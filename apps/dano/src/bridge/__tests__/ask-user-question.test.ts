@@ -102,6 +102,29 @@ function defaultForQuestion(question: {
   return "Default answer";
 }
 
+async function submitTestForms(
+  coordinator: AskUserQuestionCoordinator,
+  signal: AbortSignal,
+  formIds: readonly string[],
+): Promise<void> {
+  for (const formId of formIds) {
+    const form = coordinator.wait(
+      formId,
+      {
+        title: formId,
+        questions: [{ id: "value", question: "值？", default: formId }],
+      },
+      signal,
+    );
+    coordinator.present(formId);
+    coordinator.answer(formId, {
+      cancelled: false,
+      answer: { value: formId },
+    });
+    await form;
+  }
+}
+
 describe("ask_user_question tool", () => {
   beforeEach(() => askUserQuestionCoordinator.cancelAll());
 
@@ -1388,22 +1411,7 @@ describe("ask_user_question tool", () => {
     const controller = new AbortController();
     const formIds = ["form-a", "form-b"];
 
-    for (const formId of formIds) {
-      const form = coordinator.wait(
-        formId,
-        {
-          title: formId,
-          questions: [{ id: "value", question: "值？", default: formId }],
-        },
-        controller.signal,
-      );
-      coordinator.present(formId);
-      coordinator.answer(formId, {
-        cancelled: false,
-        answer: { value: formId },
-      });
-      await form;
-    }
+    await submitTestForms(coordinator, controller.signal, formIds);
 
     const confirmation = coordinator.wait(
       "confirm-json-string",
@@ -1428,22 +1436,11 @@ describe("ask_user_question tool", () => {
     const coordinator = new AskUserQuestionCoordinator();
     const controller = new AbortController();
 
-    for (const formId of ["form-a", "form-b"]) {
-      const form = coordinator.wait(
-        formId,
-        {
-          title: formId,
-          questions: [{ id: "value", question: "值？", default: formId }],
-        },
-        controller.signal,
-      );
-      coordinator.present(formId);
-      coordinator.answer(formId, {
-        cancelled: false,
-        answer: { value: formId },
-      });
-      await form;
-    }
+    await submitTestForms(
+      coordinator,
+      controller.signal,
+      ["form-a", "form-b"],
+    );
 
     const confirmation = coordinator.wait(
       "confirm-nested-json-string",
@@ -1507,22 +1504,11 @@ describe("ask_user_question tool", () => {
   it("combines formIds and formId while ignoring malformed, duplicate, and unavailable entries", async () => {
     const coordinator = new AskUserQuestionCoordinator();
     const controller = new AbortController();
-    for (const formId of ["form-a", "form-b"]) {
-      const submitted = coordinator.wait(
-        formId,
-        {
-          title: formId,
-          questions: [{ id: "value", question: "值？", default: formId }],
-        },
-        controller.signal,
-      );
-      coordinator.present(formId);
-      coordinator.answer(formId, {
-        cancelled: false,
-        answer: { value: formId },
-      });
-      await submitted;
-    }
+    await submitTestForms(
+      coordinator,
+      controller.signal,
+      ["form-a", "form-b"],
+    );
 
     const confirmation = coordinator.wait(
       "confirm-compatible",
