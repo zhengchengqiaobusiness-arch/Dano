@@ -1496,11 +1496,12 @@ class AssigneeSelectTest(unittest.TestCase):
             _get("https://oa/admin-api/system/user/page", {"data": {"list": [
                 {"id": 149, "nickname": "审批甲", "deptIds": 10},
                 {"id": 148, "nickname": "审批乙", "deptIds": [10, 20]},
+                {"__dano_omitted_items__": 8},
             ]}}),
             _post("https://oa/admin-api/leave/submit", {
                 "startUserSelectAssignees": {
-                    "Activity_first": [148],
-                    "Activity_second": [148],
+                    "Activity_first": ["148"],
+                    "Activity_second": ["148"],
                 },
             }, resp={"code": 0}),
         ]

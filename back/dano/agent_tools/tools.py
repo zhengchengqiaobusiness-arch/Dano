@@ -1529,6 +1529,40 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                     field["enum_options"] = deepcopy(visible_options)
         if screenshot_count:
             statuses = field.get("axis_status") if isinstance(field.get("axis_status"), dict) else {}
+            if control is not None:
+                declared_axes = {
+                    str(axis).strip() for axis in (control.get("axes") or [])
+                    if str(axis or "").strip()
+                }
+                def supports(axis: str) -> bool:
+                    return not declared_axes or axis in declared_axes
+                if supports("type"):
+                    statuses["type"] = "image_matched"
+                visible_label = str(control.get("visible_label") or "").strip()
+                if visible_label:
+                    field["public_name"] = visible_label
+                if supports("name") and str(field.get("public_name") or "").strip():
+                    statuses["name"] = "image_matched"
+                if supports("required") and isinstance(control.get("required"), bool):
+                    statuses["required"] = "image_matched"
+                if (
+                    supports("category")
+                    and supports("source")
+                    and control.get("editable") is True
+                    and not control.get("disabled")
+                    and not control.get("read_only")
+                    and not manual_source_contract
+                ):
+                    field["category"] = "user_param"
+                    field["source_kind"] = (
+                        current_source_kind
+                        if option_control and current_source_kind in {
+                            "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+                        }
+                        else "page_enum" if option_control else "user_input"
+                    )
+                    statuses["category"] = "image_matched"
+                    statuses["source"] = "image_matched"
             preserved_axes = []
             resolved = {"grounded", "image_matched", "preserved_fact", "locked"}
             preserved_values = {

@@ -168,6 +168,62 @@ def test_compiled_dictionary_enum_binds_exact_field_to_captured_label_value_reco
     assert all(item["enum_source"] == "script_dictionary" for item in page_options.values())
 
 
+def test_dictionary_enum_uses_unique_exact_visible_label_set_without_script_binding() -> None:
+    sess = RecordSession()
+    sess.dictionary_reads = [{
+        "url": "https://example.test/system/dict-data/simple-list",
+        "json": {"data": [
+            {"dictType": "process_status", "label": "未提交", "value": 0},
+            {"dictType": "process_status", "label": "审批中", "value": 1},
+            {"dictType": "process_status", "label": "审批通过", "value": 2},
+            {"dictType": "process_status", "label": "审批不通过", "value": 3},
+            {"dictType": "process_status", "label": "已取消", "value": 4},
+            {"dictType": "yes_no", "label": "是", "value": 1},
+            {"dictType": "yes_no", "label": "否", "value": 0},
+        ]},
+    }]
+    page_options = {"流程状态": {
+        "field_key": "processStatus",
+        "field_aliases": ["processStatus"],
+        "control_kind": "select",
+        "options": ["未提交", "审批中", "审批通过", "审批不通过", "已取消"],
+    }}
+
+    sess._supplement_page_enums_from_dictionaries(page_options)
+
+    status = page_options["流程状态"]
+    assert status["dict_type"] == "process_status"
+    assert status["enum_source"] == "script_dictionary"
+    assert status["mapping_complete"] is True
+    assert status["options"] == [
+        {"label": "未提交", "value": 0},
+        {"label": "审批中", "value": 1},
+        {"label": "审批通过", "value": 2},
+        {"label": "审批不通过", "value": 3},
+        {"label": "已取消", "value": 4},
+    ]
+    from dano.execution.page.flow_spec import to_flow_spec
+    spec = to_flow_spec(
+        [{
+            "method": "GET",
+            "url": (
+                "https://example.test/admin-api/oa/seal-apply/page?"
+                "pageNo=1&pageSize=10&billCode=A1&useInfo=test&processStatus=1"
+            ),
+            "headers": {},
+            "response_json": {"code": 0, "data": {"list": [], "total": 0}},
+        }],
+        samples={"流程状态": "审批中"},
+        page_enum_options=page_options,
+    )
+    process_status = next(
+        param for step in spec.steps for param in step.params
+        if param.path == "query.processStatus"
+    )
+    assert (process_status.type, process_status.source_kind) == ("enum", "api_option")
+    assert process_status.enum_value_map["审批中"] == 1
+
+
 def test_compiled_dictionary_enum_bridges_visible_label_to_virtual_form_prop() -> None:
     """Element Plus renders the label but does not put form-item prop on input DOM."""
     sess = RecordSession()
@@ -267,8 +323,8 @@ def test_compiled_dictionary_enum_does_not_guess_ambiguous_field_binding() -> No
         "json": {"data": [
             {"dictType": "status_a", "label": "A1", "value": 1},
             {"dictType": "status_a", "label": "A2", "value": 2},
-            {"dictType": "status_b", "label": "B1", "value": 1},
-            {"dictType": "status_b", "label": "B2", "value": 2},
+            {"dictType": "status_b", "label": "A1", "value": 3},
+            {"dictType": "status_b", "label": "A2", "value": 4},
         ]},
     }]
     page_options = {"状态": {"field_key": "status", "options": ["A1", "A2"]}}

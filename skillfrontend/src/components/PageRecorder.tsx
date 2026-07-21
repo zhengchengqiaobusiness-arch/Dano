@@ -809,7 +809,7 @@ function EditableTextArea({
   const [local, setLocal] = useState(value || "");
   useEffect(() => setLocal(value || ""), [value]);
   function save() {
-    if (onDraftChange || local !== (value || "")) onSave(local);
+    if (local !== (value || "")) onSave(local);
   }
   return (
     <Input.TextArea

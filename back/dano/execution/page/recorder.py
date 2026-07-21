@@ -2643,7 +2643,9 @@ class RecordSession:
         return options, source_url, complete
 
     def _supplement_page_enums_from_dictionaries(self, page_options: dict) -> None:
-        if not page_options or not self.script_sources:
+        from dano.execution.page.request_capture import as_list_payload
+
+        if not page_options:
             return
 
         constant_values: dict[str, set[str]] = {}
@@ -2655,9 +2657,6 @@ class RecordSession:
             for name, values in constant_values.items()
             if len(values) == 1
         }
-        if not constants:
-            return
-
         associations: dict[str, set[str]] = {}
         label_fields: dict[str, set[str]] = {}
         for script in self.script_sources:
@@ -2706,6 +2705,32 @@ class RecordSession:
                 if normalized(field) in aliases
                 for dict_type in dict_types
             }
+            if not matched_types:
+                visible_labels = {
+                    str((item.get("label") if isinstance(item, dict) else item) or "").strip()
+                    for item in (entry.get("options") or [])
+                } - {""}
+                inferred_types: set[str] = set()
+                if len(visible_labels) >= 2:
+                    for read in reads:
+                        grouped: dict[str, set[str]] = {}
+                        for item in (as_list_payload(read.get("json")) or []):
+                            if not isinstance(item, dict):
+                                continue
+                            values = {
+                                re.sub(r"[^a-z0-9]+", "", str(key).casefold()): value
+                                for key, value in item.items()
+                            }
+                            dict_type = str(values.get("dicttype") or "")
+                            label = str(values.get("label") or "").strip()
+                            if dict_type and label and values.get("value") is not None:
+                                grouped.setdefault(dict_type, set()).add(label)
+                        inferred_types.update(
+                            dict_type for dict_type, labels in grouped.items()
+                            if labels == visible_labels
+                        )
+                if len(inferred_types) == 1:
+                    matched_types = inferred_types
             if len(matched_types) != 1:
                 continue
             dict_type = next(iter(matched_types))

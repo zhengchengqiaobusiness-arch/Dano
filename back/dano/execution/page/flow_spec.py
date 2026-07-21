@@ -16291,6 +16291,15 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         param_key=str(edit.get("param_key") or ""),
                         param_label=str(edit.get("param_label") or ""),
                     )
+                comparable_value = value
+                if field in {"required", "exposed_to_user", "editable", "need_human_confirm", "locked"}:
+                    comparable_value = bool(value)
+                elif field in {"key", "label", "description", "path", "type", "category", "source_kind"}:
+                    comparable_value = str(value or "").strip() if field == "path" else str(value)
+                elif field == "value":
+                    comparable_value = str(value)
+                if hasattr(param, str(field)) and getattr(param, str(field)) == comparable_value:
+                    continue
                 if field == "key":
                     _rename_param_public_key(new_spec, step, param, str(value), actor=actor)
                 elif field == "path":

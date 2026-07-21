@@ -6711,6 +6711,32 @@ def test_r2_semantic_completion_does_not_resurrect_unreviewed_field_values():
     assert "field_semantics" in coverage["missing"]
 
 
+def test_unchanged_user_field_update_does_not_create_manual_lock():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="query",
+        params=[ParamField(
+            path="query.status", key="流程状态", type="enum",
+            source_kind="page_enum", category="user_param",
+            enum_options=[{"label": "未提交"}, {"label": "审批中"}],
+            enum_value_map=None, need_human_confirm=True,
+        )],
+    )])
+
+    unchanged = apply_flow_edits(spec, [
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "enum_options", "value": [{"label": "未提交"}, {"label": "审批中"}]},
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "enum_value_map", "value": None},
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "need_human_confirm", "value": True},
+    ])
+
+    assert not any(
+        item.get("source") == "manual_edit"
+        for item in unchanged.steps[0].params[0].evidence
+    )
+
+
 def test_semantic_capability_keeps_grounded_preflight_chain_for_its_write():
     process = FlowStep(
         step_id="process", method="GET", path="/process-definition",

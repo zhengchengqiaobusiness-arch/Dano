@@ -249,18 +249,30 @@ def as_list_payload(data):
     通用:① 常见包装键(rows/data/records…)挖一到两层;② **兜底:任意值是非空对象数组**(覆盖未知包装键
     如 options/payload/choices,不挑系统)。供 Q2「选领导/代码下拉」等 select 解析。
     """
+    def rows(value):
+        if not isinstance(value, list):
+            return None
+        usable = [
+            item for item in value
+            if not (
+                isinstance(item, dict)
+                and set(item) == {"__dano_omitted_items__"}
+            )
+        ]
+        return usable if usable and isinstance(usable[0], (dict, str, int, float)) else None
+
     if isinstance(data, list):
-        return data if data and isinstance(data[0], (dict, str, int, float)) else None
+        return rows(data)
     if isinstance(data, dict):
         for k in _LIST_KEYS:
             v = data.get(k)
             if isinstance(v, list) and v:
-                return v
+                return rows(v)
             if isinstance(v, dict):                     # 再下一层(如 data.records / data.rows)
                 for k2 in _LIST_KEYS:
                     v2 = v.get(k2)
                     if isinstance(v2, list) and v2:
-                        return v2
+                        return rows(v2)
         # Unknown vendors frequently wrap rows under payload/options/resultSet.
         # Recurse conservatively and accept only one object-list candidate; if
         # multiple unrelated lists exist, ambiguity stays unresolved.
@@ -278,7 +290,7 @@ def as_list_payload(data):
         collect(data)
         unique = {id(candidate): candidate for candidate in candidates}
         if len(unique) == 1:
-            return next(iter(unique.values()))
+            return rows(next(iter(unique.values())))
     return None
 
 

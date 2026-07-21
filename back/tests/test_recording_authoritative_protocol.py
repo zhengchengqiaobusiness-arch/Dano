@@ -83,7 +83,7 @@ def test_enum_mapping_warning_tracks_the_textarea_draft_before_blur() -> None:
     assert "parseEnumOptionsText(v)" in editor
     assert "patchLocalParam(step.step_id, p" in editor
     assert "need_human_confirm: !mappingComplete" in editor
-    assert 'if (onDraftChange || local !== (value || "")) onSave(local);' in source
+    assert 'if (local !== (value || "")) onSave(local);' in source
 
 
 def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() -> None:
