@@ -1,179 +1,61 @@
+import { parse } from "unbash";
+import type { Command, Node, WordPart } from "unbash";
+
 export type SafeBashCommandSummary =
   | { kind: "commands"; executableNames: string[] }
   | { kind: "script" };
 
-const SHELL_CONTROL_WORDS = new Set([
-  "case",
-  "coproc",
-  "do",
-  "done",
-  "elif",
-  "else",
-  "esac",
-  "fi",
-  "for",
-  "function",
-  "if",
-  "in",
-  "select",
-  "then",
-  "time",
-  "until",
-  "while",
-]);
-
 export function safeBashCommandSummary(command: string): SafeBashCommandSummary {
-  const segments = simpleShellSegments(command);
-  if (!segments?.length) return { kind: "script" };
+  const script = parse(command);
+  if (script.errors?.length || !script.commands.length) return { kind: "script" };
 
   const executableNames: string[] = [];
-  for (const segment of segments) {
-    const name = simpleExecutableName(segment);
-    if (!name) return { kind: "script" };
-    executableNames.push(name);
+  for (const statement of script.commands) {
+    if (statement.redirects.length || !collectExecutableNames(statement.command, executableNames)) {
+      return { kind: "script" };
+    }
   }
-  return { kind: "commands", executableNames };
+
+  return executableNames.length
+    ? { kind: "commands", executableNames }
+    : { kind: "script" };
 }
 
-function simpleShellSegments(command: string): string[] | undefined {
-  const segments: string[] = [];
-  let current = "";
-  let quote = "";
-  let escaped = false;
-  let comment = false;
-  let atWordStart = true;
+function collectExecutableNames(node: Node, names: string[]): boolean {
+  if (node.type === "Command") {
+    const name = staticExecutableName(node);
+    if (!name) return false;
+    names.push(name);
+    return true;
+  }
 
-  const finishSegment = () => {
-    const segment = current.trim();
-    if (segment) segments.push(segment);
-    current = "";
-    atWordStart = true;
-  };
+  if (node.type === "Pipeline" || node.type === "AndOr") {
+    return node.commands.every(command => collectExecutableNames(command, names));
+  }
 
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (comment) {
-      if (character === "\n") {
-        comment = false;
-        finishSegment();
-      }
-      continue;
-    }
-    if (escaped) {
-      current += character;
-      escaped = false;
-      atWordStart = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += character;
-      if (character === quote) quote = "";
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      current += character;
-      quote = character;
-      atWordStart = false;
-      continue;
-    }
-    if (character === "#" && atWordStart) {
-      comment = true;
-      continue;
-    }
+  return false;
+}
+
+function staticExecutableName(command: Command): string | undefined {
+  if (command.redirects.length || !command.name || !isStaticWord(command.name.parts)) {
+    return undefined;
+  }
+
+  const name = command.name.value.replace(/^.*[\\/]/u, "");
+  return /^[\w.+-]+$/u.test(name) ? name : undefined;
+}
+
+function isStaticWord(parts: WordPart[] | undefined): boolean {
+  if (!parts) return true;
+
+  return parts.every(part => {
     if (
-      character === "`" || character === "(" || character === ")" ||
-      character === "{" || character === "}" ||
-      (character === "$" && command[index + 1] === "(") ||
-      (character === "<" && command[index + 1] === "<")
-    ) return undefined;
+      part.type === "Literal" ||
+      part.type === "SingleQuoted" ||
+      part.type === "AnsiCQuoted"
+    ) return true;
 
-    const isRedirectAmpersand = character === "&" &&
-      (command[index - 1] === ">" || command[index - 1] === "<" ||
-        command[index + 1] === ">");
-    const isRedirectPipe = character === "|" && command[index - 1] === ">";
-    const isBoundary = character === ";" || character === "\n" ||
-      (character === "|" && !isRedirectPipe) ||
-      (character === "&" && !isRedirectAmpersand);
-    if (isBoundary) {
-      finishSegment();
-      while (command[index + 1] === character) index += 1;
-      continue;
-    }
-
-    current += character;
-    atWordStart = /\s/u.test(character);
-  }
-
-  if (quote || escaped) return undefined;
-  finishSegment();
-  return segments;
-}
-
-function simpleExecutableName(segment: string): string | undefined {
-  let index = 0;
-  while (index < segment.length) {
-    while (/\s/u.test(segment[index] ?? "")) index += 1;
-    if (index >= segment.length || startsWithRedirection(segment, index)) {
-      return undefined;
-    }
-
-    const word = readShellWord(segment, index);
-    if (!word) return undefined;
-    index = word.endIndex;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) continue;
-    if (SHELL_CONTROL_WORDS.has(word.value) || word.value.includes("$")) {
-      return undefined;
-    }
-    const name = word.value.replace(/^.*[\\/]/u, "");
-    return /^[\w.+-]+$/u.test(name) ? name : undefined;
-  }
-  return undefined;
-}
-
-function startsWithRedirection(segment: string, startIndex: number): boolean {
-  let operatorIndex = startIndex;
-  while (/\d/u.test(segment[operatorIndex] ?? "")) operatorIndex += 1;
-  return ["<<<", "<<-", "&>>", ">>", "<<", "<&", ">&", "<>", ">|", "&>", ">", "<"]
-    .some(operator => segment.startsWith(operator, operatorIndex));
-}
-
-function readShellWord(
-  source: string,
-  startIndex: number,
-): { value: string; endIndex: number } | undefined {
-  let quote = "";
-  let escaped = false;
-  let value = "";
-  let index = startIndex;
-
-  for (; index < source.length; index += 1) {
-    const character = source[index]!;
-    if (escaped) {
-      value += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      else value += character;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (/\s/u.test(character)) break;
-    value += character;
-  }
-
-  return quote || escaped ? undefined : { value, endIndex: index };
+    return part.type === "DoubleQuoted" &&
+      part.parts.every(child => child.type === "Literal");
+  });
 }

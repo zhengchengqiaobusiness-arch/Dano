@@ -94,12 +94,8 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
   its pending, completed, and failed states. Until that copy exists, use the
   generic task-processing fallback and never expose the raw tool name.
 - Treat the collapsed summary and expanded details as user-facing product UI.
-  Do not expose complete paths or URLs, command arguments, full commands,
-  scripts, code, raw output, or other implementation details during normal tool
-  activity. For conservatively recognized simple Bash command lists, details may
-  identify only executable basenames with copy such as `执行了 <name> 命令`; strip
-  directories and arguments. Complex or ambiguous Shell syntax must use a generic
-  localized script detail instead of guessing command names. For an unresolved
+  Do not expose complete paths or URLs, commands, scripts, code, raw output, or
+  other implementation details during normal tool activity. For an unresolved
   failure that has no reliable user-facing explanation, keep the collapsed row
   non-technical and allow the expanded details to show the original failure
   information instead of inventing a classification.

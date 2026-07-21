@@ -21,7 +21,8 @@
     "@josephyoung/pi-heimdall": "0.2.17",
     "bits-ui": "^2.18.1",
     "date-fns": "^4.4.0",
-    "typebox": "1.2.7"
+    "typebox": "1.2.7",
+    "unbash": "4.0.3"
   },
   "devDependencies": {
     "@comark/svelte": "^0.3.1",

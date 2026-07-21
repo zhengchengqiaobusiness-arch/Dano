@@ -165,7 +165,7 @@ describe("Activity Trail presentation", () => {
         block: toolBlock("bash", "success", {
           toolArgs: {
             command:
-              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret 2>&1 && /bin/ls -la /private/company\n/usr/bin/pwd & /usr/bin/whoami',
+              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret && /bin/ls -la /private/company | /usr/bin/pwd & /usr/bin/whoami',
           },
           resultText: "secret output",
         }),
@@ -243,6 +243,30 @@ describe("Activity Trail presentation", () => {
 
     expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(activities)).not.toContain("payroll.csv");
+  });
+
+  it("uses a generic detail for dynamic command names and parse errors", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-dynamic",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "$PRIVATE_COMMAND --token secret" },
+        }),
+      },
+      {
+        key: "bash-invalid",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "if /private/company/secret-tool; then" },
+        }),
+      },
+    ]);
+
+    expect(activities.map(activity => activity.details)).toEqual([
+      ["执行了 Shell 脚本", "执行了 Shell 脚本"],
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("PRIVATE_COMMAND");
+    expect(JSON.stringify(activities)).not.toContain("secret-tool");
+    expect(JSON.stringify(activities)).not.toContain("--token");
   });
 
   it("uses a generic detail for shell control structures", () => {
