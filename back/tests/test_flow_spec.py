@@ -1491,6 +1491,36 @@ class AssigneeSelectTest(unittest.TestCase):
     下,body 存 user id,应识别为 select(api_option + userId/name 绑定),即便 value 在 samples 里
     也要豁免「用户亲手填的值当码」的拒判。通用,不挑系统。"""
 
+    def test_repeated_assignees_share_the_grounded_user_api(self):
+        captured = [
+            _get("https://oa/admin-api/system/user/page", {"data": {"list": [
+                {"id": 149, "nickname": "审批甲", "deptIds": 10},
+                {"id": 148, "nickname": "审批乙", "deptIds": [10, 20]},
+            ]}}),
+            _post("https://oa/admin-api/leave/submit", {
+                "startUserSelectAssignees": {
+                    "Activity_first": [149],
+                    "Activity_second": [148],
+                },
+            }, resp={"code": 0}),
+        ]
+        spec = to_flow_spec(captured, field_evidence=[
+            {"path": "startUserSelectAssignees.Activity_first[0]", "key": "Activity_first", "suggest_name": "审批人1"},
+            {"path": "startUserSelectAssignees.Activity_second[0]", "key": "Activity_second", "suggest_name": "审批人2"},
+        ], page_enum_options=_dom_enum(
+            "无关选择", "unrelated", "审批乙", 148,
+            [{"label": "审批甲", "value": 149}, {"label": "审批乙", "value": 148}],
+        ))
+
+        params = {param.path: param for step in spec.steps for param in step.params}
+        for path in (
+            "startUserSelectAssignees.Activity_first[0]",
+            "startUserSelectAssignees.Activity_second[0]",
+        ):
+            self.assertEqual(params[path].type, "enum")
+            self.assertEqual(params[path].source_kind, "api_option")
+            self.assertIn("/admin-api/system/user/page", params[path].source.get("source_url", ""))
+
     def test_assignee_path_recognized_as_select_with_user_list(self):
         reads = [{
             "url": "https://oa/system/user/page",

@@ -5631,6 +5631,8 @@ def to_flow_spec(
         },
     )
     _infer_computed_runtime_fields(spec)
+    # ponytail: reuse the existing grounded matcher before the first projection.
+    _repair_structural_option_bindings(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
 
 
@@ -14187,6 +14189,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             item.get(category_key)
                             for item in matching_items
                             if item.get(category_key) not in (None, "")
+                            and not isinstance(item.get(category_key), (dict, list))
                         }
                         for category_value in category_values:
                             subset = [
