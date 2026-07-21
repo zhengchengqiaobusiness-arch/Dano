@@ -1309,6 +1309,45 @@ def test_legacy_primary_step_plan_keeps_grounded_query_and_submit_boundaries():
     assert by_name["submit_application"]["step_ids"] == ["submit"]
 
 
+def test_capability_request_step_ids_are_normalized_to_grounded_boundaries():
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="query", method="GET", path="/api/applications/page?status=1",
+            source_meta={"role": "business_get"},
+        ),
+        FlowStep(
+            step_id="submit", method="POST", path="/api/applications/submit",
+            source_meta={"role": "business_write"},
+        ),
+    ])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "Query and submit applications"},
+        "request_roles": [], "field_semantics": [],
+        "capabilities": [
+            {
+                "capability_id": "query_applications",
+                "capability_type": "business_get",
+                "request_step_ids": ["query"],
+            },
+            {
+                "capability_id": "submit_application",
+                "capability_type": "business_write",
+                "request_step_ids": ["submit"],
+            },
+        ],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    by_name = {
+        item["name"]: item
+        for item in normalized["semantic_plan"]["capabilities"]
+    }
+
+    assert by_name["query_applications"]["step_ids"] == ["query"]
+    assert by_name["submit_application"]["step_ids"] == ["submit"]
+
+
 def test_semicolon_record_field_semantics_are_normalized_instead_of_dropped():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit", method="POST", path="/api/applications/submit",

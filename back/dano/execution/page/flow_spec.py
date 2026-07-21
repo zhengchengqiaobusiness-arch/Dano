@@ -5400,6 +5400,11 @@ def to_flow_spec(
         and (
             _request_has_command_anchor(request)
             or (
+                _request_transaction_id(request)
+                and _business_filter_count(request) > 0
+                and float((role_by_key.get(_request_role_key(request)) or {}).get("confidence") or 0.0) >= 0.9
+            )
+            or (
                 not observer_command_anchors
                 and float((role_by_key.get(_request_role_key(request)) or {}).get("confidence") or 0.0) >= 0.9
             )

@@ -894,9 +894,14 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
         {
             **_get(1, "/daily-report/page?window=current", {"data": {"list": [{"date": "2026-05-01"}]}}),
             "query": {"window": "current"},
-            "trigger_op": "click",
-            "trigger_locator": "button[type=submit]",
+            "trigger_op": "control_open",
+            "trigger_locator": "label=Report number",
             "trigger_transaction_id": "txn-business-query",
+            "causality_confidence": "high",
+            "_request_role": {
+                "role": "business_get", "keep": True,
+                "confidence": 0.94, "reason": "user query with business filters",
+            },
         },
         _get(2, "/process/definition/get?key=daily", {"data": {"id": "PROC-UNIQUE-001"}}),
         _post(
@@ -905,6 +910,11 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
             {"processId": "PROC-UNIQUE-001", "content": "完成回归测试"},
         ),
     ]
+    captured[2].update({
+        "trigger_op": "submit",
+        "trigger_transaction_id": "txn-business-submit",
+        "causality_confidence": "high",
+    })
 
     spec = to_flow_spec(captured, samples={"content": "完成回归测试"})
 

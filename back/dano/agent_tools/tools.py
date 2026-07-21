@@ -1545,6 +1545,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         capability = deepcopy(raw_capability)
         raw_steps = (
             capability.get("step_ids")
+            or capability.get("request_step_ids")
             or capability.get("steps")
             or capability.get("depends_on_step_ids")
             or []
