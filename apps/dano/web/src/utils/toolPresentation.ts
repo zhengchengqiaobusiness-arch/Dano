@@ -1,5 +1,6 @@
 import { t } from "../i18n";
 import type { ImageContentBlock, ToolContentBlock } from "./transcript";
+import { safeBashExecutableNames } from "./safeShellPresentation";
 import { classifyReadToolBlock } from "./toolBlock";
 
 export type ToolActivityKind =
@@ -198,102 +199,6 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
   }
 
   return [];
-}
-
-function safeBashExecutableNames(command: string): string[] {
-  return safeShellCommandSegments(command).flatMap(segment => {
-    const executable = firstShellWord(segment);
-    if (!executable || executable.includes("$")) return [];
-    const name = safeBaseName(executable);
-    return /^[\w.+-]+$/u.test(name) ? [name] : [];
-  });
-}
-
-// This intentionally recognizes only top-level separators. It extracts the
-// executable token and fails closed for shell syntax that could expose source.
-function safeShellCommandSegments(command: string): string[] {
-  const segments: string[] = [];
-  let start = 0;
-  let quote = "";
-  let escaped = false;
-  let suppressNewlineBoundaries = false;
-
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "<" && command[index + 1] === "<") {
-      suppressNewlineBoundaries = true;
-      continue;
-    }
-    const isRedirectAmpersand = character === "&" &&
-      (command[index - 1] === ">" || command[index - 1] === "<" ||
-        command[index + 1] === ">");
-    const isBoundary = character === ";" || character === "|" ||
-      (character === "\n" && !suppressNewlineBoundaries) ||
-      (character === "&" && !isRedirectAmpersand);
-    if (!isBoundary) continue;
-    const segment = command.slice(start, index).trim();
-    if (segment) segments.push(segment);
-    while (command[index + 1] === character) index += 1;
-    start = index + 1;
-  }
-
-  const finalSegment = command.slice(start).trim();
-  if (finalSegment) segments.push(finalSegment);
-  return segments;
-}
-
-function firstShellWord(segment: string): string | undefined {
-  let index = 0;
-  while (index < segment.length) {
-    while (/\s/u.test(segment[index] ?? "")) index += 1;
-    if (index >= segment.length || segment[index] === "#") return undefined;
-
-    let word = "";
-    let quote = "";
-    let escaped = false;
-    for (; index < segment.length; index += 1) {
-      const character = segment[index]!;
-      if (escaped) {
-        word += character;
-        escaped = false;
-        continue;
-      }
-      if (character === "\\" && quote !== "'") {
-        escaped = true;
-        continue;
-      }
-      if (quote) {
-        if (character === quote) quote = "";
-        else word += character;
-        continue;
-      }
-      if (character === "'" || character === '"') {
-        quote = character;
-        continue;
-      }
-      if (/\s/u.test(character)) break;
-      word += character;
-    }
-    if (quote) return undefined;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) return word || undefined;
-  }
-  return undefined;
 }
 
 function rawToolFailureDetails(block: ToolContentBlock): string[] {

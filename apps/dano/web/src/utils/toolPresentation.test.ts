@@ -180,6 +180,31 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("secret");
   });
 
+  it("ignores heredoc data and resumes with commands after its delimiter", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-heredoc",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: [
+              "cat <<'EOF'",
+              "not-a-command; /private/company/secret.sh --token secret",
+              "EOF",
+              "/bin/ls -la /private/company",
+            ].join("\n"),
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 cat 命令",
+      "执行了 ls 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("secret.sh");
+    expect(JSON.stringify(activities)).not.toContain("--token");
+  });
+
   it("keeps one safe detail per repeated read invocation", () => {
     const activities = buildToolActivities([
       {
