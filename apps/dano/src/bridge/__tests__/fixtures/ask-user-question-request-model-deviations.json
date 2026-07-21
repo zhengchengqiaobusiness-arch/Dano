@@ -1,0 +1,33 @@
+{
+  "issue": 322,
+  "description": "Sanitized real-model deviations for question choices and grouped-form presentation",
+  "deviations": [
+    {
+      "name": "JSON-stringified top-level options",
+      "capturedArguments": {
+        "question": "是否开始？",
+        "options": "[\"是\",\"否\"]"
+      },
+      "canonicalArguments": {
+        "question": "是否开始？",
+        "options": ["是", "否"]
+      }
+    },
+    {
+      "name": "JSON-stringified questions without a presentation title",
+      "capturedArguments": {
+        "questions": "[{\"id\":\"reason\",\"question\":\"用途？\",\"default\":\"签署合同\"}]"
+      },
+      "canonicalArguments": {
+        "title": "表单",
+        "questions": [
+          {
+            "id": "reason",
+            "question": "用途？",
+            "default": "签署合同"
+          }
+        ]
+      }
+    }
+  ]
+}

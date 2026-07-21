@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "../../types/ask-user-question-date.js";
+import { DANO_DEFAULT_CONFIG } from "./dano-config.js";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
@@ -52,13 +53,16 @@ const askUserQuestionFields = {
         "Single-question call: the clear, specific question to ask the user. With questions[], top-level question/title/label/prompt is treated only as optional form instruction text; each actual field question must be inside questions[].",
     }),
   ),
-  title: Type.Optional(Type.Any()),
+  title: Type.Optional(Type.Any({
+    description:
+      "Canonical grouped-form title. If omitted or malformed with questions, Dano uses the configured product default title.",
+  })),
   label: Type.Optional(Type.Any()),
   prompt: Type.Optional(Type.Any()),
   options: Type.Optional(
     Type.Any({
       description:
-        "Choices for this question. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input.",
+        "Canonical choices array for this question. Dano also accepts a one-level JSON-stringified array and the choices alias. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input.",
     }),
   ),
   choices: Type.Optional(Type.Any()),
@@ -117,7 +121,7 @@ export const askUserQuestionParameters = Type.Object({
   questions: Type.Optional(
     Type.Any({
       description:
-        "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple?, inputType?, fieldAssist?, dateFormat?, required?, dataSource? }, ...]. Every non-confirmation questions[] item must include a context-based, non-empty default. A single question object is also accepted and normalized to an array. When questions is present, put each field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside its questions[] item. Do not include top-level confirm or top-level field configuration with questions.",
+        "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple?, inputType?, fieldAssist?, dateFormat?, required?, dataSource? }, ...]. Every canonical non-confirmation questions[] item should include a context-based, non-empty default. A single question object or one-level JSON-stringified object/array is also accepted and normalized to an array. If title is omitted or malformed, Dano uses the configured product default. When questions is present, put each field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside its questions[] item. Do not include top-level confirm or top-level field configuration with questions.",
     }),
   ),
 });
@@ -242,7 +246,10 @@ export class AskUserQuestionCoordinator {
 
   constructor(
     private readonly presentationTimeoutMs = 5_000,
-    private readonly maxRetries = 10,
+    private readonly maxRetries =
+      DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
+    private readonly defaultTitle =
+      DANO_DEFAULT_CONFIG.askUserQuestion.defaultTitle,
   ) {}
 
   wait(
@@ -276,16 +283,9 @@ export class AskUserQuestionCoordinator {
       ? confirmationRequest(
           (confirmationSelection as { forms: SubmittedForm[] }).forms,
         )
-      : normalizeAskUserQuestionRequest(rawRequest);
+      : normalizeAskUserQuestionRequest(rawRequest, this.defaultTitle);
     if ("error" in normalized) {
       return this.rejectValidation(toolCallId, normalized.error, signal);
-    }
-    if (normalized.request.questions !== undefined && !normalized.request.title) {
-      return this.rejectValidation(
-        toolCallId,
-        "Grouped forms require a top-level title",
-        signal,
-      );
     }
     if (signal) this.validationFailuresBySignal.delete(signal);
     const { request, questions, cardRequest } = normalized;
@@ -607,6 +607,7 @@ type CompatibleQuestionResult =
 
 function normalizeCompatibleRequest(
   request: AskUserQuestionRequestParams,
+  defaultTitle: string,
 ): CompatibleRequestResult {
   const rawQuestions = request.questions;
   const questionResult = normalizeCompatibleQuestion(
@@ -616,7 +617,7 @@ function normalizeCompatibleRequest(
   if ("error" in questionResult) return questionResult;
   const normalized: NormalizedAskUserQuestionRequest = questionResult.question;
   if (rawQuestions !== undefined) {
-    normalized.title = firstScalarString(request.title);
+    normalized.title = firstScalarString(request.title) ?? defaultTitle;
     normalized.question = firstScalarString(request.question, request.label, request.prompt);
     if (!normalized.question) delete normalized.question;
     const questionsResult = normalizeCompatibleQuestions(rawQuestions);
@@ -947,14 +948,15 @@ function confirmationParameterShape(value: unknown): string {
 function normalizeCompatibleOptions(
   value: unknown,
 ): { values: Array<string | AskUserQuestionOption>; invalid: boolean } {
-  if (!Array.isArray(value)) {
+  const parsed = parseJsonString(value);
+  if (!Array.isArray(parsed)) {
     return { values: [], invalid: value !== undefined };
   }
-  const values = value.flatMap(option => {
+  const values = parsed.flatMap(option => {
     const normalized = normalizeCompatibleOption(option);
     return normalized === undefined ? [] : [normalized];
   });
-  return { values, invalid: values.length !== value.length };
+  return { values, invalid: values.length !== parsed.length };
 }
 
 function normalizeCompatibleOptionsAlias(
@@ -1209,13 +1211,19 @@ function normalizeInputType(value: unknown): AskUserQuestionInputType | undefine
 
 function normalizeRequestQuestions(
   request: NormalizedAskUserQuestionRequest,
+  requireDefault: boolean,
 ): string | PendingQuestionItem[] {
   if (request.questions !== undefined) {
     const seenIds = new Set<string>();
     const questions: PendingQuestionItem[] = [];
     for (let index = 0; index < request.questions.length; index += 1) {
       const question = request.questions[index];
-      const normalized = normalizeQuestion(question, `q${index + 1}`);
+      if (!question.id?.trim()) return "Grouped question ids are required";
+      const normalized = normalizeQuestion(
+        question,
+        `q${index + 1}`,
+        requireDefault,
+      );
       if (typeof normalized === "string") return normalized;
       if (seenIds.has(normalized.id)) {
         return `Grouped question ids must be unique: ${normalized.id}`;
@@ -1230,18 +1238,31 @@ function normalizeRequestQuestions(
   const question = normalizeQuestion(
     { ...request, id: "answer", question: request.question },
     "answer",
+    requireDefault,
   );
   return typeof question === "string" ? question : [question];
 }
 
 export function normalizeAskUserQuestionCardRequest(
   rawRequest: unknown,
+  options: {
+    defaultTitle?: string;
+    requireDefault?: boolean;
+  } = {},
 ): AskUserQuestionCardRequest | null {
-  const normalized = normalizeAskUserQuestionRequest(rawRequest);
+  const normalized = normalizeAskUserQuestionRequest(
+    rawRequest,
+    options.defaultTitle ?? DANO_DEFAULT_CONFIG.askUserQuestion.defaultTitle,
+    options.requireDefault,
+  );
   return "error" in normalized ? null : normalized.cardRequest;
 }
 
-function normalizeAskUserQuestionRequest(rawRequest: unknown):
+function normalizeAskUserQuestionRequest(
+  rawRequest: unknown,
+  defaultTitle: string,
+  requireDefault = false,
+):
   | {
       request: NormalizedAskUserQuestionRequest;
       questions: PendingQuestionItem[];
@@ -1252,13 +1273,14 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
   if (!isPlainRecord(parsed)) return { error: "Question cannot be rendered" };
   const compatible = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
+    defaultTitle,
   );
   if ("error" in compatible) return compatible;
   const { request } = compatible;
   if (request.confirm && request.questions === undefined) {
     return { error: missingConfirmationSourceError };
   }
-  const questions = normalizeRequestQuestions(request);
+  const questions = normalizeRequestQuestions(request, requireDefault);
   if (typeof questions === "string") return { error: questions };
   if (questions.length === 0) return { error: "Question is required" };
   if (
@@ -1456,6 +1478,7 @@ function normalizeQuestion(
     default?: AskUserQuestionAnswerInput;
   },
   fallbackId: string,
+  requireDefault = false,
 ): PendingQuestionItem | string {
   if (!request.question?.trim()) return "Question is required";
   const inputType = request.confirm
@@ -1532,7 +1555,7 @@ function normalizeQuestion(
     ...(compatibleDataSource ? { dataSource: compatibleDataSource } : {}),
     ...(dateFormat ? { dateFormat } : {}),
   };
-  if (kind !== "confirm" && request.default === undefined) {
+  if (requireDefault && kind !== "confirm" && request.default === undefined) {
     return "默认答案缺失：每个非确认问题都必须提供非空 default 推荐值";
   }
   if (request.default !== undefined) {
@@ -1699,7 +1722,7 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases and safe scalar deviations, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.`,
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Canonical calls should provide a non-empty default; compatibility input without one renders without a prefill. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases, safe scalar deviations, and one-level JSON-stringified collections; it uses the configured product title when a grouped title is missing, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -1709,7 +1732,7 @@ For a single question, use top-level question/options/inputType/fieldAssist/date
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-    "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
+    "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
     "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -1751,10 +1774,19 @@ export interface AskUserQuestionRuntime {
   tool: ReturnType<typeof createAskUserQuestionTool>;
 }
 
+export interface AskUserQuestionRuntimeOptions {
+  maxRetries?: number;
+  defaultTitle?: string;
+}
+
 export function createAskUserQuestionRuntime(
-  maxRetries = 10,
+  options: AskUserQuestionRuntimeOptions = {},
 ): AskUserQuestionRuntime {
-  const coordinator = new AskUserQuestionCoordinator(5_000, maxRetries);
+  const coordinator = new AskUserQuestionCoordinator(
+    5_000,
+    options.maxRetries ?? DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
+    options.defaultTitle ?? DANO_DEFAULT_CONFIG.askUserQuestion.defaultTitle,
+  );
   return {
     coordinator,
     tool: createAskUserQuestionTool(coordinator),

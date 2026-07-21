@@ -243,7 +243,7 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-      "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
+      "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
       "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -273,6 +273,7 @@ describe("ask_user_question tool", () => {
       },
       {
         batch: true,
+        title: "表单",
         questions: [
           {
             id: "reason",
@@ -301,6 +302,7 @@ describe("ask_user_question tool", () => {
       },
       {
         batch: true,
+        title: "表单",
         questions: [
           {
             id: "leave_type",
@@ -962,16 +964,43 @@ describe("ask_user_question tool", () => {
     })).rejects.toThrow("default 必须是非空推荐值");
   });
 
-  it("rejects non-confirmation questions without defaults", async () => {
-    await expect(
-      askUserQuestionTool.execute(
-        "missing-default",
-        { question: "Reason?" },
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow("默认答案缺失");
+  it("accepts a missing non-confirmation default without adding a prefill", async () => {
+    const execution = askUserQuestionTool.execute(
+      "missing-default",
+      { question: "Reason?" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(askUserQuestionCoordinator.cardRequest("missing-default")).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "text",
+      question: "Reason?",
+      fieldAssist: false,
+    });
+    askUserQuestionCoordinator.answer("missing-default", {
+      cancelled: false,
+      answer: "Annual leave",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "Annual leave" },
+    });
+  });
+
+  it("uses the configured grouped-form default title", async () => {
+    const coordinator = new AskUserQuestionCoordinator(5_000, 10, "信息收集");
+    const pending = coordinator.wait(
+      "configured-form-title",
+      { questions: [{ id: "reason", question: "用途？" }] },
+      new AbortController().signal,
+    );
+    expect(coordinator.cardRequest("configured-form-title")).toMatchObject({
+      batch: true,
+      title: "信息收集",
+    });
+    coordinator.answer("configured-form-title", { cancelled: true });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("returns date answers exactly as submitted", async () => {
@@ -1577,15 +1606,19 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow(/invalid_confirmation_source.*fallbackAttempted/s);
   });
 
-  it("rejects grouped forms without a top-level title", async () => {
+  it("defaults grouped forms without a top-level title", async () => {
     const coordinator = new AskUserQuestionCoordinator();
-    await expect(
-      coordinator.wait(
-        "form-without-title",
-        { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow("Grouped forms require a top-level title");
+    const pending = coordinator.wait(
+      "form-without-title",
+      { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
+      new AbortController().signal,
+    );
+    expect(coordinator.cardRequest("form-without-title")).toMatchObject({
+      batch: true,
+      title: "表单",
+    });
+    coordinator.answer("form-without-title", { cancelled: true });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("returns grouped answers from one tool confirmation", async () => {
@@ -1816,19 +1849,23 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE);
   });
 
-  it("still requires a title for JSON-stringified grouped forms", async () => {
+  it("defaults the title for JSON-stringified grouped forms", async () => {
     const coordinator = new AskUserQuestionCoordinator();
-    await expect(
-      coordinator.wait(
-        "compat-json-missing-title",
-        {
-          questions: JSON.stringify([
-            { id: "seal_id", question: "印章类型？", default: "公章" },
-          ]),
-        },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow("Grouped forms require a top-level title");
+    const pending = coordinator.wait(
+      "compat-json-missing-title",
+      {
+        questions: JSON.stringify([
+          { id: "seal_id", question: "印章类型？", default: "公章" },
+        ]),
+      },
+      new AbortController().signal,
+    );
+    expect(coordinator.cardRequest("compat-json-missing-title")).toMatchObject({
+      batch: true,
+      title: "表单",
+    });
+    coordinator.answer("compat-json-missing-title", { cancelled: true });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("ignores redundant top-level fields on a complete JSON-stringified grouped form", async () => {

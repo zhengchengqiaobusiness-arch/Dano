@@ -27,6 +27,11 @@ evidence determine what Dano can safely accept.
 - [ ] Run the focused compatibility matrix, the relevant Coordinator and
   RPC/JSONL tests, the full test suite, checks, and the complete build.
 
+For `ask_user_question` request fields, the executable sources are:
+
+- `apps/dano/src/bridge/__tests__/fixtures/ask-user-question-request-model-deviations.json`
+- `apps/dano/src/bridge/__tests__/ask-user-question-request-compatibility.test.ts`
+
 For `ask_user_question` confirmation targets, the executable sources are:
 
 - `apps/dano/src/bridge/__tests__/fixtures/ask-user-question-model-deviations.json`
