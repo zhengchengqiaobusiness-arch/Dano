@@ -1535,31 +1535,48 @@ async def record_ws(ws: WebSocket) -> None:
                 analysis_screenshots: list[dict] = []
                 before_operation = pending_flow_spec.model_copy(deep=True)
                 try:
-                    from dano.execution.page.flow_spec import flow_operation_report
+                    from dano.execution.page.flow_spec import (
+                        flow_operation_report,
+                        orchestrate_flow_capabilities,
+                    )
 
                     analysis_screenshots = _normalize_analysis_screenshots(msg.get("analysis_screenshots"))
                     _checkpoint_resume()
-                    pi_session = await _ensure_recording_pi()
-                    pi_session.bind_flow_spec(pending_flow_spec)
-                    pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
-                    async with _recording_operation_keepalive(
-                        sender,
-                        operation="plan",
-                        operation_id=operation_id,
-                    ):
-                        pi_result = await pi_session.prompt(
-                            "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
-                            "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
-                            "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
-                            f" recording_id={recording_id}"
-                            + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
-                            + _analysis_screenshot_guidance(analysis_screenshots),
-                            timeout_s=0,
+                    pi_session = None
+                    delivered_image_count = 0
+                    if not before_operation.capabilities and not analysis_screenshots:
+                        # The recorder already has enough facts to create the
+                        # first runnable baseline. Do not make the first click
+                        # wait for a model that may never submit its tool call.
+                        pending_flow_spec = await orchestrate_flow_capabilities(
+                            before_operation,
+                            submission={"ops": []},
+                            generation_mode="initial",
                         )
-                    delivered_image_count = _verified_pi_image_count(pi_result, len(analysis_screenshots))
-                    if pi_session.last_submission_kind != "plan":
-                        raise RuntimeError("Pi 未提交 recording plan")
-                    pending_flow_spec = pi_session.current_flow_spec()
+                    else:
+                        pi_session = await _ensure_recording_pi()
+                        pi_session.bind_flow_spec(pending_flow_spec)
+                        pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
+                        async with _recording_operation_keepalive(
+                            sender,
+                            operation="plan",
+                            operation_id=operation_id,
+                        ):
+                            pi_result = await pi_session.prompt(
+                                "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
+                                "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
+                                "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
+                                f" recording_id={recording_id}"
+                                + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
+                                + _analysis_screenshot_guidance(analysis_screenshots),
+                                timeout_s=90,
+                            )
+                        delivered_image_count = _verified_pi_image_count(
+                            pi_result, len(analysis_screenshots),
+                        )
+                        if pi_session.last_submission_kind != "plan":
+                            raise RuntimeError("Pi 未提交 recording plan")
+                        pending_flow_spec = pi_session.current_flow_spec()
                     operation = "plan"
                     operation_report = flow_operation_report(
                         before_operation, pending_flow_spec, operation=operation,
@@ -1592,7 +1609,7 @@ async def record_ws(ws: WebSocket) -> None:
                         **_recording_flow_projection(pending_flow_spec),
                         "operation_report": operation_report,
                         "analysis_application": analysis_application,
-                        "pi_session": pi_session.descriptor,
+                        **({"pi_session": pi_session.descriptor} if pi_session else {}),
                         "analysis_evidence": {
                             "screenshot_count": len(analysis_screenshots),
                             "model_image_count": delivered_image_count,

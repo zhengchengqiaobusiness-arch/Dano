@@ -89,6 +89,9 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"status": "rejected"' in branch
     assert "原配置保持不变" in branch
     assert "orchestrate_flow_capabilities" in branch
+    assert "if not before_operation.capabilities and not analysis_screenshots:" in branch
+    assert 'generation_mode="initial"' in branch
+    assert "timeout_s=90" in branch
     assert "pending_flow_spec or before_operation" in branch
     assert '"operation_warning": str(e)' in branch
     assert '"type": "flow_spec"' in branch

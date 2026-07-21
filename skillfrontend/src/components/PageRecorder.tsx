@@ -1611,7 +1611,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // 统一在 ws.onclose 里通过 wsAliveRef 标记后,首次发现时弹一次提示
     if (wsAliveRef.current) {
       wsAliveRef.current = false;
-      message.warning("录制连接已断开，正在停止后续操作");
+      message.warning("录制连接已断开，正在自动恢复");
     }
     return false;
   }
