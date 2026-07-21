@@ -187,6 +187,17 @@ function pendingSingleQuestionBlock(): ToolContentBlock {
   };
 }
 
+function answeredSingleQuestionBlock(): ToolContentBlock {
+  return {
+    ...pendingSingleQuestionBlock(),
+    toolStatus: "success",
+    resultDetails: {
+      status: "answered",
+      answer: "上海",
+    },
+  };
+}
+
 describe("QuestionToolCard", () => {
   it("omits Field Assist actions when the canonical text field disables exposure", async () => {
     vi.useFakeTimers();
@@ -427,6 +438,35 @@ describe("QuestionToolCard", () => {
     expect(target.querySelector("button")?.disabled).toBe(true);
     expect(target.textContent).not.toContain("确认");
     expect(target.textContent).not.toContain("取消");
+
+    unmount(component);
+  });
+
+  it("keeps an answered single question and its submitted value in the original card", async () => {
+    const response = vi.fn(async () => {
+      throw new Error("an answered question must not issue RPCs");
+    });
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: answeredSingleQuestionBlock(),
+        active: false,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    const input = target.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(target.textContent).toContain("目的地？");
+    expect(input?.value).toBe("上海");
+    expect(input?.disabled).toBe(true);
+    expect(target.textContent).toContain("已提交");
+    expect(target.querySelector(".mobile-answered-result")).toBeNull();
+    expect(response).not.toHaveBeenCalled();
 
     unmount(component);
   });
@@ -801,12 +841,7 @@ describe("QuestionToolCard", () => {
     [
       "submitted source form",
       () => submittedFormBlock("confirmed"),
-      ".answered-source-form .question-form-scroll-region",
-    ],
-    [
-      "submitted source mobile summary",
-      () => submittedFormBlock("confirmed"),
-      ".mobile-answered-result.question-form-scroll-region",
+      "form .question-form-scroll-region",
     ],
   ] as const)(
     "caps inline %s content height and enables overflow scrolling",
