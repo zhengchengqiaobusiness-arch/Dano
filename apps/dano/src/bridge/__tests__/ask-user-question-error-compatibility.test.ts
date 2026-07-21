@@ -37,7 +37,7 @@ describe("ask_user_question executable error compatibility matrix", () => {
     ["missing grouped id", { questions: [{ question: "First?" }] }, "missing_question_id", "questions[0].id"],
     ["missing question text", { default: "A" }, "missing_question_text", "question"],
     ["invalid input type", { question: "Value?", inputType: "spreadsheet" }, "invalid_input_type", "inputType"],
-    ["invalid options", { question: "Pick", options: ["A", null] }, "invalid_options", "options"],
+    ["invalid options", { question: "Pick", options: ["A", null] }, "invalid_options", "options[1]"],
     ["duplicate option ids", { question: "Pick", options: ["A", "A"] }, "duplicate_option_id", "options[0]"],
     ["missing choice source", { question: "Pick", inputType: "select" }, "missing_choice_source", "question"],
     ["invalid default", { question: "Pick", options: ["A"], default: "B" }, "invalid_default", "default"],
@@ -83,6 +83,23 @@ describe("ask_user_question executable error compatibility matrix", () => {
       expect.objectContaining({ code: "duplicate_question_id", path: "questions[1].id" }),
       expect.objectContaining({ code: "duplicate_question_id", path: "questions[2].id" }),
     ]);
+  });
+
+  it("reports independent compatibility and field problems in one pass", () => {
+    const failure = normalizeFailure({
+      questions: [{
+        options: ["A"],
+        choices: ["B"],
+        default: { unsupported: true },
+      }],
+    });
+
+    expect(failure.error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "missing_question_id", path: "questions[0].id" }),
+      expect.objectContaining({ code: "missing_question_text", path: "questions[0].question" }),
+      expect.objectContaining({ code: "conflicting_aliases", path: "questions[0].options" }),
+      expect.objectContaining({ code: "invalid_default", path: "questions[0].default" }),
+    ]));
   });
 
   it("keeps canonical, JSON-stringified, and alias failures equivalent", () => {

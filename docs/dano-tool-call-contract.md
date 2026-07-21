@@ -401,7 +401,31 @@ still alive. Unsaved edits and server-process restarts are outside this contract
     "errorIssue": {
       "type": "object",
       "properties": {
-        "code": { "type": "string" },
+        "code": {
+          "enum": [
+            "invalid_request_shape",
+            "invalid_questions_json",
+            "invalid_questions_shape",
+            "invalid_question_item",
+            "conflicting_aliases",
+            "missing_question_id",
+            "duplicate_question_id",
+            "missing_question_text",
+            "invalid_input_type",
+            "invalid_options",
+            "duplicate_option_id",
+            "missing_choice_source",
+            "invalid_default",
+            "invalid_date_format",
+            "invalid_data_source",
+            "invalid_confirmation_target",
+            "duplicate_tool_call",
+            "presentation_timeout",
+            "presentation_failed",
+            "validation_retry_exhausted",
+            "cancelled"
+          ]
+        },
         "path": { "type": "string" },
         "message": { "type": "string" }
       },
@@ -431,9 +455,42 @@ still alive. Unsaved edits and server-process restarts are outside this contract
           "minItems": 1,
           "items": { "$ref": "#/$defs/errorIssue" }
         },
-        "sourceCode": { "type": "string" },
-        "terminalCode": { "type": "string" },
-        "context": { "type": "object" }
+        "sourceCode": {
+          "enum": [
+            "invalid_question_arguments",
+            "invalid_confirmation_source",
+            "duplicate_question_call",
+            "question_presentation_timeout",
+            "question_presentation_failed",
+            "question_validation_failed",
+            "question_cancelled"
+          ]
+        },
+        "terminalCode": {
+          "enum": [
+            "QUESTION_PRESENTATION_TIMEOUT",
+            "QUESTION_PRESENTATION_FAILED",
+            "QUESTION_VALIDATION_FAILED",
+            "ASK_USER_QUESTION_CANCELLED"
+          ]
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "receivedShape": {
+              "type": "object",
+              "properties": {
+                "formIds": { "type": "string" },
+                "formId": { "type": "string" }
+              }
+            },
+            "ignoredReasons": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "fallbackAttempted": { "type": "boolean" }
+          }
+        }
       },
       "required": ["code", "category", "message", "retryable", "issues"]
     }

@@ -112,44 +112,58 @@ export const ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE =
   "QUESTION_PRESENTATION_FAILED";
 export const ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE =
   "QUESTION_VALIDATION_FAILED";
+export const ASK_USER_QUESTION_CANCELLED_CODE =
+  "ASK_USER_QUESTION_CANCELLED";
+
+export const ASK_USER_QUESTION_ERROR_CATEGORIES = [
+  "validation",
+  "confirmation",
+  "duplicate_call",
+  "lifecycle",
+] as const;
 
 export type AskUserQuestionErrorCategory =
-  | "validation"
-  | "confirmation"
-  | "duplicate_call"
-  | "lifecycle";
+  (typeof ASK_USER_QUESTION_ERROR_CATEGORIES)[number];
+
+export const ASK_USER_QUESTION_ERROR_CODES = [
+  "invalid_question_arguments",
+  "invalid_confirmation_source",
+  "duplicate_question_call",
+  "question_presentation_timeout",
+  "question_presentation_failed",
+  "question_validation_failed",
+  "question_cancelled",
+] as const;
 
 export type AskUserQuestionErrorCode =
-  | "invalid_question_arguments"
-  | "invalid_confirmation_source"
-  | "duplicate_question_call"
-  | "question_presentation_timeout"
-  | "question_presentation_failed"
-  | "question_validation_failed"
-  | "question_cancelled";
+  (typeof ASK_USER_QUESTION_ERROR_CODES)[number];
+
+export const ASK_USER_QUESTION_ISSUE_CODES = [
+  "invalid_request_shape",
+  "invalid_questions_json",
+  "invalid_questions_shape",
+  "invalid_question_item",
+  "conflicting_aliases",
+  "missing_question_id",
+  "duplicate_question_id",
+  "missing_question_text",
+  "invalid_input_type",
+  "invalid_options",
+  "duplicate_option_id",
+  "missing_choice_source",
+  "invalid_default",
+  "invalid_date_format",
+  "invalid_data_source",
+  "invalid_confirmation_target",
+  "duplicate_tool_call",
+  "presentation_timeout",
+  "presentation_failed",
+  "validation_retry_exhausted",
+  "cancelled",
+] as const;
 
 export type AskUserQuestionIssueCode =
-  | "invalid_request_shape"
-  | "invalid_questions_json"
-  | "invalid_questions_shape"
-  | "invalid_question_item"
-  | "conflicting_aliases"
-  | "missing_question_id"
-  | "duplicate_question_id"
-  | "missing_question_text"
-  | "invalid_input_type"
-  | "invalid_options"
-  | "duplicate_option_id"
-  | "missing_choice_source"
-  | "invalid_default"
-  | "invalid_date_format"
-  | "invalid_data_source"
-  | "invalid_confirmation_target"
-  | "duplicate_tool_call"
-  | "presentation_timeout"
-  | "presentation_failed"
-  | "validation_retry_exhausted"
-  | "cancelled";
+  (typeof ASK_USER_QUESTION_ISSUE_CODES)[number];
 
 export type AskUserQuestionErrorIssue = {
   code: AskUserQuestionIssueCode;
@@ -165,7 +179,11 @@ export type AskUserQuestionError = {
   issues: AskUserQuestionErrorIssue[];
   sourceCode?: AskUserQuestionErrorCode;
   /** Legacy Pi error token retained as structured metadata during migration. */
-  terminalCode?: string;
+  terminalCode?:
+    | typeof ASK_USER_QUESTION_PRESENTATION_RETRY_CODE
+    | typeof ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE
+    | typeof ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE
+    | typeof ASK_USER_QUESTION_CANCELLED_CODE;
   context?: {
     receivedShape?: { formIds: string; formId: string };
     ignoredReasons?: string[];

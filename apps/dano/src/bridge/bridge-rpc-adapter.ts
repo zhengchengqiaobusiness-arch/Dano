@@ -4315,8 +4315,9 @@ class TranscriptProjector {
     const sessionKey = sessionPath ?? "active";
     const submittedForms =
       this.submittedFormsBySession.get(sessionKey) ?? new Map();
+    const browserMessage = projectAskUserQuestionResult(message);
     const projectedMessage = projectAskUserQuestionRequests(
-      message,
+      browserMessage,
       recovering,
       submittedForms,
       this.coordinator,
@@ -4406,6 +4407,28 @@ function projectAskUserQuestionRequests(
   if (!Array.isArray(message.content)) return message;
   let changed = false;
   const content = message.content.map((block, index) => {
+    if (typeof block !== "string" && block.type === "toolResult") {
+      const source = message.content?.[index - 1];
+      if (
+        typeof source !== "string" &&
+        source?.type === "toolCall" &&
+        source.name === ASK_USER_QUESTION_TOOL_NAME
+      ) {
+        const failure =
+          parseAskUserQuestionFailure(block.details) ??
+          parseAskUserQuestionFailure(questionResultErrorText(block));
+        if (failure) {
+          const projection = projectAskUserQuestionFailure(failure);
+          changed = true;
+          return {
+            ...block,
+            text: projection.message,
+            content: [{ type: "text" as const, text: projection.message }],
+            details: projection,
+          };
+        }
+      }
+    }
     if (
       typeof block === "string" ||
       block.type !== "toolCall" ||
@@ -4780,6 +4803,29 @@ function questionErrorProjection(
     parseAskUserQuestionFailure(result.details) ??
     parseAskUserQuestionFailure(questionResultErrorText(result));
   return failure ? projectAskUserQuestionFailure(failure) : undefined;
+}
+
+function projectAskUserQuestionResult(
+  message: RpcTranscriptMessage,
+): RpcTranscriptMessage {
+  if (
+    message.role !== "toolResult" ||
+    message.toolName !== ASK_USER_QUESTION_TOOL_NAME
+  ) {
+    return message;
+  }
+  const failure =
+    parseAskUserQuestionFailure(message.details) ??
+    parseAskUserQuestionFailure(questionResultErrorText(message));
+  if (!failure) return message;
+  const projection = projectAskUserQuestionFailure(failure);
+  return {
+    ...message,
+    content: [{ type: "text", text: projection.message }],
+    text: projection.message,
+    errorMessage: projection.message,
+    details: projection,
+  };
 }
 
 function questionResultErrorText(source: {

@@ -6,6 +6,11 @@ import type {
   AskUserQuestionInvalidResult,
   AskUserQuestionIssueCode,
 } from "./types.js";
+import {
+  ASK_USER_QUESTION_ERROR_CATEGORIES,
+  ASK_USER_QUESTION_ERROR_CODES,
+  ASK_USER_QUESTION_ISSUE_CODES,
+} from "./types.js";
 
 export function askUserQuestionIssue(
   code: AskUserQuestionIssueCode,
@@ -103,9 +108,13 @@ function isAskUserQuestionInvalidResult(
     typeof error.message === "string" &&
     typeof error.retryable === "boolean" &&
     Array.isArray(error.issues) &&
+    error.issues.length > 0 &&
     error.issues.every(issue =>
       isRecord(issue) &&
       typeof issue.code === "string" &&
+      ASK_USER_QUESTION_ISSUE_CODES.includes(
+        issue.code as AskUserQuestionIssueCode,
+      ) &&
       typeof issue.message === "string" &&
       (issue.path === undefined || typeof issue.path === "string"),
     )
@@ -115,26 +124,17 @@ function isAskUserQuestionInvalidResult(
 function isAskUserQuestionErrorCode(
   value: unknown,
 ): value is AskUserQuestionErrorCode {
-  return typeof value === "string" && [
-    "invalid_question_arguments",
-    "invalid_confirmation_source",
-    "duplicate_question_call",
-    "question_presentation_timeout",
-    "question_presentation_failed",
-    "question_validation_failed",
-    "question_cancelled",
-  ].includes(value);
+  return typeof value === "string" &&
+    ASK_USER_QUESTION_ERROR_CODES.includes(value as AskUserQuestionErrorCode);
 }
 
 function isAskUserQuestionErrorCategory(
   value: unknown,
 ): value is AskUserQuestionErrorCategory {
-  return typeof value === "string" && [
-    "validation",
-    "confirmation",
-    "duplicate_call",
-    "lifecycle",
-  ].includes(value);
+  return typeof value === "string" &&
+    ASK_USER_QUESTION_ERROR_CATEGORIES.includes(
+      value as AskUserQuestionErrorCategory,
+    );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

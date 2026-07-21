@@ -9,6 +9,10 @@ import {
   serializeAskUserQuestionFailure,
 } from "./ask-user-question-errors.js";
 import {
+  ASK_USER_QUESTION_CANCELLED_CODE,
+  ASK_USER_QUESTION_ERROR_CATEGORIES,
+  ASK_USER_QUESTION_ERROR_CODES,
+  ASK_USER_QUESTION_ISSUE_CODES,
   ASK_USER_QUESTION_TOOL_NAME,
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
@@ -28,8 +32,7 @@ import {
   type AskUserQuestionResult,
 } from "./types.js";
 
-export const ASK_USER_QUESTION_CANCELLED_CODE =
-  "ASK_USER_QUESTION_CANCELLED";
+export { ASK_USER_QUESTION_CANCELLED_CODE };
 
 const askUserQuestionAnswerSchema = Type.Union([
   Type.String(),
@@ -40,6 +43,9 @@ const askUserQuestionAnswerSchema = Type.Union([
   description:
     "Canonical answer value returned to the model: string or number id, id array, text string, or boolean confirmation.",
 });
+
+const literalUnion = (values: readonly string[]) =>
+  Type.Union(values.map(value => Type.Literal(value)));
 
 const duplicateCallMessage =
   "Another ask_user_question call is still pending in this assistant response. Retry with exactly one native ask_user_question call and combine all fields into one questions array.";
@@ -148,59 +154,16 @@ export const askUserQuestionResultSchema = Type.Union([
   Type.Object({
     status: Type.Literal("invalid"),
     error: Type.Object({
-      code: Type.Union([
-        Type.Literal("invalid_question_arguments"),
-        Type.Literal("invalid_confirmation_source"),
-        Type.Literal("duplicate_question_call"),
-        Type.Literal("question_presentation_timeout"),
-        Type.Literal("question_presentation_failed"),
-        Type.Literal("question_validation_failed"),
-        Type.Literal("question_cancelled"),
-      ]),
-      category: Type.Union([
-        Type.Literal("validation"),
-        Type.Literal("confirmation"),
-        Type.Literal("duplicate_call"),
-        Type.Literal("lifecycle"),
-      ]),
+      code: literalUnion(ASK_USER_QUESTION_ERROR_CODES),
+      category: literalUnion(ASK_USER_QUESTION_ERROR_CATEGORIES),
       message: Type.String(),
       retryable: Type.Boolean(),
       issues: Type.Array(Type.Object({
-        code: Type.Union([
-          Type.Literal("invalid_request_shape"),
-          Type.Literal("invalid_questions_json"),
-          Type.Literal("invalid_questions_shape"),
-          Type.Literal("invalid_question_item"),
-          Type.Literal("conflicting_aliases"),
-          Type.Literal("missing_question_id"),
-          Type.Literal("duplicate_question_id"),
-          Type.Literal("missing_question_text"),
-          Type.Literal("invalid_input_type"),
-          Type.Literal("invalid_options"),
-          Type.Literal("duplicate_option_id"),
-          Type.Literal("missing_choice_source"),
-          Type.Literal("invalid_default"),
-          Type.Literal("invalid_date_format"),
-          Type.Literal("invalid_data_source"),
-          Type.Literal("invalid_confirmation_target"),
-          Type.Literal("duplicate_tool_call"),
-          Type.Literal("presentation_timeout"),
-          Type.Literal("presentation_failed"),
-          Type.Literal("validation_retry_exhausted"),
-          Type.Literal("cancelled"),
-        ]),
+        code: literalUnion(ASK_USER_QUESTION_ISSUE_CODES),
         path: Type.Optional(Type.String()),
         message: Type.String(),
       }), { minItems: 1 }),
-      sourceCode: Type.Optional(Type.Union([
-        Type.Literal("invalid_question_arguments"),
-        Type.Literal("invalid_confirmation_source"),
-        Type.Literal("duplicate_question_call"),
-        Type.Literal("question_presentation_timeout"),
-        Type.Literal("question_presentation_failed"),
-        Type.Literal("question_validation_failed"),
-        Type.Literal("question_cancelled"),
-      ])),
+      sourceCode: Type.Optional(literalUnion(ASK_USER_QUESTION_ERROR_CODES)),
       terminalCode: Type.Optional(Type.Union([
         Type.Literal(ASK_USER_QUESTION_PRESENTATION_RETRY_CODE),
         Type.Literal(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE),
@@ -732,16 +695,23 @@ type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
 };
 
 type CompatibleRequestResult =
-  | { request: NormalizedAskUserQuestionRequest }
+  | {
+      request: NormalizedAskUserQuestionRequest;
+      issues: AskUserQuestionErrorIssue[];
+    }
   | { error: AskUserQuestionInvalidResult };
 
 type CompatibleQuestionsResult =
-  | { questions: NormalizedAskUserQuestionRequestItem[] }
+  | {
+      questions: NormalizedAskUserQuestionRequestItem[];
+      issues: AskUserQuestionErrorIssue[];
+    }
   | { error: AskUserQuestionInvalidResult };
 
-type CompatibleQuestionResult =
-  | { question: NormalizedAskUserQuestionRequestItem }
-  | { error: AskUserQuestionInvalidResult };
+type CompatibleQuestionResult = {
+  question: NormalizedAskUserQuestionRequestItem;
+  issues: AskUserQuestionErrorIssue[];
+};
 
 function invalidQuestionArguments(
   issues: AskUserQuestionErrorIssue[],
@@ -765,8 +735,8 @@ function normalizeCompatibleRequest(
     rawQuestions === undefined,
     "",
   );
-  if ("error" in questionResult) return questionResult;
   const normalized: NormalizedAskUserQuestionRequest = questionResult.question;
+  const issues = [...questionResult.issues];
   if (rawQuestions !== undefined) {
     normalized.title = firstScalarString(request.title) ?? defaultTitle;
     normalized.question = firstScalarString(request.question, request.label, request.prompt);
@@ -774,9 +744,10 @@ function normalizeCompatibleRequest(
     const questionsResult = normalizeCompatibleQuestions(rawQuestions);
     if ("error" in questionsResult) return questionsResult;
     normalized.questions = questionsResult.questions;
-    return { request: foldCompatibleGroupedFields(normalized) };
+    issues.push(...questionsResult.issues);
+    return { request: foldCompatibleGroupedFields(normalized), issues };
   }
-  return { request: normalized };
+  return { request: normalized, issues };
 }
 
 function normalizeCompatibleQuestions(
@@ -821,14 +792,10 @@ function normalizeCompatibleQuestions(
       continue;
     }
     const result = normalizeCompatibleQuestion(value, true, path);
-    if ("error" in result) {
-      issues.push(...result.error.error.issues);
-      continue;
-    }
     questions.push(result.question);
+    issues.push(...result.issues);
   }
-  if (issues.length > 0) return { error: invalidQuestionArguments(issues) };
-  return { questions };
+  return { questions, issues };
 }
 
 function normalizeCompatibleQuestion(
@@ -837,13 +804,15 @@ function normalizeCompatibleQuestion(
   path = "",
 ): CompatibleQuestionResult {
   const normalized: NormalizedAskUserQuestionRequestItem = {};
+  const issues: AskUserQuestionErrorIssue[] = [];
   const id = normalizeCompatibleAliases(
     "question id",
     [request.id, request.key, request.name],
     firstScalarString,
   );
-  if ("error" in id) return aliasConflictFailure(pathFor(path, "id"), id.error);
-  if (id.value) normalized.id = id.value;
+  if ("error" in id) {
+    issues.push(aliasConflictIssue(pathFor(path, "id"), id.error));
+  } else if (id.value) normalized.id = id.value;
 
   const question = normalizeCompatibleAliases(
     "question text",
@@ -856,9 +825,8 @@ function normalizeCompatibleQuestion(
     firstScalarString,
   );
   if ("error" in question) {
-    return aliasConflictFailure(pathFor(path, "question"), question.error);
-  }
-  if (question.value) normalized.question = question.value;
+    issues.push(aliasConflictIssue(pathFor(path, "question"), question.error));
+  } else if (question.value) normalized.question = question.value;
 
   const inputType = normalizeCompatibleAliases(
     "input type",
@@ -866,24 +834,22 @@ function normalizeCompatibleQuestion(
     normalizeInputType,
   );
   if ("error" in inputType) {
-    return aliasConflictFailure(pathFor(path, "inputType"), inputType.error);
-  }
+    issues.push(aliasConflictIssue(pathFor(path, "inputType"), inputType.error));
+  } else if (inputType.value) normalized.inputType = inputType.value;
+  const normalizedInputType = "error" in inputType ? undefined : inputType.value;
   const inputTypeProvided = [
     request.inputType,
     request.input_type,
     request.type,
     request.component,
   ].some(value => value !== undefined);
-  if (inputTypeProvided && !inputType.value) {
-    return { error: invalidQuestionArguments([
-      askUserQuestionIssue(
-        "invalid_input_type",
-        "inputType must identify a supported question control.",
-        pathFor(path, "inputType"),
-      ),
-    ]) };
+  if (!("error" in inputType) && inputTypeProvided && !normalizedInputType) {
+    issues.push(askUserQuestionIssue(
+      "invalid_input_type",
+      "inputType must identify a supported question control.",
+      pathFor(path, "inputType"),
+    ));
   }
-  if (inputType.value) normalized.inputType = inputType.value;
 
   const options = normalizeCompatibleAliases(
     "options",
@@ -891,35 +857,34 @@ function normalizeCompatibleQuestion(
     normalizeCompatibleOptionsAlias,
   );
   if ("error" in options) {
-    return aliasConflictFailure(pathFor(path, "options"), options.error);
+    issues.push(aliasConflictIssue(pathFor(path, "options"), options.error));
   }
   const optionsProvided = request.options !== undefined || request.choices !== undefined;
-  if (options.value) {
+  if (!("error" in options) && options.value) {
     normalized.options = options.value;
   } else if (
+    !("error" in options) &&
     optionsProvided &&
-    inputType.value !== "text" &&
-    inputType.value !== "textarea" &&
-    inputType.value !== "date" &&
-    inputType.value !== "confirm"
+    normalizedInputType !== "text" &&
+    normalizedInputType !== "textarea" &&
+    normalizedInputType !== "date" &&
+    normalizedInputType !== "confirm"
   ) {
-    normalized.inputType = inputType.value ?? "radio";
+    normalized.inputType = normalizedInputType ?? "radio";
   }
   if (
     optionsProvided &&
+    !("error" in options) &&
     !options.value &&
     normalized.inputType !== "text" &&
     normalized.inputType !== "textarea" &&
     normalized.inputType !== "date" &&
     normalized.inputType !== "confirm"
   ) {
-    return { error: invalidQuestionArguments([
-      askUserQuestionIssue(
-        "invalid_options",
-        "options must be a non-empty array of valid, unambiguous choices.",
-        pathFor(path, "options"),
-      ),
-    ]) };
+    issues.push(...invalidOptionsIssues(
+      request.options !== undefined ? request.options : request.choices,
+      pathFor(path, "options"),
+    ));
   }
 
   const fieldAssist = firstNormalizedFieldAssistValue(
@@ -938,25 +903,29 @@ function normalizeCompatibleQuestion(
     normalizeCompatibleDataSource,
   );
   if ("error" in dataSource) {
-    return aliasConflictFailure(pathFor(path, "dataSource"), dataSource.error);
+    issues.push(aliasConflictIssue(pathFor(path, "dataSource"), dataSource.error));
   }
   const dataSourceProvided =
     request.dataSource !== undefined || request.data_source !== undefined;
   if (
     dataSourceProvided &&
+    !("error" in dataSource) &&
     !dataSource.value &&
-    (inputType.value === "select" || inputType.value === "treeSelect")
+    (normalizedInputType === "select" || normalizedInputType === "treeSelect")
   ) {
-    return { error: invalidQuestionArguments([
-      askUserQuestionIssue(
+    issues.push(askUserQuestionIssue(
         "invalid_data_source",
         "dataSource must define an api type and a non-empty endpoint.",
         pathFor(path, "dataSource"),
-      ),
-    ]) };
+      ));
   }
-  if (dataSource.value) normalized.dataSource = dataSource.value;
-  if (dataSource.value && !inputType.value) normalized.inputType = "select";
+  if (!("error" in dataSource) && dataSource.value) {
+    normalized.dataSource = dataSource.value;
+  }
+  if (
+    !("error" in dataSource) && dataSource.value &&
+    !normalizedInputType
+  ) normalized.inputType = "select";
 
   const multiple = normalizeCompatibleAliases(
     "multiple",
@@ -964,14 +933,16 @@ function normalizeCompatibleQuestion(
     normalizeBoolean,
   );
   if ("error" in multiple) {
-    return aliasConflictFailure(pathFor(path, "multiple"), multiple.error);
-  }
-  if (multiple.value !== undefined) normalized.multiple = multiple.value;
+    issues.push(aliasConflictIssue(pathFor(path, "multiple"), multiple.error));
+  } else if (multiple.value !== undefined) normalized.multiple = multiple.value;
 
   const required = normalizeBoolean(request.required);
   if (required !== undefined) normalized.required = required;
 
-  if (normalizeBoolean(request.confirm) === true || inputType.value === "confirm") {
+  if (
+    normalizeBoolean(request.confirm) === true ||
+    normalizedInputType === "confirm"
+  ) {
     normalized.confirm = true;
   }
 
@@ -987,9 +958,8 @@ function normalizeCompatibleQuestion(
     normalizeCompatibleDefault,
   );
   if ("error" in compatibleDefault) {
-    return aliasConflictFailure(pathFor(path, "default"), compatibleDefault.error);
-  }
-  if (compatibleDefault.value !== undefined) {
+    issues.push(aliasConflictIssue(pathFor(path, "default"), compatibleDefault.error));
+  } else if (compatibleDefault.value !== undefined) {
     normalized.default = compatibleDefault.value;
   } else {
     const invalidDefault = firstNormalizedValue(
@@ -999,30 +969,56 @@ function normalizeCompatibleQuestion(
     if (invalidDefault !== undefined) {
       normalized.default = invalidDefault;
     } else if (defaultValues.some(value => value !== undefined && value !== null)) {
-      return { error: invalidQuestionArguments([
-        askUserQuestionIssue(
+      issues.push(askUserQuestionIssue(
           "invalid_default",
           "default must match the selected question control.",
           pathFor(path, "default"),
-        ),
-      ]) };
+        ));
     }
   }
 
-  return { question: normalized };
+  return { question: normalized, issues };
 }
 
 function pathFor(base: string, field: string): string {
   return base ? `${base}.${field}` : field;
 }
 
-function aliasConflictFailure(
+function aliasConflictIssue(
   path: string,
   message: string,
-): CompatibleQuestionResult {
-  return { error: invalidQuestionArguments([
-    askUserQuestionIssue("conflicting_aliases", message, path),
-  ]) };
+): AskUserQuestionErrorIssue {
+  return askUserQuestionIssue("conflicting_aliases", message, path);
+}
+
+function invalidOptionsIssues(
+  value: unknown,
+  path: string,
+): AskUserQuestionErrorIssue[] {
+  const parsed = parseJsonString(value);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return [askUserQuestionIssue(
+      "invalid_options",
+      "options must be a non-empty array of valid, unambiguous choices.",
+      path,
+    )];
+  }
+  const issues = parsed.flatMap((option, index) =>
+    normalizeCompatibleOption(option) === undefined
+      ? [askUserQuestionIssue(
+          "invalid_options",
+          "Each option must have a non-empty, unambiguous id and label.",
+          `${path}[${index}]`,
+        )]
+      : [],
+  );
+  return issues.length > 0
+    ? issues
+    : [askUserQuestionIssue(
+        "invalid_options",
+        "options must be a non-empty array of valid, unambiguous choices.",
+        path,
+      )];
 }
 
 function foldCompatibleGroupedFields(
@@ -1647,13 +1643,21 @@ function normalizeAskUserQuestionRequest(
     defaultTitle,
   );
   if ("error" in compatible) return compatible;
-  const { request } = compatible;
+  const { request, issues: compatibilityIssues } = compatible;
   if (request.confirm && request.questions === undefined) {
     return { error: invalidConfirmationSourceFailure() };
   }
   const questionsResult = normalizeRequestQuestions(request, requireDefault);
   if ("issues" in questionsResult) {
-    return { error: invalidQuestionArguments(questionsResult.issues) };
+    return {
+      error: invalidQuestionArguments([
+        ...compatibilityIssues,
+        ...questionsResult.issues,
+      ]),
+    };
+  }
+  if (compatibilityIssues.length > 0) {
+    return { error: invalidQuestionArguments(compatibilityIssues) };
   }
   const { questions } = questionsResult;
   if (questions.length === 0) {
@@ -1868,12 +1872,14 @@ function normalizeQuestion(
   requireDefault = false,
   path = "",
 ): NormalizedQuestionResult {
-  if (!request.question?.trim()) {
-    return { issues: [askUserQuestionIssue(
+  const issues: AskUserQuestionErrorIssue[] = [];
+  const questionText = request.question?.trim() ?? "";
+  if (!questionText) {
+    issues.push(askUserQuestionIssue(
       "missing_question_text",
       "Question text is required.",
       pathFor(path, "question"),
-    )] };
+    ));
   }
   const inputType = request.confirm
     ? "confirm"
@@ -1895,23 +1901,24 @@ function normalizeQuestion(
   if (inputType === "date") {
     const error = validateAskUserQuestionDateFormat(request.dateFormat);
     if (error) {
-      return { issues: [askUserQuestionIssue(
+      issues.push(askUserQuestionIssue(
         "invalid_date_format",
         safeDateFormatErrorMessage(error),
         pathFor(path, "dateFormat"),
-      )] };
+      ));
     }
     if (
+      !error &&
       typeof request.default === "string" &&
       request.default.trim() &&
       dateFormat &&
       !parseAskUserQuestionDateValue(request.default, dateFormat)
     ) {
-      return { issues: [askUserQuestionIssue(
+      issues.push(askUserQuestionIssue(
         "invalid_default",
         "The default date must match dateFormat.",
         pathFor(path, "default"),
-      )] };
+      ));
     }
   }
   const rawOptions = compatibleOptions?.map(normalizeOption);
@@ -1925,10 +1932,10 @@ function normalizeQuestion(
       ));
     }
   });
-  if (optionIssues.length > 0) {
-    return { issues: optionIssues };
-  }
-  const options = rawOptions as PendingQuestionOption[] | undefined;
+  issues.push(...optionIssues);
+  const options = rawOptions?.filter(
+    (option): option is PendingQuestionOption => option !== null,
+  );
   const optionIndexes = new Map<string, number[]>();
   options?.forEach((option, index) => {
     const key = optionKey(option.id);
@@ -1945,30 +1952,29 @@ function normalizeQuestion(
           `${pathFor(path, "options")}[${index}]`,
         )),
   );
-  if (duplicateOptionIssues.length > 0) {
-    return { issues: duplicateOptionIssues };
-  }
+  issues.push(...duplicateOptionIssues);
   if (
     multiple &&
     !options &&
     !compatibleDataSource
   ) {
-    return { issues: [askUserQuestionIssue(
+    issues.push(askUserQuestionIssue(
       "missing_choice_source",
       "Multiple-choice questions require options or dataSource.",
       path || "question",
-    )] };
+    ));
   }
   if (
+    !multiple &&
     (inputType === "radio" || inputType === "select" || inputType === "treeSelect") &&
     !options &&
     !compatibleDataSource
   ) {
-    return { issues: [askUserQuestionIssue(
+    issues.push(askUserQuestionIssue(
       "missing_choice_source",
       "Choice questions require options or dataSource.",
       path || "question",
-    )] };
+    ));
   }
 
   let kind: PendingQuestionKind = "text";
@@ -1982,7 +1988,7 @@ function normalizeQuestion(
   const question: PendingQuestionItem = {
     id: request.id?.trim() || fallbackId,
     kind,
-    question: request.question.trim(),
+    question: questionText,
     inputType,
     ...(kind === "text"
       ? { fieldAssist: request.fieldAssist ?? inputType === "textarea" }
@@ -1993,11 +1999,11 @@ function normalizeQuestion(
     ...(dateFormat ? { dateFormat } : {}),
   };
   if (requireDefault && kind !== "confirm" && request.default === undefined) {
-    return { issues: [askUserQuestionIssue(
+    issues.push(askUserQuestionIssue(
       "invalid_default",
       "Every non-confirmation question must provide a non-empty default.",
       pathFor(path, "default"),
-    )] };
+    ));
   }
   if (request.default !== undefined) {
     const compatibleDefault =
@@ -2006,48 +2012,30 @@ function normalizeQuestion(
         ? String(request.default)
         : request.default;
     if (typeof compatibleDefault === "string" && !compatibleDefault.trim()) {
-      return { issues: [askUserQuestionIssue(
+      issues.push(askUserQuestionIssue(
         "invalid_default",
         "default must be a non-empty recommended value.",
         pathFor(path, "default"),
-      )] };
-    }
-    try {
+      ));
+    } else try {
       question.default = normalizeAnswer(question, compatibleDefault);
     } catch (cause) {
-      return { issues: [askUserQuestionIssue(
+      issues.push(askUserQuestionIssue(
         "invalid_default",
-        cause instanceof Error
-          ? `default is invalid: ${safeDefaultErrorMessage(cause.message)}`
+        cause instanceof AskUserQuestionAnswerValidationError
+          ? `default is invalid: ${cause.message}`
           : "default is invalid.",
         pathFor(path, "default"),
-      )] };
+      ));
     }
   }
-  return { question };
+  return issues.length > 0 ? { issues } : { question };
 }
 
 function safeDateFormatErrorMessage(message: string): string {
   return message.startsWith("dateFormat is not supported:")
     ? "dateFormat is not supported by the date control. Use yyyy-MM-dd or yyyy-MM-dd HH:mm."
     : message;
-}
-
-function safeDefaultErrorMessage(message: string): string {
-  const known = [
-    "请确认或取消",
-    "请至少选择一个选项",
-    "不能重复选择同一选项",
-    "只能填写一个其他回答",
-    "请选择一个有效选项",
-    "请输入其他回答",
-    "选项不唯一，请重新选择",
-    "选项标签不唯一，请重新选择",
-    "答案必须匹配一个可选项",
-    "日期答案必须是字符串",
-    "答案不能为空",
-  ];
-  return known.includes(message) ? message : "the value does not match the question control";
 }
 
 function normalizeOption(
@@ -2063,27 +2051,53 @@ function normalizeOption(
   return isValidOptionId(id) && label ? { id, label } : null;
 }
 
+const answerValidationMessages = {
+  confirmation_required: "请确认或取消",
+  selection_required: "请至少选择一个选项",
+  duplicate_selection: "不能重复选择同一选项",
+  multiple_custom_answers: "只能填写一个其他回答",
+  invalid_choice: "请选择一个有效选项",
+  custom_answer_required: "请输入其他回答",
+  ambiguous_option_id: "选项不唯一，请重新选择",
+  ambiguous_option_label: "选项标签不唯一，请重新选择",
+  unmatched_choice: "答案必须匹配一个可选项",
+  date_string_required: "日期答案必须是字符串",
+  answer_required: "答案不能为空",
+} as const;
+
+type AskUserQuestionAnswerValidationCode = keyof typeof answerValidationMessages;
+
+class AskUserQuestionAnswerValidationError extends Error {
+  constructor(readonly code: AskUserQuestionAnswerValidationCode) {
+    super(answerValidationMessages[code]);
+  }
+}
+
+function rejectAnswer(code: AskUserQuestionAnswerValidationCode): never {
+  throw new AskUserQuestionAnswerValidationError(code);
+}
+
 function normalizeAnswer(
   pending: PendingQuestionItem,
   answer: AskUserQuestionAnswerInput,
 ): AskUserQuestionAnswer {
   if (pending.kind === "confirm") {
     if (typeof answer !== "boolean") {
-      throw new Error("请确认或取消");
+      rejectAnswer("confirmation_required");
     }
     return answer;
   }
   if (pending.kind === "multiple") {
     if (!Array.isArray(answer) || answer.length === 0) {
       if (!pending.required && Array.isArray(answer)) return [];
-      throw new Error("请至少选择一个选项");
+      rejectAnswer("selection_required");
     }
     const normalized = answer.map(value => normalizeChoiceAnswer(pending, value));
     const keys = normalized.map(optionKey);
-    if (new Set(keys).size !== keys.length) throw new Error("不能重复选择同一选项");
+    if (new Set(keys).size !== keys.length) rejectAnswer("duplicate_selection");
     const customAnswers = normalized.filter(value => !hasExactOption(pending, value));
     if (customAnswers.length > 1 && pending.options?.some(isOtherOption)) {
-      throw new Error("只能填写一个其他回答");
+      rejectAnswer("multiple_custom_answers");
     }
     return normalized;
   }
@@ -2094,17 +2108,17 @@ function normalizeAnswer(
   }
 
   if (pending.kind === "date") {
-    if (typeof answer !== "string") throw new Error("日期答案必须是字符串");
-    if (pending.required && !answer.trim()) throw new Error("答案不能为空");
+    if (typeof answer !== "string") rejectAnswer("date_string_required");
+    if (pending.required && !answer.trim()) rejectAnswer("answer_required");
     return answer;
   }
 
   if (typeof answer !== "string") {
-    throw new Error("答案不能为空");
+    rejectAnswer("answer_required");
   }
   if (!answer.trim()) {
     if (!pending.required) return "";
-    throw new Error("答案不能为空");
+    rejectAnswer("answer_required");
   }
   return answer.trim();
 }
@@ -2116,14 +2130,14 @@ function normalizeChoiceAnswer(
   const rawCandidate = isOptionObject(answer) ? answer.id : answer;
   const candidate =
     typeof rawCandidate === "string" ? rawCandidate.trim() : rawCandidate;
-  if (!isValidOptionId(candidate)) throw new Error("请选择一个有效选项");
+  if (!isValidOptionId(candidate)) rejectAnswer("invalid_choice");
 
   const options = pending.options ?? [];
   if (options.length === 0) return candidate;
 
   const exact = options.find(option => option.id === candidate);
   if (exact) {
-    if (isOtherOption(exact)) throw new Error("请输入其他回答");
+    if (isOtherOption(exact)) rejectAnswer("custom_answer_required");
     return exact.id;
   }
 
@@ -2131,28 +2145,28 @@ function normalizeChoiceAnswer(
     option => String(option.id) === String(candidate),
   );
   if (byStringifiedId.length === 1) {
-    if (isOtherOption(byStringifiedId[0])) throw new Error("请输入其他回答");
+    if (isOtherOption(byStringifiedId[0])) rejectAnswer("custom_answer_required");
     return byStringifiedId[0].id;
   }
-  if (byStringifiedId.length > 1) throw new Error("选项不唯一，请重新选择");
+  if (byStringifiedId.length > 1) rejectAnswer("ambiguous_option_id");
 
   if (typeof candidate === "string") {
     const byTypedKey = options.filter(option => optionKey(option.id) === candidate);
     if (byTypedKey.length === 1) {
-      if (isOtherOption(byTypedKey[0])) throw new Error("请输入其他回答");
+      if (isOtherOption(byTypedKey[0])) rejectAnswer("custom_answer_required");
       return byTypedKey[0].id;
     }
 
     const byLabel = options.filter(option => option.label === candidate);
     if (byLabel.length === 1) {
-      if (isOtherOption(byLabel[0])) throw new Error("请输入其他回答");
+      if (isOtherOption(byLabel[0])) rejectAnswer("custom_answer_required");
       return byLabel[0].id;
     }
-    if (byLabel.length > 1) throw new Error("选项标签不唯一，请重新选择");
+    if (byLabel.length > 1) rejectAnswer("ambiguous_option_label");
     if (options.some(isOtherOption)) return candidate;
   }
 
-  throw new Error("答案必须匹配一个可选项");
+  rejectAnswer("unmatched_choice");
 }
 
 function isValidOptionId(value: unknown): value is AskUserQuestionOptionId {

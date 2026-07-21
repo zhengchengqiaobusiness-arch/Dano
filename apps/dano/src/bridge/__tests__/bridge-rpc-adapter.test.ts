@@ -3306,6 +3306,33 @@ describe("BridgeRpcAdapter", () => {
                 questions: [{ question: "审批人？" }],
               },
             },
+            {
+              type: "toolCall",
+              id: "embedded-structured-invalid-question",
+              name: "ask_user_question",
+              arguments: { question: "审批人？", default: {} },
+            },
+            {
+              type: "toolResult",
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  status: "invalid",
+                  error: {
+                    code: "invalid_question_arguments",
+                    category: "validation",
+                    message: "Question fields contain invalid arguments.",
+                    retryable: true,
+                    issues: [{
+                      code: "invalid_default",
+                      path: "default",
+                      message: "default is invalid.",
+                    }],
+                  },
+                }),
+              }],
+              isError: true,
+            },
           ],
         },
         {
@@ -3407,6 +3434,37 @@ describe("BridgeRpcAdapter", () => {
       });
       expect(response.payload.data.messages[0].content[3].questionError)
         .not.toHaveProperty("issues");
+      const browserPayload = JSON.stringify(response.payload.data);
+      expect(browserPayload).not.toContain("missing_question_id");
+      expect(browserPayload).not.toContain("questions[0].id");
+      expect(browserPayload).not.toContain("invalid_default");
+      expect(response.payload.data.messages[0].content[5]).toMatchObject({
+        type: "toolResult",
+        details: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+        content: [{
+          type: "text",
+          text: "Question fields contain invalid arguments.",
+        }],
+      });
+      expect(response.payload.data.messages[4]).toMatchObject({
+        role: "toolResult",
+        toolCallId: "structured-invalid-question",
+        details: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+        content: [{
+          type: "text",
+          text: "Question fields contain invalid arguments.",
+        }],
+      });
     });
 
     it("defaults transcript pages to the latest 80 messages", async () => {
