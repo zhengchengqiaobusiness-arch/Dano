@@ -7,6 +7,9 @@
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "pnpm -C apps/dano build",
+    "container:build": "podman build -t dano-app:local .",
+    "container:down": "node scripts/local-container.mjs down",
+    "container:up": "node scripts/local-container.mjs up",
     "build:server": "pnpm -C apps/dano build:server",
     "build:web": "pnpm -C apps/dano build:web",
     "check": "pnpm -C apps/dano check",

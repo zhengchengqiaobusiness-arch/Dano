@@ -55,6 +55,21 @@ the exact read-only runtime skills path.
 
 ## Local Compose Run
 
+For repeatable local Podman runs, use the stable commands below. Build the
+reusable local image after source changes, then start or stop the existing
+Compose deployment on `http://localhost:18082`:
+
+```bash
+pnpm run container:build
+pnpm run container:up
+pnpm run container:down
+```
+
+These commands use Podman and keep local runtime data outside the source
+checkout under the system temporary directory. Start the Podman machine first
+when it is not already running. Run `smoke:deploy` and the browser acceptance
+steps below after `container:up` when validating a change.
+
 ```bash
 cp .env.example .env
 docker build -t dano-app:local .
