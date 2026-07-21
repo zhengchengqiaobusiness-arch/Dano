@@ -248,9 +248,16 @@ describe("Activity Trail presentation", () => {
         }),
       },
     ]);
+    const missingActivities = buildToolActivities([
+      {
+        key: "bash-missing",
+        block: toolBlock("bash", "success"),
+      },
+    ]);
 
     expect(dynamicActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(invalidActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(missingActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(dynamicActivities)).not.toContain("PRIVATE_COMMAND");
     expect(JSON.stringify(dynamicActivities)).not.toContain("--token");
     expect(JSON.stringify(invalidActivities)).not.toContain("secret-tool");

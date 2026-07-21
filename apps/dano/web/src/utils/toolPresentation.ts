@@ -194,7 +194,7 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
 
   if (block.toolName === "bash") {
     const command = stringField(asRecord(block.toolArgs), "command");
-    if (!command) return [];
+    if (!command) return [t("chatTranscript.activity.process.scriptDetail")];
     const summary = safeBashCommandSummary(command);
     return summary.kind === "commands"
       ? summary.executableNames.map(
