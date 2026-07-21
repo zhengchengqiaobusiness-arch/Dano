@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dano Production Deploy"
+  short_description: "Safely deploy upstream/main to Dano production"
+  default_prompt: "Use $dano-production-deploy to update Dano production from the latest upstream/main and complete full acceptance."
