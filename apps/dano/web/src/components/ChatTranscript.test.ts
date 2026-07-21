@@ -165,7 +165,7 @@ describe("ChatTranscript Activity Trail", () => {
       await tick();
       expect(target.querySelectorAll(".tool-activity")).toHaveLength(1);
       expect(target.querySelectorAll(".message-row.assistant")).toHaveLength(1);
-      expect(target.textContent).toContain("正在查阅资料 2 次");
+      expect(target.textContent).toContain("正在查阅 2 项资料");
       expect(target.textContent).not.toContain("已查阅资料");
       expect(target.textContent).not.toContain("继续核对");
     } finally {

@@ -75,10 +75,11 @@ export function buildToolActivities(
     ) {
       previous.sourceKeys.push(source.key);
       previous.count += 1;
-      previous.details = [
+      const details = [
         ...previous.details,
         ...safeToolActivityDetails(source.block),
       ];
+      previous.details = kind === "read" ? details : uniqueStrings(details);
       previous.images = uniqueImages([
         ...previous.images,
         ...safeToolActivityImages(source.block),

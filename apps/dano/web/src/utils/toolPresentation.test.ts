@@ -99,7 +99,7 @@ describe("Activity Trail presentation", () => {
       sourceKeys: activity.sourceKeys,
     }))).toEqual([
       {
-        label: "已查阅资料 2 次",
+        label: "已查阅 2 项资料",
         count: 2,
         sourceKeys: ["read-1", "read-2"],
       },
@@ -232,13 +232,15 @@ describe("Activity Trail presentation", () => {
   });
 
   it("uses a generic detail when Bash cannot be parsed or has no static command name", () => {
-    const activities = buildToolActivities([
+    const dynamicActivities = buildToolActivities([
       {
         key: "bash-dynamic",
         block: toolBlock("bash", "success", {
           toolArgs: { command: "$PRIVATE_COMMAND --token secret" },
         }),
       },
+    ]);
+    const invalidActivities = buildToolActivities([
       {
         key: "bash-invalid",
         block: toolBlock("bash", "success", {
@@ -247,12 +249,11 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities.map(activity => activity.details)).toEqual([
-      ["执行了 Shell 脚本", "执行了 Shell 脚本"],
-    ]);
-    expect(JSON.stringify(activities)).not.toContain("PRIVATE_COMMAND");
-    expect(JSON.stringify(activities)).not.toContain("secret-tool");
-    expect(JSON.stringify(activities)).not.toContain("--token");
+    expect(dynamicActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(invalidActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(JSON.stringify(dynamicActivities)).not.toContain("PRIVATE_COMMAND");
+    expect(JSON.stringify(dynamicActivities)).not.toContain("--token");
+    expect(JSON.stringify(invalidActivities)).not.toContain("secret-tool");
   });
 
   it("localizes bash activity details", () => {
@@ -305,12 +306,28 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.label).toBe("已查阅资料 3 次");
+    expect(activities[0]?.label).toBe("已查阅 3 项资料");
     expect(activities[0]?.details).toEqual([
       "dano_call.py",
       "dano_call.py",
       "dano_call.py",
     ]);
+
+    const externalActivities = buildToolActivities([
+      {
+        key: "curl-1",
+        block: toolBlock("curl", "success", {
+          toolArgs: { url: "https://example.com/one" },
+        }),
+      },
+      {
+        key: "curl-2",
+        block: toolBlock("curl", "success", {
+          toolArgs: { url: "https://example.com/two" },
+        }),
+      },
+    ]);
+    expect(externalActivities[0]?.details).toEqual(["example.com"]);
   });
 
   it("caps detail names at five while preserving known-tool images", () => {
