@@ -226,20 +226,23 @@ describe("ask_user_question confirmation compatibility matrix", () => {
     expect(select(request)).toEqual(expected);
   });
 
-  it("keeps native and safely JSON-stringified collections metamorphically equivalent", () => {
+  it.each([
+    {
+      name: "partial-valid selection",
+      formIds: ["form-b", "form-a", "form-b", "missing", null],
+    },
+    {
+      name: "all-invalid fallback",
+      formIds: ["missing", null],
+    },
+  ])("keeps native and JSON collections equivalent for $name", ({ formIds }) => {
     const native = select({
       confirm: true,
-      formIds: ["form-b", "form-a", "form-b", "missing", null],
+      formIds,
     });
     const jsonString = select({
       confirm: "True",
-      formIds: JSON.stringify([
-        "form-b",
-        "form-a",
-        "form-b",
-        "missing",
-        null,
-      ]),
+      formIds: JSON.stringify(formIds),
     });
 
     expect({ ...jsonString, receivedShape: native.receivedShape }).toEqual(native);
