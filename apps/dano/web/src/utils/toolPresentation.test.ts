@@ -292,6 +292,27 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("yaml 命令");
   });
 
+  it("skips quoted case alternatives containing whitespace", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-case-quoted",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: [
+              'case "$type" in',
+              'payroll|"internal data") /bin/ls ;;',
+              "esac",
+            ].join("\n"),
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(JSON.stringify(activities)).not.toContain("payroll 命令");
+    expect(JSON.stringify(activities)).not.toContain("internal data");
+  });
+
   it("does not present function declarations or compound-assignment data as commands", () => {
     const functionActivities = buildToolActivities([
       {
@@ -313,9 +334,20 @@ describe("Activity Trail presentation", () => {
         }),
       },
     ]);
+    const followingCommandActivities = buildToolActivities([
+      {
+        key: "bash-function-then-command",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "prepare() { /bin/pwd; }; /bin/ls -la",
+          },
+        }),
+      },
+    ]);
 
     expect(functionActivities[0]?.details).toEqual([]);
     expect(assignmentActivities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(followingCommandActivities[0]?.details).toEqual(["执行了 ls 命令"]);
     expect(JSON.stringify(functionActivities)).not.toContain("internal_deploy_secret");
     expect(JSON.stringify(assignmentActivities)).not.toContain("payroll.csv");
   });

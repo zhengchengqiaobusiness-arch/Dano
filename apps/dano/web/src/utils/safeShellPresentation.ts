@@ -32,8 +32,7 @@ const NON_COMMAND_SEGMENT_WORDS = new Set([
 ]);
 
 export function safeBashExecutableNames(command: string): string[] {
-  const visibleCommand = withoutHeredocBodies(command);
-  if (containsFunctionDeclaration(visibleCommand)) return [];
+  const visibleCommand = withoutFunctionDeclarations(withoutHeredocBodies(command));
   return shellCommandSegments(visibleCommand).flatMap(segment => {
     const executable = firstShellExecutable(segment);
     if (!executable || executable.includes("$")) return [];
@@ -42,9 +41,37 @@ export function safeBashExecutableNames(command: string): string[] {
   });
 }
 
-function containsFunctionDeclaration(command: string): boolean {
-  return /(?:^|[;|&\n]\s*)(?:(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)|function\s+[A-Za-z_][A-Za-z0-9_]*)\s*\{/u
-    .test(command);
+function withoutFunctionDeclarations(command: string): string {
+  const declarationPattern = /(^|[;|&\n]\s*)((?:(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)|function\s+[A-Za-z_][A-Za-z0-9_]*)\s*\{)/gmu;
+  let cursor = 0;
+  let result = "";
+
+  for (const match of command.matchAll(declarationPattern)) {
+    const declarationStart = (match.index ?? 0) + (match[1]?.length ?? 0);
+    if (declarationStart < cursor) continue;
+    const openingBrace = declarationStart + (match[2]?.lastIndexOf("{") ?? 0);
+    const declarationEnd = matchingFunctionBraceEnd(command, openingBrace);
+    result += command.slice(cursor, declarationStart);
+    result += command.slice(declarationStart, declarationEnd).replace(/[^\n]/gu, " ");
+    cursor = declarationEnd;
+  }
+
+  return result + command.slice(cursor);
+}
+
+function matchingFunctionBraceEnd(command: string, openingBrace: number): number {
+  const remainder = command.slice(openingBrace);
+  let depth = 0;
+  let end = command.length;
+  scanUnquotedShellCharacters(remainder, "", (character, index) => {
+    if (character === "{") depth += 1;
+    if (character !== "}") return;
+    depth -= 1;
+    if (depth > 0) return;
+    end = openingBrace + index + 1;
+    return remainder.length;
+  });
+  return end;
 }
 
 function withoutHeredocBodies(command: string): string {
@@ -143,10 +170,20 @@ function hasCasePatternClosingParenthesis(
   pipeIndex: number,
 ): boolean {
   const prefix = command.slice(segmentStart, pipeIndex).trim();
-  const closingParenthesis = command.indexOf(")", pipeIndex + 1);
-  if (!prefix || closingParenthesis < 0) return false;
-  const suffix = command.slice(pipeIndex + 1, closingParenthesis);
-  return Boolean(suffix) && !/[\s;&()]/u.test(suffix);
+  if (!prefix) return false;
+
+  const suffix = command.slice(pipeIndex + 1);
+  let foundClosingParenthesis = false;
+  scanUnquotedShellCharacters(suffix, "", (character) => {
+    if (character === ")") {
+      foundClosingParenthesis = true;
+      return suffix.length;
+    }
+    if (character === ";" || character === "&" || character === "\n" || character === "(") {
+      return suffix.length;
+    }
+  });
+  return foundClosingParenthesis;
 }
 
 function firstShellExecutable(segment: string): string | undefined {
