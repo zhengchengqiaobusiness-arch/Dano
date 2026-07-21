@@ -1,9 +1,9 @@
 export function registerBridgePageLifecycle(
-  target: EventTarget,
+  target: Window,
   disconnect: () => void,
 ): () => void {
-  const handlePageHide = (event: Event) => {
-    if ((event as PageTransitionEvent).persisted) return;
+  const handlePageHide = (event: PageTransitionEvent) => {
+    if (event.persisted) return;
     disconnect();
   };
 

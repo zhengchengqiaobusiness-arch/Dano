@@ -42,6 +42,7 @@ const eventSources: FakeEventSource[] = [];
 
 async function connectBridge(
   promptResponse: Promise<Response> | (() => Promise<Response>),
+  onPromptRequest?: (init: RequestInit | undefined) => void,
 ) {
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     if (String(input) === "/api/clients") {
@@ -58,6 +59,7 @@ async function connectBridge(
       payload?: { type?: string };
     };
     if (envelope.payload?.type === "prompt") {
+      onPromptRequest?.(init);
       return typeof promptResponse === "function"
         ? promptResponse()
         : promptResponse;
@@ -78,6 +80,7 @@ async function connectBridge(
 
 describe("Bridge prompt acceptance", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.resetModules();
     eventSources.length = 0;
@@ -211,4 +214,80 @@ describe("Bridge prompt acceptance", () => {
 
     bridge.disconnect();
   });
+
+  it.each([
+    ["follow-up", "followUp" as const, "followUp" as const],
+    ["steering", "steer" as const, "steering" as const],
+  ])(
+    "aborts a timed-out streaming %s, returns false for Composer, and preserves the authoritative queue",
+    async (_label, streamingBehavior, queueType) => {
+      let requestSignal: AbortSignal | undefined;
+      const bridge = await connectBridge(
+        new Promise<Response>(() => {}),
+        init => {
+          requestSignal = init?.signal ?? undefined;
+        },
+      );
+      eventSources[0]!.send({
+        type: "event",
+        payload: { type: "agent_start", sessionPath: null },
+      });
+      vi.useFakeTimers();
+
+      const submitted = bridge.sendPrompt(
+        "times out in the browser queue",
+        undefined,
+        undefined,
+        streamingBehavior,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bridge.queuedUserMessages).toMatchObject([
+        { text: "times out in the browser queue", queueType },
+      ]);
+
+      eventSources[0]!.send({
+        type: "event",
+        payload: {
+          type: "queue_update",
+          sessionPath: null,
+          steering:
+            queueType === "steering"
+              ? [
+                  {
+                    text: "authoritative queued message",
+                    images: [],
+                    timestamp: 123,
+                    queueType: "steering",
+                  },
+                ]
+              : [],
+          followUp:
+            queueType === "followUp"
+              ? [
+                  {
+                    text: "authoritative queued message",
+                    images: [],
+                    timestamp: 123,
+                    queueType: "followUp",
+                  },
+                ]
+              : [],
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(submitted).resolves.toBe(false);
+      expect(requestSignal?.aborted).toBe(true);
+      expect(bridge.queuedUserMessages).toMatchObject([
+        { text: "authoritative queued message", queueType },
+      ]);
+      expect(bridge.notifications.at(-1)).toMatchObject({
+        notifyType: "error",
+        message: expect.stringMatching(/10|超时|timed out/i),
+      });
+
+      bridge.disconnect();
+    },
+  );
 });

@@ -28,6 +28,7 @@
     "smoke:deploy": "node scripts/smoke-dano-deploy.mjs",
     "start": "pnpm -C apps/dano start",
     "test": "vitest run",
+    "test:browser:multi-tab": "node scripts/test-multi-tab-prompt-browser.mjs",
     "test:watch": "vitest"
   },
   "devDependencies": {
@@ -35,6 +36,7 @@
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^25.8.0",
     "happy-dom": "^20.10.6",
+    "playwright-core": "^1.61.1",
     "svelte": "^5.55.7",
     "svelte-check": "^4.4.8",
     "tsdown": "^0.22.0",

@@ -99,7 +99,7 @@ function writeChunk(
 }
 
 describe("Dano provider timeout", () => {
-  it("persists the accepted user prompt before presenting a provider 429", async () => {
+  it("persists the user JSONL before presenting a real provider 429 fixture", async () => {
     const baseUrl = await startProvider((_request, response) => {
       response.writeHead(429, { "content-type": "application/json" });
       response.end(

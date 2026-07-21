@@ -252,6 +252,72 @@ describe("BridgeServer HTTP/SSE transport", () => {
     });
   });
 
+  it("returns 202 before an asynchronous provider-stage prompt error is presented", async () => {
+    let presentProviderError!: () => void;
+    const providerErrorGate = new Promise<void>(resolve => {
+      presentProviderError = resolve;
+    });
+    const { server, eventBus } = createServer(ctx => ({
+      handleClientMessage(message: ClientMessage) {
+        if (message.type !== "command" || message.payload.type !== "prompt") {
+          return;
+        }
+        // The real 429 and JSONL ordering are covered by llm-provider-timeout;
+        // this transport seam proves HTTP acceptance does not await that stage.
+        void providerErrorGate.then(() => {
+          ctx.send({
+            type: "event",
+            payload: {
+              type: "command_error",
+              commandType: "prompt",
+              error: "provider rate limit",
+            },
+          });
+        });
+      },
+      dispose: vi.fn(),
+    }));
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{
+      client: { id: string };
+      eventsUrl: string;
+      messagesUrl: string;
+    }>(`${origin}/api/clients`);
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+    await vi.waitFor(() =>
+      expect(eventBus.hasActiveClientConnection(created.client.id)).toBe(true),
+    );
+
+    const response = await fetch(`${origin}${created.messagesUrl}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "command",
+        payload: {
+          id: "provider-rate-limit",
+          type: "prompt",
+          message: "accepted before provider execution",
+        },
+      } satisfies ClientMessage),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ status: "accepted" });
+    presentProviderError();
+    await expect(sse.waitForMessages(1)).resolves.toMatchObject([
+      {
+        type: "event",
+        payload: {
+          type: "command_error",
+          commandType: "prompt",
+          error: "provider rate limit",
+        },
+      },
+    ]);
+    sse.close();
+  });
+
   it("rejects client messages when no SSE stream is active", async () => {
     const commandSpy = vi.fn();
     const { server } = createServer(() => ({

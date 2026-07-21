@@ -1765,7 +1765,7 @@ async function sendPrompt(
       ..._queuedUserMessages,
       optimisticQueuedMessage,
     ];
-    const optimisticQueuedSnapshot = _queuedUserMessages.at(-1);
+    const optimisticQueueEntry = _queuedUserMessages.at(-1);
     try {
       await dispatchPromptForAcknowledgement(
         clientMessagesUrl!,
@@ -1774,7 +1774,7 @@ async function sendPrompt(
       return true;
     } catch (error) {
       _queuedUserMessages = _queuedUserMessages.filter(
-        queuedMessage => queuedMessage !== optimisticQueuedSnapshot,
+        queuedMessage => queuedMessage !== optimisticQueueEntry,
       );
       reportPromptDispatchFailure(error);
       return false;
