@@ -861,7 +861,7 @@
   <div class="question-card-anchor">
     <article
       bind:this={cardElement}
-      class="question-card"
+      class="question-card bounded-width-card"
       class:inline-readonly-card={result?.status === "answered" ||
         result?.status === "confirmed" ||
         interaction?.state === "confirmed" ||
@@ -1236,7 +1236,14 @@
     box-shadow: var(--shadow-raised);
   }
 
+  .question-card.bounded-width-card {
+    width: 100%;
+    max-width: 680px;
+    margin-inline: auto;
+  }
+
   .question-card:global(.center-focused-card) {
+    max-width: none;
     overflow: hidden;
   }
 
@@ -1285,7 +1292,7 @@
     flex-direction: column;
     gap: 12px;
     width: 100%;
-    max-width: 900px;
+    max-width: 640px;
     margin-inline: auto;
   }
 
@@ -1326,7 +1333,6 @@
 
   .single-line-text-field {
     width: 100%;
-    max-width: 600px;
   }
 
   .question-option {
