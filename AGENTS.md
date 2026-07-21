@@ -73,6 +73,8 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Silently ignore or default unknown, misplaced, or malformed optional arguments when doing so does not prevent the requested capability from rendering, executing, or returning the correct result. Do not reject the tool call or trigger a model retry solely for those non-functional errors.
 - Keep strict validation only when recovery would be ambiguous or could cause an incorrect submission, incorrect field mapping, data loss, or another materially wrong result.
 - Encode runtime behavior in parser code, runtime defaults, tool prompt metadata, and tests; do not rely on this file alone to enforce model-facing behavior.
+- When adding or changing a collection- or object-shaped model parameter, update the executable compatibility matrix and the sanitized captured model-deviation fixtures that exercise it. A schema, prompt, or prose-only change is not complete evidence.
+- Review such changes with [the model argument compatibility checklist](docs/agents/model-argument-compatibility-review.md), including canonical input, safe JSON strings, aliases, malformed or ambiguous input, partial-valid input, fallback, isolation/leakage, and the canonical browser projection.
 
 ## Frontend component library
 

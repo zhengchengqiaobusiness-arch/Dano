@@ -80,6 +80,25 @@ Submission remains strict after rendering: required answers must be present,
 choice answers must map to exactly one option (or the explicit Other path), and
 grouped answers must map by canonical field id.
 
+### Compatibility change evidence
+
+Collection- and object-shaped model parameters require executable evidence in
+addition to the canonical schema and prose contract. For confirmation targets,
+the matrix in
+`apps/dano/src/bridge/__tests__/ask-user-question-confirmation-compatibility.test.ts`
+and the sanitized fixtures under its `fixtures/` directory enforce canonical,
+safe JSON-string, alias, malformed, partial-valid, fallback, isolation, and
+canonical-projection behavior. A compatibility change is incomplete when it
+updates only the schema, prompt metadata, or this document.
+
+Tests can enforce accepted encodings, target order, stable deduplication,
+ignored-reason classes, fallback decisions, Assistant Turn isolation, leakage
+boundaries, and the canonical Card Request. Reviewers must still decide whether
+a new coercion is unambiguous and safe to recover, whether fallback preserves
+the user's intended operation, and whether expanding the accepted input space
+could map answers or targets incorrectly. See the
+[model argument compatibility review checklist](agents/model-argument-compatibility-review.md).
+
 ## Confirmation lifecycle
 
 1. Call a grouped form with `title` and `questions`.

@@ -1,0 +1,17 @@
+{
+  "issue": 312,
+  "description": "Sanitized real-model encoding deviation for grouped-form confirmation targets",
+  "capturedArguments": {
+    "confirm": "True",
+    "formIds": "[\"form-a\", \"form-b\"]"
+  },
+  "canonicalArguments": {
+    "confirm": true,
+    "formIds": ["form-a", "form-b"]
+  },
+  "expected": {
+    "targetIds": ["form-a", "form-b"],
+    "ignoredReasons": [],
+    "fallbackAttempted": false
+  }
+}
