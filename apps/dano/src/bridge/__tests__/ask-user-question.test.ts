@@ -273,6 +273,7 @@ describe("ask_user_question tool", () => {
       },
       {
         batch: true,
+        title: "表单",
         questions: [
           {
             id: "reason",
@@ -301,6 +302,7 @@ describe("ask_user_question tool", () => {
       },
       {
         batch: true,
+        title: "表单",
         questions: [
           {
             id: "leave_type",
@@ -1577,15 +1579,19 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow(/invalid_confirmation_source.*fallbackAttempted/s);
   });
 
-  it("rejects grouped forms without a top-level title", async () => {
+  it("defaults grouped forms without a top-level title", async () => {
     const coordinator = new AskUserQuestionCoordinator();
-    await expect(
-      coordinator.wait(
-        "form-without-title",
-        { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow("Grouped forms require a top-level title");
+    const pending = coordinator.wait(
+      "form-without-title",
+      { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
+      new AbortController().signal,
+    );
+    expect(coordinator.cardRequest("form-without-title")).toMatchObject({
+      batch: true,
+      title: "表单",
+    });
+    coordinator.answer("form-without-title", { cancelled: true });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("returns grouped answers from one tool confirmation", async () => {
@@ -1816,19 +1822,23 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE);
   });
 
-  it("still requires a title for JSON-stringified grouped forms", async () => {
+  it("defaults the title for JSON-stringified grouped forms", async () => {
     const coordinator = new AskUserQuestionCoordinator();
-    await expect(
-      coordinator.wait(
-        "compat-json-missing-title",
-        {
-          questions: JSON.stringify([
-            { id: "seal_id", question: "印章类型？", default: "公章" },
-          ]),
-        },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow("Grouped forms require a top-level title");
+    const pending = coordinator.wait(
+      "compat-json-missing-title",
+      {
+        questions: JSON.stringify([
+          { id: "seal_id", question: "印章类型？", default: "公章" },
+        ]),
+      },
+      new AbortController().signal,
+    );
+    expect(coordinator.cardRequest("compat-json-missing-title")).toMatchObject({
+      batch: true,
+      title: "表单",
+    });
+    coordinator.answer("compat-json-missing-title", { cancelled: true });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("ignores redundant top-level fields on a complete JSON-stringified grouped form", async () => {

@@ -23,6 +23,8 @@ import {
 export const ASK_USER_QUESTION_CANCELLED_CODE =
   "ASK_USER_QUESTION_CANCELLED";
 
+const DEFAULT_GROUPED_FORM_TITLE = "表单";
+
 const askUserQuestionAnswerSchema = Type.Union([
   Type.String(),
   Type.Number(),
@@ -279,13 +281,6 @@ export class AskUserQuestionCoordinator {
       : normalizeAskUserQuestionRequest(rawRequest);
     if ("error" in normalized) {
       return this.rejectValidation(toolCallId, normalized.error, signal);
-    }
-    if (normalized.request.questions !== undefined && !normalized.request.title) {
-      return this.rejectValidation(
-        toolCallId,
-        "Grouped forms require a top-level title",
-        signal,
-      );
     }
     if (signal) this.validationFailuresBySignal.delete(signal);
     const { request, questions, cardRequest } = normalized;
@@ -616,7 +611,7 @@ function normalizeCompatibleRequest(
   if ("error" in questionResult) return questionResult;
   const normalized: NormalizedAskUserQuestionRequest = questionResult.question;
   if (rawQuestions !== undefined) {
-    normalized.title = firstScalarString(request.title);
+    normalized.title = firstScalarString(request.title) ?? DEFAULT_GROUPED_FORM_TITLE;
     normalized.question = firstScalarString(request.question, request.label, request.prompt);
     if (!normalized.question) delete normalized.question;
     const questionsResult = normalizeCompatibleQuestions(rawQuestions);
@@ -947,14 +942,15 @@ function confirmationParameterShape(value: unknown): string {
 function normalizeCompatibleOptions(
   value: unknown,
 ): { values: Array<string | AskUserQuestionOption>; invalid: boolean } {
-  if (!Array.isArray(value)) {
+  const parsed = parseJsonString(value);
+  if (!Array.isArray(parsed)) {
     return { values: [], invalid: value !== undefined };
   }
-  const values = value.flatMap(option => {
+  const values = parsed.flatMap(option => {
     const normalized = normalizeCompatibleOption(option);
     return normalized === undefined ? [] : [normalized];
   });
-  return { values, invalid: values.length !== value.length };
+  return { values, invalid: values.length !== parsed.length };
 }
 
 function normalizeCompatibleOptionsAlias(
@@ -1215,6 +1211,7 @@ function normalizeRequestQuestions(
     const questions: PendingQuestionItem[] = [];
     for (let index = 0; index < request.questions.length; index += 1) {
       const question = request.questions[index];
+      if (!question.id?.trim()) return "Grouped question ids are required";
       const normalized = normalizeQuestion(question, `q${index + 1}`);
       if (typeof normalized === "string") return normalized;
       if (seenIds.has(normalized.id)) {
