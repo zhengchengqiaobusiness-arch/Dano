@@ -481,6 +481,8 @@ class _RecordingConnectionLease:
     def __init__(self, *, task: asyncio.Task, released: asyncio.Event) -> None:
         self.task = task
         self.released = released
+        self.operation_idle = asyncio.Event()
+        self.operation_idle.set()
 
 
 _ACTIVE_RECORDING_CONNECTIONS: dict[tuple[str, str, str], _RecordingConnectionLease] = {}
@@ -501,6 +503,7 @@ async def _claim_recording_connection(
     if previous is None or previous.task is task:
         return lease
     if cancel_previous:
+        await previous.operation_idle.wait()
         # A replacement websocket is the new transport owner. The previous
         # handler can otherwise remain blocked forever in ``receive_json``
         # after a proxy-side 1006 close, leaving the UI stuck reconnecting.
@@ -1550,6 +1553,7 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 analysis_screenshots: list[dict] = []
                 before_operation = pending_flow_spec.model_copy(deep=True)
+                connection_lease.operation_idle.clear()
                 try:
                     from dano.execution.page.flow_spec import flow_operation_report
 
@@ -1675,6 +1679,8 @@ async def record_ws(ws: WebSocket) -> None:
                     }
                     _remember_costly(msg, error_response)
                     await sender.send_json(error_response)
+                finally:
+                    connection_lease.operation_idle.set()
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
                 if await _replay_costly(msg):

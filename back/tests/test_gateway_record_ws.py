@@ -638,6 +638,43 @@ async def test_reconnect_cancels_and_drains_previous_transport_owner() -> None:
     gateway._release_recording_connection(key, replacement)
 
 
+@pytest.mark.asyncio
+async def test_reconnect_waits_for_an_inflight_analysis() -> None:
+    key = ("tenant", "subsystem", "recording_busy")
+    ready = asyncio.Event()
+    finish = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def owner() -> None:
+        lease = await gateway._claim_recording_connection(key)
+        lease.operation_idle.clear()
+        ready.set()
+        try:
+            await finish.wait()
+            lease.operation_idle.set()
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+        finally:
+            gateway._release_recording_connection(key, lease)
+
+    previous = asyncio.create_task(owner())
+    await ready.wait()
+    replacement_task = asyncio.create_task(
+        gateway._claim_recording_connection(key, cancel_previous=True),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not cancelled.is_set()
+    assert not replacement_task.done()
+    finish.set()
+    replacement = await asyncio.wait_for(replacement_task, timeout=0.5)
+    await previous
+    assert cancelled.is_set()
+    gateway._release_recording_connection(key, replacement)
+
+
 def test_finalize_projection_preserves_recorded_enum_fact_metadata() -> None:
     raw = {
         "requestType": {

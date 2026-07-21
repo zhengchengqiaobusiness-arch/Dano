@@ -2697,7 +2697,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       nodes: [],
       input_schema: { type: "object", properties: {}, required: [] },
       output_schema: { type: "object", properties: { raw: { type: "object" } } },
-      output_mapping: [{ kind: "final_response", response_path: "response" }],
+      output_mapping: [{ kind: "final_response", name: "raw", response_path: "response" }],
       confirmed: false,
       requires_human_confirm: true,
       confidence: 0.5,
