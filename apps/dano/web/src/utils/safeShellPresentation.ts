@@ -3,6 +3,13 @@ type HeredocSpec = {
   stripLeadingTabs: boolean;
 };
 
+type ShellQuote = "" | "'" | '"';
+
+type ShellWord = {
+  endIndex: number;
+  value: string;
+};
+
 export function safeBashExecutableNames(command: string): string[] {
   return shellCommandSegments(withoutHeredocBodies(command)).flatMap(segment => {
     const executable = firstShellWord(segment);
@@ -15,6 +22,7 @@ export function safeBashExecutableNames(command: string): string[] {
 function withoutHeredocBodies(command: string): string {
   const visibleLines: string[] = [];
   const pendingHeredocs: HeredocSpec[] = [];
+  let quote: ShellQuote = "";
 
   for (const line of command.split(/\r?\n/u)) {
     const activeHeredoc = pendingHeredocs[0];
@@ -29,49 +37,31 @@ function withoutHeredocBodies(command: string): string {
     }
 
     visibleLines.push(line);
-    pendingHeredocs.push(...heredocSpecs(line));
+    const scan = heredocSpecs(line, quote);
+    quote = scan.quote;
+    pendingHeredocs.push(...scan.specs);
   }
 
   return visibleLines.join("\n");
 }
 
-function heredocSpecs(line: string): HeredocSpec[] {
+function heredocSpecs(
+  line: string,
+  initialQuote: ShellQuote,
+): { specs: HeredocSpec[]; quote: ShellQuote } {
   const specs: HeredocSpec[] = [];
-  let quote = "";
-  let escaped = false;
-
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "#" && (index === 0 || /[\s;|&]/u.test(line[index - 1]!))) {
-      break;
-    }
+  const quote = scanUnquotedShellCharacters(line, initialQuote, (character, index) => {
     if (character !== "<" || line[index + 1] !== "<" || line[index + 2] === "<") {
-      continue;
+      return;
     }
 
     const parsed = readHeredocSpec(line, index + 2);
-    if (!parsed) continue;
+    if (!parsed) return;
     specs.push(parsed.spec);
-    index = parsed.endIndex - 1;
-  }
+    return parsed.endIndex - 1;
+  });
 
-  return specs;
+  return { specs, quote };
 }
 
 function readHeredocSpec(
@@ -82,78 +72,35 @@ function readHeredocSpec(
   const stripLeadingTabs = line[index] === "-";
   if (stripLeadingTabs) index += 1;
   while (/\s/u.test(line[index] ?? "")) index += 1;
-
-  const quote = line[index] === "'" || line[index] === '"'
-    ? line[index]!
-    : "";
-  if (quote) index += 1;
-
-  let delimiter = "";
-  let escaped = false;
-  for (; index < line.length; index += 1) {
-    const character = line[index]!;
-    if (escaped) {
-      delimiter += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) {
-        index += 1;
-        return delimiter
-          ? { spec: { delimiter, stripLeadingTabs }, endIndex: index }
-          : undefined;
-      }
-      delimiter += character;
-      continue;
-    }
-    if (/[\s;|&<>]/u.test(character)) break;
-    delimiter += character;
-  }
-
-  if (quote || !delimiter) return undefined;
-  return { spec: { delimiter, stripLeadingTabs }, endIndex: index };
+  const delimiter = readShellWord(
+    line,
+    index,
+    character => /[\s;|&<>]/u.test(character),
+  );
+  if (!delimiter?.value) return undefined;
+  return {
+    spec: { delimiter: delimiter.value, stripLeadingTabs },
+    endIndex: delimiter.endIndex,
+  };
 }
 
 function shellCommandSegments(command: string): string[] {
   const segments: string[] = [];
   let start = 0;
-  let quote = "";
-  let escaped = false;
-
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
+  scanUnquotedShellCharacters(command, "", (character, index) => {
     const isRedirectAmpersand = character === "&" &&
       (command[index - 1] === ">" || command[index - 1] === "<" ||
         command[index + 1] === ">");
     const isBoundary = character === ";" || character === "|" ||
       character === "\n" || (character === "&" && !isRedirectAmpersand);
-    if (!isBoundary) continue;
+    if (!isBoundary) return;
     const segment = command.slice(start, index).trim();
     if (segment) segments.push(segment);
-    while (command[index + 1] === character) index += 1;
-    start = index + 1;
-  }
+    let endIndex = index;
+    while (command[endIndex + 1] === character) endIndex += 1;
+    start = endIndex + 1;
+    return endIndex;
+  });
 
   const finalSegment = command.slice(start).trim();
   if (finalSegment) segments.push(finalSegment);
@@ -165,35 +112,97 @@ function firstShellWord(segment: string): string | undefined {
   while (index < segment.length) {
     while (/\s/u.test(segment[index] ?? "")) index += 1;
     if (index >= segment.length || segment[index] === "#") return undefined;
-
-    let word = "";
-    let quote = "";
-    let escaped = false;
-    for (; index < segment.length; index += 1) {
-      const character = segment[index]!;
-      if (escaped) {
-        word += character;
-        escaped = false;
-        continue;
-      }
-      if (character === "\\" && quote !== "'") {
-        escaped = true;
-        continue;
-      }
-      if (quote) {
-        if (character === quote) quote = "";
-        else word += character;
-        continue;
-      }
-      if (character === "'" || character === '"') {
-        quote = character;
-        continue;
-      }
-      if (/\s/u.test(character)) break;
-      word += character;
+    const word = readShellWord(segment, index, character => /\s/u.test(character));
+    if (!word) return undefined;
+    index = word.endIndex;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) {
+      return word.value || undefined;
     }
-    if (quote) return undefined;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) return word || undefined;
   }
   return undefined;
+}
+
+function scanUnquotedShellCharacters(
+  source: string,
+  initialQuote: ShellQuote,
+  visit: (character: string, index: number) => number | void,
+): ShellQuote {
+  let quote = initialQuote;
+  let escaped = false;
+  let comment = false;
+  let atWordStart = !quote;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (comment) {
+      if (character !== "\n") continue;
+      comment = false;
+    }
+    if (escaped) {
+      escaped = false;
+      atWordStart = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      atWordStart = false;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      atWordStart = false;
+      continue;
+    }
+    if (character === "#" && atWordStart) {
+      comment = true;
+      continue;
+    }
+
+    const nextIndex = visit(character, index);
+    if (typeof nextIndex === "number") index = nextIndex;
+    atWordStart = /[\s;|&()<>]/u.test(character);
+  }
+
+  return quote;
+}
+
+function readShellWord(
+  source: string,
+  startIndex: number,
+  isTerminator: (character: string) => boolean,
+): ShellWord | undefined {
+  let quote: ShellQuote = "";
+  let escaped = false;
+  let value = "";
+  let index = startIndex;
+
+  for (; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (escaped) {
+      value += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      else value += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (isTerminator(character)) break;
+    value += character;
+  }
+
+  return quote ? undefined : { value, endIndex: index };
 }

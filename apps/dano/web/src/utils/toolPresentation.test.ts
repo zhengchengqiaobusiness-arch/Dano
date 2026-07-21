@@ -205,6 +205,29 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("--token");
   });
 
+  it("ignores command-like text inside shell comments", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-comment",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: [
+              "echo ok # note; /private/company/secret-tool --token secret",
+              "/bin/ls -la /private/company",
+            ].join("\n"),
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 echo 命令",
+      "执行了 ls 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("secret-tool");
+    expect(JSON.stringify(activities)).not.toContain("--token");
+  });
+
   it("keeps one safe detail per repeated read invocation", () => {
     const activities = buildToolActivities([
       {
