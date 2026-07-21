@@ -184,37 +184,20 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("secret");
   });
 
-  it("uses a generic detail for heredoc scripts without exposing their data", () => {
+  it("extracts commands from successfully parsed Bash syntax", () => {
     const activities = buildToolActivities([
       {
-        key: "bash-heredoc",
+        key: "bash-ast",
         block: toolBlock("bash", "success", {
           toolArgs: {
             command: [
-              "cat <<'EOF'",
-              "not-a-command; /private/company/secret.sh --token secret",
+              "if /bin/test -f x; then",
+              "  cat <<'EOF'",
+              "  not-a-command; /private/company/secret.sh --token secret",
               "EOF",
-              "/bin/ls -la /private/company",
-            ].join("\n"),
-          },
-        }),
-      },
-    ]);
-
-    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(activities)).not.toContain("secret.sh");
-    expect(JSON.stringify(activities)).not.toContain("--token");
-  });
-
-  it("ignores command-like text inside shell comments", () => {
-    const activities = buildToolActivities([
-      {
-        key: "bash-comment",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: [
-              "echo ok # note; /private/company/secret-tool --token secret",
-              "/bin/ls -la /private/company",
+              "else",
+              "  ! /bin/ls | /usr/bin/pwd",
+              "fi",
             ].join("\n"),
           },
         }),
@@ -222,30 +205,33 @@ describe("Activity Trail presentation", () => {
     ]);
 
     expect(activities[0]?.details).toEqual([
-      "执行了 echo 命令",
+      "执行了 test 命令",
+      "执行了 cat 命令",
       "执行了 ls 命令",
+      "执行了 pwd 命令",
     ]);
-    expect(JSON.stringify(activities)).not.toContain("secret-tool");
+    expect(JSON.stringify(activities)).not.toContain("secret.sh");
     expect(JSON.stringify(activities)).not.toContain("--token");
   });
 
-  it("uses a generic detail for commands with leading redirections", () => {
+  it("extracts available command nodes without exposing arguments", () => {
     const activities = buildToolActivities([
       {
-        key: "bash-redirection",
+        key: "bash-nested",
         block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "2>/private/company/payroll.csv /bin/ls -la",
-          },
+          toolArgs: { command: "/bin/cat <(private-helper --secret value)" },
         }),
       },
     ]);
 
-    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(activities)).not.toContain("payroll.csv");
+    expect(activities[0]?.details).toEqual([
+      "执行了 cat 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("--secret");
+    expect(JSON.stringify(activities)).not.toContain("value");
   });
 
-  it("uses a generic detail for dynamic command names and parse errors", () => {
+  it("uses a generic detail when Bash cannot be parsed or has no static command name", () => {
     const activities = buildToolActivities([
       {
         key: "bash-dynamic",
@@ -267,151 +253,6 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("PRIVATE_COMMAND");
     expect(JSON.stringify(activities)).not.toContain("secret-tool");
     expect(JSON.stringify(activities)).not.toContain("--token");
-  });
-
-  it("uses a generic detail for dynamic prefixes and arguments", () => {
-    const activities = buildToolActivities([
-      {
-        key: "bash-dynamic-prefix",
-        block: toolBlock("bash", "success", {
-          toolArgs: { command: "TOKEN=$(private-helper) /bin/ls" },
-        }),
-      },
-      {
-        key: "bash-dynamic-argument",
-        block: toolBlock("bash", "success", {
-          toolArgs: { command: "/bin/cat <(private-helper --secret value)" },
-        }),
-      },
-    ]);
-
-    expect(activities[0]?.details).toEqual([
-      "执行了 Shell 脚本",
-      "执行了 Shell 脚本",
-    ]);
-    expect(JSON.stringify(activities)).not.toContain("private-helper");
-    expect(JSON.stringify(activities)).not.toContain("--secret");
-  });
-
-  it("uses a generic detail for shell control structures", () => {
-    const activities = buildToolActivities([
-      {
-        key: "bash-control",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "if /bin/test -f x; then /bin/ls; fi\n{ /usr/bin/pwd; }",
-          },
-        }),
-      },
-    ]);
-
-    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-
-    const coprocessActivities = buildToolActivities([
-      {
-        key: "bash-coproc",
-        block: toolBlock("bash", "success", {
-          toolArgs: { command: "coproc /usr/bin/worker --secret value" },
-        }),
-      },
-    ]);
-    expect(coprocessActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(coprocessActivities)).not.toContain("worker");
-    expect(JSON.stringify(coprocessActivities)).not.toContain("--secret");
-  });
-
-  it("uses a generic detail for case scripts", () => {
-    const activities = buildToolActivities([
-      {
-        key: "bash-case",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: [
-              'case "$type" in',
-              "json|yaml) /usr/bin/jq file.json ;;&",
-              "*) /bin/cat file.json ;;",
-              "esac",
-            ].join("\n"),
-          },
-        }),
-      },
-    ]);
-
-    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(activities)).not.toContain("json 命令");
-    expect(JSON.stringify(activities)).not.toContain("yaml 命令");
-  });
-
-  it("does not expose quoted case alternatives containing whitespace", () => {
-    const activities = buildToolActivities([
-      {
-        key: "bash-case-quoted",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: [
-              'case "$type" in',
-              'payroll|"internal data") /bin/ls ;;',
-              "esac",
-            ].join("\n"),
-          },
-        }),
-      },
-    ]);
-
-    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(activities)).not.toContain("payroll 命令");
-    expect(JSON.stringify(activities)).not.toContain("internal data");
-  });
-
-  it("does not present function declarations or compound-assignment data as commands", () => {
-    const functionActivities = buildToolActivities([
-      {
-        key: "bash-function",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "internal_deploy_secret() { /bin/ls; /bin/pwd; }",
-          },
-        }),
-      },
-    ]);
-    const assignmentActivities = buildToolActivities([
-      {
-        key: "bash-array",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "arr=(payroll.csv); /bin/ls",
-          },
-        }),
-      },
-    ]);
-    const followingCommandActivities = buildToolActivities([
-      {
-        key: "bash-function-then-command",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "prepare() { /bin/pwd; }; /bin/ls -la",
-          },
-        }),
-      },
-    ]);
-    const braceArgumentActivities = buildToolActivities([
-      {
-        key: "bash-function-brace-argument",
-        block: toolBlock("bash", "success", {
-          toolArgs: {
-            command: "prepare() { /bin/echo value}; /private/company/secret-tool; }; /bin/ls",
-          },
-        }),
-      },
-    ]);
-
-    expect(functionActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(assignmentActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(followingCommandActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(braceArgumentActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
-    expect(JSON.stringify(functionActivities)).not.toContain("internal_deploy_secret");
-    expect(JSON.stringify(assignmentActivities)).not.toContain("payroll.csv");
-    expect(JSON.stringify(braceArgumentActivities)).not.toContain("secret-tool");
   });
 
   it("localizes bash activity details", () => {
@@ -436,7 +277,10 @@ describe("Activity Trail presentation", () => {
         }),
       },
     ]);
-    expect(scriptActivities[0]?.details).toEqual(["Ran a shell script"]);
+    expect(scriptActivities[0]?.details).toEqual([
+      "Ran test command",
+      "Ran ls command",
+    ]);
   });
 
   it("keeps one safe detail per repeated read invocation", () => {

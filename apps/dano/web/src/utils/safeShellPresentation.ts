@@ -1,5 +1,5 @@
 import { parse } from "unbash";
-import type { Command, Node, WordPart } from "unbash";
+import type { Command, WordPart } from "unbash";
 
 export type SafeBashCommandSummary =
   | { kind: "commands"; executableNames: string[] }
@@ -7,55 +7,35 @@ export type SafeBashCommandSummary =
 
 export function safeBashCommandSummary(command: string): SafeBashCommandSummary {
   const script = parse(command);
-  if (script.errors?.length || !script.commands.length) return { kind: "script" };
+  if (script.errors?.length) return { kind: "script" };
 
   const executableNames: string[] = [];
-  for (const statement of script.commands) {
-    if (statement.redirects.length || !collectExecutableNames(statement.command, executableNames)) {
-      return { kind: "script" };
-    }
-  }
-
+  collectExecutableNames(script, executableNames);
   return executableNames.length
     ? { kind: "commands", executableNames }
     : { kind: "script" };
 }
 
-function collectExecutableNames(node: Node, names: string[]): boolean {
+function collectExecutableNames(value: unknown, names: string[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectExecutableNames(item, names);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+
+  const node = value as Record<string, unknown>;
   if (node.type === "Command") {
-    const name = staticExecutableName(node);
-    if (!name) return false;
-    names.push(name);
-    return true;
+    const name = staticExecutableName(node as unknown as Command);
+    if (name) names.push(name);
   }
-
-  if (node.type === "Pipeline" || node.type === "AndOr") {
-    return node.commands.every(command => collectExecutableNames(command, names));
-  }
-
-  return false;
+  for (const child of Object.values(node)) collectExecutableNames(child, names);
 }
 
 function staticExecutableName(command: Command): string | undefined {
-  if (!isSimpleCommand(command)) {
-    return undefined;
-  }
+  if (!command.name || !isStaticWord(command.name.parts)) return undefined;
 
   const name = command.name.value.replace(/^.*[\\/]/u, "");
   return /^[\w.+-]+$/u.test(name) ? name : undefined;
-}
-
-function isSimpleCommand(command: Command): command is Command & { name: NonNullable<Command["name"]> } {
-  return command.redirects.length === 0 &&
-    command.name !== undefined &&
-    isStaticWord(command.name.parts) &&
-    command.prefix.every(assignment =>
-      assignment.append !== true &&
-      assignment.index === undefined &&
-      assignment.array === undefined &&
-      (assignment.value === undefined || isStaticWord(assignment.value.parts))
-    ) &&
-    command.suffix.every(word => isStaticWord(word.parts));
 }
 
 function isStaticWord(parts: WordPart[] | undefined): boolean {
