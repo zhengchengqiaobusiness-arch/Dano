@@ -4,6 +4,7 @@ export type SafeBashCommandSummary =
 
 const SHELL_CONTROL_WORDS = new Set([
   "case",
+  "coproc",
   "do",
   "done",
   "elif",

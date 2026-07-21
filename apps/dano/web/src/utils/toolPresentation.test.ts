@@ -258,6 +258,18 @@ describe("Activity Trail presentation", () => {
     ]);
 
     expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+
+    const coprocessActivities = buildToolActivities([
+      {
+        key: "bash-coproc",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "coproc /usr/bin/worker --secret value" },
+        }),
+      },
+    ]);
+    expect(coprocessActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(JSON.stringify(coprocessActivities)).not.toContain("worker");
+    expect(JSON.stringify(coprocessActivities)).not.toContain("--secret");
   });
 
   it("uses a generic detail for case scripts", () => {
