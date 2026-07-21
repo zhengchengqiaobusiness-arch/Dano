@@ -21,6 +21,8 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
 For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Canonical calls should provide a non-empty default; compatibility input without one renders without a prefill. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases, safe scalar deviations, and one-level JSON-stringified collections; it uses the configured product title when a grouped title is missing, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
+
+Failures use one JSON result shape: {"status":"invalid","error":{"code":"...","category":"...","message":"...","retryable":true,"issues":[{"code":"...","path":"questions[0].id","message":"..."}]}}. Correct every reported issue path in one replacement call only when retryable is true. Never retry terminal or cancelled failures.
 ```
 
 ## promptSnippet
@@ -38,7 +40,8 @@ Ask the user one native question card; for several fields use one questions arra
   "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
   "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
   "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-  "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+  "If ask_user_question returns status:invalid, inspect error.code, category, retryable, and every issues[] entry. Retry silently with one corrected native tool call only when retryable is true; correct all reported paths together and do not explain the correction to the user.",
+  "Do not retry question_presentation_failed, question_validation_failed, or question_cancelled results. Stop the current response and let the user decide whether to try again.",
   "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
   "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
   "Set required:true only when an answer is mandatory. required defaults to false.",
@@ -83,6 +86,61 @@ Submission remains strict after rendering: required answers must be present,
 choice answers must map to exactly one option (or the explicit Other path), and
 grouped answers must map by canonical field id.
 
+### Structured failures and retry behavior
+
+Every tool failure is represented as `status:"invalid"`. `error.code` identifies
+the call-level outcome, `error.category` groups it for policy, `retryable`
+controls whether the model may make one corrected call, and `issues` contains
+safe field-level diagnostics. An issue includes a stable `code`, an optional
+canonical `path`, and an actionable `message`. Dano reports all independently
+identifiable issues found in the same pass, including every missing or
+conflicting grouped id location.
+
+| `error.code` | Category | Retryable | Model action |
+| --- | --- | --- | --- |
+| `invalid_question_arguments` | `validation` | yes | Correct every `issues[].path` and replace the call once. |
+| `invalid_confirmation_source` | `confirmation` | yes | Submit a grouped form first, then use its returned `formId`. |
+| `duplicate_question_call` | `duplicate_call` | yes | Replace concurrent calls with one `questions` array. |
+| `question_presentation_timeout` | `lifecycle` | yes | Retry the same canonical call once. |
+| `question_presentation_failed` | `lifecycle` | no | Stop the response and let the user retry. |
+| `question_validation_failed` | `lifecycle` | no | Automatic validation retries are exhausted; stop the response. |
+| `question_cancelled` | `lifecycle` | no | Stop the workflow until the user sends a new request. |
+
+Example with more than one independent problem:
+
+```json
+{
+  "status": "invalid",
+  "error": {
+    "code": "invalid_question_arguments",
+    "category": "validation",
+    "message": "Question fields contain invalid arguments.",
+    "retryable": true,
+    "issues": [
+      {
+        "code": "missing_question_id",
+        "path": "questions[0].id",
+        "message": "Grouped question field id is required."
+      },
+      {
+        "code": "missing_question_id",
+        "path": "questions[1].id",
+        "message": "Grouped question field id is required."
+      }
+    ]
+  }
+}
+```
+
+Pi's failed-tool channel carries text rather than arbitrary details, so Dano
+serializes exactly this result object as one JSON string. Bridge and JSONL
+recovery parse that string back into the same shared type. The browser receives
+only a canonical summary containing `code`, `category`, `message`, and
+`retryable`; field issues stay model-facing. Error construction never copies
+answers, unavailable form ids, raw model arguments, scripts, or stack traces.
+`terminalCode` is optional structured migration metadata for legacy transcript
+classification; callers must use `error.code` and `retryable` for new logic.
+
 ### Compatibility change evidence
 
 Collection- and object-shaped model parameters require executable evidence in
@@ -97,6 +155,12 @@ and the sanitized fixtures under its `fixtures/` directory enforce canonical,
 safe JSON-string, alias, malformed, partial-valid, fallback, isolation, and
 canonical-projection behavior. A compatibility change is incomplete when it
 updates only the schema, prompt metadata, or this document.
+
+The executable failure contract is maintained in
+`apps/dano/src/bridge/__tests__/ask-user-question-error-compatibility.test.ts`.
+It covers every stable call-level code, granular paths, retry semantics,
+terminal wrapping, equivalent canonical/JSON/alias failures, multi-issue
+results, safe serialization, and the browser-safe projection.
 
 Tests can enforce accepted encodings, target order, stable deduplication,
 ignored-reason classes, fallback decisions, Assistant Turn isolation, leakage
@@ -333,6 +397,102 @@ still alive. Unsaved edits and server-process restarts are outside this contract
         },
         { "type": "boolean" }
       ]
+    },
+    "errorIssue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_request_shape",
+            "invalid_questions_json",
+            "invalid_questions_shape",
+            "invalid_question_item",
+            "conflicting_aliases",
+            "missing_question_id",
+            "duplicate_question_id",
+            "missing_question_text",
+            "invalid_input_type",
+            "invalid_options",
+            "duplicate_option_id",
+            "missing_choice_source",
+            "invalid_default",
+            "invalid_date_format",
+            "invalid_data_source",
+            "invalid_confirmation_target",
+            "duplicate_tool_call",
+            "presentation_timeout",
+            "presentation_failed",
+            "validation_retry_exhausted",
+            "cancelled"
+          ]
+        },
+        "path": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["code", "message"]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_question_arguments",
+            "invalid_confirmation_source",
+            "duplicate_question_call",
+            "question_presentation_timeout",
+            "question_presentation_failed",
+            "question_validation_failed",
+            "question_cancelled"
+          ]
+        },
+        "category": {
+          "enum": ["validation", "confirmation", "duplicate_call", "lifecycle"]
+        },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/errorIssue" }
+        },
+        "sourceCode": {
+          "enum": [
+            "invalid_question_arguments",
+            "invalid_confirmation_source",
+            "duplicate_question_call",
+            "question_presentation_timeout",
+            "question_presentation_failed",
+            "question_validation_failed",
+            "question_cancelled"
+          ]
+        },
+        "terminalCode": {
+          "enum": [
+            "QUESTION_PRESENTATION_TIMEOUT",
+            "QUESTION_PRESENTATION_FAILED",
+            "QUESTION_VALIDATION_FAILED",
+            "ASK_USER_QUESTION_CANCELLED"
+          ]
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "receivedShape": {
+              "type": "object",
+              "properties": {
+                "formIds": { "type": "string" },
+                "formId": { "type": "string" }
+              }
+            },
+            "ignoredReasons": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "fallbackAttempted": { "type": "boolean" }
+          }
+        }
+      },
+      "required": ["code", "category", "message", "retryable", "issues"]
     }
   },
   "anyOf": [
@@ -385,6 +545,14 @@ still alive. Unsaved edits and server-process restarts are outside this contract
         "status": { "type": "string", "const": "cancelled" }
       },
       "required": ["status"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "const": "invalid" },
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "required": ["status", "error"]
     }
   ]
 }

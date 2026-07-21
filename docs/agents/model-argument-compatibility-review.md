@@ -24,6 +24,14 @@ evidence determine what Dano can safely accept.
 - [ ] Prove isolation and leakage boundaries, including unavailable and
   cross-Assistant-Turn targets. Raw compatibility-only values must not cross the
   browser protocol or appear in errors with sensitive identifiers or answers.
+- [ ] Assert every strict failure as the executable `status:"invalid"` shape:
+  stable call-level and issue codes, canonical field paths, actionable messages,
+  category, retryable policy, and terminal wrapping.
+- [ ] When independent problems can be diagnosed safely in one pass, assert that
+  they are returned together rather than exposed through repeated retries.
+- [ ] Prove the failed-tool JSON serialization round trip and the browser-safe
+  summary projection. Neither projection may include raw arguments, answers,
+  unavailable ids, scripts, or internal stacks.
 - [ ] Run the focused compatibility matrix, the relevant Coordinator and
   RPC/JSONL tests, the full test suite, checks, and the complete build.
 
@@ -37,6 +45,10 @@ For `ask_user_question` confirmation targets, the executable sources are:
 - `apps/dano/src/bridge/__tests__/fixtures/ask-user-question-model-deviations.json`
 - `apps/dano/src/bridge/__tests__/ask-user-question-confirmation-compatibility.test.ts`
 - the Coordinator and RPC/JSONL regressions in the neighboring test files
+
+For all `ask_user_question` failure variants, the executable source is:
+
+- `apps/dano/src/bridge/__tests__/ask-user-question-error-compatibility.test.ts`
 
 ## Reviewer judgement
 

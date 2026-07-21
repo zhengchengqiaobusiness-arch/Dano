@@ -3297,6 +3297,42 @@ describe("BridgeRpcAdapter", () => {
               name: "ask_user_question",
               arguments: { title: "请假申请", questions: "[" },
             },
+            {
+              type: "toolCall",
+              id: "structured-invalid-question",
+              name: "ask_user_question",
+              arguments: {
+                title: "请假申请",
+                questions: [{ question: "审批人？" }],
+              },
+            },
+            {
+              type: "toolCall",
+              id: "embedded-structured-invalid-question",
+              name: "ask_user_question",
+              arguments: { question: "审批人？", default: {} },
+            },
+            {
+              type: "toolResult",
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  status: "invalid",
+                  error: {
+                    code: "invalid_question_arguments",
+                    category: "validation",
+                    message: "Question fields contain invalid arguments.",
+                    retryable: true,
+                    issues: [{
+                      code: "invalid_default",
+                      path: "default",
+                      message: "default is invalid.",
+                    }],
+                  },
+                }),
+              }],
+              isError: true,
+            },
           ],
         },
         {
@@ -3326,6 +3362,31 @@ describe("BridgeRpcAdapter", () => {
             {
               type: "text",
               text: "QUESTION_VALIDATION_FAILED: repeated invalid calls",
+            },
+          ],
+          isError: true,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "structured-invalid-question",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "invalid",
+                error: {
+                  code: "invalid_question_arguments",
+                  category: "validation",
+                  message: "Question fields contain invalid arguments.",
+                  retryable: true,
+                  issues: [{
+                    code: "missing_question_id",
+                    path: "questions[0].id",
+                    message: "Grouped question field id is required.",
+                  }],
+                },
+              }),
             },
           ],
           isError: true,
@@ -3360,6 +3421,49 @@ describe("BridgeRpcAdapter", () => {
       expect(response.payload.data.messages[0].content[2]).toMatchObject({
         id: "validation-terminal-question",
         questionState: "terminal_failure",
+      });
+      expect(response.payload.data.messages[0].content[3]).toMatchObject({
+        id: "structured-invalid-question",
+        questionState: "invalid",
+        questionError: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+      });
+      expect(response.payload.data.messages[0].content[3].questionError)
+        .not.toHaveProperty("issues");
+      const browserPayload = JSON.stringify(response.payload.data);
+      expect(browserPayload).not.toContain("missing_question_id");
+      expect(browserPayload).not.toContain("questions[0].id");
+      expect(browserPayload).not.toContain("invalid_default");
+      expect(response.payload.data.messages[0].content[5]).toMatchObject({
+        type: "toolResult",
+        details: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+        content: [{
+          type: "text",
+          text: "Question fields contain invalid arguments.",
+        }],
+      });
+      expect(response.payload.data.messages[4]).toMatchObject({
+        role: "toolResult",
+        toolCallId: "structured-invalid-question",
+        details: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+        content: [{
+          type: "text",
+          text: "Question fields contain invalid arguments.",
+        }],
       });
     });
 

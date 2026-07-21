@@ -114,6 +114,8 @@ export function isAskUserQuestionTerminalFailure(
   return (
     isAskUserQuestionToolError(block) &&
     (block.questionState === "terminal_failure" ||
+      block.questionError?.code === "question_presentation_failed" ||
+      block.questionError?.code === "question_validation_failed" ||
       Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)) ||
       isAskUserQuestionValidationTerminalFailure(block))
   );
@@ -124,7 +126,8 @@ export function isAskUserQuestionValidationTerminalFailure(
 ): boolean {
   return (
     isAskUserQuestionToolError(block) &&
-    Boolean(block.resultText?.includes(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE))
+    (block.questionError?.code === "question_validation_failed" ||
+      Boolean(block.resultText?.includes(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE)))
   );
 }
 
