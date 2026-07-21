@@ -9,6 +9,10 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { configureDanoLlmResilience } from "../llm-resilience.js";
+import {
+  DANO_LLM_RATE_LIMIT_ERROR,
+  normalizeLlmErrorMessage,
+} from "../llm-error.js";
 
 const roots: string[] = [];
 const servers: http.Server[] = [];
@@ -36,7 +40,11 @@ async function startProvider(
   return `http://127.0.0.1:${address.port}/v1`;
 }
 
-async function createProviderSession(baseUrl: string, timeoutMs: number) {
+async function createProviderSession(
+  baseUrl: string,
+  timeoutMs: number,
+  options: { persistSession?: boolean } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-llm-timeout-"));
   roots.push(root);
   const model = {
@@ -56,7 +64,9 @@ async function createProviderSession(baseUrl: string, timeoutMs: number) {
     agentDir: path.join(root, "agent"),
     model,
     noTools: "all",
-    sessionManager: SessionManager.inMemory(root),
+    sessionManager: options.persistSession
+      ? SessionManager.create(root, root)
+      : SessionManager.inMemory(root),
   });
   vi.spyOn(session.modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
   vi.spyOn(session.modelRegistry, "getApiKeyAndHeaders").mockResolvedValue({
@@ -89,6 +99,40 @@ function writeChunk(
 }
 
 describe("Dano provider timeout", () => {
+  it("persists the accepted user prompt before presenting a provider 429", async () => {
+    const baseUrl = await startProvider((_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          error: {
+            message: "429 rate limit exceeded",
+            type: "rate_limit_error",
+          },
+        }),
+      );
+    });
+    const session = await createProviderSession(baseUrl, 1_000, {
+      persistSession: true,
+    });
+
+    try {
+      await session.prompt("provider-rate-limit-prompt");
+      const assistant = session.messages.at(-1);
+      if (!assistant) throw new Error("provider did not produce a response");
+      const sessionFile = session.sessionManager.getSessionFile();
+      const jsonl = sessionFile ? fs.readFileSync(sessionFile, "utf8") : "";
+
+      expect(jsonl).toContain('"role":"user"');
+      expect(jsonl).toContain("provider-rate-limit-prompt");
+      expect(assistant).toMatchObject({ role: "assistant", stopReason: "error" });
+      expect(normalizeLlmErrorMessage(assistant)).toBe(
+        DANO_LLM_RATE_LIMIT_ERROR,
+      );
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("aborts a provider request that never returns response headers", async () => {
     const baseUrl = await startProvider((_request, _response) => {});
     const session = await createProviderSession(baseUrl, 50);

@@ -32,6 +32,7 @@
     type ThemeMode,
     type ThemePreference,
   } from "./themes";
+  import { registerBridgePageLifecycle } from "./utils/bridgePageLifecycle";
   import type { RpcModelInfo } from "./utils/models";
   import {
     DEBUG_WORKSPACE_NAME,
@@ -1235,6 +1236,7 @@
     syncCompactLayout();
 
     const disposers: Array<() => void> = [];
+    disposers.push(registerBridgePageLifecycle(window, bridge.disconnect));
     const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
     const handleMediaThemeChange = (event: MediaQueryListEvent) => {
       applySystemThemeMode(event.matches ? "light" : "dark");
