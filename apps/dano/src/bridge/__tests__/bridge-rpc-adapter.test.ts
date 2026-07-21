@@ -1266,7 +1266,10 @@ describe("BridgeRpcAdapter", () => {
 
         const confirmation = askUserQuestionCoordinator.wait(
           "confirm-two",
-          { confirm: true, formIds: ["form-a", "form-b"] },
+          {
+            confirm: "True",
+            formIds: JSON.stringify(["form-a", "form-b"]),
+          } as never,
           controller.signal,
         );
         sessionManager.appendMessage({
@@ -1275,17 +1278,45 @@ describe("BridgeRpcAdapter", () => {
             type: "toolCall",
             id: "confirm-two",
             name: "ask_user_question",
-            arguments: { confirm: true, formIds: ["form-a", "form-b"] },
+            arguments: {
+              confirm: "True",
+              formIds: JSON.stringify(["form-a", "form-b"]),
+            },
           }],
           timestamp: Date.now(),
           stopReason: "toolUse",
         } as any);
-        for (const payload of [
-          {
-            id: "present-confirm-two",
-            type: "present_question",
-            toolCallId: "confirm-two",
+        ws.trigger(
+          "message",
+          Buffer.from(JSON.stringify({
+            type: "command",
+            payload: {
+              id: "present-confirm-two",
+              type: "present_question",
+              toolCallId: "confirm-two",
+            } satisfies RpcCommand,
+          })),
+        );
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const initialInteractions = sessionManager.getEntries().filter(
+          entry =>
+            entry.type === "custom"
+            && entry.customType === "dano.form-interaction.v1"
+            && (entry.data as { interactionId?: string }).interactionId
+              === "confirm-two",
+        );
+        expect(initialInteractions).toHaveLength(1);
+        expect(initialInteractions[0]).toMatchObject({
+          data: {
+            state: "awaiting_confirmation",
+            revision: 1,
+            forms: [
+              { formId: "form-a", answer: { reason: "家庭事务" } },
+              { formId: "form-b", answer: { destination: "上海" } },
+            ],
           },
+        });
+        for (const payload of [
           {
             id: "revise-confirm-two",
             type: "revise_question",
