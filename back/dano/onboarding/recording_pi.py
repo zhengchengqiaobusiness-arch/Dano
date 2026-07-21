@@ -179,6 +179,7 @@ class RecordingPiSession:
         self._closed = False
         self.flow_spec: Any = None
         self._analysis_images: list[dict[str, str]] = []
+        self._active_analysis_image_count = 0
         self.last_submission_kind = ""
         self.last_review: dict[str, Any] = {}
         self._on_submission_accepted = on_submission_accepted
@@ -280,6 +281,7 @@ class RecordingPiSession:
             try:
                 images = [dict(image) for image in self._analysis_images]
                 self._analysis_images = []
+                self._active_analysis_image_count = len(images)
                 event = await self._command(
                     "prompt", timeout_s=timeout_s, text=text,
                     images=images,
@@ -305,6 +307,8 @@ class RecordingPiSession:
                         "录制 Pi 操作超时且取消确认失败；会话不可继续使用"
                     ) from cancel_exc
                 raise RecordingPiError("录制 Pi 操作超时，已取消；未切换到其他模型链路") from exc
+            finally:
+                self._active_analysis_image_count = 0
 
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
@@ -332,7 +336,7 @@ class RecordingPiSession:
 
     @property
     def analysis_image_count(self) -> int:
-        return len(self._analysis_images)
+        return self._active_analysis_image_count or len(self._analysis_images)
 
     def current_flow_spec(self) -> Any:
 

@@ -139,6 +139,31 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_analysis_image_count_remains_visible_during_prompt() -> None:
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE,
+    )
+    client._proc = object()
+    observed_counts: list[int] = []
+
+    async def fake_command(command_type: str, **payload):  # noqa: ANN003, ANN202
+        assert command_type == "prompt"
+        observed_counts.append(client.analysis_image_count)
+        return {"image_count": len(payload.get("images") or [])}
+
+    client._command = fake_command
+    client.bind_analysis_images([
+        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+    ])
+
+    result = await client.prompt("执行截图规划")
+
+    assert result["image_count"] == 1
+    assert observed_counts == [1]
+    assert client.analysis_image_count == 0
+
+
+@pytest.mark.asyncio
 async def test_recording_pi_runtime_error_has_no_fallback(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     process = _FakeProcess(str(tmp_path / "session.jsonl"))
     original_write = process.stdin.write

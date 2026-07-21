@@ -1499,7 +1499,7 @@ class AssigneeSelectTest(unittest.TestCase):
             ]}}),
             _post("https://oa/admin-api/leave/submit", {
                 "startUserSelectAssignees": {
-                    "Activity_first": [149],
+                    "Activity_first": [148],
                     "Activity_second": [148],
                 },
             }, resp={"code": 0}),

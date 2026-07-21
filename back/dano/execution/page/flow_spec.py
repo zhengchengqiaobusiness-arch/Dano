@@ -8132,6 +8132,7 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         return []
     ops: list[dict[str, Any]] = []
     step_ids = {step.step_id for step in spec.steps}
+    step_by_id = {step.step_id: step for step in spec.steps}
     by_kind: dict[str, list[FlowCapability]] = {}
     for capability in spec.capabilities or []:
         by_kind.setdefault(capability.kind, []).append(capability)
@@ -8401,6 +8402,37 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 "usage": "execute",
                 "origin": "planner",
             })
+        if kind in {"submit", "submit_batch"}:
+            option_source_ids = _option_source_step_ids(spec)
+            write_ids = {
+                ref["step_id"] for ref in memberships
+                if ref["step_id"] in step_ids
+                and _is_write_step(step_by_id[ref["step_id"]])
+            }
+            all_write_ids = {step.step_id for step in _write_steps(spec)}
+            owned_preflights: set[str] = set()
+            for step in spec.steps:
+                meta = step.source_meta or {}
+                if not meta.get("control_preflight_for_write") or step.step_id in option_source_ids:
+                    continue
+                owners = {str(value) for value in (meta.get("control_preflight_for_write_ids") or []) if str(value)}
+                if (owners and owners & write_ids) or (not owners and len(all_write_ids) == 1 and write_ids):
+                    owned_preflights.add(step.step_id)
+            required_ids = _dependency_closure_step_ids(spec, write_ids | owned_preflights)
+            existing_memberships = {ref["step_id"] for ref in memberships}
+            for step in spec.steps:
+                if (
+                    step.step_id not in required_ids
+                    or step.step_id in existing_memberships
+                    or step.step_id in option_source_ids
+                ):
+                    continue
+                memberships.append({
+                    "step_id": step.step_id,
+                    "usage": "preflight",
+                    "origin": "repair",
+                })
+                existing_memberships.add(step.step_id)
         proposed_steps = [
             ref["step_id"]
             for ref in memberships
@@ -11896,14 +11928,21 @@ def flow_spec_fingerprint(spec: FlowSpec) -> str:
 def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) -> dict[str, Any]:
     """Build a safe, operator-facing semantic diff for a workbench operation."""
 
-    def field_detail_index(spec: FlowSpec) -> dict[tuple[str, str], dict[str, Any]]:
+    def field_identity(param: ParamField) -> tuple[str, str]:
+        if param.field_id:
+            return "id", param.field_id
+        if param.key:
+            return "key", param.key
+        return "path", param.path
+
+    def field_detail_index(spec: FlowSpec) -> dict[tuple[str, str, str], dict[str, Any]]:
         capability_by_step = {
             step_id: capability.title or capability.name or capability.capability_id
             for capability in spec.capabilities or []
             for step_id in _capability_node_step_ids(capability)
         }
         return {
-            (step.step_id, param.path): {
+            (step.step_id, *field_identity(param)): {
                 "capability": capability_by_step.get(step.step_id, ""),
                 "step_id": step.step_id,
                 "path": param.path,
@@ -11918,10 +11957,10 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
             for step in spec.steps for param in step.params
         }
 
-    def field_index(spec: FlowSpec) -> dict[tuple[str, str], tuple[Any, ...]]:
+    def field_index(spec: FlowSpec) -> dict[tuple[str, str, str], tuple[Any, ...]]:
         return {
-            (step.step_id, param.path): (
-                param.key, param.label, param.type, param.wire_type,
+            (step.step_id, *field_identity(param)): (
+                param.path, param.key, param.label, param.type, param.wire_type,
                 param.category, param.source_kind, _stable_json_hash(param.source or {}),
                 bool(param.required), bool(param.exposed_to_user),
                 _stable_json_hash(param.default_value),
@@ -11930,9 +11969,13 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
             for step in spec.steps for param in step.params
         }
 
-    def capability_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+    def capability_identity(cap: FlowCapability, index: int) -> tuple[Any, ...]:
+        step_ids = tuple(sorted(_capability_node_step_ids(cap)))
+        return ("steps", step_ids) if step_ids else ("id", str(cap.capability_id or index))
+
+    def capability_index(spec: FlowSpec) -> dict[tuple[Any, ...], tuple[Any, ...]]:
         return {
-            str(cap.capability_id or cap.name or index): (
+            capability_identity(cap, index): (
                 cap.name, cap.title, cap.kind, tuple(_capability_node_step_ids(cap)),
                 bool(cap.confirmed), bool(cap.requires_human_confirm),
                 _stable_json_hash(cap.nodes or []),
@@ -11943,23 +11986,22 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
             for index, cap in enumerate(spec.capabilities or [])
         }
 
-    def link_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+    def link_index(spec: FlowSpec) -> dict[tuple[str, str, str, str], tuple[Any, ...]]:
         return {
-            str(link.link_id or index): (
-                link.source_step_id, link.source_path, link.target_step_id,
-                link.target_path, bool(link.confirmed), float(link.confidence or 0),
+            (link.source_step_id, link.source_path, link.target_step_id, link.target_path): (
+                bool(link.confirmed), float(link.confidence or 0),
             )
-            for index, link in enumerate(spec.links or [])
+            for link in spec.links or []
         }
 
-    def relation_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+    def relation_index(spec: FlowSpec) -> dict[tuple[str, str, str, str, str], tuple[Any, ...]]:
         return {
-            str(relation.relation_id or index): (
+            (
                 relation.from_capability, relation.from_output,
                 relation.to_capability, relation.to_input,
-                relation.mode or relation.type, bool(relation.confirmed), float(relation.confidence or 0),
-            )
-            for index, relation in enumerate(spec.capability_relations or [])
+                relation.mode or relation.type,
+            ): (bool(relation.confirmed), float(relation.confidence or 0))
+            for relation in spec.capability_relations or []
         }
 
     def changed_count(left: dict[Any, Any], right: dict[Any, Any]) -> int:
@@ -11969,7 +12011,7 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
     after_field_details = field_detail_index(after)
     field_changes: list[dict[str, Any]] = []
     field_axes = (
-        "name", "type", "category", "source", "required", "default", "enum_options",
+        "name", "path", "type", "category", "source", "required", "default", "enum_options",
     )
     for field_ref in sorted(set(before_field_details) | set(after_field_details)):
         left = before_field_details.get(field_ref)
@@ -11984,11 +12026,83 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
             continue
         field_changes.append({
             "capability": (right or left or {}).get("capability") or "",
-            "step_id": field_ref[0],
-            "path": field_ref[1],
-            "name": (right or left or {}).get("name") or field_ref[1],
+            "step_id": (right or left or {}).get("step_id") or field_ref[0],
+            "path": (right or left or {}).get("path") or "",
+            "name": (right or left or {}).get("name") or (right or left or {}).get("path") or "",
             "axes": axes,
         })
+
+    capability_details = {
+        capability_identity(cap, index): {
+            "name": cap.title or cap.name or cap.capability_id,
+            "technical_name": cap.name,
+            "kind": cap.kind,
+            "step_ids": tuple(_capability_node_step_ids(cap)),
+        }
+        for index, cap in enumerate(after.capabilities or [])
+    }
+    before_capability_details = {
+        capability_identity(cap, index): {
+            "name": cap.title or cap.name or cap.capability_id,
+            "technical_name": cap.name,
+            "kind": cap.kind,
+            "step_ids": tuple(_capability_node_step_ids(cap)),
+        }
+        for index, cap in enumerate(before.capabilities or [])
+    }
+    change_details: list[str] = []
+    for identity in sorted(
+        set(before_capability_details) | set(capability_details), key=str,
+    ):
+        left = before_capability_details.get(identity)
+        right = capability_details.get(identity)
+        name = str((right or left or {}).get("name") or "未命名能力")
+        if left is None:
+            change_details.append(f"新增能力「{name}」")
+            continue
+        if right is None:
+            change_details.append(f"移除能力「{name}」")
+            continue
+        axes = []
+        for key, label in (("name", "名称"), ("technical_name", "标识"), ("kind", "类型"), ("step_ids", "接口")):
+            if left[key] != right[key]:
+                before_value = "、".join(left[key]) if key == "step_ids" else left[key]
+                after_value = "、".join(right[key]) if key == "step_ids" else right[key]
+                axes.append(f"{label}从“{before_value}”改为“{after_value}”")
+        if axes:
+            change_details.append(f"能力「{name}」：" + "；".join(axes))
+
+    before_links = link_index(before)
+    after_links = link_index(after)
+    for endpoint in sorted(set(before_links) | set(after_links)):
+        left = before_links.get(endpoint)
+        right = after_links.get(endpoint)
+        label = f"{endpoint[0]}.{endpoint[1]} → {endpoint[2]}.{endpoint[3]}"
+        if left is None:
+            change_details.append(f"新增字段依赖：{label}")
+        elif right is None:
+            change_details.append(f"移除字段依赖：{label}")
+        elif left != right:
+            change_details.append(
+                f"字段依赖「{label}」确认状态从“{'已确认' if left[0] else '待确认'}”"
+                f"改为“{'已确认' if right[0] else '待确认'}”"
+            )
+
+    before_relations = relation_index(before)
+    after_relations = relation_index(after)
+    for endpoint in sorted(set(before_relations) | set(after_relations)):
+        left = before_relations.get(endpoint)
+        right = after_relations.get(endpoint)
+        label = f"{endpoint[0]}.{endpoint[1]} → {endpoint[2]}.{endpoint[3]}"
+        if left is None:
+            change_details.append(f"新增能力关系：{label}")
+        elif right is None:
+            change_details.append(f"移除能力关系：{label}")
+        elif left != right:
+            change_details.append(
+                f"能力关系「{label}」确认状态从“{'已确认' if left[0] else '待确认'}”"
+                f"改为“{'已确认' if right[0] else '待确认'}”"
+            )
 
     before_report = validate_flow_spec(before)
     after_report = validate_flow_spec(after)
@@ -12039,6 +12153,7 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
         "changed": changed,
         "changes": changes,
         "field_changes": field_changes,
+        "change_details": change_details,
         "summary": summary,
         "edit_errors": edit_errors,
         "proposal_gate": proposal_gate,

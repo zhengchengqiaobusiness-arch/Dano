@@ -880,6 +880,13 @@ _RECORDER_JS = r"""() => {
                     '.v-field,.v-input,' +
                     '.q-field,.q-select,.q-input';
   var activeTrigger = null, activeControlActionId = '', prevVal = '', pickTimer = null, lastPickOptions = [];
+  function clearActiveControl() {
+    if (pickTimer) { clearInterval(pickTimer); pickTimer = null; }
+    activeTrigger = null;
+    activeControlActionId = '';
+    prevVal = '';
+    lastPickOptions = [];
+  }
   function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
     var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;
     var node = t;
@@ -959,7 +966,8 @@ _RECORDER_JS = r"""() => {
           'pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)),
           isEnumTrigger(trig) ? lastPickOptions : [], fieldEvidence(inp || trig), actionId
         );
-      } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
+        clearActiveControl();
+      } else if (tries >= 25) { clearActiveControl(); }   // ~2.5s 仍没变 → 放弃并解除旧弹层归属
     }, 100);
   }
   document.addEventListener('click', function (e) {
@@ -983,8 +991,9 @@ _RECORDER_JS = r"""() => {
       return;
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
-    if (e.target.closest && e.target.closest('input,select,textarea')) return;
+    if (e.target.closest && e.target.closest('input,select,textarea')) { clearActiveControl(); return; }
     // D) 普通可点元素(按钮/卡片/菜单/链接)
+    clearActiveControl();
     var el = target(e.target); if (!el) return;
     var loc = locateClickable(el); if (!loc) return;
     var role = roleOf(el); var name = accName(el);

@@ -69,6 +69,7 @@ interface AnalysisApplication {
   screenshot_names?: string[];
   changes?: Record<string, number>;
   field_changes?: AnalysisFieldChange[];
+  change_details?: string[];
   capability_count_before?: number;
   capability_count_after?: number;
   field_count_before?: number;
@@ -251,6 +252,7 @@ interface FlowOperationReport {
   operation?: "plan" | "repair";
   changed?: boolean;
   changes?: Record<string, number>;
+  change_details?: string[];
   summary?: string;
   edit_errors?: string[];
   errors_before?: number;
@@ -1167,7 +1169,7 @@ const MAX_ANALYSIS_SCREENSHOTS = 4;
 const MAX_ANALYSIS_SCREENSHOT_BYTES = 1_400_000;
 
 const ANALYSIS_AXIS_LABELS: Record<string, string> = {
-  name: "名称", type: "类型", category: "分类", source: "来源",
+  name: "名称", path: "路径", type: "类型", category: "分类", source: "来源",
   required: "必填性", default: "默认值", enum_options: "候选项",
 };
 const ANALYSIS_VALUE_LABELS: Record<string, string> = {
@@ -3312,6 +3314,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const unmatchedIssues = lastAnalysisEvidence?.unmatched_fields || [];
     const unresolvedIssues = lastAnalysisEvidence?.unresolved_items || [];
     const rejectedIssues = lastAnalysisEvidence?.rejected_items || [];
+    const structuralChanges = lastAnalysisEvidence?.change_details || [];
+    const visibleStructuralChanges = structuralChanges.slice(0, 2);
+    const visibleFieldChanges = (lastAnalysisEvidence?.field_changes || []).slice(
+      0, Math.max(0, 6 - visibleStructuralChanges.length),
+    );
+    const hiddenChangeCount = Math.max(
+      0,
+      (lastAnalysisEvidence?.field_changes?.length || 0)
+        + structuralChanges.length
+        - visibleFieldChanges.length
+        - visibleStructuralChanges.length,
+    );
     const issueLimit = showAllAnalysisIssues ? Number.POSITIVE_INFINITY : 6;
     const visibleUnmatched = unmatchedIssues.slice(0, issueLimit);
     const remainingLimit = Math.max(0, issueLimit - visibleUnmatched.length);
@@ -3328,14 +3342,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 ? (lastAnalysisEvidence.summary || "最近一次能力分析已完成")
                 : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
             </Typography.Text>
-            {showDetailedAnalysis && lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
+            {showDetailedAnalysis && visibleFieldChanges.map((change) => (
               <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
                 {analysisFieldChangeText(change)}
               </Typography.Text>
             ))}
-            {showDetailedAnalysis && (lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
+            {showDetailedAnalysis && visibleStructuralChanges.map((detail, index) => (
+              <Typography.Text key={`structural-change:${index}`} style={{ fontSize: 12 }}>
+                {detail}
+              </Typography.Text>
+            ))}
+            {showDetailedAnalysis && hiddenChangeCount > 0 && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
+                另有 {hiddenChangeCount} 项实际修改
               </Typography.Text>
             )}
             {showDetailedAnalysis && visibleUnmatched.map((item) => (

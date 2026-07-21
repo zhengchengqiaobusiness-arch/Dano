@@ -1309,6 +1309,58 @@ def test_flow_operation_report_explains_noop_and_changes():
     assert noop["summary"] == "未修改任何字段、能力或关联"
 
 
+def test_flow_operation_report_uses_capability_boundary_and_lists_real_structural_changes():
+    steps = [
+        FlowStep(step_id="query", method="GET", path="/api/query"),
+        FlowStep(step_id="submit", method="POST", path="/api/submit"),
+    ]
+    before = FlowSpec(
+        steps=steps,
+        capabilities=[FlowCapability(
+            capability_id="old-id", name="submit_old", title="旧提交能力",
+            kind="submit", step_ids=["submit"], nodes=_call_nodes(["submit"]),
+        )],
+    )
+    after = before.model_copy(deep=True)
+    after.capabilities = [FlowCapability(
+        capability_id="new-id", name="submit_new", title="提交申请",
+        kind="submit", step_ids=["submit"], nodes=_call_nodes(["submit"]),
+    )]
+    after.links = [FlowLink(
+        source_step_id="query", source_path="response.id",
+        target_step_id="submit", target_path="body.id", confirmed=True,
+    )]
+    after.capability_relations = [CapabilityRelation(
+        from_capability="query_status", from_output="id",
+        to_capability="submit_new", to_input="id", confirmed=True,
+    )]
+
+    report = flow_operation_report(before, after, operation="plan")
+
+    assert report["changes"]["capabilities"] == 1
+    assert any("能力「提交申请」" in detail and "名称从" in detail for detail in report["change_details"])
+    assert any("新增字段依赖" in detail for detail in report["change_details"])
+    assert any("新增能力关系" in detail for detail in report["change_details"])
+
+
+def test_flow_operation_report_describes_field_path_change_as_one_real_change():
+    before = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[ParamField(field_id="field-status", path="body.state", key="state", label="状态")],
+    )])
+    after = before.model_copy(deep=True)
+    after.steps[0].params[0].path = "body.status"
+
+    report = flow_operation_report(before, after, operation="repair")
+
+    assert report["changes"]["fields"] == 1
+    assert len(report["field_changes"]) == 1
+    assert report["field_changes"][0]["path"] == "body.status"
+    assert report["field_changes"][0]["axes"] == {
+        "path": {"before": "body.state", "after": "body.status"},
+    }
+
+
 def _mixed_stale_repair_ops() -> list[dict]:
     return [
             {"op": "rename_field", "step_id": "query", "path": "query.status", "label": "状态"},
@@ -6657,3 +6709,52 @@ def test_r2_semantic_completion_does_not_resurrect_unreviewed_field_values():
     assert coverage["total_fields"] == 2
     assert coverage["covered_fields"] == 1
     assert "field_semantics" in coverage["missing"]
+
+
+def test_semantic_capability_keeps_grounded_preflight_chain_for_its_write():
+    process = FlowStep(
+        step_id="process", method="GET", path="/process-definition",
+        source_meta={
+            "role": "read_context",
+            "control_preflight_for_write": True,
+            "control_preflight_for_write_ids": ["submit"],
+        },
+    )
+    approval = FlowStep(
+        step_id="approval", method="GET", path="/approval-detail",
+        source_meta={
+            "role": "read_context",
+            "control_preflight_for_write": True,
+            "control_preflight_for_write_ids": ["submit"],
+        },
+    )
+    submit = FlowStep(step_id="submit", method="POST", path="/leave/submit-process")
+    spec = FlowSpec(
+        steps=[process, approval, submit],
+        links=[FlowLink(
+            source_step_id="process", source_path="data.id",
+            target_step_id="approval", target_path="query.processDefinitionId",
+        )],
+        capabilities=[FlowCapability(
+            name="submit", kind="submit",
+            nodes=_call_nodes(["process", "approval", "submit"]),
+        )],
+    )
+
+    ops = flow_spec_module._semantic_plan_to_ops(spec, {"semantic_plan": {
+        "capabilities": [{
+            "name": "submit", "kind": "submit",
+            "request_refs": [{"step_id": "submit", "usage": "execute"}],
+        }],
+    }})
+
+    memberships = {
+        (op.get("step_id"), op.get("usage"))
+        for op in ops if op.get("op") == "add_request_to_capability"
+    }
+    assert memberships == {
+        ("process", "preflight"),
+        ("approval", "preflight"),
+        ("submit", "execute"),
+    }
+    assert not any(op.get("op") == "remove_request_from_capability" for op in ops)

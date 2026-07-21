@@ -832,6 +832,58 @@ def test_popup_option_value_reads_framework_props_without_label_fallback() -> No
     assert "explicitly named `value` props" in _RECORDER_JS
 
 
+_POPUP_OWNERSHIP = """<!doctype html><html><body>
+<label for="leave-type">请假类型</label>
+<div id="leave-trigger" class="el-select" aria-controls="leave-options" aria-expanded="false">
+  <input id="leave-type" name="type" readonly>
+</div>
+<div id="leave-options" role="listbox" hidden>
+  <div role="option" data-value="1">病假</div>
+  <div role="option" data-value="2">事假</div>
+  <div role="option" data-value="3">婚假</div>
+</div>
+<button id="approver" type="button">选择审批人</button>
+<div id="users" role="dialog" aria-modal="true" hidden>
+  <div role="option" data-value="148">审批乙</div>
+</div>
+<script>
+const trigger = document.getElementById('leave-trigger');
+const options = document.getElementById('leave-options');
+trigger.addEventListener('click', () => { trigger.setAttribute('aria-expanded', 'true'); options.hidden = false; });
+options.addEventListener('click', event => {
+  document.getElementById('leave-type').value = event.target.textContent.trim();
+  trigger.setAttribute('aria-expanded', 'false');
+  options.hidden = true;
+});
+document.getElementById('approver').addEventListener('click', () => { document.getElementById('users').hidden = false; });
+</script></body></html>"""
+
+
+async def test_unrelated_modal_does_not_pollute_previous_select_options(tmp_path) -> None:  # noqa: ANN001
+    """关闭下拉后打开选人弹窗，用户候选不得串到前一个枚举字段。"""
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    page = tmp_path / "popup-ownership.html"
+    page.write_text(_POPUP_OWNERSHIP, encoding="utf-8")
+
+    sess = RecordSession()
+    try:
+        await sess.start(page.as_uri())
+        await sess.page.locator("#leave-trigger").dispatch_event("click")
+        await sess.page.get_by_role("option", name="病假").click()
+        await sess.page.get_by_role("button", name="选择审批人").click()
+        await sess.page.get_by_role("option", name="审批乙").click()
+        await sess.page.wait_for_timeout(400)
+        enums = sess.recorded_page_enum_options()
+    finally:
+        await sess.stop()
+
+    leave = enums["请假类型"]
+    labels = [item.get("label") if isinstance(item, dict) else item for item in leave["options"]]
+    assert labels == ["病假", "事假", "婚假"]
+    assert "审批乙" not in str(leave)
+
+
 _HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <form>
   <label for="amt">金额</label><input id="amt" name="amount" type="text">

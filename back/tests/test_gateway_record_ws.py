@@ -141,6 +141,7 @@ def test_analysis_application_report_is_persistable_and_explicit(
             "summary": "analysis complete",
             "changes": {"capabilities": int(changed), "fields": int(changed)},
             "field_changes": ([{"step_id": "submit", "path": "reason", "name": "原因", "axes": {"type": {"before": "string", "after": "enum"}}}] if changed else []),
+            "change_details": (["能力「提交申请」：名称已修改"] if changed else []),
             "proposal_gate": {"accepted": accepted, "reasons": []},
         },
         screenshots=[{"name": "form.png"}],
@@ -156,6 +157,7 @@ def test_analysis_application_report_is_persistable_and_explicit(
     assert report["field_count_after"] == 2
     assert report["operation_id"] == "plan-1"
     assert len(report["field_changes"]) == int(changed)
+    assert len(report["change_details"]) == int(changed)
 
 
 class _ConcurrentWriteProbe:
