@@ -1424,6 +1424,43 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("does not recursively parse nested JSON-stringified formIds", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+
+    for (const formId of ["form-a", "form-b"]) {
+      const form = coordinator.wait(
+        formId,
+        {
+          title: formId,
+          questions: [{ id: "value", question: "值？", default: formId }],
+        },
+        controller.signal,
+      );
+      coordinator.present(formId);
+      coordinator.answer(formId, {
+        cancelled: false,
+        answer: { value: formId },
+      });
+      await form;
+    }
+
+    const confirmation = coordinator.wait(
+      "confirm-nested-json-string",
+      {
+        confirm: true,
+        formIds: JSON.stringify(JSON.stringify(["form-a", "form-b"])),
+      } as never,
+      controller.signal,
+    );
+
+    expect(coordinator.cardRequest("confirm-nested-json-string")).toMatchObject({
+      forms: [{ formId: "form-b" }],
+    });
+    coordinator.answer("confirm-nested-json-string", { cancelled: true });
+    await expect(confirmation).resolves.toEqual({ status: "cancelled" });
+  });
+
   it("accepts formId compatibility input and falls back to the latest eligible form", async () => {
     const coordinator = new AskUserQuestionCoordinator();
     const controller = new AbortController();
