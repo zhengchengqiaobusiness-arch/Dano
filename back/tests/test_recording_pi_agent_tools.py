@@ -1150,6 +1150,60 @@ def test_image_free_normalization_does_not_relabel_a_model_axis_as_grounded():
     assert field["evidence"] == [{"source": "pi_analysis", "detail": "Model-only guess"}]
 
 
+def test_screenshot_normalization_preserves_unresolved_axes_and_canonicalizes_evidence():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/task",
+        params=[ParamField(
+            path="ownerId", key="审批人", label="审批人", type="enum",
+            default_value=148, required=True, category="user_param", source_kind="api_option",
+        )],
+    )])
+    raw_plan = {"_analysis_screenshot_count": 1, "semantic_plan": {
+        "business_understanding": {"summary": "提交审批"},
+        "request_roles": [{
+            "step_id": "submit", "role": "business_write",
+            "name": "提交审批", "reason": "录制的提交请求",
+        }],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "ownerId", "public_name": "审批人",
+            "business_type": "enum", "category": "user_param", "source_kind": "user_input",
+            "default_value": 148, "required": True, "confidence": 0.95,
+            "axis_status": {
+                "path": "grounded", "name": "image_matched", "default_value": "grounded",
+                "type": "image_matched", "category": "grounded", "source": "unresolved",
+                "required": "image_matched",
+            },
+            "evidence": [{
+                "source": "screenshot", "screenshot_name": "form.png",
+                "visible_label": "审批人", "control_kind": "select", "editable": True,
+                "supported_axis": ["name", "type", "required"],
+            }, {
+                "source": "recorder_facts",
+                "support_axis": ["path", "default_value", "category", "source"],
+            }],
+        }],
+        "capabilities": [{
+            "name": "submit_task", "title": "提交审批", "intent": "提交审批",
+            "kind": "submit", "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [{"kind": "options_not_visible", "severity": "low", "blocking": False}],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )
+    field = normalized["semantic_plan"]["field_semantics"][0]
+
+    assert field["evidence"][0]["axes"] == ["name", "type", "required"]
+    assert field["source_kind"] == "api_option"
+    assert field["axis_status"]["source"] == "preserved_fact"
+    assert field["evidence"][-1] == {
+        "source": "recorded_flow_spec", "kind": "preserved_fact", "axes": ["source"],
+    }
+    assert flow_module._semantic_plan_coverage(spec, normalized)["complete"] is True
+
+
 def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",

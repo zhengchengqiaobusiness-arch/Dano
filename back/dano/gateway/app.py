@@ -187,10 +187,11 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         evidence_rule += (
             " The required screenshot field axes are public_name, "
             "business_type, category, source_kind, required, confidence, axis_status, and evidence. "
+            "axis_status belongs inside every field_semantics item; never emit a top-level field_semantic_axes. "
             "axis_status must resolve each of path,name,default_value,type,category,source,required as "
             "grounded,image_matched,preserved_fact,locked,or unresolved. Every evidence object must declare "
-            "the axis or axes it supports; unresolved axes must also be listed in unresolved_items with an "
-            "exact reason."
+            "the supported axes in an axes array. Unresolved items must include severity and blocking; only "
+            "genuine high-risk blockers use blocking=true."
         )
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
@@ -2046,7 +2047,7 @@ async def record_ws(ws: WebSocket) -> None:
         ):
             try:
                 _checkpoint_resume(storage_state=await sess.storage_state())
-            except Exception as e:  # noqa: BLE001
+            except (Exception, asyncio.CancelledError) as e:  # noqa: BLE001
                 log.warning("recording.resume_snapshot_failed", action=session_action, error=str(e))
         if recording_pi is not None:
             await recording_pi.close()

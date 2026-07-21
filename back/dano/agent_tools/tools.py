@@ -1303,6 +1303,14 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         for raw_item in raw_items:
             if isinstance(raw_item, dict):
                 item = deepcopy(raw_item)
+                declared_axes = next((
+                    item.get(key) for key in (
+                        "axes", "axis", "supported_axes", "supported_axis",
+                        "support_axes", "support_axis",
+                    ) if item.get(key)
+                ), None)
+                if declared_axes is not None:
+                    item["axes"] = declared_axes if isinstance(declared_axes, list) else [declared_axes]
                 source = str(item.get("source") or item.get("kind") or "").strip().lower()
                 detail = item.get("detail") or item.get("reason") or item.get("description") or ""
                 if source in {"screenshot", "reference_screenshot", "uploaded_screenshot"}:
@@ -1519,6 +1527,33 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 visible_options = control.get("options")
                 if isinstance(visible_options, list):
                     field["enum_options"] = deepcopy(visible_options)
+        if screenshot_count:
+            statuses = field.get("axis_status") if isinstance(field.get("axis_status"), dict) else {}
+            preserved_axes = []
+            resolved = {"grounded", "image_matched", "preserved_fact", "locked"}
+            preserved_values = {
+                "path": ("wire_path", str(param.path)),
+                "name": ("public_name", str(param.label or param.key or param.path)),
+                "default_value": ("default_value", deepcopy(param.default_value)),
+                "type": ("business_type", str(param.type or param.wire_type or "string")),
+                "category": ("category", str(param.category or "user_param")),
+                "source": ("source_kind", str(param.source_kind or "unknown")),
+                "required": ("required", bool(param.required)),
+            }
+            for axis, (key, value) in preserved_values.items():
+                raw_status = statuses.get(axis)
+                status = raw_status.get("status") if isinstance(raw_status, dict) else raw_status
+                if str(status or "") not in resolved:
+                    field[key] = value
+                    statuses[axis] = "preserved_fact"
+                    preserved_axes.append(axis)
+            if preserved_axes:
+                evidence.append({
+                    "source": "recorded_flow_spec",
+                    "kind": "preserved_fact",
+                    "axes": preserved_axes,
+                })
+            field["axis_status"] = statuses
         fields.append(field)
     semantic["field_semantics"] = fields
     if screenshot_count:

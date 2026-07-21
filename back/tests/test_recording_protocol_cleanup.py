@@ -57,6 +57,10 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
     assert 'type: "finalize"' in finalize_source
     assert "steps" not in finalize_source
 
+    error_start = source.index('else if (m.type === "error")')
+    error_end = source.index("ws.onclose =", error_start)
+    assert "if (!m.operation) connectionErrorRef.current = detail" in source[error_start:error_end]
+
 
 def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:
     assert gateway.InvokeReq(input={"month": "2026-07"}).input == {"month": "2026-07"}

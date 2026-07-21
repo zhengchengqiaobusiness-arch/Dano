@@ -65,8 +65,15 @@ def _screenshot_candidate_rejection_reasons(candidate: Any) -> list[str]:
         reasons.append(f"candidate_status:{model.get('status') or 'missing'}")
     semantic = model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
     unresolved = semantic.get("unresolved_items") if isinstance(semantic, dict) else []
-    if unresolved:
-        reasons.append(f"unresolved_items:{len(unresolved)}")
+    blockers = [
+        item for item in unresolved or []
+        if not isinstance(item, dict)
+        or item.get("blocking") is True
+        or str(item.get("severity") or "").strip().lower()
+        in {"", "high", "critical", "blocker", "error"}
+    ]
+    if blockers:
+        reasons.append(f"unresolved_items:{len(blockers)}")
     return list(dict.fromkeys(reasons))
 
 

@@ -239,6 +239,9 @@ export function canonicalizeRecordingPlan(value) {
     && !Array.isArray(value.semantic_plan)
   ) ? value.semantic_plan : {};
   const semantic = { ...rawSemantic };
+  // Descriptive axis lists carry no edits. Some models emit this after a
+  // validation hint; discard it while keeping every real unknown key strict.
+  delete semantic.field_semantic_axes;
   const submittedSemanticKeys = SEMANTIC_PLAN_KEYS.filter(
     (key) => rawSemantic[key] !== undefined || value[key] !== undefined,
   );
@@ -307,7 +310,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、数值 confidence（0 到 1）、evidence。入口会修复常见字段摊平并归一化置信度，后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
+      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。每个 field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、数值 confidence（0 到 1）、axis_status 和 evidence；证据支持的轴写入 evidence.axes，不要输出顶层 field_semantic_axes。入口会修复常见字段摊平并归一化置信度，后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

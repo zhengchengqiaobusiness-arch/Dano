@@ -519,7 +519,9 @@ def test_screenshot_candidate_gate_requires_complete_ready_candidate() -> None:
         "status": "ready",
         "semantic_coverage": {"complete": True, "missing": []},
         "proposal_gate": {"accepted": True, "reasons": []},
-        "semantic_plan": {"unresolved_items": []},
+        "semantic_plan": {"unresolved_items": [{
+            "kind": "image_observation", "severity": "low", "blocking": False,
+        }]},
     }
     assert recording_pi._screenshot_candidate_rejection_reasons(candidate) == []
 

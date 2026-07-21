@@ -2046,7 +2046,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        connectionErrorRef.current = detail;
+        // Operation failures belong to the workbench, not the transport. Keep
+        // the socket healthy so a rejected Pi proposal cannot poison reconnect.
+        if (!m.operation) connectionErrorRef.current = detail;
         setNamingBusy(false); setDescBusy(false); clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;

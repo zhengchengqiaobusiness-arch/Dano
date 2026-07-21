@@ -8701,7 +8701,13 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         missing.append("capability_relations")
     if not isinstance(plan.get("unresolved_items"), list):
         missing.append("unresolved_items")
-    elif plan.get("unresolved_items"):
+    elif any(
+        not isinstance(item, dict)
+        or item.get("blocking") is True
+        or str(item.get("severity") or "").strip().lower()
+        in {"", "high", "critical", "blocker", "error"}
+        for item in plan.get("unresolved_items") or []
+    ):
         missing.append("unresolved_blockers")
     return {
         "complete": not missing,

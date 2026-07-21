@@ -171,6 +171,9 @@ function verifyPlanToolCompatibility() {
   );
   const plan = {
     semantic_plan: {
+      field_semantic_axes: "path,name,type,category,source,required,default_value",
+    },
+    semantic_plan: {
       business_understanding: "Create request",
       capabilities: [{ capability_id: "query", step_ids: ["query"] }],
       capability_relations: [],
@@ -209,6 +212,7 @@ function verifyPlanToolCompatibility() {
   assert(semantic.field_semantics[0].confidence === 0.95, "high confidence was not normalized");
   assert(semantic.capabilities.length === 3, "misplaced capability items were not merged");
   assert(Array.isArray(semantic.unresolved_items), "unresolved_items were not restored");
+  assert(!("field_semantic_axes" in semantic), "descriptive field_semantic_axes was not discarded");
   assert(Array.isArray(sanitized.plan.ops) && sanitized.plan.ops.length === 0, "invalid ops were not normalized");
 }
 
