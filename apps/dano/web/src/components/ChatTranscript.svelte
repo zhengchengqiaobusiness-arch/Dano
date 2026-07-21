@@ -8,13 +8,9 @@
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import ArrowDown from "lucide-svelte/icons/arrow-down";
-  import BookOpenText from "lucide-svelte/icons/book-open-text";
   import ChevronRight from "lucide-svelte/icons/chevron-right";
-  import CodeXml from "lucide-svelte/icons/code-xml";
   import Copy from "lucide-svelte/icons/copy";
-  import FilePenLine from "lucide-svelte/icons/file-pen-line";
   import FileText from "lucide-svelte/icons/file-text";
-  import PenLine from "lucide-svelte/icons/pen-line";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import X from "lucide-svelte/icons/x";
@@ -78,16 +74,17 @@
     shouldAutoLoadOlderTranscript,
     shouldShowTranscriptStartNotice,
   } from "./chatTranscriptPagination";
-  import { classifyReadToolBlock } from "../utils/toolBlock";
-  import { transcriptToolIconName } from "../utils/toolPresentation";
-  import DiffView from "./DiffView.svelte";
-  import HighlightedCode from "./HighlightedCode.svelte";
+  import {
+    buildSkillActivity,
+    buildToolActivities,
+    type ToolActivity,
+  } from "../utils/toolPresentation";
   import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionToolCard from "./QuestionToolCard.svelte";
+  import ToolActivityRow from "./ToolActivityRow.svelte";
   import type { QuestionFocusChange } from "./questionFocus";
-  import SkillInvocationCard from "./SkillInvocationCard.svelte";
   import {
     getRuntimeEmptyStateConfig,
     getRuntimeTranscriptProcessSummaryEnabled,
@@ -510,6 +507,139 @@
     return contentBlockKey(msg, messageIndex, block, blockIndex);
   }
 
+  function askUserQuestionFailureActivity(
+    key: string,
+    block: ToolContentBlock,
+  ): ToolActivity {
+    const activity = buildToolActivities([{ key, block }])[0]!;
+    const validationTerminal = isAskUserQuestionValidationTerminalFailure(block);
+    const terminal = isAskUserQuestionTerminalFailure(block);
+    return {
+      ...activity,
+      label: t(validationTerminal
+        ? "chatTranscript.askUserQuestionValidationFailure"
+        : terminal
+          ? "chatTranscript.askUserQuestionTerminalFailure"
+          : "chatTranscript.askUserQuestionRetryFailure"),
+      details: [t(validationTerminal
+        ? "chatTranscript.askUserQuestionValidationFailureDetail"
+        : terminal
+          ? "chatTranscript.askUserQuestionTerminalFailureDetail"
+          : "chatTranscript.askUserQuestionRetryFailureDetail")],
+      rawDetails: [],
+    };
+  }
+
+  function hiddenAskUserQuestionFailureKeys(): Set<string> {
+    const hidden = new Set<string>();
+    let unresolvedRetryKeys: string[] = [];
+
+    const keepOnlyLatestRetry = () => {
+      for (const key of unresolvedRetryKeys.slice(0, -1)) hidden.add(key);
+      unresolvedRetryKeys = [];
+    };
+
+    for (const item of displayItems) {
+      if (item.message.role === "user") {
+        keepOnlyLatestRetry();
+        continue;
+      }
+      if (isToolResultMessage(item.message) || isErrorMessage(item.message)) continue;
+
+      for (const [blockIndex, block] of displayContentBlocks(
+        item.message,
+        item.messageIndex,
+      ).entries()) {
+        if (block.kind !== "tool") continue;
+        const key = toolBlockStateKey(
+          item.message,
+          item.messageIndex,
+          block,
+          blockIndex,
+        );
+        if (isAskUserQuestionToolError(block)) {
+          if (isAskUserQuestionTerminalFailure(block)) {
+            for (const retryKey of unresolvedRetryKeys) hidden.add(retryKey);
+            unresolvedRetryKeys = [];
+          } else {
+            unresolvedRetryKeys.push(key);
+          }
+          continue;
+        }
+        if (askUserQuestionRequest(block)) {
+          for (const retryKey of unresolvedRetryKeys) hidden.add(retryKey);
+          unresolvedRetryKeys = [];
+        }
+      }
+    }
+    keepOnlyLatestRetry();
+    return hidden;
+  }
+
+  let toolActivityProjection = $derived.by(() => {
+    const bySourceKey = new Map<string, ToolActivity>();
+    const firstSourceKeys = new Set<string>();
+    let activeKey: string | undefined;
+    let pendingSources: Array<{ key: string; block: ToolContentBlock }> = [];
+    const hiddenQuestionFailureKeys = hiddenAskUserQuestionFailureKeys();
+
+    const register = (activity: ToolActivity) => {
+      const firstSourceKey = activity.sourceKeys[0];
+      if (firstSourceKey) firstSourceKeys.add(firstSourceKey);
+      for (const sourceKey of activity.sourceKeys) {
+        bySourceKey.set(sourceKey, activity);
+      }
+      if (activity.status === "pending") activeKey = activity.key;
+    };
+
+    const flush = () => {
+      for (const activity of buildToolActivities(pendingSources)) {
+        register(activity);
+      }
+      pendingSources = [];
+    };
+
+    for (const item of displayItems) {
+      if (item.message.role === "user" || isToolResultMessage(item.message) || isErrorMessage(item.message)) {
+        flush();
+        continue;
+      }
+
+      const blocks = displayContentBlocks(item.message, item.messageIndex);
+      for (const [blockIndex, block] of blocks.entries()) {
+        if (block.kind === "thinking") continue;
+        if (block.kind !== "tool") {
+          flush();
+          continue;
+        }
+        const key = toolBlockStateKey(
+          item.message,
+          item.messageIndex,
+          block,
+          blockIndex,
+        );
+        if (isAskUserQuestionToolError(block)) {
+          flush();
+          if (!hiddenQuestionFailureKeys.has(key)) {
+            register(askUserQuestionFailureActivity(key, block));
+          }
+          continue;
+        }
+        if (askUserQuestionRequest(block)) {
+          flush();
+          continue;
+        }
+        pendingSources.push({
+          key,
+          block,
+        });
+      }
+    }
+    flush();
+
+    return { bySourceKey, firstSourceKeys, activeKey };
+  });
+
   function processGroupForItemIndex(itemIndex: number): TranscriptProcessGroup | undefined {
     return processGroups.find(group =>
       itemIndex >= group.startItemIndex && itemIndex <= group.endItemIndex,
@@ -639,67 +769,6 @@
     return `${singleLine.slice(0, maxLength - 3).trimEnd()}...`;
   }
 
-  function toolBlockDescriptor(block: ToolContentBlock) {
-    if (isAskUserQuestionToolError(block)) {
-      const validationTerminal = isAskUserQuestionValidationTerminalFailure(block);
-      const terminal = isAskUserQuestionTerminalFailure(block);
-      return {
-        name: t(validationTerminal
-          ? "chatTranscript.askUserQuestionValidationFailure"
-          : terminal
-            ? "chatTranscript.askUserQuestionTerminalFailure"
-            : "chatTranscript.askUserQuestionRetryFailure"),
-        params: undefined,
-        meta: t(validationTerminal
-          ? "chatTranscript.askUserQuestionValidationFailureMeta"
-          : terminal
-            ? "chatTranscript.askUserQuestionTerminalFailureMeta"
-            : "chatTranscript.askUserQuestionRetryFailureMeta"),
-        status: block.toolStatus,
-      };
-    }
-    const model = blockState.toolBlockModel(block);
-    return {
-      name: block.toolName || t("chatTranscript.toolFallback"),
-      params: model.title !== model.label ? model.title : undefined,
-      meta: model.meta ?? toolStatusMeta(block.toolStatus),
-      status: block.toolStatus,
-    };
-  }
-
-  function toolBlockDiffStats(block: ToolContentBlock) {
-    return blockState.toolBlockModel(block).diffStats;
-  }
-
-  function toolBlockTrailingKind(block: ToolContentBlock): "diff" | "meta" | "empty" {
-    if (toolBlockDiffStats(block)) return "diff";
-    if (toolBlockDescriptor(block).meta) return "meta";
-    return "empty";
-  }
-
-  function toolBlockTrailingHidden(kind: "diff" | "meta" | "empty", target: "diff" | "meta") {
-    return kind === "empty" || kind !== target;
-  }
-
-  function toolStatusMeta(status: ToolContentBlock["toolStatus"] | "success" | "error"): string | undefined {
-    if (status === "pending") return t("chatTranscript.toolRunning");
-    if (status === "error") return t("chatTranscript.error");
-    return undefined;
-  }
-
-  function toolBlockImages(block: ToolContentBlock): ImageContentBlock[] {
-    return (block.resultBlocks ?? []).filter(
-      (item): item is ImageContentBlock => item.kind === "image",
-    );
-  }
-
-  function toolBlockEmptyState(block: ToolContentBlock): string {
-    if (block.toolStatus === "pending") return t("chatTranscript.waitingForToolResult");
-    if (block.toolName === "write" && blockState.toolBlockDetail(block).kind === "empty")
-      return t("chatTranscript.fileEmpty");
-    return t("chatTranscript.noTextResult");
-  }
-
   function toolResultText(msg: TranscriptEntry): string {
     if (msg.toolName === "read" && toolResultImages(msg).length > 0) return "";
     return contentBlocks(msg)
@@ -707,14 +776,24 @@
       .join("\n");
   }
 
-  function toolResultPreview(msg: TranscriptEntry): string {
-    return previewText(toolResultText(msg), 6);
-  }
-
   function toolResultImages(msg: TranscriptEntry): ImageContentBlock[] {
     return contentBlocks(msg).filter(
       (block): block is ImageContentBlock => block.kind === "image",
     );
+  }
+
+  function orphanToolActivity(msg: TranscriptEntry, messageIndex: number): ToolActivity {
+    const key = `${messageStableKey(msg, messageIndex)}:tool-result`;
+    const block: ToolContentBlock = {
+      kind: "tool",
+      toolName: msg.toolName?.trim() || "unknown",
+      toolArgs: {},
+      argumentsText: "",
+      toolStatus: msg.isError ? "error" : "success",
+      resultText: toolResultText(msg),
+      resultBlocks: toolResultImages(msg),
+    };
+    return buildToolActivities([{ key, block }])[0]!;
   }
 
   function openFileBlock(block: FileContentBlock) {
@@ -799,19 +878,6 @@
     if (!clientId) return null;
     const query = new URLSearchParams({ clientId, path: block.path });
     return `/api/workspace-files/preview?${query.toString()}`;
-  }
-
-  function toolResultName(msg: TranscriptEntry): string {
-    return msg.toolName?.trim() || t("chatTranscript.toolFallback");
-  }
-
-  function toolResultMeta(msg: TranscriptEntry): string | undefined {
-    const preview = compactInlineText(toolResultPreview(msg));
-    if (preview) return preview;
-    const images = toolResultImages(msg);
-    if (images.length > 0)
-      return t("chatTranscript.imageCount", { count: images.length });
-    return toolStatusMeta(msg.isError ? "error" : "success");
   }
 
   function errorSummaryLabel(msg: TranscriptEntry): string {
@@ -1240,26 +1306,6 @@
 
 <svelte:document oncopy={handleCopy} />
 
-{#snippet toolSummaryName(toolName: string | undefined, fallbackName: string)}
-  {@const iconName = transcriptToolIconName(toolName)}
-  {#if iconName}
-    {@const accessibleName = toolName?.trim() || fallbackName}
-    <span class="tool-inline-name tool-inline-icon" aria-label={accessibleName} title={accessibleName}>
-      {#if iconName === "code-xml"}
-        <CodeXml size={15} strokeWidth={1.8} aria-hidden="true" />
-      {:else if iconName === "book-open-text"}
-        <BookOpenText size={15} strokeWidth={1.8} aria-hidden="true" />
-      {:else if iconName === "file-pen-line"}
-        <FilePenLine size={15} strokeWidth={1.8} aria-hidden="true" />
-      {:else}
-        <PenLine size={15} strokeWidth={1.8} aria-hidden="true" />
-      {/if}
-    </span>
-  {:else}
-    <span class="tool-inline-name">{fallbackName}</span>
-  {/if}
-{/snippet}
-
 <div
   bind:this={container}
   class="chat-transcript"
@@ -1313,6 +1359,7 @@
 
   {#each displayItems as item, index (displayItemKey(item, index))}
     {#if shouldRenderDisplayItemAt(index) && isToolResultMessage(item.message)}
+      {@const activity = orphanToolActivity(item.message, item.messageIndex)}
       <div
         class="message-row tool"
         data-message-id={item.message.id ?? undefined}
@@ -1320,65 +1367,13 @@
         transition:slide={transcriptRevealTransition}
       >
         <div class="message-content tool">
-          <div class="tool-inline" data-status={item.message.isError ? "error" : "success"}>
-            <button
-              type="button"
-              class="tool-inline-toggle"
-              onclick={() => blockState.toggleToolBlock(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
-              aria-expanded={blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
-            >
-              <span class="tool-inline-summary">
-                {@render toolSummaryName(item.message.toolName, toolResultName(item.message))}
-              </span>
-              {#if toolResultMeta(item.message)}
-                <span class="tool-inline-meta">{toolResultMeta(item.message)}</span>
-              {/if}
-            </button>
-
-            {#if blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
-              <div class="tool-inline-details" transition:slide={transcriptRevealTransition}>
-                {#if showMessageIds}
-                  <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
-                {/if}
-
-                {#if toolResultImages(item.message).length > 0}
-                  <div class="tool-inline-images">
-                    {#each toolResultImages(item.message) as image, imgIdx (`${image.src}-${imgIdx}`)}
-                      <figure class="message-image-block">
-                        <button
-                          type="button"
-                          class="message-image-button"
-                          aria-label={t("chatTranscript.openImageNumber", { number: imgIdx + 1 })}
-                          onclick={() => lightbox.openImageLightbox(toolResultImages(item.message), imgIdx)}
-                        >
-                          <img
-                            class="message-image"
-                            src={image.src}
-                            alt={image.alt}
-                            loading="lazy"
-                          />
-                        </button>
-                      </figure>
-                    {/each}
-                  </div>
-                {/if}
-
-                {#if toolResultText(item.message).trim()}
-                  <section class="tool-inline-section">
-                    {#if toolResultName(item.message) === "bash"}
-                      <div class="tool-inline-code-panel">
-                        <pre class="tool-inline-code-output">{toolResultText(item.message)}</pre>
-                      </div>
-                    {:else}
-                      <pre class="tool-inline-pre">{toolResultText(item.message)}</pre>
-                    {/if}
-                  </section>
-                {:else if toolResultImages(item.message).length === 0}
-                  <div class="tool-inline-empty">{t("chatTranscript.noTextResult")}</div>
-                {/if}
-              </div>
-            {/if}
-          </div>
+          <ToolActivityRow
+            {activity}
+            treeEntryId={item.message.id}
+            expanded={blockState.isToolBlockExpanded(activity.key)}
+            onToggle={() => blockState.toggleToolBlock(activity.key)}
+            onOpenImage={(imageIndex) => lightbox.openImageLightbox(activity.images, imageIndex)}
+          />
         </div>
       </div>
     {:else if shouldRenderDisplayItemAt(index) && isErrorMessage(item.message)}
@@ -1466,121 +1461,21 @@
                   </div>
                 </div>
               {:else if block.kind === "tool"}
-                {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
                   <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onCancelRevision={cancelQuestionRevision} onSubmitRevision={submitQuestionRevision} onFocusChange={onQuestionFocusChange} {onFieldAssist} />
-                {:else if readClassification?.kind === "skill"}
-                  <SkillInvocationCard skillName={readClassification.label} />
                 {:else}
-                  {@const descriptor = toolBlockDescriptor(block)}
-                  {@const diffStats = toolBlockDiffStats(block)}
-                  {@const trailingKind = toolBlockTrailingKind(block)}
-                  <div class="tool-inline-block" data-tree-entry-id={block.resultSourceMessageId}>
-                    <div
-                      class="tool-inline"
-                      data-status={descriptor.status}
-                      data-question-error={isAskUserQuestionToolError(block) ? true : undefined}
-                    >
-                      <button
-                        type="button"
-                        class="tool-inline-toggle"
-                        onclick={() => blockState.toggleToolBlock(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                        aria-expanded={blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                      >
-                      <span class="tool-inline-summary">
-                        {@render toolSummaryName(block.toolName, descriptor.name)}
-                        {#if descriptor.params}
-                          <span class="tool-inline-params">{descriptor.params}</span>
-                        {/if}
-                      </span>
-                      <span class="tool-inline-trailing" hidden={trailingKind === "empty"}>
-                        <span
-                          class="tool-inline-meta"
-                          hidden={toolBlockTrailingHidden(trailingKind, "meta")}
-                          aria-hidden={trailingKind !== "meta"}
-                        >{descriptor.meta ?? ""}</span>
-                        <span
-                          class="tool-inline-diff"
-                          hidden={toolBlockTrailingHidden(trailingKind, "diff")}
-                          aria-hidden={trailingKind !== "diff"}
-                          aria-label={t("chatTranscript.diffStats", {
-                            additions: diffStats?.added ?? 0,
-                            deletions: diffStats?.removed ?? 0,
-                          })}
-                        >
-                          <span class="tool-inline-diff-added">+{diffStats?.added ?? 0}</span>
-                          <span class="tool-inline-diff-removed">-{diffStats?.removed ?? 0}</span>
-                        </span>
-                      </span>
-                      </button>
-
-                    {#if blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                      <div class="tool-inline-details" transition:slide={transcriptRevealTransition}>
-                        {#if showMessageIds && block.resultSourceMessageId}
-                          <span class="message-debug-id">{t("chatTranscript.messageId", { id: block.resultSourceMessageId })}</span>
-                        {/if}
-
-                        {#if toolBlockImages(block).length > 0}
-                          <div class="tool-inline-images">
-                            {#each toolBlockImages(block) as image, imgIdx (`${image.src}-${imgIdx}`)}
-                              <figure class="message-image-block">
-                                <button
-                                  type="button"
-                                  class="message-image-button"
-                                  aria-label={t("chatTranscript.openImageNumber", { number: imgIdx + 1 })}
-                                  onclick={() => lightbox.openImageLightbox(toolBlockImages(block), imgIdx)}
-                                >
-                                  <img class="message-image" src={image.src} alt={image.alt} loading="lazy" />
-                                </button>
-                              </figure>
-                            {/each}
-                          </div>
-                        {/if}
-
-                        {#if isAskUserQuestionToolError(block)}
-                          <section class="tool-inline-section">
-                            <pre class="tool-inline-pre">{t(isAskUserQuestionValidationTerminalFailure(block)
-                              ? "chatTranscript.askUserQuestionValidationFailureDetail"
-                              : isAskUserQuestionTerminalFailure(block)
-                                ? "chatTranscript.askUserQuestionTerminalFailureDetail"
-                                : "chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
-                          </section>
-                        {:else if blockState.toolBlockDetail(block).kind !== "empty"}
-                          <section class="tool-inline-section">
-                            {#if blockState.toolBlockDetail(block).kind === "diff"}
-                              <DiffView
-                                diff={blockState.toolBlockDetail(block).text || ""}
-                                path={blockState.toolBlockDetail(block).path}
-                                edits={blockState.toolBlockDetail(block).edits || []}
-                                {readWorkspaceFile}
-                              />
-                            {:else if blockState.toolBlockDetail(block).kind === "code"}
-                              <div class="tool-inline-code-panel">
-                                <HighlightedCode
-                                  code={blockState.toolBlockDetail(block).text || ""}
-                                  path={blockState.toolBlockDetail(block).path}
-                                />
-                              </div>
-                            {:else if blockState.toolBlockDetail(block).kind === "bash"}
-                              <div class="tool-inline-code-panel">
-                                {#if blockState.toolBlockDetail(block).command}
-                                  <pre class="tool-inline-code-output tool-inline-command-output">{blockState.toolBlockDetail(block).command}</pre>
-                                {/if}
-                                {#if blockState.toolBlockDetail(block).text}
-                                  <pre class="tool-inline-code-output">{blockState.toolBlockDetail(block).text}</pre>
-                                {/if}
-                              </div>
-                            {:else}
-                              <pre class="tool-inline-pre">{blockState.toolBlockDetail(block).text}</pre>
-                            {/if}
-                          </section>
-                        {:else if toolBlockImages(block).length === 0}
-                          <div class="tool-inline-empty">{toolBlockEmptyState(block)}</div>
-                        {/if}
-                      </div>
-                    {/if}
-                    </div>
-                  </div>
+                  {@const activityKey = toolBlockStateKey(item.message, item.messageIndex, block, bIdx)}
+                  {@const activity = toolActivityProjection.bySourceKey.get(activityKey)}
+                  {#if activity && toolActivityProjection.firstSourceKeys.has(activityKey)}
+                    <ToolActivityRow
+                      {activity}
+                      treeEntryId={block.resultSourceMessageId}
+                      expanded={blockState.isToolBlockExpanded(activity.key)}
+                      active={activity.key === toolActivityProjection.activeKey && isStreaming && !initialLoading}
+                      onToggle={() => blockState.toggleToolBlock(activity.key)}
+                      onOpenImage={(imageIndex) => lightbox.openImageLightbox(activity.images, imageIndex)}
+                    />
+                  {/if}
                 {/if}
               {:else if block.kind === "image"}
                 <figure class="message-image-block">
@@ -1624,7 +1519,9 @@
                   {/if}
                 </div>
               {:else if block.kind === "skill"}
-                <SkillInvocationCard skillName={block.skillName} />
+                {@const skillActivityKey = contentBlockKey(item.message, item.messageIndex, block, bIdx)}
+                {@const skillActivity = buildSkillActivity(skillActivityKey, block.skillName)}
+                <ToolActivityRow activity={skillActivity} />
               {:else if block.kind === "text" && block.text}
                 <MarkdownRenderer
                   content={block.text}
@@ -2511,17 +2408,7 @@
     color: var(--text-subtle);
   }
 
-  .tool-inline-trailing {
-    display: inline-flex;
-    align-items: center;
-    justify-content: flex-end;
-    flex: none;
-    min-width: 0;
-    max-width: 180px;
-  }
-
-  .tool-inline-meta,
-  .tool-inline-diff {
+  .tool-inline-meta {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2534,30 +2421,8 @@
     display: inline-block;
   }
 
-  .tool-inline-diff {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-family: var(--pi-font-mono);
-    font-weight: 600;
-  }
-
-  .tool-inline-trailing[hidden],
-  .tool-inline-meta[hidden],
-  .tool-inline-diff[hidden] {
-    display: none !important;
-  }
-
-  .tool-inline-diff-added { color: var(--diff-added-accent); }
-  .tool-inline-diff-removed { color: var(--diff-removed-accent); }
-
   .tool-inline[data-status="error"] .tool-inline-name,
   .tool-inline[data-status="error"] .tool-inline-meta { color: var(--error-text); }
-
-  .tool-inline[data-question-error="true"] .tool-inline-name,
-  .tool-inline[data-question-error="true"] .tool-inline-meta {
-    color: var(--text-muted);
-  }
 
   .tool-inline-details {
     display: flex;

@@ -5,17 +5,21 @@ const source = readFileSync(
   new URL("../../web/src/components/ChatTranscript.svelte", import.meta.url),
   "utf8",
 );
+const activityRowSource = readFileSync(
+  new URL("../../web/src/components/ToolActivityRow.svelte", import.meta.url),
+  "utf8",
+);
 
 describe("ChatTranscript presentation", () => {
-  it("uses the shared icon renderer for tool calls and standalone results", () => {
-    expect(source).toContain("transcriptToolIconName");
-    expect(source).toContain("toolSummaryName(item.message.toolName");
-    expect(source).toContain("toolSummaryName(block.toolName");
-    expect(source).toContain("<CodeXml");
-    expect(source).toContain("<BookOpenText");
-    expect(source).toContain("<FilePenLine");
-    expect(source).toContain("<PenLine");
-    expect(source).toContain("aria-label={accessibleName}");
+  it("routes tool calls and standalone results through the Activity Trail", () => {
+    expect(source).toContain("buildToolActivities");
+    expect(source).toContain("orphanToolActivity");
+    expect(source).toContain("<ToolActivityRow");
+    expect(activityRowSource).toContain("<SquareTerminal");
+    expect(activityRowSource).toContain("<BookOpenText");
+    expect(activityRowSource).toContain("<FilePenLine");
+    expect(activityRowSource).toContain("<ListChecks");
+    expect(activityRowSource).toContain("<WandSparkles");
   });
 
   it("renders an accessible animated skeleton only for initial loading", () => {

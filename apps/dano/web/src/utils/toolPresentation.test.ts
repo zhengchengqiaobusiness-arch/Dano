@@ -1,18 +1,276 @@
 import { describe, expect, it } from "vitest";
-import { transcriptToolIconName } from "./toolPresentation";
+import {
+  buildSkillActivity,
+  buildToolActivities,
+  toolActivityLabel,
+} from "./toolPresentation";
+import type { ToolContentBlock } from "./transcript";
 
-describe("transcript tool icon presentation", () => {
-  it.each([
-    ["bash", "code-xml"],
-    ["read", "book-open-text"],
-    ["write", "file-pen-line"],
-    ["edit", "pen-line"],
-  ] as const)("maps %s to %s", (toolName, iconName) => {
-    expect(transcriptToolIconName(toolName)).toBe(iconName);
+function toolBlock(
+  toolName: string,
+  toolStatus: ToolContentBlock["toolStatus"],
+  overrides: Partial<ToolContentBlock> = {},
+): ToolContentBlock {
+  return {
+    kind: "tool",
+    toolName,
+    toolArgs: {},
+    argumentsText: "",
+    toolStatus,
+    ...overrides,
+  };
+}
+
+describe("Activity Trail presentation", () => {
+  it("falls back to count-free copy for invalid activity counts", () => {
+    expect(toolActivityLabel("read", "success", 0)).toBe("已查阅资料");
+    expect(toolActivityLabel("read", "success", Number.NaN)).toBe("已查阅资料");
+    expect(toolActivityLabel("read", "success", Number.POSITIVE_INFINITY)).toBe("已查阅资料");
+    expect(toolActivityLabel("read", "success", 1.5)).toBe("已查阅资料");
+    expect(toolActivityLabel("external", "success", 2)).toBe("已获取 2 项外部信息");
+    expect(toolActivityLabel("process", "pending", 2)).toBe("正在执行 2 条命令");
+    expect(toolActivityLabel("generic", "success", 2)).toBe("已处理 2 项任务");
   });
 
-  it("keeps unknown and missing tools on the text fallback", () => {
-    expect(transcriptToolIconName("curl")).toBeUndefined();
-    expect(transcriptToolIconName(undefined)).toBeUndefined();
+  it("uses user-facing activity copy without exposing tool names", () => {
+    const activities = buildToolActivities([
+      { key: "read", block: toolBlock("read", "success") },
+      { key: "update", block: toolBlock("edit", "success") },
+      { key: "external", block: toolBlock("curl", "pending") },
+      { key: "process", block: toolBlock("bash", "pending") },
+      { key: "unknown", block: toolBlock("internal_sync_v2", "success") },
+    ]);
+
+    expect(activities.map(activity => activity.label)).toEqual([
+      "已查阅资料",
+      "已更新内容",
+      "正在获取外部信息",
+      "正在执行命令",
+      "已处理任务",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("internal_sync_v2");
+  });
+
+  it("keeps each failed tool's action copy without appending internal names", () => {
+    const activities = buildToolActivities([
+      { key: "read", block: toolBlock("read", "error", { resultText: "failed" }) },
+      { key: "edit", block: toolBlock("edit", "error", { resultText: "failed" }) },
+      { key: "write", block: toolBlock("write", "error", { resultText: "failed" }) },
+      { key: "curl", block: toolBlock("curl", "error", { resultText: "failed" }) },
+      { key: "bash", block: toolBlock("bash", "error", { resultText: "failed" }) },
+      {
+        key: "question",
+        block: toolBlock("ask_user_question", "error", { resultText: "failed" }),
+      },
+      {
+        key: "unknown",
+        block: toolBlock("internal_sync_v2", "error", { resultText: "failed" }),
+      },
+    ]);
+
+    expect(activities.map(activity => activity.label)).toEqual([
+      "资料查阅失败",
+      "内容更新失败",
+      "内容更新失败",
+      "外部信息获取失败",
+      "命令执行失败",
+      "问题卡调用失败",
+      "任务处理失败",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("ask_user_question");
+    expect(JSON.stringify(activities)).not.toContain("internal_sync_v2");
+  });
+
+  it("consolidates consecutive work of the same kind with a live count", () => {
+    const activities = buildToolActivities([
+      { key: "read-1", block: toolBlock("read", "success") },
+      { key: "read-2", block: toolBlock("read", "success") },
+      { key: "edit", block: toolBlock("edit", "pending") },
+      { key: "write", block: toolBlock("write", "pending") },
+    ]);
+
+    expect(activities.map(activity => ({
+      label: activity.label,
+      count: activity.count,
+      sourceKeys: activity.sourceKeys,
+    }))).toEqual([
+      {
+        label: "已查阅 2 项资料",
+        count: 2,
+        sourceKeys: ["read-1", "read-2"],
+      },
+      {
+        label: "正在更新 2 项内容",
+        count: 2,
+        sourceKeys: ["edit", "write"],
+      },
+    ]);
+  });
+
+  it("exposes only safe object names in expanded details", () => {
+    const activities = buildToolActivities([
+      {
+        key: "read",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/company/contracts/采购合同.pdf" },
+        }),
+      },
+      {
+        key: "write",
+        block: toolBlock("write", "success", {
+          toolArgs: { path: "/private/company/output/修改建议.docx", content: "secret" },
+        }),
+      },
+      {
+        key: "curl",
+        block: toolBlock("curl", "success", {
+          toolArgs: { args: ["-L", "https://records.example.com/search?q=secret"] },
+        }),
+      },
+      {
+        key: "bash",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "cat /private/company/contracts/采购合同.pdf" },
+          resultText: "secret output",
+        }),
+      },
+      {
+        key: "unknown",
+        block: toolBlock("internal_sync_v2", "success", {
+          toolArgs: { token: "secret", target: "/private/company" },
+          resultText: "secret output",
+        }),
+      },
+    ]);
+
+    expect(activities.map(activity => activity.details)).toEqual([
+      ["采购合同.pdf"],
+      ["修改建议.docx"],
+      ["records.example.com"],
+      [],
+      [],
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("/private/company");
+    expect(JSON.stringify(activities)).not.toContain("secret");
+  });
+
+  it("caps detail names at five while preserving known-tool images", () => {
+    const sources = Array.from({ length: 6 }, (_, index) => ({
+      key: `read-${index + 1}`,
+      block: toolBlock("read", "success", {
+        toolArgs: { path: `/private/docs/资料-${index + 1}.pdf` },
+        ...(index === 0
+          ? {
+              resultBlocks: [{
+                kind: "image" as const,
+                src: "data:image/png;base64,preview",
+                alt: "资料预览",
+              }],
+            }
+          : {}),
+      }),
+    }));
+
+    const [activity] = buildToolActivities(sources);
+
+    expect(activity?.details).toEqual([
+      "资料-1.pdf",
+      "资料-2.pdf",
+      "资料-3.pdf",
+      "资料-4.pdf",
+      "资料-5.pdf",
+    ]);
+    expect(activity?.overflowCount).toBe(1);
+    expect(activity?.images).toEqual([{
+      kind: "image",
+      src: "data:image/png;base64,preview",
+      alt: "图片附件",
+    }]);
+  });
+
+  it("shows only Chinese skill names from SKILL.md frontmatter", () => {
+    const activities = buildToolActivities([
+      {
+        key: "chinese-skill",
+        block: toolBlock("read", "pending", {
+          toolArgs: { path: "/skills/leave/SKILL.md" },
+          resultText: "---\nname: OA 请假流程\n---\nbody",
+        }),
+      },
+      {
+        key: "internal-skill",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/skills/internal-sync/SKILL.md" },
+          resultText: "---\nname: internal-sync\n---\nbody",
+        }),
+      },
+      {
+        key: "folder-name-only",
+        block: toolBlock("read", "pending", {
+          toolArgs: { path: "/skills/请假流程/SKILL.md" },
+        }),
+      },
+    ]);
+
+    expect(activities.map(activity => activity.label)).toEqual([
+      "正在调用「OA 请假流程」",
+      "已调用专业能力",
+      "正在调用专业能力",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("internal-sync");
+    expect(activities.map(activity => activity.details)).toEqual([[], [], []]);
+  });
+
+  it("sanitizes standalone skill activity names with the same rule", () => {
+    expect(buildSkillActivity("skill-cn", "OA 请假流程").label).toBe("已调用「OA 请假流程」");
+    expect(buildSkillActivity("skill-internal", "ask-matt").label).toBe("已调用专业能力");
+    expect(JSON.stringify(buildSkillActivity("skill-internal", "ask-matt"))).not.toContain("ask-matt");
+  });
+
+  it("hides recovered failures without guessing unresolved failure reasons", () => {
+    const activities = buildToolActivities([
+      {
+        key: "failed-then-retried",
+        block: toolBlock("read", "error", {
+          toolArgs: { path: "/private/docs/合同.pdf" },
+          resultText: "EACCES: permission denied /private/docs/合同.pdf",
+        }),
+      },
+      {
+        key: "successful-retry",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/docs/合同.pdf" },
+          resultText: "secret contract text",
+        }),
+      },
+      {
+        key: "unresolved",
+        block: toolBlock("read", "error", {
+          toolArgs: { path: "/private/docs/付款记录.pdf" },
+          resultText: "ECONNREFUSED 10.0.0.8",
+        }),
+      },
+    ]);
+
+    expect(activities.map(activity => ({
+      sourceKeys: activity.sourceKeys,
+      label: activity.label,
+      details: activity.details,
+      rawDetails: activity.rawDetails,
+    }))).toEqual([
+      {
+        sourceKeys: ["successful-retry"],
+        label: "已查阅资料",
+        details: ["合同.pdf"],
+        rawDetails: [],
+      },
+      {
+        sourceKeys: ["unresolved"],
+        label: "资料查阅失败",
+        details: [],
+        rawDetails: ["ECONNREFUSED 10.0.0.8"],
+      },
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("网络连接失败");
   });
 });

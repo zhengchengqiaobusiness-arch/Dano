@@ -28,6 +28,10 @@ _Avoid_: pending confirmation, editable form, separate form identifier
 The server-owned execution that starts from one user message and may contain multiple sequential model responses and tool calls. Submitted Forms are eligible for confirmation only within the Assistant Turn that created them.
 _Avoid_: one assistant message, one tool call, browser streaming state
 
+**Activity Trail**:
+A durable, chronological account of meaningful work within an Assistant Turn that consolidates consecutive work of the same kind and communicates unresolved setbacks without technical errors in the collapsed row. It remains visible with lower emphasis after the final answer; its summary and normal expanded details may identify work through safe object names, domains, and counts, but never expose tool names, complete paths or URLs, commands, scripts, code, raw output, or other implementation details. When an unresolved failure has no reliable user-facing explanation, its expanded details may show the original failure information instead of inventing a classification.
+_Avoid_: tool log, tool-call list, process summary, technical trace
+
 **Form Interaction**:
 The server-owned confirmation lifecycle for one or more Submitted Forms. Its append-only snapshots live in the existing session JSONL and reduce to `awaiting_confirmation`, `revising`, `confirmed`, `cancelled`, or `interrupted`; the browser only renders the projected state, Form Revisions, and allowed actions.
 _Avoid_: frontend confirmation state, global streaming state, reconstructed form relationship
