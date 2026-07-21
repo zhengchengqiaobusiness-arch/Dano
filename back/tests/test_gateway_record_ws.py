@@ -33,14 +33,14 @@ def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
         "mimeType": "image/png",
     }]
     assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
-    assert "fresh full semantic analysis" in gateway._analysis_screenshot_guidance(screenshots)
+    assert "strong references, not an admission gate" in gateway._analysis_screenshot_guidance(screenshots)
     protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
     assert "field_semantics" in protocol and "step_id" in protocol and "wire_path" in protocol
     assert "control_kind" in protocol
     assert "user_param/user_input" in protocol
     assert "capability_relations" in protocol
     assert "from_output" in protocol and "to_input" in protocol
-    assert "not only enums" in protocol
+    assert "non-blocking unresolved item" in protocol
     assert "Never submit flow_spec" in protocol
 
 
@@ -89,7 +89,9 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"status": "rejected"' in branch
     assert "原配置保持不变" in branch
     assert "orchestrate_flow_capabilities" in branch
-    assert "if not before_operation.capabilities and not analysis_screenshots:" in branch
+    assert "if not before_operation.capabilities:" in branch
+    assert "needs_pi = bool(before_operation.capabilities or analysis_screenshots)" in branch
+    assert "if needs_pi:" in branch
     assert 'generation_mode="initial"' in branch
     assert "timeout_s=3000" in branch
     assert "pending_flow_spec or before_operation" in branch

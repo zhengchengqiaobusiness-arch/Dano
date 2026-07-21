@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 import dano.agent_tools.tools as agent_tools
 from dano.execution.page import flow_spec as flow_module
@@ -39,16 +36,17 @@ def _six_field_spec() -> FlowSpec:
     )])
 
 
-def test_screenshot_prose_only_plan_is_rejected() -> None:
+def test_screenshot_prose_only_plan_keeps_the_fact_baseline_available() -> None:
     incident = _incident()
 
-    with pytest.raises(agent_tools.ToolError, match="截图分析.*不能为空|field_semantics"):
-        agent_tools._normalize_recording_plan_submission(
-            incident["bridge_output_plan"], _six_field_spec(),
-        )
+    normalized = agent_tools._normalize_recording_plan_submission(
+        incident["bridge_output_plan"], _six_field_spec(),
+    )
+
+    assert normalized["semantic_plan"]["field_semantics"] == []
 
 
-def test_screenshot_zero_match_report_is_rejected() -> None:
+def test_screenshot_zero_match_report_is_non_blocking_review() -> None:
     before = _six_field_spec()
     after = before.model_copy(deep=True)
     after.meta = {
@@ -76,7 +74,7 @@ def test_screenshot_zero_match_report_is_rejected() -> None:
     )
 
     assert report["matched_field_count"] == 0
-    assert report["status"] == "rejected"
+    assert report["status"] == "needs_review"
 
 
 def test_screenshot_value_never_writes_default_value() -> None:

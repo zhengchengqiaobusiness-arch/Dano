@@ -1226,21 +1226,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     )
 
     screenshot_count = int(raw_plan.get("_analysis_screenshot_count") or 0)
-    if screenshot_count:
-        submitted_keys = raw_plan.get("_submitted_semantic_keys")
-        if isinstance(submitted_keys, list):
-            missing_submitted = sorted(semantic_keys.difference(
-                str(key) for key in submitted_keys
-            ))
-            if missing_submitted:
-                raise ToolError(
-                    "截图分析没有实际提交完整语义字段："
-                    + ", ".join(missing_submitted)
-                )
-        for key in ("request_roles", "field_semantics", "capabilities"):
-            value = semantic.get(key)
-            if not isinstance(value, list) or not value:
-                raise ToolError(f"截图分析的 {key} 不能为空")
     grounded = spec.model_copy(deep=True)
     rebuild_flow_dependencies(grounded)
     _repair_structural_option_bindings(grounded)
@@ -1430,6 +1415,26 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         labels.discard("")
         visible_value = control.get("visible_value")
         requested_step = str(field.get("step_id") or "")
+        compatible_types = {
+            "text": {"string", "text", "textarea", "email", "url"},
+            "textarea": {"string", "text", "textarea"},
+            "rich_text": {"string", "text", "textarea", "rich_text"},
+            "number": {"number", "integer"},
+            "slider": {"number", "integer"},
+            "date": {"date"},
+            "datetime": {"datetime"},
+            "time": {"time"},
+            "checkbox": {"boolean", "enum", "list-enum"},
+            "switch": {"boolean"},
+            "select": {"enum", "list-enum"},
+            "combobox": {"enum", "list-enum"},
+            "cascader": {"enum", "list-enum"},
+            "picker": {"enum", "list-enum"},
+            "radio": {"enum"},
+            "tree_select": {"enum", "list-enum"},
+            "upload": {"string", "array", "file"},
+            "file": {"string", "array", "file"},
+        }.get(str(control.get("control_kind") or "").lower(), set())
         ranked: list[tuple[int, str, str, object, object, list[str]]] = []
         for step, param in field_candidates:
             ref = (str(step.step_id), normalized_path(param.path))
@@ -1450,9 +1455,19 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             if requested_step and requested_step == str(step.step_id):
                 score += 20
                 reasons.append("step_hint")
-            if visible_value not in (None, "") and str(visible_value) == str(getattr(param, "value", "")):
+            recorded_value_match = bool(
+                visible_value not in (None, "")
+                and str(visible_value) == str(getattr(param, "value", ""))
+            )
+            if recorded_value_match:
                 score += 45
                 reasons.append("recorded_value")
+            if recorded_value_match and compatible_types & {
+                str(getattr(param, "type", None) or "").lower(),
+                str(getattr(param, "wire_type", None) or "").lower(),
+            }:
+                score += 35
+                reasons.append("control_type")
             page_id = str(control.get("page_id") or control.get("frame_id") or "")
             source_meta = getattr(step, "source_meta", None) or {}
             if page_id and page_id in {
@@ -1520,6 +1535,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             for key in (
                 "screenshot_name", "visible_label", "control_kind", "editable",
                 "disabled", "read_only", "multiple", "required", "options",
+                "visible_value", "page_id", "frame_id",
             ):
                 if key in field and evidence_item.get(key) in (None, ""):
                     evidence_item[key] = deepcopy(field[key])
@@ -1618,16 +1634,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             field["axis_status"] = statuses
         fields.append(field)
     semantic["field_semantics"] = fields
-    if screenshot_count:
-        if not fields:
-            raise ToolError("截图分析未匹配到任何真实接口字段")
-        if not any(
-            str(evidence.get("source") or "").lower() == "screenshot"
-            for field in fields
-            for evidence in (field.get("evidence") or [])
-            if isinstance(evidence, dict)
-        ):
-            raise ToolError("截图分析没有提交可验证的图片字段证据")
 
     allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
     allowed_usages = {"execute", "option_source", "fact_check", "preflight"}
@@ -1915,26 +1921,25 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             **deepcopy(raw_plan),
             "_analysis_screenshot_count": int(session.analysis_image_count),
         }
+    screenshot_count = int(getattr(session, "analysis_image_count", 0) or 0)
     try:
-        submission = _normalize_recording_plan_submission(raw_plan, session.current_flow_spec())
+        submission = _normalize_recording_plan_submission(
+            raw_plan, session.current_flow_spec()
+        )
+        submission.setdefault("submission_id", str(uuid4()))
+        return await _apply_recording_submission_atomic(
+            session,
+            submission,
+            mode="plan",
+            base_flow_version=params["base_flow_version"],
+        )
     except ToolError as exc:
-        screenshot_noop_errors = {
-            "截图分析未匹配到任何真实接口字段",
-            "截图分析没有提交可验证的图片字段证据",
-        }
-        if int(getattr(session, "analysis_image_count", 0) or 0) and str(exc) in screenshot_noop_errors:
+        if screenshot_count:
             return await session.accept_unchanged_plan(
                 base_flow_version=params["base_flow_version"],
                 warning=f"{exc}，当前配置未修改",
             )
         raise
-    submission.setdefault("submission_id", str(uuid4()))
-    return await _apply_recording_submission_atomic(
-        session,
-        submission,
-        mode="plan",
-        base_flow_version=params["base_flow_version"],
-    )
 
 
 async def get_validation_report(run_id: str, params: dict) -> dict:

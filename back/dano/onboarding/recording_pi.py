@@ -49,34 +49,6 @@ class RecordingPiError(RuntimeError):
     """The recording Pi runtime failed or returned an invalid protocol event."""
 
 
-def _screenshot_candidate_rejection_reasons(candidate: Any) -> list[str]:
-    """Return hard-gate reasons before a screenshot candidate mutates session state."""
-    model = dict((getattr(candidate, "meta", None) or {}).get("capability_model") or {})
-    coverage = dict(model.get("semantic_coverage") or {})
-    gate = dict(model.get("proposal_gate") or {})
-    reasons: list[str] = []
-    if coverage.get("complete") is not True:
-        missing = ",".join(str(item) for item in coverage.get("missing") or [])
-        reasons.append(f"semantic_coverage_incomplete{':' + missing if missing else ''}")
-    if gate.get("accepted") is False:
-        detail = ",".join(str(item) for item in gate.get("reasons") or [])
-        reasons.append(f"proposal_rejected{':' + detail if detail else ''}")
-    if str(model.get("status") or "") != "ready":
-        reasons.append(f"candidate_status:{model.get('status') or 'missing'}")
-    semantic = model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
-    unresolved = semantic.get("unresolved_items") if isinstance(semantic, dict) else []
-    blockers = [
-        item for item in unresolved or []
-        if not isinstance(item, dict)
-        or item.get("blocking") is True
-        or str(item.get("severity") or "").strip().lower()
-        in {"", "high", "critical", "blocker", "error"}
-    ]
-    if blockers:
-        reasons.append(f"unresolved_items:{len(blockers)}")
-    return list(dict.fromkeys(reasons))
-
-
 def _acquire_scope_file_lock(path: Path) -> BinaryIO:
     """Hold a cross-process lock for one persisted Pi JSONL scope."""
     handle = path.open("a+b")
@@ -389,13 +361,6 @@ class RecordingPiSession:
                 submission=submission,
                 mode=mode,
             )
-            if mode == "plan" and int(submission.get("_analysis_screenshot_count") or 0):
-                rejection_reasons = _screenshot_candidate_rejection_reasons(updated)
-                if rejection_reasons:
-                    raise RecordingPiError(
-                        "截图分析候选未通过原子准入，原配置保持不变："
-                        + "；".join(rejection_reasons)
-                    )
             self.flow_spec = updated
             self.last_submission_kind = mode
             # A plan/repair changes the authoritative contract. Any review

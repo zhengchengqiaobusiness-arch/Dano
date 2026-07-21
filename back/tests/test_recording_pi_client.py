@@ -496,38 +496,8 @@ def test_require_publish_review_hard_fails_missing_stale_and_rejected(monkeypatc
     )["all_passed"] is True
 
 
-def test_screenshot_candidate_gate_requires_complete_ready_candidate() -> None:
-    candidate = FlowSpec(meta={
-        "capability_model": {
-            "status": "needs_review",
-            "semantic_coverage": {
-                "complete": False,
-                "missing": ["field_semantics", "field_axis_contract"],
-            },
-            "proposal_gate": {"accepted": True, "reasons": []},
-            "semantic_plan": {"unresolved_items": [{"kind": "field"}]},
-        },
-    })
-
-    reasons = recording_pi._screenshot_candidate_rejection_reasons(candidate)
-
-    assert any(reason.startswith("semantic_coverage_incomplete") for reason in reasons)
-    assert "candidate_status:needs_review" in reasons
-    assert "unresolved_items:1" in reasons
-
-    candidate.meta["capability_model"] = {
-        "status": "ready",
-        "semantic_coverage": {"complete": True, "missing": []},
-        "proposal_gate": {"accepted": True, "reasons": []},
-        "semantic_plan": {"unresolved_items": [{
-            "kind": "image_observation", "severity": "low", "blocking": False,
-        }]},
-    }
-    assert recording_pi._screenshot_candidate_rejection_reasons(candidate) == []
-
-
 @pytest.mark.asyncio
-async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoints(
+async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_changes(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -542,7 +512,7 @@ async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoi
         meta={"current_version": 0},
     )
     candidate = before.model_copy(deep=True)
-    candidate.title = "candidate-must-not-land"
+    candidate.title = "grounded-partial-update"
     candidate.meta = {
         **candidate.meta,
         "capability_model": {
@@ -567,14 +537,13 @@ async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoi
     )
     client.bind_flow_spec(before)
 
-    with pytest.raises(recording_pi.RecordingPiError, match="原配置保持不变"):
-        await client.apply_submission(
-            {"_analysis_screenshot_count": 1}, mode="plan", base_flow_version=0,
-        )
+    await client.apply_submission(
+        {"_analysis_screenshot_count": 1}, mode="plan", base_flow_version=0,
+    )
 
-    assert client.current_flow_spec().title == "original"
-    assert client.last_submission_kind == ""
-    assert checkpoints == []
+    assert client.current_flow_spec().title == "grounded-partial-update"
+    assert client.last_submission_kind == "plan"
+    assert checkpoints == ["plan"]
 
 
 @pytest.mark.asyncio

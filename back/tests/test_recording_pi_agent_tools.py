@@ -1295,7 +1295,7 @@ def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_valu
     assert field["confidence"] == 0.0
 
 
-def test_screenshot_plan_requires_actual_image_evidence_after_field_matching():
+def test_screenshot_plan_keeps_grounded_field_when_image_has_no_field_evidence():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",
         method="POST",
@@ -1327,8 +1327,13 @@ def test_screenshot_plan_requires_actual_image_evidence_after_field_matching():
         "ops": [],
     }
 
-    with pytest.raises(ToolError, match="图片字段证据"):
-        agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    field = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )["semantic_plan"]["field_semantics"][0]
+
+    assert (field["step_id"], field["wire_path"]) == ("submit", "title")
+    assert field["evidence"][0] == {"source": "pi_analysis"}
+    assert field["evidence"][-1]["source"] == "recorded_flow_spec"
 
 
 def test_no_screenshot_plan_keeps_existing_compatibility_for_empty_semantic_lists():
@@ -1540,8 +1545,131 @@ def test_screenshot_field_does_not_guess_between_duplicate_recorded_labels():
         }],
     }])
 
-    with pytest.raises(ToolError, match="未匹配到任何真实接口字段"):
-        agent_tools_module._normalize_recording_plan_submission(plan, spec)
+    semantic = agent_tools_module._normalize_recording_plan_submission(
+        plan, spec,
+    )["semantic_plan"]
+
+    assert semantic["field_semantics"] == []
+    assert semantic["unresolved_items"][0]["type"] == "unmatched_field"
+
+
+def test_screenshot_field_can_match_unique_recorded_value_and_control_type():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        source_meta={"role": "business_write"},
+        params=[
+            ParamField(
+                path="quantity", key="unknownQuantity", value=7,
+                type="enum", wire_type="number", source_kind="api_option",
+            ),
+            ParamField(path="title", key="unknownTitle", value="demo", wire_type="string"),
+        ],
+    )])
+    plan = _screenshot_match_plan([{
+        "step_id": "submit", "wire_path": "wrong.path", "public_name": "数量",
+        "business_type": "number", "category": "user_param",
+        "source_kind": "user_input", "required": True, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "数量", "visible_value": 7,
+            "control_kind": "number", "editable": True,
+        }],
+    }])
+
+    field = agent_tools_module._normalize_recording_plan_submission(
+        plan, spec,
+    )["semantic_plan"]["field_semantics"][0]
+
+    assert (field["step_id"], field["wire_path"]) == ("submit", "quantity")
+    assert {"recorded_value", "control_type"}.issubset(field["match"]["reasons"])
+
+
+def test_screenshot_field_does_not_guess_from_duplicate_values():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        params=[
+            ParamField(path="firstCount", key="firstCount", value=1, wire_type="number"),
+            ParamField(path="secondCount", key="secondCount", value=1, wire_type="number"),
+        ],
+    )])
+    plan = _screenshot_match_plan([{
+        "public_name": "数量", "business_type": "number", "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "数量", "visible_value": 1,
+            "control_kind": "number", "editable": True,
+        }],
+    }])
+
+    semantic = agent_tools_module._normalize_recording_plan_submission(
+        plan, spec,
+    )["semantic_plan"]
+
+    assert semantic["field_semantics"] == []
+    assert semantic["unresolved_items"][0]["type"] == "unmatched_field"
+
+
+@pytest.mark.parametrize("existing_capabilities", [False, True])
+@pytest.mark.asyncio
+async def test_partial_screenshot_updates_initial_and_existing_capability_plans(
+    monkeypatch, existing_capabilities,
+):
+    session = _bind(monkeypatch)
+    session.analysis_image_count = 1
+    session.spec = ensure_flow_version(FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/request",
+            source_meta={"role": "business_write"},
+            params=[
+                ParamField(
+                    path="quantity", key="unknownQuantity", value=7,
+                    type="enum", wire_type="number", category="user_param",
+                    source_kind="api_option",
+                    source={"kind": "api_option", "source_url": "/api/unrelated/options"},
+                    enum_options=[{"label": "unrelated", "value": 7}],
+                    evidence=[{
+                        "source": "recorder_dom", "control_kind": "number",
+                        "editable": True, "disabled": False, "read_only": False,
+                    }],
+                ),
+                ParamField(path="untouched", key="untouched", value="same"),
+            ],
+        )],
+        capabilities=[flow_module.FlowCapability(
+            capability_id="existing", name="existing", title="Existing",
+            kind="submit", nodes=[{"id": "call-submit", "type": "call", "step_id": "submit"}],
+        )] if existing_capabilities else [],
+    ), "recorded", reason="test")
+    plan = _screenshot_match_plan([{
+        "step_id": "submit", "wire_path": "wrong.path", "public_name": "数量",
+        "business_type": "number", "category": "user_param",
+        "source_kind": "user_input", "required": True, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "数量", "visible_value": 7,
+            "control_kind": "number", "editable": True,
+        }],
+    }, {
+        "public_name": "无法匹配", "business_type": "string",
+        "category": "user_param", "source_kind": "user_input", "confidence": 0.8,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "无法匹配", "control_kind": "text", "editable": True,
+        }],
+    }])
+
+    await submit_recording_plan("run-1", {
+        "recording_id": session.recording_id,
+        "base_flow_version": int(session.spec.meta["current_version"]),
+        "plan": plan,
+    })
+
+    quantity, untouched = session.spec.steps[0].params
+    assert (quantity.key, quantity.type, quantity.source_kind) == ("数量", "number", "user_input")
+    assert not quantity.enum_options
+    assert (untouched.key, untouched.value) == ("untouched", "same")
+    assert session.spec.capabilities
+    assert session.last_submission_kind == "plan"
 
 
 def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
@@ -1576,7 +1704,7 @@ def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
 
 
 @pytest.mark.asyncio
-async def test_unmatched_screenshot_submission_finishes_as_unchanged_warning(monkeypatch):
+async def test_unmatched_screenshot_field_does_not_block_capability_plan(monkeypatch):
     session = _bind(monkeypatch)
     session.analysis_image_count = 1
     session.spec = ensure_flow_version(FlowSpec(steps=[FlowStep(
@@ -1601,6 +1729,24 @@ async def test_unmatched_screenshot_submission_finishes_as_unchanged_warning(mon
         "recording_id": session.recording_id,
         "base_flow_version": int(session.spec.meta["current_version"]),
         "plan": plan,
+    })
+
+    assert result["flow_version"] == int(session.spec.meta["current_version"])
+    assert session.spec.capabilities
+    assert session.received_submission["semantic_plan"]["field_semantics"] == []
+    assert session.received_submission["semantic_plan"]["unresolved_items"]
+    assert session.last_submission_kind == "plan"
+
+
+@pytest.mark.asyncio
+async def test_invalid_screenshot_plan_finishes_without_model_retry(monkeypatch):
+    session = _bind(monkeypatch)
+    session.analysis_image_count = 1
+
+    result = await submit_recording_plan("run-1", {
+        "recording_id": session.recording_id,
+        "base_flow_version": int(session.spec.meta["current_version"]),
+        "plan": {"semantic_plan": {"business_understanding": {}}},
     })
 
     assert result["accepted"] is True
