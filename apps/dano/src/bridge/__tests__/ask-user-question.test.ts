@@ -19,6 +19,7 @@ import {
   askUserQuestionTool,
   normalizeAskUserQuestionCardRequest,
 } from "../ask-user-question.js";
+import { submitTestForms } from "./ask-user-question-test-helpers.js";
 
 function executeQuestion(
   toolCallId: string,
@@ -100,29 +101,6 @@ function defaultForQuestion(question: {
   if (firstOptionValue !== undefined) return firstOptionValue;
   if (question.inputType === "date") return "2026-07-07";
   return "Default answer";
-}
-
-async function submitTestForms(
-  coordinator: AskUserQuestionCoordinator,
-  signal: AbortSignal,
-  formIds: readonly string[],
-): Promise<void> {
-  for (const formId of formIds) {
-    const form = coordinator.wait(
-      formId,
-      {
-        title: formId,
-        questions: [{ id: "value", question: "值？", default: formId }],
-      },
-      signal,
-    );
-    coordinator.present(formId);
-    coordinator.answer(formId, {
-      cancelled: false,
-      answer: { value: formId },
-    });
-    await form;
-  }
 }
 
 describe("ask_user_question tool", () => {

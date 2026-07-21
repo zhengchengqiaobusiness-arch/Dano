@@ -5,6 +5,7 @@ import {
   isAskUserQuestionConfirmationCall,
   selectAskUserQuestionConfirmationTargets,
 } from "../ask-user-question.js";
+import { submitTestForms } from "./ask-user-question-test-helpers.js";
 
 interface ModelDeviationFixture {
   issue: number;
@@ -167,13 +168,23 @@ const compatibilityCases: CompatibilityCase[] = [
     },
   },
   {
-    name: "cross-Assistant-Turn target",
-    request: { confirm: true, formIds: ["other-turn-form", "form-a"] },
+    name: "malformed JSON collection",
+    request: { confirm: true, formIds: '["form-a"' },
     expected: {
-      targetIds: ["form-a"],
+      targetIds: ["form-b"],
       ignoredReasons: ["unavailable_form_id"],
-      fallbackAttempted: false,
-      receivedShape: { formIds: "array(2)", formId: "omitted" },
+      fallbackAttempted: true,
+      receivedShape: { formIds: "string", formId: "omitted" },
+    },
+  },
+  {
+    name: "malformed object collection",
+    request: { confirm: true, formIds: { 0: "form-a" } },
+    expected: {
+      targetIds: ["form-b"],
+      ignoredReasons: ["malformed_formIds"],
+      fallbackAttempted: true,
+      receivedShape: { formIds: "object", formId: "omitted" },
     },
   },
 ];
@@ -194,22 +205,11 @@ function select(request: unknown) {
 async function canonicalProjection(request: Record<string, unknown>) {
   const coordinator = new AskUserQuestionCoordinator();
   const controller = new AbortController();
-  for (const formId of ["form-a", "form-b"]) {
-    const submitted = coordinator.wait(
-      formId,
-      {
-        title: formId,
-        questions: [{ id: "value", question: "值？", default: formId }],
-      },
-      controller.signal,
-    );
-    coordinator.present(formId);
-    coordinator.answer(formId, {
-      cancelled: false,
-      answer: { value: formId },
-    });
-    await submitted;
-  }
+  await submitTestForms(
+    coordinator,
+    controller.signal,
+    ["form-a", "form-b"],
+  );
   const confirmation = coordinator.wait(
     "confirm-fixture",
     request as never,
@@ -259,8 +259,45 @@ describe("ask_user_question confirmation compatibility matrix", () => {
     expect(fixture.issue).toBe(312);
     expect(select(fixture.capturedArguments)).toMatchObject(fixture.expected);
     expect(select(fixture.canonicalArguments)).toMatchObject(fixture.expected);
-    await expect(canonicalProjection(fixture.capturedArguments)).resolves.toEqual(
+    const capturedProjection = await canonicalProjection(
+      fixture.capturedArguments,
+    );
+    expect(capturedProjection).toMatchObject({
+      kind: "confirm",
+      title: "确认 2 份表单",
+      forms: [
+        { formId: "form-a", answer: { value: "form-a" } },
+        { formId: "form-b", answer: { value: "form-b" } },
+      ],
+    });
+    expect(capturedProjection).toEqual(
       await canonicalProjection(fixture.canonicalArguments),
     );
+  });
+
+  it("excludes Submitted Forms from another Assistant Turn", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await submitTestForms(
+      coordinator,
+      new AbortController().signal,
+      ["other-turn-form"],
+    );
+    const eligibleTurn = new AbortController();
+    await submitTestForms(coordinator, eligibleTurn.signal, ["form-a"]);
+
+    const confirmation = coordinator.wait(
+      "confirm-cross-turn",
+      {
+        confirm: "True",
+        formIds: JSON.stringify(["other-turn-form", "form-a"]),
+      } as never,
+      eligibleTurn.signal,
+    );
+    expect(coordinator.cardRequest("confirm-cross-turn")).toMatchObject({
+      kind: "confirm",
+      forms: [{ formId: "form-a" }],
+    });
+    coordinator.answer("confirm-cross-turn", { cancelled: true });
+    await expect(confirmation).resolves.toEqual({ status: "cancelled" });
   });
 });
