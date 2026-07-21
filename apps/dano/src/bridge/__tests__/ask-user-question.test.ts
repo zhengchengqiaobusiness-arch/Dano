@@ -242,7 +242,8 @@ describe("ask_user_question tool", () => {
       "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-      "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+      "If ask_user_question returns status:invalid, inspect error.code, category, retryable, and every issues[] entry. Retry silently with one corrected native tool call only when retryable is true; correct all reported paths together and do not explain the correction to the user.",
+      "Do not retry question_presentation_failed, question_validation_failed, or question_cancelled results. Stop the current response and let the user decide whether to try again.",
       "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
       "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
@@ -911,7 +912,7 @@ describe("ask_user_question tool", () => {
           { id: "emp_1001", label: "Alice duplicate" },
         ],
       }),
-    ).rejects.toThrow("non-empty and unique");
+    ).rejects.toThrow('"code":"duplicate_option_id"');
   });
 
   it("accepts remote select ids without requiring static options", async () => {
@@ -961,7 +962,7 @@ describe("ask_user_question tool", () => {
     await expect(executeQuestion("empty-default", {
       question: "Reason?",
       default: "",
-    })).rejects.toThrow("default 必须是非空推荐值");
+    })).rejects.toThrow('"code":"invalid_default"');
   });
 
   it("accepts a missing non-confirmation default without adding a prefill", async () => {
@@ -1060,7 +1061,7 @@ describe("ask_user_question tool", () => {
         question: "Start date?",
         inputType: "date",
       }),
-    ).rejects.toThrow("dateFormat is required");
+    ).rejects.toThrow('"code":"invalid_date_format"');
   });
 
   it("rejects unsupported dateFormat values before rendering", async () => {
@@ -1070,7 +1071,7 @@ describe("ask_user_question tool", () => {
         inputType: "date",
         dateFormat: "yyyy-MM-dd HH:mm:ss",
       }),
-    ).rejects.toThrow("seconds and time zones are not supported");
+    ).rejects.toThrow('"code":"invalid_date_format"');
 
     await expect(
       executeQuestion("date-format-missing-day", {
@@ -1078,7 +1079,7 @@ describe("ask_user_question tool", () => {
         inputType: "date",
         dateFormat: "yyyy-MM",
       }),
-    ).rejects.toThrow("must include year, month, and day");
+    ).rejects.toThrow('"code":"invalid_date_format"');
 
     await expect(
       executeQuestion("date-format-12-hour", {
@@ -1086,7 +1087,7 @@ describe("ask_user_question tool", () => {
         inputType: "date",
         dateFormat: "yyyy-MM-dd h:mm",
       }),
-    ).rejects.toThrow("must use 24-hour H/HH tokens");
+    ).rejects.toThrow('"code":"invalid_date_format"');
   });
 
   it("uses required only to decide whether blank date answers are allowed", async () => {
@@ -1132,7 +1133,7 @@ describe("ask_user_question tool", () => {
         dateFormat: "yyyy-MM-dd",
         default: "2026/07/03",
       }),
-    ).rejects.toThrow("默认日期必须匹配 dateFormat: yyyy-MM-dd");
+    ).rejects.toThrow('"code":"invalid_default"');
   });
 
   it("coerces an unambiguous required value", async () => {

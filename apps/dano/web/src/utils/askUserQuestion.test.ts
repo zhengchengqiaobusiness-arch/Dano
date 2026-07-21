@@ -424,11 +424,21 @@ describe("ask user question transcript data", () => {
       toolStatus: "error",
       resultText: "QUESTION_VALIDATION_FAILED: stop",
     });
+    const structuredValidationTerminal = block({}, {
+      toolStatus: "error",
+      questionError: {
+        code: "question_validation_failed",
+        category: "lifecycle",
+        message: "The question call remained invalid after retrying.",
+        retryable: false,
+      },
+    });
 
     expect(isAskUserQuestionTerminalFailure(retryable)).toBe(false);
     expect(isAskUserQuestionTerminalFailure(terminal)).toBe(true);
     expect(isAskUserQuestionTerminalFailure(validationTerminal)).toBe(true);
     expect(isAskUserQuestionValidationTerminalFailure(validationTerminal)).toBe(true);
+    expect(isAskUserQuestionValidationTerminalFailure(structuredValidationTerminal)).toBe(true);
     expect(isAskUserQuestionValidationTerminalFailure(terminal)).toBe(false);
   });
 });

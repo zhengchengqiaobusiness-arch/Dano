@@ -316,6 +316,40 @@ describe("curl transcript status", () => {
     });
   });
 
+  it("consumes only the canonical sanitized question failure summary", () => {
+    const messages = normalizeTranscript([{
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "question-invalid",
+        name: "ask_user_question",
+        arguments: { questions: [{ question: "审批人？" }] },
+        questionState: "invalid",
+        questionError: {
+          code: "invalid_question_arguments",
+          category: "validation",
+          message: "Question fields contain invalid arguments.",
+          retryable: true,
+        },
+      }],
+    }] as never);
+
+    const block = contentBlocks(messages[0]!).find(item => item.kind === "tool");
+    expect(block).toMatchObject({
+      kind: "tool",
+      questionState: "invalid",
+      questionError: {
+        code: "invalid_question_arguments",
+        category: "validation",
+        message: "Question fields contain invalid arguments.",
+        retryable: true,
+      },
+      toolStatus: "error",
+    });
+    expect(block?.kind === "tool" ? block.questionError : undefined)
+      .not.toHaveProperty("issues");
+  });
+
   it("lets an authoritative interrupted interaction render as a read-only card", () => {
     const messages = normalizeTranscript([
       {

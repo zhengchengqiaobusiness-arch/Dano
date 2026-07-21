@@ -4,6 +4,15 @@ import { Type } from "typebox";
 import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "../../types/ask-user-question-date.js";
 import { DANO_DEFAULT_CONFIG } from "./dano-config.js";
 import {
+  askUserQuestionFailure,
+  askUserQuestionIssue,
+  serializeAskUserQuestionFailure,
+} from "./ask-user-question-errors.js";
+import {
+  ASK_USER_QUESTION_CANCELLED_CODE,
+  ASK_USER_QUESTION_ERROR_CATEGORIES,
+  ASK_USER_QUESTION_ERROR_CODES,
+  ASK_USER_QUESTION_ISSUE_CODES,
   ASK_USER_QUESTION_TOOL_NAME,
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
@@ -14,15 +23,16 @@ import {
   type AskUserQuestionCardRequest,
   type AskUserQuestionConfirmationCardRequest,
   type AskUserQuestionDataSource,
+  type AskUserQuestionErrorIssue,
   type AskUserQuestionInputType,
+  type AskUserQuestionInvalidResult,
   type AskUserQuestionLifecycleState,
   type AskUserQuestionOption,
   type AskUserQuestionOptionId,
   type AskUserQuestionResult,
 } from "./types.js";
 
-export const ASK_USER_QUESTION_CANCELLED_CODE =
-  "ASK_USER_QUESTION_CANCELLED";
+export { ASK_USER_QUESTION_CANCELLED_CODE };
 
 const askUserQuestionAnswerSchema = Type.Union([
   Type.String(),
@@ -34,17 +44,11 @@ const askUserQuestionAnswerSchema = Type.Union([
     "Canonical answer value returned to the model: string or number id, id array, text string, or boolean confirmation.",
 });
 
-const groupedRetryError =
-  "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. Put every field's options, inputType, fieldAssist, dateFormat, dataSource, multiple, required, and default inside its questions[] item. Do not explain this correction to the user.";
+const literalUnion = (values: readonly string[]) =>
+  Type.Union(values.map(value => Type.Literal(value)));
 
-const missingConfirmationSourceError = JSON.stringify({
-  code: "invalid_confirmation_source",
-  receivedShape: { formIds: "omitted", formId: "omitted" },
-  ignoredReasons: [],
-  fallbackAttempted: true,
-  retry: "Submit a grouped form first, then confirm it with the returned formId.",
-  example: { confirm: true, formIds: ["<formId>"] },
-});
+const duplicateCallMessage =
+  "Another ask_user_question call is still pending in this assistant response. Retry with exactly one native ask_user_question call and combine all fields into one questions array.";
 
 const askUserQuestionFields = {
   question: Type.Optional(
@@ -147,9 +151,42 @@ export const askUserQuestionResultSchema = Type.Union([
     ),
   }),
   Type.Object({ status: Type.Literal("cancelled") }),
+  Type.Object({
+    status: Type.Literal("invalid"),
+    error: Type.Object({
+      code: literalUnion(ASK_USER_QUESTION_ERROR_CODES),
+      category: literalUnion(ASK_USER_QUESTION_ERROR_CATEGORIES),
+      message: Type.String(),
+      retryable: Type.Boolean(),
+      issues: Type.Array(Type.Object({
+        code: literalUnion(ASK_USER_QUESTION_ISSUE_CODES),
+        path: Type.Optional(Type.String()),
+        message: Type.String(),
+      }), { minItems: 1 }),
+      sourceCode: Type.Optional(literalUnion(ASK_USER_QUESTION_ERROR_CODES)),
+      terminalCode: Type.Optional(Type.Union([
+        Type.Literal(ASK_USER_QUESTION_PRESENTATION_RETRY_CODE),
+        Type.Literal(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE),
+        Type.Literal(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE),
+        Type.Literal(ASK_USER_QUESTION_CANCELLED_CODE),
+      ])),
+      context: Type.Optional(Type.Object({
+        receivedShape: Type.Optional(Type.Object({
+          formIds: Type.String(),
+          formId: Type.String(),
+        })),
+        ignoredReasons: Type.Optional(Type.Array(Type.String())),
+        fallbackAttempted: Type.Optional(Type.Boolean()),
+      })),
+    }),
+  }),
 ]);
 
 type PendingQuestionKind = "text" | "date" | "single" | "multiple" | "confirm";
+type AskUserQuestionCompletedResult = Exclude<
+  AskUserQuestionResult,
+  { status: "invalid" }
+>;
 
 type AskUserQuestionRequestItem = {
   id?: unknown;
@@ -215,7 +252,7 @@ interface PendingQuestion {
   state: "awaiting_presentation" | "presented";
   signal?: AbortSignal;
   presentationTimer?: ReturnType<typeof setTimeout>;
-  resolve(result: AskUserQuestionResult): void;
+  resolve(result: AskUserQuestionCompletedResult): void;
   reject(error: Error): void;
   cleanup(): void;
 }
@@ -256,11 +293,11 @@ export class AskUserQuestionCoordinator {
     toolCallId: string,
     rawRequest: AskUserQuestionRequestParams,
     signal: AbortSignal | undefined,
-  ): Promise<AskUserQuestionResult> {
+  ): Promise<AskUserQuestionCompletedResult> {
     if (this.pending.has(toolCallId)) {
       logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(
-        new Error(`Question is already pending: ${toolCallId}`),
+      return rejectAskUserQuestionFailure(
+        duplicateQuestionCallFailure("This ask_user_question call is already pending."),
       );
     }
 
@@ -297,7 +334,9 @@ export class AskUserQuestionCoordinator {
       this.pending.has(pendingInCurrentTurn)
     ) {
       logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error(groupedRetryError));
+      return rejectAskUserQuestionFailure(
+        duplicateQuestionCallFailure(duplicateCallMessage),
+      );
     }
     return new Promise((resolve, reject) => {
       const cleanup = () => {
@@ -314,11 +353,7 @@ export class AskUserQuestionCoordinator {
       const abort = () => {
         cleanup();
         logQuestionLifecycle(toolCallId, "cancelled");
-        reject(
-          new Error(
-            `${ASK_USER_QUESTION_CANCELLED_CODE}: Question was aborted`,
-          ),
-        );
+        reject(askUserQuestionFailureError(questionCancelledFailure()));
       };
       signal?.addEventListener("abort", abort, { once: true });
       if (signal) this.pendingToolCallBySignal.set(signal, toolCallId);
@@ -351,13 +386,9 @@ export class AskUserQuestionCoordinator {
             toolCallId,
             terminal ? "terminal_failure" : "retrying",
           );
-          reject(
-            new Error(
-              terminal
-                ? `${ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE}: Dano could not display the question card after bounded retries. Stop this response and let the user retry.`
-                : `${ASK_USER_QUESTION_PRESENTATION_RETRY_CODE}: The accepted question card was not presented. Retry with a corrected native ask_user_question call.`,
-            ),
-          );
+          reject(askUserQuestionFailureError(
+            presentationFailure(terminal),
+          ));
         }, this.presentationTimeoutMs);
       }
 
@@ -454,14 +485,14 @@ export class AskUserQuestionCoordinator {
             | AskUserQuestionAnswerInput
             | Record<string, AskUserQuestionAnswerInput>;
         },
-  ): AskUserQuestionResult {
+  ): AskUserQuestionCompletedResult {
     const pending = this.pending.get(toolCallId);
     if (!pending) throw new Error(`Pending question not found: ${toolCallId}`);
     if (pending.state === "awaiting_presentation") {
       this.present(toolCallId);
     }
 
-    let result: AskUserQuestionResult;
+    let result: AskUserQuestionCompletedResult;
     if (response.cancelled) {
       result = { status: "cancelled" };
     } else if (pending.confirmation) {
@@ -531,11 +562,7 @@ export class AskUserQuestionCoordinator {
   }
 
   cancelAll(): void {
-    this.rejectAll(
-      new Error(
-        `${ASK_USER_QUESTION_CANCELLED_CODE}: Question coordinator was disposed`,
-      ),
-    );
+    this.rejectAll(askUserQuestionFailureError(questionCancelledFailure()));
   }
 
   private rejectAll(error: Error): void {
@@ -548,7 +575,7 @@ export class AskUserQuestionCoordinator {
 
   private rejectValidation(
     toolCallId: string,
-    message: string,
+    failure: AskUserQuestionInvalidResult,
     signal: AbortSignal | undefined,
   ): Promise<never> {
     const failures = signal
@@ -557,14 +584,88 @@ export class AskUserQuestionCoordinator {
     if (signal) this.validationFailuresBySignal.set(signal, failures);
     const terminal = failures > this.maxRetries;
     logQuestionLifecycle(toolCallId, terminal ? "terminal_failure" : "invalid");
-    return Promise.reject(
-      new Error(
-        terminal
-          ? `${ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE}: Repeated invalid ask_user_question calls. Stop this response and let the user retry. Last validation error: ${message}`
-          : message,
-      ),
+    return rejectAskUserQuestionFailure(
+      terminal ? terminalValidationFailure(failure) : failure,
     );
   }
+}
+
+function rejectAskUserQuestionFailure(
+  failure: AskUserQuestionInvalidResult,
+): Promise<never> {
+  return Promise.reject(askUserQuestionFailureError(failure));
+}
+
+function askUserQuestionFailureError(
+  failure: AskUserQuestionInvalidResult,
+): Error {
+  return new Error(serializeAskUserQuestionFailure(failure));
+}
+
+function duplicateQuestionCallFailure(message: string): AskUserQuestionInvalidResult {
+  return askUserQuestionFailure(
+    "duplicate_question_call",
+    "duplicate_call",
+    message,
+    true,
+    [askUserQuestionIssue("duplicate_tool_call", message)],
+  );
+}
+
+function questionCancelledFailure(): AskUserQuestionInvalidResult {
+  return askUserQuestionFailure(
+    "question_cancelled",
+    "lifecycle",
+    "The question flow was cancelled.",
+    false,
+    [askUserQuestionIssue("cancelled", "Question was aborted or the coordinator was disposed.")],
+    { terminalCode: ASK_USER_QUESTION_CANCELLED_CODE },
+  );
+}
+
+function presentationFailure(terminal: boolean): AskUserQuestionInvalidResult {
+  return askUserQuestionFailure(
+    terminal ? "question_presentation_failed" : "question_presentation_timeout",
+    "lifecycle",
+    terminal
+      ? "Dano could not display the question card after bounded retries."
+      : "The accepted question card was not presented in time.",
+    !terminal,
+    [askUserQuestionIssue(
+      terminal ? "presentation_failed" : "presentation_timeout",
+      terminal
+        ? "Stop this response and let the user retry."
+        : "Retry with one corrected native ask_user_question call.",
+    )],
+    {
+      terminalCode: terminal
+        ? ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE
+        : ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+    },
+  );
+}
+
+function terminalValidationFailure(
+  source: AskUserQuestionInvalidResult,
+): AskUserQuestionInvalidResult {
+  return askUserQuestionFailure(
+    "question_validation_failed",
+    "lifecycle",
+    "Repeated invalid ask_user_question calls exhausted automatic retries.",
+    false,
+    [
+      askUserQuestionIssue(
+        "validation_retry_exhausted",
+        "Stop this response and let the user retry.",
+      ),
+      ...source.error.issues,
+    ],
+    {
+      terminalCode: ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
+      sourceCode: source.error.code,
+      ...(source.error.context ? { context: source.error.context } : {}),
+    },
+  );
 }
 
 function logQuestionLifecycle(
@@ -594,16 +695,35 @@ type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
 };
 
 type CompatibleRequestResult =
-  | { request: NormalizedAskUserQuestionRequest }
-  | { error: string };
+  | {
+      request: NormalizedAskUserQuestionRequest;
+      issues: AskUserQuestionErrorIssue[];
+    }
+  | { error: AskUserQuestionInvalidResult };
 
 type CompatibleQuestionsResult =
-  | { questions: NormalizedAskUserQuestionRequestItem[] }
-  | { error: string };
+  | {
+      questions: NormalizedAskUserQuestionRequestItem[];
+      issues: AskUserQuestionErrorIssue[];
+    }
+  | { error: AskUserQuestionInvalidResult };
 
-type CompatibleQuestionResult =
-  | { question: NormalizedAskUserQuestionRequestItem }
-  | { error: string };
+type CompatibleQuestionResult = {
+  question: NormalizedAskUserQuestionRequestItem;
+  issues: AskUserQuestionErrorIssue[];
+};
+
+function invalidQuestionArguments(
+  issues: AskUserQuestionErrorIssue[],
+): AskUserQuestionInvalidResult {
+  return askUserQuestionFailure(
+    "invalid_question_arguments",
+    "validation",
+    "Question fields contain invalid arguments.",
+    true,
+    issues,
+  );
+}
 
 function normalizeCompatibleRequest(
   request: AskUserQuestionRequestParams,
@@ -613,9 +733,10 @@ function normalizeCompatibleRequest(
   const questionResult = normalizeCompatibleQuestion(
     request,
     rawQuestions === undefined,
+    "",
   );
-  if ("error" in questionResult) return questionResult;
   const normalized: NormalizedAskUserQuestionRequest = questionResult.question;
+  const issues = [...questionResult.issues];
   if (rawQuestions !== undefined) {
     normalized.title = firstScalarString(request.title) ?? defaultTitle;
     normalized.question = firstScalarString(request.question, request.label, request.prompt);
@@ -623,9 +744,10 @@ function normalizeCompatibleRequest(
     const questionsResult = normalizeCompatibleQuestions(rawQuestions);
     if ("error" in questionsResult) return questionsResult;
     normalized.questions = questionsResult.questions;
-    return { request: foldCompatibleGroupedFields(normalized) };
+    issues.push(...questionsResult.issues);
+    return { request: foldCompatibleGroupedFields(normalized), issues };
   }
-  return { request: normalized };
+  return { request: normalized, issues };
 }
 
 function normalizeCompatibleQuestions(
@@ -637,40 +759,60 @@ function normalizeCompatibleQuestions(
       parsed = JSON.parse(value) as unknown;
     } catch {
       return {
-        error: "Invalid questions: questions must be valid JSON containing an array or object",
+        error: invalidQuestionArguments([
+          askUserQuestionIssue(
+            "invalid_questions_json",
+            "questions must be valid JSON containing one object or an array of objects.",
+            "questions",
+          ),
+        ]),
       };
     }
   }
   if (!Array.isArray(parsed) && !isPlainRecord(parsed)) {
-    return { error: "Invalid questions: questions must be an array or object" };
+    return { error: invalidQuestionArguments([
+      askUserQuestionIssue(
+        "invalid_questions_shape",
+        "questions must be one object or an array of objects.",
+        "questions",
+      ),
+    ]) };
   }
   const rawItems = Array.isArray(parsed) ? parsed : [parsed];
-  if (!rawItems.every(isPlainRecord)) {
-    return {
-      error: "Invalid questions: every questions array item must be an object",
-    };
-  }
   const questions: NormalizedAskUserQuestionRequestItem[] = [];
-  for (const value of rawItems) {
-    const result = normalizeCompatibleQuestion(value);
-    if ("error" in result) return result;
+  const issues: AskUserQuestionErrorIssue[] = [];
+  for (const [index, value] of rawItems.entries()) {
+    const path = `questions[${index}]`;
+    if (!isPlainRecord(value)) {
+      issues.push(askUserQuestionIssue(
+        "invalid_question_item",
+        "Each questions item must be an object.",
+        path,
+      ));
+      continue;
+    }
+    const result = normalizeCompatibleQuestion(value, true, path);
     questions.push(result.question);
+    issues.push(...result.issues);
   }
-  return { questions };
+  return { questions, issues };
 }
 
 function normalizeCompatibleQuestion(
   request: AskUserQuestionRequestItem | Record<string, unknown>,
   includeTitleAsQuestion = true,
+  path = "",
 ): CompatibleQuestionResult {
   const normalized: NormalizedAskUserQuestionRequestItem = {};
+  const issues: AskUserQuestionErrorIssue[] = [];
   const id = normalizeCompatibleAliases(
     "question id",
     [request.id, request.key, request.name],
     firstScalarString,
   );
-  if ("error" in id) return id;
-  if (id.value) normalized.id = id.value;
+  if ("error" in id) {
+    issues.push(aliasConflictIssue(pathFor(path, "id"), id.error));
+  } else if (id.value) normalized.id = id.value;
 
   const question = normalizeCompatibleAliases(
     "question text",
@@ -682,34 +824,67 @@ function normalizeCompatibleQuestion(
     ],
     firstScalarString,
   );
-  if ("error" in question) return question;
-  if (question.value) normalized.question = question.value;
+  if ("error" in question) {
+    issues.push(aliasConflictIssue(pathFor(path, "question"), question.error));
+  } else if (question.value) normalized.question = question.value;
 
   const inputType = normalizeCompatibleAliases(
     "input type",
     [request.inputType, request.input_type, request.type, request.component],
     normalizeInputType,
   );
-  if ("error" in inputType) return inputType;
-  if (inputType.value) normalized.inputType = inputType.value;
+  if ("error" in inputType) {
+    issues.push(aliasConflictIssue(pathFor(path, "inputType"), inputType.error));
+  } else if (inputType.value) normalized.inputType = inputType.value;
+  const normalizedInputType = "error" in inputType ? undefined : inputType.value;
+  const inputTypeProvided = [
+    request.inputType,
+    request.input_type,
+    request.type,
+    request.component,
+  ].some(value => value !== undefined);
+  if (!("error" in inputType) && inputTypeProvided && !normalizedInputType) {
+    issues.push(askUserQuestionIssue(
+      "invalid_input_type",
+      "inputType must identify a supported question control.",
+      pathFor(path, "inputType"),
+    ));
+  }
 
   const options = normalizeCompatibleAliases(
     "options",
     [request.options, request.choices],
     normalizeCompatibleOptionsAlias,
   );
-  if ("error" in options) return options;
+  if ("error" in options) {
+    issues.push(aliasConflictIssue(pathFor(path, "options"), options.error));
+  }
   const optionsProvided = request.options !== undefined || request.choices !== undefined;
-  if (options.value) {
+  if (!("error" in options) && options.value) {
     normalized.options = options.value;
   } else if (
+    !("error" in options) &&
     optionsProvided &&
-    inputType.value !== "text" &&
-    inputType.value !== "textarea" &&
-    inputType.value !== "date" &&
-    inputType.value !== "confirm"
+    normalizedInputType !== "text" &&
+    normalizedInputType !== "textarea" &&
+    normalizedInputType !== "date" &&
+    normalizedInputType !== "confirm"
   ) {
-    normalized.inputType = inputType.value ?? "radio";
+    normalized.inputType = normalizedInputType ?? "radio";
+  }
+  if (
+    optionsProvided &&
+    !("error" in options) &&
+    !options.value &&
+    normalized.inputType !== "text" &&
+    normalized.inputType !== "textarea" &&
+    normalized.inputType !== "date" &&
+    normalized.inputType !== "confirm"
+  ) {
+    issues.push(...invalidOptionsIssues(
+      request.options !== undefined ? request.options : request.choices,
+      pathFor(path, "options"),
+    ));
   }
 
   const fieldAssist = firstNormalizedFieldAssistValue(
@@ -727,22 +902,47 @@ function normalizeCompatibleQuestion(
     [request.dataSource, request.data_source],
     normalizeCompatibleDataSource,
   );
-  if ("error" in dataSource) return dataSource;
-  if (dataSource.value) normalized.dataSource = dataSource.value;
-  if (dataSource.value && !inputType.value) normalized.inputType = "select";
+  if ("error" in dataSource) {
+    issues.push(aliasConflictIssue(pathFor(path, "dataSource"), dataSource.error));
+  }
+  const dataSourceProvided =
+    request.dataSource !== undefined || request.data_source !== undefined;
+  if (
+    dataSourceProvided &&
+    !("error" in dataSource) &&
+    !dataSource.value &&
+    (normalizedInputType === "select" || normalizedInputType === "treeSelect")
+  ) {
+    issues.push(askUserQuestionIssue(
+        "invalid_data_source",
+        "dataSource must define an api type and a non-empty endpoint.",
+        pathFor(path, "dataSource"),
+      ));
+  }
+  if (!("error" in dataSource) && dataSource.value) {
+    normalized.dataSource = dataSource.value;
+  }
+  if (
+    !("error" in dataSource) && dataSource.value &&
+    !normalizedInputType
+  ) normalized.inputType = "select";
 
   const multiple = normalizeCompatibleAliases(
     "multiple",
     [request.multiple, request.multi, request.multipleSelect],
     normalizeBoolean,
   );
-  if ("error" in multiple) return multiple;
-  if (multiple.value !== undefined) normalized.multiple = multiple.value;
+  if ("error" in multiple) {
+    issues.push(aliasConflictIssue(pathFor(path, "multiple"), multiple.error));
+  } else if (multiple.value !== undefined) normalized.multiple = multiple.value;
 
   const required = normalizeBoolean(request.required);
   if (required !== undefined) normalized.required = required;
 
-  if (normalizeBoolean(request.confirm) === true || inputType.value === "confirm") {
+  if (
+    normalizeBoolean(request.confirm) === true ||
+    normalizedInputType === "confirm"
+  ) {
     normalized.confirm = true;
   }
 
@@ -757,18 +957,68 @@ function normalizeCompatibleQuestion(
     defaultValues,
     normalizeCompatibleDefault,
   );
-  if ("error" in compatibleDefault) return compatibleDefault;
-  if (compatibleDefault.value !== undefined) {
+  if ("error" in compatibleDefault) {
+    issues.push(aliasConflictIssue(pathFor(path, "default"), compatibleDefault.error));
+  } else if (compatibleDefault.value !== undefined) {
     normalized.default = compatibleDefault.value;
   } else {
     const invalidDefault = firstNormalizedValue(
       defaultValues,
       normalizeCompatibleAnswerInput,
     );
-    if (invalidDefault !== undefined) normalized.default = invalidDefault;
+    if (invalidDefault !== undefined) {
+      normalized.default = invalidDefault;
+    } else if (defaultValues.some(value => value !== undefined && value !== null)) {
+      issues.push(askUserQuestionIssue(
+          "invalid_default",
+          "default must match the selected question control.",
+          pathFor(path, "default"),
+        ));
+    }
   }
 
-  return { question: normalized };
+  return { question: normalized, issues };
+}
+
+function pathFor(base: string, field: string): string {
+  return base ? `${base}.${field}` : field;
+}
+
+function aliasConflictIssue(
+  path: string,
+  message: string,
+): AskUserQuestionErrorIssue {
+  return askUserQuestionIssue("conflicting_aliases", message, path);
+}
+
+function invalidOptionsIssues(
+  value: unknown,
+  path: string,
+): AskUserQuestionErrorIssue[] {
+  const parsed = parseJsonString(value);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return [askUserQuestionIssue(
+      "invalid_options",
+      "options must be a non-empty array of valid, unambiguous choices.",
+      path,
+    )];
+  }
+  const issues = parsed.flatMap((option, index) =>
+    normalizeCompatibleOption(option) === undefined
+      ? [askUserQuestionIssue(
+          "invalid_options",
+          "Each option must have a non-empty, unambiguous id and label.",
+          `${path}[${index}]`,
+        )]
+      : [],
+  );
+  return issues.length > 0
+    ? issues
+    : [askUserQuestionIssue(
+        "invalid_options",
+        "options must be a non-empty array of valid, unambiguous choices.",
+        path,
+      )];
 }
 
 function foldCompatibleGroupedFields(
@@ -825,7 +1075,7 @@ export function isAskUserQuestionConfirmationCall(
 function selectSubmittedForms(
   rawRequest: unknown,
   availableForms: Map<string, SubmittedForm> | undefined,
-): { forms: SubmittedForm[] } | { error: string } {
+): { forms: SubmittedForm[] } | { error: AskUserQuestionInvalidResult } {
   const selection = selectAskUserQuestionConfirmationTargets(
     rawRequest,
     availableForms,
@@ -835,16 +1085,69 @@ function selectSubmittedForms(
   }
 
   return {
-    error: JSON.stringify({
-      code: "invalid_confirmation_source",
-      receivedShape: selection.receivedShape,
-      ignoredReasons: selection.ignoredReasons,
-      fallbackAttempted: selection.fallbackAttempted,
-      retry:
-        "Submit a grouped form first, then confirm it with the returned formId.",
-      example: { confirm: true, formIds: ["<formId>"] },
-    }),
+    error: invalidConfirmationSourceFailure(
+      selection.receivedShape,
+      selection.ignoredReasons,
+    ),
   };
+}
+
+function invalidConfirmationSourceFailure(
+  receivedShape: { formIds: string; formId: string } = {
+    formIds: "omitted",
+    formId: "omitted",
+  },
+  ignoredReasons: string[] = [],
+): AskUserQuestionInvalidResult {
+  const issues: AskUserQuestionErrorIssue[] = [];
+  if (receivedShape.formIds !== "omitted") {
+    issues.push(askUserQuestionIssue(
+      "invalid_confirmation_target",
+      confirmationTargetMessage(receivedShape.formIds, ignoredReasons),
+      "formIds",
+    ));
+  }
+  if (receivedShape.formId !== "omitted") {
+    issues.push(askUserQuestionIssue(
+      "invalid_confirmation_target",
+      confirmationTargetMessage(receivedShape.formId, ignoredReasons),
+      "formId",
+    ));
+  }
+  if (issues.length === 0) {
+    issues.push(askUserQuestionIssue(
+      "invalid_confirmation_target",
+      "No submitted grouped form target was provided.",
+      "formIds",
+    ));
+  }
+  return askUserQuestionFailure(
+    "invalid_confirmation_source",
+    "confirmation",
+    "Confirmation requires an available submitted grouped form.",
+    true,
+    issues,
+    {
+      context: {
+        receivedShape,
+        ignoredReasons,
+        fallbackAttempted: true,
+      },
+    },
+  );
+}
+
+function confirmationTargetMessage(
+  shape: string,
+  ignoredReasons: string[],
+): string {
+  if (ignoredReasons.includes("unavailable_form_id")) {
+    return `The ${shape} confirmation target did not identify an available submitted form.`;
+  }
+  if (ignoredReasons.some(reason => reason.startsWith("malformed_"))) {
+    return `The ${shape} confirmation target has an unsupported shape.`;
+  }
+  return `The ${shape} confirmation target did not identify a submitted form.`;
 }
 
 export function selectAskUserQuestionConfirmationTargets<T extends object>(
@@ -1209,38 +1512,76 @@ function normalizeInputType(value: unknown): AskUserQuestionInputType | undefine
   return undefined;
 }
 
+type NormalizedQuestionsResult =
+  | { questions: PendingQuestionItem[] }
+  | { issues: AskUserQuestionErrorIssue[] };
+
+type NormalizedQuestionResult =
+  | { question: PendingQuestionItem }
+  | { issues: AskUserQuestionErrorIssue[] };
+
 function normalizeRequestQuestions(
   request: NormalizedAskUserQuestionRequest,
   requireDefault: boolean,
-): string | PendingQuestionItem[] {
+): NormalizedQuestionsResult {
   if (request.questions !== undefined) {
-    const seenIds = new Set<string>();
     const questions: PendingQuestionItem[] = [];
+    const issues: AskUserQuestionErrorIssue[] = [];
+    const idIndexes = new Map<string, number[]>();
     for (let index = 0; index < request.questions.length; index += 1) {
       const question = request.questions[index];
-      if (!question.id?.trim()) return "Grouped question ids are required";
+      const path = `questions[${index}]`;
+      if (!question.id?.trim()) {
+        issues.push(askUserQuestionIssue(
+          "missing_question_id",
+          "Grouped question field id is required.",
+          `${path}.id`,
+        ));
+      } else {
+        const id = question.id.trim();
+        const indexes = idIndexes.get(id) ?? [];
+        indexes.push(index);
+        idIndexes.set(id, indexes);
+      }
       const normalized = normalizeQuestion(
         question,
         `q${index + 1}`,
         requireDefault,
+        path,
       );
-      if (typeof normalized === "string") return normalized;
-      if (seenIds.has(normalized.id)) {
-        return `Grouped question ids must be unique: ${normalized.id}`;
+      if ("issues" in normalized) {
+        issues.push(...normalized.issues);
+      } else {
+        questions.push(normalized.question);
       }
-      seenIds.add(normalized.id);
-      questions.push(normalized);
     }
-    return questions;
+    for (const indexes of idIndexes.values()) {
+      if (indexes.length < 2) continue;
+      for (const index of indexes) {
+        issues.push(askUserQuestionIssue(
+          "duplicate_question_id",
+          "Grouped question field id conflicts with another field.",
+          `questions[${index}].id`,
+        ));
+      }
+    }
+    return issues.length > 0 ? { issues } : { questions };
   }
 
-  if (!request.question?.trim()) return "Question is required";
+  if (!request.question?.trim()) {
+    return { issues: [askUserQuestionIssue(
+      "missing_question_text",
+      "Question text is required.",
+      "question",
+    )] };
+  }
   const question = normalizeQuestion(
     { ...request, id: "answer", question: request.question },
     "answer",
     requireDefault,
+    "",
   );
-  return typeof question === "string" ? question : [question];
+  return "issues" in question ? question : { questions: [question.question] };
 }
 
 export function normalizeAskUserQuestionCardRequest(
@@ -1258,6 +1599,25 @@ export function normalizeAskUserQuestionCardRequest(
   return "error" in normalized ? null : normalized.cardRequest;
 }
 
+export function normalizeAskUserQuestionCardRequestResult(
+  rawRequest: unknown,
+  options: {
+    defaultTitle?: string;
+    requireDefault?: boolean;
+  } = {},
+):
+  | { request: AskUserQuestionCardRequest }
+  | { error: AskUserQuestionInvalidResult } {
+  const normalized = normalizeAskUserQuestionRequest(
+    rawRequest,
+    options.defaultTitle ?? DANO_DEFAULT_CONFIG.askUserQuestion.defaultTitle,
+    options.requireDefault,
+  );
+  return "error" in normalized
+    ? normalized
+    : { request: normalized.cardRequest };
+}
+
 function normalizeAskUserQuestionRequest(
   rawRequest: unknown,
   defaultTitle: string,
@@ -1268,33 +1628,64 @@ function normalizeAskUserQuestionRequest(
       questions: PendingQuestionItem[];
       cardRequest: AskUserQuestionCardRequest;
     }
-  | { error: string } {
+  | { error: AskUserQuestionInvalidResult } {
   const parsed = parseJsonString(rawRequest);
-  if (!isPlainRecord(parsed)) return { error: "Question cannot be rendered" };
+  if (!isPlainRecord(parsed)) {
+    return { error: invalidQuestionArguments([
+      askUserQuestionIssue(
+        "invalid_request_shape",
+        "ask_user_question arguments must be an object.",
+      ),
+    ]) };
+  }
   const compatible = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
     defaultTitle,
   );
   if ("error" in compatible) return compatible;
-  const { request } = compatible;
+  const { request, issues: compatibilityIssues } = compatible;
   if (request.confirm && request.questions === undefined) {
-    return { error: missingConfirmationSourceError };
+    return { error: invalidConfirmationSourceFailure() };
   }
-  const questions = normalizeRequestQuestions(request, requireDefault);
-  if (typeof questions === "string") return { error: questions };
-  if (questions.length === 0) return { error: "Question is required" };
+  const questionsResult = normalizeRequestQuestions(request, requireDefault);
+  if ("issues" in questionsResult) {
+    return {
+      error: invalidQuestionArguments([
+        ...compatibilityIssues,
+        ...questionsResult.issues,
+      ]),
+    };
+  }
+  if (compatibilityIssues.length > 0) {
+    return { error: invalidQuestionArguments(compatibilityIssues) };
+  }
+  const { questions } = questionsResult;
+  if (questions.length === 0) {
+    return { error: invalidQuestionArguments([
+      askUserQuestionIssue(
+        "missing_question_text",
+        "At least one question is required.",
+        "questions",
+      ),
+    ]) };
+  }
   if (
     request.confirm &&
     (request.options || request.multiple || request.questions || request.dataSource)
   ) {
     return {
-      error: "Confirmation questions cannot provide options or multiple",
+      error: invalidQuestionArguments([
+        askUserQuestionIssue(
+          "invalid_options",
+          "Confirmation questions cannot provide options, multiple selection, grouped fields, or dataSource.",
+        ),
+      ]),
     };
   }
   const cardItems = questions.map(toQuestionCardItem);
   const singleCard = cardItems[0];
   if (request.questions === undefined && singleCard.kind === "confirm") {
-    return { error: missingConfirmationSourceError };
+    return { error: invalidConfirmationSourceFailure() };
   }
   return {
     request,
@@ -1479,8 +1870,17 @@ function normalizeQuestion(
   },
   fallbackId: string,
   requireDefault = false,
-): PendingQuestionItem | string {
-  if (!request.question?.trim()) return "Question is required";
+  path = "",
+): NormalizedQuestionResult {
+  const issues: AskUserQuestionErrorIssue[] = [];
+  const questionText = request.question?.trim() ?? "";
+  if (!questionText) {
+    issues.push(askUserQuestionIssue(
+      "missing_question_text",
+      "Question text is required.",
+      pathFor(path, "question"),
+    ));
+  }
   const inputType = request.confirm
     ? "confirm"
     : (request.inputType ?? (request.multiple ? "checkbox" : request.options ? "radio" : "text"));
@@ -1500,38 +1900,81 @@ function normalizeQuestion(
       : undefined;
   if (inputType === "date") {
     const error = validateAskUserQuestionDateFormat(request.dateFormat);
-    if (error) return error;
+    if (error) {
+      issues.push(askUserQuestionIssue(
+        "invalid_date_format",
+        safeDateFormatErrorMessage(error),
+        pathFor(path, "dateFormat"),
+      ));
+    }
     if (
+      !error &&
       typeof request.default === "string" &&
       request.default.trim() &&
       dateFormat &&
       !parseAskUserQuestionDateValue(request.default, dateFormat)
     ) {
-      return `默认日期必须匹配 dateFormat: ${dateFormat}`;
+      issues.push(askUserQuestionIssue(
+        "invalid_default",
+        "The default date must match dateFormat.",
+        pathFor(path, "default"),
+      ));
     }
   }
   const rawOptions = compatibleOptions?.map(normalizeOption);
-  if (rawOptions?.some(option => !option)) {
-    return "Question options must be non-empty and unique";
-  }
-  const options = rawOptions as PendingQuestionOption[] | undefined;
-  const optionIds = options?.map(option => option.id) ?? [];
-  if (new Set(optionIds).size !== optionIds.length) {
-    return "Question options must be non-empty and unique";
-  }
+  const optionIssues: AskUserQuestionErrorIssue[] = [];
+  rawOptions?.forEach((option, index) => {
+    if (!option) {
+      optionIssues.push(askUserQuestionIssue(
+        "invalid_options",
+        "Each option must have a non-empty id and label.",
+        `${pathFor(path, "options")}[${index}]`,
+      ));
+    }
+  });
+  issues.push(...optionIssues);
+  const options = rawOptions?.filter(
+    (option): option is PendingQuestionOption => option !== null,
+  );
+  const optionIndexes = new Map<string, number[]>();
+  options?.forEach((option, index) => {
+    const key = optionKey(option.id);
+    const indexes = optionIndexes.get(key) ?? [];
+    indexes.push(index);
+    optionIndexes.set(key, indexes);
+  });
+  const duplicateOptionIssues = [...optionIndexes.values()].flatMap(indexes =>
+    indexes.length < 2
+      ? []
+      : indexes.map(index => askUserQuestionIssue(
+          "duplicate_option_id",
+          "Option id conflicts with another option.",
+          `${pathFor(path, "options")}[${index}]`,
+        )),
+  );
+  issues.push(...duplicateOptionIssues);
   if (
     multiple &&
     !options &&
     !compatibleDataSource
   ) {
-    return "Multiple-choice questions require options or dataSource";
+    issues.push(askUserQuestionIssue(
+      "missing_choice_source",
+      "Multiple-choice questions require options or dataSource.",
+      path || "question",
+    ));
   }
   if (
+    !multiple &&
     (inputType === "radio" || inputType === "select" || inputType === "treeSelect") &&
     !options &&
     !compatibleDataSource
   ) {
-    return "Choice questions require options or dataSource";
+    issues.push(askUserQuestionIssue(
+      "missing_choice_source",
+      "Choice questions require options or dataSource.",
+      path || "question",
+    ));
   }
 
   let kind: PendingQuestionKind = "text";
@@ -1545,7 +1988,7 @@ function normalizeQuestion(
   const question: PendingQuestionItem = {
     id: request.id?.trim() || fallbackId,
     kind,
-    question: request.question.trim(),
+    question: questionText,
     inputType,
     ...(kind === "text"
       ? { fieldAssist: request.fieldAssist ?? inputType === "textarea" }
@@ -1556,7 +1999,11 @@ function normalizeQuestion(
     ...(dateFormat ? { dateFormat } : {}),
   };
   if (requireDefault && kind !== "confirm" && request.default === undefined) {
-    return "默认答案缺失：每个非确认问题都必须提供非空 default 推荐值";
+    issues.push(askUserQuestionIssue(
+      "invalid_default",
+      "Every non-confirmation question must provide a non-empty default.",
+      pathFor(path, "default"),
+    ));
   }
   if (request.default !== undefined) {
     const compatibleDefault =
@@ -1565,16 +2012,30 @@ function normalizeQuestion(
         ? String(request.default)
         : request.default;
     if (typeof compatibleDefault === "string" && !compatibleDefault.trim()) {
-      return "默认答案无效：default 必须是非空推荐值，不能是空字符串";
-    }
-    try {
+      issues.push(askUserQuestionIssue(
+        "invalid_default",
+        "default must be a non-empty recommended value.",
+        pathFor(path, "default"),
+      ));
+    } else try {
       question.default = normalizeAnswer(question, compatibleDefault);
     } catch (cause) {
-      if (cause instanceof Error) return `默认答案无效：${cause.message}`;
-      return "默认答案无效";
+      issues.push(askUserQuestionIssue(
+        "invalid_default",
+        cause instanceof AskUserQuestionAnswerValidationError
+          ? `default is invalid: ${cause.message}`
+          : "default is invalid.",
+        pathFor(path, "default"),
+      ));
     }
   }
-  return question;
+  return issues.length > 0 ? { issues } : { question };
+}
+
+function safeDateFormatErrorMessage(message: string): string {
+  return message.startsWith("dateFormat is not supported:")
+    ? "dateFormat is not supported by the date control. Use yyyy-MM-dd or yyyy-MM-dd HH:mm."
+    : message;
 }
 
 function normalizeOption(
@@ -1590,27 +2051,53 @@ function normalizeOption(
   return isValidOptionId(id) && label ? { id, label } : null;
 }
 
+const answerValidationMessages = {
+  confirmation_required: "请确认或取消",
+  selection_required: "请至少选择一个选项",
+  duplicate_selection: "不能重复选择同一选项",
+  multiple_custom_answers: "只能填写一个其他回答",
+  invalid_choice: "请选择一个有效选项",
+  custom_answer_required: "请输入其他回答",
+  ambiguous_option_id: "选项不唯一，请重新选择",
+  ambiguous_option_label: "选项标签不唯一，请重新选择",
+  unmatched_choice: "答案必须匹配一个可选项",
+  date_string_required: "日期答案必须是字符串",
+  answer_required: "答案不能为空",
+} as const;
+
+type AskUserQuestionAnswerValidationCode = keyof typeof answerValidationMessages;
+
+class AskUserQuestionAnswerValidationError extends Error {
+  constructor(readonly code: AskUserQuestionAnswerValidationCode) {
+    super(answerValidationMessages[code]);
+  }
+}
+
+function rejectAnswer(code: AskUserQuestionAnswerValidationCode): never {
+  throw new AskUserQuestionAnswerValidationError(code);
+}
+
 function normalizeAnswer(
   pending: PendingQuestionItem,
   answer: AskUserQuestionAnswerInput,
 ): AskUserQuestionAnswer {
   if (pending.kind === "confirm") {
     if (typeof answer !== "boolean") {
-      throw new Error("请确认或取消");
+      rejectAnswer("confirmation_required");
     }
     return answer;
   }
   if (pending.kind === "multiple") {
     if (!Array.isArray(answer) || answer.length === 0) {
       if (!pending.required && Array.isArray(answer)) return [];
-      throw new Error("请至少选择一个选项");
+      rejectAnswer("selection_required");
     }
     const normalized = answer.map(value => normalizeChoiceAnswer(pending, value));
     const keys = normalized.map(optionKey);
-    if (new Set(keys).size !== keys.length) throw new Error("不能重复选择同一选项");
+    if (new Set(keys).size !== keys.length) rejectAnswer("duplicate_selection");
     const customAnswers = normalized.filter(value => !hasExactOption(pending, value));
     if (customAnswers.length > 1 && pending.options?.some(isOtherOption)) {
-      throw new Error("只能填写一个其他回答");
+      rejectAnswer("multiple_custom_answers");
     }
     return normalized;
   }
@@ -1621,17 +2108,17 @@ function normalizeAnswer(
   }
 
   if (pending.kind === "date") {
-    if (typeof answer !== "string") throw new Error("日期答案必须是字符串");
-    if (pending.required && !answer.trim()) throw new Error("答案不能为空");
+    if (typeof answer !== "string") rejectAnswer("date_string_required");
+    if (pending.required && !answer.trim()) rejectAnswer("answer_required");
     return answer;
   }
 
   if (typeof answer !== "string") {
-    throw new Error("答案不能为空");
+    rejectAnswer("answer_required");
   }
   if (!answer.trim()) {
     if (!pending.required) return "";
-    throw new Error("答案不能为空");
+    rejectAnswer("answer_required");
   }
   return answer.trim();
 }
@@ -1643,14 +2130,14 @@ function normalizeChoiceAnswer(
   const rawCandidate = isOptionObject(answer) ? answer.id : answer;
   const candidate =
     typeof rawCandidate === "string" ? rawCandidate.trim() : rawCandidate;
-  if (!isValidOptionId(candidate)) throw new Error("请选择一个有效选项");
+  if (!isValidOptionId(candidate)) rejectAnswer("invalid_choice");
 
   const options = pending.options ?? [];
   if (options.length === 0) return candidate;
 
   const exact = options.find(option => option.id === candidate);
   if (exact) {
-    if (isOtherOption(exact)) throw new Error("请输入其他回答");
+    if (isOtherOption(exact)) rejectAnswer("custom_answer_required");
     return exact.id;
   }
 
@@ -1658,28 +2145,28 @@ function normalizeChoiceAnswer(
     option => String(option.id) === String(candidate),
   );
   if (byStringifiedId.length === 1) {
-    if (isOtherOption(byStringifiedId[0])) throw new Error("请输入其他回答");
+    if (isOtherOption(byStringifiedId[0])) rejectAnswer("custom_answer_required");
     return byStringifiedId[0].id;
   }
-  if (byStringifiedId.length > 1) throw new Error("选项不唯一，请重新选择");
+  if (byStringifiedId.length > 1) rejectAnswer("ambiguous_option_id");
 
   if (typeof candidate === "string") {
     const byTypedKey = options.filter(option => optionKey(option.id) === candidate);
     if (byTypedKey.length === 1) {
-      if (isOtherOption(byTypedKey[0])) throw new Error("请输入其他回答");
+      if (isOtherOption(byTypedKey[0])) rejectAnswer("custom_answer_required");
       return byTypedKey[0].id;
     }
 
     const byLabel = options.filter(option => option.label === candidate);
     if (byLabel.length === 1) {
-      if (isOtherOption(byLabel[0])) throw new Error("请输入其他回答");
+      if (isOtherOption(byLabel[0])) rejectAnswer("custom_answer_required");
       return byLabel[0].id;
     }
-    if (byLabel.length > 1) throw new Error("选项标签不唯一，请重新选择");
+    if (byLabel.length > 1) rejectAnswer("ambiguous_option_label");
     if (options.some(isOtherOption)) return candidate;
   }
 
-  throw new Error("答案必须匹配一个可选项");
+  rejectAnswer("unmatched_choice");
 }
 
 function isValidOptionId(value: unknown): value is AskUserQuestionOptionId {
@@ -1722,7 +2209,9 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Canonical calls should provide a non-empty default; compatibility input without one renders without a prefill. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases, safe scalar deviations, and one-level JSON-stringified collections; it uses the configured product title when a grouped title is missing, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.`,
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Canonical calls should provide a non-empty default; compatibility input without one renders without a prefill. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases, safe scalar deviations, and one-level JSON-stringified collections; it uses the configured product title when a grouped title is missing, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
+
+Failures use one JSON result shape: {"status":"invalid","error":{"code":"...","category":"...","message":"...","retryable":true,"issues":[{"code":"...","path":"questions[0].id","message":"..."}]}}. Correct every reported issue path in one replacement call only when retryable is true. Never retry terminal or cancelled failures.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -1731,7 +2220,8 @@ For a single question, use top-level question/options/inputType/fieldAssist/date
     "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-    "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+    "If ask_user_question returns status:invalid, inspect error.code, category, retryable, and every issues[] entry. Retry silently with one corrected native tool call only when retryable is true; correct all reported paths together and do not explain the correction to the user.",
+    "Do not retry question_presentation_failed, question_validation_failed, or question_cancelled results. Stop the current response and let the user decide whether to try again.",
     "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
     "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
