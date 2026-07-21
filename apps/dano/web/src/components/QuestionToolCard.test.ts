@@ -11,8 +11,6 @@ vi.mock("./MarkdownRenderer.svelte", () => ({
     payload.out += props.content;
   },
 }));
-vi.mock("./QuestionDateField.svelte", () => ({ default: () => {} }));
-vi.mock("./SubmittedAnswerValue.svelte", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/chevron-down", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/calendar", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/check", () => ({ default: () => {} }));
@@ -21,6 +19,13 @@ vi.mock("lucide-svelte/icons/list-checks", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/message-square-text", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/refresh-cw", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/sparkle", () => ({ default: () => {} }));
+
+vi.stubGlobal("matchMedia", vi.fn(() => ({
+  matches: true,
+  media: "(max-width: 640px)",
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+})));
 
 function submittedFormBlock(
   state?: "awaiting_confirmation" | "confirmed" | "cancelled" | "interrupted",
@@ -198,7 +203,30 @@ function answeredSingleQuestionBlock(): ToolContentBlock {
   };
 }
 
+function answeredSingleDateQuestionBlock(): ToolContentBlock {
+  return {
+    ...pendingSingleQuestionBlock(),
+    toolStatus: "success",
+    questionRequest: {
+      batch: false,
+      id: "start_at",
+      kind: "date",
+      question: "开始时间？",
+      dateFormat: "yyyy-MM-dd HH:mm",
+    },
+    resultDetails: {
+      status: "answered",
+      answer: "2026-07-22 09:00",
+    },
+  };
+}
+
 describe("QuestionToolCard", () => {
+  it("uses one answered-card structure at every responsive width", () => {
+    expect(questionToolCardSource).not.toContain("mobile-answered-result");
+    expect(questionToolCardSource).not.toContain("answered-source-form");
+  });
+
   it("omits Field Assist actions when the canonical text field disables exposure", async () => {
     vi.useFakeTimers();
     const response = vi.fn(async () => ({ success: true } as never));
@@ -436,8 +464,40 @@ describe("QuestionToolCard", () => {
     expect(target.innerHTML).toContain("已提交");
     expect(target.querySelector("article")?.dataset.formId).toBe("form-1");
     expect(target.querySelector("button")?.disabled).toBe(true);
+    expect(target.textContent).toContain("申请原因？");
+    expect(target.querySelector<HTMLInputElement>('input[type="text"]')?.value)
+      .toBe("个人事务");
     expect(target.textContent).not.toContain("确认");
     expect(target.textContent).not.toContain("取消");
+
+    unmount(component);
+  });
+
+  it("restores an answered single date in the mobile read-only card", async () => {
+    const response = vi.fn(async () => {
+      throw new Error("an answered question must not issue RPCs");
+    });
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: answeredSingleDateQuestionBlock(),
+        active: false,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+    await tick();
+
+    const input = target.querySelector<HTMLInputElement>('input[type="datetime-local"]');
+    expect(target.textContent).toContain("开始时间？");
+    expect(input?.value).toBe("2026-07-22T09:00");
+    expect(input?.disabled).toBe(true);
+    expect(target.textContent).toContain("已提交");
+    expect(response).not.toHaveBeenCalled();
 
     unmount(component);
   });
