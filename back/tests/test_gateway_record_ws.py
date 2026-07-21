@@ -774,6 +774,27 @@ def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> N
     assert report["unmatched_fields"] == []
 
 
+def test_analysis_kind_uses_completed_operation_history_not_generation_metadata() -> None:
+    before = FlowSpec(steps=[])
+    after = before.model_copy(deep=True)
+    after.meta = {"capability_generation": {"last_mode": "optimize"}}
+
+    first = gateway._analysis_application_report(
+        before=before, after=after,
+        operation_report={"changed": False, "changes": {}, "field_changes": []},
+        screenshots=[], delivered_image_count=0, operation_id="first",
+    )
+    assert first["analysis_kind"] == "initial"
+
+    before.meta = {"last_analysis_application": first}
+    second = gateway._analysis_application_report(
+        before=before, after=after,
+        operation_report={"changed": False, "changes": {}, "field_changes": []},
+        screenshots=[], delivered_image_count=0, operation_id="second",
+    )
+    assert second["analysis_kind"] == "incremental"
+
+
 def test_analysis_report_ignores_malformed_axis_status_instead_of_failing_operation() -> None:
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit", method="POST", path="/api/submit",

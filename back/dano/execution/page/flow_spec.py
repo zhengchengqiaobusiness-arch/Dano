@@ -10077,8 +10077,11 @@ async def orchestrate_flow_capabilities(
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
-    if not screenshot_analysis:
-        _repair_structural_option_bindings(current)
+    # Recorded DOM/request facts remain authoritative during screenshot
+    # analysis too.  Skipping this pass preserved stale API-option bindings on
+    # ordinary text/number controls whenever the screenshot planner omitted a
+    # field or failed to submit a plan.
+    _repair_structural_option_bindings(current)
     capability_model = (current.meta or {}).get("capability_model") or {}
     auto_generated_existing = bool(
         current.capabilities
@@ -10230,7 +10233,7 @@ async def orchestrate_flow_capabilities(
     if initial_generation:
         current = _repair_generated_capability_contracts(
             current,
-            repair_option_bindings=not screenshot_analysis,
+            repair_option_bindings=True,
         )
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))

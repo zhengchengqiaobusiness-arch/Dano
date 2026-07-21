@@ -1380,7 +1380,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const screenshotInputRef = useRef<HTMLInputElement>(null);
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
-  const [showAllAnalysisIssues, setShowAllAnalysisIssues] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -3312,103 +3311,33 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderLatestOperationDetail() {
     if (!lastAnalysisEvidence && !lastOperationReport) return null;
     const showDetailedAnalysis = lastAnalysisEvidence?.analysis_kind !== "initial";
-    const unmatchedIssues = lastAnalysisEvidence?.unmatched_fields || [];
-    const unresolvedIssues = lastAnalysisEvidence?.unresolved_items || [];
-    const rejectedIssues = lastAnalysisEvidence?.rejected_items || [];
     const structuralChanges = lastAnalysisEvidence?.change_details || [];
-    const visibleStructuralChanges = structuralChanges.slice(0, 2);
-    const visibleFieldChanges = (lastAnalysisEvidence?.field_changes || []).slice(
-      0, Math.max(0, 6 - visibleStructuralChanges.length),
-    );
-    const hiddenChangeCount = Math.max(
-      0,
-      (lastAnalysisEvidence?.field_changes?.length || 0)
-        + structuralChanges.length
-        - visibleFieldChanges.length
-        - visibleStructuralChanges.length,
-    );
-    const issueLimit = showAllAnalysisIssues ? Number.POSITIVE_INFINITY : 6;
-    const visibleUnmatched = unmatchedIssues.slice(0, issueLimit);
-    const remainingLimit = Math.max(0, issueLimit - visibleUnmatched.length);
-    const visibleUnresolved = unresolvedIssues.slice(0, remainingLimit);
-    const remainingRejectedLimit = Math.max(0, remainingLimit - visibleUnresolved.length);
-    const visibleRejected = rejectedIssues.slice(0, remainingRejectedLimit);
-    const analysisIssueCount = unmatchedIssues.length + unresolvedIssues.length + rejectedIssues.length;
+    const fieldChanges = lastAnalysisEvidence?.field_changes || [];
+    const hasActualChanges = fieldChanges.length > 0 || structuralChanges.length > 0;
     return (
       <Space direction="vertical" size={2}>
         {lastAnalysisEvidence && (
           <>
-            <Typography.Text style={{ fontSize: 12 }}>
-              {showDetailedAnalysis
-                ? (lastAnalysisEvidence.summary || "最近一次能力分析已完成")
-                : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
-            </Typography.Text>
-            {showDetailedAnalysis && visibleFieldChanges.map((change) => (
+            {(!showDetailedAnalysis || !hasActualChanges) && (
+              <Typography.Text style={{ fontSize: 12 }}>
+                {showDetailedAnalysis
+                  ? (lastAnalysisEvidence.summary || "未修改任何字段、能力或关联")
+                  : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
+              </Typography.Text>
+            )}
+            {showDetailedAnalysis && fieldChanges.map((change) => (
               <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
                 {analysisFieldChangeText(change)}
               </Typography.Text>
             ))}
-            {showDetailedAnalysis && visibleStructuralChanges.map((detail, index) => (
+            {showDetailedAnalysis && structuralChanges.map((detail, index) => (
               <Typography.Text key={`structural-change:${index}`} style={{ fontSize: 12 }}>
                 {detail}
               </Typography.Text>
             ))}
-            {showDetailedAnalysis && hiddenChangeCount > 0 && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                另有 {hiddenChangeCount} 项实际修改
-              </Typography.Text>
-            )}
-            {showDetailedAnalysis && visibleUnmatched.map((item) => (
-              <Button key={`unmatched:${item.step_id}:${item.path}`} type="link" size="small"
-                style={{ padding: 0, height: "auto", textAlign: "left" }}
-                onClick={() => locatePublishIssue(item.target || { kind: "param", step_id: item.step_id, path: item.path })}>
-                未匹配：{item.name || item.path}（{item.step_id} · {item.path}）
-                {item.missing_axes?.length ? ` · 缺 ${item.missing_axes.map((axis) => ANALYSIS_AXIS_LABELS[axis] || axis).join("、")}` : ""}
-              </Button>
-            ))}
-            {showDetailedAnalysis && visibleUnresolved.map((item, index) => (
-              <Button key={`unresolved:${item.step_id}:${item.path}:${item.axis}:${index}`} type="link" size="small"
-                style={{ padding: 0, height: "auto", textAlign: "left" }}
-                onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
-                待确认：{item.name || item.path || item.step_id || "字段"}{item.axis ? ` · ${ANALYSIS_AXIS_LABELS[item.axis] || item.axis}` : ""}{item.reason ? `（${item.reason}）` : ""}
-              </Button>
-            ))}
-            {showDetailedAnalysis && visibleRejected.map((item, index) => (
-              <Button key={`rejected:${item.step_id}:${item.path}:${index}`} type="link" danger size="small"
-                style={{ padding: 0, height: "auto", textAlign: "left" }}
-                onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
-                已拒绝：{item.name || item.path || item.step_id || item.kind || "建议"}{item.reason ? `（${item.reason}）` : ""}
-              </Button>
-            ))}
-            {showDetailedAnalysis && analysisIssueCount > 6 && (
-              <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
-                onClick={() => setShowAllAnalysisIssues((value) => !value)}>
-                {showAllAnalysisIssues ? "收起问题" : `展开全部 ${analysisIssueCount} 项`}
-              </Button>
-            )}
-            <Space wrap size={4}>
-              {lastAnalysisEvidence.screenshot_count > 0 && (
-                <Tag color={(lastAnalysisEvidence.model_image_count ?? 0) === lastAnalysisEvidence.screenshot_count ? "success" : "error"}>
-                  图片匹配 {lastAnalysisEvidence.model_image_count ?? 0}/{lastAnalysisEvidence.screenshot_count}
-                </Tag>
-              )}
-              {showDetailedAnalysis && lastAnalysisEvidence.screenshot_count > 0 && (
-                <Tag>截图匹配字段 {lastAnalysisEvidence.matched_field_count ?? 0}</Tag>
-              )}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.unresolved_relation_count && <Tag color="orange">待确认关系 {lastAnalysisEvidence.unresolved_relation_count}</Tag>}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
-              {lastAnalysisEvidence.capability_count_after !== undefined && (
-                <Tag>能力总数 {lastAnalysisEvidence.capability_count_after}</Tag>
-              )}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.capabilities && <Tag>能力内容变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}
-              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.relations && <Tag>能力关联变化 {lastAnalysisEvidence.changes.relations} 项</Tag>}
-            </Space>
           </>
         )}
-        {lastOperationReport && (!lastAnalysisEvidence || showDetailedAnalysis) && (
+        {lastOperationReport && !lastAnalysisEvidence && (
           <Space wrap size={4}>
             <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
             {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
@@ -3442,7 +3371,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
           <Alert
             key="flow-status-panel"
-            type={publishPending || analysisPending ? "info" : publishFailed || analysisRejected ? "error" : analysisNeedsReview || (!validationRefreshing && (!checkReport?.passed || hasPublishAdvice)) ? "warning" : validationRefreshing ? "info" : "success"}
+            type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
             showIcon
             style={{ marginBottom: 12, minHeight: 96 }}
             message={publishPending
@@ -3456,7 +3385,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               : analysisRejected
               ? "分析提出的修改未通过准入"
               : analysisNeedsReview
-              ? "分析结果未应用，仍有字段需要确认"
+              ? "分析完成，未应用缺少证据的修改"
               : lastAnalysisEvidence?.status === "applied"
               ? "分析结果已应用"
               : lastAnalysisEvidence?.status === "no_change"

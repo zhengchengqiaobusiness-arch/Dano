@@ -383,8 +383,13 @@ def _analysis_application_report(
             "unmatched_field_count": 0,
             "unmatched_fields": [],
         }
-    generation = dict((getattr(after, "meta", None) or {}).get("capability_generation") or {})
-    analysis_kind = "initial" if generation.get("last_mode") == "initial" else "incremental"
+    # The first button click is defined by completed operation history, not by
+    # the planner's generation metadata.  A fallback/rebuild may legitimately
+    # call that first pass "optimize", while the UI must still hide its diff.
+    previous_application = dict(
+        (getattr(before, "meta", None) or {}).get("last_analysis_application") or {}
+    )
+    analysis_kind = "incremental" if previous_application else "initial"
     semantic_coverage = dict(
         ((getattr(after, "meta", None) or {}).get("capability_model") or {}).get("semantic_coverage") or {}
     )
@@ -1675,7 +1680,11 @@ async def record_ws(ws: WebSocket) -> None:
                         **_recording_flow_projection(before_operation),
                         "analysis_application": {
                             "status": "rejected",
-                            "analysis_kind": "incremental",
+                            "analysis_kind": (
+                                "incremental"
+                                if (before_operation.meta or {}).get("last_analysis_application")
+                                else "initial"
+                            ),
                             "summary": f"分析结果未应用，原配置保持不变：{e}",
                             "screenshot_count": len(analysis_screenshots),
                             "model_image_count": 0,

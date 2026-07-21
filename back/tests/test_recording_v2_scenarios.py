@@ -3583,6 +3583,42 @@ def test_r6_screenshot_report_marks_incomplete_field_coverage_as_needs_review():
     assert report["unresolved_field_count"] == 1
 
 
+def test_screenshot_analysis_reconciles_stale_option_binding_with_recorded_control_fact():
+    direct_input = ParamField(
+        path="guestCount", key="入住人数", label="入住人数", value=1,
+        type="enum", wire_type="number", category="user_param",
+        source_kind="api_option",
+        source={"kind": "api_option", "source_url": "/api/tenant/options"},
+        enum_options=[{"label": "租户甲", "value": 1}, {"label": "租户乙", "value": 2}],
+        enum_value_map={"租户甲": 1, "租户乙": 2},
+        evidence=[{
+            "kind": "page_control", "source": "recorder_dom",
+            "control_kind": "number", "editable": True,
+            "field_aliases": ["guestCount"],
+        }],
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/apply", params=[direct_input],
+        selects=[SelectBinding(
+            path="guestCount", source_url="/api/tenant/options",
+            value_key="id", label_key="name", enum_source="api", enum_confirmed=True,
+            options=direct_input.enum_options, option_map=direct_input.enum_value_map,
+        )],
+    )
+    spec = FlowSpec(steps=[submit])
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"_analysis_screenshot_count": 1, "ops": []},
+        generation_mode="optimize",
+    ))
+
+    repaired = optimized.steps[0].params[0]
+    assert (repaired.type, repaired.source_kind) == ("number", "user_input")
+    assert repaired.enum_options is None
+    assert optimized.steps[0].selects == []
+
+
 def test_r6_screenshot_field_identity_does_not_cross_same_named_paths():
     first = FlowStep(
         step_id="create", method="POST", path="/api/create",
