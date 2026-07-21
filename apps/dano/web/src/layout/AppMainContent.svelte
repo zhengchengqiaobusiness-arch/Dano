@@ -376,7 +376,7 @@
     bottom: 24px;
     left: 24px;
     z-index: 22;
-    width: min(1104px, calc(100vw - var(--right-rail-space, 0px) - 48px));
+    width: min(760px, calc(100vw - var(--right-rail-space, 0px) - 48px));
     max-height: calc(100dvh - 48px);
     height: fit-content;
     margin: auto;
