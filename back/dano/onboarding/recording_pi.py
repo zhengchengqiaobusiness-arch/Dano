@@ -474,7 +474,8 @@ class RecordingPiSession:
         self._pending[request_id] = future
         try:
             await self._send({"type": command_type, "request_id": request_id, **payload})
-            return await asyncio.wait_for(future, timeout=timeout_s or self.timeout_s)
+            timeout = self.timeout_s if timeout_s is None else timeout_s
+            return await future if timeout <= 0 else await asyncio.wait_for(future, timeout=timeout)
         finally:
             self._pending.pop(request_id, None)
 

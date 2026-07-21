@@ -548,3 +548,22 @@ async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoi
     assert client.current_flow_spec().title == "original"
     assert client.last_submission_kind == ""
     assert checkpoints == []
+
+
+@pytest.mark.asyncio
+async def test_zero_command_timeout_waits_without_a_deadline(monkeypatch) -> None:  # noqa: ANN001
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE,
+    )
+    client._proc = object()
+
+    async def fake_send(command: dict) -> None:
+        client._pending[command["request_id"]].set_result({"status": "completed"})
+
+    async def unexpected_wait_for(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("zero timeout must not install a deadline")
+
+    client._send = fake_send
+    monkeypatch.setattr(recording_pi.asyncio, "wait_for", unexpected_wait_for)
+
+    assert await client._command("prompt", timeout_s=0) == {"status": "completed"}

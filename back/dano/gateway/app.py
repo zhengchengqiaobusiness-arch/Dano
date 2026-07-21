@@ -1573,7 +1573,8 @@ async def record_ws(ws: WebSocket) -> None:
                             "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
                             f" recording_id={recording_id}"
                             + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
-                            + _analysis_screenshot_guidance(analysis_screenshots)
+                            + _analysis_screenshot_guidance(analysis_screenshots),
+                            timeout_s=0,
                         )
                     delivered_image_count = _verified_pi_image_count(pi_result, len(analysis_screenshots))
                     if pi_session.last_submission_kind != "plan":
@@ -1697,7 +1698,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await pi_session.prompt(
                         "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
                         "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
-                        f" recording_id={recording_id}"
+                        f" recording_id={recording_id}", timeout_s=0
                     )
                     if pi_session.last_submission_kind != "repair":
                         raise RuntimeError("Pi 未提交 recording repair")
@@ -1729,7 +1730,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await pi_session.prompt(
                         "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
                         "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}"
+                        f" recording_id={recording_id}", timeout_s=0
                     )
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 step naming plan")
@@ -1756,7 +1757,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
                         " business_understanding.summary；不得改写人工业务文本。必须先调用"
                         " get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}"
+                        f" recording_id={recording_id}", timeout_s=0
                     )
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 business description plan")
@@ -1910,7 +1911,8 @@ async def record_ws(ws: WebSocket) -> None:
                         "可能是管理员刚刚真实执行的合法业务写操作；不得仅凭 HTTP 方法、路径关键词或"
                         "destructive/L4 等风险标签拒绝，拒绝必须基于独立、具体且可定位的契约、权限或校验证据。"
                         "提交成功后立即结束，不得再次读取或重复提交。"
-                        f" recording_id={recording_id} flow_version={review_version}"
+                        f" recording_id={recording_id} flow_version={review_version}",
+                        timeout_s=0,
                     )
                     pi_session.require_publish_review(
                         flow_version=review_version,
