@@ -269,6 +269,30 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("--token");
   });
 
+  it("uses a generic detail for dynamic prefixes and arguments", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-dynamic-prefix",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "TOKEN=$(private-helper) /bin/ls" },
+        }),
+      },
+      {
+        key: "bash-dynamic-argument",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "/bin/cat <(private-helper --secret value)" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 Shell 脚本",
+      "执行了 Shell 脚本",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("private-helper");
+    expect(JSON.stringify(activities)).not.toContain("--secret");
+  });
+
   it("uses a generic detail for shell control structures", () => {
     const activities = buildToolActivities([
       {

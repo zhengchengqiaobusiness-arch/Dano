@@ -37,12 +37,25 @@ function collectExecutableNames(node: Node, names: string[]): boolean {
 }
 
 function staticExecutableName(command: Command): string | undefined {
-  if (command.redirects.length || !command.name || !isStaticWord(command.name.parts)) {
+  if (!isSimpleCommand(command)) {
     return undefined;
   }
 
   const name = command.name.value.replace(/^.*[\\/]/u, "");
   return /^[\w.+-]+$/u.test(name) ? name : undefined;
+}
+
+function isSimpleCommand(command: Command): command is Command & { name: NonNullable<Command["name"]> } {
+  return command.redirects.length === 0 &&
+    command.name !== undefined &&
+    isStaticWord(command.name.parts) &&
+    command.prefix.every(assignment =>
+      assignment.append !== true &&
+      assignment.index === undefined &&
+      assignment.array === undefined &&
+      (assignment.value === undefined || isStaticWord(assignment.value.parts))
+    ) &&
+    command.suffix.every(word => isStaticWord(word.parts));
 }
 
 function isStaticWord(parts: WordPart[] | undefined): boolean {
