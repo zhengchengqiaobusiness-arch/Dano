@@ -1521,7 +1521,7 @@ def test_unrelated_same_value_list_is_not_bound_as_option_source():
     assert not any(binding.path == "requestType" for step in spec.steps for binding in step.selects)
 
 
-def test_same_transaction_is_causal_evidence_for_an_option_source():
+def test_same_transaction_without_field_contract_is_not_option_source_evidence():
     source = FlowStep(
         step_id="permissions",
         method="GET",
@@ -1554,9 +1554,9 @@ def test_same_transaction_is_causal_evidence_for_an_option_source():
 
     repaired = flow_spec_module._repair_structural_option_bindings(spec)
 
-    assert repaired == 1
-    assert target.params[0].source_kind == "api_option"
-    assert target.params[0].enum_value_map == {"管理员": "1", "访客": "2"}
+    assert repaired == 0
+    assert target.params[0].source_kind == "user_input"
+    assert target.params[0].enum_value_map is None
 
 
 def test_structurally_generic_list_is_not_promoted_without_business_evidence():
@@ -3692,6 +3692,9 @@ def test_r7_editor_state_uses_stable_identity_and_reorder_rolls_back_in_place():
     assert 'key={`${step.step_id}:param:${paramIndex}`}' not in source
     assert "function Button(props: ButtonProps)" in source
     assert 'htmlType="button"' in source
+    assert "if (!addStepToCapability" in source
+    assert "if (!send({ type: \"flow_update\", edits: [{" in source
+    assert "_rollback: () =>" in source
 
 
 def test_r7_only_explicit_error_location_scrolls_the_page():

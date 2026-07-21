@@ -67,13 +67,19 @@ def test_workbench_contract_uses_stable_field_identity_and_rolls_back_disconnect
 
     assert 'analysis_kind?: "initial" | "incremental"' in source
     assert 'lastAnalysisEvidence?.analysis_kind !== "initial"' in source
-    assert "showDetailedAnalysis && fieldChanges.map" in source
-    assert "showDetailedAnalysis && structuralChanges.map" in source
+    assert "fieldChanges.map(analysisFieldChangeText)" in source
+    assert "...structuralChanges" in source
+    assert "showDetailedAnalysis && visibleChangeLines.map" in source
     assert "未匹配：" not in source
-    assert "展开全部" not in source
     assert "截图匹配字段" not in source
     assert "lastOperationReport && !lastAnalysisEvidence" in source
     assert 'analysisNeedsReview || validationRefreshing ? "info"' in source
+    assert "changeLines.slice(0, 3)" in source
+    assert "展开全部修改" in source
+    assert 'm.operation === "finalize"' in source
+    assert "setLastAnalysisEvidence(null)" in source
+    assert "m.analysis_application?.summary" in source
+    assert "模型分析未完成，已保留可运行的事实基线" not in source
     assert "p.field_id" in source
     assert 'key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}' not in source
     onclose = source[source.index("ws.onclose ="):source.index("ws.onerror =")]

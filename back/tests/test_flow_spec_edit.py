@@ -1306,7 +1306,7 @@ def test_flow_operation_report_explains_noop_and_changes():
     assert delta["field_changes"][0]["path"] == changed.steps[0].params[0].path
     assert set(delta["field_changes"][0]["axes"]) == {"name", "default"}
     assert delta["summary"] == "实际修改：字段1项"
-    assert noop["summary"] == "未修改任何字段、能力或关联"
+    assert noop["summary"] == "分析结果与当前配置相同，无需修改"
 
 
 def test_flow_operation_report_uses_capability_boundary_and_lists_real_structural_changes():

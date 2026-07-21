@@ -743,16 +743,25 @@ async def _recording_operation_keepalive(
     interval: float = 12.0,
 ):  # noqa: ANN001, ANN202
     """Keep a long Pi operation visible to proxies without changing its result."""
+    owner = asyncio.current_task()
+    send_failure: list[BaseException] = []
+
     async def emit_progress() -> None:
         sequence = 0
         while True:
             sequence += 1
-            await sender.send_json({
-                "type": "operation_progress",
-                "operation": operation,
-                "operation_id": operation_id,
-                "sequence": sequence,
-            })
+            try:
+                await sender.send_json({
+                    "type": "operation_progress",
+                    "operation": operation,
+                    "operation_id": operation_id,
+                    "sequence": sequence,
+                })
+            except Exception as exc:  # noqa: BLE001
+                send_failure.append(exc)
+                if owner is not None:
+                    owner.cancel()
+                return
             await asyncio.sleep(interval)
 
     keepalive = asyncio.create_task(
@@ -760,6 +769,10 @@ async def _recording_operation_keepalive(
     )
     try:
         yield
+    except asyncio.CancelledError:
+        if send_failure:
+            raise send_failure[0]
+        raise
     finally:
         keepalive.cancel()
         await asyncio.gather(keepalive, return_exceptions=True)
@@ -1569,7 +1582,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 f" recording_id={recording_id}"
                                 + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
                                 + _analysis_screenshot_guidance(analysis_screenshots),
-                                timeout_s=90,
+                                timeout_s=3000,
                             )
                         delivered_image_count = _verified_pi_image_count(
                             pi_result, len(analysis_screenshots),
@@ -1663,7 +1676,11 @@ async def record_ws(ws: WebSocket) -> None:
                         )
                         analysis_application.update({
                             "status": "needs_review",
-                            "summary": f"模型分析未完成，已生成并保留可运行的事实基线：{e}",
+                            "summary": (
+                                f"模型分析未完成，已生成并保留可运行的事实基线：{e}"
+                                if operation_report.get("changed")
+                                else f"模型分析未完成，未修改当前配置：{e}"
+                            ),
                         })
                         pending_flow_spec.meta = {
                             **(pending_flow_spec.meta or {}),

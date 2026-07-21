@@ -1380,6 +1380,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const screenshotInputRef = useRef<HTMLInputElement>(null);
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
+  const [showAllAnalysisChanges, setShowAllAnalysisChanges] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -1645,7 +1646,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
     flowMutationQueueRef.current.push({ ...obj, operation_id: operationId });
     flushFlowMutationQueue();
-    return true;
+    return flowMutationInFlightRef.current?.operation_id === operationId
+      || flowMutationQueueRef.current.some((queued) => queued.operation_id === operationId);
   }
 
   function finishQueuedFlowMutation(operationId?: string) {
@@ -1791,6 +1793,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     analysisScreenshotsRef.current = [];
     setAnalysisScreenshots([]);
     setLastAnalysisEvidence(null);
+    setLastOperationReport(null);
+    setShowAllAnalysisChanges(false);
     setActiveFlowTab("abilities");
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
@@ -1962,6 +1966,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
           finalizeOperationRef.current = null;
+          setLastAnalysisEvidence(null);
+          setLastOperationReport(null);
+          setShowAllAnalysisChanges(false);
           // finalize 完成:无论之前 phase 是什么,都必须清回 recording,
           // 否则 "停止并分析请求" 按钮会一直转圈 (P5 引入的守卫漏判 finalize)。
           setPhase("recording");
@@ -1996,6 +2003,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             summary: m.operation_report?.summary,
             changes: m.operation_report?.changes,
           };
+          setShowAllAnalysisChanges(false);
           setLastAnalysisEvidence(application);
         }
         // A successful server mutation produces a new validation snapshot.
@@ -2019,7 +2027,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           else if (!report.changed) message.info(report.summary || "检查完成，没有可自动修改的内容");
         }
         if (m.operation_warning) {
-          message.warning(`模型分析未完成，已保留可运行的事实基线：${m.operation_warning}`);
+          message.warning(
+            m.analysis_application?.summary
+            || `模型分析未完成，未修改当前配置：${m.operation_warning}`,
+          );
         }
         if (m.operation === "flow_update") finishQueuedFlowMutation(m.operation_id);
       }
@@ -2710,7 +2721,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [{
       op: "add_capability",
       capability,
-    }] });
+    }], _rollback: () => {
+      flowSpecRef.current = current;
+      setFlowSpec(current);
+    } });
   }
   function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
     patchLocalCapability(idx, { confirmed, requires_human_confirm: false }, false);
@@ -2742,21 +2756,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     });
   }
   function addStepToCapability(idx: number, value?: string, usage?: CapabilityUsage | "") {
-    if (!value || !usage) return;
+    if (!value || !usage) return false;
     const membership = { usage, origin: "manual", confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
-      send({ type: "flow_update", edits: [
+      return send({ type: "flow_update", edits: [
         { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
         { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
       ] });
-      return;
     }
     if (value.startsWith("req:")) {
       const requestKey = value.slice(4);
       const req = findCapturedRequest(flowSpecRef.current, requestKey);
-      if (!req) { message.warning("没有找到选中的捕获接口"); return; }
+      if (!req) { message.warning("没有找到选中的捕获接口"); return false; }
       const cap = flowSpecRef.current?.capabilities?.[idx];
+      const sent = send({ type: "flow_update", edits: [
+        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id, ...membership },
+        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+      ] });
+      if (!sent) return false;
       pendingCapabilityMembershipRef.current.push({
         capability: capabilityRef(cap || {}, idx),
         requestId: req.request_id,
@@ -2764,11 +2782,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         usage,
       });
       patchLocalCapability(idx, {});
-      send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id, ...membership },
-        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-      ] });
+      return true;
     }
+    return false;
   }
   function removeStepFromCapability(idx: number, stepId: string) {
 
@@ -3313,7 +3329,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const showDetailedAnalysis = lastAnalysisEvidence?.analysis_kind !== "initial";
     const structuralChanges = lastAnalysisEvidence?.change_details || [];
     const fieldChanges = lastAnalysisEvidence?.field_changes || [];
-    const hasActualChanges = fieldChanges.length > 0 || structuralChanges.length > 0;
+    const changeLines = [
+      ...fieldChanges.map(analysisFieldChangeText),
+      ...structuralChanges,
+    ];
+    const visibleChangeLines = showAllAnalysisChanges ? changeLines : changeLines.slice(0, 3);
+    const hasActualChanges = changeLines.length > 0;
     return (
       <Space direction="vertical" size={2}>
         {lastAnalysisEvidence && (
@@ -3321,20 +3342,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             {(!showDetailedAnalysis || !hasActualChanges) && (
               <Typography.Text style={{ fontSize: 12 }}>
                 {showDetailedAnalysis
-                  ? (lastAnalysisEvidence.summary || "未修改任何字段、能力或关联")
+                  ? (lastAnalysisEvidence.summary || "分析结果与当前配置相同，无需修改")
                   : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
               </Typography.Text>
             )}
-            {showDetailedAnalysis && fieldChanges.map((change) => (
-              <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
-                {analysisFieldChangeText(change)}
-              </Typography.Text>
-            ))}
-            {showDetailedAnalysis && structuralChanges.map((detail, index) => (
-              <Typography.Text key={`structural-change:${index}`} style={{ fontSize: 12 }}>
+            {showDetailedAnalysis && visibleChangeLines.map((detail, index) => (
+              <Typography.Text key={`analysis-change:${index}`} style={{ fontSize: 12 }}>
                 {detail}
               </Typography.Text>
             ))}
+            {showDetailedAnalysis && changeLines.length > 3 && (
+              <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
+                onClick={() => setShowAllAnalysisChanges((value) => !value)}>
+                {showAllAnalysisChanges ? "收起修改" : `展开全部修改（${changeLines.length} 项）`}
+              </Button>
+            )}
           </>
         )}
         {lastOperationReport && !lastAnalysisEvidence && (
@@ -3950,13 +3972,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               reason: "人工新增字段",
             };
             const source = sourceDescriptor(sourceKind, param);
-            send({ type: "flow_update", edits: [{
+            if (!send({ type: "flow_update", edits: [{
               op: "add", step_id: step.step_id, param: {
                 ...param,
                 source,
                 need_human_confirm: sourceNeedsConfiguration(sourceKind, source),
               },
-            }] });
+            }] })) return;
             setNewParam({
               step_id: step.step_id, path: "", key: "", type: "string", category: "user_param", source_kind: "unknown",
             });
@@ -4070,7 +4092,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             type="primary"
             disabled={!capabilityAddValue[capabilityUiKey] || !capabilityAddUsage[capabilityUiKey]}
             onClick={() => {
-              addStepToCapability(capIdx, capabilityAddValue[capabilityUiKey], capabilityAddUsage[capabilityUiKey]);
+              if (!addStepToCapability(capIdx, capabilityAddValue[capabilityUiKey], capabilityAddUsage[capabilityUiKey])) return;
               setCapabilityAddValue((s) => ({ ...s, [capabilityUiKey]: "" }));
               setCapabilityAddUsage((s) => ({ ...s, [capabilityUiKey]: "" }));
             }}

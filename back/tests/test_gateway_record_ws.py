@@ -91,7 +91,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert "orchestrate_flow_capabilities" in branch
     assert "if not before_operation.capabilities and not analysis_screenshots:" in branch
     assert 'generation_mode="initial"' in branch
-    assert "timeout_s=90" in branch
+    assert "timeout_s=3000" in branch
     assert "pending_flow_spec or before_operation" in branch
     assert '"operation_warning": str(e)' in branch
     assert '"type": "flow_spec"' in branch
@@ -611,6 +611,20 @@ async def test_recording_operation_keepalive_sends_progress_until_completion() -
     assert all(message["operation_id"] == "plan-1" for message in sender.messages)
     await asyncio.sleep(0.02)
     assert len(sender.messages) == sent
+
+
+@pytest.mark.asyncio
+async def test_recording_operation_keepalive_releases_a_disconnected_transport() -> None:
+    class DisconnectedSender:
+        async def send_json(self, _message: dict) -> None:
+            raise gateway.WebSocketDisconnect(code=1006)
+
+    with pytest.raises(gateway.WebSocketDisconnect):
+        async with gateway._recording_operation_keepalive(
+            DisconnectedSender(), operation="plan", operation_id="plan-disconnected",
+            interval=0.01,
+        ):
+            await asyncio.sleep(1)
 
 
 @pytest.mark.asyncio

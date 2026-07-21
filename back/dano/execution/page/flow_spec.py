@@ -12159,7 +12159,7 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
     elif edit_errors:
         summary = "已跳过无效修复项，其他有效修改已保留：" + "；".join(edit_errors[:3])
     else:
-        summary = "未修改任何字段、能力或关联"
+        summary = "分析结果与当前配置相同，无需修改"
     return {
         "operation": operation,
         "changed": changed,
@@ -14529,11 +14529,6 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             target_tokens = _option_binding_tokens(target_text)
             target_families = _option_binding_semantic_families(target_text)
             page_contracts = page_evidence_for(target, param, value)
-            has_recorded_select = any(
-                isinstance(evidence, dict)
-                and str(evidence.get("control_kind") or "").lower() == "select"
-                for evidence in (param.evidence or [])
-            )
             matches: list[dict[str, Any]] = []
             for source in candidates:
                 items = source["items"]
@@ -14554,10 +14549,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 # captured while the leave-type popup is still visible).
                 source_page_contracts = [*page_contracts, None] if page_contracts else [None]
                 for page_contract in source_page_contracts:
-                    # Same-action timing is only sufficient when the target is
-                    # a recorded select. It cannot convert textarea/input
-                    # values into enums through an accidental ID collision.
-                    if page_contract is None and not semantic_match and not has_recorded_select:
+                    # Timing plus a matching scalar value does not identify an
+                    # option owner. Require either field-local visible options
+                    # or a semantic bridge to the candidate endpoint.
+                    if page_contract is None and not semantic_match:
                         continue
                     if not source_is_grounded_for_target(source, target, page_contract, semantic_match):
                         continue
