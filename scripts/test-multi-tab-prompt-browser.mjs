@@ -392,17 +392,41 @@ async function run() {
   await sendAndWaitForAcceptance(tabs[4].page, fiveTabMarker, "enter");
   logStep("five-tab prompt received 202, cleared, and projected exactly once");
 
+  const constrainedPage = tabs[3].page;
+  const attachmentName = `six-tab-attachment-${Date.now()}.txt`;
+  const fileInput = constrainedPage.locator("input.hidden-file-input");
+  await fileInput.setInputFiles({
+    name: attachmentName,
+    mimeType: "text/plain",
+    buffer: Buffer.from("Dano multi-tab attachment regression fixture\n"),
+  });
+  const attachmentChip = constrainedPage.locator(".attachment-chip", {
+    hasText: attachmentName,
+  });
+  await attachmentChip.waitFor({ state: "visible" });
+  await waitFor(
+    async () =>
+      !(await attachmentChip.evaluate(element =>
+        element.classList.contains("uploading") || element.classList.contains("failed"),
+      )),
+    "attachment did not finish uploading before the sixth tab opened",
+  );
+
   const sixth = await openConnectedPage(context, 6);
   tabs.push(sixth);
   const constrainedMarker = `dano-six-tab-${Date.now()}`;
-  const textarea = sixth.page.locator("textarea.prompt-input");
-  const sendButton = sixth.page.locator("button.send-btn");
+  const textarea = constrainedPage.locator("textarea.prompt-input");
+  const sendButton = constrainedPage.locator("button.send-btn");
   let markerRequests = 0;
   let abortedMarkerRequests = 0;
-  sixth.page.on("request", request => {
-    if (request.postData()?.includes(constrainedMarker)) markerRequests += 1;
+  const markerRequestBodies = [];
+  constrainedPage.on("request", request => {
+    if (request.postData()?.includes(constrainedMarker)) {
+      markerRequests += 1;
+      markerRequestBodies.push(JSON.parse(request.postData()));
+    }
   });
-  sixth.page.on("requestfailed", request => {
+  constrainedPage.on("requestfailed", request => {
     if (request.postData()?.includes(constrainedMarker)) abortedMarkerRequests += 1;
   });
 
@@ -411,18 +435,24 @@ async function run() {
   await delay(300);
   assert.equal(await textarea.inputValue(), constrainedMarker, "pending draft was cleared before acknowledgement");
   assert.equal(await sendButton.isDisabled(), true, "pending submit did not disable duplicate submission");
-  await sixth.page.evaluate(() => {
+  await constrainedPage.evaluate(() => {
     document.querySelector("button.send-btn")?.click();
   });
   assert.equal(markerRequests, 1, "duplicate submission created a second prompt request");
+  const initialFiles = markerRequestBodies[0]?.payload?.files;
+  assert.equal(initialFiles?.length, 1, "timed-out prompt did not carry the uploaded attachment");
+  assert.equal(initialFiles[0]?.name, attachmentName);
 
-  const timeoutToast = sixth.page.locator(".toast-item.error", {
+  const timeoutToast = constrainedPage.locator(".toast-item.error", {
     hasText: /发送超时|Send timed out/,
   });
   await timeoutToast.waitFor({ state: "visible", timeout: 13_000 });
   assert.equal(await textarea.inputValue(), constrainedMarker, "timeout did not preserve the exact draft");
   assert.equal(await textarea.isEnabled(), true, "timeout did not restore an editable draft");
   assert.equal(await sendButton.isEnabled(), true, "timeout did not make explicit retry available");
+  assert.equal(await attachmentChip.count(), 1, "timeout did not preserve the uploaded attachment");
+  const removeAttachmentButton = attachmentChip.locator("button.attachment-chip-remove");
+  assert.equal(await removeAttachmentButton.isEnabled(), true, "preserved attachment was not removable after timeout");
   assert.equal(markerJsonlUserRecordCount(constrainedMarker), 0, "unaccepted prompt reached session JSONL");
   await waitFor(() => abortedMarkerRequests === 1, "timed-out prompt request was not aborted");
   logStep("six-tab prompt stayed pending, rejected duplicates, timed out, and remained retryable");
@@ -463,11 +493,17 @@ async function run() {
 
   await delay(500);
   assert.equal(markerJsonlUserRecordCount(constrainedMarker), 0, "aborted prompt arrived after a connection slot was released");
-  await sendAndWaitForAcceptance(sixth.page, constrainedMarker, "button");
+  await sendAndWaitForAcceptance(constrainedPage, constrainedMarker, "button");
   assert.equal(markerRequests, 2, "explicit retry did not create exactly one new request");
+  const retryFiles = markerRequestBodies[1]?.payload?.files;
+  assert.deepEqual(
+    retryFiles,
+    initialFiles,
+    "explicit retry did not carry the same preserved attachment",
+  );
   assert.equal(markerJsonlUserRecordCount(constrainedMarker), 1, "explicit retry was not persisted exactly once");
-  assert.equal(await projectedUserMessage(sixth.page, constrainedMarker).count(), 1);
-  logStep("aborted request did not arrive late; explicit retry projected and persisted exactly once");
+  assert.equal(await projectedUserMessage(constrainedPage, constrainedMarker).count(), 1);
+  logStep("aborted request did not arrive late; explicit retry preserved its attachment and projected/persisted exactly once");
 }
 
 try {
