@@ -147,11 +147,65 @@ describe("Activity Trail presentation", () => {
       ["采购合同.pdf"],
       ["修改建议.docx"],
       ["records.example.com"],
-      [],
+      ["执行了 cat 命令"],
       [],
     ]);
     expect(JSON.stringify(activities)).not.toContain("/private/company");
     expect(JSON.stringify(activities)).not.toContain("secret");
+  });
+
+  it("shows bash executable names without paths or arguments", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-1",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command:
+              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret 2>&1 && /bin/ls -la /private/company',
+          },
+          resultText: "secret output",
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 python3 命令",
+      "执行了 ls 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("/usr/bin");
+    expect(JSON.stringify(activities)).not.toContain("/private/company");
+    expect(JSON.stringify(activities)).not.toContain("--token");
+    expect(JSON.stringify(activities)).not.toContain("secret");
+  });
+
+  it("keeps one safe detail per repeated read invocation", () => {
+    const activities = buildToolActivities([
+      {
+        key: "read-1",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/one/dano_call.py" },
+        }),
+      },
+      {
+        key: "read-2",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/two/dano_call.py" },
+        }),
+      },
+      {
+        key: "read-3",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/three/dano_call.py" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.label).toBe("已查阅 3 项资料");
+    expect(activities[0]?.details).toEqual([
+      "dano_call.py",
+      "dano_call.py",
+      "dano_call.py",
+    ]);
   });
 
   it("caps detail names at five while preserving known-tool images", () => {

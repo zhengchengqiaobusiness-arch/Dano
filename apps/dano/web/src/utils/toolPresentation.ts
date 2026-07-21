@@ -74,10 +74,10 @@ export function buildToolActivities(
     ) {
       previous.sourceKeys.push(source.key);
       previous.count += 1;
-      previous.details = uniqueStrings([
+      previous.details = [
         ...previous.details,
         ...safeToolActivityDetails(source.block),
-      ]);
+      ];
       previous.images = uniqueImages([
         ...previous.images,
         ...safeToolActivityImages(source.block),
@@ -190,7 +190,99 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
     return uniqueStrings(candidates.flatMap(safeUrlHostname));
   }
 
+  if (block.toolName === "bash") {
+    const command = stringField(asRecord(block.toolArgs), "command");
+    return command ? safeBashCommandNames(command).map(
+      name => `执行了 ${name} 命令`,
+    ) : [];
+  }
+
   return [];
+}
+
+function safeBashCommandNames(command: string): string[] {
+  return shellCommandSegments(command).flatMap(segment => {
+    const executable = firstShellWord(segment);
+    if (!executable || executable.includes("$")) return [];
+    const name = safeBaseName(executable);
+    return /^[\w.+-]+$/u.test(name) ? [name] : [];
+  });
+}
+
+function shellCommandSegments(command: string): string[] {
+  const segments: string[] = [];
+  let start = 0;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    const isBoundary = character === ";" || character === "|" ||
+      (character === "&" && command[index + 1] === "&");
+    if (!isBoundary) continue;
+    const segment = command.slice(start, index).trim();
+    if (segment) segments.push(segment);
+    while (command[index + 1] === character) index += 1;
+    start = index + 1;
+  }
+
+  const finalSegment = command.slice(start).trim();
+  if (finalSegment) segments.push(finalSegment);
+  return segments;
+}
+
+function firstShellWord(segment: string): string | undefined {
+  let index = 0;
+  while (index < segment.length) {
+    while (/\s/u.test(segment[index] ?? "")) index += 1;
+    if (index >= segment.length || segment[index] === "#") return undefined;
+
+    let word = "";
+    let quote = "";
+    let escaped = false;
+    for (; index < segment.length; index += 1) {
+      const character = segment[index]!;
+      if (escaped) {
+        word += character;
+        escaped = false;
+        continue;
+      }
+      if (character === "\\" && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (quote) {
+        if (character === quote) quote = "";
+        else word += character;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+        continue;
+      }
+      if (/\s/u.test(character)) break;
+      word += character;
+    }
+    if (quote) return undefined;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) return word || undefined;
+  }
+  return undefined;
 }
 
 function rawToolFailureDetails(block: ToolContentBlock): string[] {

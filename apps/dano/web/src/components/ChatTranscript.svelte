@@ -685,6 +685,48 @@
     return blocks.slice(group.finalAnswerBlockIndex);
   }
 
+  function shouldRenderProjectedBlock(
+    item: TranscriptMessageDisplayItem,
+    blocks: ContentBlock[],
+    block: ContentBlock,
+    blockIndex: number,
+  ): boolean {
+    if (block.kind === "thinking") {
+      return isStreamingThinkingBlock(
+        isMessageThinkingActive(item.message, item.messageIndex),
+        blocks,
+        blockIndex,
+      );
+    }
+    if (block.kind === "text") return Boolean(block.text);
+    if (block.kind !== "tool") return true;
+    if (askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)) {
+      return true;
+    }
+    const key = toolBlockStateKey(
+      item.message,
+      item.messageIndex,
+      block,
+      blockIndex,
+    );
+    return Boolean(
+      toolActivityProjection.bySourceKey.get(key) &&
+      toolActivityProjection.firstSourceKeys.has(key),
+    );
+  }
+
+  function shouldRenderMessageRow(
+    item: TranscriptMessageDisplayItem,
+    blocks: ContentBlock[],
+  ): boolean {
+    return showMessageIds ||
+      canCopyMessage(item.message) ||
+      canReviseMessage(item.message) ||
+      blocks.some((block, blockIndex) =>
+        shouldRenderProjectedBlock(item, blocks, block, blockIndex)
+      );
+  }
+
   function processSummaryLabel(group: TranscriptProcessGroup): string {
     const duration = formatTranscriptDuration(group.durationMs);
     return duration
@@ -1418,7 +1460,8 @@
       </div>
     {:else if shouldRenderDisplayItemAt(index)}
       {@const blocks = visibleContentBlocks(item, index)}
-      <div
+      {#if shouldRenderMessageRow(item, blocks)}
+        <div
         class="message-row {roleClass(item.message.role)}"
         data-message-id={item.message.id ?? undefined}
         data-tree-entry-id={item.message.id ?? undefined}
@@ -1565,7 +1608,8 @@
             </div>
           {/if}
         </div>
-      </div>
+        </div>
+      {/if}
     {/if}
     {#if processGroupForUserItemIndex(index)}
       {@const group = processGroupForUserItemIndex(index)}
@@ -1650,7 +1694,7 @@
     padding: 42px 32px 12px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     background: transparent;
     scrollbar-width: none;
     /* Use explicit scroll restoration instead of browser anchoring. */
@@ -2479,7 +2523,7 @@
   @media (max-width: 900px) {
     .chat-transcript {
       padding: 42px 16px 48px;
-      gap: 6px;
+      gap: 0;
     }
 
     .scroll-bottom-overlay {

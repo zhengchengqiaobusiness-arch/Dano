@@ -4,6 +4,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import ChatTranscript from "./ChatTranscript.svelte";
 import chatTranscriptSource from "./ChatTranscript.svelte?raw";
+import activityRowSource from "./ToolActivityRow.svelte?raw";
 
 vi.mock("../composables/bridgeStore.svelte", () => ({
   abortGeneration: vi.fn(),
@@ -163,6 +164,7 @@ describe("ChatTranscript Activity Trail", () => {
     try {
       await tick();
       expect(target.querySelectorAll(".tool-activity")).toHaveLength(1);
+      expect(target.querySelectorAll(".message-row.assistant")).toHaveLength(1);
       expect(target.textContent).toContain("正在查阅 2 项资料");
       expect(target.textContent).not.toContain("已查阅资料");
       expect(target.textContent).not.toContain("继续核对");
@@ -396,5 +398,10 @@ describe("ChatTranscript Activity Trail", () => {
       await unmount(component);
       target.remove();
     }
+  });
+
+  it("removes the transcript row gap while preserving activity hit areas", () => {
+    expect(chatTranscriptSource).toContain("gap: 0;");
+    expect(activityRowSource).toContain("min-height: 36px;");
   });
 });
