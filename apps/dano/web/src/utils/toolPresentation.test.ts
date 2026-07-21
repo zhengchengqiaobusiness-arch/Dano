@@ -95,7 +95,7 @@ describe("Activity Trail presentation", () => {
       sourceKeys: activity.sourceKeys,
     }))).toEqual([
       {
-        label: "已查阅 2 项资料",
+        label: "已查阅资料 2 次",
         count: 2,
         sourceKeys: ["read-1", "read-2"],
       },
@@ -161,7 +161,7 @@ describe("Activity Trail presentation", () => {
         block: toolBlock("bash", "success", {
           toolArgs: {
             command:
-              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret 2>&1 && /bin/ls -la /private/company',
+              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret 2>&1 && /bin/ls -la /private/company\n/usr/bin/pwd & /usr/bin/whoami',
           },
           resultText: "secret output",
         }),
@@ -171,6 +171,8 @@ describe("Activity Trail presentation", () => {
     expect(activities[0]?.details).toEqual([
       "执行了 python3 命令",
       "执行了 ls 命令",
+      "执行了 pwd 命令",
+      "执行了 whoami 命令",
     ]);
     expect(JSON.stringify(activities)).not.toContain("/usr/bin");
     expect(JSON.stringify(activities)).not.toContain("/private/company");
@@ -200,7 +202,7 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.label).toBe("已查阅 3 项资料");
+    expect(activities[0]?.label).toBe("已查阅资料 3 次");
     expect(activities[0]?.details).toEqual([
       "dano_call.py",
       "dano_call.py",

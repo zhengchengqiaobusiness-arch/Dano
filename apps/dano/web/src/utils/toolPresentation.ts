@@ -192,7 +192,7 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
 
   if (block.toolName === "bash") {
     const command = stringField(asRecord(block.toolArgs), "command");
-    return command ? safeBashCommandNames(command).map(
+    return command ? safeBashExecutableNames(command).map(
       name => `执行了 ${name} 命令`,
     ) : [];
   }
@@ -200,8 +200,8 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
   return [];
 }
 
-function safeBashCommandNames(command: string): string[] {
-  return shellCommandSegments(command).flatMap(segment => {
+function safeBashExecutableNames(command: string): string[] {
+  return safeShellCommandSegments(command).flatMap(segment => {
     const executable = firstShellWord(segment);
     if (!executable || executable.includes("$")) return [];
     const name = safeBaseName(executable);
@@ -209,11 +209,14 @@ function safeBashCommandNames(command: string): string[] {
   });
 }
 
-function shellCommandSegments(command: string): string[] {
+// This intentionally recognizes only top-level separators. It extracts the
+// executable token and fails closed for shell syntax that could expose source.
+function safeShellCommandSegments(command: string): string[] {
   const segments: string[] = [];
   let start = 0;
   let quote = "";
   let escaped = false;
+  let suppressNewlineBoundaries = false;
 
   for (let index = 0; index < command.length; index += 1) {
     const character = command[index]!;
@@ -233,8 +236,16 @@ function shellCommandSegments(command: string): string[] {
       quote = character;
       continue;
     }
+    if (character === "<" && command[index + 1] === "<") {
+      suppressNewlineBoundaries = true;
+      continue;
+    }
+    const isRedirectAmpersand = character === "&" &&
+      (command[index - 1] === ">" || command[index - 1] === "<" ||
+        command[index + 1] === ">");
     const isBoundary = character === ";" || character === "|" ||
-      (character === "&" && command[index + 1] === "&");
+      (character === "\n" && !suppressNewlineBoundaries) ||
+      (character === "&" && !isRedirectAmpersand);
     if (!isBoundary) continue;
     const segment = command.slice(start, index).trim();
     if (segment) segments.push(segment);
