@@ -88,22 +88,6 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
   from feature components; low-level primitive imports belong only inside the
   shadcn component wrappers under `components/ui`.
 
-## Tool activity presentation
-
-- Every new non-interactive tool must define user-facing Activity Trail copy for
-  its pending, completed, and failed states. Until that copy exists, use the
-  generic task-processing fallback and never expose the raw tool name.
-- Treat the collapsed summary and expanded details as user-facing product UI.
-  Do not expose complete paths or URLs, commands, scripts, code, raw output, or
-  other implementation details during normal tool activity. For an unresolved
-  failure that has no reliable user-facing explanation, keep the collapsed row
-  non-technical and allow the expanded details to show the original failure
-  information instead of inventing a classification.
-- Keep tools that require user input, such as `ask_user_question`, in their
-  dedicated interactive presentation. Their unresolved invocation failures may
-  use the Activity Trail with the tool's matching icon and user-facing failure
-  copy; hide transient failures after a successful retry.
-
 ## GitHub Workflow
 
 - Run every `gh` command outside the sandbox with escalated permissions, using

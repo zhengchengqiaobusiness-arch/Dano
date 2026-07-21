@@ -17,6 +17,10 @@ const deployScript = new URL(
   "../../../../../scripts/deploy-compose.mjs",
   import.meta.url,
 ).pathname;
+const localContainerScript = new URL(
+  "../../../../../scripts/local-container.mjs",
+  import.meta.url,
+).pathname;
 const releaseScript = new URL(
   "../../../../../scripts/deploy-release.mjs",
   import.meta.url,
@@ -274,6 +278,53 @@ afterEach(() => {
 });
 
 describe("deploy compose wrapper", () => {
+  it("uses stable local Podman paths and port", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "dano-local-container-test-"));
+    tempDirs.push(cwd);
+    const fakeBin = join(cwd, "bin");
+    const logPath = join(cwd, "podman.json");
+    mkdirSync(fakeBin);
+    writeFileSync(
+      join(fakeBin, "podman"),
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
+  args: process.argv.slice(2),
+  runtimeDir: process.env.DANO_RUNTIME_DIR,
+  secretsDir: process.env.DANO_SECRETS_DIR,
+  port: process.env.DANO_NGINX_PORT,
+}));
+`,
+    );
+    chmodSync(join(fakeBin, "podman"), 0o755);
+
+    execFileSync(process.execPath, [localContainerScript, "up"], {
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        TMPDIR: cwd,
+        DANO_IMAGE: "",
+        DANO_LOCAL_CONTAINER_LOG: logPath,
+      },
+    });
+
+    expect(JSON.parse(readFileSync(logPath, "utf8"))).toMatchObject({
+      args: [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "deploy/compose/http.yml",
+        "up",
+        "-d",
+        "--no-build",
+      ],
+      runtimeDir: join(cwd, "dano-local-container/runtime"),
+      secretsDir: join(cwd, "dano-local-container/secrets"),
+      port: "18082",
+    });
+  });
+
   it("starts without building when no image is provided", () => {
     expect(run("up")).toEqual([
       [

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSkillActivity,
   buildToolActivities,
@@ -22,6 +22,10 @@ function toolBlock(
 }
 
 describe("Activity Trail presentation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("falls back to count-free copy for invalid activity counts", () => {
     expect(toolActivityLabel("read", "success", 0)).toBe("已查阅资料");
     expect(toolActivityLabel("read", "success", Number.NaN)).toBe("已查阅资料");
@@ -147,11 +151,190 @@ describe("Activity Trail presentation", () => {
       ["采购合同.pdf"],
       ["修改建议.docx"],
       ["records.example.com"],
-      [],
+      ["执行了 cat 命令"],
       [],
     ]);
     expect(JSON.stringify(activities)).not.toContain("/private/company");
     expect(JSON.stringify(activities)).not.toContain("secret");
+  });
+
+  it("shows bash executable names without paths or arguments", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-1",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command:
+              'PATH=/bin "/opt/My Tools/python3" /private/company/dano_call.py --token secret && /bin/ls -la /private/company | /usr/bin/pwd & /usr/bin/whoami',
+          },
+          resultText: "secret output",
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 python3 命令",
+      "执行了 ls 命令",
+      "执行了 pwd 命令",
+      "执行了 whoami 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("/usr/bin");
+    expect(JSON.stringify(activities)).not.toContain("/private/company");
+    expect(JSON.stringify(activities)).not.toContain("--token");
+    expect(JSON.stringify(activities)).not.toContain("secret");
+  });
+
+  it("extracts commands from successfully parsed Bash syntax", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-ast",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: [
+              "if /bin/test -f x; then",
+              "  cat <<'EOF'",
+              "  not-a-command; /private/company/secret.sh --token secret",
+              "EOF",
+              "else",
+              "  ! /bin/ls | /usr/bin/pwd",
+              "fi",
+            ].join("\n"),
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 test 命令",
+      "执行了 cat 命令",
+      "执行了 ls 命令",
+      "执行了 pwd 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("secret.sh");
+    expect(JSON.stringify(activities)).not.toContain("--token");
+  });
+
+  it("extracts available command nodes without exposing arguments", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-nested",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "/bin/cat <(private-helper --secret value)" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 cat 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("--secret");
+    expect(JSON.stringify(activities)).not.toContain("value");
+  });
+
+  it("uses a generic detail when Bash cannot be parsed or has no static command name", () => {
+    const dynamicActivities = buildToolActivities([
+      {
+        key: "bash-dynamic",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "$PRIVATE_COMMAND --token secret" },
+        }),
+      },
+    ]);
+    const invalidActivities = buildToolActivities([
+      {
+        key: "bash-invalid",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "if /private/company/secret-tool; then" },
+        }),
+      },
+    ]);
+    const missingActivities = buildToolActivities([
+      {
+        key: "bash-missing",
+        block: toolBlock("bash", "success"),
+      },
+    ]);
+
+    expect(dynamicActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(invalidActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(missingActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(JSON.stringify(dynamicActivities)).not.toContain("PRIVATE_COMMAND");
+    expect(JSON.stringify(dynamicActivities)).not.toContain("--token");
+    expect(JSON.stringify(invalidActivities)).not.toContain("secret-tool");
+  });
+
+  it("localizes bash activity details", () => {
+    vi.stubGlobal("window", { __PI_WEB_CONFIG__: { locale: "en-US" } });
+
+    const activities = buildToolActivities([
+      {
+        key: "bash-en",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "/bin/ls -la" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual(["Ran ls command"]);
+
+    const scriptActivities = buildToolActivities([
+      {
+        key: "bash-en-script",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "if /bin/test -f x; then /bin/ls; fi" },
+        }),
+      },
+    ]);
+    expect(scriptActivities[0]?.details).toEqual([
+      "Ran test command",
+      "Ran ls command",
+    ]);
+  });
+
+  it("keeps one safe detail per repeated read invocation", () => {
+    const activities = buildToolActivities([
+      {
+        key: "read-1",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/one/dano_call.py" },
+        }),
+      },
+      {
+        key: "read-2",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/two/dano_call.py" },
+        }),
+      },
+      {
+        key: "read-3",
+        block: toolBlock("read", "success", {
+          toolArgs: { path: "/private/three/dano_call.py" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.label).toBe("已查阅 3 项资料");
+    expect(activities[0]?.details).toEqual([
+      "dano_call.py",
+      "dano_call.py",
+      "dano_call.py",
+    ]);
+
+    const externalActivities = buildToolActivities([
+      {
+        key: "curl-1",
+        block: toolBlock("curl", "success", {
+          toolArgs: { url: "https://example.com/one" },
+        }),
+      },
+      {
+        key: "curl-2",
+        block: toolBlock("curl", "success", {
+          toolArgs: { url: "https://example.com/two" },
+        }),
+      },
+    ]);
+    expect(externalActivities[0]?.details).toEqual(["example.com"]);
   });
 
   it("caps detail names at five while preserving known-tool images", () => {

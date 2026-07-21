@@ -1,5 +1,6 @@
 import { t } from "../i18n";
 import type { ImageContentBlock, ToolContentBlock } from "./transcript";
+import { safeBashCommandSummary } from "./safeShellPresentation";
 import { classifyReadToolBlock } from "./toolBlock";
 
 export type ToolActivityKind =
@@ -74,10 +75,11 @@ export function buildToolActivities(
     ) {
       previous.sourceKeys.push(source.key);
       previous.count += 1;
-      previous.details = uniqueStrings([
+      const details = [
         ...previous.details,
         ...safeToolActivityDetails(source.block),
-      ]);
+      ];
+      previous.details = kind === "read" ? details : uniqueStrings(details);
       previous.images = uniqueImages([
         ...previous.images,
         ...safeToolActivityImages(source.block),
@@ -188,6 +190,17 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
       ...stringValues(args?.url),
     ];
     return uniqueStrings(candidates.flatMap(safeUrlHostname));
+  }
+
+  if (block.toolName === "bash") {
+    const command = stringField(asRecord(block.toolArgs), "command");
+    if (!command) return [t("chatTranscript.activity.process.scriptDetail")];
+    const summary = safeBashCommandSummary(command);
+    return summary.kind === "commands"
+      ? summary.executableNames.map(
+          name => t("chatTranscript.activity.process.detail", { name }),
+        )
+      : [t("chatTranscript.activity.process.scriptDetail")];
   }
 
   return [];

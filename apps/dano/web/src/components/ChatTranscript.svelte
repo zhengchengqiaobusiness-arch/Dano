@@ -685,6 +685,48 @@
     return blocks.slice(group.finalAnswerBlockIndex);
   }
 
+  type ProjectedContentBlock = {
+    block: ContentBlock;
+    blockIndex: number;
+    activity?: ToolActivity;
+  };
+
+  function projectedContentBlocks(
+    item: TranscriptMessageDisplayItem,
+    itemIndex: number,
+  ): ProjectedContentBlock[] {
+    const blocks = visibleContentBlocks(item, itemIndex);
+    return blocks.flatMap((block, blockIndex): ProjectedContentBlock[] => {
+      if (
+        block.kind === "thinking" &&
+        !isStreamingThinkingBlock(
+          isMessageThinkingActive(item.message, item.messageIndex),
+          blocks,
+          blockIndex,
+        )
+      ) return [];
+      if (block.kind === "text" && !block.text) return [];
+      if (block.kind !== "tool") return [{ block, blockIndex }];
+      if (askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)) {
+        return [{ block, blockIndex }];
+      }
+      const key = toolBlockStateKey(
+        item.message,
+        item.messageIndex,
+        block,
+        blockIndex,
+      );
+      const activity = toolActivityProjection.bySourceKey.get(key);
+      return activity && toolActivityProjection.firstSourceKeys.has(key)
+        ? [{ block, blockIndex, activity }]
+        : [];
+    });
+  }
+
+  function isActivityTrailOnly(blocks: ProjectedContentBlock[]): boolean {
+    return blocks.length > 0 && blocks.every(({ activity }) => Boolean(activity));
+  }
+
   function processSummaryLabel(group: TranscriptProcessGroup): string {
     const duration = formatTranscriptDuration(group.durationMs);
     return duration
@@ -1417,13 +1459,15 @@
         </div>
       </div>
     {:else if shouldRenderDisplayItemAt(index)}
-      {@const blocks = visibleContentBlocks(item, index)}
-      <div
-        class="message-row {roleClass(item.message.role)}"
-        data-message-id={item.message.id ?? undefined}
-        data-tree-entry-id={item.message.id ?? undefined}
-        transition:slide={transcriptRevealTransition}
-      >
+      {@const projectedBlocks = projectedContentBlocks(item, index)}
+      {#if showMessageIds || canCopyMessage(item.message) || canReviseMessage(item.message) || projectedBlocks.length > 0}
+        <div
+          class="message-row {roleClass(item.message.role)}"
+          class:activity-trail-row={isActivityTrailOnly(projectedBlocks)}
+          data-message-id={item.message.id ?? undefined}
+          data-tree-entry-id={item.message.id ?? undefined}
+          transition:slide={transcriptRevealTransition}
+        >
         <div class="message-stack {roleClass(item.message.role)}">
           <div
             class="message-content {roleClass(item.message.role)}"
@@ -1433,7 +1477,9 @@
               <div class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</div>
             {/if}
 
-            {#each blocks as block, bIdx (contentBlockKey(item.message, item.messageIndex, block, bIdx))}
+            {#each projectedBlocks as projected (contentBlockKey(item.message, item.messageIndex, projected.block, projected.blockIndex))}
+              {@const block = projected.block}
+              {@const bIdx = projected.blockIndex}
               {#if block.kind === "system"}
                 <article class="system-block" data-system-type={block.systemType}>
                   <div class="system-block-header">
@@ -1451,7 +1497,7 @@
                     />
                   {/if}
                 </article>
-              {:else if block.kind === "thinking" && isStreamingThinkingBlock(isMessageThinkingActive(item.message, item.messageIndex), blocks, bIdx)}
+              {:else if block.kind === "thinking"}
                 <div class="thinking-block">
                   <div class="thinking-stream-line">
                     <span class="thinking-stream-icon" aria-hidden="true">
@@ -1464,16 +1510,14 @@
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
                   <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onCancelRevision={cancelQuestionRevision} onSubmitRevision={submitQuestionRevision} onFocusChange={onQuestionFocusChange} {onFieldAssist} />
                 {:else}
-                  {@const activityKey = toolBlockStateKey(item.message, item.messageIndex, block, bIdx)}
-                  {@const activity = toolActivityProjection.bySourceKey.get(activityKey)}
-                  {#if activity && toolActivityProjection.firstSourceKeys.has(activityKey)}
+                  {#if projected.activity}
                     <ToolActivityRow
-                      {activity}
+                      activity={projected.activity}
                       treeEntryId={block.resultSourceMessageId}
-                      expanded={blockState.isToolBlockExpanded(activity.key)}
-                      active={activity.key === toolActivityProjection.activeKey && isStreaming && !initialLoading}
-                      onToggle={() => blockState.toggleToolBlock(activity.key)}
-                      onOpenImage={(imageIndex) => lightbox.openImageLightbox(activity.images, imageIndex)}
+                      expanded={blockState.isToolBlockExpanded(projected.activity.key)}
+                      active={projected.activity.key === toolActivityProjection.activeKey && isStreaming && !initialLoading}
+                      onToggle={() => blockState.toggleToolBlock(projected.activity!.key)}
+                      onOpenImage={(imageIndex) => lightbox.openImageLightbox(projected.activity!.images, imageIndex)}
                     />
                   {/if}
                 {/if}
@@ -1565,7 +1609,8 @@
             </div>
           {/if}
         </div>
-      </div>
+        </div>
+      {/if}
     {/if}
     {#if processGroupForUserItemIndex(index)}
       {@const group = processGroupForUserItemIndex(index)}
@@ -1643,6 +1688,7 @@
 
 <style>
   .chat-transcript {
+    --transcript-row-gap: 8px;
     position: relative;
     flex: 1;
     min-height: 0;
@@ -1650,7 +1696,7 @@
     padding: 42px 32px 12px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--transcript-row-gap);
     background: transparent;
     scrollbar-width: none;
     /* Use explicit scroll restoration instead of browser anchoring. */
@@ -1658,6 +1704,10 @@
   }
 
   .chat-transcript::-webkit-scrollbar { display: none; }
+
+  .message-row.activity-trail-row + .message-row.activity-trail-row {
+    margin-top: calc(-1 * var(--transcript-row-gap));
+  }
 
   .scroll-bottom-overlay {
     position: sticky;
@@ -2478,8 +2528,8 @@
 
   @media (max-width: 900px) {
     .chat-transcript {
+      --transcript-row-gap: 6px;
       padding: 42px 16px 48px;
-      gap: 6px;
     }
 
     .scroll-bottom-overlay {

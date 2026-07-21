@@ -4,6 +4,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import ChatTranscript from "./ChatTranscript.svelte";
 import chatTranscriptSource from "./ChatTranscript.svelte?raw";
+import activityRowSource from "./ToolActivityRow.svelte?raw";
 
 vi.mock("../composables/bridgeStore.svelte", () => ({
   abortGeneration: vi.fn(),
@@ -163,9 +164,62 @@ describe("ChatTranscript Activity Trail", () => {
     try {
       await tick();
       expect(target.querySelectorAll(".tool-activity")).toHaveLength(1);
+      expect(target.querySelectorAll(".message-row.assistant")).toHaveLength(1);
       expect(target.textContent).toContain("正在查阅 2 项资料");
       expect(target.textContent).not.toContain("已查阅资料");
       expect(target.textContent).not.toContain("继续核对");
+    } finally {
+      await unmount(component);
+      target.remove();
+    }
+  });
+
+  it("marks only activity-only message rows for zero-gap layout", async () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const component = mount(ChatTranscript, {
+      target,
+      props: {
+        messages: [
+          { id: "user-1", role: "user", content: "review" },
+          {
+            id: "assistant-read",
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "read-1",
+                name: "read",
+                arguments: { path: "/private/docs/合同.pdf" },
+              },
+              { type: "toolResult", text: "done", sourceMessageId: "result-read" },
+            ],
+          },
+          {
+            id: "assistant-bash",
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "bash-1",
+                name: "bash",
+                arguments: { command: "/bin/ls -la /private/docs" },
+              },
+              { type: "toolResult", text: "done", sourceMessageId: "result-bash" },
+            ],
+          },
+          { id: "assistant-text", role: "assistant", content: "完成。" },
+        ] as never,
+      },
+    });
+
+    try {
+      await tick();
+      const rows = [...target.querySelectorAll(".message-row.assistant")];
+      expect(rows).toHaveLength(3);
+      expect(rows[0]?.classList.contains("activity-trail-row")).toBe(true);
+      expect(rows[1]?.classList.contains("activity-trail-row")).toBe(true);
+      expect(rows[2]?.classList.contains("activity-trail-row")).toBe(false);
     } finally {
       await unmount(component);
       target.remove();
@@ -396,5 +450,14 @@ describe("ChatTranscript Activity Trail", () => {
       await unmount(component);
       target.remove();
     }
+  });
+
+  it("removes only adjacent activity row gaps while preserving conversation spacing and hit areas", () => {
+    expect(chatTranscriptSource).toContain("--transcript-row-gap: 8px;");
+    expect(chatTranscriptSource).toContain("gap: var(--transcript-row-gap);");
+    expect(chatTranscriptSource).toContain(
+      ".message-row.activity-trail-row + .message-row.activity-trail-row",
+    );
+    expect(activityRowSource).toContain("min-height: 36px;");
   });
 });
