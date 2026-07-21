@@ -6411,6 +6411,33 @@ def test_repeated_option_field_reuses_complete_sibling_contract_when_facts_are_t
     assert second.enum_value_map == {"财务A": 145, "姜楠": 144}
 
 
+def test_repeated_option_field_repairs_the_earlier_sibling_from_a_later_grounded_binding():
+    first = ParamField(
+        path="approvers.Activity_first[0]", key="审批人1", value=148,
+        type="number", wire_type="number", category="user_param", source_kind="user_input",
+    )
+    second = ParamField(
+        path="approvers.Activity_second[0]", key="审批人2", value=145,
+        type="enum", wire_type="number", category="user_param", source_kind="api_option",
+        source={"kind": "api_option", "source_url": "/api/users", "source_request_id": "users"},
+        enum_options=[{"label": "城城", "value": 148}, {"label": "财务A", "value": 145}],
+        enum_value_map={"城城": 148, "财务A": 145},
+    )
+    step = FlowStep(
+        step_id="submit", method="POST", path="/api/submit", params=[first, second],
+        selects=[SelectBinding(
+            param="审批人2", path=second.path, id_path=second.path,
+            source_url="/api/users", value_key="id", label_key="username",
+            options=second.enum_options, option_map=second.enum_value_map,
+            enum_source="api", enum_confirmed=True,
+        )],
+    )
+
+    assert flow_spec_module._repair_structural_option_bindings(FlowSpec(steps=[step])) == 1
+    assert first.source_kind == "api_option"
+    assert first.enum_value_map == {"城城": 148, "财务A": 145}
+
+
 @pytest.mark.parametrize(("control_kind", "wire_type"), [
     ("text", "string"), ("textarea", "string"), ("rich_text", "string"),
     ("number", "number"), ("slider", "number"),

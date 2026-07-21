@@ -188,6 +188,7 @@ class RecordingPiSession:
         self._analysis_images: list[dict[str, str]] = []
         self._active_analysis_image_count = 0
         self.last_submission_kind = ""
+        self.last_submission_warning = ""
         self.last_review: dict[str, Any] = {}
         self._on_submission_accepted = on_submission_accepted
 
@@ -322,6 +323,7 @@ class RecordingPiSession:
         self.flow_spec = spec.model_copy(deep=True)
         self._analysis_images = []
         self.last_submission_kind = ""
+        self.last_submission_warning = ""
         # A review is evidence for one exact FlowSpec version. Any subsequent
         # bind invalidates it, including a user edit that happens to reuse the
         # same websocket and Pi conversation.
@@ -404,6 +406,32 @@ class RecordingPiSession:
                 # not a best-effort action after the Pi prompt response.
                 self._on_submission_accepted(updated.model_copy(deep=True), mode)
             return recording_agent_validation(updated)
+
+    async def accept_unchanged_plan(
+        self,
+        *,
+        base_flow_version: int,
+        warning: str,
+    ) -> dict[str, Any]:
+        """Finish a screenshot turn that has no safely grounded field edits."""
+        from dano.execution.page.flow_spec import recording_agent_validation
+
+        async with self._state_lock:
+            current = self.current_flow_spec()
+            actual_version = int((current.meta or {}).get("current_version") or 0)
+            if int(base_flow_version) != actual_version:
+                raise RecordingPiError(
+                    f"录制版本冲突: base={base_flow_version}, current={actual_version}; 请重新读取状态"
+                )
+            self.last_submission_kind = "plan"
+            self.last_submission_warning = warning
+            self.last_review = {}
+            return {
+                **recording_agent_validation(current),
+                "accepted": True,
+                "unchanged": True,
+                "warning": warning,
+            }
 
     async def submit_review(self, review: dict[str, Any], *, base_flow_version: int) -> dict[str, Any]:
         async with self._state_lock:

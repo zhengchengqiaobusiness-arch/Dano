@@ -5131,11 +5131,19 @@ def _merge_flow_read_sources(explicit_reads: list[dict], captured_requests: list
             source=r,
         )
     for sequence, (req, role) in enumerate(zip(captured_requests or [], request_roles or [])):
-        if role.get("role") not in {"read_option", "read_context", "business_get"}:
+        payload = req.get("response_json", req.get("json"))
+        is_reference_read = (
+            str(req.get("method") or "GET").upper() in {"GET", "HEAD"}
+            and _list_payload_has_reference_contract(payload)
+        )
+        if (
+            role.get("role") not in {"read_option", "read_context", "business_get"}
+            and not is_reference_read
+        ):
             continue
         add(
             req.get("url") or "",
-            req.get("response_json", req.get("json")),
+            payload,
             role=str(role.get("role") or ""),
             source=req,
             sequence=sequence,

@@ -1056,7 +1056,7 @@ def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
         name_subs = [k for k in e0 if isinstance(e0.get(k), str) and e0.get(k).strip() and not _is_idlike(k)]
         if not id_subs or not name_subs:                 # 非"实体多选"(无 id 子键或无文字子键)→ 跳过
             continue
-        best = None                                      # (命中数, url, value_key, sub, items, item_by_val, matched)
+        candidates = []
         for r in reads or []:
             items = as_list_payload(r.get("json"))
             if not items or not isinstance(items[0], dict):
@@ -1066,13 +1066,46 @@ def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
                 for vk in item_idks:
                     by_val = {str(it.get(vk)): it for it in items if isinstance(it, dict) and it.get(vk) is not None}
                     matched = [e for e in elems if str(e.get(sub)) in by_val]
-                    if matched and (best is None or len(matched) > best[0]):
-                        best = (len(matched), r.get("url"), vk, sub, items, by_val, matched)
-        if not best:
+                    if not matched:
+                        continue
+                    label_scores: list[tuple[int, str]] = []
+                    for label_key in items[0]:
+                        if label_key == vk:
+                            continue
+                        score = sum(
+                            1
+                            for element in matched
+                            for name_key in name_subs
+                            if str(element.get(name_key) or "").strip()
+                            and str(element.get(name_key))
+                            == str(by_val[str(element.get(sub))].get(label_key))
+                        )
+                        if score:
+                            label_scores.append((score, label_key))
+                    # An equal identifier is not enough: unrelated lists often
+                    # reuse small numeric IDs. The submitted entity name must
+                    # agree with the same response row before this source can
+                    # own the whole object array.
+                    if not label_scores:
+                        continue
+                    name_score, label_key = max(label_scores, key=lambda item: (item[0], item[1]))
+                    candidates.append((
+                        len(matched), name_score, str(r.get("url") or ""),
+                        vk, label_key, sub, items, by_val, matched,
+                    ))
+        if not candidates:
             continue
-        _n, src_url, vk, sub, items, by_val, matched = best
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2], item[3], item[4]))
+        best_score = candidates[0][:2]
+        best_candidates = [candidate for candidate in candidates if candidate[:2] == best_score]
+        fingerprints = {
+            (candidate[2], candidate[3], candidate[4], candidate[5])
+            for candidate in best_candidates
+        }
+        if len(fingerprints) != 1:
+            continue
+        _n, _name_n, src_url, vk, lk, sub, items, by_val, matched = candidates[0]
         e, it = matched[0], by_val[str(matched[0].get(sub))]
-        lk = _pick_label_key(it, vk)
         template: dict = {}                              # 子键 → {"from":"item","item_key":..} | {"const":..}
         for sk in e0:
             if sk == sub:

@@ -2014,7 +2014,11 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
     query.update({"page_id": "hotel-list", "frame_id": "main"})
     submit = _post(
         "https://oa.test/admin-api/oa/hotel-apply/submit-process",
-        {"applyTitle": "1", "totalAmt": 1, "roomType": 2, "useTime": 1784044800000, "remark": "1"},
+        {
+            "applyTitle": "1", "totalAmt": 1, "roomType": 2,
+            "roomCount": 1, "userCount": 1,
+            "useTime": 1784044800000, "remark": "1",
+        },
         resp={"code": 0, "data": True},
     )
     submit.update({"page_id": "hotel-form", "frame_id": "main"})
@@ -2024,6 +2028,8 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
         {"page_id": "hotel-form", "frame_id": "main", "label": "申请标题", "value": "1", "field_aliases": ["applyTitle"], "control_kind": "text"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "预计金额", "value": "1", "field_aliases": ["totalAmt"], "control_kind": "number"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "房间类型", "value": "大床房", "field_aliases": ["roomType"], "control_kind": "select"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "房间数量", "value": "1", "field_aliases": ["roomCount"], "control_kind": "number"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "入住人数", "value": "1", "field_aliases": ["userCount"], "control_kind": "number"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "入住时间", "value": "2026-07-14 00:00:00", "field_aliases": ["useTime"], "control_kind": "datetime"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "备注", "value": "1", "field_aliases": ["remark"], "control_kind": "textarea"},
     ]
@@ -2041,8 +2047,8 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
             "options": [{"label": "双床房", "value": 1}, {"label": "大床房", "value": 2}],
         },
     }
-    unrelated = [{"url": "/admin-api/system/dict-data/simple-list", "json": {"data": [
-        {"label": "歌词模式", "value": 1}, {"label": "描述模式", "value": 2},
+    unrelated = [{"url": "/admin-api/system/tenant/simple-list", "json": {"data": [
+        {"id": 1, "name": "点新信息"}, {"id": 2, "name": "小租户"},
     ]}}]
 
     spec = to_flow_spec(
@@ -2057,12 +2063,67 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
     assert (params["applyTitle"].key, params["applyTitle"].type, params["applyTitle"].source_kind) == ("申请标题", "string", "user_input")
     assert (params["totalAmt"].key, params["totalAmt"].type, params["totalAmt"].source_kind) == ("预计金额", "number", "user_input")
     assert (params["roomType"].key, params["roomType"].type, params["roomType"].source_kind) == ("房间类型", "enum", "page_enum")
+    assert (params["roomCount"].key, params["roomCount"].type, params["roomCount"].source_kind) == ("房间数量", "number", "user_input")
+    assert (params["userCount"].key, params["userCount"].type, params["userCount"].source_kind) == ("入住人数", "number", "user_input")
     assert (params["useTime"].key, params["useTime"].type, params["useTime"].source_kind) == ("入住时间", "datetime", "user_input")
     assert (params["remark"].key, params["remark"].type, params["remark"].source_kind) == ("备注", "string", "user_input")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_meeting_participants_are_one_interface_backed_entity_list_even_when_read_role_was_missed():
+    user_read = _get("https://oa/admin-api/system/user/page?pageNo=1&pageSize=10", {
+        "data": {"list": [
+            {"id": 148, "username": "chengchengzhang", "avatar": ""},
+            {"id": 149, "username": "hunk", "avatar": ""},
+        ]},
+    })
+    user_read["_request_role"] = {
+        "role": "noise", "keep": False, "reason": "classifier missed source",
+        "confidence": 0.4,
+    }
+    submit = _post("https://oa/admin-api/oa/meetingroom-apply/create", {
+        "meetingTitle": "1",
+        "organizer": "2",
+        "userCount": 3,
+        "meetingDes": "<p>5</p>",
+        "remark": "6",
+        "billType": "oa_meetingroom_apply",
+        "meetingroomId": "b478b328de5d8c351bb528dea4946e77",
+        "meetingroomName": "205会议室",
+        "participants": [{
+            "userId": 148,
+            "userName": "chengchengzhang",
+            "userAvatar": "",
+            "participantType": 2,
+        }],
+        "processDefKey": "oa_meetingroom_apply",
+        "timeRangeList": ["06:30-07:00"],
+        "timeSlot": "06:30 - 07:00",
+        "useDate": "2026-07-21",
+    }, resp={"code": 0})
+    submit["_request_role"] = {
+        "role": "business_write", "keep": True, "reason": "meeting submit",
+        "confidence": 0.99,
+    }
+
+    spec = to_flow_spec(
+        [user_read, submit],
+        samples={"参会人": "chengchengzhang", "会议主题": "1"},
+    )
+    write_step = next(step for step in spec.steps if step.method == "POST")
+    by_path = {param.path: param for param in write_step.params}
+
+    assert "participants" in by_path
+    assert not any(path.startswith("participants[") for path in by_path)
+    participants = by_path["participants"]
+    assert participants.type == "list-enum"
+    assert participants.source_kind == "api_option"
+    binding = next(item for item in write_step.selects if item.path == "participants")
+    assert binding.source_url.endswith("/admin-api/system/user/page?pageNo=1&pageSize=10")
+    assert (binding.value_key, binding.label_key) == ("id", "username")
 
 
 def test_timesheet_field_ownership_and_selected_project_projections():

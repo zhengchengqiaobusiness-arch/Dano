@@ -1602,6 +1602,14 @@ async def record_ws(ws: WebSocket) -> None:
                         delivered_image_count=delivered_image_count,
                         operation_id=msg.get("operation_id"),
                     )
+                    operation_warning = str(
+                        getattr(pi_session, "last_submission_warning", "") if pi_session else ""
+                    )
+                    if operation_warning:
+                        analysis_application.update({
+                            "status": "needs_review",
+                            "summary": operation_warning,
+                        })
                     log.info(
                         "recording.analysis_application",
                         status=analysis_application.get("status"),
@@ -1622,6 +1630,7 @@ async def record_ws(ws: WebSocket) -> None:
                         **_recording_flow_projection(pending_flow_spec),
                         "operation_report": operation_report,
                         "analysis_application": analysis_application,
+                        **({"operation_warning": operation_warning} if operation_warning else {}),
                         **({"pi_session": pi_session.descriptor} if pi_session else {}),
                         "analysis_evidence": {
                             "screenshot_count": len(analysis_screenshots),

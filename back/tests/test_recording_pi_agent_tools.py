@@ -195,6 +195,19 @@ class _Session:
         self.last_review = {}
         return flow_module.recording_agent_validation(self.spec)
 
+    async def accept_unchanged_plan(self, *, base_flow_version, warning):
+        current = int((self.spec.meta or {}).get("current_version") or 0)
+        if base_flow_version != current:
+            raise RuntimeError("录制版本冲突")
+        self.last_submission_kind = "plan"
+        self.last_submission_warning = warning
+        return {
+            **flow_module.recording_agent_validation(self.spec),
+            "accepted": True,
+            "unchanged": True,
+            "warning": warning,
+        }
+
     async def submit_review(self, review, *, base_flow_version):
         current = int((self.spec.meta or {}).get("current_version") or 0)
         if base_flow_version != current:
@@ -1529,6 +1542,71 @@ def test_screenshot_field_does_not_guess_between_duplicate_recorded_labels():
 
     with pytest.raises(ToolError, match="未匹配到任何真实接口字段"):
         agent_tools_module._normalize_recording_plan_submission(plan, spec)
+
+
+def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/hotel/apply",
+            source_meta={"role": "business_write"},
+            params=[ParamField(path="roomCount", key="roomCount", label="roomCount")],
+        )],
+        meta={"field_evidence": [{
+            "field_aliases": ["roomCount"],
+            "label": "房间数量",
+            "control_kind": "number",
+        }]},
+    )
+    plan = _screenshot_match_plan([{
+        "public_name": "房间数量", "business_type": "number",
+        "category": "user_param", "source_kind": "user_input",
+        "required": True, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "hotel.png",
+            "visible_label": "房间数量", "control_kind": "number", "editable": True,
+        }],
+    }])
+
+    field = agent_tools_module._normalize_recording_plan_submission(
+        plan, spec,
+    )["semantic_plan"]["field_semantics"][0]
+
+    assert (field["step_id"], field["wire_path"]) == ("submit", "roomCount")
+    assert field["public_name"] == "房间数量"
+
+
+@pytest.mark.asyncio
+async def test_unmatched_screenshot_submission_finishes_as_unchanged_warning(monkeypatch):
+    session = _bind(monkeypatch)
+    session.analysis_image_count = 1
+    session.spec = ensure_flow_version(FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        source_meta={"role": "business_write"},
+        params=[
+            ParamField(path="applicant.remark", key="备注", label="备注"),
+            ParamField(path="review.remark", key="备注", label="备注"),
+        ],
+    )]), "recorded", reason="test")
+    plan = _screenshot_match_plan([{
+        "public_name": "备注", "business_type": "string",
+        "category": "user_param", "source_kind": "user_input",
+        "required": False, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "备注", "control_kind": "textarea", "editable": True,
+        }],
+    }])
+
+    result = await submit_recording_plan("run-1", {
+        "recording_id": session.recording_id,
+        "base_flow_version": int(session.spec.meta["current_version"]),
+        "plan": plan,
+    })
+
+    assert result["accepted"] is True
+    assert result["unchanged"] is True
+    assert "当前配置未修改" in result["warning"]
+    assert session.last_submission_kind == "plan"
 
 
 def test_capability_memberships_use_recorded_internal_roles_not_model_execute_labels():

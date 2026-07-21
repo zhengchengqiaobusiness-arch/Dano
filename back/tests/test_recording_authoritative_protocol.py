@@ -251,6 +251,20 @@ def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
     assert "pauseFlowOperationForReconnect()" in source[close_start:close_end]
 
 
+def test_frontend_automatically_retries_local_edit_after_server_version_conflict() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    helper_start = source.index("function retryFlowMutationAfterConflict")
+    helper_end = source.index("function restoreAuthoritativeFlowSpec", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert 'messageData?.stage !== "flow_spec_conflict"' in helper
+    assert "serverFingerprintRef.current" in helper
+    assert "flowMutationQueueRef.current.unshift" in helper
+    assert "flushFlowMutationQueue()" in helper
+    error_start = source.index('else if (m.type === "error")')
+    assert "if (retryFlowMutationAfterConflict(m)) return;" in source[error_start:error_start + 300]
+
+
 def test_frontend_only_starts_flow_operation_on_connected_websocket() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 

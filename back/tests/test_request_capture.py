@@ -737,6 +737,29 @@ def test_suggest_list_selects_ignores_non_entity_arrays():
     assert suggest_list_selects(_PART_SUBMIT, []) == []                                       # 无来源可对
 
 
+def test_list_entity_source_requires_id_and_name_from_the_same_response_row():
+    submit = json.dumps({
+        "participants": [{
+            "userId": 1, "userName": "alice", "participantType": 2,
+        }],
+    })
+    unrelated = {
+        "url": "/system/tenant/simple-list",
+        "json": {"data": [{"id": 1, "name": "点新信息"}]},
+    }
+    users = {
+        "url": "/system/user/page",
+        "json": {"data": {"list": [{"id": 1, "username": "alice"}]}},
+    }
+
+    result = suggest_list_selects(submit, [unrelated, users], {"参会人": "alice"})
+
+    assert len(result) == 1
+    assert result[0]["source_url"] == "/system/user/page"
+    assert result[0]["label_key"] == "username"
+    assert suggest_list_selects(submit, [unrelated], {"参会人": "alice"}) == []
+
+
 def test_flatten_body_collapses_list_select_into_one_field():
     """列表多选接管的数组 → flatten 折叠成**一个** list-enum 字段,前端不再见 participants[0].userId… 一堆。"""
     fields = flatten_body(_PART_SUBMIT, {"参会人": "测试号02"}, collapse_paths=["participants"])

@@ -1622,7 +1622,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const queued = flowMutationQueueRef.current.shift();
     const next = { ...queued, expected_fingerprint: serverFingerprintRef.current };
     flowMutationInFlightRef.current = next;
-    const { _rollback, ...wireMessage } = next;
+    const { _rollback, _conflictRetries, ...wireMessage } = next;
     if (!sendRaw(wireMessage)) {
       next._rollback?.();
       restoreAuthoritativeFlowSpec();
@@ -1674,6 +1674,29 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
     afterFlowSyncRef.current = null;
+  }
+
+  function retryFlowMutationAfterConflict(messageData: any) {
+    const active = flowMutationInFlightRef.current;
+    if (
+      !active
+      || messageData?.operation !== "flow_update"
+      || messageData?.stage !== "flow_spec_conflict"
+      || !messageData?.flow_spec
+      || Number(active._conflictRetries || 0) >= 3
+    ) return false;
+
+    const serverSpec = withStableParamFieldIds(messageData.flow_spec);
+    authoritativeFlowSpecRef.current = serverSpec;
+    serverFingerprintRef.current = String(serverSpec.meta?.current_fingerprint || "");
+    flowMutationInFlightRef.current = null;
+    flowMutationQueueRef.current.unshift({
+      ...active,
+      _conflictRetries: Number(active._conflictRetries || 0) + 1,
+    });
+    flushFlowMutationQueue();
+    message.info("服务端版本已自动同步，正在重新应用本次修改");
+    return true;
   }
 
   function restoreAuthoritativeFlowSpec() {
@@ -2055,6 +2078,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
+        if (retryFlowMutationAfterConflict(m)) return;
         // Operation failures belong to the workbench, not the transport. Keep
         // the socket healthy so a rejected Pi proposal cannot poison reconnect.
         if (!m.operation) connectionErrorRef.current = detail;

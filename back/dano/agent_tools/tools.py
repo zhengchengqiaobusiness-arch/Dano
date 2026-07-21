@@ -1243,8 +1243,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 raise ToolError(f"截图分析的 {key} 不能为空")
     grounded = spec.model_copy(deep=True)
     rebuild_flow_dependencies(grounded)
-    if not screenshot_count:
-        _repair_structural_option_bindings(grounded)
+    _repair_structural_option_bindings(grounded)
     steps = list(getattr(grounded, "steps", None) or [])
     step_by_id = {str(step.step_id): step for step in steps}
     step_order = {str(step.step_id): index for index, step in enumerate(steps)}
@@ -1373,12 +1372,41 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     def semantic_token(value: object) -> str:
         return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
 
+    recorded_field_labels: list[tuple[set[str], set[str]]] = []
+    for item in (getattr(grounded, "meta", None) or {}).get("field_evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        aliases = {
+            semantic_token(value)
+            for value in [
+                item.get("path"), item.get("key"), item.get("field_key"),
+                *(item.get("field_aliases") or []),
+            ]
+            if semantic_token(value)
+        }
+        labels = {
+            semantic_token(item.get(key))
+            for key in ("visible_label", "label", "field_label", "suggest_name", "name")
+            if semantic_token(item.get(key))
+        }
+        if aliases and labels:
+            recorded_field_labels.append((aliases, labels))
+
     def candidate_labels(param) -> set[str]:  # noqa: ANN001
         values = {
             semantic_token(getattr(param, "key", "")),
             semantic_token(getattr(param, "label", "")),
             semantic_token(str(getattr(param, "path", "")).split(".")[-1]),
         }
+        param_aliases = {
+            semantic_token(getattr(param, "path", "")),
+            semantic_token(normalized_path(getattr(param, "path", ""))),
+            semantic_token(getattr(param, "key", "")),
+            semantic_token(str(getattr(param, "path", "")).split(".")[-1]),
+        }
+        for aliases, labels in recorded_field_labels:
+            if aliases & param_aliases:
+                values.update(labels)
         for item in getattr(param, "evidence", None) or []:
             if not isinstance(item, dict):
                 continue
@@ -1887,7 +1915,19 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             **deepcopy(raw_plan),
             "_analysis_screenshot_count": int(session.analysis_image_count),
         }
-    submission = _normalize_recording_plan_submission(raw_plan, session.current_flow_spec())
+    try:
+        submission = _normalize_recording_plan_submission(raw_plan, session.current_flow_spec())
+    except ToolError as exc:
+        screenshot_noop_errors = {
+            "截图分析未匹配到任何真实接口字段",
+            "截图分析没有提交可验证的图片字段证据",
+        }
+        if int(getattr(session, "analysis_image_count", 0) or 0) and str(exc) in screenshot_noop_errors:
+            return await session.accept_unchanged_plan(
+                base_flow_version=params["base_flow_version"],
+                warning=f"{exc}，当前配置未修改",
+            )
+        raise
     submission.setdefault("submission_id", str(uuid4()))
     return await _apply_recording_submission_atomic(
         session,

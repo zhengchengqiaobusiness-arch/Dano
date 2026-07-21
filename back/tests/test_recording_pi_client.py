@@ -578,6 +578,37 @@ async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoi
 
 
 @pytest.mark.asyncio
+async def test_unmatched_screenshot_plan_can_finish_without_mutating_or_checkpointing(
+    tmp_path,
+) -> None:
+    before = FlowSpec(
+        title="original",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        meta={"current_version": 3},
+    )
+    checkpoints: list[str] = []
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+        on_submission_accepted=lambda _spec, mode: checkpoints.append(mode),
+    )
+    client.bind_flow_spec(before)
+
+    result = await client.accept_unchanged_plan(
+        base_flow_version=3,
+        warning="截图分析未匹配到任何真实接口字段，当前配置未修改",
+    )
+
+    assert result["accepted"] is True
+    assert result["unchanged"] is True
+    assert client.current_flow_spec() == before
+    assert client.last_submission_kind == "plan"
+    assert checkpoints == []
+
+
+@pytest.mark.asyncio
 async def test_zero_command_timeout_waits_without_a_deadline(monkeypatch) -> None:  # noqa: ANN001
     client = recording_pi.RecordingPiSession(
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE,
