@@ -13,6 +13,11 @@ This project is the Dano P0 browser-only LLM chat app.
 - Model credentials and runtime secrets are server-side only. Do not expose them to the browser.
 - Conversation state is process/runtime session state only; no database is used for P0.
 
+## Implementation rules
+
+- Do not hardcode. Never complete a specific case by writing variable values,
+  decisions, or behavior directly into the implementation.
+
 ## Common Commands
 
 - Install dependencies: `pnpm install`
@@ -82,6 +87,22 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
   through `apps/dano/web/src/components/ui`. Do not import `bits-ui` directly
   from feature components; low-level primitive imports belong only inside the
   shadcn component wrappers under `components/ui`.
+
+## Tool activity presentation
+
+- Every new non-interactive tool must define user-facing Activity Trail copy for
+  its pending, completed, and failed states. Until that copy exists, use the
+  generic task-processing fallback and never expose the raw tool name.
+- Treat the collapsed summary and expanded details as user-facing product UI.
+  Do not expose complete paths or URLs, commands, scripts, code, raw output, or
+  other implementation details during normal tool activity. For an unresolved
+  failure that has no reliable user-facing explanation, keep the collapsed row
+  non-technical and allow the expanded details to show the original failure
+  information instead of inventing a classification.
+- Keep tools that require user input, such as `ask_user_question`, in their
+  dedicated interactive presentation. Their unresolved invocation failures may
+  use the Activity Trail with the tool's matching icon and user-facing failure
+  copy; hide transient failures after a successful retry.
 
 ## GitHub Workflow
 
