@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import type { ImageContentBlock, ToolContentBlock } from "./transcript";
-import { safeBashExecutableNames } from "./safeShellPresentation";
+import { safeBashCommandSummary } from "./safeShellPresentation";
 import { classifyReadToolBlock } from "./toolBlock";
 
 export type ToolActivityKind =
@@ -193,9 +193,13 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
 
   if (block.toolName === "bash") {
     const command = stringField(asRecord(block.toolArgs), "command");
-    return command ? safeBashExecutableNames(command).map(
-      name => t("chatTranscript.activity.process.detail", { name }),
-    ) : [];
+    if (!command) return [];
+    const summary = safeBashCommandSummary(command);
+    return summary.kind === "commands"
+      ? summary.executableNames.map(
+          name => t("chatTranscript.activity.process.detail", { name }),
+        )
+      : [t("chatTranscript.activity.process.scriptDetail")];
   }
 
   return [];

@@ -184,7 +184,7 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("secret");
   });
 
-  it("ignores heredoc data and resumes with commands after its delimiter", () => {
+  it("uses a generic detail for heredoc scripts without exposing their data", () => {
     const activities = buildToolActivities([
       {
         key: "bash-heredoc",
@@ -201,10 +201,7 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.details).toEqual([
-      "执行了 cat 命令",
-      "执行了 ls 命令",
-    ]);
+    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(activities)).not.toContain("secret.sh");
     expect(JSON.stringify(activities)).not.toContain("--token");
   });
@@ -232,7 +229,7 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("--token");
   });
 
-  it("skips leading redirections and reports the invoked executable", () => {
+  it("uses a generic detail for commands with leading redirections", () => {
     const activities = buildToolActivities([
       {
         key: "bash-redirection",
@@ -244,11 +241,11 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(activities)).not.toContain("payroll.csv");
   });
 
-  it("reports executables inside shell control structures", () => {
+  it("uses a generic detail for shell control structures", () => {
     const activities = buildToolActivities([
       {
         key: "bash-control",
@@ -260,14 +257,10 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.details).toEqual([
-      "执行了 test 命令",
-      "执行了 ls 命令",
-      "执行了 pwd 命令",
-    ]);
+    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
   });
 
-  it("skips case patterns and reports branch executables", () => {
+  it("uses a generic detail for case scripts", () => {
     const activities = buildToolActivities([
       {
         key: "bash-case",
@@ -284,15 +277,12 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.details).toEqual([
-      "执行了 jq 命令",
-      "执行了 cat 命令",
-    ]);
+    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(activities)).not.toContain("json 命令");
     expect(JSON.stringify(activities)).not.toContain("yaml 命令");
   });
 
-  it("skips quoted case alternatives containing whitespace", () => {
+  it("does not expose quoted case alternatives containing whitespace", () => {
     const activities = buildToolActivities([
       {
         key: "bash-case-quoted",
@@ -308,7 +298,7 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(activities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(activities)).not.toContain("payroll 命令");
     expect(JSON.stringify(activities)).not.toContain("internal data");
   });
@@ -344,12 +334,24 @@ describe("Activity Trail presentation", () => {
         }),
       },
     ]);
+    const braceArgumentActivities = buildToolActivities([
+      {
+        key: "bash-function-brace-argument",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "prepare() { /bin/echo value}; /private/company/secret-tool; }; /bin/ls",
+          },
+        }),
+      },
+    ]);
 
-    expect(functionActivities[0]?.details).toEqual([]);
-    expect(assignmentActivities[0]?.details).toEqual(["执行了 ls 命令"]);
-    expect(followingCommandActivities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(functionActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(assignmentActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(followingCommandActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
+    expect(braceArgumentActivities[0]?.details).toEqual(["执行了 Shell 脚本"]);
     expect(JSON.stringify(functionActivities)).not.toContain("internal_deploy_secret");
     expect(JSON.stringify(assignmentActivities)).not.toContain("payroll.csv");
+    expect(JSON.stringify(braceArgumentActivities)).not.toContain("secret-tool");
   });
 
   it("localizes bash activity details", () => {
@@ -365,6 +367,16 @@ describe("Activity Trail presentation", () => {
     ]);
 
     expect(activities[0]?.details).toEqual(["Ran ls command"]);
+
+    const scriptActivities = buildToolActivities([
+      {
+        key: "bash-en-script",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "if /bin/test -f x; then /bin/ls; fi" },
+        }),
+      },
+    ]);
+    expect(scriptActivities[0]?.details).toEqual(["Ran a shell script"]);
   });
 
   it("keeps one safe detail per repeated read invocation", () => {
