@@ -267,6 +267,59 @@ describe("Activity Trail presentation", () => {
     ]);
   });
 
+  it("skips case patterns and reports branch executables", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-case",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: [
+              'case "$type" in',
+              "json|yaml) /usr/bin/jq file.json ;;&",
+              "*) /bin/cat file.json ;;",
+              "esac",
+            ].join("\n"),
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 jq 命令",
+      "执行了 cat 命令",
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("json 命令");
+    expect(JSON.stringify(activities)).not.toContain("yaml 命令");
+  });
+
+  it("does not present function declarations or compound-assignment data as commands", () => {
+    const functionActivities = buildToolActivities([
+      {
+        key: "bash-function",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "internal_deploy_secret() { /bin/ls; /bin/pwd; }",
+          },
+        }),
+      },
+    ]);
+    const assignmentActivities = buildToolActivities([
+      {
+        key: "bash-array",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "arr=(payroll.csv); /bin/ls",
+          },
+        }),
+      },
+    ]);
+
+    expect(functionActivities[0]?.details).toEqual([]);
+    expect(assignmentActivities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(JSON.stringify(functionActivities)).not.toContain("internal_deploy_secret");
+    expect(JSON.stringify(assignmentActivities)).not.toContain("payroll.csv");
+  });
+
   it("localizes bash activity details", () => {
     vi.stubGlobal("window", { __PI_WEB_CONFIG__: { locale: "en-US" } });
 

@@ -32,12 +32,19 @@ const NON_COMMAND_SEGMENT_WORDS = new Set([
 ]);
 
 export function safeBashExecutableNames(command: string): string[] {
-  return shellCommandSegments(withoutHeredocBodies(command)).flatMap(segment => {
+  const visibleCommand = withoutHeredocBodies(command);
+  if (containsFunctionDeclaration(visibleCommand)) return [];
+  return shellCommandSegments(visibleCommand).flatMap(segment => {
     const executable = firstShellExecutable(segment);
     if (!executable || executable.includes("$")) return [];
     const name = executable.replace(/^.*[\\/]/u, "");
     return /^[\w.+-]+$/u.test(name) ? [name] : [];
   });
+}
+
+function containsFunctionDeclaration(command: string): boolean {
+  return /(?:^|[;|&\n]\s*)(?:(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)|function\s+[A-Za-z_][A-Za-z0-9_]*)\s*\{/u
+    .test(command);
 }
 
 function withoutHeredocBodies(command: string): string {
@@ -112,7 +119,9 @@ function shellCommandSegments(command: string): string[] {
     const isRedirectAmpersand = character === "&" &&
       (command[index - 1] === ">" || command[index - 1] === "<" ||
         command[index + 1] === ">");
-    const isBoundary = character === ";" || character === "|" ||
+    const isCasePatternPipe = character === "|" &&
+      hasCasePatternClosingParenthesis(command, start, index);
+    const isBoundary = character === ";" || (character === "|" && !isCasePatternPipe) ||
       character === "\n" || (character === "&" && !isRedirectAmpersand);
     if (!isBoundary) return;
     const segment = command.slice(start, index).trim();
@@ -126,6 +135,18 @@ function shellCommandSegments(command: string): string[] {
   const finalSegment = command.slice(start).trim();
   if (finalSegment) segments.push(finalSegment);
   return segments;
+}
+
+function hasCasePatternClosingParenthesis(
+  command: string,
+  segmentStart: number,
+  pipeIndex: number,
+): boolean {
+  const prefix = command.slice(segmentStart, pipeIndex).trim();
+  const closingParenthesis = command.indexOf(")", pipeIndex + 1);
+  if (!prefix || closingParenthesis < 0) return false;
+  const suffix = command.slice(pipeIndex + 1, closingParenthesis);
+  return Boolean(suffix) && !/[\s;&()]/u.test(suffix);
 }
 
 function firstShellExecutable(segment: string): string | undefined {
@@ -160,7 +181,14 @@ function firstShellExecutable(segment: string): string | undefined {
     );
     if (!word) return undefined;
     index = word.endIndex;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) continue;
+    if (segment[index] === ")") {
+      index += 1;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) {
+      if (segment[index] === "(") return undefined;
+      continue;
+    }
     if (COMMAND_PREFIX_WORDS.has(word.value)) continue;
     if (NON_COMMAND_SEGMENT_WORDS.has(word.value)) return undefined;
     return word.value || undefined;
