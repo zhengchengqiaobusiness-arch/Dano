@@ -4317,10 +4317,16 @@ class TranscriptProjector {
       submittedForms,
       this.coordinator,
     );
-    const submittedForm = submittedFormFromMessage(projectedMessage);
+    const submittedForm = recovering
+      ? null
+      : submittedFormFromMessage(projectedMessage);
     if (submittedForm) submittedForms.set(submittedForm.toolCallId, submittedForm);
     this.submittedFormsBySession.set(sessionKey, submittedForms);
-    this.recordSubmittedFormProjection(projectedMessage, submittedForms);
+    this.recordSubmittedFormProjection(
+      projectedMessage,
+      submittedForms,
+      recovering,
+    );
     if (!projectedMessage || projectedMessage.role !== "user") {
       return projectedMessage;
     }
@@ -4352,6 +4358,7 @@ class TranscriptProjector {
   private recordSubmittedFormProjection(
     message: RpcTranscriptMessage,
     submittedForms: Map<string, SubmittedFormProjection>,
+    recovering = false,
   ): void {
     if (Array.isArray(message.content)) {
       for (const block of message.content) {
@@ -4359,7 +4366,11 @@ class TranscriptProjector {
           typeof block !== "string" &&
           block.type === "toolCall" &&
           block.id &&
-          block.questionRequest?.batch
+          block.questionRequest?.batch &&
+          (!recovering ||
+            normalizeAskUserQuestionCardRequest(block.arguments, {
+              requireDefault: true,
+            })?.batch)
         ) {
           this.batchFormByToolCallId.set(block.id, block.questionRequest);
         }
@@ -4407,6 +4418,7 @@ function projectAskUserQuestionRequests(
         index,
         block.arguments,
         previousSubmittedForms,
+        recovering,
       );
     const questionState = questionLifecycleState(
       message.content as Array<string | RpcTranscriptContentBlock>,
@@ -4432,6 +4444,7 @@ function confirmationRequestFromTranscript(
   confirmIndex: number,
   rawArguments: unknown,
   previousSubmittedForms?: Map<string, SubmittedFormProjection>,
+  requireDefault = false,
 ): AskUserQuestionCardRequest | null {
   if (!isAskUserQuestionConfirmationCall(rawArguments)) {
     return null;
@@ -4453,8 +4466,12 @@ function confirmationRequestFromTranscript(
       block.id
     ) {
       const source =
-        block.questionRequest ??
-        normalizeAskUserQuestionCardRequest(block.arguments);
+        (requireDefault
+          ? normalizeAskUserQuestionCardRequest(block.arguments, {
+              requireDefault: true,
+            })
+          : block.questionRequest ??
+            normalizeAskUserQuestionCardRequest(block.arguments));
       if (source?.batch) {
         availableForms.set(block.id, {
           toolCallId: block.id,

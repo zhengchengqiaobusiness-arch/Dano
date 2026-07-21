@@ -28,7 +28,6 @@ const canonicalChoiceProjection = {
     { id: "是", label: "是" },
     { id: "否", label: "否" },
   ],
-  default: "是",
 };
 
 describe("ask_user_question request compatibility matrix", () => {
@@ -38,13 +37,16 @@ describe("ask_user_question request compatibility matrix", () => {
     ["whitespace-padded JSON options", { options: '  ["是", "否"]  ' }],
     ["choices alias", { choices: '["是","否"]' }],
     [
+      "malformed canonical falls back to choices alias",
+      { options: '["是"', choices: '["是","否"]' },
+    ],
+    [
       "equivalent canonical and alias options",
       { options: ["是", "否"], choices: '["是","否"]' },
     ],
   ])("projects %s to the canonical browser request", (_name, fields) => {
     expect(normalizeAskUserQuestionCardRequest({
       question: "是否开始？",
-      default: "是",
       ...fields,
     })).toEqual(canonicalChoiceProjection);
   });
@@ -96,6 +98,10 @@ describe("ask_user_question request compatibility matrix", () => {
   });
 
   it.each([
+    ["empty JSON options", { question: "选择？", options: "[]" }],
+    ["all-invalid JSON options", { question: "选择？", options: "[null]" }],
+    ["duplicate JSON options", { question: "选择？", options: '["A","A"]' }],
+    ["partial-invalid JSON options", { question: "选择？", options: '["A",null]' }],
     ["malformed JSON options", { question: "选择？", options: '["A"', default: "A" }],
     ["partial-invalid options", { question: "选择？", options: ["A", null], default: "A" }],
     ["conflicting aliases", { question: "选择？", options: ["A"], choices: '["B"]', default: "A" }],

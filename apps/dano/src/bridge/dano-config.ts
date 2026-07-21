@@ -15,6 +15,7 @@ export interface DanoConfig {
   };
   askUserQuestion?: {
     maxRetries?: number;
+    defaultTitle?: string;
   };
   slashCommandsAndMentionsEnabled?: boolean;
   transcriptProcessSummaryEnabled?: boolean;
@@ -31,6 +32,7 @@ export const DANO_DEFAULT_CONFIG = {
   },
   askUserQuestion: {
     maxRetries: 10,
+    defaultTitle: "表单",
   },
   slashCommandsAndMentionsEnabled: false,
   transcriptProcessSummaryEnabled: false,
@@ -97,6 +99,21 @@ function readRetryOptions(value: unknown): { maxRetries?: number } | undefined {
   return maxRetries === undefined ? undefined : { maxRetries };
 }
 
+function readAskUserQuestionOptions(
+  value: unknown,
+): DanoConfig["askUserQuestion"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const maxRetries = readNonNegativeInteger(record.maxRetries);
+  const defaultTitle = readString(record.defaultTitle);
+  return maxRetries === undefined && defaultTitle === undefined
+    ? undefined
+    : {
+        ...(maxRetries !== undefined ? { maxRetries } : {}),
+        ...(defaultTitle ? { defaultTitle } : {}),
+      };
+}
+
 function readQuickActions(value: unknown): BridgeQuickActionConfig[] | undefined {
   if (!Array.isArray(value)) return undefined;
 
@@ -124,7 +141,7 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     ? record.defaultThinkingLevel
     : undefined;
   const fieldAssist = readRetryOptions(record.fieldAssist);
-  const askUserQuestion = readRetryOptions(record.askUserQuestion);
+  const askUserQuestion = readAskUserQuestionOptions(record.askUserQuestion);
   const slashCommandsAndMentionsEnabled = readBoolean(
     record.slashCommandsAndMentionsEnabled,
   );

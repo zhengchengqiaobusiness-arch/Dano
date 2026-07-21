@@ -2870,6 +2870,61 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("projects a recovered JSON-string options question without a default", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "defaultless-question",
+              name: "ask_user_question",
+              arguments: {
+                question: "是否开始？",
+                options: '["是","否"]',
+              },
+            },
+          ],
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-defaultless-recovery", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "cmd-defaultless-recovery");
+      const content = response.payload.data.messages[0].content;
+      expect(content[0]).toMatchObject({
+        id: "defaultless-question",
+        questionRequest: {
+          question: "是否开始？",
+          options: [
+            { id: "是", label: "是" },
+            { id: "否", label: "否" },
+          ],
+        },
+        questionState: "terminal_failure",
+      });
+      expect(content[0].questionRequest).not.toHaveProperty("defaultValue");
+    });
+
     it("preserves Submitted Form identity when projecting session history", async () => {
       const messages = [
         {

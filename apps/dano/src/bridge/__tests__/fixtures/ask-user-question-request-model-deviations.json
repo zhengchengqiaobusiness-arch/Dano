@@ -6,13 +6,11 @@
       "name": "JSON-stringified top-level options",
       "capturedArguments": {
         "question": "是否开始？",
-        "options": "[\"是\",\"否\"]",
-        "default": "是"
+        "options": "[\"是\",\"否\"]"
       },
       "canonicalArguments": {
         "question": "是否开始？",
-        "options": ["是", "否"],
-        "default": "是"
+        "options": ["是", "否"]
       }
     },
     {

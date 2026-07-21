@@ -4,7 +4,6 @@ import {
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
-  DANO_DEFAULT_CONFIG,
   type DanoConfig,
   loadDanoConfig,
 } from "./bridge/dano-config.js";
@@ -180,10 +179,10 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
 export function createDanoBackendFromSession(
   session: AgentSession,
   danoConfig: DanoConfig = {},
-  askUserQuestion: AskUserQuestionRuntime = createAskUserQuestionRuntime(
-    danoConfig.askUserQuestion?.maxRetries ??
-      DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
-  ),
+  askUserQuestion: AskUserQuestionRuntime = createAskUserQuestionRuntime({
+    maxRetries: danoConfig.askUserQuestion?.maxRetries,
+    defaultTitle: danoConfig.askUserQuestion?.defaultTitle,
+  }),
 ): DanoBackend {
   interruptOpenFormInteractions(session.sessionManager);
   let pendingMessageCount = 0;
@@ -357,10 +356,10 @@ export async function createDanoBackend(
   const sessionManager = options.sessionPath
     ? SessionManager.open(options.sessionPath)
     : SessionManager.create(cwd, options.sessionDir);
-  const askUserQuestion = createAskUserQuestionRuntime(
-    danoConfig.askUserQuestion?.maxRetries ??
-      DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
-  );
+  const askUserQuestion = createAskUserQuestionRuntime({
+    maxRetries: danoConfig.askUserQuestion?.maxRetries,
+    defaultTitle: danoConfig.askUserQuestion?.defaultTitle,
+  });
   const result = await createDetachedAgentSession(
     sessionManager.getCwd() || cwd,
     sessionManager,

@@ -20,7 +20,7 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases and safe scalar deviations, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Canonical calls should provide a non-empty default; compatibility input without one renders without a prefill. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases, safe scalar deviations, and one-level JSON-stringified collections; it uses the configured product title when a grouped title is missing, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
 ```
 
 ## promptSnippet
@@ -39,7 +39,7 @@ Ask the user one native question card; for several fields use one questions arra
   "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
   "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
   "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-  "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
+  "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input, normalizes safe aliases and one-level JSON collection strings, uses the configured product title when a grouped title is missing, and admits an omitted default without a prefill. It still rejects ambiguity that could change rendering, submission, or answer mapping.",
   "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
   "Set required:true only when an answer is mandatory. required defaults to false.",
   "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -65,15 +65,18 @@ values never cross the browser protocol boundary.
 | Finite numbers or booleans used for textual question, title, id, option label, or text default values | Recoverable | Convert deterministically to strings. |
 | Boolean-like `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` values | Recoverable | Convert `required`, `multiple`, `confirm`, and Field Assist values; otherwise treat an unrecognized optional value as omitted. |
 | `formIds` or compatibility `formId` containing a safely parseable JSON-stringified array | Recoverable | Treat it as the equivalent native array before selecting Submitted Forms. Ordinary scalar strings remain single form IDs. |
+| `options` or `choices` containing a safely parseable one-level JSON-stringified array | Recoverable | Treat it as the equivalent native array before normalizing choice ids and labels. |
 | Option ids/labels and optional `dataSource` fields with safely coercible scalar types | Recoverable | Normalize them and discard unknown nested fields. |
 | `dateFormat`, options, `multiple`, `dataSource`, or Field Assist on a control that does not use them | Recoverable | Ignore the inapplicable fields. |
 | Malformed optional presentation data that does not determine the control | Recoverable | Treat it as omitted. |
+| Missing or malformed grouped-form `title` | Recoverable | Use `askUserQuestion.defaultTitle` from Dano runtime configuration. |
+| Missing non-confirmation `default` | Recoverable | Render without a prefilled answer; canonical model calls should still provide a recommended default. |
 | Non-object request; malformed JSON `questions`; non-object question entries | Not recoverable | Reject because no question structure can be determined. |
-| Missing question text, empty `questions`, or a grouped form without a title | Not recoverable | Reject because the question cannot be presented correctly. |
-| Duplicate grouped field ids, duplicate option ids, or malformed options needed by an explicit/inferred choice control | Not recoverable | Reject because answer mapping would be ambiguous. Missing grouped ids receive deterministic positional ids. |
+| Missing question text or empty `questions` | Not recoverable | Reject because the question cannot be presented correctly. |
+| Missing or duplicate grouped field ids, duplicate option ids, or malformed options needed by an explicit/inferred choice control | Not recoverable | Reject because answer mapping would be ambiguous. |
 | Choice or multiple-choice control without static options or a valid remote data source | Not recoverable | Reject because the answer semantics cannot be determined. |
 | Date control without a supported `dateFormat`, or a non-empty default that does not match it | Not recoverable | Reject because the browser value cannot be rendered and returned under the requested format. |
-| Missing, empty, or incompatible non-confirmation default | Not recoverable | Reject because Dano requires a usable recommended default. |
+| Explicitly empty or incompatible non-confirmation default | Not recoverable | Reject because the supplied prefill cannot be submitted safely. |
 | Confirmation with no eligible Submitted Form | Not recoverable | Reject because no authoritative form identity can be selected. |
 
 Submission remains strict after rendering: required answers must be present,
@@ -83,8 +86,12 @@ grouped answers must map by canonical field id.
 ### Compatibility change evidence
 
 Collection- and object-shaped model parameters require executable evidence in
-addition to the canonical schema and prose contract. For confirmation targets,
-the matrix in
+addition to the canonical schema and prose contract. For question request
+fields, the matrix in
+`apps/dano/src/bridge/__tests__/ask-user-question-request-compatibility.test.ts`
+and its sanitized fixture enforce canonical, safe JSON-string, alias,
+malformed, partial-valid, fallback, leakage, and canonical-projection behavior.
+For confirmation targets, the matrix in
 `apps/dano/src/bridge/__tests__/ask-user-question-confirmation-compatibility.test.ts`
 and the sanitized fixtures under its `fixtures/` directory enforce canonical,
 safe JSON-string, alias, malformed, partial-valid, fallback, isolation, and
@@ -219,7 +226,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
     "title": {
       "type": "string",
       "minLength": 1,
-      "description": "Required form title when questions is present; Dano derives the confirmation title as <title>确认."
+      "description": "Canonical grouped-form title. If omitted or malformed with questions, Dano uses the configured product default title."
     },
     "label": { "type": "string", "minLength": 1 },
     "prompt": { "type": "string", "minLength": 1 },
@@ -227,7 +234,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
       "type": "array",
       "minItems": 2,
       "items": { "$ref": "#/$defs/option" },
-      "description": "Choices for this question. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input."
+      "description": "Canonical choices array for this question. Dano also accepts a one-level JSON-stringified array and the choices alias. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input."
     },
     "choices": {
       "type": "array",
@@ -287,7 +294,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
       "description": "Standard grouped-form confirmation target: an array of formId strings returned by earlier grouped form submissions in this Assistant Turn."
     },
     "questions": {
-      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. Put fieldAssist inside the matching questions[] item when overriding its text-field default. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions.",
+      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. Put fieldAssist inside the matching questions[] item when overriding its text-field default. A single question object or one-level JSON-stringified object/array is also accepted and normalized to an array. If title is missing or malformed, Dano uses the configured product default. Do not include top-level confirm or top-level field configuration with questions.",
       "anyOf": [
         { "$ref": "#/$defs/question" },
         {

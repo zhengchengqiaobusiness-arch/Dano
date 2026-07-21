@@ -20,6 +20,7 @@ describe("Dano config", () => {
         },
         askUserQuestion: {
           maxRetries: 12,
+          defaultTitle: " 信息收集 ",
         },
         slashCommandsAndMentionsEnabled: true,
         transcriptProcessSummaryEnabled: true,
@@ -46,6 +47,7 @@ describe("Dano config", () => {
       },
       askUserQuestion: {
         maxRetries: 12,
+        defaultTitle: "信息收集",
       },
       slashCommandsAndMentionsEnabled: true,
       transcriptProcessSummaryEnabled: true,
