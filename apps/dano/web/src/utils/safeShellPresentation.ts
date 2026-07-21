@@ -10,9 +10,30 @@ type ShellWord = {
   value: string;
 };
 
+const COMMAND_PREFIX_WORDS = new Set([
+  "if",
+  "elif",
+  "then",
+  "else",
+  "while",
+  "until",
+  "do",
+  "time",
+]);
+const NON_COMMAND_SEGMENT_WORDS = new Set([
+  "case",
+  "done",
+  "esac",
+  "fi",
+  "for",
+  "function",
+  "in",
+  "select",
+]);
+
 export function safeBashExecutableNames(command: string): string[] {
   return shellCommandSegments(withoutHeredocBodies(command)).flatMap(segment => {
-    const executable = firstShellWord(segment);
+    const executable = firstShellExecutable(segment);
     if (!executable || executable.includes("$")) return [];
     const name = executable.replace(/^.*[\\/]/u, "");
     return /^[\w.+-]+$/u.test(name) ? [name] : [];
@@ -107,19 +128,62 @@ function shellCommandSegments(command: string): string[] {
   return segments;
 }
 
-function firstShellWord(segment: string): string | undefined {
+function firstShellExecutable(segment: string): string | undefined {
   let index = 0;
   while (index < segment.length) {
     while (/\s/u.test(segment[index] ?? "")) index += 1;
     if (index >= segment.length || segment[index] === "#") return undefined;
-    const word = readShellWord(segment, index, character => /\s/u.test(character));
+
+    const structuralCharacter = segment[index];
+    if (structuralCharacter === "(" || structuralCharacter === "{") {
+      index += 1;
+      continue;
+    }
+    if (structuralCharacter === ")" || structuralCharacter === "}") {
+      return undefined;
+    }
+    if (structuralCharacter === "!" && /\s/u.test(segment[index + 1] ?? "")) {
+      index += 1;
+      continue;
+    }
+
+    const redirectionEnd = leadingRedirectionEnd(segment, index);
+    if (redirectionEnd !== undefined) {
+      index = redirectionEnd;
+      continue;
+    }
+
+    const word = readShellWord(
+      segment,
+      index,
+      character => /[\s(){}<>]/u.test(character),
+    );
     if (!word) return undefined;
     index = word.endIndex;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) {
-      return word.value || undefined;
-    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word.value)) continue;
+    if (COMMAND_PREFIX_WORDS.has(word.value)) continue;
+    if (NON_COMMAND_SEGMENT_WORDS.has(word.value)) return undefined;
+    return word.value || undefined;
   }
   return undefined;
+}
+
+function leadingRedirectionEnd(segment: string, startIndex: number): number | undefined {
+  let operatorIndex = startIndex;
+  while (/\d/u.test(segment[operatorIndex] ?? "")) operatorIndex += 1;
+
+  const operator = ["<<<", "<<-", ">>", "<<", "<&", ">&", "<>", ">|", "&>", ">", "<"]
+    .find(candidate => segment.startsWith(candidate, operatorIndex));
+  if (!operator) return undefined;
+
+  let targetIndex = operatorIndex + operator.length;
+  while (/\s/u.test(segment[targetIndex] ?? "")) targetIndex += 1;
+  const target = readShellWord(
+    segment,
+    targetIndex,
+    character => /[\s;|&(){}<>]/u.test(character),
+  );
+  return target?.value ? target.endIndex : segment.length;
 }
 
 function scanUnquotedShellCharacters(

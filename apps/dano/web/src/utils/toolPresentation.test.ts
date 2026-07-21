@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSkillActivity,
   buildToolActivities,
@@ -22,6 +22,10 @@ function toolBlock(
 }
 
 describe("Activity Trail presentation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("falls back to count-free copy for invalid activity counts", () => {
     expect(toolActivityLabel("read", "success", 0)).toBe("已查阅资料");
     expect(toolActivityLabel("read", "success", Number.NaN)).toBe("已查阅资料");
@@ -226,6 +230,56 @@ describe("Activity Trail presentation", () => {
     ]);
     expect(JSON.stringify(activities)).not.toContain("secret-tool");
     expect(JSON.stringify(activities)).not.toContain("--token");
+  });
+
+  it("skips leading redirections and reports the invoked executable", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-redirection",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "2>/private/company/payroll.csv /bin/ls -la",
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual(["执行了 ls 命令"]);
+    expect(JSON.stringify(activities)).not.toContain("payroll.csv");
+  });
+
+  it("reports executables inside shell control structures", () => {
+    const activities = buildToolActivities([
+      {
+        key: "bash-control",
+        block: toolBlock("bash", "success", {
+          toolArgs: {
+            command: "if /bin/test -f x; then /bin/ls; fi\n{ /usr/bin/pwd; }",
+          },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual([
+      "执行了 test 命令",
+      "执行了 ls 命令",
+      "执行了 pwd 命令",
+    ]);
+  });
+
+  it("localizes bash activity details", () => {
+    vi.stubGlobal("window", { __PI_WEB_CONFIG__: { locale: "en-US" } });
+
+    const activities = buildToolActivities([
+      {
+        key: "bash-en",
+        block: toolBlock("bash", "success", {
+          toolArgs: { command: "/bin/ls -la" },
+        }),
+      },
+    ]);
+
+    expect(activities[0]?.details).toEqual(["Ran ls command"]);
   });
 
   it("keeps one safe detail per repeated read invocation", () => {

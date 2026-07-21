@@ -194,7 +194,7 @@ function safeToolActivityDetails(block: ToolContentBlock): string[] {
   if (block.toolName === "bash") {
     const command = stringField(asRecord(block.toolArgs), "command");
     return command ? safeBashExecutableNames(command).map(
-      name => `执行了 ${name} 命令`,
+      name => t("chatTranscript.activity.process.detail", { name }),
     ) : [];
   }
 
