@@ -1266,7 +1266,10 @@ describe("BridgeRpcAdapter", () => {
 
         const confirmation = askUserQuestionCoordinator.wait(
           "confirm-two",
-          { confirm: true, formIds: ["form-a", "form-b"] },
+          {
+            confirm: "True",
+            formIds: JSON.stringify(["form-a", "form-b"]),
+          } as never,
           controller.signal,
         );
         sessionManager.appendMessage({
@@ -1275,7 +1278,10 @@ describe("BridgeRpcAdapter", () => {
             type: "toolCall",
             id: "confirm-two",
             name: "ask_user_question",
-            arguments: { confirm: true, formIds: ["form-a", "form-b"] },
+            arguments: {
+              confirm: "True",
+              formIds: JSON.stringify(["form-a", "form-b"]),
+            },
           }],
           timestamp: Date.now(),
           stopReason: "toolUse",

@@ -927,6 +927,11 @@ function collectConfirmationFormIds(
     return;
   }
   if (typeof value === "string") {
+    const parsed = parseJsonString(value);
+    if (Array.isArray(parsed)) {
+      candidates.push(...parsed);
+      return;
+    }
     candidates.push(value);
     return;
   }

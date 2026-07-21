@@ -1383,6 +1383,47 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("atomically confirms every Submitted Form from JSON-stringified formIds", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+    const formIds = ["form-a", "form-b"];
+
+    for (const formId of formIds) {
+      const form = coordinator.wait(
+        formId,
+        {
+          title: formId,
+          questions: [{ id: "value", question: "值？", default: formId }],
+        },
+        controller.signal,
+      );
+      coordinator.present(formId);
+      coordinator.answer(formId, {
+        cancelled: false,
+        answer: { value: formId },
+      });
+      await form;
+    }
+
+    const confirmation = coordinator.wait(
+      "confirm-json-string",
+      {
+        confirm: "True",
+        formIds: JSON.stringify(formIds),
+      } as never,
+      controller.signal,
+    );
+    const request = coordinator.cardRequest("confirm-json-string");
+    coordinator.answer("confirm-json-string", { cancelled: true });
+    await expect(confirmation).resolves.toEqual({ status: "cancelled" });
+
+    expect(request).toMatchObject({
+      kind: "confirm",
+      title: "确认 2 份表单",
+      forms: [{ formId: "form-a" }, { formId: "form-b" }],
+    });
+  });
+
   it("accepts formId compatibility input and falls back to the latest eligible form", async () => {
     const coordinator = new AskUserQuestionCoordinator();
     const controller = new AbortController();
@@ -1451,7 +1492,7 @@ describe("ask_user_question tool", () => {
       {
         confirm: true,
         formIds: [null, "form-a", 7, "missing", "form-a"],
-        formId: ["form-b", false],
+        formId: JSON.stringify(["form-b", false]),
       } as never,
       controller.signal,
     );

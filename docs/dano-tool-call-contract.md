@@ -64,6 +64,7 @@ values never cross the browser protocol boundary.
 | `key`/`name`, `label`/`prompt`/`title`, `choices`, `input_type`/`type`/`component`, `data_source`, `multi`/`multipleSelect`, `defaultValue`/`prefill`/`value`, and Field Assist aliases | Recoverable when one canonical meaning is available | Map to the canonical field. |
 | Finite numbers or booleans used for textual question, title, id, option label, or text default values | Recoverable | Convert deterministically to strings. |
 | Boolean-like `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` values | Recoverable | Convert `required`, `multiple`, `confirm`, and Field Assist values; otherwise treat an unrecognized optional value as omitted. |
+| `formIds` or compatibility `formId` containing a safely parseable JSON-stringified array | Recoverable | Treat it as the equivalent native array before selecting Submitted Forms. Ordinary scalar strings remain single form IDs. |
 | Option ids/labels and optional `dataSource` fields with safely coercible scalar types | Recoverable | Normalize them and discard unknown nested fields. |
 | `dateFormat`, options, `multiple`, `dataSource`, or Field Assist on a control that does not use them | Recoverable | Ignore the inapplicable fields. |
 | Malformed optional presentation data that does not determine the control | Recoverable | Treat it as omitted. |
