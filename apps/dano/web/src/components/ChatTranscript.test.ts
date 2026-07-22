@@ -657,4 +657,22 @@ describe("ChatTranscript Activity Trail", () => {
     );
     expect(activityRowSource).toContain("min-height: 36px;");
   });
+
+  it("keeps the hover chevron eight pixels after the activity label", () => {
+    expect(activityRowSource).toContain("width: fit-content;");
+    expect(activityRowSource).toContain("max-width: 100%;");
+    expect(activityRowSource).toContain("flex: 0 1 auto;");
+    expect(activityRowSource).toMatch(
+      /\.tool-activity-chevron\s*\{[\s\S]*?margin-left: 8px;/,
+    );
+    expect(activityRowSource).toMatch(
+      /\.tool-activity-trigger:hover \.tool-activity-chevron\s*\{[\s\S]*?opacity: 1;/,
+    );
+    expect(activityRowSource).toMatch(
+      /\.tool-activity-chevron\.expanded\s*\{[\s\S]*?opacity: 1;[\s\S]*?rotate: 90deg;/,
+    );
+    expect(activityRowSource).not.toContain(
+      "background: color-mix(in srgb, var(--panel-2) 68%, transparent);",
+    );
+  });
 });
