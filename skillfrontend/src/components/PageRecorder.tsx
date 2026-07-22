@@ -3085,7 +3085,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
       else if (sid && targetAnchorRef) anchor = fieldEditorAnchorId(String(sid), String(targetAnchorRef));
       else if (sid) anchor = `step-${domAnchorPart(sid)}`;
-      else anchor = `capability-${domAnchorPart(cap!.name || cap!.capability_id || capIdx)}`;
+      else anchor = `capability-${domAnchorPart(cap!.capability_id || cap!.name || capIdx)}`;
     }
     if (!anchor && capRef) anchor = `capability-${domAnchorPart(capRef)}`;
     if (!anchor && target.kind === "capability_relation" && target.relation_id) {

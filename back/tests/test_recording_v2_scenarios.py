@@ -3893,7 +3893,9 @@ def test_r7_only_explicit_error_location_scrolls_the_page():
     assert source.count("scrollIntoView(") == 1
     locate_start = source.index("function locatePublishIssue(")
     locate_end = source.index("function publishIssueReviewId(")
-    assert "scrollIntoView(" in source[locate_start:locate_end]
+    locator = source[locate_start:locate_end]
+    assert "scrollIntoView(" in locator
+    assert "cap!.capability_id || cap!.name || capIdx" in locator
 
 
 @pytest.mark.parametrize(
