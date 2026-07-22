@@ -2313,6 +2313,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       e.preventDefault();
     }
   }
+  function onKbBeforeInput(e: React.FormEvent<HTMLInputElement>) {
+    const inputEvent = e.nativeEvent as InputEvent;
+    if (inputEvent.inputType === "deleteContentBackward") {
+      send({ type: "input", event: { kind: "key", key: "Backspace" } });
+      e.preventDefault();
+    }
+  }
   function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
     if (text) {
@@ -4644,7 +4651,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 touchAction: "none", userSelect: "none",
               }} />
             {!hasFrame && <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
-            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onPaste={onKbPaste}
+            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onBeforeInput={onKbBeforeInput} onPaste={onKbPaste}
               onCompositionStart={onKbCompositionStart} onCompositionUpdate={onKbCompositionUpdate} onCompositionEnd={onKbCompositionEnd}
               autoComplete="off" aria-label="录制画面键盘输入" tabIndex={-1}
               style={{ position: "absolute", left: 0, top: 0, width: 2, height: 2, opacity: 0.01, border: 0, padding: 0, pointerEvents: "none" }} />

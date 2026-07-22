@@ -511,13 +511,16 @@ def test_recorder_key_safety_policy() -> None:
         assert not _safe_recorder_key(key)
 
 
-def test_screencast_rate_limits_preserve_clarity_without_overloading_ui() -> None:
-    from dano.execution.page.recorder import _CAST_ACTIVE_FPS, _CAST_IDLE_FPS, _CAST_QUALITY
+def test_screencast_rate_limits_fit_remote_deployment_bandwidth() -> None:
+    from dano.execution.page.recorder import (
+        _CAST_ACTIVE_FPS, _CAST_ACTIVE_WINDOW_S, _CAST_IDLE_FPS, _CAST_QUALITY,
+    )
 
-    assert 15 <= _CAST_ACTIVE_FPS <= 24
-    assert 2 <= _CAST_IDLE_FPS <= 6
+    assert 8 <= _CAST_ACTIVE_FPS <= 12
+    assert 1 <= _CAST_IDLE_FPS <= 3
     assert _CAST_IDLE_FPS < _CAST_ACTIVE_FPS
-    assert _CAST_QUALITY >= 75
+    assert 65 <= _CAST_QUALITY <= 72
+    assert _CAST_ACTIVE_WINDOW_S <= 3
 
 
 class _RecordingMouse:
@@ -695,7 +698,7 @@ async def test_screencast_uses_full_viewport_quality_and_emits_dimensions() -> N
 
     await sess.start_screencast(on_frame)
     start_params = next(params for method, params in cdp.calls if method == "Page.startScreencast")
-    assert start_params == {"format": "jpeg", "quality": 80, "maxWidth": 1280, "maxHeight": 800}
+    assert start_params == {"format": "jpeg", "quality": 70, "maxWidth": 1280, "maxHeight": 800}
     task = cdp.handlers["Page.screencastFrame"]({
         "sessionId": 7,
         "data": "jpeg-base64",
@@ -751,7 +754,7 @@ async def test_screencast_coalesces_burst_but_flushes_final_dynamic_frame() -> N
     await callback({"sessionId": 3, "data": "loaded-final", "metadata": {}})
 
     assert [frame["data"] for frame in frames] == ["initial"]
-    await asyncio.sleep((1 / 20) + 0.03)
+    await asyncio.sleep((1 / 10) + 0.03)
     assert [frame["data"] for frame in frames] == ["initial", "loaded-final"]
     assert [frame["seq"] for frame in frames] == [1, 2]
 
@@ -1015,6 +1018,7 @@ async def test_dispatch_input_relays_and_captures(tmp_path) -> None:  # noqa: AN
         await sess.start(page.as_uri())
         await sess.dispatch_input({"kind": "click", "nx": 0.5, "ny": 0.2})    # 命中大输入框
         await sess.dispatch_input({"kind": "text", "text": "差旅费100"})       # 含中文 CJK,验 insert_text
+        await sess.dispatch_input({"kind": "key", "key": "Backspace"})
         await sess.dispatch_input({"kind": "click", "nx": 0.5, "ny": 0.65})   # 命中提交按钮
         await sess.page.wait_for_timeout(300)
         steps, samples = sess.recorded_steps()
@@ -1022,7 +1026,7 @@ async def test_dispatch_input_relays_and_captures(tmp_path) -> None:  # noqa: AN
         await sess.stop()
     ops = [s["op"] for s in steps]
     assert "fill" in ops and "submit" in ops
-    assert samples.get("amount") == "差旅费100"          # 中文经回传被正确填入并捕获
+    assert samples.get("amount") == "差旅费10"           # 中文输入和退格删除均经回传生效
 
 
 _LOGIN = """<!doctype html><html><head><meta charset="utf-8"></head><body>

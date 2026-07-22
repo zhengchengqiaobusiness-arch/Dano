@@ -62,6 +62,13 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
     assert "if (!m.operation) connectionErrorRef.current = detail" in source[error_start:error_end]
 
 
+def test_frontend_relays_backward_delete_without_relying_only_on_keydown() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert 'inputType === "deleteContentBackward"' in source
+    assert "onBeforeInput={onKbBeforeInput}" in source
+
+
 def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:
     assert gateway.InvokeReq(input={"month": "2026-07"}).input == {"month": "2026-07"}
     assert gateway.ToolCallReq(name="A-OA__query", input={}).input == {}
