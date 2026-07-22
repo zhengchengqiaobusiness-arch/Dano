@@ -1444,12 +1444,19 @@
   .question-actions {
     display: flex;
     flex: 0 0 auto;
+    align-self: flex-end;
+    align-items: center;
     justify-content: flex-end;
     gap: 8px;
   }
 
   .question-actions .question-button {
-    padding: 6px 26px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--question-control-height);
+    padding: 0 14px;
     font-weight: normal;
   }
 

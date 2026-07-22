@@ -1,6 +1,8 @@
-.question-input {
+.question-card {
   --question-control-height: 36px;
+}
 
+.question-input {
   box-sizing: border-box;
   width: 100%;
   padding: 10px 12px;
@@ -73,7 +75,7 @@ select.question-input {
 }
 
 @media (max-width: 640px) {
-  .question-input:not(textarea) {
+  .question-card {
     --question-control-height: 44px;
   }
 }
