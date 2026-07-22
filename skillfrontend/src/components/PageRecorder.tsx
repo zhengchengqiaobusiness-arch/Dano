@@ -27,7 +27,6 @@ import {
   DeleteOutlined,
   FileTextOutlined,
   LinkOutlined,
-  PictureOutlined,
   PlusOutlined,
   RobotOutlined,
   UpOutlined,
@@ -3459,7 +3458,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderFlowWorkbench() {
     if (!flowSpec) return null;
-    const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
     const capabilities = flowSpec.capabilities || [];
     const capturedTotal = allCapturedRequests(flowSpec).length;
     // Before a capability contract exists there is nothing actionable to
@@ -3588,9 +3586,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             left: (
               <Space wrap size={4} style={{ marginRight: 16 }}>
                 <Typography.Text strong>编排工作台</Typography.Text>
-                <Tag color="cyan">{capturedTotal} 接口</Tag>
-                <Tag>{totalParams} 字段</Tag>
-                {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
                 <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
               </Space>
             ),
@@ -4360,12 +4355,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
               onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
-          <Button
-            icon={<PictureOutlined />}
-            loading={analysisScreenshotBusy}
-            disabled={analysisScreenshots.length >= MAX_ANALYSIS_SCREENSHOTS || orchestrateBusy || autoFixBusy}
-            onClick={() => screenshotInputRef.current?.click()}
-          >{"\u4e0a\u4f20\u53c2\u8003\u622a\u56fe"}</Button>
           <input
             ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
             onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
@@ -4386,7 +4375,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{"截图可选；上传后，每次点击生成/优化都会结合截图与已录制接口重新分析。"}</Typography.Text>
         {analysisScreenshots.length > 0 && (
           <Space wrap size={8}>
             {analysisScreenshots.map((item) => (
