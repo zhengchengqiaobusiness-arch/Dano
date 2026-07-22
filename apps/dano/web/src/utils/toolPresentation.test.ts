@@ -85,7 +85,7 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(activities)).not.toContain("internal_sync_v2");
   });
 
-  it("consolidates consecutive work of the same kind with a live count", () => {
+  it("keeps every tool call in its own activity row", () => {
     const activities = buildToolActivities([
       { key: "read-1", block: toolBlock("read", "success") },
       { key: "read-2", block: toolBlock("read", "success") },
@@ -99,14 +99,24 @@ describe("Activity Trail presentation", () => {
       sourceKeys: activity.sourceKeys,
     }))).toEqual([
       {
-        label: "已查阅 2 项资料",
-        count: 2,
-        sourceKeys: ["read-1", "read-2"],
+        label: "已查阅资料",
+        count: 1,
+        sourceKeys: ["read-1"],
       },
       {
-        label: "正在更新 2 项内容",
-        count: 2,
-        sourceKeys: ["edit", "write"],
+        label: "已查阅资料",
+        count: 1,
+        sourceKeys: ["read-2"],
+      },
+      {
+        label: "正在更新内容",
+        count: 1,
+        sourceKeys: ["edit"],
+      },
+      {
+        label: "正在更新内容",
+        count: 1,
+        sourceKeys: ["write"],
       },
     ]);
   });
@@ -172,6 +182,7 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
+    expect(activities[0]?.label).toBe("已执行 4 条命令");
     expect(activities[0]?.details).toEqual([
       "执行了 python3 命令",
       "执行了 ls 命令",
@@ -291,7 +302,7 @@ describe("Activity Trail presentation", () => {
     ]);
   });
 
-  it("keeps one safe detail per repeated read invocation", () => {
+  it("keeps repeated read and external invocations in separate rows", () => {
     const activities = buildToolActivities([
       {
         key: "read-1",
@@ -313,11 +324,26 @@ describe("Activity Trail presentation", () => {
       },
     ]);
 
-    expect(activities[0]?.label).toBe("已查阅 3 项资料");
-    expect(activities[0]?.details).toEqual([
-      "dano_call.py",
-      "dano_call.py",
-      "dano_call.py",
+    expect(activities.map(activity => ({
+      label: activity.label,
+      details: activity.details,
+      sourceKeys: activity.sourceKeys,
+    }))).toEqual([
+      {
+        label: "已查阅资料",
+        details: ["dano_call.py"],
+        sourceKeys: ["read-1"],
+      },
+      {
+        label: "已查阅资料",
+        details: ["dano_call.py"],
+        sourceKeys: ["read-2"],
+      },
+      {
+        label: "已查阅资料",
+        details: ["dano_call.py"],
+        sourceKeys: ["read-3"],
+      },
     ]);
 
     const externalActivities = buildToolActivities([
@@ -334,35 +360,47 @@ describe("Activity Trail presentation", () => {
         }),
       },
     ]);
-    expect(externalActivities[0]?.details).toEqual(["example.com"]);
+    expect(externalActivities.map(activity => ({
+      label: activity.label,
+      details: activity.details,
+      sourceKeys: activity.sourceKeys,
+    }))).toEqual([
+      {
+        label: "已获取外部信息",
+        details: ["example.com"],
+        sourceKeys: ["curl-1"],
+      },
+      {
+        label: "已获取外部信息",
+        details: ["example.com"],
+        sourceKeys: ["curl-2"],
+      },
+    ]);
   });
 
-  it("caps detail names at five while preserving known-tool images", () => {
-    const sources = Array.from({ length: 6 }, (_, index) => ({
-      key: `read-${index + 1}`,
-      block: toolBlock("read", "success", {
-        toolArgs: { path: `/private/docs/资料-${index + 1}.pdf` },
-        ...(index === 0
-          ? {
-              resultBlocks: [{
-                kind: "image" as const,
-                src: "data:image/png;base64,preview",
-                alt: "资料预览",
-              }],
-            }
-          : {}),
+  it("caps one call's details at five while preserving its total and images", () => {
+    const [activity] = buildToolActivities([{
+      key: "bash-many",
+      block: toolBlock("bash", "success", {
+        toolArgs: {
+          command: Array.from({ length: 6 }, () => "/bin/cat file").join(" && "),
+        },
+        resultBlocks: [{
+          kind: "image" as const,
+          src: "data:image/png;base64,preview",
+          alt: "资料预览",
+        }],
       }),
-    }));
-
-    const [activity] = buildToolActivities(sources);
+    }]);
 
     expect(activity?.details).toEqual([
-      "资料-1.pdf",
-      "资料-2.pdf",
-      "资料-3.pdf",
-      "资料-4.pdf",
-      "资料-5.pdf",
+      "执行了 cat 命令",
+      "执行了 cat 命令",
+      "执行了 cat 命令",
+      "执行了 cat 命令",
+      "执行了 cat 命令",
     ]);
+    expect(activity?.label).toBe("已执行 6 条命令");
     expect(activity?.overflowCount).toBe(1);
     expect(activity?.images).toEqual([{
       kind: "image",
@@ -410,7 +448,7 @@ describe("Activity Trail presentation", () => {
     expect(JSON.stringify(buildSkillActivity("skill-internal", "ask-matt"))).not.toContain("ask-matt");
   });
 
-  it("hides recovered failures without guessing unresolved failure reasons", () => {
+  it("keeps recovered and unresolved failures as separate tool calls", () => {
     const activities = buildToolActivities([
       {
         key: "failed-then-retried",
@@ -441,6 +479,12 @@ describe("Activity Trail presentation", () => {
       details: activity.details,
       rawDetails: activity.rawDetails,
     }))).toEqual([
+      {
+        sourceKeys: ["failed-then-retried"],
+        label: "资料查阅失败",
+        details: [],
+        rawDetails: ["EACCES: permission denied /private/docs/合同.pdf"],
+      },
       {
         sourceKeys: ["successful-retry"],
         label: "已查阅资料",

@@ -122,7 +122,8 @@
   .tool-activity-trigger {
     display: flex;
     align-items: center;
-    width: 100%;
+    width: fit-content;
+    max-width: 100%;
     min-width: 0;
     min-height: 36px;
     margin: 0;
@@ -136,7 +137,7 @@
     line-height: 1.45;
     text-align: left;
     cursor: pointer;
-    transition-property: background-color, color;
+    transition-property: color;
     transition-duration: 150ms;
     transition-timing-function: ease-out;
   }
@@ -150,7 +151,6 @@
   }
 
   button.tool-activity-trigger:hover {
-    background: color-mix(in srgb, var(--panel-2) 68%, transparent);
     color: var(--text);
   }
 
@@ -169,7 +169,7 @@
 
   .tool-activity-label {
     min-width: 0;
-    flex: 1;
+    flex: 0 1 auto;
     font-variant-numeric: tabular-nums;
     text-wrap: pretty;
   }
@@ -194,6 +194,9 @@
   }
 
   .tool-activity-chevron.expanded {
+    opacity: 1;
+    scale: 1;
+    filter: blur(0);
     rotate: 90deg;
   }
 

@@ -58,58 +58,29 @@ export function buildToolActivities(
   sources: readonly ToolActivitySource[],
 ): ToolActivity[] {
   const activities: ToolActivity[] = [];
-  const visibleSources = sources.filter((source, index) =>
-    !isRecoveredFailure(source, index, sources)
-  );
 
-  for (const source of visibleSources) {
+  for (const source of sources) {
     const descriptor = toolActivityDescriptor(source.block);
     const { kind, skillName } = descriptor;
-    const previous = activities.at(-1);
-    if (
-      previous &&
-      previous.kind === kind &&
-      kind !== "skill" &&
-      previous.status !== "error" &&
-      source.block.toolStatus !== "error"
-    ) {
-      previous.sourceKeys.push(source.key);
-      previous.count += 1;
-      const details = [
-        ...previous.details,
-        ...safeToolActivityDetails(source.block),
-      ];
-      previous.details = kind === "read" ? details : uniqueStrings(details);
-      previous.images = uniqueImages([
-        ...previous.images,
-        ...safeToolActivityImages(source.block),
-      ]);
-      if (source.block.toolStatus === "pending") previous.status = "pending";
-      previous.label = toolActivityLabel(
-        previous.kind,
-        previous.status,
-        previous.count,
-        previous.skillName,
-      );
-      continue;
-    }
+    const details = source.block.toolStatus === "error" || kind === "skill"
+      ? []
+      : safeToolActivityDetails(source.block);
+    const count = Math.max(1, details.length);
 
     activities.push({
       key: source.key,
       sourceKeys: [source.key],
       kind,
       status: source.block.toolStatus,
-      count: 1,
+      count,
       label: toolActivityLabel(
         kind,
         source.block.toolStatus,
-        1,
+        count,
         skillName,
       ),
       ...(skillName ? { skillName } : {}),
-      details: source.block.toolStatus === "error" || kind === "skill"
-        ? []
-        : safeToolActivityDetails(source.block),
+      details,
       rawDetails: source.block.toolStatus === "error"
         ? rawToolFailureDetails(source.block)
         : [],
@@ -123,56 +94,6 @@ export function buildToolActivities(
     details: activity.details.slice(0, MAX_ACTIVITY_DETAILS),
     overflowCount: Math.max(0, activity.details.length - MAX_ACTIVITY_DETAILS),
   }));
-}
-
-function isRecoveredFailure(
-  source: ToolActivitySource,
-  index: number,
-  sources: readonly ToolActivitySource[],
-): boolean {
-  if (source.block.toolStatus !== "error") return false;
-  const identity = toolRetryIdentity(source.block);
-  if (!identity) return false;
-  return sources.slice(index + 1).some(candidate =>
-    candidate.block.toolStatus === "success" &&
-    toolRetryIdentity(candidate.block) === identity
-  );
-}
-
-function toolRetryIdentity(block: ToolContentBlock): string | undefined {
-  const args = asRecord(block.toolArgs);
-  let target: string | undefined;
-  switch (block.toolName) {
-    case "read":
-    case "edit":
-    case "write":
-      target = stringField(args, "path") ?? stringField(args, "file_path");
-      break;
-    case "bash":
-      target = stringField(args, "command");
-      break;
-    case "curl":
-      target = stableJson(block.toolArgs);
-      break;
-    default:
-      target = stableJson(block.toolArgs);
-      break;
-  }
-  return target ? `${block.toolName.trim()}:${target}` : undefined;
-}
-
-function stableJson(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  if (Array.isArray(value)) {
-    return `[${value.map(item => stableJson(item) ?? "null").join(",")}]`;
-  }
-  if (typeof value === "object" && value !== null) {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item) ?? "null"}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function safeToolActivityDetails(block: ToolContentBlock): string[] {
@@ -278,15 +199,6 @@ function safeUrlHostname(value: string): string[] {
 
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-function uniqueImages(images: readonly ImageContentBlock[]): ImageContentBlock[] {
-  const seen = new Set<string>();
-  return images.filter(image => {
-    if (seen.has(image.src)) return false;
-    seen.add(image.src);
-    return true;
-  });
 }
 
 function toolActivityDescriptor(block: ToolContentBlock): {
