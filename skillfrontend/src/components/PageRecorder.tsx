@@ -32,7 +32,6 @@ import {
   UpOutlined,
   DownOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
 
 function Button(props: ButtonProps) {
   return <AntButton htmlType="button" {...props} />;
@@ -275,14 +274,6 @@ interface RecorderFrameMeta {
   viewportHeight?: number;
   deviceScaleFactor?: number;
 }
-
-const STATUS_META: Record<string, { color: string; label: string }> = {
-  verified: { color: "success", label: "已验证" },
-  partially_verified: { color: "warning", label: "部分验证" },
-  needs_clarification: { color: "warning", label: "待澄清" },
-  unsupported: { color: "default", label: "不支持" },
-  rejected: { color: "error", label: "已拒绝" },
-};
 
 const KEYMAP: Record<string, string> = {
   Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete",
@@ -1280,7 +1271,6 @@ async function prepareAnalysisScreenshot(file: File): Promise<AnalysisScreenshot
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
 }) {
-  const nav = useNavigate();
   const wsRef = useRef<WebSocket | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const kbRef = useRef<HTMLInputElement | null>(null);
@@ -3515,7 +3505,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
                 </Space>
               ) : <Space direction="vertical" size={2}>
-                {renderLatestOperationDetail()}
+                {!result?.ok && renderLatestOperationDetail()}
                 <Typography.Text style={{ fontSize: 12 }}>
                   Skill 参数：{checkReport.api_preview?.params?.length ? checkReport.api_preview.params.join(", ") : "无"}
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
@@ -3523,35 +3513,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Typography.Text>
                 {result && !publishPending && (
                   <Space direction="vertical" size={2}>
-                    <Space wrap size={4}>
-                      <Typography.Text type={result.ok ? "success" : "danger"}>
-                        {result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}
-                      </Typography.Text>
-                      {result.status && STATUS_META[result.status] && <Tag color={STATUS_META[result.status].color}>{STATUS_META[result.status].label}</Tag>}
-                    </Space>
-                    {result.ok && result.api && (
-                      <Typography.Text style={{ fontSize: 12 }}>
-                        接口 <Typography.Text code>{result.api.method} {result.api.path}</Typography.Text> · 参数 [{(result.api.params || []).join(", ")}]
-                      </Typography.Text>
-                    )}
-                    {result.recording_mode && (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
-                      </Typography.Text>
-                    )}
+                    <Typography.Text type={result.ok ? "success" : "danger"}>
+                      {result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}
+                    </Typography.Text>
                     {result.ok && result.lifecycle_pending && (
                       <Typography.Text type="warning" style={{ fontSize: 12 }}>
                         {result.lifecycle_message || "资产已发布，生命周期登记待补偿"}
                         {result.asset_version ? `（资产版本 ${result.asset_version}）` : ""}
                       </Typography.Text>
                     )}
-                    {result.verification_basis && <Typography.Text type="secondary" style={{ fontSize: 12 }}>验证依据：{result.verification_basis}</Typography.Text>}
-                    {(result.clarifications || []).map((item, index) => <Typography.Text key={index} type="warning" style={{ fontSize: 12 }}>{item}</Typography.Text>)}
-                    {result.ok && (
-                      <Button type="primary" size="small" onClick={() => nav(`/skills?invoke=${encodeURIComponent(result.skill_id || `${subsystem}.${result.action || action}`)}`)}>
-                        直接调用
-                      </Button>
-                    )}
+                    {!result.ok && (result.clarifications || []).map((item, index) => <Typography.Text key={index} type="warning" style={{ fontSize: 12 }}>{item}</Typography.Text>)}
                   </Space>
                 )}
                 <Space direction="vertical" size={4}>

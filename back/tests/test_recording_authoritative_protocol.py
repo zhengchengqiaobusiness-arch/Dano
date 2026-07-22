@@ -299,6 +299,24 @@ def test_frontend_capability_tabs_do_not_reserve_an_empty_spacer() -> None:
     assert 'display: analysisScreenshots.length || flowSpec.meta?.capability_generation ? undefined : "none"' not in composer
 
 
+def test_frontend_published_result_is_compact_and_has_no_duplicate_details() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    result_start = source.index("{result && !publishPending && (")
+    result_end = source.index("                <Space direction=\"vertical\" size={4}>", result_start)
+    published_result = source[result_start:result_end]
+    assert "STATUS_META" not in published_result
+    assert "result.api" not in published_result
+    assert "result.recording_mode" not in published_result
+    assert "result.verification_basis" not in published_result
+    assert "直接调用" not in published_result
+
+    description_start = source.index("description={", source.index("function renderFlowWorkbench()"))
+    description_end = source.index("            }", description_start)
+    description = source[description_start:description_end]
+    assert "{!result?.ok && renderLatestOperationDetail()}" in description
+
+
 def test_recording_transport_drains_messages_during_long_model_operations() -> None:
     source = inspect.getsource(gateway.record_ws)
 
