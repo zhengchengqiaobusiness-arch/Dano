@@ -1,337 +1,237 @@
 <script lang="ts">
-  import Moon from "lucide-svelte/icons/moon";
-  import Sun from "lucide-svelte/icons/sun";
+  import type { AccentColorPreset } from "@dano/types/protocol";
+  import Check from "lucide-svelte/icons/check";
+  import Palette from "lucide-svelte/icons/palette";
   import X from "lucide-svelte/icons/x";
-  import { onMount } from "svelte";
-  import type { Base46Theme, ThemeMode } from "../themes";
+  import * as Dialog from "./ui/dialog";
+  import { t } from "../i18n";
+  import { ACCENT_COLOR_PRESETS, DEFAULT_ACCENT_COLOR_PRESET } from "../themes";
 
   let {
     open = false,
-    mode = "dark" as ThemeMode,
-    darkThemeId = "",
-    lightThemeId = "",
-    darkThemes = [] as Base46Theme[],
-    lightThemes = [] as Base46Theme[],
+    selectedPreset = DEFAULT_ACCENT_COLOR_PRESET,
     themeStyle = "",
     onClose = () => {},
-    onSetTheme = (_: string) => {},
+    onSelectPreset = (_: AccentColorPreset) => {},
   }: {
     open?: boolean;
-    mode?: ThemeMode;
-    darkThemeId?: string;
-    lightThemeId?: string;
-    darkThemes?: Base46Theme[];
-    lightThemes?: Base46Theme[];
+    selectedPreset?: AccentColorPreset;
     themeStyle?: string;
     onClose?: () => void;
-    onSetTheme?: (themeId: string) => void;
+    onSelectPreset?: (preset: AccentColorPreset) => void;
   } = $props();
 
-  let currentThemes = $derived(
-    mode === "dark" ? darkThemes : lightThemes,
-  );
-  let currentThemeId = $derived(
-    mode === "dark" ? darkThemeId : lightThemeId,
-  );
-  let currentModeLabel = $derived(
-    mode === "dark" ? "Dark theme" : "Light theme",
-  );
-  let defaultThemeId = $derived(
-    mode === "dark" ? "pi-base46-dark" : "pi-base46-light",
-  );
-  let displayThemes = $derived.by(() => {
-    const def = currentThemes.find(t => t.id === defaultThemeId);
-    const rest = currentThemes.filter(t => t.id !== defaultThemeId);
-    return [
-      ...(def
-        ? [{ theme: def, label: "Default (Built-in)", isDefault: true }]
-        : []),
-      ...rest.map(t => ({ theme: t, label: t.label, isDefault: false })),
-    ];
-  });
+  const presets = [
+    { key: "default", label: "themeColor.default" },
+    { key: "blue", label: "themeColor.blue" },
+    { key: "gray", label: "themeColor.gray" },
+    { key: "yellow", label: "themeColor.yellow" },
+    { key: "pink", label: "themeColor.pink" },
+    { key: "purple", label: "themeColor.purple" },
+  ] as const satisfies ReadonlyArray<{
+    key: AccentColorPreset;
+    label: Parameters<typeof t>[0];
+  }>;
 
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && open) onClose();
+  function handleOpenChange(nextOpen: boolean) {
+    if (!nextOpen && open) onClose();
   }
-
-  $effect(() => {
-    if (typeof document === "undefined") return;
-    document.body.style.overflow = open ? "hidden" : "";
-  });
-
-  onMount(() => {
-    window.addEventListener("keydown", handleKeydown);
-    return () => {
-      window.removeEventListener("keydown", handleKeydown);
-      if (typeof document !== "undefined") {
-        document.body.style.removeProperty("overflow");
-      }
-    };
-  });
 </script>
 
-{#if open}
-  <div
-    class="theme-dialog-overlay"
-    style={themeStyle}
-    role="button"
-    tabindex="0"
-    onclick={() => onClose()}
-    onkeydown={(e) => (e.key === "Enter" || e.key === " ") && onClose()}
-  >
-    <div
+<Dialog.Root {open} onOpenChange={handleOpenChange}>
+  <Dialog.Portal>
+    <Dialog.Overlay
+      class="theme-dialog-overlay"
+      style={themeStyle}
+      onclick={onClose}
+    />
+    <Dialog.Content
       class="theme-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="theme-dialog-title"
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
+      style={themeStyle}
+      aria-labelledby="theme-color-dialog-title"
     >
-      <div class="theme-dialog-body">
-        <div class="theme-dialog-top">
-          <div class="theme-dialog-intro">
-            <div class="theme-title-row">
-              {#if mode === "dark"}
-                <Moon aria-hidden="true" size={18} style="color: var(--accent-hover); flex-shrink: 0" />
-              {:else}
-                <Sun aria-hidden="true" size={18} style="color: var(--accent-hover); flex-shrink: 0" />
-              {/if}
-              <h2 id="theme-dialog-title" class="theme-dialog-title">
-                {currentModeLabel}
-              </h2>
-            </div>
-          </div>
+      <header class="theme-dialog-top">
+        <Dialog.Title
+          id="theme-color-dialog-title"
+          class="theme-dialog-title"
+          level={2}
+        >
+          <Palette size={18} aria-hidden="true" />
+          <span>{t("appHeader.themeColor")}</span>
+        </Dialog.Title>
+        <Dialog.Close
+          class="theme-dialog-close"
+          aria-label={t("themeColor.close")}
+        >
+          <X size={17} aria-hidden="true" />
+        </Dialog.Close>
+      </header>
+
+      <div class="theme-color-list">
+        {#each presets as preset (preset.key)}
           <button
-            class="theme-dialog-close"
+            class="theme-color-row"
+            class:selected={selectedPreset === preset.key}
             type="button"
-            aria-label="Close theme settings"
-            onclick={() => onClose()}
+            data-theme-color-preset={preset.key}
+            aria-pressed={selectedPreset === preset.key}
+            onclick={() => onSelectPreset(preset.key)}
           >
-            <X aria-hidden="true" size={15} />
+            <span
+              class="theme-color-swatch"
+              style={`background: ${ACCENT_COLOR_PRESETS[preset.key]}`}
+              aria-hidden="true"
+            ></span>
+            <span>{t(preset.label)}</span>
+            <span class="theme-color-check-slot" aria-hidden="true">
+              {#if selectedPreset === preset.key}
+                <Check class="theme-color-check" size={16} strokeWidth={2.5} />
+              {/if}
+            </span>
           </button>
-        </div>
-
-        <!-- <div class="theme-section-meta">
-          <span class="theme-section-label">{currentModeLabel}</span>
-          <span class="theme-section-subtle">
-            {displayThemes.length} themes available
-          </span>
-        </div> -->
-
-        <div class="theme-grid">
-          {#each displayThemes as item (item.theme.id)}
-            <button
-              class="theme-card"
-              class:current={currentThemeId === item.theme.id}
-              type="button"
-              onclick={() => onSetTheme(item.theme.id)}
-            >
-              <div class="theme-card-preview">
-                <span class="theme-swatch background" style="background: {item.theme.base16.base00}"></span>
-                <span class="theme-swatch panel" style="background: {item.theme.base30.one_bg2}"></span>
-                <span class="theme-swatch accent" style="background: {item.theme.base16.base0D}"></span>
-                <span class="theme-swatch success" style="background: {item.theme.base16.base0B}"></span>
-                <span class="theme-swatch warning" style="background: {item.theme.base16.base0A}"></span>
-                <span class="theme-swatch neutral" style="background: {item.theme.base16.base05}"></span>
-              </div>
-              <span class="theme-card-title-row">
-                <span class="theme-card-title">{item.label}</span>
-                {#if currentThemeId === item.theme.id}
-                  <span class="theme-card-badge">Active</span>
-                {/if}
-              </span>
-            </button>
-          {/each}
-        </div>
+        {/each}
       </div>
-    </div>
-  </div>
-{/if}
+    </Dialog.Content>
+  </Dialog.Portal>
+</Dialog.Root>
 
 <style>
-  .theme-dialog-overlay {
+  :global(.theme-dialog-overlay) {
     position: fixed;
     inset: 0;
     z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
     background: var(--overlay);
   }
 
-  .theme-dialog {
-    width: min(1120px, 100%);
-    max-height: min(82vh, 760px);
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--border-strong) 86%, transparent);
-    border-radius: 18px;
-    background-color: var(--panel);
-    background-image: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--panel-2) 94%, var(--panel) 6%),
-      var(--panel)
-    );
+  :global(.theme-dialog) {
+    box-sizing: border-box;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 1001;
+    width: min(380px, calc(100vw - 40px));
+    max-height: calc(100vh - 40px);
+    padding: 14px;
+    overflow-y: auto;
+    transform: translate(-50%, -50%);
+    border: 0;
+    border-radius: 22px;
+    background: var(--panel);
+    color: var(--text);
     box-shadow: var(--shadow-floating);
   }
 
-  .theme-dialog-body {
-    max-height: min(82vh, 760px);
-    overflow-y: auto;
-    padding: 18px 20px 20px;
-    background: var(--panel);
-  }
-
-  .theme-dialog-top {
+  :global(.theme-dialog-top) {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
-    margin-bottom: 16px;
+    margin-bottom: 18px;
   }
 
-  .theme-dialog-intro {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .theme-title-row {
+  :global(.theme-dialog-title) {
     display: flex;
     align-items: center;
-    gap: 10px;
-  }
-
-  .theme-dialog-title {
+    gap: 8px;
     margin: 0;
     color: var(--text);
-    font-size: 1.02rem;
-    line-height: 1.15;
+    font-size: 1.05rem;
     font-weight: 700;
+    line-height: 1.25;
   }
 
-  .theme-dialog-close {
+  :global(.theme-dialog-close) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    border: none;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    padding: 0;
+    border: 0;
     border-radius: 999px;
     background: transparent;
     color: var(--text-subtle);
     cursor: pointer;
     transition:
-      color 0.15s ease,
-      transform 0.15s ease;
+      background 150ms ease,
+      color 150ms ease,
+      transform 150ms ease;
   }
 
-  .theme-dialog-close:hover,
-  .theme-dialog-close:focus-visible {
-    border-color: var(--accent);
+  :global(.theme-dialog-close:hover) {
+    background: var(--surface-hover);
     color: var(--text);
-    transform: translateY(-1px);
   }
 
-  .theme-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 10px;
+  :global(.theme-dialog-close:active),
+  .theme-color-row:active {
+    transform: scale(0.96);
   }
 
-  .theme-card {
+  :global(.theme-dialog-close:focus-visible),
+  .theme-color-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .theme-color-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .theme-color-row {
+    box-sizing: border-box;
     display: grid;
-    gap: 6px;
-    padding: 10px;
+    grid-template-columns: 14px minmax(0, 1fr) 20px;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.9rem;
     text-align: left;
-    border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
-    border-radius: 14px;
-    background: color-mix(in srgb, var(--panel) 92%, var(--panel-2) 8%);
-    color: inherit;
     cursor: pointer;
     transition:
-      border-color 0.16s ease,
-      background 0.16s ease,
-      transform 0.16s ease,
-      box-shadow 0.16s ease;
+      background 150ms ease,
+      transform 150ms ease;
   }
 
-  .theme-card:hover {
-    transform: translateY(-1px);
-    border-color: color-mix(in srgb, var(--accent) 38%, var(--border-strong));
+  .theme-color-row:hover {
+    background: var(--surface-hover);
   }
 
-  .theme-card:focus-visible {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--focus-ring);
+  .theme-color-row.selected {
+    background: var(--surface-active);
   }
 
-  .theme-card.current {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--surface-active) 68%, var(--panel));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
-  }
-
-  .theme-card-preview {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 6px;
-  }
-
-  .theme-swatch {
+  .theme-color-swatch {
+    box-sizing: border-box;
     display: block;
-    width: 100%;
-    aspect-ratio: 1;
+    width: 12px;
+    height: 12px;
+    border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
   }
 
-  .theme-card-title-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .theme-card-title {
-    color: var(--text);
-    font-size: 0.84rem;
-    font-weight: 600;
-  }
-
-  .theme-card-badge {
+  .theme-color-check-slot {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-hover);
-    font-size: 0.62rem;
-    font-weight: 600;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
   }
 
-  @media (max-width: 900px) {
-    .theme-dialog-overlay {
-      padding: 10px;
-      align-items: flex-end;
-    }
-
-    .theme-dialog {
-      width: 100%;
-      max-height: 88vh;
-      border-radius: 18px 18px 0 0;
-    }
-
-    .theme-dialog-body {
-      max-height: 88vh;
-      padding: 16px 16px 20px;
-    }
-
-    .theme-grid {
-      grid-template-columns: 1fr;
+  @media (max-width: 640px) {
+    :global(.theme-dialog) {
+      width: min(380px, calc(100vw - 40px));
+      padding: 16px;
+      border-radius: 20px;
     }
   }
 </style>
