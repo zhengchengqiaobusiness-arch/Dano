@@ -62,7 +62,8 @@ def test_nodes_override_divergent_derived_membership_views() -> None:
     ]
 
 
-def test_auxiliary_request_refs_survive_execute_membership_derivation() -> None:
+@pytest.mark.parametrize("usage", ["option_source", "fact_check", "preflight"])
+def test_auxiliary_request_refs_survive_execute_membership_derivation(usage: str) -> None:
     spec = _spec(FlowCapability(
         name="submit",
         nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
@@ -71,7 +72,7 @@ def test_auxiliary_request_refs_survive_execute_membership_derivation() -> None:
             CapabilityRequestRef(
                 request_id="req-query",
                 step_id="query",
-                usage="option_source",
+                usage=usage,
                 origin="manual",
                 confirmed=True,
             ),
@@ -83,7 +84,7 @@ def test_auxiliary_request_refs_survive_execute_membership_derivation() -> None:
     refs = spec.capabilities[0].request_refs
     assert [(ref.step_id, ref.request_id, ref.usage) for ref in refs] == [
         ("submit", "req-submit", "execute"),
-        ("query", "req-query", "option_source"),
+        ("query", "req-query", usage),
     ]
 
 
@@ -141,6 +142,8 @@ def test_frontend_renders_every_non_execute_capability_interface() -> None:
 
     assert 'ref.usage !== "execute"' in source
     assert "{capabilityUsageLabel(ref.usage)}" in source
+    assert "const auxiliaryStepIds = new Set" in source
+    assert "${stepIds.length + auxiliaryStepIds.size} 接口" in source
 
 
 def test_frontend_optimistically_keeps_added_step_visible() -> None:

@@ -10006,11 +10006,11 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
     ]
     existing_memberships = {
         ref.step_id: ref for ref in (cap.request_refs or [])
-        if ref.usage in {"execute", "preflight"} and ref.step_id
+        if ref.usage == "execute" and ref.step_id
     }
     auxiliary_refs = [
         ref for ref in (cap.request_refs or [])
-        if ref.usage not in {"execute", "preflight"} or not ref.step_id
+        if ref.usage != "execute" or not ref.step_id
     ]
     execute_refs: list[CapabilityRequestRef] = []
     for step_id in cap.step_ids:

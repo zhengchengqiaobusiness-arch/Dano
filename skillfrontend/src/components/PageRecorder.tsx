@@ -4401,6 +4401,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const stepIds = capabilityActualStepIds(cap);
               const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
               const capParams = capSteps.flatMap((st) => st.params || []);
+              const auxiliaryStepIds = new Set((cap.request_refs || [])
+                .filter((ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id))
+                .map((ref) => ref.step_id));
               const derivedInputSchema = {
                 type: "object",
                 properties: Object.fromEntries(capParams
@@ -4465,7 +4468,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     >
                       <Collapse.Panel
                         key="interfaces"
-                        header={`接口与字段 ${stepIds.length} 接口 / ${capParams.length} 字段`}
+                        header={`接口与字段 ${stepIds.length + auxiliaryStepIds.size} 接口 / ${capParams.length} 字段`}
                       >
                         {renderCapabilityInterfacesWithFields(cap, idx)}
                       </Collapse.Panel>
