@@ -16,6 +16,12 @@ import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
 import { UploadRegistry } from "./upload-registry.js";
+import {
+  toBrowserUserSummary,
+  UserContextError,
+  type AuthenticatedUserContext,
+  type UserContextResolver,
+} from "./user-context.js";
 import type {
   BridgeConfig,
   BridgeBrowserRuntimeConfig,
@@ -45,6 +51,7 @@ export interface RpcConnectionHandler {
 
 export interface RpcConnectionContext {
   client: BridgeClient;
+  user?: AuthenticatedUserContext;
   config: BridgeConfig;
   eventBus: BridgeEventBus;
   uploadRegistry: UploadRegistry;
@@ -71,6 +78,7 @@ export class BridgeServer {
   private httpServer: http.Server | undefined;
   private handlers = new Map<string, RpcConnectionHandler>();
   private clients = new Map<string, BridgeClient>();
+  private clientUsers = new Map<string, AuthenticatedUserContext>();
   private sseStreams = new Map<string, Set<() => void>>();
   private uploadRegistry: UploadRegistry;
   private cleanupInterval: ReturnType<typeof setInterval> | undefined;
@@ -86,6 +94,7 @@ export class BridgeServer {
     handlerFactory: RpcConnectionHandlerFactory,
     eventBus: BridgeEventBus,
     emitEvent: (event: BridgeEvent) => void,
+    private readonly userContextResolver?: UserContextResolver,
   ) {
     this.config = config;
     this.handlerFactory = handlerFactory;
@@ -202,6 +211,7 @@ export class BridgeServer {
     }
     this.handlers.clear();
     this.clients.clear();
+    this.clientUsers.clear();
 
     if (this.httpServer) {
       await new Promise<void>((resolve, reject) => {
@@ -256,9 +266,11 @@ export class BridgeServer {
 
       if (req.method === "POST" && pathname === "/api/clients") {
         await readJsonBody(req);
-        this.createClient(res);
+        await this.createClient(req, res);
         return;
       }
+
+      await this.authenticateProtectedRequest(req, url);
 
       if (req.method === "POST" && pathname === "/api/uploads") {
         await this.handleUploadRequest(req, res, url);
@@ -279,7 +291,10 @@ export class BridgeServer {
         pathname,
       );
       if (req.method === "GET" && uploadPreviewMatch?.[1]) {
-        this.handleUploadPreview(res, decodeURIComponent(uploadPreviewMatch[1]));
+        await this.handleUploadPreview(
+          res,
+          decodeURIComponent(uploadPreviewMatch[1]),
+        );
         return;
       }
 
@@ -303,7 +318,17 @@ export class BridgeServer {
         pathname,
       );
       if (req.method === "GET" && clientEventsMatch?.[1]) {
-        this.openEventStream(req, res, decodeURIComponent(clientEventsMatch[1]));
+        const clientId = decodeURIComponent(clientEventsMatch[1]);
+        this.openEventStream(req, res, clientId);
+        return;
+      }
+
+      const clientUserMatch = /^\/api\/clients\/([^/]+)\/user$/.exec(pathname);
+      if (req.method === "GET" && clientUserMatch?.[1]) {
+        await this.handleCurrentUser(
+          res,
+          decodeURIComponent(clientUserMatch[1]),
+        );
         return;
       }
 
@@ -311,10 +336,11 @@ export class BridgeServer {
         pathname,
       );
       if (req.method === "POST" && clientMessagesMatch?.[1]) {
+        const clientId = decodeURIComponent(clientMessagesMatch[1]);
         const body = await readJsonBody(req);
         this.handleClientMessage(
           res,
-          decodeURIComponent(clientMessagesMatch[1]),
+          clientId,
           body,
         );
         return;
@@ -327,8 +353,9 @@ export class BridgeServer {
         (req.method === "POST" || req.method === "DELETE") &&
         clientDisconnectMatch?.[1]
       ) {
+        const clientId = decodeURIComponent(clientDisconnectMatch[1]);
         await readJsonBody(req);
-        this.disconnectClient(decodeURIComponent(clientDisconnectMatch[1]));
+        this.disconnectClient(clientId);
         writeJson(res, 202, { status: "disconnected" });
         return;
       }
@@ -340,6 +367,10 @@ export class BridgeServer {
 
       this.handleStaticRequest(req, res);
     } catch (error) {
+      if (error instanceof UserContextError) {
+        writeJson(res, error.status, { error: error.message });
+        return;
+      }
       if (error instanceof HttpError) {
         writeJson(res, error.status, { error: error.message });
         return;
@@ -487,10 +518,10 @@ export class BridgeServer {
     return workspacePath;
   }
 
-  private handleUploadPreview(
+  private async handleUploadPreview(
     res: http.ServerResponse,
     id: string,
-  ): void {
+  ): Promise<void> {
     const ref = this.uploadRegistry.touch(id);
     if (!ref) {
       writeJson(res, 404, { error: "Upload was not found" });
@@ -568,12 +599,16 @@ export class BridgeServer {
     url: URL,
   ): void {
     const clientId = url.searchParams.get("clientId");
+    if (!clientId) {
+      writeJson(res, 403, { error: "Upload does not belong to this client" });
+      return;
+    }
     const upload = this.uploadRegistry.touch(id);
     if (!upload) {
       writeJson(res, 404, { error: "Upload was not found" });
       return;
     }
-    if (!clientId || upload.ownerClientId !== clientId) {
+    if (upload.ownerClientId !== clientId) {
       writeJson(res, 403, { error: "Upload does not belong to this client" });
       return;
     }
@@ -585,7 +620,14 @@ export class BridgeServer {
     writeJson(res, 202, { status: "orphaned" });
   }
 
-  private createClient(res: http.ServerResponse): void {
+  private async createClient(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const user = await this.userContextResolver?.resolve(req.headers);
+    if (this.userContextResolver && !user) {
+      throw new UserContextError(401, "Authenticated User is required");
+    }
     clientSeqCounter++;
     const client: BridgeClient = {
       id: generateClientId(),
@@ -594,10 +636,12 @@ export class BridgeServer {
     };
 
     this.clients.set(client.id, client);
+    if (user) this.clientUsers.set(client.id, user);
     this.eventBus.registerClient(client);
 
     const handler = this.handlerFactory({
       client,
+      user: user ?? undefined,
       config: this.config,
       eventBus: this.eventBus,
       uploadRegistry: this.uploadRegistry,
@@ -615,10 +659,71 @@ export class BridgeServer {
 
     writeJson(res, 201, {
       client,
+      ...(user ? { currentUser: toBrowserUserSummary(user.user) } : {}),
       eventsUrl: `/api/clients/${encodeURIComponent(client.id)}/events`,
       messagesUrl: `/api/clients/${encodeURIComponent(client.id)}/messages`,
       defaultWorkspacePath: this.config.defaultWorkspacePath,
     });
+  }
+
+  private async handleCurrentUser(
+    res: http.ServerResponse,
+    clientId: string,
+  ): Promise<void> {
+    const boundUser = this.clientUsers.get(clientId);
+    if (!boundUser) {
+      throw new UserContextError(401, "Authenticated User is required");
+    }
+    writeJson(res, 200, toBrowserUserSummary(boundUser.user));
+  }
+
+  private async authenticateProtectedRequest(
+    req: http.IncomingMessage,
+    url: URL,
+  ): Promise<void> {
+    const clientRoute = /^\/api\/clients\/([^/]+)(?:\/|$)/.exec(url.pathname);
+    let clientId = clientRoute?.[1]
+      ? decodeURIComponent(clientRoute[1])
+      : undefined;
+    const previewMatch = /^\/api\/uploads\/([^/]+)\/preview$/.exec(url.pathname);
+
+    if (!clientId && previewMatch?.[1]) {
+      const upload = this.uploadRegistry.peek(decodeURIComponent(previewMatch[1]));
+      clientId = upload?.ownerClientId;
+    }
+
+    if (
+      !clientId &&
+      !previewMatch &&
+      (url.pathname.startsWith("/api/uploads") ||
+        url.pathname.startsWith("/api/workspace-files"))
+    ) {
+      clientId = url.searchParams.get("clientId") ?? undefined;
+    }
+
+    if (clientId) await this.authenticateBoundClientRequest(req, clientId);
+  }
+
+  private async authenticateBoundClientRequest(
+    req: http.IncomingMessage,
+    clientId: string,
+  ): Promise<AuthenticatedUserContext | undefined> {
+    if (!this.clients.has(clientId)) {
+      throw new HttpError(404, "Client was not found");
+    }
+    const boundUser = this.clientUsers.get(clientId);
+    if (!boundUser) return undefined;
+    if (!this.userContextResolver) {
+      throw new UserContextError(503, "User authentication is unavailable");
+    }
+    const requestUser = await this.userContextResolver.resolve(req.headers);
+    if (!requestUser) {
+      throw new UserContextError(401, "Authenticated User is required");
+    }
+    if (requestUser.user.id !== boundUser.user.id) {
+      throw new UserContextError(403, "Client belongs to another User");
+    }
+    return boundUser;
   }
 
   private openEventStream(
@@ -714,6 +819,7 @@ export class BridgeServer {
     handler.dispose();
     this.handlers.delete(clientId);
     this.clients.delete(clientId);
+    this.clientUsers.delete(clientId);
     this.eventBus.unregisterClient(clientId);
     this.closeSseStreams(clientId);
   }

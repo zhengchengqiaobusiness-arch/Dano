@@ -340,6 +340,32 @@ describe("Dano main", () => {
     ).toBe("/tmp/dano-runtime/.pi/agent");
   });
 
+  it("configures trusted JWT User authentication from server environment", () => {
+    const options = parseDanoServerOptions([], {
+      DANO_RUNTIME_DIR: "/tmp/dano-runtime",
+      DANO_AUTH_JWT_SECRET: " signing-secret ",
+      DANO_AUTH_JWT_ISSUER: " https://auth.example.test ",
+      DANO_AUTH_JWT_AUDIENCE: " dano-web ",
+      DANO_AUTH_COOKIE_NAME: " company_session ",
+    });
+
+    expect(options.runtimeRootPath).toBe("/tmp/dano-runtime");
+    expect(options.userAuthentication).toEqual({
+      secret: "signing-secret",
+      issuer: "https://auth.example.test",
+      audience: "dano-web",
+      cookieName: "company_session",
+    });
+  });
+
+  it("does not invent an authentication identity when JWT verification is unconfigured", () => {
+    const options = parseDanoServerOptions([], {
+      DANO_RUNTIME_DIR: "/tmp/dano-runtime",
+    });
+
+    expect(options.userAuthentication).toBeUndefined();
+  });
+
   it("uses upload configuration from environment", () => {
     const options = parseDanoServerOptions([], {
       DANO_UPLOAD_DIR: " custom-uploads ",

@@ -2,6 +2,7 @@ import { BridgeEventBus } from "./bridge/bridge-event-bus.js";
 import { BridgeRpcAdapter } from "./bridge/bridge-rpc-adapter.js";
 import { BridgeServer, type RpcConnectionHandlerFactory } from "./bridge/server.js";
 import { DetachedSessionRegistry } from "./bridge/session-registry.js";
+import type { UserContextResolver } from "./bridge/user-context.js";
 import type {
   BridgeClient,
   BridgeConfig,
@@ -21,6 +22,7 @@ export interface StartDanoServerOptions {
   backend?: DanoBackend;
   sessionRegistry?: DetachedSessionRegistry;
   onShutdown?: () => void;
+  userContextResolver?: UserContextResolver;
 }
 
 export interface DanoServerController {
@@ -82,7 +84,13 @@ export async function startDanoServer(
     );
   };
 
-  const server = new BridgeServer(config, handlerFactory, eventBus, emitEvent);
+  const server = new BridgeServer(
+    config,
+    handlerFactory,
+    eventBus,
+    emitEvent,
+    options.userContextResolver,
+  );
   let state: BridgeState = { status: "starting", port: config.port };
 
   try {
