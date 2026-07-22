@@ -128,3 +128,32 @@ def test_frontend_edits_capability_membership_through_one_typed_path() -> None:
     assert 'field: "request_refs"' not in source
     assert 'updateCapabilityField(idx, "step_ids"' not in source
     assert 'op: "reorder_capability_steps"' in source
+
+
+def test_frontend_renders_every_non_execute_capability_interface() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "skillfrontend"
+        / "src"
+        / "components"
+        / "PageRecorder.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert 'ref.usage !== "execute"' in source
+    assert "{capabilityUsageLabel(ref.usage)}" in source
+
+
+def test_frontend_optimistically_keeps_added_step_visible() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "skillfrontend"
+        / "src"
+        / "components"
+        / "PageRecorder.tsx"
+    ).read_text(encoding="utf-8")
+    handler = source.split("function addStepToCapability", 1)[1].split(
+        "function removeStepFromCapability", 1,
+    )[0]
+
+    assert "optimisticNodes" in handler
+    assert "_rollback:" in handler

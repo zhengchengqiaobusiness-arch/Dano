@@ -2815,10 +2815,33 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const membership = { usage, origin: "manual", confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
+      const current = flowSpecRef.current;
+      const cap = current?.capabilities?.[idx];
+      const step = current?.steps?.find((item) => item.step_id === stepId);
+      if (!current || !cap || !step) return false;
+      if (usage === "execute") {
+        const optimisticNodes = [...(cap.nodes || []), { type: "call", step_id: stepId }];
+        patchLocalCapability(idx, { nodes: optimisticNodes });
+      } else {
+        patchLocalCapability(idx, { request_refs: [
+          ...(cap.request_refs || []).filter((ref) => ref.step_id !== stepId),
+          {
+            step_id: stepId,
+            request_id: step.source_meta?.request_id,
+            request_index: step.source_meta?.request_index,
+            method: step.method,
+            path: step.path || stripHost(step.url),
+            ...membership,
+          },
+        ] });
+      }
       return send({ type: "flow_update", edits: [
         { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
         { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-      ] });
+      ], _rollback: () => {
+        flowSpecRef.current = current;
+        setFlowSpec(current);
+      } });
     }
     if (value.startsWith("req:")) {
       const requestKey = value.slice(4);
@@ -4123,7 +4146,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ...optimisticOrder.filter((stepId) => actualStepIds.includes(stepId)),
       ...actualStepIds.filter((stepId) => !optimisticOrder.includes(stepId)),
     ];
-    const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage === "option_source" && ref.step_id && !stepIds.includes(ref.step_id));
+    const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id));
     const addOptions = capabilityStepSelectOptions(cap);
     const fieldCount = stepIds.reduce((n, sid) => n + (stepById[sid]?.params?.length || 0), 0);
     return (
@@ -4154,11 +4177,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           >
             添加接口
           </Button>
-          <Tag>{stepIds.length} 执行接口 / {auxiliaryRefs.length} 候选来源 / {fieldCount} 字段</Tag>
+          <Tag>{stepIds.length} 执行接口 / {auxiliaryRefs.length} 辅助接口 / {fieldCount} 字段</Tag>
         </Space>
-        {!stepIds.length ? (
+        {!stepIds.length && !auxiliaryRefs.length ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未绑定接口" />
-        ) : (
+        ) : stepIds.length ? (
           <Collapse
             size="small"
             activeKey={expandedCapabilitySteps[capabilityUiKey] || []}
@@ -4169,14 +4192,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           >
             {stepIds.map((stepId, stepIdx) => renderCapabilityStepWithFields(cap, capIdx, stepId, stepIdx))}
           </Collapse>
-        )}
+        ) : null}
         {auxiliaryRefs.length > 0 && (
           <List
             size="small"
-            header={<Typography.Text strong>候选来源</Typography.Text>}
+            header={<Typography.Text strong>辅助接口</Typography.Text>}
             rowKey={(ref) => [
               capabilityUiKey,
-              "option-source",
+              ref.usage || "auxiliary",
               ref.step_id || ref.request_id || auxiliaryRefs.indexOf(ref),
             ].join(":")}
             dataSource={auxiliaryRefs}
@@ -4185,7 +4208,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               return (
                 <List.Item actions={[<Button key="remove" size="small" danger onClick={() => removeStepFromCapability(capIdx, String(ref.step_id || ""))}>移除</Button>]}>
                   <Space wrap>
-                    <Tag color="cyan">选项来源</Tag>
+                    <Tag color="cyan">{capabilityUsageLabel(ref.usage)}</Tag>
                     <Typography.Text>{st?.name || ref.path || ref.step_id}</Typography.Text>
                     {st && <PathText value={st.path || stripHost(st.url)} maxWidth={420} />}
                   </Space>
