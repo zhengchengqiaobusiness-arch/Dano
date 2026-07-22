@@ -3587,11 +3587,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             left: (
               <Space wrap size={4} style={{ marginRight: 16 }}>
                 <Typography.Text strong>编排工作台</Typography.Text>
+                <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
+                  <Button icon={<RobotOutlined />} type="primary" size="small" loading={orchestrateBusy || autoFixBusy}
+                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
+                    onClick={orchestrateFlow}>生成/优化能力</Button>
+                </Tooltip>
                 <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
               </Space>
             ),
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
+                <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
                 <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再发布当前流程" : ""}>
                   <span><Button size="small" type="primary" loading={phase === "publishing"}
                     disabled={!capabilities.length} onClick={publishRequest}>发布当前流程</Button></span>
@@ -4353,17 +4359,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
-          <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
-            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
-              disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
-              onClick={orchestrateFlow}>生成/优化能力</Button>
-          </Tooltip>
           <input
             ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
             onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
           />
           {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
-          <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           {flowSpec.meta?.capability_generation && <>
             <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
               {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
