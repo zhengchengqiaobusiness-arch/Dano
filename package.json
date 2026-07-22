@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.1.133",
+  "version": "0.1.134",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -31,6 +31,7 @@
     "smoke:deploy": "node scripts/smoke-dano-deploy.mjs",
     "start": "pnpm -C apps/dano start",
     "test": "vitest run",
+    "test:browser:question-tool": "node scripts/test-question-tool-card-browser.mjs",
     "test:browser:multi-tab": "node scripts/test-multi-tab-prompt-browser.mjs",
     "test:watch": "vitest"
   },
