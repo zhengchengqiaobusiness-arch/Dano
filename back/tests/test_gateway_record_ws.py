@@ -94,11 +94,103 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert "if needs_pi:" in branch
     assert 'generation_mode="initial"' in branch
     assert "timeout_s=3000" in branch
+    identity_check = branch.index("check_fingerprint=False")
+    replay_check = branch.index("if await _replay_costly(msg):")
+    fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
+    assert identity_check < replay_check < fingerprint_check
     assert "pending_flow_spec or before_operation" in branch
     assert '"operation_warning": str(e)' in branch
     assert '"type": "flow_spec"' in branch
     fallback = branch[branch.index("pending_flow_spec = await orchestrate_flow_capabilities"):]
     assert fallback.index("except WebSocketDisconnect:") < fallback.index("except Exception as fallback_error:")
+
+
+def test_auto_fix_flow_checks_identity_around_costly_replay() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    branch_start = source.index('elif t == "auto_fix_flow":')
+    branch_end = source.index('elif t == "step_naming":', branch_start)
+    branch = source[branch_start:branch_end]
+
+    identity_check = branch.index("check_fingerprint=False")
+    replay_check = branch.index("if await _replay_costly(msg):")
+    fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
+    assert identity_check < replay_check < fingerprint_check
+    assert '"operation": "repair"' in branch
+    assert '"operation_id": operation_id' in branch
+
+
+def test_recording_operation_identity_rejects_other_action_or_recording() -> None:
+    by_action = gateway._recording_operation_identity_conflict(
+        {"action": "action_old", "recording_id": "recording_current"},
+        session_action="action_current",
+        recording_id="recording_current",
+        check_fingerprint=False,
+    )
+    by_recording = gateway._recording_operation_identity_conflict(
+        {"action": "action_current", "recording_id": "recording_old"},
+        session_action="action_current",
+        recording_id="recording_current",
+        check_fingerprint=False,
+    )
+
+    assert by_action and by_action["stage"] == "operation_identity"
+    assert by_recording and by_recording["stage"] == "operation_identity"
+
+
+def test_recording_operation_identity_rejects_stale_flow_but_accepts_current() -> None:
+    from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+    spec = FlowSpec(steps=[FlowStep(step_id="submit", method="POST", path="/submit")])
+    current = flow_spec_fingerprint(spec)
+    common = {
+        "action": "action_current",
+        "recording_id": "recording_current",
+    }
+
+    conflict = gateway._recording_operation_identity_conflict(
+        {**common, "expected_fingerprint": "stale"},
+        session_action="action_current",
+        recording_id="recording_current",
+        current_flow_spec=spec,
+    )
+    accepted = gateway._recording_operation_identity_conflict(
+        {**common, "expected_fingerprint": current},
+        session_action="action_current",
+        recording_id="recording_current",
+        current_flow_spec=spec,
+    )
+
+    assert conflict and conflict["stage"] == "flow_spec_conflict"
+    assert accepted is None
+
+
+@pytest.mark.parametrize(
+    ("message", "check_fingerprint"),
+    [
+        ({"recording_id": "recording_current"}, False),
+        ({"action": "action_current"}, False),
+        ({
+            "action": "action_current",
+            "recording_id": "recording_current",
+        }, True),
+    ],
+)
+def test_recording_operation_identity_requires_the_full_snapshot(
+    message: dict,
+    check_fingerprint: bool,
+) -> None:
+    spec = FlowSpec(steps=[FlowStep(step_id="submit", method="POST", path="/submit")])
+
+    conflict = gateway._recording_operation_identity_conflict(
+        message,
+        session_action="action_current",
+        recording_id="recording_current",
+        current_flow_spec=spec,
+        check_fingerprint=check_fingerprint,
+    )
+
+    assert conflict is not None
+    assert "截图未分析" in conflict["detail"]
 
 
 def test_every_recording_pi_button_has_a_finite_timeout() -> None:
@@ -113,7 +205,8 @@ def test_every_recording_pi_button_has_a_finite_timeout() -> None:
     [
         (True, True, "applied"),
         (False, True, "no_change"),
-        (True, False, "rejected"),
+        (True, False, "applied"),
+        (False, False, "rejected"),
     ],
 )
 def test_analysis_application_report_is_persistable_and_explicit(

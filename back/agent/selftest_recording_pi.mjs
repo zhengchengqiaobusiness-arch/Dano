@@ -214,6 +214,97 @@ function verifyPlanToolCompatibility() {
   assert(Array.isArray(semantic.unresolved_items), "unresolved_items were not restored");
   assert(!("field_semantic_axes" in semantic), "descriptive field_semantic_axes was not discarded");
   assert(Array.isArray(sanitized.plan.ops) && sanitized.plan.ops.length === 0, "invalid ops were not normalized");
+
+  // A long tool call can spill the tail of semantic_plan beside `plan` while
+  // remaining valid JSON.  This is the exact shape emitted by the screenshot
+  // analysis path; dropping these arrays makes a successful run apply zero
+  // field changes.
+  const spilled = sanitizeRecordingToolParams("submit_recording_plan", {
+    recording_id: "rec-self-test",
+    flow_version: 3,
+    base_flow_version: 3,
+    plan: {
+      semantic_plan: {
+        business_understanding: "Create request",
+        capabilities: [{ capability_id: "submit", step_ids: ["submit"] }],
+      },
+    },
+    request_roles: [{ step_id: "submit", role: "submit_anchor" }],
+    field_semantics: [{
+      step_id: "submit",
+      wire_path: "roomCount",
+      public_name: "房间数量",
+      confidence: "high",
+    }],
+    item: { capability_id: "query", step_ids: ["query"] },
+  });
+  assert(spilled.plan.semantic_plan.request_roles.length === 1, "top-level request_roles were discarded");
+  assert(spilled.plan.semantic_plan.field_semantics.length === 1, "top-level field_semantics were discarded");
+  assert(
+    spilled.plan._submitted_semantic_keys.includes("field_semantics"),
+    "recovered top-level semantic keys were not marked as submitted",
+  );
+  assert(spilled.plan.semantic_plan.capabilities.length === 2, "top-level capability item was discarded");
+  assert(Array.isArray(spilled.plan.semantic_plan.capability_relations), "missing relations were not canonicalized");
+  assert(Array.isArray(spilled.plan.semantic_plan.unresolved_items), "missing unresolved items were not canonicalized");
+  assert(
+    !spilled.plan._submitted_semantic_keys.includes("capability_relations"),
+    "transport-filled relation key was incorrectly marked as model-submitted",
+  );
+
+  const nestedSpill = sanitizeRecordingToolParams("submit_recording_plan", {
+    recording_id: "rec-self-test",
+    flow_version: 3,
+    base_flow_version: 3,
+    plan: {
+      semantic_plan: {
+        business_understanding: {},
+        field_semantics: [],
+      },
+      ops: [],
+    },
+    semantic_plan: {
+      business_understanding: "Create request from screenshot",
+      request_roles: [{ step_id: "submit", role: "submit_anchor" }],
+      field_semantics: [{
+        step_id: "submit",
+        wire_path: "userCount",
+        public_name: "入住人数",
+        confidence: "high",
+      }],
+    },
+    ops: [{ op: "rename_field", step_id: "submit", field_path: "userCount", name: "入住人数" }],
+  });
+  assert(
+    nestedSpill.plan.semantic_plan.business_understanding === "Create request from screenshot",
+    "outer semantic_plan business understanding was hidden by an empty placeholder",
+  );
+  assert(nestedSpill.plan.semantic_plan.field_semantics.length === 1, "outer semantic_plan fields were discarded");
+  assert(nestedSpill.plan.semantic_plan.request_roles.length === 1, "outer semantic_plan roles were discarded");
+  assert(nestedSpill.plan.ops.length === 1, "outer ops were hidden by an empty plan.ops placeholder");
+
+  const compactSpill = sanitizeRecordingToolParams("submit_recording_plan", {
+    recording_id: "rec-self-test",
+    base_flow_version: 3,
+    plan: {
+      semantic_plan: {
+        business_understanding: "Compact screenshot plan",
+        request_roles: ["step_id=submit;role=submit_anchor"],
+        field_semantics: ["step_id=submit;wire_path=roomCount;public_name=房间数量;confidence=0.95"],
+        capabilities: ["capability_id=submit;step_ids=submit"],
+        capability_relations: [],
+        unresolved_items: [],
+      },
+    },
+  });
+  assert(
+    compactSpill.plan.semantic_plan.field_semantics[0].includes("wire_path=roomCount"),
+    "compact field semantics were discarded before Python normalization",
+  );
+  assert(
+    compactSpill.plan.semantic_plan.request_roles[0].includes("role=submit_anchor"),
+    "compact request roles were discarded before Python normalization",
+  );
 }
 
 function verifyRuntimeProtocol(tempDir) {

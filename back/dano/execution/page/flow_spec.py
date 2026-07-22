@@ -711,10 +711,153 @@ def _choice_control_triggered(request: dict) -> bool:
     )
 
 
+def _read_is_entity_enrichment_lookup(read: dict) -> bool:
+    """Detect batched entity enrichment reads such as online-status lookups.
+
+    These responses often contain an ``id``/display pair and were therefore
+    mistaken for selectable directories.  A batched lookup is different: a
+    plural identity query names the exact entities to enrich and the response
+    returns those same identities. Only an explicitly confirmed option-source
+    role can override this structural contract; an ordinary click/select
+    trigger is shared by both the directory request and its status hydration.
+    """
+    if str(read.get("role") or read.get("request_role") or "") == "explicit_read_option":
+        return False
+
+    items = [item for item in (as_list_payload(
+        read.get("json", read.get("response_json")),
+    ) or []) if isinstance(item, dict)]
+    if not items:
+        return False
+
+    path_tokens = [
+        token.casefold()
+        for token in re.split(r"[^a-zA-Z0-9]+", _request_path(read))
+        if token
+    ]
+    operation_tokens = {
+        "get", "batch", "online", "status", "statuses", "detail", "details",
+        "info", "profile", "hydrate", "hydration", "check", "validate",
+        "page", "pages", "list", "lists", "option", "options", "query",
+        "search", "simple", "all",
+    }
+    trailing_operations: list[str] = []
+    while path_tokens and path_tokens[-1] in operation_tokens:
+        trailing_operations.append(path_tokens.pop())
+    endpoint_owner = path_tokens[-1] if path_tokens else ""
+    trailing_set = set(trailing_operations)
+    enrichment_operations = {
+        "online", "status", "statuses", "detail", "details", "info",
+        "profile", "hydrate", "hydration", "check", "validate",
+    }
+    candidate_operations = {
+        "page", "pages", "list", "lists", "option", "options", "query",
+        "search", "simple", "all",
+    }
+    if trailing_set & candidate_operations and not trailing_set & enrichment_operations:
+        # A scoped directory such as ``/user/options?userIds=...`` is still a
+        # candidate source.  The identity filter narrows the directory; it
+        # does not turn the response into a status/detail hydration call.
+        return False
+
+    def owns_endpoint(stem: str) -> bool:
+        if not stem:
+            return True
+        variants = {stem, f"{stem}s", f"{stem}es"}
+        if stem.endswith("y"):
+            variants.add(f"{stem[:-1]}ies")
+        variants.update({
+            "people" if stem == "person" else "",
+            "persons" if stem == "people" else "",
+        })
+        return endpoint_owner in (variants - {""})
+
+    response_keys = {
+        re.sub(r"[^a-z0-9]+", "", str(key).casefold()): str(key)
+        for item in items
+        for key in item
+    }
+    identity_inputs = list(_request_query_values(read).items())
+
+    def collect_body_inputs(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(item, dict):
+                    identity_inputs.append((str(key), item if isinstance(item, list) else [item]))
+                collect_body_inputs(item)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    collect_body_inputs(item)
+
+    body = _parse_body(read.get("post_data"))
+    if body is not None:
+        collect_body_inputs(body)
+
+    for query_key, raw_values in identity_inputs:
+        compact_key = re.sub(r"[^a-z0-9]+", "", str(query_key).casefold())
+        stem = ""
+        identity_suffix = "id"
+        if compact_key == "ids":
+            pass
+        elif compact_key == "keys":
+            identity_suffix = "key"
+        elif compact_key.endswith("ids") and len(compact_key) > 3:
+            stem = compact_key[:-3]
+        elif compact_key.endswith("keys") and len(compact_key) > 4:
+            stem = compact_key[:-4]
+            identity_suffix = "key"
+        elif compact_key.endswith("idlist") and len(compact_key) > 6:
+            stem = compact_key[:-6]
+        elif compact_key.endswith("keylist") and len(compact_key) > 7:
+            stem = compact_key[:-7]
+            identity_suffix = "key"
+        else:
+            continue
+
+        # ``roleIds`` on a user directory filters users by role; it does not
+        # turn the returned users into role candidates.  Require the entity
+        # family named by the plural identity key to own the endpoint.
+        if not owns_endpoint(stem):
+            continue
+
+        requested: set[str] = set()
+        for raw_value in raw_values:
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            for value in values:
+                requested.update(
+                    token for token in re.split(r"[,;|\s]+", str(value or "").strip())
+                    if token
+                )
+        if not requested:
+            continue
+
+        response_key = (
+            response_keys.get(f"{stem}{identity_suffix}")
+            or (
+                response_keys.get(identity_suffix)
+                if not stem or trailing_set & enrichment_operations
+                else None
+            )
+        )
+        if not response_key:
+            continue
+        returned = {
+            str(item.get(response_key))
+            for item in items
+            if item.get(response_key) not in (None, "")
+        }
+        if returned and returned <= requested:
+            return True
+    return False
+
+
 def _read_is_option_source(read: dict) -> bool:
     role = str(read.get("role") or read.get("request_role") or "")
     payload = read.get("json", read.get("response_json"))
     has_list_payload = bool(as_list_payload(payload))
+    if _read_is_entity_enrichment_lookup(read):
+        return False
     if role == "explicit_read_option":
         return has_list_payload
     if role == "read_option":
@@ -731,10 +874,28 @@ def _read_is_option_source(read: dict) -> bool:
     return False
 
 
+def _read_transport_can_supply_options(read: dict) -> bool:
+    """Allow ordinary reads and explicitly classified POST option queries."""
+    method = str(read.get("method") or "GET").upper()
+    if method in {"GET", "HEAD"}:
+        return True
+    if method != "POST" or _read_is_entity_enrichment_lookup(read):
+        return False
+    role = str(read.get("role") or read.get("request_role") or "")
+    return role in {"read_option", "option_source", "explicit_read_option"} or (
+        _choice_control_triggered(read)
+        and looks_like_read_request(
+            str(read.get("url") or read.get("path") or ""),
+            read.get("post_data"),
+        )
+    )
+
+
 def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
     return [
         read for read in (reads or [])
         if isinstance(read, dict)
+        and not _read_is_entity_enrichment_lookup(read)
         and (
             _read_is_option_source(read)
             or _list_payload_has_reference_contract(
@@ -742,6 +903,31 @@ def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
             )
         )
     ]
+
+
+def _option_source_contract_endpoint(url: str) -> str:
+    """Normalize snapshot pagination while preserving semantic query scope."""
+    parsed = urlparse(str(url or ""))
+    endpoint = f"{parsed.netloc}{parsed.path}" if parsed.path else str(url or "")
+    snapshot_keys = {
+        "cursor", "keyword", "search", "searchtext", "q", "query", "_",
+        "ts", "timestamp", "nonce", "cachebuster", "sort", "sortby",
+        "order", "orderby", "token", "accesstoken", "auth", "authorization",
+        "apikey", "signature", "sign", "sig", "session", "sessionid", "jwt",
+        "traceid", "spanid",
+    }
+    semantic_query: list[tuple[str, Any]] = []
+    for key, values in sorted(parse_qs(parsed.query, keep_blank_values=True).items()):
+        normalized_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
+        if (
+            normalized_key in snapshot_keys
+            or _looks_pagination_field(key, f"query.{key}")
+        ):
+            continue
+        semantic_query.extend((key, value) for value in values)
+    if semantic_query:
+        endpoint += "?" + urlencode(semantic_query, doseq=True)
+    return endpoint
 
 
 def _select_source_kind(sel: SelectBinding | None) -> str:
@@ -2381,6 +2567,16 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
     list_items = as_list_payload(req.get("response_json"))
     segs = _request_segments(req)
 
+    if list_items is not None and _read_is_entity_enrichment_lookup(req):
+        return _role_row(
+            req,
+            role="read_context",
+            keep=False,
+            reason="实体状态/详情补充查询只丰富已选对象，不作为候选目录或独立能力",
+            confidence=0.94,
+            semantic=semantic,
+        )
+
     if method not in _WRITE_METHODS:
         if list_items is not None and _choice_control_triggered(req):
             count = len(list_items or [])
@@ -2406,6 +2602,7 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             list_items is not None
             and response_ref
             and _list_payload_has_reference_contract(req.get("response_json"))
+            and not _read_is_entity_enrichment_lookup(req)
         ):
             count = len(list_items or [])
             return _role_row(req, role="read_option", keep=False,
@@ -2428,7 +2625,7 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
                 _list_payload_has_reference_contract(req.get("response_json"))
                 and _request_has_reference_entity_hint(req)
             )
-        ):
+        ) and not _read_is_entity_enrichment_lookup(req):
             return _role_row(req, role="read_option", keep=False,
                              reason="列表响应具备明确候选项契约，作为字段来源但不进入主流程",
                              confidence=0.88, semantic=semantic)
@@ -2455,7 +2652,7 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="read_option", keep=False,
                              reason=f"POST 查询返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
                              confidence=0.9, semantic=semantic)
-        if list_items is not None and (
+        if list_items is not None and not _read_is_entity_enrichment_lookup(req) and (
             _list_payload_has_conventional_option_contract(req.get("response_json"))
             or _request_has_option_endpoint_hint(req)
         ):
@@ -2800,6 +2997,10 @@ def _api_option_source_refs(
             and "enum_options" not in semantic_roles
             and "read_option" not in semantic_roles
         ):
+            continue
+        read = fact.model_dump(exclude_none=True)
+        read["role"] = request_analysis.role
+        if _read_is_entity_enrichment_lookup(read):
             continue
         sources.append({
             "kind": "api_response",
@@ -7014,9 +7215,21 @@ def _option_source_step_ids(spec: FlowSpec) -> set[str]:
     urls: set[str] = set()
     request_ids: set[str] = set()
     for step in spec.steps:
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+        read = {
+            "url": step.url or step.path,
+            "path": step.path,
+            "method": step.method,
+            "role": role,
+            "response_json": step.response_json,
+            **dict(step.source_meta or {}),
+        }
         if (
-            str((step.source_meta or {}).get("role") or step.semantic_role or "") == "read_option"
-            or _is_option_source_url(step.path or step.url)
+            not _read_is_entity_enrichment_lookup(read)
+            and (
+                role == "read_option"
+                or _is_option_source_url(step.path or step.url)
+            )
         ):
             ids.add(step.step_id)
         for param in step.params:
@@ -10351,10 +10564,38 @@ async def orchestrate_flow_capabilities(
             ),
             "complete_semantic_submission": complete_semantic_submission,
         }
-    combined_ops = [
-        *_semantic_plan_to_ops(current, submission, include_relations=False),
-        *(submission.get("ops") or []),
-    ]
+    semantic_ops = _semantic_plan_to_ops(
+        current, submission, include_relations=False,
+    )
+    screenshot_field_candidate: FlowSpec | None = None
+    if screenshot_analysis:
+        field_ops = [
+            operation for operation in semantic_ops
+            if operation.get("op") in {
+                "rename_field", "upsert_input_field", "upsert_internal_field",
+            }
+        ]
+        field_edits = _planner_patch_edits(
+            proposal_baseline,
+            _autofix_ops_to_edits(proposal_baseline, field_ops),
+            initial_membership=initial_membership,
+        )
+        if field_edits:
+            candidate = apply_flow_edits(
+                proposal_baseline,
+                [{**edit, "actor": "planner"} for edit in field_edits],
+            )
+            _repair_structural_option_bindings(candidate)
+            candidate = _ensure_external_transform_relations(
+                _sync_capability_io_schemas(sync_flow_spec_models(candidate))
+            )
+            fields_accepted, _field_gate = _semantic_candidate_gate(
+                proposal_baseline, candidate,
+            )
+            if fields_accepted and _flow_fingerprint(candidate) != _flow_fingerprint(proposal_baseline):
+                screenshot_field_candidate = candidate
+
+    combined_ops = [*semantic_ops, *(submission.get("ops") or [])]
     if combined_ops:
         edits = _planner_patch_edits(
             current,
@@ -10410,12 +10651,37 @@ async def orchestrate_flow_capabilities(
     )
     proposal_accepted, proposal_gate = _semantic_candidate_gate(proposal_baseline, current)
     if not proposal_accepted:
-        current = proposal_baseline
-        if not initial_generation:
+        current = screenshot_field_candidate or proposal_baseline
+        # Reject only the unsafe model proposal. Grounded recorder repairs are
+        # independent facts and must survive the rollback; otherwise one bad
+        # screenshot suggestion also restores stale user-input/option bindings.
+        if screenshot_analysis and screenshot_field_candidate is None:
+            _repair_structural_option_bindings(current)
+            current = _sync_capability_io_schemas(sync_flow_spec_models(current))
+        if screenshot_field_candidate is not None:
+            proposal_gate = {
+                **proposal_gate,
+                "partial_field_overlay_applied": True,
+            }
+            semantic_plan = {
+                **({} if initial_generation else previous_semantic_plan),
+                **({
+                    "business_understanding": proposed_semantic_plan.get("business_understanding"),
+                } if proposed_semantic_plan.get("business_understanding") else {}),
+                "field_semantics": list(proposed_semantic_plan.get("field_semantics") or []),
+                "unresolved_items": list(proposed_semantic_plan.get("unresolved_items") or []),
+            }
+            source = "pi_agent_field_patch"
+        elif not initial_generation:
             semantic_plan = previous_semantic_plan
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
-        source = "deterministic" if initial_generation else "incremental_rejected"
-        reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(proposal_gate["reasons"])
+        if screenshot_field_candidate is None:
+            source = "deterministic" if initial_generation else "incremental_rejected"
+        reason = (
+            "自动语义 Proposal 未通过单调质量准入，已保留安全截图字段修正: "
+            if screenshot_field_candidate is not None
+            else "自动语义 Proposal 未通过单调质量准入: "
+        ) + ",".join(proposal_gate["reasons"])
     if preserved_human_relations:
         valid_capability_refs = {
             ref
@@ -14344,13 +14610,15 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             "method": source.method,
             "role": role,
             "response_json": source.response_json,
+            "post_data": source.body_source,
             **dict(source.source_meta or {}),
         }
         items = as_list_payload(source.response_json) or []
         if (
-            (source.method or "GET").upper() in {"GET", "HEAD"}
+            _read_transport_can_supply_options(read)
             and items
             and all(isinstance(item, dict) for item in items)
+            and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
                 or _list_payload_has_reference_contract(source.response_json)
@@ -14417,9 +14685,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         read["role"] = str(analysis.role if analysis is not None else read.get("role") or "")
         items = as_list_payload(fact.response_json) or []
         if (
-            (fact.method or "GET").upper() in {"GET", "HEAD"}
+            _read_transport_can_supply_options(read)
             and items
             and all(isinstance(item, dict) for item in items)
+            and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
                 or _list_payload_has_reference_contract(fact.response_json)
@@ -14817,25 +15086,34 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         matches.append({**source, **contract})
             unique: dict[tuple[Any, ...], dict[str, Any]] = {}
             for match in matches:
-                parsed = urlparse(str(match.get("source_url") or ""))
-                endpoint = parsed.path or str(match.get("source_url") or "")
-                if parsed.query:
-                    endpoint += "?" + parsed.query
+                endpoint = _option_source_contract_endpoint(
+                    str(match.get("source_url") or "")
+                )
+                selected_labels = tuple(sorted(
+                    str(label)
+                    for label, option_value in match["option_map"].items()
+                    if str(option_value) == value
+                ))
                 fingerprint = (
                     endpoint,
                     match["value_key"], match["label_key"],
                     str(match.get("category_key") or ""),
                     str(match.get("category_value") or ""),
-                    json.dumps(match["records"], ensure_ascii=False, sort_keys=True, default=str),
+                    selected_labels,
                 )
                 previous = unique.get(fingerprint)
 
-                def rank(item: dict[str, Any]) -> tuple[int, float]:
+                def rank(item: dict[str, Any]) -> tuple[int, int, int, float]:
                     try:
                         sequence = float(item.get("sequence"))
                     except (TypeError, ValueError):
                         sequence = -1.0
-                    return (1 if item.get("source_step_id") else 0, sequence)
+                    return (
+                        len(item.get("records") or []),
+                        1 if item.get("explicit_option_source") else 0,
+                        1 if item.get("source_step_id") else 0,
+                        sequence,
+                    )
 
                 if previous is None or rank(match) > rank(previous):
                     unique[fingerprint] = match

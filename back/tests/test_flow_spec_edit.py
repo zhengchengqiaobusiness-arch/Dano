@@ -5395,6 +5395,142 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
     )
 
 
+def test_rejected_screenshot_proposal_keeps_deterministic_option_repairs():
+    first = ParamField(
+        path="assignees.Activity_first[0]", key="Approver 1", label="Approver 1",
+        value=148, type="number", wire_type="number",
+        category="user_param", source_kind="user_input",
+    )
+    second = ParamField(
+        path="assignees.Activity_second[0]", key="Approver 2", label="Approver 2",
+        value=145, type="enum", wire_type="number",
+        category="user_param", source_kind="api_option",
+        source={
+            "kind": "api_option",
+            "source_url": "/api/users",
+            "source_request_id": "users",
+        },
+        enum_options=[
+            {"label": "Reviewer A", "value": 148},
+            {"label": "Reviewer B", "value": 145},
+        ],
+        enum_value_map={"Reviewer A": 148, "Reviewer B": 145},
+    )
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/request/submit",
+            body_source="{}", params=[first, second],
+            selects=[SelectBinding(
+                param="Approver 2", path=second.path, id_path=second.path,
+                source_url="/api/users", source_request_id="users",
+                value_key="id", label_key="name",
+                options=second.enum_options, option_map=second.enum_value_map,
+                enum_source="api", enum_confirmed=True,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_request", title="Submit request", kind="submit",
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={
+            "_analysis_screenshot_count": 1,
+            "ops": [{
+                "op": "set_condition",
+                "capability": "submit_request",
+                "node": {
+                    "id": "invalid_condition",
+                    "condition": "input.entries.length > 0",
+                    "then": [{"id": "call", "type": "call", "step_id": "submit"}],
+                },
+            }],
+        },
+        generation_mode="optimize",
+    ))
+
+    repaired = optimized.steps[0].params[0]
+    assert optimized.meta["capability_model"]["source"] == "incremental_rejected"
+    assert (repaired.type, repaired.source_kind) == ("enum", "api_option")
+    assert repaired.enum_value_map == {"Reviewer A": 148, "Reviewer B": 145}
+
+
+def test_rejected_capability_proposal_keeps_safe_screenshot_field_corrections():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/request/submit",
+            body_source='{"roomCount":1}',
+            params=[ParamField(
+                path="roomCount", key="roomCount", label="roomCount", value=1,
+                type="enum", wire_type="number", category="user_param",
+                source_kind="api_option",
+                source={"kind": "api_option", "source_url": "/api/unrelated/options"},
+                enum_options=[{"label": "one", "value": 1}],
+                enum_value_map={"one": 1},
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_request", title="Submit request", kind="submit",
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={
+            "_analysis_screenshot_count": 1,
+            "semantic_plan": {
+                "field_semantics": [{
+                    "step_id": "submit",
+                    "wire_path": "roomCount",
+                    "public_name": "房间数量",
+                    "business_type": "number",
+                    "category": "user_param",
+                    "source_kind": "user_input",
+                    "required": True,
+                    "confidence": 0.98,
+                    "axis_status": {
+                        "name": "image_matched", "type": "image_matched",
+                        "category": "image_matched", "source": "image_matched",
+                        "required": "image_matched",
+                    },
+                    "evidence": [{
+                        "source": "screenshot", "screenshot_name": "hotel-form.png",
+                        "visible_label": "房间数量", "control_kind": "number",
+                        "editable": True, "disabled": False, "read_only": False,
+                        "required": True,
+                        "axes": ["name", "type", "category", "source", "required"],
+                    }],
+                }],
+            },
+            "ops": [{
+                "op": "set_condition",
+                "capability": "submit_request",
+                "node": {
+                    "id": "invalid_condition",
+                    "condition": "input.entries.length > 0",
+                    "then": [{"id": "call", "type": "call", "step_id": "submit"}],
+                },
+            }],
+        },
+        generation_mode="optimize",
+    ))
+
+    repaired = optimized.steps[0].params[0]
+    assert optimized.meta["capability_model"]["proposal_gate"]["accepted"] is False
+    assert not any(
+        node.get("type") == "condition"
+        for node in flow_spec_module._iter_capability_nodes(optimized.capabilities[0].nodes)
+    )
+    assert (repaired.key, repaired.type, repaired.source_kind, repaired.required) == (
+        "房间数量", "number", "user_input", True,
+    )
+
+
 def test_page_context_missing_key_is_advisory_and_differs_from_upstream_response():
     step = FlowStep(
         step_id="submit",
@@ -6639,12 +6775,23 @@ def test_latest_leave_recording_binds_full_dictionary_and_captured_user_director
                 path="/admin-api/system/user/page?pageNo=1&pageSize=100",
                 response_json={"code": 0, "data": {"list": users, "total": 2}},
             ),
+            flow_spec_module.RequestFact(
+                request_id="req_71", request_index=71, sequence=71, method="GET",
+                path="/admin-api/im/user/online-status?userIds=149,144",
+                response_json={"code": 0, "data": [
+                    {"id": 901, "userId": 149, "nickname": "hunk", "online": True},
+                    {"id": 902, "userId": 144, "nickname": "姜楠", "online": False},
+                ]},
+            ),
         ],
         analysis={
             "req_10": flow_spec_module.RequestAnalysis(request_id="req_10", role="read_option", confidence=0.99),
             # Reproduce the stale misclassification observed in the real log.
             "req_68": flow_spec_module.RequestAnalysis(request_id="req_68", role="business_get", confidence=0.9),
             "req_70": flow_spec_module.RequestAnalysis(request_id="req_70", role="business_get", confidence=0.9),
+            # A stale classifier can label a status enrichment response as an
+            # option source. It must not compete with the user directory.
+            "req_71": flow_spec_module.RequestAnalysis(request_id="req_71", role="read_option", confidence=0.9),
         },
         option_sources=[{
             "kind": "page_enum_options",
@@ -6693,6 +6840,312 @@ def test_latest_leave_recording_binds_full_dictionary_and_captured_user_director
         if ref.usage == "option_source" and not ref.step_id
     }
     assert captured_option_refs == {"req_10", "req_70"}
+
+
+def test_batched_entity_enrichment_does_not_become_an_option_source():
+    read = {
+        "method": "GET",
+        "path": "/api/im/user/online-status?userIds=148,144",
+        "role": "read_option",
+        "trigger_op": "click",
+        "trigger_locator": "[role=combobox][name=approver]",
+        "response_json": {"data": [
+            {"id": 901, "userId": 148, "name": "Reviewer A", "online": True},
+            {"id": 902, "userId": 144, "name": "Reviewer B", "online": False},
+        ]},
+    }
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(read) is True
+    assert flow_spec_module._read_is_option_source(read) is False
+    classified = flow_spec_module.classify_network_request(read, trace=[
+        read,
+        {
+            "method": "POST",
+            "path": "/api/leave/submit",
+            "post_data": json.dumps({"approvers": [148, 144]}),
+        },
+    ])
+    assert (classified["role"], classified["keep"]) == ("read_context", False)
+
+
+def test_single_entity_hydration_is_removed_from_all_option_indexes():
+    response = {"data": [{
+        "id": 148, "name": "Reviewer A", "online": True,
+    }]}
+    fact = flow_spec_module.RequestFact(
+        request_id="online",
+        method="GET",
+        path="/api/im/user/online-status?userIds=148",
+        response_json=response,
+    )
+    analysis = flow_spec_module.RequestAnalysis(
+        request_id="online", role="read_option", confidence=0.9,
+    )
+    read = {**fact.model_dump(exclude_none=True), "role": "read_option"}
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="online",
+        method="GET",
+        path=fact.path,
+        response_json=response,
+        source_meta={"role": "read_option"},
+    )])
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(read) is True
+    assert flow_spec_module._api_option_source_refs(
+        {"online": fact}, {"online": analysis},
+    ) == []
+    assert flow_spec_module._option_source_step_ids(spec) == set()
+
+
+def test_entity_filter_query_does_not_hide_the_returned_entity_directory():
+    read = {
+        "method": "GET",
+        "path": "/api/system/user/page?roleIds=3,4",
+        "role": "read_option",
+        "response_json": {"data": {"list": [
+            {"id": 148, "roleId": 3, "name": "Reviewer A"},
+            {"id": 144, "roleId": 4, "name": "Reviewer B"},
+        ]}},
+    }
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(read) is False
+    assert flow_spec_module._read_is_option_source(read) is True
+
+
+def test_entity_enrichment_matches_endpoint_owner_not_any_path_segment():
+    filtered_directory = {
+        "method": "GET",
+        "path": "/api/role/users?roleIds=3,4",
+        "role": "read_option",
+        "response_json": {"data": [
+            {"id": 148, "roleId": 3, "name": "Reviewer A"},
+            {"id": 144, "roleId": 4, "name": "Reviewer B"},
+        ]},
+    }
+    people_status = {
+        "method": "GET",
+        "path": "/api/people/status?personIds=148",
+        "role": "read_option",
+        "response_json": {"data": [
+            {"id": 148, "name": "Reviewer A", "online": True},
+        ]},
+    }
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(filtered_directory) is False
+    assert flow_spec_module._read_is_entity_enrichment_lookup(people_status) is True
+
+
+def test_identity_scoped_option_directory_remains_an_option_source():
+    read = {
+        "method": "GET",
+        "path": "/api/user/options?userIds=148,144",
+        "role": "read_option",
+        "trigger_op": "click",
+        "trigger_locator": "[role=combobox][name=approver]",
+        "response_json": {"data": [
+            {"userId": 148, "name": "Reviewer A"},
+            {"userId": 144, "name": "Reviewer B"},
+        ]},
+    }
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(read) is False
+    assert flow_spec_module._read_is_option_source(read) is True
+
+
+def test_post_body_entity_status_lookup_is_not_a_business_or_option_source():
+    read = {
+        "method": "POST",
+        "path": "/api/user/online-status",
+        "post_data": json.dumps({"userIds": [148, 144]}),
+        "role": "read_option",
+        "response_json": {"data": [
+            {"userId": 148, "name": "Reviewer A", "online": True},
+            {"userId": 144, "name": "Reviewer B", "online": False},
+        ]},
+    }
+
+    assert flow_spec_module._read_is_entity_enrichment_lookup(read) is True
+    assert flow_spec_module._read_is_option_source(read) is False
+    classified = flow_spec_module.classify_network_request(read, trace=[read])
+    assert (classified["role"], classified["keep"]) == ("read_context", False)
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+def test_post_option_query_repairs_user_input_binding(materialized: bool):
+    target = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(
+            path="approverId",
+            key="Approver",
+            label="Approver",
+            value=148,
+            type="number",
+            wire_type="number",
+            category="user_param",
+            source_kind="user_input",
+        )],
+    )
+    response = {"data": [
+        {"id": 148, "name": "Reviewer A"},
+        {"id": 144, "name": "Reviewer B"},
+    ]}
+    source = FlowStep(
+        step_id="approver-options",
+        method="POST",
+        path="/api/approver/options/search",
+        body_source=json.dumps({"keyword": ""}),
+        response_json=response,
+        source_meta={"role": "read_option", "request_id": "approver-options"},
+    )
+    facts = RequestFacts()
+    steps = [target]
+    if materialized:
+        steps.insert(0, source)
+    else:
+        facts = RequestFacts(
+            requests=[flow_spec_module.RequestFact(
+                request_id="approver-options",
+                method="POST",
+                path=source.path,
+                post_data={"keyword": ""},
+                response_json=response,
+            )],
+            analysis={
+                "approver-options": flow_spec_module.RequestAnalysis(
+                    request_id="approver-options",
+                    role="read_option",
+                    confidence=0.99,
+                ),
+            },
+        )
+    spec = FlowSpec(steps=steps, request_facts=facts)
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    approver = target.params[0]
+    assert (approver.type, approver.source_kind) == ("enum", "api_option")
+    assert approver.enum_value_map == {"Reviewer A": 148, "Reviewer B": 144}
+
+
+def test_repeated_option_endpoint_with_different_snapshots_is_one_source_contract():
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/request/submit",
+        params=[
+            ParamField(
+                path="assignees.Activity_first[0]", key="Approver 1", value=148,
+                type="number", wire_type="number", category="user_param",
+                source_kind="user_input",
+            ),
+            ParamField(
+                path="assignees.Activity_second[0]", key="Approver 2", value=144,
+                type="number", wire_type="number", category="user_param",
+                source_kind="user_input",
+            ),
+        ],
+    )
+    complete = [
+        {"id": 148, "nickname": "Reviewer A"},
+        {"id": 144, "nickname": "Reviewer B"},
+        {"id": 149, "nickname": "Reviewer C"},
+    ]
+    filtered = complete[:2]
+    facts = RequestFacts(
+        requests=[
+            flow_spec_module.RequestFact(
+                request_id="users-full", request_index=10, sequence=10, method="GET",
+                path="/api/system/user/page?pageNo=1&pageSize=10",
+                response_json={"data": {"list": complete, "total": 3}},
+            ),
+            flow_spec_module.RequestFact(
+                request_id="users-filtered", request_index=11, sequence=11, method="GET",
+                path="/api/system/user/page?pageNo=1&pageSize=10&keyword=Reviewer",
+                response_json={"data": {"list": filtered, "total": 2}},
+            ),
+        ],
+        analysis={
+            "users-full": flow_spec_module.RequestAnalysis(
+                request_id="users-full", role="read_option", confidence=0.99,
+            ),
+            "users-filtered": flow_spec_module.RequestAnalysis(
+                request_id="users-filtered", role="read_option", confidence=0.99,
+            ),
+        },
+    )
+    spec = FlowSpec(steps=[submit], request_facts=facts)
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 2
+    for field in submit.params:
+        assert (field.type, field.source_kind) == ("enum", "api_option")
+        assert field.enum_value_map["Reviewer A"] == 148
+        assert field.enum_value_map["Reviewer B"] == 144
+
+
+def test_option_source_dedup_keeps_semantic_query_scope_distinct():
+    room_id = ParamField(
+        path="roomId", key="Room", label="Room", value=1,
+        type="number", wire_type="number", category="user_param",
+        source_kind="user_input",
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/booking/submit",
+        params=[room_id],
+    )
+    facts = RequestFacts(
+        requests=[
+            flow_spec_module.RequestFact(
+                request_id="rooms", method="GET",
+                path="/api/location/options?kind=room&pageNo=1",
+                response_json={"data": [
+                    {"id": 1, "name": "A"}, {"id": 2, "name": "B"},
+                ]},
+            ),
+            flow_spec_module.RequestFact(
+                request_id="buildings", method="GET",
+                path="/api/location/options?kind=building&pageNo=1",
+                response_json={"data": [
+                    {"id": 1, "name": "A"}, {"id": 2, "name": "B"},
+                    {"id": 3, "name": "C"},
+                ]},
+            ),
+        ],
+        analysis={
+            request_id: flow_spec_module.RequestAnalysis(
+                request_id=request_id, role="read_option", confidence=0.99,
+            )
+            for request_id in ("rooms", "buildings")
+        },
+    )
+    spec = FlowSpec(steps=[submit], request_facts=facts)
+
+    # Same selected value and labels do not make two semantically scoped
+    # endpoints interchangeable. The target's semantic query scope wins.
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    assert (room_id.type, room_id.source_kind) == ("enum", "api_option")
+    assert room_id.source["source_request_id"] == "rooms"
+
+
+def test_option_source_snapshot_normalization_reuses_shared_pagination_rules():
+    first = flow_spec_module._option_source_contract_endpoint(
+        "/api/system/user/page?pageNum=1&pageSize=10&keyword=A&sortBy=name"
+    )
+    second = flow_spec_module._option_source_contract_endpoint(
+        "/api/system/user/page?pageNum=2&pageSize=20&keyword=B&orderBy=id"
+    )
+
+    assert first == second == "/api/system/user/page"
+
+
+def test_option_source_snapshot_normalization_ignores_rotating_auth_context():
+    first = flow_spec_module._option_source_contract_endpoint(
+        "/api/approver/options?access_token=old&pageNo=1&signature=first"
+    )
+    second = flow_spec_module._option_source_contract_endpoint(
+        "/api/approver/options?access_token=new&pageNo=2&sessionId=second"
+    )
+
+    assert first == second == "/api/approver/options"
+
 
 def test_structural_option_binding_repairs_get_query_enum_from_recorded_facts():
     process_status = ParamField(

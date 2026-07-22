@@ -204,8 +204,12 @@ const SEMANTIC_PLAN_KEYS = [
 ];
 
 function asSemanticArray(value) {
-  if (Array.isArray(value)) return value.filter((item) => item && typeof item === "object");
-  return value && typeof value === "object" ? [value] : [];
+  const isRecord = (item) => (
+    (item && typeof item === "object" && !Array.isArray(item))
+    || (typeof item === "string" && item.trim())
+  );
+  if (Array.isArray(value)) return value.filter(isRecord);
+  return isRecord(value) ? [value] : [];
 }
 
 function normalizedConfidence(value) {
@@ -283,7 +287,65 @@ export function sanitizeRecordingToolParams(name, params) {
   const sanitized = Object.fromEntries(
     allowed.filter((key) => key in params).map((key) => [key, params[key]]),
   );
-  sanitized.plan = canonicalizeRecordingPlan(sanitized.plan);
+  const plan = (
+    sanitized.plan
+    && typeof sanitized.plan === "object"
+    && !Array.isArray(sanitized.plan)
+  ) ? { ...sanitized.plan } : sanitized.plan;
+  if (plan && typeof plan === "object" && !Array.isArray(plan)) {
+    const outerSemantic = (
+      params.semantic_plan
+      && typeof params.semantic_plan === "object"
+      && !Array.isArray(params.semantic_plan)
+    ) ? params.semantic_plan : {};
+    const semantic = (
+      plan.semantic_plan
+      && typeof plan.semantic_plan === "object"
+      && !Array.isArray(plan.semantic_plan)
+    ) ? { ...plan.semantic_plan } : {};
+    const mergeObjectArrays = (...values) => {
+      const seen = new Set();
+      return values.flatMap(asSemanticArray).filter((item) => {
+        const signature = JSON.stringify(item);
+        if (seen.has(signature)) return false;
+        seen.add(signature);
+        return true;
+      });
+    };
+    for (const key of SEMANTIC_PLAN_KEYS) {
+      if (key === "business_understanding") {
+        const meaningful = [semantic[key], outerSemantic[key], params[key]].find((value) => (
+          (typeof value === "string" && value.trim())
+          || (
+            value && typeof value === "object" && !Array.isArray(value)
+            && Object.keys(value).length > 0
+          )
+        ));
+        if (meaningful !== undefined) semantic[key] = meaningful;
+        continue;
+      }
+      const merged = mergeObjectArrays(semantic[key], outerSemantic[key], params[key]);
+      if (merged.length || semantic[key] !== undefined || outerSemantic[key] !== undefined || params[key] !== undefined) {
+        semantic[key] = merged;
+      }
+    }
+    plan.semantic_plan = semantic;
+    for (const key of ["item", "capability"]) {
+      const merged = mergeObjectArrays(plan[key], params[key]);
+      if (merged.length) plan[key] = merged;
+    }
+    const operationValues = [plan.ops, params.ops]
+      .flatMap((value) => Array.isArray(value) ? value : [value])
+      .filter((item) => item && typeof item === "object" && !Array.isArray(item));
+    const operationSignatures = new Set();
+    plan.ops = operationValues.filter((item) => {
+      const signature = JSON.stringify(item);
+      if (operationSignatures.has(signature)) return false;
+      operationSignatures.add(signature);
+      return true;
+    });
+  }
+  sanitized.plan = canonicalizeRecordingPlan(plan);
   return sanitized;
 }
 

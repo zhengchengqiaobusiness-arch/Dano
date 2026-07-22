@@ -35,3 +35,4 @@ back/.dano-sessions/
 # Pi 录制 SessionManager JSONL（服务端持久会话，可能含上下文）
 back/.dano/
 /.claude
+.codex/environments/environment.toml

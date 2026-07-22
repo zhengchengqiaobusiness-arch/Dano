@@ -1378,6 +1378,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   useEffect(() => { analysisScreenshotsRef.current = analysisScreenshots; }, [analysisScreenshots]);
   const screenshotInputRef = useRef<HTMLInputElement>(null);
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
+  const analysisScreenshotBusyRef = useRef(false);
+  const analysisScreenshotGenerationRef = useRef(0);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
   const [showAllAnalysisChanges, setShowAllAnalysisChanges] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
@@ -1390,6 +1392,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const flowOperationRef = useRef<{
     mode: "plan" | "repair"; previousUpdatedAt?: string; operationId: string;
     analysisScreenshots: AnalysisScreenshotPayload[];
+    action: string; recordingId: string; expectedFingerprint: string;
   } | null>(null);
   const finalizeOperationRef = useRef<string | null>(null);
   const publishOperationRef = useRef<string | null>(null);
@@ -1525,7 +1528,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (pending.mode === "repair") {
       setAutoFixBusy(true);
       armFlowOperationWatchdog("自动修复");
-      if (!send({ type: "auto_fix_flow", operation_id: pending.operationId })) clearFlowOperation();
+      if (!send({
+        type: "auto_fix_flow",
+        operation_id: pending.operationId,
+        action: pending.action,
+        recording_id: pending.recordingId,
+        expected_fingerprint: pending.expectedFingerprint,
+      })) clearFlowOperation();
       return;
     }
     setOrchestrateBusy(true);
@@ -1535,6 +1544,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       type: "orchestrate_flow",
       operation_id: pending.operationId,
       analysis_screenshots: pending.analysisScreenshots,
+      action: pending.action,
+      recording_id: pending.recordingId,
+      expected_fingerprint: pending.expectedFingerprint,
     })) clearFlowOperation();
   }
 
@@ -1812,6 +1824,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCapabilityAddValue({});
     setCapabilityAddUsage({});
     pendingCapabilityMembershipRef.current = [];
+    analysisScreenshotGenerationRef.current += 1;
+    analysisScreenshotBusyRef.current = false;
+    setAnalysisScreenshotBusy(false);
+    if (screenshotInputRef.current) screenshotInputRef.current.value = "";
     analysisScreenshotsRef.current = [];
     setAnalysisScreenshots([]);
     setLastAnalysisEvidence(null);
@@ -2616,6 +2632,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       return;
     }
     if (selected.length > remaining) message.warning(`\u672c\u6b21\u53ea\u6dfb\u52a0\u524d ${remaining} \u5f20\u622a\u56fe`);
+    const generation = ++analysisScreenshotGenerationRef.current;
+    analysisScreenshotBusyRef.current = true;
     setAnalysisScreenshotBusy(true);
     const prepared: AnalysisScreenshot[] = [];
     try {
@@ -2626,7 +2644,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           message.error(`${file.name}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      if (prepared.length) {
+      if (prepared.length && generation === analysisScreenshotGenerationRef.current) {
         setAnalysisScreenshots((current) => {
           const next = [...current, ...prepared].slice(0, MAX_ANALYSIS_SCREENSHOTS);
           analysisScreenshotsRef.current = next;
@@ -2636,8 +2654,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success(`\u5df2\u6dfb\u52a0 ${prepared.length} \u5f20\u53c2\u8003\u622a\u56fe\uff0c\u4e0b\u6b21\u751f\u6210/\u4f18\u5316\u5c06\u91cd\u65b0\u53c2\u8003`);
       }
     } finally {
-      setAnalysisScreenshotBusy(false);
-      if (screenshotInputRef.current) screenshotInputRef.current.value = "";
+      if (generation === analysisScreenshotGenerationRef.current) {
+        analysisScreenshotBusyRef.current = false;
+        setAnalysisScreenshotBusy(false);
+        if (screenshotInputRef.current) screenshotInputRef.current.value = "";
+      }
     }
   }
 
@@ -2652,6 +2673,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function orchestrateFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
+    if (analysisScreenshotBusyRef.current) {
+      message.warning("参考截图仍在处理中，请等待上传完成后再生成/优化");
+      return;
+    }
     if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
       message.warning(reconnectedSessionNeedsCapture
         ? "服务端草稿已失效，请重新抓取并分析请求"
@@ -2678,11 +2703,22 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       previousUpdatedAt: currentSpec.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("plan"),
       analysisScreenshots: screenshots,
+      action: actionRef.current,
+      recordingId: piRecordingIdRef.current || "",
+      expectedFingerprint: serverFingerprintRef.current
+        || String(currentSpec.meta?.current_fingerprint || ""),
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力生成");
-    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, analysis_screenshots: screenshots })) clearFlowOperation();
+    if (!send({
+      type: "orchestrate_flow",
+      operation_id: flowOperationRef.current.operationId,
+      analysis_screenshots: screenshots,
+      action: flowOperationRef.current.action,
+      recording_id: flowOperationRef.current.recordingId,
+      expected_fingerprint: flowOperationRef.current.expectedFingerprint,
+    })) clearFlowOperation();
   }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2701,10 +2737,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       previousUpdatedAt: flowSpecRef.current.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("repair"),
       analysisScreenshots: [],
+      action: actionRef.current,
+      recordingId: piRecordingIdRef.current || "",
+      expectedFingerprint: serverFingerprintRef.current
+        || String(flowSpecRef.current.meta?.current_fingerprint || ""),
     };
     setAutoFixBusy(true);
     armFlowOperationWatchdog("自动修复");
-    if (!send({ type: "auto_fix_flow", operation_id: flowOperationRef.current.operationId })) clearFlowOperation();
+    if (!send({
+      type: "auto_fix_flow",
+      operation_id: flowOperationRef.current.operationId,
+      action: flowOperationRef.current.action,
+      recording_id: flowOperationRef.current.recordingId,
+      expected_fingerprint: flowOperationRef.current.expectedFingerprint,
+    })) clearFlowOperation();
   }
   function addCapability() {
     const current = flowSpecRef.current;
@@ -4281,7 +4327,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
-              disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture}
+              disabled={analysisScreenshotBusy || connectionState !== "connected" || reconnectedSessionNeedsCapture}
               onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
           <Button

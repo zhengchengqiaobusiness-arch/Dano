@@ -1291,6 +1291,129 @@ def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
     assert semantic["unresolved_items"][0]["reason"] == "字段引用不存在或不唯一"
 
 
+def test_transport_filled_semantic_keys_are_rejected_for_agent_retry():
+    with pytest.raises(ToolError, match="未实际提交完整字段.*field_semantics"):
+        agent_tools_module._require_complete_submitted_semantic_keys({
+            "_submitted_semantic_keys": [
+                "business_understanding", "capabilities",
+            ],
+        })
+
+    agent_tools_module._require_complete_submitted_semantic_keys({
+        "_submitted_semantic_keys": [
+            "business_understanding", "request_roles", "field_semantics",
+            "capabilities", "capability_relations", "unresolved_items",
+        ],
+    })
+
+    agent_tools_module._require_complete_submitted_semantic_keys({
+        "_submitted_semantic_keys": [
+            "business_understanding", "request_roles", "field_semantics",
+            "capabilities",
+        ],
+        "semantic_plan": {"field_semantics": [{
+            "step_id": "submit", "wire_path": "title",
+        }]},
+    }, allow_screenshot_field_overlay=True)
+
+
+def test_screenshot_field_overlay_survives_invalid_capability_batch(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-field-overlay")
+    session.analysis_image_count = 1
+    result = asyncio.run(submit_recording_plan("run-field-overlay", {
+        "recording_id": "rec-field-overlay",
+        "base_flow_version": 1,
+        "plan": {
+            "_submitted_semantic_keys": [
+                "business_understanding", "request_roles", "field_semantics",
+                "capabilities", "capability_relations", "unresolved_items",
+            ],
+            "semantic_plan": {
+                "business_understanding": {"summary": "提交申请"},
+                "request_roles": [],
+                "field_semantics": [{
+                    "step_id": "submit",
+                    "wire_path": "title",
+                    "public_name": "申请标题",
+                    "business_type": "string",
+                    "category": "user_param",
+                    "source_kind": "user_input",
+                    "confidence": 0.95,
+                    "evidence": [{
+                        "source": "screenshot",
+                        "visible_label": "申请标题",
+                        "control_kind": "text",
+                        "editable": True,
+                    }],
+                }],
+                "capabilities": [{
+                    "name": "submit_application",
+                    "kind": "submit",
+                    "step_ids": ["submit"],
+                }],
+                "capability_relations": [],
+                "unresolved_items": [],
+            },
+            # Reproduces a non-field planner failure in the same tool call.
+            "ops": "invalid",
+        },
+    }))
+
+    assert result["partial_field_overlay"] is True
+    assert "已保留可验证的截图字段修正" in result["warning"]
+    assert session.spec.steps[0].params[0].label == "申请标题"
+    assert session.last_submission_kind == "plan"
+
+
+def test_recovered_long_screenshot_payload_applies_fields_with_missing_empty_keys(
+    monkeypatch,
+):
+    session = _bind(monkeypatch, recording_id="rec-long-overlay")
+    session.analysis_image_count = 1
+    result = asyncio.run(submit_recording_plan("run-long-overlay", {
+        "recording_id": "rec-long-overlay",
+        "base_flow_version": 1,
+        "plan": {
+            # The JS boundary recovered these real keys from the tool-call
+            # outer object; two trailing empty arrays were truncated.
+            "_submitted_semantic_keys": [
+                "business_understanding", "request_roles", "field_semantics",
+                "capabilities",
+            ],
+            "semantic_plan": {
+                "business_understanding": {"summary": "提交申请"},
+                "request_roles": [],
+                "field_semantics": [{
+                    "step_id": "submit",
+                    "wire_path": "title",
+                    "public_name": "申请标题",
+                    "business_type": "string",
+                    "category": "user_param",
+                    "source_kind": "user_input",
+                    "confidence": 0.95,
+                    "evidence": [{
+                        "source": "screenshot",
+                        "visible_label": "申请标题",
+                        "control_kind": "text",
+                        "editable": True,
+                    }],
+                }],
+                "capabilities": [{
+                    "name": "submit_application",
+                    "kind": "submit",
+                    "step_ids": ["submit"],
+                }],
+                "capability_relations": [],
+                "unresolved_items": [],
+            },
+            "ops": [],
+        },
+    }))
+
+    assert result["flow_version"] > 1
+    assert session.spec.steps[0].params[0].label == "申请标题"
+
+
 def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",

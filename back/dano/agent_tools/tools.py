@@ -2309,6 +2309,62 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     submission["ops"] = ops
     return submission
 
+
+def _require_complete_submitted_semantic_keys(
+    raw_plan: dict,
+    *,
+    allow_screenshot_field_overlay: bool = False,
+) -> None:
+    """Reject transport-filled semantic plans so Pi can retry the real payload."""
+    submitted = raw_plan.get("_submitted_semantic_keys")
+    if submitted is None:
+        return
+    if not isinstance(submitted, list):
+        raise ToolError("plan._submitted_semantic_keys 必须是数组")
+    required = {
+        "business_understanding", "request_roles", "field_semantics",
+        "capabilities", "capability_relations", "unresolved_items",
+    }
+    missing = sorted(required.difference(str(key) for key in submitted))
+    if missing:
+        semantic = raw_plan.get("semantic_plan")
+        submitted_fields = (
+            semantic.get("field_semantics")
+            if isinstance(semantic, dict) else None
+        )
+        if allow_screenshot_field_overlay and isinstance(submitted_fields, list) and submitted_fields:
+            # Long multimodal tool calls can be truncated after the real field
+            # records.  Those records still pass their own grounding/quality
+            # gate; missing capability/relation arrays must not erase them.
+            return
+        raise ToolError(
+            "plan.semantic_plan 未实际提交完整字段：" + ", ".join(missing)
+        )
+
+
+def _screenshot_field_only_plan(raw_plan: dict) -> dict | None:
+    """Keep independently verifiable screenshot fields when other axes fail."""
+    semantic = raw_plan.get("semantic_plan")
+    if not isinstance(semantic, dict):
+        return None
+    fields = semantic.get("field_semantics")
+    if not isinstance(fields, list) or not fields:
+        return None
+    return {
+        "_analysis_screenshot_count": int(raw_plan.get("_analysis_screenshot_count") or 0),
+        "semantic_plan": {
+            "business_understanding": deepcopy(
+                semantic.get("business_understanding") or {}
+            ),
+            "request_roles": deepcopy(semantic.get("request_roles") or []),
+            "field_semantics": deepcopy(fields),
+            "capabilities": [],
+            "capability_relations": [],
+            "unresolved_items": deepcopy(semantic.get("unresolved_items") or []),
+        },
+        "ops": [],
+    }
+
 async def submit_recording_plan(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
@@ -2325,6 +2381,10 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             "_analysis_screenshot_count": int(session.analysis_image_count),
         }
     screenshot_count = int(getattr(session, "analysis_image_count", 0) or 0)
+    _require_complete_submitted_semantic_keys(
+        raw_plan,
+        allow_screenshot_field_overlay=bool(screenshot_count),
+    )
     try:
         submission = _normalize_recording_plan_submission(
             raw_plan, session.current_flow_spec()
@@ -2338,6 +2398,25 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
         )
     except ToolError as exc:
         if screenshot_count:
+            field_only = _screenshot_field_only_plan(raw_plan)
+            if field_only is not None:
+                try:
+                    submission = _normalize_recording_plan_submission(
+                        field_only, session.current_flow_spec()
+                    )
+                    submission.setdefault("submission_id", str(uuid4()))
+                    result = await _apply_recording_submission_atomic(
+                        session,
+                        submission,
+                        mode="plan",
+                        base_flow_version=params["base_flow_version"],
+                    )
+                    warning = f"能力或关系建议未应用，已保留可验证的截图字段修正：{exc}"
+                    if hasattr(session, "last_submission_warning"):
+                        session.last_submission_warning = warning
+                    return {**result, "warning": warning, "partial_field_overlay": True}
+                except ToolError as field_exc:
+                    exc = ToolError(f"{exc}；截图字段修正也未通过准入：{field_exc}")
             return await session.accept_unchanged_plan(
                 base_flow_version=params["base_flow_version"],
                 warning=f"{exc}，当前配置未修改",

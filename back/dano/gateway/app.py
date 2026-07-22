@@ -400,12 +400,17 @@ def _analysis_application_report(
             )
         )
     )
+    changed = bool(operation_report.get("changed"))
     status = (
-        "rejected"
+        "needs_review"
+        if changed and incomplete
+        else "applied"
+        if changed
+        else "rejected"
         if proposal_gate.get("accepted") is False
         else "needs_review"
         if incomplete
-        else ("applied" if operation_report.get("changed") else "no_change")
+        else "no_change"
     )
     return {
         "status": status,
@@ -1226,6 +1231,61 @@ def _recording_flow_projection(spec) -> dict:  # noqa: ANN001
         "check_report": validate_flow_spec(spec),
     }
 
+
+def _recording_operation_identity_conflict(
+    message: dict,
+    *,
+    session_action: str,
+    recording_id: str,
+    current_flow_spec=None,  # noqa: ANN001
+    check_fingerprint: bool = True,
+) -> dict | None:
+    """Reject a costly operation that belongs to another workbench snapshot."""
+    requested_action = str(message.get("action") or "")
+    if not requested_action:
+        return {
+            "stage": "operation_identity",
+            "detail": "操作缺少业务身份，截图未分析，当前配置未修改",
+        }
+    if requested_action and requested_action != session_action:
+        return {
+            "stage": "operation_identity",
+            "detail": "操作已过期或来自其他业务，截图未分析，当前配置未修改",
+            "expected_action": requested_action,
+            "current_action": session_action,
+        }
+    requested_recording_id = str(message.get("recording_id") or "")
+    if not requested_recording_id:
+        return {
+            "stage": "operation_identity",
+            "detail": "操作缺少录制身份，截图未分析，当前配置未修改",
+        }
+    if requested_recording_id and requested_recording_id != recording_id:
+        return {
+            "stage": "operation_identity",
+            "detail": "操作已过期或来自其他录制，截图未分析，当前配置未修改",
+            "expected_recording_id": requested_recording_id,
+            "current_recording_id": recording_id,
+        }
+    expected_fingerprint = str(message.get("expected_fingerprint") or "")
+    if check_fingerprint and not expected_fingerprint:
+        return {
+            "stage": "flow_spec_conflict",
+            "detail": "操作缺少工作台版本，截图未分析，当前配置未修改；请同步最新版本后重试",
+        }
+    if check_fingerprint and expected_fingerprint and current_flow_spec is not None:
+        from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+        current_fingerprint = flow_spec_fingerprint(current_flow_spec)
+        if expected_fingerprint != current_fingerprint:
+            return {
+                "stage": "flow_spec_conflict",
+                "detail": "工作台版本已变化，截图未分析，当前配置未修改；请同步最新版本后重试",
+                "expected_fingerprint": expected_fingerprint,
+                "current_fingerprint": current_fingerprint,
+            }
+    return None
+
 @app.websocket("/onboarding/page/record")
 async def record_ws(ws: WebSocket) -> None:
     """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
@@ -1635,6 +1695,24 @@ async def record_ws(ws: WebSocket) -> None:
                     operation_id=operation_id,
                     screenshot_count=len(msg.get("analysis_screenshots") or []),
                 )
+                identity_conflict = _recording_operation_identity_conflict(
+                    msg,
+                    session_action=session_action,
+                    recording_id=recording_id,
+                    check_fingerprint=False,
+                )
+                if identity_conflict:
+                    await sender.send_json({
+                        "type": "error",
+                        "operation": "plan",
+                        "operation_id": operation_id,
+                        **identity_conflict,
+                        **(
+                            _recording_flow_projection(pending_flow_spec)
+                            if pending_flow_spec is not None else {}
+                        ),
+                    })
+                    continue
                 if await _replay_costly(msg):
                     log.info(
                         "recording.operation_completed",
@@ -1646,6 +1724,21 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                identity_conflict = _recording_operation_identity_conflict(
+                    msg,
+                    session_action=session_action,
+                    recording_id=recording_id,
+                    current_flow_spec=pending_flow_spec,
+                )
+                if identity_conflict:
+                    await sender.send_json({
+                        "type": "error",
+                        "operation": "plan",
+                        "operation_id": operation_id,
+                        **identity_conflict,
+                        **_recording_flow_projection(pending_flow_spec),
+                    })
                     continue
                 analysis_screenshots: list[dict] = []
                 before_operation = pending_flow_spec.model_copy(deep=True)
@@ -1873,10 +1966,44 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json(error_response)
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
+                operation_id = str(msg.get("operation_id") or "")
+                identity_conflict = _recording_operation_identity_conflict(
+                    msg,
+                    session_action=session_action,
+                    recording_id=recording_id,
+                    check_fingerprint=False,
+                )
+                if identity_conflict:
+                    await sender.send_json({
+                        "type": "error",
+                        "operation": "repair",
+                        "operation_id": operation_id,
+                        **identity_conflict,
+                        **(
+                            _recording_flow_projection(pending_flow_spec)
+                            if pending_flow_spec is not None else {}
+                        ),
+                    })
+                    continue
                 if await _replay_costly(msg):
                     continue
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                identity_conflict = _recording_operation_identity_conflict(
+                    msg,
+                    session_action=session_action,
+                    recording_id=recording_id,
+                    current_flow_spec=pending_flow_spec,
+                )
+                if identity_conflict:
+                    await sender.send_json({
+                        "type": "error",
+                        "operation": "repair",
+                        "operation_id": operation_id,
+                        **identity_conflict,
+                        **_recording_flow_projection(pending_flow_spec),
+                    })
                     continue
                 try:
                     from dano.execution.page.flow_spec import flow_operation_report
@@ -1906,7 +2033,12 @@ async def record_ws(ws: WebSocket) -> None:
                     _remember_costly(msg, response)
                     await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    await sender.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
+                    await sender.send_json({
+                        "type": "error",
+                        "operation": "repair",
+                        "operation_id": operation_id,
+                        "detail": f"auto_fix_flow failed: {e}",
+                    })
             # Step D2：沿用同一个 Pi Session 补充步骤业务名称。
             elif t == "step_naming":
                 if pending_flow_spec is None:
