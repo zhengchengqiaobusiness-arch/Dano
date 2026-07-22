@@ -1215,6 +1215,24 @@ export interface BridgeUserSummary {
   readonly avatarUrl?: string;
 }
 
+/** Stable keys accepted by the server-owned Theme Color preference. */
+export const ACCENT_COLOR_PRESET_KEYS = [
+  "default",
+  "blue",
+  "gray",
+  "yellow",
+  "pink",
+  "purple",
+] as const;
+
+export type AccentColorPreset = (typeof ACCENT_COLOR_PRESET_KEYS)[number];
+
+export const DEFAULT_ACCENT_COLOR_PRESET: AccentColorPreset = "default";
+
+export interface BridgeThemeColorPreference {
+  readonly accentColorPreset: AccentColorPreset;
+}
+
 /** JSON-safe configuration injected by the Dano server into the browser page. */
 export interface BridgeBrowserRuntimeConfig {
   readonly debugModeAvailable?: boolean;

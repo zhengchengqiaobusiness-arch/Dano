@@ -1,5 +1,9 @@
 import { PI_BASE46_DARK_THEME } from "./dark/pi-base46-dark";
 import { PI_BASE46_LIGHT_THEME } from "./light/pi-base46-light";
+import {
+  DEFAULT_ACCENT_COLOR_PRESET,
+  type AccentColorPreset,
+} from "@dano/types/protocol";
 
 export const ACCENT_COLOR_PRESETS = Object.freeze({
   default: "#53b559",
@@ -10,9 +14,8 @@ export const ACCENT_COLOR_PRESETS = Object.freeze({
   purple: "#cba6f7",
 } as const);
 
-export type AccentColorPreset = keyof typeof ACCENT_COLOR_PRESETS;
-
-export const DEFAULT_ACCENT_COLOR_PRESET: AccentColorPreset = "default";
+export { DEFAULT_ACCENT_COLOR_PRESET };
+export type { AccentColorPreset };
 
 export type ResolvedThemeColor = Readonly<{
   accent: string;
