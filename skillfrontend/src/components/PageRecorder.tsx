@@ -1300,6 +1300,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     at: number; clientX: number; clientY: number; button: string; clickCount: number;
   } | null>(null);
   const lastInputErrorNoticeRef = useRef(0);
+  const componentMountedRef = useRef(false);
   const intentionalCloseRef = useRef(false);
   const sessionStartedRef = useRef(false);
   const connectionErrorRef = useRef("");
@@ -1548,16 +1549,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     })) clearFlowOperation();
   }
 
-  useEffect(() => () => {
-    // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
-    // wsRef.current 在首次 mount 时为 null(start 才会建),所以首次 cleanup 一定是 noop,无副作用
-    if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
-      intentionalCloseRef.current = true;
-      wsRef.current?.close();
-    }
-    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-    if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
-    frameDecodeGenerationRef.current += 1;
+  useEffect(() => {
+    componentMountedRef.current = true;
+    return () => {
+      componentMountedRef.current = false;
+      if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
+        intentionalCloseRef.current = true;
+        wsRef.current?.close();
+      }
+      if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
+      if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
+      frameDecodeGenerationRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -2130,11 +2133,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setDescBusy(false);
       failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
-      if (intentionalCloseRef.current) {
+      if (intentionalCloseRef.current && !componentMountedRef.current) {
         setConnectionState("idle");
         clearFlowOperation();
         return;
       }
+      // React Fast Refresh tears down and recreates effects without closing the
+      // page. The old cleanup closes this socket, but the mounted component must
+      // treat that close as transient and resume the recording session.
+      intentionalCloseRef.current = false;
       reconnectRestoreOperationRef.current = null;
       if (phaseRef.current === "publishing") setPhase("recording");
       setErr((current) => current || connectionErrorRef.current || (hadStarted

@@ -258,6 +258,23 @@ def test_frontend_does_not_fill_the_websocket_queue_with_application_pings() -> 
     assert 'type: "ping"' not in source
 
 
+def test_frontend_reconnects_after_component_refresh_instead_of_staying_disconnected() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "const componentMountedRef = useRef(false)" in source
+    lifecycle_start = source.index("useEffect(() => {\n    componentMountedRef.current = true;")
+    lifecycle_end = source.index("}, []);", lifecycle_start)
+    lifecycle = source[lifecycle_start:lifecycle_end]
+    assert "componentMountedRef.current = false" in lifecycle
+
+    close_start = source.index("ws.onclose = (event) =>")
+    close_end = source.index("ws.onerror =", close_start)
+    close_handler = source[close_start:close_end]
+    assert "intentionalCloseRef.current && !componentMountedRef.current" in close_handler
+    assert "intentionalCloseRef.current = false" in close_handler
+    assert "scheduleRecorderReconnect()" in close_handler
+
+
 def test_recording_transport_drains_messages_during_long_model_operations() -> None:
     source = inspect.getsource(gateway.record_ws)
 
