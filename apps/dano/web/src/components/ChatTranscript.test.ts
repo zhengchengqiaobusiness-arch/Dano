@@ -1,6 +1,7 @@
 /** @vitest-environment happy-dom */
 
 import { mount, tick, unmount } from "svelte";
+import { createClassComponent } from "svelte/legacy";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import ChatTranscript from "./ChatTranscript.svelte";
 import chatTranscriptSource from "./ChatTranscript.svelte?raw";
@@ -28,6 +29,34 @@ beforeAll(() => {
 afterAll(() => {
   Element.prototype.animate = originalAnimate;
 });
+
+function assistantToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+  result?: { text: string; isError?: boolean },
+) {
+  return {
+    id: `assistant-${id}`,
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id,
+        name,
+        arguments: args,
+      },
+      ...(result
+        ? [{
+            type: "toolResult",
+            text: result.text,
+            ...(result.isError ? { isError: true } : {}),
+            sourceMessageId: `result-${id}`,
+          }]
+        : []),
+    ],
+  };
+}
 
 describe("ChatTranscript assistant pending indicator", () => {
   it("marks post-tool waiting for delayed presentation", async () => {
@@ -122,7 +151,7 @@ describe("ChatTranscript Activity Trail", () => {
     }
   });
 
-  it("consolidates consecutive tool work across assistant responses", async () => {
+  it("keeps consecutive tool calls separate across assistant responses", async () => {
     const target = document.createElement("div");
     document.body.appendChild(target);
     const component = mount(ChatTranscript, {
@@ -163,11 +192,179 @@ describe("ChatTranscript Activity Trail", () => {
 
     try {
       await tick();
-      expect(target.querySelectorAll(".tool-activity")).toHaveLength(1);
-      expect(target.querySelectorAll(".message-row.assistant")).toHaveLength(1);
-      expect(target.textContent).toContain("正在查阅 2 项资料");
-      expect(target.textContent).not.toContain("已查阅资料");
+      expect(target.querySelectorAll(".tool-activity")).toHaveLength(2);
+      expect(target.querySelectorAll(".message-row.assistant")).toHaveLength(2);
+      expect(target.textContent).toContain("已查阅资料");
+      expect(target.textContent).toContain("正在查阅资料");
       expect(target.textContent).not.toContain("继续核对");
+    } finally {
+      await unmount(component);
+      target.remove();
+    }
+  });
+
+  it("keeps expansion state scoped to one tool call", async () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const firstCall = assistantToolCall(
+      "read-1",
+      "read",
+      { path: "/private/docs/合同.pdf" },
+      { text: "done" },
+    );
+    const secondCall = assistantToolCall(
+      "read-2",
+      "read",
+      { path: "/private/docs/补充协议.pdf" },
+    );
+    const component = createClassComponent({
+      component: ChatTranscript,
+      target,
+      props: {
+        messages: [
+          { id: "user-1", role: "user", content: "review" },
+          firstCall,
+        ] as never,
+      },
+    });
+
+    try {
+      await tick();
+      let triggers = [...target.querySelectorAll<HTMLButtonElement>(
+        ".tool-activity-trigger",
+      )];
+      expect(triggers).toHaveLength(1);
+
+      triggers[0]?.click();
+      await tick();
+
+      component.$set({
+        messages: [
+          { id: "user-1", role: "user", content: "review" },
+          firstCall,
+          secondCall,
+        ] as never,
+      });
+      await tick();
+
+      triggers = [...target.querySelectorAll<HTMLButtonElement>(
+        ".tool-activity-trigger",
+      )];
+      expect(triggers.map(trigger => trigger.getAttribute("aria-expanded")))
+        .toEqual(["true", "false"]);
+      expect(target.textContent).toContain("合同.pdf");
+      expect(target.textContent).not.toContain("补充协议.pdf");
+
+      triggers[1]?.click();
+      await tick();
+      component.$set({
+        messages: [
+          { id: "user-1", role: "user", content: "review" },
+          firstCall,
+          assistantToolCall(
+            "read-2",
+            "read",
+            { path: "/private/docs/补充协议.pdf" },
+            { text: "done" },
+          ),
+        ] as never,
+      });
+      await tick();
+
+      triggers = [...target.querySelectorAll<HTMLButtonElement>(
+        ".tool-activity-trigger",
+      )];
+      expect(triggers.map(trigger => trigger.getAttribute("aria-expanded")))
+        .toEqual(["true", "true"]);
+    } finally {
+      component.$destroy();
+      target.remove();
+    }
+  });
+
+  it("keeps every projected tool kind separated by invocation", async () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const calls = [
+      ["read", { path: "/private/docs/one.pdf" }],
+      ["read", { path: "/private/docs/two.pdf" }],
+      ["edit", { path: "/private/docs/one.md" }],
+      ["write", { path: "/private/docs/two.md" }],
+      ["curl", { url: "https://one.example.com" }],
+      ["curl", { url: "https://two.example.com" }],
+      ["bash", { command: "/bin/ls" }],
+      ["bash", { command: "/usr/bin/pwd" }],
+      ["internal_sync_v1", {}],
+      ["internal_sync_v2", {}],
+    ] as const;
+    const component = mount(ChatTranscript, {
+      target,
+      props: {
+        messages: [
+          { id: "user-1", role: "user", content: "work" },
+          ...calls.map(([name, args], index) =>
+            assistantToolCall(
+              `tool-${index}`,
+              name,
+              args,
+              { text: "done" },
+            )
+          ),
+        ] as never,
+      },
+    });
+
+    try {
+      await tick();
+      expect([...target.querySelectorAll(".tool-activity-label")].map(
+        label => label.textContent,
+      )).toEqual([
+        "已查阅资料",
+        "已查阅资料",
+        "已更新内容",
+        "已更新内容",
+        "已获取外部信息",
+        "已获取外部信息",
+        "已执行命令",
+        "已执行命令",
+        "已处理任务",
+        "已处理任务",
+      ]);
+    } finally {
+      await unmount(component);
+      target.remove();
+    }
+  });
+
+  it("keeps a failed call visible when a later call succeeds", async () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const component = mount(ChatTranscript, {
+      target,
+      props: {
+        messages: [
+          { id: "user-1", role: "user", content: "review" },
+          assistantToolCall(
+            "read-failed",
+            "read",
+            { path: "/private/docs/合同.pdf" },
+            { text: "failed", isError: true },
+          ),
+          assistantToolCall(
+            "read-success",
+            "read",
+            { path: "/private/docs/合同.pdf" },
+            { text: "done" },
+          ),
+        ] as never,
+      },
+    });
+
+    try {
+      await tick();
+      expect([...target.querySelectorAll(".tool-activity-label")].map(
+        label => label.textContent,
+      )).toEqual(["资料查阅失败", "已查阅资料"]);
     } finally {
       await unmount(component);
       target.remove();
