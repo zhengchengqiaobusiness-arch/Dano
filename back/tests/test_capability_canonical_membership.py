@@ -62,7 +62,7 @@ def test_nodes_override_divergent_derived_membership_views() -> None:
     ]
 
 
-@pytest.mark.parametrize("usage", ["option_source", "fact_check", "preflight"])
+@pytest.mark.parametrize("usage", ["option_source", "fact_check"])
 def test_auxiliary_request_refs_survive_execute_membership_derivation(usage: str) -> None:
     spec = _spec(FlowCapability(
         name="submit",
@@ -85,6 +85,51 @@ def test_auxiliary_request_refs_survive_execute_membership_derivation(usage: str
     assert [(ref.step_id, ref.request_id, ref.usage) for ref in refs] == [
         ("submit", "req-submit", "execute"),
         ("query", "req-query", usage),
+    ]
+
+
+def test_manual_preflight_is_executable_before_main_interface() -> None:
+    spec = _spec(FlowCapability(
+        name="submit",
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+    ))
+
+    edited = apply_flow_edits(spec, [{
+        "op": "add_capability_step",
+        "capability_index": 0,
+        "step_id": "query",
+        "usage": "preflight",
+        "origin": "manual",
+    }])
+
+    cap = edited.capabilities[0]
+    assert cap.step_ids == ["query", "submit"]
+    assert [(ref.step_id, ref.usage) for ref in cap.request_refs] == [
+        ("query", "preflight"),
+        ("submit", "execute"),
+    ]
+
+
+def test_legacy_manual_preflight_reference_is_promoted_when_loaded() -> None:
+    spec = _spec(FlowCapability(
+        name="submit",
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        request_refs=[CapabilityRequestRef(
+            request_id="req-query",
+            step_id="query",
+            usage="preflight",
+            origin="manual",
+            confirmed=True,
+        )],
+    ))
+
+    _normalize_capability_references(spec)
+
+    cap = spec.capabilities[0]
+    assert cap.step_ids == ["query", "submit"]
+    assert [(ref.step_id, ref.usage) for ref in cap.request_refs] == [
+        ("query", "preflight"),
+        ("submit", "execute"),
     ]
 
 

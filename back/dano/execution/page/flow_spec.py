@@ -10035,6 +10035,9 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
 
     for cap in spec.capabilities or []:
         cap.nodes = clean_nodes(cap.nodes or [], [])
+        for ref in cap.request_refs or []:
+            if ref.usage == "preflight" and valid_step_id(ref.step_id):
+                _add_step_id_to_capability(spec, cap, ref.step_id)
         _sync_capability_order(spec, cap)
     return spec
 
@@ -10063,11 +10066,11 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
     ]
     existing_memberships = {
         ref.step_id: ref for ref in (cap.request_refs or [])
-        if ref.usage == "execute" and ref.step_id
+        if ref.usage in {"execute", "preflight"} and ref.step_id
     }
     auxiliary_refs = [
         ref for ref in (cap.request_refs or [])
-        if ref.usage != "execute" or not ref.step_id
+        if ref.usage not in {"execute", "preflight"} or not ref.step_id
     ]
     execute_refs: list[CapabilityRequestRef] = []
     for step_id in cap.step_ids:
@@ -16795,7 +16798,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             )
             cap.updated_by = "planner" if actor == "planner" else "user"
             _invalidate_capability_contract(cap)
-            if usage == "execute":
+            if usage in {"execute", "preflight"}:
                 _add_step_id_to_capability(new_spec, cap, step_id)
             _sync_capability_order(new_spec, cap)
             continue
