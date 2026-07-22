@@ -1,4 +1,11 @@
 import type { ThemeRegistration } from "shiki/core";
+import {
+  ACCENT_COLOR_PRESETS,
+  DEFAULT_ACCENT_COLOR_PRESET,
+  resolveAccentColorPreset,
+  resolveThemeColor,
+  withThemeColorOpacity,
+} from "./accent-color";
 import { DARK_THEMES, PI_BASE46_DARK_THEME } from "./dark";
 import { LIGHT_THEMES, PI_BASE46_LIGHT_THEME } from "./light";
 import type {
@@ -14,6 +21,13 @@ export type {
   ThemePair,
   ThemePreference,
 } from "./types";
+export {
+  ACCENT_COLOR_PRESETS,
+  DEFAULT_ACCENT_COLOR_PRESET,
+  resolveAccentColorPreset,
+  resolveThemeColor,
+};
+export type { AccentColorPreset, ResolvedThemeColor } from "./accent-color";
 
 export const BUILT_IN_THEMES = [
   ...DARK_THEMES,
@@ -174,8 +188,10 @@ export function resolveActiveTheme(preference: ThemePreference): Base46Theme {
 
 export function resolveAppThemeVars(
   theme: Base46Theme,
+  accentColor: string = ACCENT_COLOR_PRESETS[DEFAULT_ACCENT_COLOR_PRESET],
 ): Record<string, string> {
   const { base16, base30, mode } = theme;
+  const themeColor = resolveThemeColor(accentColor);
   const shadowSource = mode === "dark" ? base30.darker_black : base16.base07;
 
   return {
@@ -185,7 +201,7 @@ export function resolveAppThemeVars(
     "--panel-2": base30.one_bg2,
     "--panel-3": base30.one_bg3,
     "--control-bg": base30.one_bg,
-    "--on-accent": base16.base00,
+    "--on-accent": themeColor.onAccent,
     "--code-bg": base16.base00,
     "--tool-surface": base30.one_bg,
     "--tool-surface-strong": base30.one_bg2,
@@ -205,21 +221,30 @@ export function resolveAppThemeVars(
     "--text": base16.base05,
     "--text-muted": base30.grey_fg,
     "--text-subtle": base30.grey_fg2,
-    "--accent": base16.base0D,
-    "--accent-hover": base16.base0D,
+    "--accent": themeColor.accent,
+    "--accent-hover": themeColor.accent,
     "--send-button-icon": "#ffffff",
     "--success": base16.base0B,
     "--warning": base16.base0A,
     "--danger": base16.base08,
     "--surface-hover": toRgba(base30.grey_fg2, mode === "dark" ? 0.1 : 0.12),
-    "--surface-active": toRgba(base16.base0D, mode === "dark" ? 0.15 : 0.14),
+    "--surface-active": withThemeColorOpacity(
+      themeColor.accent,
+      mode === "dark" ? 0.15 : 0.14,
+    ),
     "--surface-selected": toRgba(
       base30.light_grey,
       mode === "dark" ? 0.4 : 0.2,
     ),
-    "--focus-ring": toRgba(base16.base0D, mode === "dark" ? 0.35 : 0.28),
+    "--focus-ring": withThemeColorOpacity(
+      themeColor.accent,
+      mode === "dark" ? 0.35 : 0.28,
+    ),
     "--focus-ring-muted": toRgba(base30.grey_fg, mode === "dark" ? 0.22 : 0.18),
-    "--selection-bg": toRgba(base16.base0D, mode === "dark" ? 0.22 : 0.16),
+    "--selection-bg": withThemeColorOpacity(
+      themeColor.accent,
+      mode === "dark" ? 0.22 : 0.16,
+    ),
     "--button-bg": base30.one_bg2,
     "--button-hover": base30.one_bg3,
     "--shadow-raised": `0 8px 24px ${toRgba(shadowSource, mode === "dark" ? 0.28 : 0.08)}`,
