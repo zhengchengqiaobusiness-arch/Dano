@@ -22,6 +22,11 @@ import {
   type AuthenticatedUserContext,
   type UserContextResolver,
 } from "./user-context.js";
+import {
+  parseThemeColorPreference,
+  readThemeColorPreference,
+  saveThemeColorPreference,
+} from "./user-preferences.js";
 import type {
   BridgeConfig,
   BridgeBrowserRuntimeConfig,
@@ -329,6 +334,35 @@ export class BridgeServer {
           res,
           decodeURIComponent(clientUserMatch[1]),
         );
+        return;
+      }
+
+      const clientThemePreferenceMatch =
+        /^\/api\/clients\/([^/]+)\/preferences\/theme$/.exec(pathname);
+      if (
+        (req.method === "GET" || req.method === "PUT") &&
+        clientThemePreferenceMatch?.[1]
+      ) {
+        const clientId = decodeURIComponent(clientThemePreferenceMatch[1]);
+        const userContext = this.clientUsers.get(clientId);
+        if (!userContext) {
+          throw new UserContextError(401, "Authenticated User is required");
+        }
+        if (req.method === "GET") {
+          writeJson(res, 200, await readThemeColorPreference(userContext));
+          return;
+        }
+        const body = await readJsonBody(req);
+        const preference = parseThemeColorPreference(body);
+        if (!preference) {
+          throw new HttpError(400, "Accent Color Preset is invalid");
+        }
+        try {
+          await saveThemeColorPreference(userContext, preference);
+        } catch {
+          throw new HttpError(500, "Theme Color preference could not be saved");
+        }
+        writeJson(res, 200, preference);
         return;
       }
 

@@ -45,14 +45,21 @@ afterEach(async () => {
 function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
   config: Partial<BridgeConfig> = {},
-  auth?: { secret?: string; issuer?: string; audience?: string },
+  auth?: {
+    secret?: string;
+    issuer?: string;
+    audience?: string;
+    runtimeRootPath?: string;
+  },
 ) {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-workspace-"));
   uploadRoots.push(uploadDir);
   workspaceRoots.push(workspaceDir);
-  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dano-user-runtime-"));
-  userRoots.push(runtimeRoot);
+  const runtimeRoot =
+    auth?.runtimeRootPath ??
+    fs.mkdtempSync(path.join(os.tmpdir(), "dano-user-runtime-"));
+  if (!auth?.runtimeRootPath) userRoots.push(runtimeRoot);
   const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
   const emitEvent = vi.fn();
   const handlerFactory: RpcConnectionHandlerFactory = ctx =>
@@ -103,6 +110,20 @@ function signJwt(
 
 function bearer(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
+}
+
+async function createAuthenticatedClient(
+  origin: string,
+  token: string,
+): Promise<string> {
+  const response = await fetch(`${origin}/api/clients`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...bearer(token) },
+    body: "{}",
+  });
+  expect(response.status).toBe(201);
+  const body = (await response.json()) as { client: { id: string } };
+  return body.client.id;
 }
 
 async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
@@ -432,6 +453,355 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(contexts[0]?.user.id).toBe("stable-user");
     expect(contexts[1]?.user.id).toBe("stable-user");
     expect(contexts[0]?.folderPath).toBe(contexts[1]?.folderPath);
+  });
+
+  it("reads the default Theme Color preference for an authenticated User", async () => {
+    const { server } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const token = signJwt({
+      sub: "theme-user",
+      name: "Theme User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const createdResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: "{}",
+      },
+    );
+    const created = (await createdResponse.json()) as { client: { id: string } };
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients/${created.client.id}/preferences/theme`,
+      { headers: bearer(token) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      accentColorPreset: "default",
+    });
+  });
+
+  it("saves only the stable Accent Color Preset key and re-reads it in a new client", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const token = signJwt({
+      sub: "persistent-theme-user",
+      name: "Persistent Theme User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const firstClientId = await createAuthenticatedClient(origin, token);
+    const firstEndpoint = `${origin}/api/clients/${firstClientId}/preferences/theme`;
+
+    const saveResponse = await fetch(firstEndpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...bearer(token) },
+      body: JSON.stringify({ accentColorPreset: "blue" }),
+    });
+
+    expect(saveResponse.status).toBe(200);
+    await expect(saveResponse.json()).resolves.toEqual({
+      accentColorPreset: "blue",
+    });
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(
+            runtimeRoot,
+            "users",
+            "persistent-theme-user",
+            "preferences",
+            "theme.json",
+          ),
+          "utf8",
+        ),
+      ),
+    ).toEqual({ accentColorPreset: "blue" });
+
+    const secondClientId = await createAuthenticatedClient(origin, token);
+    const readResponse = await fetch(
+      `${origin}/api/clients/${secondClientId}/preferences/theme`,
+      { headers: bearer(token) },
+    );
+    expect(readResponse.status).toBe(200);
+    await expect(readResponse.json()).resolves.toEqual({
+      accentColorPreset: "blue",
+    });
+  });
+
+  it("keeps Theme Color preferences isolated by authenticated User", async () => {
+    const { server } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const aliceToken = signJwt({
+      sub: "theme-alice",
+      name: "Alice",
+      exp: Date.now() / 1000 + 60,
+    });
+    const bobToken = signJwt({
+      sub: "theme-bob",
+      name: "Bob",
+      exp: Date.now() / 1000 + 60,
+    });
+    const aliceClientId = await createAuthenticatedClient(origin, aliceToken);
+    const bobClientId = await createAuthenticatedClient(origin, bobToken);
+    const aliceEndpoint = `${origin}/api/clients/${aliceClientId}/preferences/theme`;
+    const bobEndpoint = `${origin}/api/clients/${bobClientId}/preferences/theme`;
+
+    const aliceSave = await fetch(aliceEndpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...bearer(aliceToken) },
+      body: JSON.stringify({ accentColorPreset: "yellow" }),
+    });
+    expect(aliceSave.status).toBe(200);
+
+    const bobRead = await fetch(`${bobEndpoint}?clientId=${aliceClientId}`, {
+      headers: { ...bearer(bobToken), "X-User-Id": "theme-alice" },
+    });
+    expect(bobRead.status).toBe(200);
+    await expect(bobRead.json()).resolves.toEqual({
+      accentColorPreset: "default",
+    });
+
+    const attackerRead = await fetch(aliceEndpoint, {
+      headers: bearer(bobToken),
+    });
+    expect(attackerRead.status).toBe(403);
+    const aliceRead = await fetch(aliceEndpoint, {
+      headers: bearer(aliceToken),
+    });
+    await expect(aliceRead.json()).resolves.toEqual({
+      accentColorPreset: "yellow",
+    });
+  });
+
+  it("falls back to default for malformed or unknown stored Theme Color preferences", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const token = signJwt({
+      sub: "invalid-theme-file-user",
+      name: "Invalid Theme File User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const clientId = await createAuthenticatedClient(origin, token);
+    const endpoint = `${origin}/api/clients/${clientId}/preferences/theme`;
+    const preferenceDirectory = path.join(
+      runtimeRoot,
+      "users",
+      "invalid-theme-file-user",
+      "preferences",
+    );
+    fs.mkdirSync(preferenceDirectory);
+    const preferencePath = path.join(preferenceDirectory, "theme.json");
+
+    fs.writeFileSync(preferencePath, "not json", "utf8");
+    const malformedRead = await fetch(endpoint, { headers: bearer(token) });
+    await expect(malformedRead.json()).resolves.toEqual({
+      accentColorPreset: "default",
+    });
+
+    fs.writeFileSync(
+      preferencePath,
+      JSON.stringify({ accentColorPreset: "red", accent: "#ff0000" }),
+      "utf8",
+    );
+    const unknownRead = await fetch(endpoint, { headers: bearer(token) });
+    await expect(unknownRead.json()).resolves.toEqual({
+      accentColorPreset: "default",
+    });
+
+    fs.chmodSync(preferencePath, 0o000);
+    try {
+      const unreadableRead = await fetch(endpoint, { headers: bearer(token) });
+      await expect(unreadableRead.json()).resolves.toEqual({
+        accentColorPreset: "default",
+      });
+    } finally {
+      fs.chmodSync(preferencePath, 0o600);
+    }
+  });
+
+  it("rejects an invalid preset without changing the last successful value", async () => {
+    const { server } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const token = signJwt({
+      sub: "invalid-theme-request-user",
+      name: "Invalid Theme Request User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const clientId = await createAuthenticatedClient(origin, token);
+    const endpoint = `${origin}/api/clients/${clientId}/preferences/theme`;
+    const save = (accentColorPreset: string) =>
+      fetch(endpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: JSON.stringify({ accentColorPreset }),
+      });
+
+    expect((await save("pink")).status).toBe(200);
+    const invalidResponse = await save("red");
+    expect(invalidResponse.status).toBe(400);
+    await expect(invalidResponse.json()).resolves.toEqual({
+      error: "Accent Color Preset is invalid",
+    });
+    const read = await fetch(endpoint, { headers: bearer(token) });
+    await expect(read.json()).resolves.toEqual({ accentColorPreset: "pink" });
+  });
+
+  it("returns a save error and keeps the last successful server value", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const token = signJwt({
+      sub: "failed-theme-save-user",
+      name: "Failed Theme Save User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const clientId = await createAuthenticatedClient(origin, token);
+    const endpoint = `${origin}/api/clients/${clientId}/preferences/theme`;
+    const save = (accentColorPreset: string) =>
+      fetch(endpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: JSON.stringify({ accentColorPreset }),
+      });
+
+    expect((await save("purple")).status).toBe(200);
+    const preferenceDirectory = path.join(
+      runtimeRoot,
+      "users",
+      "failed-theme-save-user",
+      "preferences",
+    );
+    fs.chmodSync(preferenceDirectory, 0o500);
+    try {
+      const failedSave = await save("blue");
+      expect(failedSave.status).toBe(500);
+      await expect(failedSave.json()).resolves.toEqual(
+        expect.objectContaining({ error: expect.any(String) }),
+      );
+    } finally {
+      fs.chmodSync(preferenceDirectory, 0o700);
+    }
+
+    const read = await fetch(endpoint, { headers: bearer(token) });
+    await expect(read.json()).resolves.toEqual({
+      accentColorPreset: "purple",
+    });
+  });
+
+  it("restores a saved Theme Color preference after the BridgeServer is recreated", async () => {
+    const first = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const firstAddress = await first.server.start();
+    const token = signJwt({
+      sub: "restarted-theme-user",
+      name: "Restarted Theme User",
+      exp: Date.now() / 1000 + 60,
+    });
+    const firstOrigin = `http://127.0.0.1:${firstAddress.port}`;
+    const firstClientId = await createAuthenticatedClient(firstOrigin, token);
+    const saveResponse = await fetch(
+      `${firstOrigin}/api/clients/${firstClientId}/preferences/theme`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: JSON.stringify({ accentColorPreset: "gray" }),
+      },
+    );
+    expect(saveResponse.status).toBe(200);
+    await first.server.stop();
+
+    const second = createServer(
+      undefined,
+      {},
+      {
+        secret: TEST_JWT_SECRET,
+        runtimeRootPath: first.runtimeRoot,
+      },
+    );
+    const secondAddress = await second.server.start();
+    const secondOrigin = `http://127.0.0.1:${secondAddress.port}`;
+    const secondClientId = await createAuthenticatedClient(secondOrigin, token);
+    const readResponse = await fetch(
+      `${secondOrigin}/api/clients/${secondClientId}/preferences/theme`,
+      { headers: bearer(token) },
+    );
+
+    expect(readResponse.status).toBe(200);
+    await expect(readResponse.json()).resolves.toEqual({
+      accentColorPreset: "gray",
+    });
+  });
+
+  it("requires the bound authenticated User for every Theme Color preference request", async () => {
+    const { server } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const ownerToken = signJwt({
+      sub: "preference-owner",
+      name: "Preference Owner",
+      exp: Date.now() / 1000 + 60,
+    });
+    const otherToken = signJwt({
+      sub: "preference-other",
+      name: "Preference Other",
+      exp: Date.now() / 1000 + 60,
+    });
+    const clientId = await createAuthenticatedClient(origin, ownerToken);
+    const endpoint = `${origin}/api/clients/${clientId}/preferences/theme`;
+
+    expect((await fetch(endpoint)).status).toBe(401);
+    const impersonatedSave = await fetch(endpoint, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": "preference-owner",
+        ...bearer(otherToken),
+      },
+      body: JSON.stringify({ accentColorPreset: "blue" }),
+    });
+    expect(impersonatedSave.status).toBe(403);
+    const ownerRead = await fetch(endpoint, { headers: bearer(ownerToken) });
+    await expect(ownerRead.json()).resolves.toEqual({
+      accentColorPreset: "default",
+    });
   });
 
   it("accepts a verified JWT from the HttpOnly-cookie transport used by EventSource", async () => {
