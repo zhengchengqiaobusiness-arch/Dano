@@ -1367,6 +1367,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
 
+  const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
@@ -1990,9 +1991,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setReconnectedSessionNeedsCapture(false);
           message.success("录制连接及编辑内容已自动恢复");
         }
-        const completedFinalize = m.operation === "finalize"
-          && (!m.operation_id || m.operation_id === finalizeOperationRef.current);
-        if (completedFinalize) {
+        if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
           finalizeOperationRef.current = null;
           setLastAnalysisEvidence(null);
           setLastOperationReport(null);
@@ -2021,7 +2020,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           if (!hasNewerLocalMutation) acceptFlowSpec(fs);
           finishFlowOperation(fs.meta?.recording_agent_session, m.operation, m.operation_id);
         }
-        if (completedFinalize && fs) orchestrateFlow();
         if (restoredAfterReconnect && fs) resumeFlowOperationAfterReconnect(fs);
         if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
         else if (hasNewerLocalMutation) setCheckReport(null);
@@ -2043,6 +2041,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setResult(null);
         }
         if (m.operation === "step_naming") {
+          setNamingBusy(false);
           message.success("步骤名称已刷新");
         } else if (m.operation === "business_description") {
           setDescBusy(false);
@@ -2087,7 +2086,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // Operation failures belong to the workbench, not the transport. Keep
         // the socket healthy so a rejected Pi proposal cannot poison reconnect.
         if (!m.operation) connectionErrorRef.current = detail;
-        setDescBusy(false); clearFlowOperation();
+        setNamingBusy(false); setDescBusy(false); clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
@@ -2130,6 +2129,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       lastPointerClickRef.current = null;
       finalizeOperationRef.current = null;
       publishOperationRef.current = null;
+      setNamingBusy(false);
       setDescBusy(false);
       failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
@@ -2356,10 +2356,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function publishRequest() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    if (!(flowSpecRef.current?.capabilities || []).length) {
-      message.warning("请先重新抓取并分析，生成至少一个能力后再发布");
-      return;
-    }
     if (!action.trim() || badAction(action.trim())) return;
     runAfterFlowSync(performPublishRequest);
   }
@@ -3595,11 +3591,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ),
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
-                <Button size="small" loading={phase === "publishing" || orchestrateBusy || autoFixBusy} onClick={finalize}>重新抓取并分析</Button>
-                <Tooltip title={!capabilities.length ? "请先重新抓取并分析，生成至少一个能力后再发布" : ""}>
-                  <span><Button size="small" type="primary" loading={phase === "publishing"}
-                    disabled={!capabilities.length} onClick={publishRequest}>发布当前流程</Button></span>
-                </Tooltip>
+                <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
+                <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
               </Space>
             ),
           }}
@@ -4357,12 +4350,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
+          <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
+            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
+              disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
+              onClick={orchestrateFlow}>生成/优化能力</Button>
+          </Tooltip>
           <input
             ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
             onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
           />
           {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
+          {lastAnalysisEvidence && <Tag color={lastAnalysisEvidence.screenshot_count > 0 ? "success" : "default"}>{"\u6700\u8fd1\u5206\u6790\u5df2\u53c2\u8003"} {lastAnalysisEvidence.screenshot_count} {"\u5f20\u622a\u56fe"}</Tag>}
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
+          <Button icon={<RobotOutlined />} loading={namingBusy}
+            disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || orchestrateBusy || autoFixBusy}
+            onClick={() => { if (send({ type: "step_naming" })) setNamingBusy(true); }}>命名步骤</Button>
           {flowSpec.meta?.capability_generation && <>
             <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
               {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
@@ -4622,7 +4624,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
                 <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
               </Form.Item>
-              <Button type="primary" loading={phase === "publishing" || orchestrateBusy || autoFixBusy} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !reqs.length)} onClick={finalize}>
+              <Button type="primary" loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !reqs.length)} onClick={finalize}>
                 停止并分析请求
               </Button>
             </Space>
