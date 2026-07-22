@@ -120,6 +120,10 @@ export class UploadRegistry {
     return upload;
   }
 
+  peek(id: string): StoredUpload | null {
+    return this.uploads.get(id) ?? null;
+  }
+
   markDraft(id: string): StoredUpload | null {
     return this.mark(id, "draft");
   }

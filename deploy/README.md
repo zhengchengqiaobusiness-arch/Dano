@@ -35,6 +35,22 @@ The entrypoint copies those files from `deploy/runtime-defaults/` only when the
 runtime file is missing. It does not overwrite user-modified runtime files.
 It does not copy defaults into a Runtime Workspace `.pi` directory.
 
+## Authenticated User Context
+
+Dano can verify an HS256 JWT supplied as an `Authorization: Bearer` token or
+an HttpOnly cookie. Configure `DANO_AUTH_JWT_SECRET` to enable verification;
+`DANO_AUTH_JWT_ISSUER`, `DANO_AUTH_JWT_AUDIENCE`, and
+`DANO_AUTH_COOKIE_NAME` optionally constrain the token source (the cookie name
+defaults to `dano_auth`). Valid tokens require an unexpired `exp` and a safe,
+stable `sub`; `name` or `preferred_username` supplies the display name and
+`picture` may supply an HTTP(S) avatar URL.
+
+The verified `sub` maps to
+`$DANO_RUNTIME_DIR/users/<sub>/`. Dano rejects traversal-shaped subjects,
+symlink folder boundaries, invalid signatures, and client-supplied identity
+fields. Without a configured verifier or a verified token, Dano does not
+invent an anonymous User and does not expose a User Folder.
+
 The app container runs as the non-root `node` user (`1000:1000`) with
 `HOME=/home/node`. The image installs `/usr/bin/bwrap` setuid (`4755`) because
 the verified production Docker host rejects non-setuid Bubblewrap with `bwrap

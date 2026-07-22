@@ -53,6 +53,18 @@ _Avoid_: new form identity, unsaved draft, reopened Submitted Form
 The single project folder Dano gives to Pi for one Dano session. Dano may know the owning user and session, but Pi only sees this folder as its current project.
 _Avoid_: chat workspace, user workspace, project folder
 
+**User**:
+The stable person identity established from a server-verified token. A User is independent of browser clients, sessions, and Runtime Workspaces; none of those identifiers may stand in for a User.
+_Avoid_: client, session owner inferred from clientId, anonymous identity
+
+**User Context**:
+The server-owned request context produced after verifying a User token. It carries the authenticated User and the safely resolved User Folder; browser-provided identity fields never create or change it.
+_Avoid_: client context, browser identity, session context
+
+**User Folder**:
+The persistent directory under the Dano runtime users root that is mapped from one verified User ID. It holds user-owned data such as preferences and must remain isolated from other User Folders and Runtime Workspaces.
+_Avoid_: Runtime Workspace, session directory, client directory
+
 **Browser Date Value**:
 The value submitted by an `ask_user_question` date control after the frontend date component applies its configured format. Dano returns this user answer to the model as submitted and does not normalize it in the Dano Bridge.
 _Avoid_: native date value, backend-normalized date, bridge date

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BridgeEventBus } from "../bridge-event-bus.js";
 import {
@@ -10,6 +10,7 @@ import {
   type RpcConnectionHandler,
   type RpcConnectionHandlerFactory,
 } from "../server.js";
+import { createJwtUserContextResolver } from "../user-context.js";
 import {
   DEFAULT_BRIDGE_CONFIG,
   type BridgeConfig,
@@ -26,6 +27,7 @@ interface SseProbe {
 const servers: BridgeServer[] = [];
 const uploadRoots: string[] = [];
 const workspaceRoots: string[] = [];
+const userRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => server.stop()));
@@ -35,16 +37,22 @@ afterEach(async () => {
   for (const root of workspaceRoots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
+  for (const root of userRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
   config: Partial<BridgeConfig> = {},
+  auth?: { secret?: string; issuer?: string; audience?: string },
 ) {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-workspace-"));
   uploadRoots.push(uploadDir);
   workspaceRoots.push(workspaceDir);
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dano-user-runtime-"));
+  userRoots.push(runtimeRoot);
   const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
   const emitEvent = vi.fn();
   const handlerFactory: RpcConnectionHandlerFactory = ctx =>
@@ -53,6 +61,14 @@ function createServer(
       currentGitCwd: () => workspaceDir,
       dispose: vi.fn(),
     };
+  const userContextResolver = auth?.secret
+    ? createJwtUserContextResolver({
+        runtimeRootPath: runtimeRoot,
+        secret: auth.secret,
+        issuer: auth.issuer,
+        audience: auth.audience,
+      })
+    : undefined;
   const server = new BridgeServer(
     {
       ...DEFAULT_BRIDGE_CONFIG,
@@ -64,9 +80,29 @@ function createServer(
     handlerFactory,
     eventBus,
     emitEvent,
+    userContextResolver,
   );
   servers.push(server);
-  return { server, eventBus, emitEvent, workspaceDir };
+  return { server, eventBus, emitEvent, workspaceDir, runtimeRoot };
+}
+
+const TEST_JWT_SECRET = "test-secret-that-is-long-enough";
+
+function signJwt(
+  claims: Record<string, unknown>,
+  secret = TEST_JWT_SECRET,
+): string {
+  const encode = (value: unknown) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const unsigned = `${encode({ alg: "HS256", typ: "JWT" })}.${encode(claims)}`;
+  const signature = createHmac("sha256", secret)
+    .update(unsigned)
+    .digest("base64url");
+  return `${unsigned}.${signature}`;
+}
+
+function bearer(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
 }
 
 async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
@@ -198,6 +234,349 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(emitEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "client_connect" }),
     );
+  });
+
+  it("binds a verified JWT User to the client and creates that User Folder", async () => {
+    let connectionUser: Parameters<RpcConnectionHandlerFactory>[0]["user"];
+    const { server, runtimeRoot } = createServer(
+      ctx => {
+        connectionUser = ctx.user;
+        return {
+          handleClientMessage: vi.fn(),
+          dispose: vi.fn(),
+        };
+      },
+      {},
+      { secret: TEST_JWT_SECRET, issuer: "dano-auth", audience: "dano" },
+    );
+    const address = await server.start();
+    const token = signJwt({
+      sub: "user-42",
+      name: "Joseph",
+      picture: "https://example.test/avatar.png",
+      iss: "dano-auth",
+      aud: "dano",
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: "{}",
+      },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      currentUser: {
+        username: "Joseph",
+        avatarUrl: "https://example.test/avatar.png",
+      },
+    });
+    expect(connectionUser).toMatchObject({
+      user: { id: "user-42", username: "Joseph" },
+      folderPath: fs.realpathSync(path.join(runtimeRoot, "users", "user-42")),
+    });
+    expect(fs.statSync(path.join(runtimeRoot, "users", "user-42")).isDirectory()).toBe(
+      true,
+    );
+  });
+
+  it("does not turn a client-reported identity into a User Context", async () => {
+    let connectionUser: Parameters<RpcConnectionHandlerFactory>[0]["user"];
+    const { server, runtimeRoot } = createServer(ctx => {
+      connectionUser = ctx.user;
+      return { handleClientMessage: vi.fn(), dispose: vi.fn() };
+    });
+    const address = await server.start();
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients?userId=victim`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": "victim" },
+        body: JSON.stringify({ userId: "victim", username: "Victim" }),
+      },
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(201);
+    expect(body).not.toHaveProperty("currentUser");
+    expect(connectionUser).toBeUndefined();
+    expect(fs.existsSync(path.join(runtimeRoot, "users", "victim"))).toBe(false);
+  });
+
+  it("rejects an invalid JWT instead of downgrading it to an unauthenticated client", async () => {
+    const { server } = createServer(undefined, {}, { secret: TEST_JWT_SECRET });
+    const address = await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...bearer(signJwt({ sub: "attacker", exp: Date.now() / 1000 + 60 }, "wrong-secret")),
+      },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(401);
+    expect(server.getClientCount()).toBe(0);
+  });
+
+  it("rejects a missing token when trusted JWT authentication is configured", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(401);
+    expect(server.getClientCount()).toBe(0);
+    expect(fs.existsSync(path.join(runtimeRoot, "users"))).toBe(false);
+  });
+
+  it("rejects JWT subjects that could escape the users directory", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const token = signJwt({ sub: "../victim", exp: Date.now() / 1000 + 60 });
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...bearer(token) },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(401);
+    expect(fs.existsSync(path.join(runtimeRoot, "victim"))).toBe(false);
+  });
+
+  it("keeps different authenticated Users in separate summaries and User Folders", async () => {
+    const contexts: NonNullable<Parameters<RpcConnectionHandlerFactory>[0]["user"]>[] = [];
+    const { server, runtimeRoot } = createServer(
+      ctx => {
+        if (ctx.user) contexts.push(ctx.user);
+        return { handleClientMessage: vi.fn(), dispose: vi.fn() };
+      },
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const create = (sub: string, name: string) =>
+      fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...bearer(signJwt({ sub, name, exp: Date.now() / 1000 + 60 })),
+        },
+        body: "{}",
+      });
+
+    const [aliceResponse, bobResponse] = await Promise.all([
+      create("alice", "Alice"),
+      create("bob", "Bob"),
+    ]);
+
+    await expect(aliceResponse.json()).resolves.toMatchObject({
+      currentUser: { username: "Alice" },
+    });
+    await expect(bobResponse.json()).resolves.toMatchObject({
+      currentUser: { username: "Bob" },
+    });
+    expect(contexts.map(context => context.user.id).sort()).toEqual(["alice", "bob"]);
+    expect(contexts[0]?.folderPath).not.toBe(contexts[1]?.folderPath);
+    expect(fs.statSync(path.join(runtimeRoot, "users", "alice")).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(runtimeRoot, "users", "bob")).isDirectory()).toBe(true);
+  });
+
+  it("keeps the same authenticated User across separate browser clients", async () => {
+    const contexts: NonNullable<Parameters<RpcConnectionHandlerFactory>[0]["user"]>[] = [];
+    const { server } = createServer(
+      ctx => {
+        if (ctx.user) contexts.push(ctx.user);
+        return {
+          handleClientMessage: vi.fn(),
+          currentGitCwd: () => `/tmp/workspace-${contexts.length}`,
+          dispose: vi.fn(),
+        };
+      },
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const address = await server.start();
+    const token = signJwt({ sub: "stable-user", name: "Stable", exp: Date.now() / 1000 + 60 });
+    const create = () =>
+      fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(token) },
+        body: "{}",
+      });
+
+    const [first, second] = await Promise.all([create(), create()]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]?.user.id).toBe("stable-user");
+    expect(contexts[1]?.user.id).toBe("stable-user");
+    expect(contexts[0]?.folderPath).toBe(contexts[1]?.folderPath);
+  });
+
+  it("accepts a verified JWT from the HttpOnly-cookie transport used by EventSource", async () => {
+    const { server } = createServer(undefined, {}, { secret: TEST_JWT_SECRET });
+    const address = await server.start();
+    const token = signJwt({ sub: "cookie-user", name: "Cookie User", exp: Date.now() / 1000 + 60 });
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: `dano_auth=${token}` },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      currentUser: { username: "Cookie User" },
+    });
+  });
+
+  it("returns the bound User summary only to the same verified User", async () => {
+    const { server } = createServer(undefined, {}, { secret: TEST_JWT_SECRET });
+    const address = await server.start();
+    const ownerToken = signJwt({ sub: "owner", name: "Owner", exp: Date.now() / 1000 + 60 });
+    const attackerToken = signJwt({ sub: "attacker", name: "Attacker", exp: Date.now() / 1000 + 60 });
+    const createdResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(ownerToken) },
+        body: JSON.stringify({ userId: "attacker" }),
+      },
+    );
+    const created = (await createdResponse.json()) as { client: { id: string } };
+    const attackerCreatedResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(attackerToken) },
+        body: "{}",
+      },
+    );
+    const attackerCreated = (await attackerCreatedResponse.json()) as {
+      client: { id: string };
+    };
+    const endpoint = `http://127.0.0.1:${address.port}/api/clients/${created.client.id}/user`;
+    const uploadBody = new TextEncoder().encode("owner data");
+    const uploadResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${created.client.id}&name=owner.txt&mimeType=text/plain&sha256=${sha256(uploadBody)}`,
+      {
+        method: "POST",
+        headers: bearer(ownerToken),
+        body: uploadBody,
+      },
+    );
+    const upload = (await uploadResponse.json()) as { id: string };
+
+    const ownerResponse = await fetch(endpoint, { headers: bearer(ownerToken) });
+    const missingResponse = await fetch(endpoint);
+    const attackerResponse = await fetch(endpoint, { headers: bearer(attackerToken) });
+    const attackerMessageResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/clients/${created.client.id}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...bearer(attackerToken) },
+        body: JSON.stringify({ type: "command", payload: { id: "attack" } }),
+      },
+    );
+    const attackerUploadResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${created.client.id}&name=attack.txt&mimeType=text/plain&sha256=${sha256(uploadBody)}`,
+      { method: "POST", headers: bearer(attackerToken), body: uploadBody },
+    );
+    const attackerLookupResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads/lookup?clientId=${created.client.id}&name=owner.txt&mimeType=text/plain&sha256=${sha256(uploadBody)}`,
+      { headers: bearer(attackerToken) },
+    );
+    const attackerWorkspaceResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/workspace-files/preview?clientId=${created.client.id}&path=owner.txt`,
+      { headers: bearer(attackerToken) },
+    );
+    const attackerPreviewResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads/${upload.id}/preview?clientId=${attackerCreated.client.id}`,
+      { headers: bearer(attackerToken) },
+    );
+    const attackerOrphanResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads/${upload.id}/orphan?clientId=${created.client.id}`,
+      { method: "POST", headers: bearer(attackerToken), body: "{}" },
+    );
+
+    expect(uploadResponse.status).toBe(201);
+    expect(ownerResponse.status).toBe(200);
+    await expect(ownerResponse.json()).resolves.toEqual({ username: "Owner" });
+    expect(missingResponse.status).toBe(401);
+    expect(attackerResponse.status).toBe(403);
+    expect(attackerMessageResponse.status).toBe(403);
+    expect(attackerUploadResponse.status).toBe(403);
+    expect(attackerLookupResponse.status).toBe(403);
+    expect(attackerWorkspaceResponse.status).toBe(403);
+    expect(attackerPreviewResponse.status).toBe(403);
+    expect(attackerOrphanResponse.status).toBe(403);
+  });
+
+  it("rejects an existing symlink at the mapped User Folder boundary", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dano-user-outside-"));
+    userRoots.push(outside);
+    fs.mkdirSync(path.join(runtimeRoot, "users"), { recursive: true });
+    fs.symlinkSync(outside, path.join(runtimeRoot, "users", "linked-user"));
+    const address = await server.start();
+    const token = signJwt({ sub: "linked-user", exp: Date.now() / 1000 + 60 });
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...bearer(token) },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(403);
+    expect(server.getClientCount()).toBe(0);
+  });
+
+  it("rejects a symlink used as the users root", async () => {
+    const { server, runtimeRoot } = createServer(
+      undefined,
+      {},
+      { secret: TEST_JWT_SECRET },
+    );
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dano-users-root-outside-"));
+    userRoots.push(outside);
+    fs.symlinkSync(outside, path.join(runtimeRoot, "users"));
+    const address = await server.start();
+    const token = signJwt({ sub: "escaped-user", exp: Date.now() / 1000 + 60 });
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/clients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...bearer(token) },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(403);
+    expect(fs.existsSync(path.join(outside, "escaped-user"))).toBe(false);
+    expect(server.getClientCount()).toBe(0);
   });
 
   it("delivers command responses over SSE after POST accepts the command", async () => {

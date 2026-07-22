@@ -13,6 +13,7 @@ import { createDanoBackend } from "./backend.js";
 import type { DanoBackend } from "./backend.js";
 import { loadDanoConfig } from "./bridge/dano-config.js";
 import { DetachedSessionRegistry } from "./bridge/session-registry.js";
+import { createJwtUserContextResolver } from "./bridge/user-context.js";
 import type { BridgeConfig, UploadConfig } from "./bridge/types.js";
 import { createDanoDevReloadController } from "./dev-reload.js";
 import { loadDanoRuntime, type DanoRuntime } from "./runtime.js";
@@ -58,6 +59,7 @@ interface DanoPackageInfo {
 
 export interface DanoServerOptions {
   cwd: string;
+  runtimeRootPath: string;
   host: string;
   port: number;
   defaultWorkspacePath: string;
@@ -68,6 +70,12 @@ export interface DanoServerOptions {
   upload: UploadConfig;
   staticDir?: string;
   help: boolean;
+  userAuthentication?: {
+    secret: string;
+    issuer?: string;
+    audience?: string;
+    cookieName?: string;
+  };
 }
 
 function printHelp(): void {
@@ -162,6 +170,21 @@ function readEmptyStateConfig(
   }
 
   return DEFAULT_EMPTY_STATE;
+}
+
+function readUserAuthentication(
+  env: Record<string, string | undefined>,
+): DanoServerOptions["userAuthentication"] {
+  const secret = env.DANO_AUTH_JWT_SECRET?.trim();
+  if (!secret) return undefined;
+  const optional = (value: string | undefined): string | undefined =>
+    value?.trim() || undefined;
+  return {
+    secret,
+    issuer: optional(env.DANO_AUTH_JWT_ISSUER),
+    audience: optional(env.DANO_AUTH_JWT_AUDIENCE),
+    cookieName: optional(env.DANO_AUTH_COOKIE_NAME),
+  };
 }
 
 function readUploadConfig(
@@ -304,6 +327,7 @@ export function parseDanoServerOptions(
   let productName = readProductName(env);
   let emptyState = readEmptyStateConfig(env);
   const upload = readUploadConfig(env, runtimeRootPath);
+  const userAuthentication = readUserAuthentication(env);
   const staticDirOverride = env.DANO_STATIC_DIR?.trim();
   let help = false;
 
@@ -392,6 +416,7 @@ export function parseDanoServerOptions(
   );
   return {
     cwd,
+    runtimeRootPath: resolvedRuntimeRootPath,
     host,
     port,
     defaultWorkspacePath: resolvedDefaultWorkspacePath,
@@ -414,6 +439,7 @@ export function parseDanoServerOptions(
       ? resolve(cwd, staticDirOverride)
       : resolveDefaultStaticDir(fileURLToPath(import.meta.url)),
     help,
+    userAuthentication,
   };
 }
 
@@ -522,6 +548,12 @@ async function runDanoServer(
     cwd: options.cwd,
     backend,
     sessionRegistry,
+    userContextResolver: options.userAuthentication
+      ? createJwtUserContextResolver({
+          runtimeRootPath: options.runtimeRootPath,
+          ...options.userAuthentication,
+        })
+      : undefined,
     onShutdown: () => resolveStopped?.(),
   });
 

@@ -1209,6 +1209,12 @@ export interface BridgeQuickActionConfig {
   readonly prompt: string;
 }
 
+/** Browser-safe projection of the server-authenticated User. */
+export interface BridgeUserSummary {
+  readonly username: string;
+  readonly avatarUrl?: string;
+}
+
 /** JSON-safe configuration injected by the Dano server into the browser page. */
 export interface BridgeBrowserRuntimeConfig {
   readonly debugModeAvailable?: boolean;
