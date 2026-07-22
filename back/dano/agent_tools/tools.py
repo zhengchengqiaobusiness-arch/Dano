@@ -2372,13 +2372,21 @@ def _screenshot_field_only_plan(raw_plan: dict) -> dict | None:
 async def submit_recording_plan(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
-        required={"base_flow_version", "plan"},
-        optional={"recording_id", "flow_version"},
+        required={"base_flow_version"},
+        optional={"recording_id", "flow_version", "plan", "submission_error"},
     )
+    session = _recording_session(run_id, params)
     raw_plan = params.get("plan")
     if not isinstance(raw_plan, dict):
+        if params.get("submission_error") == "model_output_truncated_missing_plan":
+            return await session.accept_unchanged_plan(
+                base_flow_version=params["base_flow_version"],
+                warning=(
+                    "结构化计划在模型输出上限前未完成，本次已停止重试；"
+                    "当前配置未修改"
+                ),
+            )
         raise ToolError("plan 必须是对象")
-    session = _recording_session(run_id, params)
     if int(getattr(session, "analysis_image_count", 0) or 0):
         raw_plan = {
             **deepcopy(raw_plan),

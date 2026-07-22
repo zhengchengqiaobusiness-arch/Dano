@@ -168,6 +168,10 @@ function verifyPlanToolCompatibility() {
     !planTool?.parameters?.required?.includes("recording_id"),
     "recording_id belongs to the active server session and must not block a model submission",
   );
+  assert(
+    !planTool?.parameters?.required?.includes("plan"),
+    "a length-truncated plan must reach the deterministic fallback instead of retrying forever",
+  );
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
   assert(
     planTool?.parameters?.properties?.plan?.additionalProperties === true,
@@ -311,6 +315,17 @@ function verifyPlanToolCompatibility() {
   );
 }
 
+function verifyTruncatedPlanFallback() {
+  const sanitized = sanitizeRecordingToolParams("submit_recording_plan", {
+    base_flow_version: 2,
+    flow_version: 2,
+  });
+  assert(
+    sanitized.submission_error === "model_output_truncated_missing_plan",
+    "missing plan was not converted into a terminal backend fallback",
+  );
+}
+
 function verifyRuntimeProtocol(tempDir) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["run_recording_pi.mjs"], {
@@ -393,6 +408,7 @@ try {
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
   verifyPlanToolCompatibility();
+  verifyTruncatedPlanFallback();
   verifyPersistentSession(tempDir);
   await verifyRuntimeProtocol(tempDir);
   process.stdout.write(`${JSON.stringify({ status: "ok", tools: expectedTools, persistent_session: true, runtime_protocol: true })}\n`);

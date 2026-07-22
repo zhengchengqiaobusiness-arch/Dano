@@ -187,6 +187,7 @@ _RECORDER_JS = r"""() => {
   // 通用语义引擎(与框架/语言/公司无关):ARIA role + accessible name 优先,文本/属性兜底。
   // 不按标签/class 白名单,故 Element-UI / Ant Design / 原生 / 任意自定义控件一视同仁。
   var SUBMIT = ['提交','保存','确定','确认','申请','发起','送出','申报','通过','归档','完单','审核','立案','接单','发布','完成','结案','结算','新建','新增','编辑','更新','导入','导出','打印','submit','save','ok','confirm','apply','approve','finish','archive','review'];
+  var FORM_COMMAND = SUBMIT.concat(['查询','搜索','筛选','检索','query','search','filter']);
   var TESTID = ['data-testid','data-test','data-test-id','data-cy','data-qa'];
   var INTERACTIVE = {button:1,link:1,menuitem:1,menuitemcheckbox:1,menuitemradio:1,tab:1,option:1,
                      checkbox:1,radio:1,switch:1,treeitem:1};
@@ -975,7 +976,13 @@ _RECORDER_JS = r"""() => {
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
     if (e.target.closest && e.target.closest(POPUP)) {
       var _opts = isEnumTrigger(activeTrigger) ? popupOptions(e.target.closest(POPUP)) : [];
-      if (_opts.length) lastPickOptions = _opts;
+      if (_opts.length) {
+        lastPickOptions = _opts;
+        // Persist the owned popup before the page hides it or a following
+        // click clears the active control.  The snapshot is evidence only;
+        // it never becomes an executable workflow step.
+        emitEnumSnapshot(activeTrigger, activeControlActionId);
+      }
       pollPick(activeTrigger, false, activeControlActionId); return;
     }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
@@ -998,7 +1005,8 @@ _RECORDER_JS = r"""() => {
     var loc = locateClickable(el); if (!loc) return;
     var role = roleOf(el); var name = accName(el);
     var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
-    if (isSubmit) emitFormSnapshot();
+    var isFormCommand = role === 'button' && FORM_COMMAND.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
+    if (isFormCommand) emitFormSnapshot();
     emit(isSubmit ? 'submit' : 'click', loc, '', '');
   }, true);
 }"""
@@ -2828,10 +2836,22 @@ class RecordSession:
         Field names and types are grounded by ``name``/``data-prop``/control kind.
         Values remain samples only; repeated values never identify a request field.
         """
+        def route_identity(snapshot: dict) -> str:
+            context = snapshot.get("page_context") if isinstance(snapshot.get("page_context"), dict) else {}
+            path = str(context.get("path") or "").strip()
+            if path:
+                return path.rstrip("/") or "/"
+            url = str(context.get("url") or "").strip()
+            return (urlparse(url).path.rstrip("/") or "/") if url else ""
+
         evidence: list[dict] = []
-        latest_snapshot_by_scope: dict[tuple[str, str], dict] = {}
+        latest_snapshot_by_scope: dict[tuple[str, str, str], dict] = {}
         for snapshot in self.form_snapshots:
-            scope = (str(snapshot.get("page_id") or ""), str(snapshot.get("frame_id") or ""))
+            scope = (
+                str(snapshot.get("page_id") or ""),
+                str(snapshot.get("frame_id") or ""),
+                route_identity(snapshot),
+            )
             latest_snapshot_by_scope[scope] = snapshot
         for scope, snapshot in latest_snapshot_by_scope.items():
             for field in snapshot.get("fields") or []:
@@ -2865,6 +2885,7 @@ class RecordSession:
             aliases = tuple(str(value) for value in (item.get("field_aliases") or []) if str(value or ""))
             key = (
                 str(item.get("page_id") or ""), str(item.get("frame_id") or ""),
+                route_identity(item),
                 aliases, str(item.get("label") or item.get("field") or ""),
                 str(item.get("control_kind") or ""),
             )

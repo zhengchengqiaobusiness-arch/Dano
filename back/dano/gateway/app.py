@@ -157,7 +157,7 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     evidence_rule = (
-        " For every confidently matched visible control, field_semantics should contain public_name, business_type, category, "
+        " For every confidently matched visible control that changes the current contract, field_semantics should contain public_name, business_type, category, "
         "source_kind, required, "
         "enum_options when visible, and numeric confidence from 0 to 1, " +
         "and evidence objects shaped as {source:'screenshot',screenshot_name,detail,visible_label,control_kind,"
@@ -188,7 +188,7 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     )
     if has_screenshots:
         evidence_rule += (
-            " For each submitted screenshot field, include public_name, "
+            " For each changed screenshot field, include public_name, "
             "business_type, category, source_kind, required, confidence, axis_status, and evidence. "
             "axis_status belongs inside every field_semantics item; never emit a top-level field_semantic_axes. "
             "axis_status may mark path,name,default_value,type,category,source,required as "
@@ -199,6 +199,9 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
         "capabilities,capability_relations,unresolved_items},ops:[]}. Never submit flow_spec or plan.flow_spec."
+        " After reading state, call submit_recording_plan immediately with no explanatory text. Keep the payload below the model output limit: "
+        "do not repeat unchanged fields, capabilities, or relations; use empty arrays for unchanged sections. Prefer compact "
+        "semicolon key=value field_semantics strings; use object records only when nested enum options or relation endpoints are required."
         + evidence_rule
     )
 

@@ -292,6 +292,15 @@ export function sanitizeRecordingToolParams(name, params) {
     && typeof sanitized.plan === "object"
     && !Array.isArray(sanitized.plan)
   ) ? { ...sanitized.plan } : sanitized.plan;
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+    // A completed tool-call stream can be cut at the model output limit after
+    // the small version fields but before the large plan object.  Send that
+    // deterministic condition to Python so the turn terminates with a visible
+    // unchanged result instead of letting the SDK retry indefinitely.
+    delete sanitized.plan;
+    sanitized.submission_error = "model_output_truncated_missing_plan";
+    return sanitized;
+  }
   if (plan && typeof plan === "object" && !Array.isArray(plan)) {
     const outerSemantic = (
       params.semantic_plan
@@ -375,12 +384,12 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。每个 field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、数值 confidence（0 到 1）、axis_status 和 evidence；证据支持的轴写入 evidence.axes，不要输出顶层 field_semantic_axes。入口会修复常见字段摊平并归一化置信度，后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
+      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。plan.semantic_plan 保留六个标准键，但只列实际变化的字段/能力/关系；未变化数组用空数组。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: RecordingPlan,
+        plan: Type.Optional(RecordingPlan),
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.

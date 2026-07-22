@@ -2176,6 +2176,365 @@ def test_timesheet_field_ownership_and_selected_project_projections():
     assert "reportedHours" not in project_binding.field_projections
 
 
+def test_editable_select_is_not_reclassified_as_selected_option_projection():
+    option_read = {
+        "method": "GET", "url": "https://work.test/rpc/projects/options",
+        "json": {"data": [{
+            "projectId": "project-1", "projectName": "项目一",
+            "teamId": "team-default", "teamName": "默认团队",
+            "remainingHours": 8,
+        }]},
+        "role": "read_option",
+    }
+    submit = _post("https://work.test/rpc/submit", {
+        "projectId": "project-1", "teamId": "team-default", "remainingHours": 8,
+    })
+    evidence = [
+        {"label": "项目名称", "field_aliases": ["projectId"], "control_kind": "select", "op": "select"},
+        {"label": "团队", "field_aliases": ["teamId"], "control_kind": "select", "op": "snapshot", "disabled": False},
+        {"label": "剩余工时", "field_aliases": ["remainingHours"], "control_kind": "number", "op": "snapshot", "disabled": True},
+    ]
+
+    step = flow_spec_module._build_step_from_capture(
+        submit, reads=[option_read], samples={"项目名称": "项目一", "团队": "默认团队"},
+        storage_state=None, required_labels={"项目名称"}, page_enum_options={},
+        step_index=1, field_evidence=evidence,
+    )
+    params = {param.path: param for param in step.params}
+
+    assert params["remainingHours"].source_kind == "selected_option_field"
+    assert params["teamId"].category == "user_param"
+    assert params["teamId"].source_kind in {"user_input", "api_option"}
+    assert params["teamId"].source_kind != "selected_option_field"
+    assert params["teamId"].exposed_to_user is True
+
+
+def test_cross_system_timesheet_keeps_post_query_and_single_form_submit_separate():
+    """POST is not automatically a write and a one-row array is not automatically batch."""
+    search = FlowStep(
+        step_id="search", method="POST", path="/rpc/work-hours/search",
+        params=[
+            ParamField(path="projectName", key="项目名称", type="string", required=False),
+            ParamField(path="approver", key="审批人", type="string", required=False),
+        ],
+        response_json={"data": {"records": [{"id": "row-1"}], "total": 1}},
+        source_meta={
+            "role": "business_get", "page_id": "list-page",
+            "trigger_action_id": "query-click", "trigger_op": "click",
+            "trigger_locator": "text=查询", "causality_confidence": "high",
+        },
+    )
+    project_options = FlowStep(
+        step_id="project-options", method="GET", path="/rpc/projects/options",
+        params=[
+            ParamField(path="query.isManager", key="isManager", type="boolean"),
+            ParamField(path="query.workType", key="workType", type="string"),
+        ],
+        response_json={"data": [{"id": "project-1", "name": "项目一"}]},
+        source_meta={"role": "read_option", "page_id": "form-page"},
+    )
+    remaining = FlowStep(
+        step_id="remaining", method="GET", path="/rpc/work-hours/remaining",
+        params=[
+            ParamField(path="query.projectId", key="项目名称", type="enum", required=True),
+            ParamField(path="query.date", key="申报日期", type="date", required=True),
+        ],
+        response_json={"data": 8},
+        source_meta={
+            "role": "business_get", "page_id": "form-page",
+            "control_preflight_for_write": True,
+            "trigger_action_id": "date-change", "trigger_op": "pick",
+            "trigger_locator": "label=申报日期", "causality_confidence": "high",
+        },
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/rpc/work-hours/insertPCList",
+        body_source='[{"projectId":"project-1","date":"2026-07-22","hours":8,"content":"开发"}]',
+        params=[
+            ParamField(path="[0].projectId", key="项目名称", type="enum", required=True),
+            ParamField(path="[0].date", key="申报日期", type="date", required=True),
+            ParamField(path="[0].hours", key="申报工时", type="number", required=True),
+            ParamField(path="[0].content", key="工作内容", type="string", required=True),
+        ],
+        response_json={"code": 0},
+        source_meta={
+            "role": "business_write", "page_id": "form-page",
+            "trigger_action_id": "submit-click", "trigger_op": "click",
+            "trigger_locator": "text=提交", "causality_confidence": "high",
+        },
+    )
+    spec = FlowSpec(steps=[search, project_options, remaining, submit])
+
+    capabilities = flow_spec_module._build_initial_flow_capabilities(spec)
+
+    assert [cap.kind for cap in capabilities] == ["query_status", "submit"]
+    assert capabilities[0].step_ids == ["search"]
+    assert capabilities[1].step_ids == ["remaining", "submit"]
+    assert "project-options" not in {
+        step_id for capability in capabilities for step_id in capability.step_ids
+    }
+
+
+def test_initial_capability_recovers_post_query_from_click_evidence():
+    """A POST search triggered by 查询 is a callable query, not an empty/write-only plan."""
+    search = FlowStep(
+        step_id="search", method="POST",
+        path="/gsgl/gsApply/getWorkTimeDetailByZhId",
+        params=[
+            ParamField(path="projectName", key="项目名称", type="string", required=False),
+            ParamField(path="spr", key="审批人", type="string", required=False),
+        ],
+        response_json={"data": {"records": [{"id": "row-1"}], "total": 1}},
+        semantic_role="business_write",
+        source_meta={
+            "role": "business_write",
+            "trigger_action_id": "action-query",
+            "trigger_op": "click",
+            "trigger_locator": "text=查询",
+            "trigger_page_context": {
+                "path": "/app-vue/workingHourManage/searchWorkingHours/search",
+            },
+            "causality_confidence": "high",
+        },
+    )
+
+    capabilities = flow_spec_module._build_initial_flow_capabilities(FlowSpec(steps=[search]))
+
+    assert [cap.kind for cap in capabilities] == ["query_status"]
+    assert capabilities[0].step_ids == ["search"]
+
+
+def test_post_query_click_is_kept_when_response_rows_are_empty():
+    request = _post(
+        "https://work.test/gsgl/gsApply/getWorkTimeDetailByZhId",
+        {
+            "projectName": "项目一", "spr": "审批甲",
+            "startDate": "2026-06-01", "endDate": "2026-07-22",
+            "pageNo": 1, "pageSize": 10,
+        },
+        resp={"data": {"records": [], "total": 0}},
+    )
+    request.update({
+        "trigger_action_id": "action-query",
+        "trigger_op": "click",
+        "trigger_locator": "text=查询",
+        "causality_confidence": "high",
+    })
+
+    classified = flow_spec_module.classify_network_request(request, [request], {})
+
+    assert classified["role"] == "business_get"
+    assert classified["keep"] is True
+
+
+def test_empty_query_filters_keep_page_control_contract_and_empty_multi_select():
+    request = _post(
+        "https://work.test/gsgl/gsApply/getWorkTimeDetailByZhId",
+        {
+            "startDate": "", "endDate": "", "pageNo": 1, "pageSize": 10,
+            "projectName": "", "spr": "", "statuss": [],
+        },
+        resp={"data": {"records": [], "total": 0}},
+    )
+    request.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/search"},
+        "trigger_action_id": "action-query", "trigger_op": "click",
+        "trigger_locator": "text=查询", "causality_confidence": "high",
+    })
+    evidence = [
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "开始时间", "field_aliases": ["startDate"], "control_kind": "date", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "结束时间", "field_aliases": ["endDate"], "control_kind": "date", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "项目名称", "field_aliases": ["projectName"], "control_kind": "text", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "审批人", "field_aliases": ["spr"], "control_kind": "text", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "审批状态", "field_aliases": ["statuss"], "control_kind": "select", "required": False},
+    ]
+    page_enums = _dom_enum(
+        "审批状态", "statuss", "", [],
+        [
+            {"label": "未通过", "value": "未通过"},
+            {"label": "已审批", "value": "已审批"},
+            {"label": "审批中", "value": "审批中"},
+        ],
+    )
+    page_enums["审批状态"]["page_context"] = {"path": "/work-hours/search"}
+
+    step = flow_spec_module._build_step_from_capture(
+        request, reads=[], samples={}, storage_state=None,
+        required_labels=set(), page_enum_options=page_enums, step_index=1,
+        field_evidence=evidence,
+    )
+
+    fields = {field.path: field for field in step.params}
+    assert set(fields) == {
+        "startDate", "endDate", "pageNo", "pageSize",
+        "projectName", "spr", "statuss",
+    }
+    assert (fields["startDate"].key, fields["startDate"].type) == ("开始时间", "date")
+    assert (fields["endDate"].key, fields["endDate"].type) == ("结束时间", "date")
+    for path, label in (("projectName", "项目名称"), ("spr", "审批人")):
+        assert (
+            fields[path].key, fields[path].category, fields[path].source_kind,
+            fields[path].exposed_to_user,
+        ) == (label, "user_param", "user_input", True)
+    status = fields["statuss"]
+    assert (status.key, status.type, status.category, status.source_kind) == (
+        "审批状态", "list-enum", "user_param", "page_enum",
+    )
+    assert status.value == []
+    assert status.required is False
+    assert status.enum_options == [
+        {"label": "未通过", "value": "未通过"},
+        {"label": "已审批", "value": "已审批"},
+        {"label": "审批中", "value": "审批中"},
+    ]
+
+
+def test_visible_batch_action_is_grounded_batch_evidence():
+    step = FlowStep(
+        step_id="submit", method="POST", path="/rpc/submit-list",
+        body_source='[{"id":"one"}]',
+        source_meta={"role": "business_write", "trigger_locator": "text=批量提交"},
+    )
+
+    assert flow_spec_module._looks_batch_step(step) is True
+
+
+def test_spa_route_scopes_field_type_source_and_requiredness_to_own_request():
+    request = _post(
+        "https://work.test/rpc/search",
+        {"project": "项目一"},
+        resp={"data": {"records": [], "total": 0}},
+    )
+    request.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/search"},
+    })
+    evidence = [
+        {
+            "page_id": "page-1", "frame_id": "main",
+            "page_context": {"path": "/work-hours/search"},
+            "label": "项目名称", "field_aliases": ["project"],
+            "control_kind": "text", "required": False,
+        },
+        {
+            "page_id": "page-1", "frame_id": "main",
+            "page_context": {"path": "/work-hours/form"},
+            "label": "项目名称", "field_aliases": ["project"],
+            "control_kind": "select", "required": True,
+        },
+    ]
+
+    step = flow_spec_module._build_step_from_capture(
+        request, reads=[], samples={"项目名称": "项目一"}, storage_state=None,
+        required_labels={"项目名称"}, page_enum_options={}, step_index=1,
+        field_evidence=evidence,
+    )
+
+    project = next(param for param in step.params if param.path == "project")
+    assert (project.key, project.type, project.category, project.source_kind) == (
+        "项目名称", "string", "user_param", "user_input",
+    )
+    assert project.required is False
+
+
+def test_cross_system_timesheet_end_to_end_preserves_interface_and_field_contracts():
+    search = _post(
+        "https://work.test/rpc/work-hours/search",
+        {"projectName": "项目一", "approver": "审批甲", "pageNo": 1, "pageSize": 10},
+        resp={"data": {"records": [{"id": "row-1"}], "total": 1}},
+    )
+    search.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/search"},
+        "trigger_action_id": "query-click", "trigger_op": "click",
+        "trigger_locator": "text=查询", "causality_confidence": "high",
+        "_request_role": {"role": "business_get", "keep": True, "confidence": 0.95},
+    })
+    option = _get(
+        "https://work.test/rpc/projects/options?isManager=false&workType=public",
+        {"data": [
+            {"xmId": "project-1", "xmName": "项目一", "workType": "public"},
+            {"xmId": "project-2", "xmName": "项目二", "workType": "public"},
+        ]},
+    )
+    option.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/form"},
+        "_request_role": {"role": "read_option", "keep": False, "confidence": 0.96},
+    })
+    remaining = _get(
+        "https://work.test/rpc/work-hours/remaining?xmid=project-1&date=2026-07-22",
+        {"data": 8},
+    )
+    remaining.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/form"},
+        "trigger_action_id": "date-change", "trigger_op": "pick",
+        "trigger_locator": "label=申报日期", "causality_confidence": "high",
+        "_request_role": {"role": "business_get", "keep": True, "confidence": 0.94},
+    })
+    submit = _post(
+        "https://work.test/rpc/work-hours/insertPCList",
+        [{
+            "xmId": "project-1", "workType": "public", "hours": 8,
+            "date": "2026-07-22", "content": "开发", "id": "",
+        }],
+        resp={"code": 0},
+    )
+    submit.update({
+        "page_id": "page-1", "frame_id": "main",
+        "trigger_page_context": {"path": "/work-hours/form"},
+        "trigger_action_id": "submit-click", "trigger_op": "click",
+        "trigger_locator": "text=提交", "causality_confidence": "high",
+        "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+    })
+    evidence = [
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "项目名称", "field_aliases": ["projectName"], "control_kind": "text", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/search"}, "label": "审批人", "field_aliases": ["approver"], "control_kind": "text", "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/form"}, "label": "项目名称", "field_aliases": ["xmId"], "control_kind": "select", "required": True},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/form"}, "label": "工时类型", "field_aliases": ["workType"], "control_kind": "text", "disabled": True, "required": False},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/form"}, "label": "申报工时", "field_aliases": ["hours"], "control_kind": "number", "required": True},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/form"}, "label": "申报日期", "field_aliases": ["date"], "control_kind": "date", "required": True},
+        {"page_id": "page-1", "frame_id": "main", "page_context": {"path": "/work-hours/form"}, "label": "工作内容", "field_aliases": ["content"], "control_kind": "textarea", "required": True},
+    ]
+
+    spec = to_flow_spec(
+        [search, option, remaining, submit],
+        reads=[{"url": option["url"], "method": "GET", "json": option["response_json"], "role": "read_option", "page_id": "page-1", "frame_id": "main", "trigger_page_context": {"path": "/work-hours/form"}}],
+        samples={"项目名称": "项目一", "审批人": "审批甲", "申报日期": "2026-07-22", "申报工时": "8", "工作内容": "开发"},
+        field_evidence=evidence,
+    )
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}, generation_mode="initial"))
+
+    assert [cap.kind for cap in planned.capabilities] == ["query_status", "submit"]
+    assert planned.capability_relations == []
+    query_capability = next(cap for cap in planned.capabilities if cap.kind == "query_status")
+    submit_capability = next(cap for cap in planned.capabilities if cap.kind == "submit")
+    assert query_capability.step_ids == [next(step.step_id for step in planned.steps if step.path == "/rpc/work-hours/search")]
+    assert all(step.path != "/rpc/projects/options" for step in planned.steps)
+    search_step = next(step for step in planned.steps if step.path == "/rpc/work-hours/search")
+    search_fields = {param.path: param for param in search_step.params}
+    assert (search_fields["projectName"].key, search_fields["projectName"].required) == ("项目名称", False)
+    assert (search_fields["approver"].key, search_fields["approver"].required) == ("审批人", False)
+    submit_step = next(step for step in planned.steps if step.path == "/rpc/work-hours/insertPCList")
+    submit_fields = {param.path: param for param in submit_step.params}
+    assert (submit_fields["[0].xmId"].key, submit_fields["[0].xmId"].type, submit_fields["[0].xmId"].source_kind) == (
+        "项目名称", "enum", "api_option",
+    )
+    assert (submit_fields["[0].date"].key, submit_fields["[0].date"].type, submit_fields["[0].date"].required) == (
+        "申报日期", "date", True,
+    )
+    assert (submit_fields["[0].hours"].key, submit_fields["[0].hours"].type, submit_fields["[0].hours"].source_kind) == (
+        "申报工时", "number", "user_input",
+    )
+    assert (submit_fields["[0].content"].key, submit_fields["[0].content"].required) == ("工作内容", True)
+    assert submit_fields["[0].workType"].exposed_to_user is False
+    assert submit_fields["[0].id"].exposed_to_user is False
+    public_submit_fields = set(submit_capability.input_schema["properties"])
+    assert public_submit_fields == {"项目名称", "申报日期", "申报工时", "工作内容"}
+
+
 def test_short_readonly_value_can_link_by_exact_wire_path_without_hijacking_editable_default():
     source = FlowStep(
         step_id="context", method="GET", path="/rpc/context",

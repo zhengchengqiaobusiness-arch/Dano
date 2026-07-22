@@ -1574,6 +1574,16 @@ def _build_step_from_capture(
     body = _parse_body(pd)
     page_enum_options = _page_enum_options_for_request(req, page_enum_options)
     field_evidence = _field_evidence_for_request(req, field_evidence)
+    if field_evidence and any("required" in item for item in field_evidence):
+        # A single SPA page/frame may host several business routes. Required
+        # markers must follow the route that emitted this request instead of
+        # leaking from the last form snapshot into an earlier query contract.
+        required_labels = {
+            str(item.get("label") or item.get("field") or "").strip()
+            for item in field_evidence
+            if bool(item.get("required"))
+            and str(item.get("label") or item.get("field") or "").strip()
+        }
 
     # 风险 + 语义角色
     role = classify_request_role(req)
@@ -2169,6 +2179,21 @@ def _recording_evidence_matches_request(req: dict, item: dict) -> bool:
         return False
     if req_frame and item_frame and req_frame != item_frame:
         return False
+    def route_identity(value: dict) -> str:
+        for context in (value.get("trigger_page_context"), value.get("page_context")):
+            if not isinstance(context, dict):
+                continue
+            path = str(context.get("path") or "").strip()
+            if path:
+                return path.rstrip("/") or "/"
+            url = str(context.get("url") or "").strip()
+            if url:
+                return urlparse(url).path.rstrip("/") or "/"
+        return ""
+    req_route = route_identity(req)
+    item_route = route_identity(item)
+    if req_route and item_route and req_route != item_route:
+        return False
     return True
 
 
@@ -2528,12 +2553,24 @@ def _response_has_scalar_business_value(payload: Any) -> bool:
     return False
 
 
+_QUERY_ACTION_RE = re.compile(r"(?:查询|搜索|筛选|检索|\bquery\b|\bsearch\b|\bfilter\b)", re.I)
+
+
+def _has_query_action_evidence(trigger_op: Any, trigger_locator: Any) -> bool:
+    return bool(
+        str(trigger_op or "").strip().lower() in {"click", "submit"}
+        and _QUERY_ACTION_RE.search(str(trigger_locator or ""))
+    )
+
+
 def _request_has_business_query_evidence(req: dict) -> bool:
     business_filters = _business_filter_count(req)
     trigger_op = str(req.get("trigger_op") or "").lower()
     trigger_locator = str(req.get("trigger_locator") or "").lower()
     submitted_query = trigger_op == "submit" or (
         trigger_op == "click" and "submit" in trigger_locator
+    ) or _has_query_action_evidence(
+        trigger_op, trigger_locator,
     )
     return bool(
         not _choice_control_triggered(req)
@@ -2660,6 +2697,10 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
                          confidence=0.98, semantic=semantic)
 
     if looks_like_read_request(url, req.get("post_data")):
+        if _request_has_business_query_evidence(req):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="POST 查询由用户查询动作触发并携带业务筛选条件，作为独立查询能力候选",
+                             confidence=0.94, semantic=semantic)
         if response_ref:
             return _role_row(req, role="read_context", keep=True,
                              reason="POST 查询响应被后续业务请求引用，作为前置上下文步骤保留",
@@ -7050,6 +7091,14 @@ def _step_evidence(step: FlowStep) -> dict[str, Any]:
 
 
 def _is_write_step(step: FlowStep) -> bool:
+    meta = step.source_meta or {}
+    if _has_query_action_evidence(meta.get("trigger_op"), meta.get("trigger_locator")):
+        return False
+    role = str(meta.get("role") or step.semantic_role or "").strip().lower()
+    if role in {"business_get", "read_context", "read_option", "option_source", "explicit_read_option"}:
+        return False
+    if role in {"business_write", "submit_anchor"}:
+        return True
     return (step.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}
 
 
@@ -7057,8 +7106,8 @@ def _looks_batch_step(step: FlowStep) -> bool:
     meta = step.source_meta or {}
     if any(bool(meta.get(key)) for key in ("batch", "is_batch", "batch_intent", "repeated_submission")):
         return True
-    text = f"{step.name} {step.path} {step.url}".lower()
-    if any(x in text for x in ("batch", "bulk", "pclist", "批量")):
+    text = f"{step.name} {step.path} {step.url} {meta.get('trigger_locator') or ''}".lower()
+    if any(x in text for x in ("batch", "bulk", "批量")):
         return True
     try:
         body = _parse_body(step.body_source)
@@ -7340,7 +7389,7 @@ def _capability_call_nodes(steps: list[FlowStep]) -> list[dict[str, Any]]:
 
 
 def _write_steps(spec: FlowSpec) -> list[FlowStep]:
-    return [s for s in spec.steps if (s.method or "").upper() in _WRITE_METHODS]
+    return [s for s in spec.steps if _is_write_step(s)]
 
 
 def _option_source_step_ids(spec: FlowSpec) -> set[str]:
@@ -7392,7 +7441,7 @@ def _option_source_step_ids(spec: FlowSpec) -> set[str]:
 
 
 def _business_query_evidence_score(step: FlowStep) -> int:
-    if (step.method or "GET").upper() not in {"GET", "HEAD"}:
+    if _is_write_step(step):
         return -100
     path = _request_path({"url": step.path or step.url}).lower()
     role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
@@ -7412,6 +7461,11 @@ def _business_query_evidence_score(step: FlowStep) -> int:
     ):
         return -10
     score = 2 if role == "business_get" else 0
+    if _has_query_action_evidence(
+        (step.source_meta or {}).get("trigger_op"),
+        (step.source_meta or {}).get("trigger_locator"),
+    ):
+        score += 4
     if re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
         score += 2
     response = step.response_json
@@ -7435,7 +7489,7 @@ def _is_business_query_step(step: FlowStep) -> bool:
 def _read_status_steps(spec: FlowSpec) -> list[FlowStep]:
     out: list[FlowStep] = []
     for st in spec.steps:
-        if (st.method or "").upper() in _WRITE_METHODS:
+        if _is_write_step(st):
             continue
         if _is_business_query_step(st):
             out.append(st)
@@ -8105,7 +8159,7 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         if (page_id := _step_page_id_from_facts(initial, step))
     }
     for step in initial.steps:
-        if (step.method or "GET").upper() not in {"GET", "HEAD"}:
+        if _is_write_step(step):
             continue
         role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
         path = _request_path({"url": step.path or step.url}).lower()
@@ -8244,7 +8298,10 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 if event.get(key) not in (None, "", [], {})
             }
             for event in (spec.request_facts.page_events or [])[-300:]
-            if isinstance(event, dict)
+            # Raw mutation batches describe framework repaint churn, not field
+            # semantics.  Keeping them in the model state added tens of
+            # thousands of characters per page without helping matching.
+            if isinstance(event, dict) and event.get("kind") != "dom_effect"
         ],
         "manual_constraints": {
             "removed_capabilities": sorted(str(item) for item in ((spec.meta or {}).get("removed_capabilities") or [])),

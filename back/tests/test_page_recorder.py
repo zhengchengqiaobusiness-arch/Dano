@@ -29,6 +29,11 @@ def test_pause_recording_keeps_session_but_stops_fact_collection_until_reset() -
     assert [step["locator"] for step in sess.steps] == ["button#submit"]
 
 
+def test_query_command_captures_its_form_snapshot() -> None:
+    assert "var FORM_COMMAND = SUBMIT.concat(['查询','搜索','筛选','检索','query','search','filter'])" in _RECORDER_JS
+    assert "if (isFormCommand) emitFormSnapshot()" in _RECORDER_JS
+
+
 def test_static_script_enum_repairs_only_exact_label_value_mapping() -> None:
     sess = RecordSession()
     sess.script_sources = [{

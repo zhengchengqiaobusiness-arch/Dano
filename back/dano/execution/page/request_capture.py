@@ -2372,17 +2372,20 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         const = sys_time or internal
         is_param = bool(label is not None or (not const and sv != ""))
         conf = _field_confidence(label, confident, key, is_param)
+        control = structural.get(i)
         # 只保留一个实际的 required 结论，不再维护两套会互相矛盾的必填状态。
         required = bool(
-            is_param
-            and (
-                not required_labels
-                or label is None
-                or not confident
-                or required_label_matches(label)
+            is_param and (
+                bool(control.get("required"))
+                if control is not None and "required" in control
+                else (
+                    not required_labels
+                    or label is None
+                    or not confident
+                    or required_label_matches(label)
+                )
             )
         )
-        control = structural.get(i)
         inferred_type = type_from_control(control, _infer_type(node, key))
         out.append({"path": path, "key": key, "value": sv, "raw_value": node,
                     "suggest_param": is_param,

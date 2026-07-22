@@ -243,6 +243,31 @@ def test_recording_core_has_no_direct_llm_conversation_or_cache_path():
     assert "submission" in signature.parameters
 
 
+def test_recording_agent_state_omits_raw_dom_mutation_noise() -> None:
+    spec = _spec()
+    spec.request_facts.page_events = [
+        {
+            "event_id": "action-1",
+            "kind": "action",
+            "op": "fill",
+            "field": "申请标题",
+            "required": True,
+        },
+        {
+            "event_id": "dom-1",
+            "kind": "dom_effect",
+            "changes": [
+                {"sequence": index, "type": "childList", "added": 1, "removed": 1}
+                for index in range(100)
+            ],
+        },
+    ]
+
+    state = flow_module.recording_agent_state(spec)
+
+    assert [item["kind"] for item in state["facts"]["page_events"]] == ["action"]
+
+
 def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch):
     session = _bind(monkeypatch)
     session.analysis_image_count = 2
@@ -1422,6 +1447,21 @@ def test_recording_tool_still_rejects_an_explicit_cross_session_identity(monkeyp
         asyncio.run(get_recording_state("run-owned-by-run", {
             "recording_id": "rec-from-another-run",
         }))
+
+
+def test_length_truncated_screenshot_plan_finishes_without_retry_loop(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-truncated-plan")
+    session.analysis_image_count = 2
+
+    result = asyncio.run(submit_recording_plan("run-truncated-plan", {
+        "base_flow_version": 1,
+        "submission_error": "model_output_truncated_missing_plan",
+    }))
+
+    assert result["accepted"] is True
+    assert result["unchanged"] is True
+    assert session.last_submission_kind == "plan"
+    assert "结构化计划在模型输出上限前未完成" in result["warning"]
 
 
 def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
