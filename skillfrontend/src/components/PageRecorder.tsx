@@ -3462,7 +3462,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               : analysisRejected
               ? "分析提出的修改未通过准入"
               : analysisNeedsReview
-              ? "分析完成，未应用缺少证据的修改"
+              ? "分析完成，证据不足的建议未应用"
               : lastAnalysisEvidence?.status === "applied"
               ? "分析结果已应用"
               : lastAnalysisEvidence?.status === "no_change"
@@ -4327,7 +4327,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
-              disabled={analysisScreenshotBusy || connectionState !== "connected" || reconnectedSessionNeedsCapture}
+              disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
               onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
           <Button

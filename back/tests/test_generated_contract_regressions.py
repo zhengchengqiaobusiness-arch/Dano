@@ -80,7 +80,7 @@ def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_
     assert item_properties["processStatus"]["type"] == "number"
 
 
-def test_numeric_sample_is_not_guessed_as_enum_without_grounded_options():
+def test_recorded_select_keeps_choice_type_without_inventing_options():
     request = _get(
         1,
         "https://oa.test/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10&processStatus=1",
@@ -103,9 +103,10 @@ def test_numeric_sample_is_not_guessed_as_enum_without_grounded_options():
         if param.path == "query.processStatus"
     )
 
-    assert param.type != "enum"
-    assert param.source_kind == "user_input"
+    assert param.type == "enum"
+    assert param.source_kind == "form_option"
     assert param.enum_options is None
+    assert param.need_human_confirm is True
     assert all(select.path != "query.processStatus" for step in spec.steps for select in step.selects)
 
 

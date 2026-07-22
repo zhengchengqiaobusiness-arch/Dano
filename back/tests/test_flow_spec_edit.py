@@ -3886,10 +3886,10 @@ def test_confirmation_records_operator_decision_without_model_veto():
     assert confirmed.capabilities[0].requires_human_confirm is False
 
 
-def test_capability_confidence_above_sixty_percent_is_auto_adopted():
+def test_capability_confidence_above_seventy_percent_is_auto_adopted():
     spec = FlowSpec(capabilities=[
-        FlowCapability(name="manual", confidence=0.6, confirmed=False, requires_human_confirm=True),
-        FlowCapability(name="automatic", confidence=0.61, confirmed=False, requires_human_confirm=True),
+        FlowCapability(name="manual", confidence=0.7, confirmed=False, requires_human_confirm=True),
+        FlowCapability(name="automatic", confidence=0.7001, confirmed=False, requires_human_confirm=True),
     ])
 
     result = flow_spec_module._auto_confirm_ready_capabilities(spec)
@@ -5529,6 +5529,54 @@ def test_rejected_capability_proposal_keeps_safe_screenshot_field_corrections():
     assert (repaired.key, repaired.type, repaired.source_kind, repaired.required) == (
         "房间数量", "number", "user_input", True,
     )
+
+
+@pytest.mark.parametrize("generation_mode", ["initial", "optimize"])
+def test_uploaded_screenshot_materializes_response_grounded_query_filter(generation_mode):
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query", method="GET", path="/api/leave/page",
+            params=[ParamField(
+                path="query.pageNo", key="pageNo", required=False,
+                category="user_param", source_kind="user_input",
+            )],
+            response_json={"data": {"list": [{"processStatus": 1}] }},
+        )],
+        capabilities=[] if generation_mode == "initial" else [FlowCapability(
+            name="query_leave", title="查询请假记录", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+        meta={} if generation_mode == "initial" else {
+            "capability_model": {"status": "ready"},
+        },
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={
+            "_analysis_screenshot_count": 1,
+            "semantic_plan": {"field_semantics": [{
+                "step_id": "query", "wire_path": "processStatus",
+                "public_name": "审批结果", "business_type": "enum",
+                "category": "user_param", "source_kind": "page_enum",
+                "required": False, "confidence": 0.55,
+                "evidence": [{
+                    "source": "screenshot", "visible_label": "审批结果",
+                    "control_kind": "select", "editable": True,
+                    "required": False, "options": [],
+                }],
+            }]},
+        },
+        generation_mode=generation_mode,
+    ))
+
+    added = next(
+        param for param in optimized.steps[0].params
+        if param.path == "query.processStatus"
+    )
+    assert (added.key, added.type) == ("审批结果", "enum")
+    assert (added.category, added.source_kind) == ("user_param", "form_option")
+    assert added.default_value is None
 
 
 def test_page_context_missing_key_is_advisory_and_differs_from_upstream_response():
@@ -7256,6 +7304,82 @@ def test_r2_automated_field_resolution_requires_exact_step_path_identity():
     assert [param.key for param in spec.steps[0].params] == ["客户编号", "id"]
 
 
+def test_screenshot_can_add_query_field_grounded_by_unique_response_leaf():
+    query = FlowStep(
+        step_id="query", method="GET", path="/api/leave/page",
+        params=[ParamField(
+            path="query.pageNo", key="pageNo", required=False,
+            category="user_param", source_kind="user_input",
+        )],
+        response_json={"data": {"list": [{"processStatus": 1}] }},
+    )
+    spec = FlowSpec(
+        steps=[query],
+        capabilities=[FlowCapability(
+            name="query_leave", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+    )
+    field = {
+        "step_id": "query", "wire_path": "processStatus",
+        "public_name": "审批结果", "business_type": "enum",
+        "category": "user_param", "source_kind": "page_enum",
+        "required": False, "confidence": 0.55,
+        "evidence": [{
+            "source": "screenshot", "visible_label": "审批结果",
+            "control_kind": "select", "editable": True,
+            "required": False, "options": [],
+        }],
+    }
+
+    ops = flow_spec_module._semantic_plan_to_ops(
+        spec, {"semantic_plan": {"field_semantics": [field]}},
+    )
+    edit = next(op for op in ops if op.get("op") == "upsert_input_field")
+    assert edit["field"]["path"] == "query.processStatus"
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec, edit["field"], scope="input", actor="planner",
+    ) is True
+
+    added = next(param for param in query.params if param.path == "query.processStatus")
+    assert (added.key, added.label) == ("审批结果", "审批结果")
+    assert (added.type, added.wire_type) == ("enum", "string")
+    assert (added.category, added.source_kind) == ("user_param", "form_option")
+    assert added.required is False
+    assert added.default_value is None
+    assert added.need_human_confirm is True
+
+
+def test_screenshot_does_not_invent_query_field_without_unique_response_leaf():
+    query = FlowStep(
+        step_id="query", method="GET", path="/api/leave/page",
+        response_json={"data": {"list": [{"statusName": "审批中"}] }},
+    )
+    spec = FlowSpec(
+        steps=[query],
+        capabilities=[FlowCapability(
+            name="query_leave", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+    )
+
+    ops = flow_spec_module._semantic_plan_to_ops(spec, {"semantic_plan": {
+        "field_semantics": [{
+            "step_id": "query", "wire_path": "processStatus",
+            "public_name": "审批结果", "business_type": "enum",
+            "category": "user_param", "source_kind": "page_enum",
+            "required": False, "confidence": 0.95,
+            "evidence": [{
+                "source": "screenshot", "visible_label": "审批结果",
+                "control_kind": "select", "editable": True,
+            }],
+        }],
+    }})
+
+    assert not any(op.get("op") == "upsert_input_field" for op in ops)
+    assert query.params == []
+
+
 def test_r5_confirmed_relation_rejects_unknown_cardinality_and_transform_owner():
     source = FlowCapability(
         name="query", title="Query", kind="query_status", confirmed=True,
@@ -7391,6 +7515,100 @@ def test_unchanged_user_field_update_does_not_create_manual_lock():
         item.get("source") == "manual_edit"
         for item in unchanged.steps[0].params[0].evidence
     )
+
+
+def test_planner_text_guess_cannot_downgrade_recorded_select_contract():
+    room_type = ParamField(
+        path="query.roomType", key="房间类型", label="房间类型", value="1",
+        type="enum", wire_type="string", category="user_param",
+        source_kind="page_enum", source={"kind": "page_enum", "enum_confirmed": True},
+        enum_options=[
+            {"label": "标准间", "value": "1"},
+            {"label": "标准间大床房", "value": "2"},
+        ],
+        enum_value_map={"标准间": "1", "标准间大床房": "2"},
+    )
+    step = FlowStep(
+        step_id="query-hotel", method="GET", path="/api/hotel/page",
+        params=[room_type],
+        selects=[SelectBinding(
+            param="房间类型", path="query.roomType",
+            options=room_type.enum_options, option_map=room_type.enum_value_map,
+            enum_source="dom", enum_confirmed=True,
+        )],
+    )
+    spec = FlowSpec(steps=[step])
+
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "query-hotel", "wire_path": "query.roomType",
+            "public_name": "房间类型", "type": "string",
+            "category": "user_param", "source_kind": "user_input",
+        },
+        scope="input",
+        actor="planner",
+    ) is True
+    flow_spec_module.sync_flow_spec_models(spec)
+
+    assert (room_type.type, room_type.source_kind) == ("enum", "page_enum")
+    assert room_type.enum_value_map == {"标准间": "1", "标准间大床房": "2"}
+
+
+def test_closed_query_select_is_still_a_choice_without_opened_options():
+    spec = to_flow_spec(
+        [{
+            "request_id": "hotel-query", "method": "GET",
+            "url": "/api/hotel/page?pageNo=1&pageSize=10&roomType=1&roomLevel=1",
+            "path": "/api/hotel/page?pageNo=1&pageSize=10&roomType=1&roomLevel=1",
+            "page_id": "hotel-list",
+            "response_json": {"data": {"list": [], "total": 0}},
+            "_request_role": {
+                "role": "business_get", "keep": True, "confidence": 0.99,
+                "reason": "recorded hotel query",
+            },
+        }],
+        field_evidence=[
+            {
+                "page_id": "hotel-list", "field": "房间类型",
+                "field_aliases": ["roomType"], "control_kind": "select",
+            },
+            {
+                "page_id": "hotel-list", "field": "房间等级",
+                "field_aliases": ["roomLevel"], "control_kind": "select",
+            },
+        ],
+    )
+
+    query = next(step for step in spec.steps if step.step_id)
+    by_path = {param.path: param for param in query.params}
+    for path in ("query.roomType", "query.roomLevel"):
+        param = by_path[path]
+        assert param.type == "enum"
+        assert param.source_kind == "form_option"
+        assert param.category == "user_param"
+        assert param.need_human_confirm is True
+
+
+def test_operation_report_does_not_claim_an_undisplayable_field_change():
+    before = FlowSpec(steps=[FlowStep(
+        step_id="query", method="GET", path="/api/query",
+        params=[ParamField(
+            path="query.status", key="流程状态", label="流程状态",
+            type="enum", wire_type="number", category="user_param",
+            source_kind="page_enum", required=False, default_value="1",
+            enum_options=[{"label": "审批中", "value": "1"}],
+        )],
+    )])
+    after = before.model_copy(deep=True)
+    after.steps[0].params[0].wire_type = "string"
+
+    report = flow_spec_module.flow_operation_report(before, after, operation="plan")
+
+    assert report["field_changes"] == []
+    assert report["changes"]["fields"] == 0
+    assert report["changed"] is False
+    assert report["summary"] == "分析结果与当前配置相同，无需修改"
 
 
 def test_semantic_capability_keeps_grounded_preflight_chain_for_its_write():

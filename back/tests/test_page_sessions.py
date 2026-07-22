@@ -1,8 +1,21 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from dano.execution.page import sessions
+
+
+def test_linux_export_ignores_persisted_windows_path(monkeypatch, tmp_path) -> None:
+    export_conf = tmp_path / ".export-dir"
+    export_conf.write_text(r"C:\dano\.agents\skills", encoding="utf-8")
+    monkeypatch.setattr(sessions, "_EXPORT_CONF", export_conf)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("DANO_EXPORT_DIR", raising=False)
+
+    assert sessions.get_export_dir("/opt/dano/runtime-data/.agents/skills") == (
+        "/opt/dano/runtime-data/.agents/skills"
+    )
 
 
 def test_save_session_keeps_main_playwright_compatible_and_loads_sidecar(monkeypatch, tmp_path) -> None:  # noqa: ANN001

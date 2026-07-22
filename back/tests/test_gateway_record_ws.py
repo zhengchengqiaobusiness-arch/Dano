@@ -4,6 +4,7 @@ import asyncio
 import base64
 import inspect
 import re
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,12 @@ import pytest
 from dano.agent_tools import tools as agent_tools_module
 from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
 from dano.gateway import app as gateway
+
+
+def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert gateway._default_export_dir() == "/opt/dano/runtime-data/.agents/skills"
 
 
 def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
@@ -1025,6 +1032,12 @@ def test_analysis_report_only_requires_review_for_real_unapplied_work() -> None:
     })
     assert blocking["status"] == "needs_review"
 
+    applied_with_advisory = report_for({
+        "kind": "unmatched_field", "status": "unmatched", "blocking": False,
+        "reason": "visible control has no unique recorded field match",
+    }, changed=True)
+    assert applied_with_advisory["status"] == "applied"
+
 
 def test_normalized_unmatched_screenshot_field_reaches_application_report() -> None:
     before = FlowSpec(steps=[FlowStep(
@@ -1062,7 +1075,9 @@ def test_normalized_unmatched_screenshot_field_reaches_application_report() -> N
         operation_id="plan-unmatched",
     )
 
-    assert report["status"] == "needs_review"
+    # Unmatched screenshot evidence is advisory. A separate accepted flow
+    # change remains applied instead of being mislabeled as wholly unapplied.
+    assert report["status"] == "applied"
     assert report["unmatched_field_count"] == 1
     assert report["unmatched_fields"][0]["kind"] == "unmatched_field"
 

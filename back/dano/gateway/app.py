@@ -402,9 +402,7 @@ def _analysis_application_report(
     )
     changed = bool(operation_report.get("changed"))
     status = (
-        "needs_review"
-        if changed and incomplete
-        else "applied"
+        "applied"
         if changed
         else "rejected"
         if proposal_gate.get("accepted") is False
@@ -2381,7 +2379,7 @@ async def record_ws(ws: WebSocket) -> None:
 async def _auto_export(tenant: str) -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
-    目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 仓库默认** —— 与手动导出落同一处。
+    目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
     best-effort:导出失败不影响接入结果。
     """
     try:
@@ -2440,6 +2438,10 @@ async def onboarding_job(job_id: str) -> dict:
 
 
 def _default_export_dir() -> str:
+    import sys
+
+    if sys.platform.startswith("linux"):
+        return "/opt/dano/runtime-data/.agents/skills"
     return str(Path(__file__).resolve().parents[3] / "export" / "agent-skills")
 
 

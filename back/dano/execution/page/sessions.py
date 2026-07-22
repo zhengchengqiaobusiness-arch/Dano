@@ -9,7 +9,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import sys
 
 import structlog
 
@@ -114,14 +115,23 @@ def save_export_dir(path: str) -> None:
 def get_export_dir(default: str) -> str:
     """导出目录优先级:页面配过的(持久化)> DANO_EXPORT_DIR 环境变量 > 传入默认。"""
     import os
+
+    def compatible(path: str) -> bool:
+        if sys.platform.startswith("linux"):
+            return PurePosixPath(path).is_absolute()
+        if sys.platform.startswith("win"):
+            return PureWindowsPath(path).is_absolute()
+        return True
+
     try:
         if _EXPORT_CONF.exists():
             v = _EXPORT_CONF.read_text(encoding="utf-8").strip()
-            if v:
+            if v and compatible(v):
                 return v
     except Exception:  # noqa: BLE001
         pass
-    return os.environ.get("DANO_EXPORT_DIR") or default
+    configured = os.environ.get("DANO_EXPORT_DIR") or ""
+    return configured if configured and compatible(configured) else default
 
 
 def get_export_dirs(default: str) -> list[str]:

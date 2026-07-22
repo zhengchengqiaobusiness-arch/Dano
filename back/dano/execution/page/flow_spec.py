@@ -1738,6 +1738,23 @@ def _build_step_from_capture(
             request_headers=req.get("headers") or {},
             query_is_option_source=query_is_option_source,
         )
+        recorded_option_control = bool(
+            ptype in _ENUM_PARAM_TYPES
+            and str(f.get("control_kind") or "").lower()
+            in _SCREENSHOT_OPTION_CONTROL_KINDS
+            and select_meta is None
+        )
+        if recorded_option_control:
+            source_guess = {
+                **source_guess,
+                "category": "user_param",
+                "source_kind": "form_option",
+                "source": {"kind": "form_option", "path": path, "enum_confirmed": False},
+                "exposed_to_user": True,
+                "editable": True,
+                "need_human_confirm": True,
+                "reason": "录制页面确认该字段为选择控件；候选值尚未完整展开",
+            }
         enum_options = _enum_options_for_param(select_meta)
         enum_value_map = _enum_value_map_for_param(select_meta)
         if select_meta is not None and select_meta.enum_source == "dom" and enum_options:
@@ -2106,6 +2123,10 @@ def _params_from_get_query(
             inferred_type = "date"
         elif control_kind in {"datetime", "time"}:
             inferred_type = "datetime"
+        elif control_kind in _SCREENSHOT_OPTION_CONTROL_KINDS:
+            # A closed select still proves choice semantics even when its popup
+            # options were not expanded during recording.
+            inferred_type = "enum"
         elif recorded_user_input and inferred_type == "number":
             # Legacy recordings know the operator typed the value even when the
             # browser did not yet expose input[type]. Numeric-looking free text
@@ -4004,6 +4025,23 @@ def _param_has_page_required_evidence(param: ParamField) -> bool:
     )
 
 
+def _param_has_option_control_evidence(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and (
+            item.get("canonical_screenshot_control") is True
+            or str(item.get("source") or item.get("kind") or "").lower()
+            in {
+                "recorder_dom", "page", "page_snapshot", "page_control",
+                "screenshot", "reference_screenshot", "uploaded_screenshot",
+            }
+        )
+        and str(item.get("control_kind") or "").lower()
+        in _SCREENSHOT_OPTION_CONTROL_KINDS
+        for item in (param.evidence or [])
+    )
+
+
 def _semantic_recorded_type(param: ParamField) -> str:
     text = " ".join(str(value or "") for value in (param.path, param.key, param.label)).lower()
     value = str(param.value or param.default_value or "").strip()
@@ -4089,7 +4127,12 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             if param.type in _ENUM_PARAM_TYPES:
                 _refresh_param_enum_description(param)
             continue
-        option_contract = bool(param.enum_options or param.enum_value_map or normalized_path in display_paths)
+        option_contract = bool(
+            param.enum_options
+            or param.enum_value_map
+            or normalized_path in display_paths
+            or _param_has_option_control_evidence(param)
+        )
         if normalized_path in id_paths and normalized_path not in display_paths:
             continue
         if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
@@ -4668,6 +4711,47 @@ def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _grounded_screenshot_query_path(
+    step: FlowStep,
+    raw: dict[str, Any],
+) -> str | None:
+    """Resolve one screenshot control to a query param without guessing.
+
+    Existing request params are authoritative. A control missing from the
+    recorded request may be added only when the same leaf occurs exactly once
+    in that request's response schema; this covers untouched list filters while
+    rejecting label-only screenshot inventions.
+    """
+    control = _screenshot_control_evidence(raw)
+    if (
+        control is None
+        or str(step.method or "GET").upper() not in {"GET", "HEAD"}
+        or control.get("editable") is False
+        or control.get("disabled")
+        or control.get("read_only")
+    ):
+        return None
+    proposed = str(raw.get("path") or raw.get("wire_path") or "").strip()
+    leaf = re.sub(r"^(?:query|body)\.", "", proposed, flags=re.I)
+    if not leaf or "." in leaf or "[" in leaf or "]" in leaf:
+        return None
+    existing = [
+        param.path for param in step.params
+        if re.sub(r"^(?:query|body)\.", "", param.path, flags=re.I).lower()
+        == leaf.lower()
+    ]
+    if len(existing) == 1:
+        return existing[0]
+    response_matches = [
+        path for path in normalized_leaf_paths(step.response_json)
+        if str(path).rsplit(".", 1)[-1].lower() == leaf.lower()
+    ]
+    return (
+        f"query.{response_matches[0].rsplit('.', 1)[-1]}"
+        if len(response_matches) == 1 else None
+    )
+
+
 def _param_has_grounded_direct_input_contract(param: ParamField) -> bool:
     """A visible editable non-choice control must not be repaired into an enum."""
     screenshot = _screenshot_control_evidence({"evidence": param.evidence})
@@ -4766,7 +4850,56 @@ def _apply_capability_field_to_param(
     if automated:
         param = next((item for item in step.params if item.path == path), None)
         if param is None:
-            return False
+            grounded_path = _grounded_screenshot_query_path(step, raw)
+            if grounded_path is None:
+                return False
+            path = grounded_path
+            raw = {**raw, "path": path}
+            param = next((item for item in step.params if item.path == path), None)
+            if param is None:
+                control = _screenshot_control_evidence(raw)
+                control_kind = str((control or {}).get("control_kind") or "").lower()
+                option_control = control_kind in _SCREENSHOT_OPTION_CONTROL_KINDS
+                options = (
+                    raw.get("enum_options")
+                    if isinstance(raw.get("enum_options"), list)
+                    else (control or {}).get("options")
+                )
+                source_kind = "form_option" if option_control and not options else (
+                    "page_enum" if option_control else "user_input"
+                )
+                raw = {
+                    **raw,
+                    "source_kind": source_kind,
+                    "source": {
+                        "kind": source_kind, "path": path,
+                        **({"enum_confirmed": False} if option_control else {}),
+                    },
+                    **({"enum_options": options} if isinstance(options, list) and options else {}),
+                }
+                param = ParamField(
+                    path=path,
+                    key=str(raw.get("key") or raw.get("display_name") or path.rsplit(".", 1)[-1]),
+                    label=str(raw.get("display_name") or raw.get("key") or ""),
+                    value="",
+                    type="string",
+                    wire_type="string",
+                    required=bool((control or {}).get("required") is True),
+                    category="user_param",
+                    source_kind="unknown",
+                    default_value=None,
+                    need_human_confirm=bool(option_control and not options),
+                    evidence=[{
+                        "source": "response_schema_match",
+                        "path": next(
+                            response_path
+                            for response_path in normalized_leaf_paths(step.response_json)
+                            if response_path.rsplit(".", 1)[-1].lower()
+                            == path.rsplit(".", 1)[-1].lower()
+                        ),
+                    }],
+                )
+                step.params.append(param)
     else:
         try:
             param = _find_param(
@@ -8551,6 +8684,25 @@ def _semantic_plan_to_ops(
             item.get("public_name") or item.get("business_name") or item.get("label") or ""
         ).strip()
         confidence = float(item.get("confidence") or 0.0)
+        target_step = step_by_id.get(step_id)
+        target_param = next((
+            param for param in (target_step.params if target_step else [])
+            if param.path == path
+        ), None)
+        if target_step is not None and _screenshot_control_evidence(item) is not None:
+            grounded_path = _grounded_screenshot_query_path(target_step, item)
+            if target_param is None and grounded_path is None:
+                # A screenshot label alone cannot invent an HTTP parameter.
+                continue
+            if grounded_path is not None:
+                path = grounded_path
+                target_param = next((
+                    param for param in target_step.params if param.path == path
+                ), None)
+                # Screenshot control semantics plus a unique same-interface
+                # response leaf is executable evidence, even if the model
+                # conservatively marked the unseen query path as unresolved.
+                confidence = max(confidence, 0.8)
         if step_id in step_ids and path and public_name and confidence >= 0.8:
             owning_capability = next((
                 capability for capability in spec.capabilities or []
@@ -8566,11 +8718,6 @@ def _semantic_plan_to_ops(
                     "evidence": item.get("evidence") or [],
                 })
                 continue
-            target_step = step_by_id.get(step_id)
-            target_param = next((
-                param for param in (target_step.params if target_step else [])
-                if param.path == path
-            ), None)
             # Field semantics may rename and describe a grounded field, but it
             # cannot invent a source axis. Source/category changes require the
             # executable bind_dependency/bind_option_source DSL and their
@@ -10356,7 +10503,55 @@ def _semantic_wire_hash(spec: FlowSpec) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def _semantic_candidate_gate(before: FlowSpec, candidate: FlowSpec) -> tuple[bool, dict[str, Any]]:
+def _only_grounded_screenshot_query_params_added(
+    before: FlowSpec,
+    candidate: FlowSpec,
+) -> bool:
+    before_steps = {step.step_id: step for step in before.steps}
+    candidate_steps = {step.step_id: step for step in candidate.steps}
+    if before_steps.keys() != candidate_steps.keys():
+        return False
+    added = 0
+    for step_id, old_step in before_steps.items():
+        new_step = candidate_steps[step_id]
+        if (
+            (old_step.method or "GET").upper() != (new_step.method or "GET").upper()
+            or (old_step.path or old_step.url) != (new_step.path or new_step.url)
+            or old_step.content_type != new_step.content_type
+        ):
+            return False
+        old_params = {param.path: param for param in old_step.params}
+        new_params = {param.path: param for param in new_step.params}
+        if not old_params.keys() <= new_params.keys():
+            return False
+        if any(
+            (old_params[path].wire_type or "") != (new_params[path].wire_type or "")
+            for path in old_params
+        ):
+            return False
+        for path in new_params.keys() - old_params.keys():
+            param = new_params[path]
+            if (
+                (new_step.method or "GET").upper() not in {"GET", "HEAD"}
+                or not path.startswith("query.")
+                or _screenshot_control_evidence({"evidence": param.evidence}) is None
+                or not any(
+                    isinstance(item, dict)
+                    and item.get("source") == "response_schema_match"
+                    for item in param.evidence
+                )
+            ):
+                return False
+            added += 1
+    return added > 0
+
+
+def _semantic_candidate_gate(
+    before: FlowSpec,
+    candidate: FlowSpec,
+    *,
+    allow_screenshot_query_additions: bool = False,
+) -> tuple[bool, dict[str, Any]]:
     """Admit an automatic proposal only when executable quality is monotonic."""
     before_report = validate_flow_spec(before)
     after_report = validate_flow_spec(candidate)
@@ -10393,7 +10588,13 @@ def _semantic_candidate_gate(before: FlowSpec, candidate: FlowSpec) -> tuple[boo
         reasons.append("new_validation_errors")
     before_warning_list = generation_findings(before_report, "warnings")
     after_warning_list = generation_findings(after_report, "warnings")
-    if _semantic_wire_hash(before) != _semantic_wire_hash(candidate):
+    if (
+        _semantic_wire_hash(before) != _semantic_wire_hash(candidate)
+        and not (
+            allow_screenshot_query_additions
+            and _only_grounded_screenshot_query_params_added(before, candidate)
+        )
+    ):
         reasons.append("wire_contract_changed")
     before_dry = dry_run_flow_spec(before)
     after_dry = dry_run_flow_spec(candidate)
@@ -10591,6 +10792,7 @@ async def orchestrate_flow_capabilities(
             )
             fields_accepted, _field_gate = _semantic_candidate_gate(
                 proposal_baseline, candidate,
+                allow_screenshot_query_additions=True,
             )
             if fields_accepted and _flow_fingerprint(candidate) != _flow_fingerprint(proposal_baseline):
                 screenshot_field_candidate = candidate
@@ -10649,7 +10851,11 @@ async def orchestrate_flow_capabilities(
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
-    proposal_accepted, proposal_gate = _semantic_candidate_gate(proposal_baseline, current)
+    proposal_accepted, proposal_gate = _semantic_candidate_gate(
+        proposal_baseline,
+        current,
+        allow_screenshot_query_additions=screenshot_analysis,
+    )
     if not proposal_accepted:
         current = screenshot_field_candidate or proposal_baseline
         # Reject only the unsafe model proposal. Grounded recorder repairs are
@@ -12561,7 +12767,9 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
             {step.step_id: (step.method, step.path, step.name, step.semantic_role) for step in before.steps},
             {step.step_id: (step.method, step.path, step.name, step.semantic_role) for step in after.steps},
         ),
-        "fields": changed_count(field_index(before), field_index(after)),
+        # Use the same business axes that are rendered to the operator. Internal
+        # transport/view sync must not claim an invisible field modification.
+        "fields": len(field_changes),
         "capabilities": changed_count(capability_index(before), capability_index(after)),
         "links": changed_count(link_index(before), link_index(after)),
         "relations": changed_count(relation_index(before), relation_index(after)),
@@ -18053,12 +18261,12 @@ async def auto_fix_flow_spec(
 
 
 def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
-    """置信度超过 60% 的能力默认采纳，低置信能力仍可人工采纳。"""
+    """置信度超过 70% 的能力默认采纳，低置信能力仍可人工采纳。"""
     _normalize_capability_references(spec)
     for cap in spec.capabilities or []:
         if cap.confirmed:
             continue
-        if float(cap.confidence or 0) <= 0.6:
+        if float(cap.confidence or 0) <= 0.7:
             continue
         cap.confirmed = True
         cap.requires_human_confirm = False
