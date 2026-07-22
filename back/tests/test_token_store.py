@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
 
 import pytest
 
@@ -15,6 +14,9 @@ class _FakePool:
         self.rows: dict[tuple, dict] = {}
 
     def acquire(self):
+        return self
+
+    def transaction(self):
         return self
 
     async def __aenter__(self):
@@ -32,6 +34,9 @@ class _FakePool:
             return row
         tenant, subsystem = args                       # SELECT
         return self.rows.get((tenant, subsystem))
+
+    async def fetchval(self, _sql, *_args):
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +59,16 @@ def test_mask_headers_masks_secrets_keeps_plain():
 
 def test_mask_short_secret_fully_starred():
     assert ts.mask_headers({"token": "abcd"})["token"] == "****"
+
+
+def test_header_names_are_case_insensitive_and_latest_value_wins():
+    headers = ts.normalize_headers({
+        "tenant-id": "1",
+        "Authorization": "Bearer old",
+        "authorization": "Bearer fresh",
+    })
+    assert headers == {"Tenant-Id": "1", "Authorization": "Bearer fresh"}
+    assert list(ts.mask_headers(headers)).count("Authorization") == 1
 
 
 def test_headers_from_api_request_single_and_workflow():
@@ -118,6 +133,38 @@ async def test_manual_refresh_merges_with_existing():
     rec = await ts.get_token("aaa", "A-OA")
     assert rec["headers"] == {"Authorization": "Bearer NEW", "Tenant-Id": "1"}
     assert rec["source"] == "manual"
+
+
+async def test_shared_update_path_preserves_existing_headers():
+    await ts.save_token("aaa", "A-OA", {"Authorization": "Bearer OLD", "Tenant-Id": "1"})
+    rec = await ts.update_token_headers(
+        "aaa", "A-OA", {"Authorization": "Bearer NEW"}, source="scheduled:password_http",
+    )
+    assert rec["headers"] == {"Authorization": "Bearer NEW", "Tenant-Id": "1"}
+    assert rec["source"] == "scheduled:password_http"
+
+
+async def test_recording_save_skips_immediately_when_refresh_holds_lock(monkeypatch):
+    class BusyPool(_FakePool):
+        def __init__(self):
+            super().__init__()
+            self.write_attempted = False
+
+        async def fetchval(self, _sql, *_args):
+            return False
+
+        async def fetchrow(self, sql, *args):
+            if sql.strip().lower().startswith("insert"):
+                self.write_attempted = True
+                raise AssertionError("busy token lock must not write or block publishing")
+            return await super().fetchrow(sql, *args)
+
+    pool = BusyPool()
+    monkeypatch.setattr(ts, "_pool_or_none", lambda: pool)
+    assert await ts.save_token(
+        "aaa", "A-OA", {"Authorization": "Bearer fresh"}, source="recording",
+    ) is None
+    assert pool.write_attempted is False
 
 
 async def test_no_pool_degrades_gracefully(monkeypatch):

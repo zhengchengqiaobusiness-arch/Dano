@@ -142,17 +142,17 @@ export interface RuntimeToken {
   tenant: string;
   subsystem: string;
   has_token: boolean;
-  headers: Record<string, string>;   // 默认打码;reveal=true 才明文
-  source?: string;                   // recording(录制自动抓)/ manual(手动刷新)
+  headers: Record<string, string>;   // 后端始终打码
+  source?: string;                   // recording / manual / scheduled:*
   updated_at?: string;
 }
 
-export async function getRuntimeToken(tenant: string, subsystem: string, reveal = false): Promise<RuntimeToken> {
-  const { data } = await api.get("/settings/token", { params: { tenant, subsystem, reveal } });
+export async function getRuntimeToken(tenant: string, subsystem: string): Promise<RuntimeToken> {
+  const { data } = await api.get("/v1/settings/token", { params: { tenant, subsystem } });
   return data;
 }
 
-export interface PutRuntimeTokenReq {
+export interface SaveRuntimeTokenReq {
   tenant: string;
   subsystem: string;
   token?: string;                    // 只换一个头(默认 Authorization),与已存合并
@@ -161,7 +161,7 @@ export interface PutRuntimeTokenReq {
   headers?: Record<string, string>;  // 或整组覆盖
 }
 
-export async function putRuntimeToken(req: PutRuntimeTokenReq): Promise<{ ok: boolean; headers: Record<string, string>; updated_at: string }> {
-  const { data } = await api.put("/settings/token", req);
+export async function saveRuntimeToken(req: SaveRuntimeTokenReq): Promise<{ ok: boolean; headers: Record<string, string>; updated_at: string }> {
+  const { data } = await api.post("/v1/settings/token", req);
   return data;
 }

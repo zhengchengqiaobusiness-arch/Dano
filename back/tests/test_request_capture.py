@@ -486,6 +486,89 @@ async def test_fetch_field_options_executes_captured_post_read_contract():
         server.shutdown()
 
 
+async def test_field_options_preserve_non_json_401_for_get_and_post():
+    import http.server as _h
+    import socketserver as _s
+    import threading as _t
+
+    class Handler(_h.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: ANN001
+            pass
+
+        def reject(self):
+            self.send_response(401)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"login expired")
+
+        do_GET = reject
+        do_POST = reject
+
+    server = _s.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    _t.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = {
+            "param": "状态",
+            "source_url": f"http://127.0.0.1:{port}/options",
+            "value_key": "id",
+            "label_key": "name",
+        }
+        get_result = await fetch_field_options({"selects": [{**base, "source_method": "GET"}]}, "状态", verify=False)
+        post_result = await fetch_field_options({"selects": [{
+            **base,
+            "source_method": "POST",
+            "source_role": "read_option",
+            "source_body": "{}",
+            "source_content_type": "application/json",
+        }]}, "状态", verify=False)
+        assert get_result["status"] == 401
+        assert post_result["status"] == 401
+    finally:
+        server.shutdown()
+
+
+async def test_execute_api_request_prefers_runtime_cookie_over_storage_cookie():
+    import http.server as _h
+    import json as _j
+    import socketserver as _s
+    import threading as _t
+
+    seen = {}
+
+    class Handler(_h.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: ANN001
+            pass
+
+        def do_GET(self):
+            seen["cookie"] = self.headers.get("Cookie")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(_j.dumps({"code": 0}).encode())
+
+    server = _s.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    _t.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = await execute_api_request(
+            {
+                "method": "GET",
+                "url": f"http://127.0.0.1:{port}/run",
+                "auth_headers": {"Cookie": "session=fresh"},
+            },
+            {},
+            storage_state={"cookies": [{
+                "domain": "127.0.0.1", "name": "session", "value": "old",
+            }]},
+            verify=False,
+        )
+        assert result["ok"] is True
+        assert seen["cookie"] == "session=fresh"
+    finally:
+        server.shutdown()
+
+
 def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
     """根因:type=2 同时撞**1431 项通用大字典**(未确认,垃圾标签)和**小请假类型字典**(确认命中 事假)→
     必须绑确认的小字典(事假/病假/年假),不能绑通用大字典(治"请假类型绑到歌词模式/OpenAI…")。"""

@@ -1,0 +1,4 @@
+# 放在公网 server {} 中，并置于通用反向代理 location 之前。
+location ^~ /internal/ {
+    return 404;
+}

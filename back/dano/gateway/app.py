@@ -964,44 +964,89 @@ async def llm_test() -> dict:
 
 # ── 运行期 token(抓请求路径):录制自动抓 → 存 PG(表 runtime_token),可查/可刷新;过期前端换一下即可,免重录 ──
 class TokenUpsertReq(BaseModel):
-    tenant: str
-    subsystem: str
+    tenant: str = Field(min_length=1)
+    subsystem: str = Field(min_length=1)
     headers: dict[str, str] | None = None     # 整组鉴权头(优先);或下面 token 三件套只更一个头
     token: str | None = None
-    header_name: str = "Authorization"
+    header_name: str = Field(default="Authorization", min_length=1)
     token_prefix: str = "Bearer "
 
 
-@app.get("/settings/token")
-async def get_runtime_token(tenant: str, subsystem: str, reveal: bool = False) -> dict:
-    """查某 (tenant, subsystem) 运行期用的鉴权头(token)。默认打码;reveal=true 明文(管理用)。"""
+@app.get("/v1/settings/token")
+async def get_runtime_token(
+    tenant: str,
+    subsystem: str,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """查某 (tenant, subsystem) 运行期用的鉴权头；始终打码。"""
     from dano.infra.token_store import get_token, mask_headers
+    authenticated_tenant = await _auth_tenant(x_tenant_key)
+    if authenticated_tenant != tenant:
+        raise HTTPException(status_code=403, detail="不能读取其他租户的 token")
     rec = await get_token(tenant, subsystem)
     if not rec:
         return {"tenant": tenant, "subsystem": subsystem, "has_token": False, "headers": {}}
     headers = rec.get("headers") or {}
     return {"tenant": tenant, "subsystem": subsystem, "has_token": bool(headers),
-            "headers": headers if reveal else mask_headers(headers),
+            "headers": mask_headers(headers),
             "source": rec.get("source"), "updated_at": rec.get("updated_at")}
 
 
-@app.put("/settings/token")
-async def put_runtime_token(req: TokenUpsertReq) -> dict:
+@app.post("/v1/settings/token")
+async def post_runtime_token(
+    req: TokenUpsertReq,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
     """更新/刷新某 (tenant, subsystem) 的运行期 token(过期时换一份,免重录)。
     传 headers 用整组;或只传 token(+header_name/token_prefix)更一个头 —— 都会与已存的合并
     (可只换 Authorization,保留 Tenant-Id 等)。"""
-    from dano.infra.token_store import get_token_headers, mask_headers, save_token
+    from dano.infra.token_store import mask_headers, update_token_headers
+    authenticated_tenant = await _auth_tenant(x_tenant_key)
+    if authenticated_tenant != req.tenant:
+        raise HTTPException(status_code=403, detail="不能修改其他租户的 token")
     headers = {k: v for k, v in (req.headers or {}).items() if v}
     if not headers and req.token:
         headers[req.header_name] = f"{req.token_prefix}{req.token}"
     if not headers:
         raise HTTPException(status_code=400, detail="需提供 headers 或 token")
-    merged = {**(await get_token_headers(req.tenant, req.subsystem)), **headers}
-    rec = await save_token(req.tenant, req.subsystem, merged, source="manual")
+    rec = await update_token_headers(req.tenant, req.subsystem, headers, source="manual")
     if not rec:
         raise HTTPException(status_code=500, detail="token 保存失败(DB 不可用?)")
     return {"ok": True, "tenant": req.tenant, "subsystem": req.subsystem,
-            "headers": mask_headers(merged), "updated_at": rec.get("updated_at")}
+            "headers": mask_headers(rec.get("headers") or {}), "updated_at": rec.get("updated_at")}
+
+
+class TokenRefreshRunReq(BaseModel):
+    tenant: str | None = None
+    subsystem: str | None = None
+    force: bool = False
+
+
+@app.post("/internal/runtime-tokens/refresh-due")
+async def refresh_runtime_tokens(
+    req: TokenRefreshRunReq,
+    x_dano_refresh_key: str | None = Header(default=None),
+) -> dict:
+    """供 Linux systemd timer 调用；可刷新全部到期来源或指定一个系统。"""
+    import secrets
+
+    from dano.config import get_settings
+    from dano.infra.token_refresh import refresh_due, refresh_one
+
+    expected = get_settings().token_refresh_key
+    if not expected:
+        raise HTTPException(status_code=503, detail="未配置 DANO_TOKEN_REFRESH_KEY")
+    if not x_dano_refresh_key or not secrets.compare_digest(x_dano_refresh_key, expected):
+        raise HTTPException(status_code=401, detail="刷新密钥无效")
+    if bool(req.tenant) != bool(req.subsystem):
+        raise HTTPException(status_code=400, detail="tenant 与 subsystem 必须同时提供")
+    if req.tenant and req.subsystem:
+        result = await refresh_one(req.tenant, req.subsystem, force=req.force)
+    else:
+        result = await refresh_due(force=req.force)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
+    return result
 
 
 # ── 租户 ──
@@ -2120,6 +2165,12 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
+                log.info(
+                    "recording.operation_started",
+                    action=session_action,
+                    operation="publish",
+                    operation_id=msg.get("operation_id"),
+                )
                 requested_action = str(msg.get("action") or "")
                 if requested_action and requested_action != session_action:
                     log.info(
@@ -2239,6 +2290,11 @@ async def record_ws(ws: WebSocket) -> None:
                         flow_version=review_version,
                         flow_fingerprint=str(release_candidate["flow_fingerprint"]),
                     )
+                    log.info(
+                        "recording.publish_review_completed",
+                        action=session_action,
+                        operation_id=msg.get("operation_id"),
+                    )
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({
                         "type": "result",
@@ -2326,6 +2382,13 @@ async def record_ws(ws: WebSocket) -> None:
                             "pi_session": pi_session.descriptor}
                 _remember_costly(msg, response)
                 await sender.send_json(response)
+                log.info(
+                    "recording.operation_completed",
+                    action=session_action,
+                    operation="publish",
+                    operation_id=msg.get("operation_id"),
+                    ok=bool(rep.get("ok")),
+                )
             elif t == "stop":
                 # Ending capture is not ending the workbench session. Keep the
                 # websocket, browser, draft and Pi context alive for later edits,

@@ -1,0 +1,9 @@
+fail-with-body
+silent
+show-error
+max-time = 300
+request = "POST"
+header = "X-Dano-Refresh-Key: <same value as DANO_TOKEN_REFRESH_KEY>"
+header = "Content-Type: application/json"
+data = "{\"force\":false}"
+url = "http://127.0.0.1:8077/internal/runtime-tokens/refresh-due"

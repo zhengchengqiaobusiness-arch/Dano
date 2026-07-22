@@ -1,5 +1,5 @@
 """页面 token 凭证(落 Postgres,表 runtime_token):录制时抓到的鉴权头(Authorization / Tenant-Id /
-satoken…)单独存一份,运行期 invoke 时覆盖焊进资产里的旧 token → token 过期只需前端 PUT 换一份,免重录。
+satoken…)单独存一份,运行期 invoke 时覆盖焊进资产里的旧 token → token 过期只需前端 POST 换一份,免重录。
 
 与 sessions.py(storage_state 整登录态,落文件)互补、解耦:
 - storage_state:浏览器整登录态(cookie+localStorage),录制/请求验证路径用;过期只能重录。
@@ -18,6 +18,12 @@ log = structlog.get_logger(__name__)
 
 # 头部 key 像"机密"的(查询接口默认打码)。Tenant-Id / clientId 等非机密照常可见。
 _SECRET_HINTS = ("authorization", "token", "satoken", "cookie", "secret", "password", "session", "ticket", "credential")
+_CANONICAL_HEADER_NAMES = {
+    "authorization": "Authorization",
+    "content-type": "Content-Type",
+    "cookie": "Cookie",
+    "tenant-id": "Tenant-Id",
+}
 
 
 # ───────────────────────── 纯函数(无 DB,可离线测试) ─────────────────────────
@@ -40,9 +46,27 @@ def _mask(v: str) -> str:
     return scheme + val[:4] + "*" * (len(val) - 8) + val[-4:]
 
 
+def normalize_headers(headers: dict | None) -> dict:
+    """HTTP 头名大小写不敏感；同名头只保留最后值并使用稳定名称。"""
+    normalized: dict = {}
+    names: dict[str, str] = {}
+    for raw_name, value in (headers or {}).items():
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        folded = name.casefold()
+        canonical = _CANONICAL_HEADER_NAMES.get(folded) or names.get(folded) or name
+        previous = names.get(folded)
+        if previous and previous != canonical:
+            normalized.pop(previous, None)
+        normalized[canonical] = value
+        names[folded] = canonical
+    return normalized
+
+
 def mask_headers(headers: dict | None) -> dict:
     """把机密头的值打码(供查询接口默认返回);非机密头(Tenant-Id 等)原样。"""
-    return {k: (_mask(v) if _is_secret_key(k) else v) for k, v in (headers or {}).items()}
+    return {k: (_mask(v) if _is_secret_key(k) else v) for k, v in normalize_headers(headers).items()}
 
 
 def headers_from_api_request(api_request: dict | None) -> dict:
@@ -52,7 +76,7 @@ def headers_from_api_request(api_request: dict | None) -> dict:
     h = api_request.get("auth_headers")
     if not h and api_request.get("steps"):
         h = (api_request["steps"][-1] or {}).get("auth_headers")
-    return dict(h or {})
+    return normalize_headers(h)
 
 
 def merge_auth_headers(api_request: dict, override: dict | None) -> dict:
@@ -60,10 +84,13 @@ def merge_auth_headers(api_request: dict, override: dict | None) -> dict:
     返回新 dict,不改原对象;override 为空则原样返回拷贝。"""
     if not override:
         return dict(api_request)
-    out = {**api_request, "auth_headers": {**(api_request.get("auth_headers") or {}), **override}}
+    out = {
+        **api_request,
+        "auth_headers": normalize_headers({**(api_request.get("auth_headers") or {}), **override}),
+    }
     steps = api_request.get("steps")
     if steps:
-        out["steps"] = [{**(s or {}), "auth_headers": {**((s or {}).get("auth_headers") or {}), **override}}
+        out["steps"] = [{**(s or {}), "auth_headers": normalize_headers({**((s or {}).get("auth_headers") or {}), **override})}
                         for s in steps]
     return out
 
@@ -86,23 +113,30 @@ def _row_to_rec(row) -> dict:  # noqa: ANN001
         except Exception:  # noqa: BLE001
             h = {}
     upd = row["updated_at"]
-    return {"tenant": row["tenant"], "subsystem": row["subsystem"], "headers": dict(h or {}),
+    return {"tenant": row["tenant"], "subsystem": row["subsystem"], "headers": normalize_headers(h),
             "source": row["source"], "updated_at": upd.isoformat() if hasattr(upd, "isoformat") else upd}
 
 
-async def save_token(tenant: str, subsystem: str, headers: dict | None, *, source: str = "recording") -> dict | None:
-    """存/更一组运行期鉴权头(空值丢弃)。source: recording(录制自动抓)/ manual(前端手动刷新)。
+async def save_token(
+    tenant: str,
+    subsystem: str,
+    headers: dict | None,
+    *,
+    source: str = "recording",
+    _conn=None,  # noqa: ANN001 - 刷新锁持有的 asyncpg.Connection
+) -> dict | None:
+    """存/更一组运行期鉴权头(空值丢弃)。source: recording/manual/scheduled:*。
     无有效头或 DB 不可用 → 返回 None(不抛)。"""
-    headers = {k: v for k, v in (headers or {}).items() if v}
+    headers = {k: v for k, v in normalize_headers(headers).items() if v}
     if not headers:
         return None
-    pool = _pool_or_none()
-    if pool is None:
+    pool = _pool_or_none() if _conn is None else None
+    if _conn is None and pool is None:
         log.warning("token_store.no_pool_skip_save", tenant=tenant, subsystem=subsystem)
         return None
     try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
+        async def write(conn):  # noqa: ANN001, ANN202
+            return await conn.fetchrow(
                 """
                 INSERT INTO runtime_token (tenant, subsystem, headers, source, updated_at)
                 VALUES ($1, $2, $3::jsonb, $4, now())
@@ -111,6 +145,25 @@ async def save_token(tenant: str, subsystem: str, headers: dict | None, *, sourc
                 RETURNING tenant, subsystem, headers, source, updated_at
                 """,
                 tenant, subsystem, json.dumps(headers, ensure_ascii=False), source)
+
+        if _conn is not None:
+            row = await write(_conn)
+        else:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    locked = await conn.fetchval(
+                        "SELECT pg_try_advisory_xact_lock(hashtext($1))",
+                        f"runtime-token:{tenant}/{subsystem}",
+                    )
+                    if not locked:
+                        log.info(
+                            "token_store.busy_skip_save",
+                            tenant=tenant,
+                            subsystem=subsystem,
+                            source=source,
+                        )
+                        return None
+                    row = await write(conn)
         log.info("token_store.saved", tenant=tenant, subsystem=subsystem, source=source, keys=sorted(headers))
         return _row_to_rec(row)
     except Exception as e:  # noqa: BLE001
@@ -118,23 +171,60 @@ async def save_token(tenant: str, subsystem: str, headers: dict | None, *, sourc
         return None
 
 
-async def get_token(tenant: str, subsystem: str) -> dict | None:
+async def get_token(tenant: str, subsystem: str, *, _conn=None) -> dict | None:  # noqa: ANN001
     """取该 (tenant, subsystem) 的 token 记录(含 headers/source/updated_at);没有/DB 不可用返回 None。"""
-    pool = _pool_or_none()
-    if pool is None:
+    pool = _pool_or_none() if _conn is None else None
+    if _conn is None and pool is None:
         return None
     try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
+        async def read(conn):  # noqa: ANN001, ANN202
+            return await conn.fetchrow(
                 "SELECT tenant, subsystem, headers, source, updated_at FROM runtime_token "
                 "WHERE tenant = $1 AND subsystem = $2", tenant, subsystem)
+
+        if _conn is not None:
+            row = await read(_conn)
+        else:
+            async with pool.acquire() as conn:
+                row = await read(conn)
         return _row_to_rec(row) if row else None
     except Exception as e:  # noqa: BLE001
         log.warning("token_store.read_failed", tenant=tenant, subsystem=subsystem, error=str(e))
         return None
 
 
-async def get_token_headers(tenant: str, subsystem: str) -> dict:
+async def get_token_headers(tenant: str, subsystem: str, *, _conn=None) -> dict:  # noqa: ANN001
     """运行期取该 (tenant, subsystem) 的鉴权头;没有返回 {}。"""
-    rec = await get_token(tenant, subsystem)
+    rec = await get_token(tenant, subsystem, _conn=_conn)
     return dict(rec.get("headers") or {}) if rec else {}
+
+
+async def update_token_headers(
+    tenant: str,
+    subsystem: str,
+    headers: dict | None,
+    *,
+    source: str,
+    _conn=None,  # noqa: ANN001 - 刷新锁持有的 asyncpg.Connection
+) -> dict | None:
+    """合并并保存鉴权头。人工更新和自动登录刷新必须共用这一条写入路径。"""
+    incoming = {k: v for k, v in normalize_headers(headers).items() if v}
+    if not incoming:
+        return None
+    if _conn is not None:
+        merged = {**(await get_token_headers(tenant, subsystem, _conn=_conn)), **incoming}
+        return await save_token(tenant, subsystem, merged, source=source, _conn=_conn)
+    pool = _pool_or_none()
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"runtime-token:{tenant}/{subsystem}",
+            )
+            merged = {**(await get_token_headers(tenant, subsystem, _conn=conn)), **incoming}
+            return await save_token(tenant, subsystem, merged, source=source, _conn=conn)
+    except Exception as error:  # noqa: BLE001
+        log.warning("token_store.update_failed", tenant=tenant, subsystem=subsystem, error=str(error))
+        return None

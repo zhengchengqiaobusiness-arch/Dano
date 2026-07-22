@@ -2963,13 +2963,13 @@ def _identity_audit(body, api_request: dict, storage_state: dict | None) -> list
 
 
 async def _get_json(url: str, base_url: str, storage_state, token_key: str | None, verify: bool,
-                    auth_headers: dict | None):
+                    auth_headers: dict | None, *, return_status: bool = False):
     """带登录态 GET 一个 URL,返回解析后的 JSON(失败返回 None)。鉴权头通用构造,不挑系统。"""
     full = url if url.startswith("http") else (base_url or "").rstrip("/") + url
     host = urlparse(full).hostname or ""
     headers: dict = dict(auth_headers or {})
     ck = _auth_headers(storage_state, host, token_key)
-    if ck.get("Cookie"):
+    if ck.get("Cookie") and "Cookie" not in headers:
         headers["Cookie"] = ck["Cookie"]
     if "Authorization" not in headers and not (auth_headers or {}) and ck.get("Authorization"):
         headers["Authorization"] = ck["Authorization"]
@@ -2977,16 +2977,30 @@ async def _get_json(url: str, base_url: str, storage_state, token_key: str | Non
     try:
         async with httpx.AsyncClient(timeout=30, verify=verify, trust_env=False) as c:
             r = await c.get(full, headers=headers)
-        return r.json()
     except Exception:  # noqa: BLE001
-        return None
+        return (None, None) if return_status else None
+    try:
+        data = r.json()
+    except Exception:  # noqa: BLE001
+        data = None
+    return (data, r.status_code) if return_status else data
 
 
 async def _fetch_list(url: str, base_url: str, storage_state, token_key: str | None, verify: bool,
                       auth_headers: dict | None) -> list:
     """带登录态 GET 一个候选列表(选领导源),用 as_list_payload 取出数组。失败返回 []。"""
-    data = await _get_json(url, base_url, storage_state, token_key, verify, auth_headers)
-    return as_list_payload(data) or []
+    data, status = await _get_json(
+        url, base_url, storage_state, token_key, verify, auth_headers, return_status=True,
+    )
+    items = _FetchedItems(as_list_payload(data) or [])
+    items.source_status = status
+    return items
+
+
+class _FetchedItems(list):
+    """保持 list 调用契约，同时携带来源 HTTP 状态供 401 自愈使用。"""
+
+    source_status: int | None = None
 
 
 async def _fetch_select_list(sel: dict, base_url: str, storage_state, token_key: str | None,
@@ -3004,7 +3018,7 @@ async def _fetch_select_list(sel: dict, base_url: str, storage_state, token_key:
     headers = dict(sel.get("source_headers") or {})
     headers.update(dict(auth_headers or {}))
     credentials = _auth_headers(storage_state, host, token_key)
-    if credentials.get("Cookie"):
+    if credentials.get("Cookie") and "Cookie" not in headers:
         headers["Cookie"] = credentials["Cookie"]
     if "Authorization" not in headers and credentials.get("Authorization"):
         headers["Authorization"] = credentials["Authorization"]
@@ -3026,9 +3040,15 @@ async def _fetch_select_list(sel: dict, base_url: str, storage_state, token_key:
                 request_kw["content"] = parsed
         async with httpx.AsyncClient(timeout=30, verify=verify, trust_env=False) as client:
             response = await client.request(method, full, **request_kw)
-        return as_list_payload(response.json()) or []
     except Exception:  # noqa: BLE001
         return []
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        payload = None
+    items = _FetchedItems(as_list_payload(payload) or [])
+    items.source_status = response.status_code
+    return items
 
 
 def _filter_category(items: list, sel: dict) -> list:
@@ -3080,6 +3100,9 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
         sel, base_url, storage_state, token_key, verify,
         (api_request or {}).get("auth_headers"),
     )
+    if getattr(items, "source_status", None) == 401:
+        return {"field": field, "options": [], "count": 0, "status": 401,
+                "note": "实时选项接口登录已失效"}
     items = _filter_category(items, sel)        # 聚合字典 → 只列该字段所属类目(与录制快照一致)
     opts = []
     for it in items:
@@ -3534,7 +3557,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     headers.update(api_request.get("auth_headers") or {})
     # ② Cookie 用 storageState 的(更全/可能更新);没抓到自定义头时,才回退到按 token_key 猜 Authorization
     ck = _auth_headers(storage_state, host, token_key)
-    if ck.get("Cookie"):
+    if ck.get("Cookie") and "Cookie" not in headers:
         headers["Cookie"] = ck["Cookie"]
     if "Authorization" not in headers and not (api_request.get("auth_headers") or {}) and ck.get("Authorization"):
         headers["Authorization"] = ck["Authorization"]

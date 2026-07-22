@@ -516,6 +516,7 @@ class Orchestrator:
         from dano.execution.page.sessions import session_path_if_exists
         from dano.infra.http import tls_verify
         from dano.infra.token_store import get_token_headers, merge_auth_headers
+        from dano.infra.token_refresh import is_auth_failure, refresh_one
 
         env = await self.store.get(skill.recording_asset_id)
         if env is None:
@@ -537,6 +538,11 @@ class Orchestrator:
                 storage = _json.loads(open(sp, encoding="utf-8").read())
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            await refresh_one(tenant, skill.subsystem.value)
+        except Exception as error:  # noqa: BLE001 - 保留已有 token 继续调用
+            log.warning("token_refresh.preflight_failed", tenant=tenant,
+                        subsystem=skill.subsystem.value, error=str(error))
         override = await get_token_headers(tenant, skill.subsystem.value)
         if override:
             api_request = merge_auth_headers(api_request, override)
@@ -555,6 +561,26 @@ class Orchestrator:
             storage_state=storage,
             verify=tls_verify(),
         )
+        if is_auth_failure(out):
+            try:
+                refreshed = await refresh_one(tenant, skill.subsystem.value, force=True)
+            except Exception as error:  # noqa: BLE001 - 返回原始鉴权失败，不用刷新异常覆盖它
+                log.warning("token_refresh.retry_failed", tenant=tenant,
+                            subsystem=skill.subsystem.value, error=str(error))
+                refreshed = {"ok": False}
+            if refreshed.get("status") == "refreshed":
+                override = await get_token_headers(tenant, skill.subsystem.value)
+                if override:
+                    api_request = merge_auth_headers(api_request, override)
+                out = await invoke_skill_capability(
+                    skill=skill,
+                    capability=capability,
+                    payload=payload,
+                    api_request=api_request,
+                    base_url=base_url,
+                    storage_state=storage,
+                    verify=tls_verify(),
+                )
         ok = bool(out.get("ok"))
         stage = str(out.get("stage") or "")
         if out.get("status") == "partial_success":
@@ -600,6 +626,7 @@ class Orchestrator:
         from dano.execution.page.sessions import session_path_if_exists
         from dano.infra.http import tls_verify
         from dano.infra.token_store import get_token_headers, merge_auth_headers
+        from dano.infra.token_refresh import is_auth_failure, refresh_one
         skill = self.registry.by_action(subsystem, action)
         if skill is None or not getattr(skill, "recording_asset_id", None):
             return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非录制型 skill"}
@@ -634,11 +661,30 @@ class Orchestrator:
                 storage = _json.loads(open(sp, encoding="utf-8").read())
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            await refresh_one(tenant, skill.subsystem.value)
+        except Exception as error:  # noqa: BLE001 - 选项读取继续使用已有 token
+            log.warning("token_refresh.preflight_failed", tenant=tenant,
+                        subsystem=skill.subsystem.value, error=str(error))
         override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
         if override:
             apir = merge_auth_headers(apir, override)
         result = await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
                                            verify=tls_verify())
+        if is_auth_failure(result):
+            try:
+                refreshed = await refresh_one(tenant, skill.subsystem.value, force=True)
+            except Exception as error:  # noqa: BLE001 - 保留原始 401，不升级成网关 500
+                log.warning("token_refresh.option_retry_failed", tenant=tenant,
+                            subsystem=skill.subsystem.value, error=str(error))
+                refreshed = {"ok": False}
+            if refreshed.get("ok"):
+                override = await get_token_headers(tenant, skill.subsystem.value)
+                if override:
+                    apir = merge_auth_headers(apir, override)
+                result = await fetch_field_options(
+                    apir, field, base_url=base_url, storage_state=storage, verify=tls_verify(),
+                )
         if capability:
             result["capability"] = capability
         return result

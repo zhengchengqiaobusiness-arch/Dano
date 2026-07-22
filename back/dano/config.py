@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # 在此填(或留空:接入时页面 token 会临时写进进程内存)。生产应走 Vault(见上)。
     runtime_credentials: dict = Field(default_factory=dict, description='如 {"1/oa": {"token": "..."}}')
 
+    # ── 运行期 Token 自动刷新 ──
+    # key=tenant/subsystem,value=按顺序尝试的登录来源。账号密码放 Vault/runtime_credentials,
+    # 此处只保存登录请求模板与凭证引用。
+    token_refresh_sources: dict = Field(default_factory=dict)
+    token_refresh_key: str = Field(default="", description="Linux 定时刷新内部接口密钥")
+
     # ── 三模型评审委员会(发布前硬闸门;强制 distinct(model_id)=3,改模型名即可)──
     review_enabled: bool = True
     review_model_acceptance: str = "claude-opus-4-8"   # 成果验收:是否真满足业务意图

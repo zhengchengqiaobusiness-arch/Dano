@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Dano runtime tokens that are due
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dano
+Group=dano
+ExecStart=/usr/bin/curl --config /etc/dano/token-refresh.curl
+NoNewPrivileges=true
