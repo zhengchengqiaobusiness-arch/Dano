@@ -29,6 +29,7 @@
   let imageNaturalHeight = $state(0);
   let imageElement = $state<HTMLImageElement | undefined>();
   let maximized = $state(false);
+  let shellElement = $state<HTMLDialogElement | undefined>();
   let bodyElement = $state<HTMLDivElement | undefined>();
   let dragging = $state(false);
   let dragStart:
@@ -210,14 +211,6 @@
     return `width: ${Math.round(imageNaturalWidth * imageScale)}px; height: ${Math.round(imageNaturalHeight * imageScale)}px;`;
   }
 
-  function handleKeydown(event: KeyboardEvent) {
-    if (!preview) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-    }
-  }
-
   $effect(() => {
     void preview?.src;
     resetImageZoom();
@@ -229,13 +222,20 @@
   $effect(() => {
     if (typeof document === "undefined") return;
     if (preview) {
-      document.addEventListener("keydown", handleKeydown);
       document.body.style.overflow = "hidden";
       return () => {
-        document.removeEventListener("keydown", handleKeydown);
         document.body.style.removeProperty("overflow");
       };
     }
+  });
+
+  $effect(() => {
+    const shell = shellElement;
+    if (!preview || !shell) return;
+    if (!shell.open) shell.showModal();
+    return () => {
+      if (shell.open) shell.close();
+    };
   });
 
   $effect(() => {
@@ -255,7 +255,15 @@
 </script>
 
 {#if preview}
-  <div class="file-preview-shell">
+  <dialog
+    bind:this={shellElement}
+    class="file-preview-shell"
+    aria-label={preview.name}
+    oncancel={(event) => {
+      event.preventDefault();
+      onClose();
+    }}
+  >
     <button
       type="button"
       class="file-preview-backdrop"
@@ -265,9 +273,6 @@
     <div
       class="file-preview-dialog"
       class:maximized={maximized}
-      role="dialog"
-      aria-modal="true"
-      aria-label={preview.name}
       tabindex="-1"
     >
       <header class="file-preview-header">
@@ -366,7 +371,7 @@
         {/if}
       </div>
     </div>
-  </div>
+  </dialog>
 {/if}
 
 <style>
@@ -376,7 +381,20 @@
     z-index: 80;
     display: grid;
     place-items: center;
+    box-sizing: border-box;
+    width: 100dvw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
     padding: 24px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+  }
+
+  .file-preview-shell::backdrop {
+    background: transparent;
   }
 
   .file-preview-backdrop {
