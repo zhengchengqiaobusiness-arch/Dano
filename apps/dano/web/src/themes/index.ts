@@ -6,20 +6,18 @@ import {
   resolveThemeColor,
   withThemeColorOpacity,
 } from "./accent-color";
-import { DARK_THEMES, PI_BASE46_DARK_THEME } from "./dark";
-import { LIGHT_THEMES, PI_BASE46_LIGHT_THEME } from "./light";
+import { PI_BASE46_DARK_THEME } from "./dark";
+import { PI_BASE46_LIGHT_THEME } from "./light";
 import type {
   Base46Theme,
   ThemeMode,
   ThemePair,
-  ThemePreference,
 } from "./types";
 
 export type {
   Base46Theme,
   ThemeMode,
   ThemePair,
-  ThemePreference,
 } from "./types";
 export {
   ACCENT_COLOR_PRESETS,
@@ -29,26 +27,15 @@ export {
 };
 export type { AccentColorPreset, ResolvedThemeColor } from "./accent-color";
 
-export const BUILT_IN_THEMES = [
-  ...DARK_THEMES,
-  ...LIGHT_THEMES,
-] as const satisfies readonly Base46Theme[];
-
 const FALLBACK_THEME_BY_MODE: Record<ThemeMode, Base46Theme> = {
   dark: PI_BASE46_DARK_THEME,
   light: PI_BASE46_LIGHT_THEME,
 };
 
 const THEMES_BY_ID = new Map<string, Base46Theme>(
-  BUILT_IN_THEMES.map(theme => [theme.id, theme]),
+  [PI_BASE46_DARK_THEME, PI_BASE46_LIGHT_THEME].map(theme => [theme.id, theme]),
 );
 const SHIKI_THEME_CACHE = new Map<string, ThemeRegistration>();
-
-const DEFAULT_THEME_PREFERENCE: ThemePreference = {
-  mode: "dark",
-  darkThemeId: PI_BASE46_DARK_THEME.id,
-  lightThemeId: PI_BASE46_LIGHT_THEME.id,
-};
 
 function parseHexColor(value: string): [number, number, number] | null {
   const normalized = value.trim().replace(/^#/, "");
@@ -82,108 +69,6 @@ function themeById(
   themeId: string | null | undefined,
 ): Base46Theme | undefined {
   return themeId ? THEMES_BY_ID.get(themeId) : undefined;
-}
-
-export function listThemes(mode?: ThemeMode): Base46Theme[] {
-  const themes = mode
-    ? BUILT_IN_THEMES.filter(theme => theme.mode === mode)
-    : [...BUILT_IN_THEMES];
-  return [...themes].sort((a, b) => a.label.localeCompare(b.label));
-}
-
-export function readStoredThemePreference(
-  raw: string | null,
-  prefersLight: boolean,
-): ThemePreference {
-  const fallbackMode: ThemeMode = prefersLight ? "light" : "dark";
-  const fallback: ThemePreference = {
-    ...DEFAULT_THEME_PREFERENCE,
-    mode: fallbackMode,
-  };
-
-  if (raw === "dark" || raw === "light") {
-    return { ...fallback, mode: raw };
-  }
-
-  if (!raw) {
-    return fallback;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<ThemePreference>;
-    const mode =
-      parsed.mode === "light" || parsed.mode === "dark"
-        ? parsed.mode
-        : fallback.mode;
-    const darkThemeId =
-      typeof parsed.darkThemeId === "string" &&
-      themeById(parsed.darkThemeId)?.mode === "dark"
-        ? parsed.darkThemeId
-        : DEFAULT_THEME_PREFERENCE.darkThemeId;
-    const lightThemeId =
-      typeof parsed.lightThemeId === "string" &&
-      themeById(parsed.lightThemeId)?.mode === "light"
-        ? parsed.lightThemeId
-        : DEFAULT_THEME_PREFERENCE.lightThemeId;
-
-    return {
-      mode,
-      darkThemeId,
-      lightThemeId,
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-export function serializeThemePreference(preference: ThemePreference): string {
-  return JSON.stringify(preference);
-}
-
-export function setThemePreferenceMode(
-  preference: ThemePreference,
-  mode: ThemeMode,
-): ThemePreference {
-  return {
-    ...preference,
-    mode,
-  };
-}
-
-export function toggleThemePreferenceMode(
-  preference: ThemePreference,
-): ThemePreference {
-  return setThemePreferenceMode(
-    preference,
-    preference.mode === "dark" ? "light" : "dark",
-  );
-}
-
-export function setThemePreferenceTheme(
-  preference: ThemePreference,
-  mode: ThemeMode,
-  themeId: string,
-): ThemePreference {
-  const theme = themeById(themeId);
-  if (!theme || theme.mode !== mode) {
-    return preference;
-  }
-
-  return mode === "dark"
-    ? { ...preference, darkThemeId: theme.id }
-    : { ...preference, lightThemeId: theme.id };
-}
-
-export function resolveThemePair(preference: ThemePreference): ThemePair {
-  return {
-    dark: themeById(preference.darkThemeId) ?? FALLBACK_THEME_BY_MODE.dark,
-    light: themeById(preference.lightThemeId) ?? FALLBACK_THEME_BY_MODE.light,
-  };
-}
-
-export function resolveActiveTheme(preference: ThemePreference): Base46Theme {
-  const pair = resolveThemePair(preference);
-  return preference.mode === "dark" ? pair.dark : pair.light;
 }
 
 export function resolveAppThemeVars(

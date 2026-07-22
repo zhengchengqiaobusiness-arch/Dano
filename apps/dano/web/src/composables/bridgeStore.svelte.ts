@@ -1,4 +1,5 @@
 import type {
+  AccentColorPreset,
   AskUserQuestionAnswer,
   BridgeUserSummary,
   ClientMessage,
@@ -34,6 +35,10 @@ import type {
   RpcSessionStatsEvent,
   RpcWorkspaceSummary,
   ServerMessage,
+} from "@dano/types/protocol";
+import {
+  ACCENT_COLOR_PRESET_KEYS,
+  DEFAULT_ACCENT_COLOR_PRESET,
 } from "@dano/types/protocol";
 import {
   normalizeRpcModel,
@@ -320,6 +325,9 @@ function setActiveTreeSessionPath(sessionPath: string | null) {
 
 let _connectionStatus = $state<ConnectionStatus>("disconnected");
 let _currentUser = $state<BridgeUserSummary | undefined>(undefined);
+let _accentColorPreset = $state<AccentColorPreset>(DEFAULT_ACCENT_COLOR_PRESET);
+let themeColorSelectionRevision = 0;
+let themeColorTransportRevision = 0;
 let _rawTranscript = $state<TranscriptEntry[]>([]);
 let _transcriptSessionPath = $state<string | null>(null);
 let _transcriptHasOlder = $state(false);
@@ -378,6 +386,7 @@ let _prefillText = $state<string | null>(null);
 
 let connectionStatus = $derived(_connectionStatus);
 let currentUser = $derived(_currentUser);
+let accentColorPreset = $derived(_accentColorPreset);
 let transcript = $derived(_transcript);
 let transcriptDeltas = $derived(_transcriptDeltas);
 let transcriptStreams = $derived(_transcriptStreams);
@@ -976,6 +985,81 @@ function pushNotification(message: string, notifyType?: string) {
     ..._notifications,
     { message, notifyType, id: `local-notify:${createRequestId()}` },
   ];
+}
+
+function isAccentColorPreset(value: unknown): value is AccentColorPreset {
+  return (
+    typeof value === "string" &&
+    (ACCENT_COLOR_PRESET_KEYS as readonly string[]).includes(value)
+  );
+}
+
+function themeColorPreferenceUrl(): string | null {
+  return clientId
+    ? `/api/clients/${encodeURIComponent(clientId)}/preferences/theme`
+    : null;
+}
+
+async function loadThemeColorPreference(): Promise<void> {
+  const url = themeColorPreferenceUrl();
+  if (!url) return;
+  const selectionRevision = themeColorSelectionRevision;
+
+  try {
+    const response = await fetch(url, { method: "GET" });
+    if (!response.ok) return;
+    const body = (await response.json()) as { accentColorPreset?: unknown };
+    if (
+      selectionRevision === themeColorSelectionRevision &&
+      isAccentColorPreset(body.accentColorPreset)
+    ) {
+      _accentColorPreset = body.accentColorPreset;
+    }
+  } catch {
+    // The product default remains active when the server preference cannot load.
+  }
+}
+
+let themeColorSaveQueue: Promise<void> = Promise.resolve();
+
+async function saveAccentColorPreset(
+  url: string | null,
+  preset: AccentColorPreset,
+  transportRevision: number,
+): Promise<boolean> {
+  if (!url) {
+    if (transportRevision === themeColorTransportRevision) {
+      pushNotification(t("store.error.saveThemeColorFailed"), "error");
+    }
+    return false;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accentColorPreset: preset }),
+    });
+    if (!response.ok) throw new Error("Theme Color preference save failed");
+    return true;
+  } catch {
+    if (transportRevision === themeColorTransportRevision) {
+      pushNotification(t("store.error.saveThemeColorFailed"), "error");
+    }
+    return false;
+  }
+}
+
+function setAccentColorPreset(preset: AccentColorPreset): Promise<boolean> {
+  const url = themeColorPreferenceUrl();
+  const transportRevision = themeColorTransportRevision;
+  themeColorSelectionRevision += 1;
+  _accentColorPreset = preset;
+  const save = themeColorSaveQueue.then(() =>
+    saveAccentColorPreset(url, preset, transportRevision)
+  );
+  themeColorSaveQueue = save.then(() => undefined, () => undefined);
+  return save;
 }
 
 export function dismissNotification(id: string) {
@@ -2803,6 +2887,10 @@ function resetTransportState() {
   clientId = null;
   clientMessagesUrl = null;
   _currentUser = undefined;
+  themeColorSelectionRevision += 1;
+  themeColorTransportRevision += 1;
+  themeColorSaveQueue = Promise.resolve();
+  _accentColorPreset = DEFAULT_ACCENT_COLOR_PRESET;
   stopHeartbeatWatchdog();
   lastHeartbeatAt = 0;
   if (eventSource) {
@@ -2910,6 +2998,7 @@ async function connectOnce(): Promise<boolean> {
     lastHeartbeatAt = Date.now();
     startHeartbeatWatchdog();
     resetReconnectDelay();
+    void loadThemeColorPreference();
     void fetchInitialState();
   });
 
@@ -2969,6 +3058,9 @@ export function initBridge() {
     },
     get currentUser() {
       return currentUser;
+    },
+    get accentColorPreset() {
+      return accentColorPreset;
     },
     get transcript() {
       return transcript;
@@ -3127,6 +3219,7 @@ export function initBridge() {
     presentQuestion,
     answerQuestion,
     fieldAssist,
+    setAccentColorPreset,
     dismissNotification,
     reconnect: connect,
     disconnect,

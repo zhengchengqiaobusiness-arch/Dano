@@ -21,17 +21,12 @@
   import AppRightSidebar from "./layout/AppRightSidebar.svelte";
   import { t } from "./i18n";
   import {
-    listThemes,
-    readStoredThemePreference,
-    resolveActiveTheme,
+    ACCENT_COLOR_PRESETS,
     resolveAppThemeVars,
-    serializeThemePreference,
-    setThemePreferenceMode,
-    setThemePreferenceTheme,
-    toggleThemePreferenceMode,
     type ThemeMode,
-    type ThemePreference,
   } from "./themes";
+  import { PI_BASE46_DARK_THEME } from "./themes/dark";
+  import { PI_BASE46_LIGHT_THEME } from "./themes/light";
   import { registerBridgePageLifecycle } from "./utils/bridgePageLifecycle";
   import type { RpcModelInfo } from "./utils/models";
   import {
@@ -94,7 +89,6 @@
 
   const debugStreamTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
   const debugWorkspaceSummary = createDebugWorkspaceSummary();
-  const THEME_CACHE_KEY = "pi-web-theme";
   const LEFT_RAIL_WIDTH_CACHE_KEY = "pi-web-left-rail-width";
   const RIGHT_RAIL_WIDTH_CACHE_KEY = "pi-web-right-rail-width";
   const LEFT_RAIL_MIN_WIDTH = 260;
@@ -114,22 +108,9 @@
 
   type RailSide = "left" | "right";
 
-  function hasStoredThemePreference(): boolean {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(THEME_CACHE_KEY) !== null;
-  }
-
   function readSystemPrefersLight(): boolean {
     if (typeof window === "undefined") return false;
     return window.matchMedia("(prefers-color-scheme: light)").matches;
-  }
-
-  function readCachedThemePreference(): ThemePreference {
-    if (typeof window === "undefined") return readStoredThemePreference(null, false);
-    return readStoredThemePreference(
-      window.localStorage.getItem(THEME_CACHE_KEY),
-      readSystemPrefersLight(),
-    );
   }
 
   const debugModeAvailable =
@@ -155,8 +136,7 @@
       : fallback;
   }
 
-  let themePreferenceExplicit = $state(hasStoredThemePreference());
-  let themePreference = $state<ThemePreference>(readCachedThemePreference());
+  let themeMode = $state<ThemeMode>(readSystemPrefersLight() ? "light" : "dark");
   let compactLayout = $state(isCompactLayout());
   let leftRailWidth = $state(
     readCachedRailWidth(LEFT_RAIL_WIDTH_CACHE_KEY, LEFT_RAIL_DEFAULT_WIDTH, LEFT_RAIL_MIN_WIDTH, LEFT_RAIL_MAX_WIDTH),
@@ -170,10 +150,9 @@
     startWidth: number;
   } | null>(null);
 
-  const darkThemes = listThemes("dark");
-  const lightThemes = listThemes("light");
-
-  let activeTheme = $derived(resolveActiveTheme(themePreference));
+  let activeTheme = $derived(
+    themeMode === "light" ? PI_BASE46_LIGHT_THEME : PI_BASE46_DARK_THEME,
+  );
 
   function styleString(styles: Record<string, string>): string {
     return Object.entries(styles)
@@ -183,7 +162,10 @@
 
   let allStyle = $derived.by(() => {
     const s: Record<string, string> = {
-      ...resolveAppThemeVars(activeTheme),
+      ...resolveAppThemeVars(
+        activeTheme,
+        ACCENT_COLOR_PRESETS[bridge.accentColorPreset],
+      ),
       ...browserChromeVars,
       "--right-rail-space": !compactLayout && shellRightRailOpen
         ? `${rightRailWidth}px`
@@ -691,21 +673,8 @@
     rightRailWidth = clampRailWidth("right", RIGHT_RAIL_DEFAULT_WIDTH);
   }
 
-  function applyExplicitThemePreference(nextPreference: ThemePreference) {
-    themePreferenceExplicit = true;
-    themePreference = nextPreference;
-  }
-
   function applySystemThemeMode(mode: ThemeMode) {
-    if (themePreferenceExplicit) {
-      return;
-    }
-
-    themePreference = setThemePreferenceMode(themePreference, mode);
-  }
-
-  function toggleTheme() {
-    applyExplicitThemePreference(toggleThemePreferenceMode(themePreference));
+    themeMode = mode;
   }
 
   function openThemeSettings() {
@@ -714,16 +683,6 @@
 
   function closeThemeSettings() {
     themeSettingsOpen = false;
-  }
-
-  function handleThemePresetSelect(themeId: string) {
-    applyExplicitThemePreference(
-      setThemePreferenceTheme(
-        themePreference,
-        themePreference.mode,
-        themeId,
-      ),
-    );
   }
 
   function toggleSessionSidebar() {
@@ -1118,12 +1077,6 @@
 
   // Effects
   $effect(() => {
-    if (typeof window !== "undefined" && themePreferenceExplicit) {
-      window.localStorage.setItem(THEME_CACHE_KEY, serializeThemePreference(themePreference));
-    }
-  });
-
-  $effect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(LEFT_RAIL_WIDTH_CACHE_KEY, String(leftRailWidth));
     }
@@ -1270,8 +1223,7 @@
   class:right-rail-open={shellRightRailOpen}
   data-theme={activeTheme.id}
   data-theme-mode={activeTheme.mode}
-  data-dark-theme={themePreference.darkThemeId}
-  data-light-theme={themePreference.lightThemeId}
+  data-accent-color-preset={bridge.accentColorPreset}
   style={allStyle}
 >
   <div class="app-main-column">
@@ -1283,6 +1235,7 @@
       {newSessionPending}
       {showNewSession}
       currentUser={bridge.currentUser}
+      onOpenTheme={openThemeSettings}
     />
 
     <ReconnectBanner
@@ -1391,14 +1344,10 @@
 
   <ThemeSettingsDialog
     open={themeSettingsOpen}
-    mode={themePreference.mode}
-    darkThemeId={themePreference.darkThemeId}
-    lightThemeId={themePreference.lightThemeId}
-    {darkThemes}
-    {lightThemes}
+    selectedPreset={bridge.accentColorPreset}
     themeStyle={allStyle}
     onClose={closeThemeSettings}
-    onSetTheme={handleThemePresetSelect}
+    onSelectPreset={bridge.setAccentColorPreset}
   />
 
   <ExtensionDialog

@@ -1,11 +1,5 @@
 export type ThemeMode = "dark" | "light";
 
-export type ThemePreference = {
-  mode: ThemeMode;
-  darkThemeId: string;
-  lightThemeId: string;
-};
-
 export type Base46Palette = Record<string, string>;
 export type Base16Palette = Record<
   | "base00"
