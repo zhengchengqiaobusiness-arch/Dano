@@ -3586,20 +3586,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           tabBarExtraContent={{
             left: (
               <Space wrap size={4} style={{ marginRight: 16 }}>
-                <Typography.Text strong>编排工作台</Typography.Text>
                 <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
-                  <Button icon={<RobotOutlined />} type="primary" size="small" loading={orchestrateBusy || autoFixBusy}
+                  <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
                     disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
                     onClick={orchestrateFlow}>生成/优化能力</Button>
                 </Tooltip>
-                <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
               </Space>
             ),
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
                 <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
                 <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再发布当前流程" : ""}>
-                  <span><Button size="small" type="primary" loading={phase === "publishing"}
+                  <span><Button type="primary" loading={phase === "publishing"}
                     disabled={!capabilities.length} onClick={publishRequest}>发布当前流程</Button></span>
                 </Tooltip>
               </Space>
@@ -4358,7 +4356,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const kindOptions = CAPABILITY_KIND_OPTIONS;
     return (
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
-        <Space wrap>
+        <Space wrap style={{ display: analysisScreenshots.length || flowSpec.meta?.capability_generation ? undefined : "none" }}>
           <input
             ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
             onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
