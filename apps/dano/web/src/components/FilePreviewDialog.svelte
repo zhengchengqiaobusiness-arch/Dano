@@ -1,7 +1,7 @@
 <script lang="ts">
-  import Maximize from "lucide-svelte/icons/maximize";
-  import Maximize2 from "lucide-svelte/icons/maximize-2";
-  import Minimize2 from "lucide-svelte/icons/minimize-2";
+  import Expand from "lucide-svelte/icons/expand";
+  import Scan from "lucide-svelte/icons/scan";
+  import Shrink from "lucide-svelte/icons/shrink";
   import X from "lucide-svelte/icons/x";
   import ZoomIn from "lucide-svelte/icons/zoom-in";
   import ZoomOut from "lucide-svelte/icons/zoom-out";
@@ -277,13 +277,35 @@
     >
       <header class="file-preview-header">
         <div class="file-preview-title">{preview.name}</div>
+        <button
+          type="button"
+          class="file-preview-control"
+          aria-label={maximized ? t("filePreview.shrink") : t("filePreview.expand")}
+          title={maximized ? t("filePreview.shrink") : t("filePreview.expand")}
+          onclick={() => (maximized = !maximized)}
+        >
+          {#if maximized}
+            <Shrink aria-hidden="true" size={16} />
+          {:else}
+            <Expand aria-hidden="true" size={16} />
+          {/if}
+        </button>
+        <button
+          type="button"
+          class="file-preview-close"
+          aria-label={t("filePreview.close")}
+          title={t("filePreview.close")}
+          onclick={onClose}
+        >
+          <X aria-hidden="true" size={18} />
+        </button>
         {#if preview.src}
           <div class="file-preview-controls">
             <button
               type="button"
               class="file-preview-control"
-              aria-label="Zoom out"
-              title="Zoom out"
+              aria-label={t("filePreview.zoomOut")}
+              title={t("filePreview.zoomOut")}
               onclick={() => zoomImage(1 / 1.25)}
             >
               <ZoomOut aria-hidden="true" size={16} />
@@ -291,8 +313,17 @@
             <button
               type="button"
               class="file-preview-control"
-              aria-label="Original size"
-              title="Original size"
+              aria-label={t("filePreview.zoomIn")}
+              title={t("filePreview.zoomIn")}
+              onclick={() => zoomImage(1.25)}
+            >
+              <ZoomIn aria-hidden="true" size={16} />
+            </button>
+            <button
+              type="button"
+              class="file-preview-control"
+              aria-label={t("filePreview.originalSize")}
+              title={t("filePreview.originalSize")}
               onclick={setImageOriginalSize}
             >
               1:1
@@ -300,44 +331,14 @@
             <button
               type="button"
               class="file-preview-control"
-              aria-label="Fit to view"
-              title="Fit to view"
+              aria-label={t("filePreview.fitToView")}
+              title={t("filePreview.fitToView")}
               onclick={setImageFit}
             >
-              <Maximize2 aria-hidden="true" size={16} />
-            </button>
-            <button
-              type="button"
-              class="file-preview-control"
-              aria-label="Zoom in"
-              title="Zoom in"
-              onclick={() => zoomImage(1.25)}
-            >
-              <ZoomIn aria-hidden="true" size={16} />
+              <Scan aria-hidden="true" size={16} />
             </button>
           </div>
         {/if}
-        <button
-          type="button"
-          class="file-preview-control"
-          aria-label={maximized ? "Restore dialog" : "Maximize dialog"}
-          title={maximized ? "Restore dialog" : "Maximize dialog"}
-          onclick={() => (maximized = !maximized)}
-        >
-          {#if maximized}
-            <Minimize2 aria-hidden="true" size={16} />
-          {:else}
-            <Maximize aria-hidden="true" size={16} />
-          {/if}
-        </button>
-        <button
-          type="button"
-          class="file-preview-close"
-          aria-label={t("common.cancel")}
-          onclick={onClose}
-        >
-          <X aria-hidden="true" size={18} />
-        </button>
       </header>
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_element_interactions: drag-to-pan is mouse-only sugar; native scrolling still works -->
       <div
@@ -426,7 +427,7 @@
 
   .file-preview-header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
@@ -446,6 +447,8 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
+    grid-column: 1 / -1;
+    justify-content: center;
   }
 
   .file-preview-control,
@@ -453,8 +456,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 40px;
+    height: 40px;
     border: 0;
     border-radius: 999px;
     background: transparent;
@@ -551,15 +554,14 @@
       border-radius: 0;
     }
 
-    .file-preview-header {
-      grid-template-columns: minmax(0, 1fr) auto auto;
-    }
-
     .file-preview-controls {
       gap: 0;
-      grid-column: 1 / -1;
-      justify-content: center;
-      order: 3;
+    }
+
+    .file-preview-control,
+    .file-preview-close {
+      width: 44px;
+      height: 44px;
     }
   }
 </style>
