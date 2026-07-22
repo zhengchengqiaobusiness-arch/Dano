@@ -294,7 +294,7 @@ def as_list_payload(data):
     return None
 
 
-def _leaf_paths(body) -> list[tuple]:
+def _leaf_paths(body, *, include_empty_lists: bool = False) -> list[tuple]:
     """body 拍平成 [(点路径, tokens, 值字符串, 原始值)]。
 
     tokens=真实分段列表(str 键 / int 下标),用于**无歧义**按路径注入——键名含 '.'/'[' 也安全。
@@ -306,6 +306,9 @@ def _leaf_paths(body) -> list[tuple]:
             for k, v in node.items():
                 walk(v, f"{path}.{k}" if path else k, toks + [k])
         elif isinstance(node, list):
+            if include_empty_lists and not node and path:
+                out.append((path, toks, "[]", node))
+                return
             for i, v in enumerate(node):
                 walk(v, f"{path}[{i}]", toks + [i])
         else:
@@ -1216,6 +1219,14 @@ def _page_enum_source_is_grounded(source: str, metadata: dict, records: list[dic
 def _page_enum_selection_matches(records: list[dict], selected_label: str, selected_value, current) -> bool:
     """Require the captured selection and outgoing wire value to agree."""
     label = str(selected_label or "").strip()
+    if (
+        not label
+        and isinstance(selected_value, list) and not selected_value
+        and isinstance(current, list) and not current
+    ):
+        # An explicitly captured empty multi-select still proves the field and
+        # its complete option contract; no selected row exists to compare.
+        return True
     wire = selected_value if selected_value not in (None, "") else current
     if selected_value not in (None, "") and current not in (None, "") and str(selected_value) != str(current):
         return False
@@ -1259,7 +1270,9 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 _page_enum_metadata(v),
             ))
     body = _parse_body(post_data) if post_data is not None else None
-    value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
+    value_by_path = {
+        p: raw for p, _t, _sv, raw in _leaf_paths(body, include_empty_lists=True)
+    } if body is not None else {}
     for s in selects or []:
         path = str(s.get("path") or "")
         leaf_key = str(path).split(".")[-1].split("[")[0]
@@ -1336,7 +1349,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         return []
     existing = existing_paths or set()
     out: list[dict] = []
-    leaves = _leaf_paths(body)
+    leaves = _leaf_paths(body, include_empty_lists=True)
     for picked, opts_raw in page_enum_options.items():
         if (
             not isinstance(opts_raw, dict)
@@ -1373,7 +1386,10 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         path, toks = matches[0]
         if path in existing or any(o.get("path") == path for o in out):
             continue
-        current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
+        current = next((
+            raw if isinstance(raw, list) and not raw else sv
+            for p, _t, sv, raw in leaves if p == path
+        ), "")
         records = _enum_records_from_page_options(opts)
         if not _page_enum_source_is_grounded(evidence_source, metadata, records, len(opts)):
             continue
@@ -1382,7 +1398,8 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         entry = {"path": path, "tokens": toks, "source_url": metadata.get("source_url", ""),
                  "value_key": "value" if metadata.get("source_url") else "",
                  "label_key": "label" if metadata.get("source_url") else "",
-                 "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
+                 "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or "",
+                 "multi": isinstance(current, list)}
         if metadata.get("dict_type"):
             entry.update({"category_key": "dictType", "category_value": metadata["dict_type"]})
         _attach_enum_binding(
@@ -2279,6 +2296,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             for k, v in node.items():
                 walk(v, f"{path}.{k}" if path else k)
         elif isinstance(node, list):
+            if not node and path:
+                key = path.split(".")[-1].split("[")[0]
+                leaves.append((path, key, node, "[]", False, False))
+                return
             for i, v in enumerate(node):
                 walk(v, f"{path}[{i}]")
         else:
@@ -2363,6 +2384,12 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
     out: list[dict] = []
     for i, (path, key, node, sv, time_like, internal) in enumerate(leaves):
+        if isinstance(node, list) and not node and i not in structural:
+            # Empty arrays such as attachment placeholders are not caller
+            # fields by themselves. Preserve them only when an exact page
+            # control alias proves that the empty collection is a real input
+            # (for example an unselected multi-select filter).
+            continue
         label, confident = labels[i]
         # 系统生成的时间戳(submitTime/createTime/updateTime 等):**系统类时间 key** + 裸时间戳 + 对不上任何录制样例
         #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 标 system_values 填 now,而非焊死)。

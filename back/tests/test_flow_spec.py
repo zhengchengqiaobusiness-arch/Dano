@@ -2370,18 +2370,27 @@ def test_empty_query_filters_keep_page_control_contract_and_empty_multi_select()
         "startDate", "endDate", "pageNo", "pageSize",
         "projectName", "spr", "statuss",
     }
-    assert (fields["startDate"].key, fields["startDate"].type) == ("开始时间", "date")
-    assert (fields["endDate"].key, fields["endDate"].type) == ("结束时间", "date")
+    for path, label in (("startDate", "开始时间"), ("endDate", "结束时间")):
+        assert (
+            fields[path].key, fields[path].default_value, fields[path].type,
+            fields[path].category, fields[path].source_kind, fields[path].required,
+        ) == (label, "", "date", "user_param", "user_input", False)
     for path, label in (("projectName", "项目名称"), ("spr", "审批人")):
         assert (
-            fields[path].key, fields[path].category, fields[path].source_kind,
-            fields[path].exposed_to_user,
-        ) == (label, "user_param", "user_input", True)
+            fields[path].key, fields[path].default_value, fields[path].type,
+            fields[path].category, fields[path].source_kind,
+            fields[path].exposed_to_user, fields[path].required,
+        ) == (label, "", "string", "user_param", "user_input", True, False)
+    for path, default in (("pageNo", 1), ("pageSize", 10)):
+        assert (
+            fields[path].key, fields[path].default_value, fields[path].type,
+            fields[path].category, fields[path].source_kind, fields[path].required,
+        ) == (path, default, "number", "user_param", "user_input", False)
     status = fields["statuss"]
     assert (status.key, status.type, status.category, status.source_kind) == (
         "审批状态", "list-enum", "user_param", "page_enum",
     )
-    assert status.value == []
+    assert status.default_value == []
     assert status.required is False
     assert status.enum_options == [
         {"label": "未通过", "value": "未通过"},

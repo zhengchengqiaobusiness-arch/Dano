@@ -1718,9 +1718,9 @@ def _build_step_from_capture(
         ptype = f.get("type") or wire_type
         if path in list_paths:
             ptype = "list-enum"
-        elif path in select_paths:
-            ptype = "enum"
         select_meta = select_by_path.get(path)
+        if path in select_paths:
+            ptype = "list-enum" if select_meta is not None and select_meta.multi else "enum"
 
         # 字段中文名优先级
         nm = f.get("suggest_name") or f.get("key") or ""
@@ -1827,7 +1827,7 @@ def _build_step_from_capture(
             value=str(f.get("value") or ""),
             type=ptype,
             wire_type=wire_type,
-            required=bool(f.get("required")) and caller_owned,
+            required=bool(f.get("required")) and caller_owned and not _looks_pagination_field(nm, path),
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
