@@ -17,12 +17,12 @@
       "prompt": "请假"
     },
     {
-      "label": "报销",
-      "prompt": "报销"
+      "label": "申请公章",
+      "prompt": "申请公章"
     },
     {
-      "label": "出差申请",
-      "prompt": "出差申请"
+      "label": "申请酒店",
+      "prompt": "申请酒店"
     }
   ]
 }

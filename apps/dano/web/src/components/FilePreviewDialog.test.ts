@@ -38,21 +38,50 @@ describe("FilePreviewDialog stacking", () => {
       expect(shell?.open).toBe(true);
       expect(shell?.parentElement).toBe(isolatedContent);
 
-      const maximize = shell?.querySelector<HTMLButtonElement>(
-        '[aria-label="Maximize dialog"]',
+      const controls = [
+        ["缩小", "lucide-zoom-out"],
+        ["放大图片", "lucide-zoom-in"],
+        ["原始尺寸", null],
+        ["适应窗口", "lucide-scan"],
+        ["最大化", "lucide-expand"],
+        ["关闭", "lucide-x"],
+      ] as const;
+      for (const [label, iconClass] of controls) {
+        const control = shell?.querySelector<HTMLButtonElement>(
+          `[aria-label="${label}"]`,
+        );
+        expect(control?.title).toBe(label);
+        if (iconClass) expect(control?.querySelector(`.${iconClass}`)).not.toBeNull();
+      }
+
+      expect(
+        Array.from(shell?.querySelectorAll(".file-preview-controls button") ?? []).map(
+          (control) => control.getAttribute("aria-label"),
+        ),
+      ).toEqual(["缩小", "放大图片", "原始尺寸", "适应窗口"]);
+      expect(
+        Array.from(
+          shell?.querySelectorAll(".file-preview-header button") ?? [],
+        ).map((control) => control.getAttribute("aria-label")),
+      ).toEqual(["最大化", "关闭", "缩小", "放大图片", "原始尺寸", "适应窗口"]);
+
+      const expand = shell?.querySelector<HTMLButtonElement>(
+        '[aria-label="最大化"]',
       );
-      maximize?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expand?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await tick();
       expect(shell?.querySelector(".file-preview-dialog.maximized")).not.toBeNull();
 
-      const restore = shell?.querySelector<HTMLButtonElement>(
-        '[aria-label="Restore dialog"]',
+      const shrink = shell?.querySelector<HTMLButtonElement>(
+        '[aria-label="还原"]',
       );
-      restore?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(shrink?.title).toBe("还原");
+      expect(shrink?.querySelector(".lucide-shrink")).not.toBeNull();
+      shrink?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await tick();
       expect(shell?.querySelector(".file-preview-dialog.maximized")).toBeNull();
 
-      maximize?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expand?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await tick();
       shell
         ?.querySelector<HTMLButtonElement>(".file-preview-close")
