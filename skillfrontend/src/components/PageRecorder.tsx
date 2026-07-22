@@ -3590,6 +3590,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           activeKey={activeFlowTab}
           onChange={setActiveFlowTab}
           destroyOnHidden={false}
+          tabBarStyle={{ marginBottom: 0 }}
           tabBarExtraContent={{
             left: (
               <Space wrap size={4} style={{ marginRight: 16 }}>
@@ -4363,22 +4364,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const kindOptions = CAPABILITY_KIND_OPTIONS;
     return (
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
-        <Space wrap style={{ display: analysisScreenshots.length || flowSpec.meta?.capability_generation ? undefined : "none" }}>
-          <input
-            ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
-            onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
-          />
-          {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
-          {flowSpec.meta?.capability_generation && <>
-            <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
-              {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
-            </Tag>
-            {flowSpec.meta?.recording_agent_session?.mode &&
-              <Tag color="blue">Pi {flowSpec.meta.recording_agent_session.mode === "repair" ? "修复" : "规划"}</Tag>}
-            {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
-              <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
-          </>}
-        </Space>
+        {(analysisScreenshots.length > 0 || !!flowSpec.meta?.capability_generation) && (
+          <Space wrap>
+            <input
+              ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
+              onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
+            />
+            {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
+            {flowSpec.meta?.capability_generation && <>
+              <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
+                {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
+              </Tag>
+              {flowSpec.meta?.recording_agent_session?.mode &&
+                <Tag color="blue">Pi {flowSpec.meta.recording_agent_session.mode === "repair" ? "修复" : "规划"}</Tag>}
+              {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
+                <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
+            </>}
+          </Space>
+        )}
         {analysisScreenshots.length > 0 && (
           <Space wrap size={8}>
             {analysisScreenshots.map((item) => (

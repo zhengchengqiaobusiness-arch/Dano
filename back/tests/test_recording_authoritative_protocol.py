@@ -275,6 +275,22 @@ def test_frontend_reconnects_after_component_refresh_instead_of_staying_disconne
     assert "scheduleRecorderReconnect()" in close_handler
 
 
+def test_frontend_capability_tabs_do_not_reserve_an_empty_spacer() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    workbench_start = source.index("function renderFlowWorkbench()")
+    tabs_start = source.index("<Tabs", workbench_start)
+    tabs_end = source.index("/>", tabs_start)
+    tabs = source[tabs_start:tabs_end]
+    assert 'tabBarStyle={{ marginBottom: 0 }}' in tabs
+
+    composer_start = source.index("function renderCapabilityComposerPanel()")
+    composer_end = source.index("function renderDescriptionPanel()", composer_start)
+    composer = source[composer_start:composer_end]
+    assert "analysisScreenshots.length > 0 || !!flowSpec.meta?.capability_generation" in composer
+    assert 'display: analysisScreenshots.length || flowSpec.meta?.capability_generation ? undefined : "none"' not in composer
+
+
 def test_recording_transport_drains_messages_during_long_model_operations() -> None:
     source = inspect.getsource(gateway.record_ws)
 
