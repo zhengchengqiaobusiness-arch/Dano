@@ -164,6 +164,10 @@ function verifyReviewToolSchema() {
 }
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
+  assert(
+    !planTool?.parameters?.required?.includes("recording_id"),
+    "recording_id belongs to the active server session and must not block a model submission",
+  );
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
   assert(
     planTool?.parameters?.properties?.plan?.additionalProperties === true,

@@ -1023,8 +1023,12 @@ def _recording_session(run_id: str, params: dict):  # noqa: ANN202
     if session is None:
         raise ToolError("录制 Pi Session 不存在或已经关闭")
     recording_id = str(params.get("recording_id") or "")
-    if not recording_id or recording_id != session.recording_id:
+    if recording_id and recording_id != session.recording_id:
         raise ToolError("recording_id 与当前录制会话不匹配")
+    # run_id is the authenticated, server-owned session boundary.  Fill the
+    # redundant display identity here so a model omission cannot invalidate an
+    # otherwise complete (and expensive) screenshot analysis.
+    params.setdefault("recording_id", session.recording_id)
     return session
 
 
@@ -1124,7 +1128,7 @@ async def _apply_recording_submission_atomic(
 
 
 async def get_recording_state(run_id: str, params: dict) -> dict:
-    _strict_recording_params(params, required={"recording_id"}, optional={"flow_version"})
+    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version"})
     return await _recording_session(run_id, params).get_recording_state()
 
 
@@ -2368,8 +2372,8 @@ def _screenshot_field_only_plan(raw_plan: dict) -> dict | None:
 async def submit_recording_plan(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
-        required={"recording_id", "base_flow_version", "plan"},
-        optional={"flow_version"},
+        required={"base_flow_version", "plan"},
+        optional={"recording_id", "flow_version"},
     )
     raw_plan = params.get("plan")
     if not isinstance(raw_plan, dict):
@@ -2425,15 +2429,15 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
 
 
 async def get_validation_report(run_id: str, params: dict) -> dict:
-    _strict_recording_params(params, required={"recording_id"}, optional={"flow_version"})
+    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version"})
     return await _recording_session(run_id, params).get_validation_report()
 
 
 async def submit_recording_repair(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
-        required={"recording_id", "base_flow_version", "operations"},
-        optional={"flow_version"},
+        required={"base_flow_version", "operations"},
+        optional={"recording_id", "flow_version"},
     )
     operations = params.get("operations")
     if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
@@ -2450,9 +2454,10 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
 async def submit_recording_review(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
-        required={"recording_id", "base_flow_version", "review"},
-        optional={"flow_version"},
+        required={"base_flow_version", "review"},
+        optional={"recording_id", "flow_version"},
     )
+    session = _recording_session(run_id, params)
     review = params.get("review")
     if not isinstance(review, dict):
         raise ToolError("review 必须是对象")
@@ -2494,7 +2499,6 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         "blocking_reasons": blocking_reasons,
         "all_passed": all(bool(item["passed"]) for item in verdicts),
     }
-    session = _recording_session(run_id, params)
     from dano.execution.page.flow_spec import flow_spec_fingerprint
 
     current_spec = session.current_flow_spec()

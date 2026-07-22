@@ -351,7 +351,10 @@ export function sanitizeRecordingToolParams(name, params) {
 
 
 const RecordingIdentity = {
-  recording_id: Type.String({ minLength: 1 }),
+  // The Python gateway already binds every tool call to one active run/session.
+  // Models may repeat this diagnostic identity, but correctness must not depend
+  // on them copying it through a long multimodal tool call.
+  recording_id: Type.Optional(Type.String({ minLength: 1 })),
   flow_version: Type.Optional(Type.Integer({ minimum: 0 })),
 };
 

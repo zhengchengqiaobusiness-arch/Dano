@@ -1371,7 +1371,8 @@ def test_recovered_long_screenshot_payload_applies_fields_with_missing_empty_key
     session = _bind(monkeypatch, recording_id="rec-long-overlay")
     session.analysis_image_count = 1
     result = asyncio.run(submit_recording_plan("run-long-overlay", {
-        "recording_id": "rec-long-overlay",
+        # The active run already owns this identity.  Real multimodal model
+        # calls can omit it and must not spend another full inference retrying.
         "base_flow_version": 1,
         "plan": {
             # The JS boundary recovered these real keys from the tool-call
@@ -1412,6 +1413,15 @@ def test_recovered_long_screenshot_payload_applies_fields_with_missing_empty_key
 
     assert result["flow_version"] > 1
     assert session.spec.steps[0].params[0].label == "申请标题"
+
+
+def test_recording_tool_still_rejects_an_explicit_cross_session_identity(monkeypatch):
+    _bind(monkeypatch, recording_id="rec-owned-by-run")
+
+    with pytest.raises(ToolError, match="recording_id 与当前录制会话不匹配"):
+        asyncio.run(get_recording_state("run-owned-by-run", {
+            "recording_id": "rec-from-another-run",
+        }))
 
 
 def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
