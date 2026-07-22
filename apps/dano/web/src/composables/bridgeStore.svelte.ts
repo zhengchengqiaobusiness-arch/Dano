@@ -1,5 +1,6 @@
 import type {
   AskUserQuestionAnswer,
+  BridgeUserSummary,
   ClientMessage,
   FieldAssistCommandPayload,
   FieldAssistResult,
@@ -318,6 +319,7 @@ function setActiveTreeSessionPath(sessionPath: string | null) {
 }
 
 let _connectionStatus = $state<ConnectionStatus>("disconnected");
+let _currentUser = $state<BridgeUserSummary | undefined>(undefined);
 let _rawTranscript = $state<TranscriptEntry[]>([]);
 let _transcriptSessionPath = $state<string | null>(null);
 let _transcriptHasOlder = $state(false);
@@ -375,6 +377,7 @@ let _prefillText = $state<string | null>(null);
 // ---------------------------------------------------------------------------
 
 let connectionStatus = $derived(_connectionStatus);
+let currentUser = $derived(_currentUser);
 let transcript = $derived(_transcript);
 let transcriptDeltas = $derived(_transcriptDeltas);
 let transcriptStreams = $derived(_transcriptStreams);
@@ -2799,6 +2802,7 @@ async function fetchInitialState() {
 function resetTransportState() {
   clientId = null;
   clientMessagesUrl = null;
+  _currentUser = undefined;
   stopHeartbeatWatchdog();
   lastHeartbeatAt = 0;
   if (eventSource) {
@@ -2873,6 +2877,7 @@ async function connectOnce(): Promise<boolean> {
       eventsUrl?: string;
       messagesUrl?: string;
       defaultWorkspacePath?: string | null;
+      currentUser?: BridgeUserSummary;
     };
     const nextClientId = created.client?.id;
     if (!nextClientId || !created.eventsUrl || !created.messagesUrl) {
@@ -2882,6 +2887,7 @@ async function connectOnce(): Promise<boolean> {
     clientId = nextClientId;
     clientMessagesUrl = created.messagesUrl;
     defaultWorkspacePath = normalizeBridgePath(created.defaultWorkspacePath);
+    _currentUser = created.currentUser;
     eventSource = new EventSource(created.eventsUrl);
   } catch (error) {
     markDisconnected(
@@ -2960,6 +2966,9 @@ export function initBridge() {
   return {
     get connectionStatus() {
       return connectionStatus;
+    },
+    get currentUser() {
+      return currentUser;
     },
     get transcript() {
       return transcript;

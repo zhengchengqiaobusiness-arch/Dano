@@ -1,5 +1,6 @@
 /** @vitest-environment happy-dom */
 
+import type { BridgeUserSummary } from "@dano/types/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 function deferred<T>() {
@@ -43,6 +44,7 @@ const eventSources: FakeEventSource[] = [];
 async function connectBridge(
   promptResponse: Promise<Response> | (() => Promise<Response>),
   onPromptRequest?: (init: RequestInit | undefined) => void,
+  currentUser?: BridgeUserSummary,
 ) {
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     if (String(input) === "/api/clients") {
@@ -51,6 +53,7 @@ async function connectBridge(
           client: { id: "client-1" },
           eventsUrl: "/events",
           messagesUrl: "/messages",
+          ...(currentUser ? { currentUser } : {}),
         }),
         { status: 201, headers: { "content-type": "application/json" } },
       );
@@ -84,6 +87,23 @@ describe("Bridge prompt acceptance", () => {
     vi.unstubAllGlobals();
     vi.resetModules();
     eventSources.length = 0;
+  });
+
+  it("exposes the server-projected User summary to the application", async () => {
+    const bridge = await connectBridge(
+      Promise.resolve(new Response(null, { status: 202 })),
+      undefined,
+      {
+        username: "Alice",
+        avatarUrl: "https://example.test/alice.png",
+      },
+    );
+
+    expect(bridge.currentUser).toEqual({
+      username: "Alice",
+      avatarUrl: "https://example.test/alice.png",
+    });
+    bridge.disconnect();
   });
 
   it("waits for HTTP 202 without restoring pending after an earlier server event", async () => {

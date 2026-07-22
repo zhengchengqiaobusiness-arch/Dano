@@ -1282,6 +1282,7 @@
       onNewSession={handleExplicitNewSession}
       {newSessionPending}
       {showNewSession}
+      currentUser={bridge.currentUser}
     />
 
     <ReconnectBanner

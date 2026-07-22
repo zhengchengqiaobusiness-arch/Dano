@@ -1,5 +1,10 @@
 <script lang="ts">
+  import CircleUserRound from "lucide-svelte/icons/circle-user-round";
+  import Menu from "lucide-svelte/icons/menu";
+  import Palette from "lucide-svelte/icons/palette";
   import SquarePen from "lucide-svelte/icons/square-pen";
+  import type { BridgeUserSummary } from "@dano/types/protocol";
+  import * as Popover from "../components/ui/popover";
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
 
@@ -10,6 +15,8 @@
     onNewSession,
     newSessionPending = false,
     showNewSession = true,
+    currentUser,
+    onOpenTheme,
   }: {
     connectionStatus: ConnectionStatus;
     disconnectReason?: string;
@@ -17,7 +24,12 @@
     onNewSession?: () => void;
     newSessionPending?: boolean;
     showNewSession?: boolean;
+    currentUser?: BridgeUserSummary;
+    onOpenTheme?: () => void;
   } = $props();
+
+  let menuOpen = $state(false);
+  let failedAvatarUrl = $state<string | null>(null);
 
   const statusMeta = $derived.by(() => {
     switch (connectionStatus) {
@@ -36,10 +48,30 @@
       ? disconnectReason
       : statusMeta.label,
   );
+
+  function openTheme() {
+    menuOpen = false;
+    onOpenTheme?.();
+  }
 </script>
 
 <header class="app-header">
   <div class="header-leading">
+    {#if showNewSession}
+      <button
+        class="new-session-button"
+        type="button"
+        aria-label={t("appHeader.newSession")}
+        title={t("appHeader.newSession")}
+        disabled={newSessionPending}
+        onclick={() => onNewSession?.()}
+      >
+        <SquarePen size={18} strokeWidth={2.5} aria-hidden="true" />
+        <span>{t("appHeader.newSession")}</span>
+      </button>
+    {/if}
+  </div>
+  <div class="header-trailing">
     <button
       class={`connection-status ${statusMeta.className}`}
       type="button"
@@ -51,20 +83,49 @@
       <span class="status-dot" aria-hidden="true"></span>
       <span>{statusMeta.label}</span>
     </button>
+    <Popover.Root open={menuOpen} onOpenChange={(open) => (menuOpen = open)}>
+      <Popover.Trigger
+        class="menu-button"
+        aria-label={t("appHeader.menu")}
+        title={t("appHeader.menu")}
+      >
+        <Menu size={14} strokeWidth={2.5} aria-hidden="true" />
+      </Popover.Trigger>
+
+      <Popover.Content
+        class="header-menu"
+        align="end"
+        sideOffset={8}
+        collisionPadding={10}
+        trapFocus={false}
+      >
+        <button class="theme-menu-item" type="button" onclick={openTheme}>
+          <Palette size={16} aria-hidden="true" />
+          <span>{t("appHeader.themeColor")}</span>
+        </button>
+        <div class="header-menu-separator" role="separator"></div>
+        <div class="header-user-summary">
+          {#if currentUser?.avatarUrl && currentUser.avatarUrl !== failedAvatarUrl}
+            <img
+              class="header-user-avatar"
+              src={currentUser.avatarUrl}
+              alt=""
+              width="20"
+              height="20"
+              onerror={() => (failedAvatarUrl = currentUser?.avatarUrl ?? null)}
+            />
+          {:else}
+            <CircleUserRound
+              class="header-user-placeholder"
+              size={17}
+              aria-hidden="true"
+            />
+          {/if}
+          <span>{currentUser?.username ?? t("appHeader.defaultUser")}</span>
+        </div>
+      </Popover.Content>
+    </Popover.Root>
   </div>
-  {#if showNewSession}
-    <button
-      class="new-session-button"
-      type="button"
-      aria-label={t("appHeader.newSession")}
-      title={t("appHeader.newSession")}
-      disabled={newSessionPending}
-      onclick={() => onNewSession?.()}
-    >
-      <SquarePen size={18} aria-hidden="true" />
-      <span>{t("appHeader.newSession")}</span>
-    </button>
-  {/if}
 </header>
 
 <style>
@@ -87,6 +148,7 @@
   }
 
   .new-session-button {
+    box-sizing: border-box;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -99,14 +161,21 @@
     color: var(--text);
     font: inherit;
     font-size: 0.82rem;
-    font-weight: 600;
+    font-weight: 700;
     line-height: 1;
     cursor: pointer;
     box-shadow: var(--header-control-shadow);
+    transition:
+      background 150ms ease,
+      transform 150ms ease;
   }
 
   .new-session-button:hover:not(:disabled) {
     background: var(--panel-2);
+  }
+
+  .new-session-button:active:not(:disabled) {
+    transform: scale(0.96);
   }
 
   .new-session-button:focus-visible {
@@ -122,9 +191,16 @@
   .header-leading {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     height: 100%;
     min-width: 0;
+  }
+
+  .header-trailing {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
   }
 
   .connection-status {
@@ -138,13 +214,143 @@
     border-radius: 999px;
     color: var(--text);
     font-size: 0.78rem;
-    font-weight: 650;
+    font-weight: 700;
     line-height: 1;
     background: color-mix(in srgb, var(--panel) 65%, transparent);
     -webkit-backdrop-filter: blur(2px);
     backdrop-filter: blur(2px);
     box-shadow: var(--header-control-shadow);
     cursor: pointer;
+    transition:
+      background 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms ease;
+  }
+
+  .connection-status:hover {
+    background: color-mix(in srgb, var(--panel-2) 76%, transparent);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  }
+
+  .connection-status:active {
+    transform: scale(0.96);
+  }
+
+  .connection-status:focus-visible,
+  :global(.menu-button:focus-visible),
+  :global(.theme-menu-item:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  :global(.menu-button) {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+    color: var(--text);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+    box-shadow: var(--header-control-shadow);
+    cursor: pointer;
+    transition:
+      background 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms ease;
+  }
+
+  :global(.menu-button:hover),
+  :global(.menu-button[data-state="open"]) {
+    background: color-mix(in srgb, var(--panel-2) 76%, transparent);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  }
+
+  :global(.menu-button:active) {
+    transform: scale(0.96);
+  }
+
+  :global(.header-menu) {
+    box-sizing: border-box;
+    z-index: 30;
+    width: 248px;
+    padding: 6px;
+    border: 0;
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+    color: var(--text);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--text) 9%, transparent),
+      0 12px 32px color-mix(in srgb, var(--text) 14%, transparent);
+  }
+
+  :global(.theme-menu-item) {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.84rem;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background 150ms ease,
+      transform 150ms ease;
+  }
+
+  :global(.theme-menu-item:hover),
+  :global(.theme-menu-item:focus-visible) {
+    background: var(--surface-hover);
+  }
+
+  :global(.theme-menu-item:active) {
+    transform: scale(0.96);
+  }
+
+  :global(.header-menu-separator) {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--border);
+  }
+
+  :global(.header-user-summary) {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 40px;
+    padding: 0 10px;
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+
+  :global(.header-user-avatar) {
+    display: block;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+
+  :global(.header-user-placeholder) {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    background: transparent;
   }
 
   .status-dot {
@@ -172,10 +378,6 @@
   @media (max-width: 640px) {
     .app-header {
       margin: 10px 10px 0;
-    }
-
-    .header-leading {
-      gap: 10px;
     }
 
     .new-session-button {
