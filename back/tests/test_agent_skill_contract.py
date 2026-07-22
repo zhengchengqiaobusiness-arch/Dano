@@ -93,6 +93,9 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "多题按 questions 的 `id`" in markdown
     assert "非空" in markdown and "占位" in markdown
     assert "空字符串或安全默认值" not in markdown
+    assert "录制样例必须保留为推荐值" in markdown
+    assert "推荐默认值只用于 `ask_user_question` 展示" in markdown
+    assert "`x-dano-apply-default: true`" in markdown
     assert "取消" in markdown and "停止" in markdown
     assert "校验错误" in markdown and "静默" in markdown
     assert "`inputType: \"date\"`" in markdown
@@ -127,7 +130,8 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
 def test_exported_skill_renders_schema_defaults_in_tables_and_examples():
     markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
 
-    assert "默认值" in markdown
+    assert "推荐默认值" in markdown
+    assert "录制推荐值，需用户确认" in markdown
     assert '"pageNo": 1' in markdown
     assert '"pageSize": 10' in markdown
     assert '"流程状态": "审批中"' in markdown

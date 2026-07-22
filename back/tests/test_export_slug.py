@@ -35,6 +35,12 @@ def test_slug_chinese_actions_unique():
     assert _slug("A-OA.日报填写") == a
 
 
+def test_slug_is_portable_when_internal_id_is_long():
+    slug = _slug("A-OA." + "very_long_action_name_" * 5)
+    assert len(slug) <= 64
+    assert slug == _slug("A-OA." + "very_long_action_name_" * 5)
+
+
 class _FakeRepo:
     def __init__(self, subs=None, *, raises=False):
         self._subs, self._raises = subs or [], raises
@@ -84,22 +90,28 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
 
     folder = _write_skill(tmp_path, manifest)
     contract = json.loads((folder / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
-    readme = (folder / "references" / "README.md").read_text(encoding="utf-8")
     skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+    openai_yaml = (folder / "agents" / "openai.yaml").read_text(encoding="utf-8")
 
     assert contract == manifest.model_dump(mode="json")
     assert len(contract["capabilities"]) == 2
     assert contract["capability_relations"][0]["automatic"] is False
     assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
-    assert "CONTRACT.json" in readme
+    assert f'name: "{folder.name}"' in skill_md
+    assert "metadata:" not in skill_md.split("---", 2)[1]
+    assert f'display_name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in openai_yaml
+    assert f"${folder.name}" in openai_yaml
     assert "ask_user_question" in skill_md
-    assert not (folder / "references" / "platform").exists()
-    assert "## 执行与判定" not in readme
+    assert not (folder / "references" / "README.md").exists()
+    assert not (folder / "references" / "QUICKREF.md").exists()
 
     bundle = _write_business_skill(tmp_path, "A-OA", "日报", [manifest])
     bundle_contract = json.loads((bundle / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
     assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]
+    assert (bundle / "agents" / "openai.yaml").is_file()
+    assert not (bundle / "references" / "README.md").exists()
+    assert not (bundle / "references" / "QUICKREF.md").exists()
 
 
 def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path, monkeypatch):
@@ -139,8 +151,12 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     legacy = folder / "references" / "platform"
     legacy.mkdir(parents=True)
     (legacy / "old.md").write_text("stale", encoding="utf-8")
+    (folder / "scripts" / "__pycache__").mkdir()
+    (folder / "stale.txt").write_text("stale", encoding="utf-8")
     _write_skill(tmp_path / "out", manifest, reference_docs=references)
     assert not legacy.exists()
+    assert not (folder / "scripts" / "__pycache__").exists()
+    assert not (folder / "stale.txt").exists()
 
     with pytest.raises(ValueError, match="日期格式"):
         _write_skill(tmp_path / "out", manifest, reference_docs=references[:1])
@@ -156,6 +172,7 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     )
     index = tmp_path / "out" / index_slug
     assert not (index / "references" / "platform").exists()
+    assert (index / "agents" / "openai.yaml").is_file()
 
 
 def test_reference_configuration_rejects_absolute_missing_and_empty_directories(tmp_path, monkeypatch):

@@ -5,7 +5,8 @@
 
 每个 skill = 一个文件夹(skill-creator 规范:渐进式披露 + 脚本 + references):
   SKILL.md           —— frontmatter(pushy description/触发场景)+ 逐字段参数表 + 输出契约 + 确认工作流 + 示例 + 故障排除
-  references/QUICKREF.md / README.md  —— 速查卡 + 详细说明(字段含义/事实核查解读)
+  agents/openai.yaml —— 业务展示名与默认提示词
+  references/CONTRACT.json / OPTIONS.md —— 无损契约 + 选择项参考
   scripts/dano_call.py  —— 真逻辑:能力级参数校验 + --confirm + --diagnose,POST Dano capability invoke,末行打印稳定 JSON 状态
   scripts/submit.sh / submit.ps1     —— 转发到 dano_call.py 的薄壳
 
@@ -21,6 +22,8 @@ import asyncio
 import json
 import re
 import shutil
+import tempfile
+import uuid
 from pathlib import Path, PureWindowsPath
 
 import structlog
@@ -92,11 +95,33 @@ def _validate_reference_markdown(reference_docs: list[tuple[Path, str]]) -> None
         raise ValueError(f"Skill 参考 Markdown 缺少必要的提问契约（{', '.join(missing)}）: {names}")
 
 
-def _remove_legacy_reference_copy(folder: Path) -> None:
-    """Remove reference files copied by the superseded export implementation."""
-    legacy = folder / "references" / "platform"
-    if legacy.is_dir():
-        shutil.rmtree(legacy)
+def _stage_folder(out_dir: Path, slug: str) -> Path:
+    """Build a complete export beside its target so failed writes never corrupt it."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f".{slug}-", dir=out_dir))
+
+
+def _publish_folder(stage: Path, target: Path, slug: str) -> Path:
+    """Validate then atomically replace one exporter-owned Skill folder."""
+    _validate_generated_skill(stage, slug)
+    backup = target.with_name(f".{target.name}.old-{uuid.uuid4().hex}")
+    had_target = target.exists()
+    if had_target:
+        target.rename(backup)
+    try:
+        stage.rename(target)
+    except Exception:
+        if had_target and backup.exists():
+            backup.rename(target)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+    return target
+
+
+def _abort_stage(stage: Path) -> None:
+    if stage.exists():
+        shutil.rmtree(stage)
 
 
 async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsystem]:
@@ -257,7 +282,50 @@ def _slug(skill_id: str) -> str:
         import hashlib
         h = hashlib.md5(skill_id.encode("utf-8")).hexdigest()[:6]
         s = (f"{s}-{h}".strip("-")) if s else f"dano-{h}"
+    if len(s) > 64:
+        import hashlib
+        suffix = hashlib.sha256(skill_id.encode("utf-8")).hexdigest()[:8]
+        s = f"{s[:55].rstrip('-')}-{suffix}"
     return s
+
+
+def _agents_openai_yaml(slug: str, display_name: str, short_description: str) -> str:
+    """Render the standard UI metadata without adding product-specific guesses."""
+    short = short_description.strip()
+    if len(short) < 25:
+        short += "，支持参数收集、用户确认和执行结果处理"
+    short = short[:64]
+    prompt = f"使用 ${slug} 完成“{display_name}”对应的已发布业务能力。"
+    return (
+        "interface:\n"
+        f"  display_name: {json.dumps(display_name, ensure_ascii=False)}\n"
+        f"  short_description: {json.dumps(short, ensure_ascii=False)}\n"
+        f"  default_prompt: {json.dumps(prompt, ensure_ascii=False)}\n"
+    )
+
+
+def _validate_generated_skill(folder: Path, expected_name: str) -> None:
+    """Fail export before publication when the generated package is not portable."""
+    if not re.fullmatch(r"[a-z0-9-]{1,64}", expected_name):
+        raise ValueError(f"Skill name 不符合 lowercase-hyphen 规范: {expected_name}")
+    skill_path = folder / "SKILL.md"
+    text = skill_path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("SKILL.md 缺少 YAML frontmatter")
+    frontmatter = parts[1]
+    name_line = next((line for line in frontmatter.splitlines() if line.startswith("name:")), "")
+    raw_name = name_line.partition(":")[2].strip()
+    try:
+        actual_name = json.loads(raw_name)
+    except json.JSONDecodeError:
+        actual_name = raw_name
+    if actual_name != expected_name:
+        raise ValueError(f"Skill name 与目录不一致: {actual_name!r} != {expected_name!r}")
+    if len(text.splitlines()) > 500:
+        raise ValueError("SKILL.md 超过 500 行，违反渐进式披露约束")
+    if not (folder / "agents" / "openai.yaml").is_file():
+        raise ValueError("Skill 缺少 agents/openai.yaml")
 
 
 def _fields(m: SkillManifest) -> tuple[list[str], set[str], dict]:
@@ -457,11 +525,12 @@ def _schema_example_value(name: str, schema: dict):  # noqa: ANN001
 
 
 def _schema_default_text(schema: dict) -> str:
-    """Render a grounded default without inventing a business value."""
+    """Keep recorded samples as recommendations while marking silent-safe defaults."""
     schema = schema or {}
     if "default" not in schema or schema.get("default") in (None, ""):
         return "运行时按用户上下文给出非空推荐值"
-    return f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`"
+    label = "安全默认值" if schema.get("x-dano-apply-default") is True else "录制推荐值，需用户确认"
+    return f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`（{label}）"
 
 
 def _capability_contract_section(m: SkillManifest) -> str:
@@ -476,7 +545,7 @@ def _capability_contract_section(m: SkillManifest) -> str:
         if not props:
             blocks.append("\n(无业务输入参数)")
         else:
-            rows = ["| 参数 | 类型 | 必填 | 默认值 | 说明 |", "|---|---|---|---|---|"]
+            rows = ["| 参数 | 类型 | 必填 | 推荐默认值 | 说明 |", "|---|---|---|---|---|"]
             for field, prop in props.items():
                 desc = str((prop or {}).get("description") or (prop or {}).get("label") or field).replace("|", "\\|")
                 rows.append(
@@ -832,7 +901,8 @@ def _interaction_section(m: SkillManifest) -> str:
         "- 同一用户请求包含多个表单、多个表单分区或连续步骤时,必须先一次性汇总本轮所需的全部用户字段,再通过一次 `ask_user_question` 的一个 `questions[]` 统一展示和提交;不得按表单、分区、步骤或字段逐个提问。",
         "- 只收集一个非确认字段时使用顶层 `question` 及该字段自己的 `default`/`options`/`inputType`/`dateFormat`/`required`/`dataSource`/`multiple`;收集多个字段时只使用 `questions[]`。",
         "- `questions[]` 的每一项都必须把自己的 `id`、`question`、`default` 以及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple` 放在该项内部;使用 `questions` 时不要混入顶层字段配置或顶层 `confirm`。",
-        "- 每个非确认问题都必须设置结合当前上下文的非空 `default`:优先使用用户已说出的值,其次使用契约中有证据的默认值或录制样例;禁止空字符串、`<字段>` 等占位值,也不得凭字段名臆造业务值。",
+        "- 每个非确认问题都必须设置结合当前上下文的非空 `default`:优先使用用户已说出的值,其次使用契约中有证据的默认值或录制样例;录制样例必须保留为推荐值供用户直接确认或修改,禁止空字符串、`<字段>` 等占位值,也不得凭字段名臆造业务值。",
+        "- 推荐默认值只用于 `ask_user_question` 展示,不等于用户已回答。只有 `x-dano-apply-default: true` 的安全默认值才允许脚本在缺参时自动应用,其他录制推荐值必须经过用户回答后才能进入调用参数。",
         "- 只有业务上确实必填的字段才设置 `required: true`;可选字段使用 `required: false` 或省略。工具返回 `status=answered` 后,单题取 `answer`,多题按 questions 的 `id` 从 answer 对象合并到能力参数。",
         "- 日期字段使用 `inputType: \"date\"` 并提供 `dateFormat`(如 `yyyy-MM-dd` 或 `yyyy-MM-dd HH:mm`);下游格式不同由调用方在提交前转换。",
         "- 选择型字段只使用参数契约、完整 DOM/JS 证据或真实来源接口提供的候选。API 选项使用 `inputType: \"select\"`/`treeSelect` 与有真实 endpoint 的 `dataSource`;否则先按参数说明或 `--list-options <字段名>` 获取已证实候选,不得猜测枚举或来源接口。",
@@ -990,14 +1060,8 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
         if has_batch_capability else ""
     )
     return f"""---
-name: {slug}
-description: {desc}
-metadata:
-  source: dano:{m.name}
-  capability: {default_capability or 'explicit-selection'}
-  tool: {tool}
-  risk_level: {m.risk_level}
-  requires_confirmation: {str(confirm).lower()}
+name: {json.dumps(slug, ensure_ascii=False)}
+description: {json.dumps(desc, ensure_ascii=False)}
 ---
 
 # {m.title}
@@ -1064,69 +1128,11 @@ metadata:
 {json.dumps(protocol_example, ensure_ascii=False)}
 ```
 
-速查见 `references/QUICKREF.md`；完整机器契约见 `references/CONTRACT.json`。
+完整机器契约见 `references/CONTRACT.json`；存在选择型字段时参考 `references/OPTIONS.md`。
 """
 
 
 # ─────────────────────────── references ───────────────────────────
-def _quickref(m: SkillManifest) -> str:
-    contracts = _capability_contracts(m)
-    if len(contracts) > 1:
-        calls = []
-        for name, contract in contracts.items():
-            properties = ((contract.get("parameters") or {}).get("properties") or {})
-            payload = {"capability": name, "input": {
-                field: _schema_example_value(field, field_schema) for field, field_schema in properties.items()
-            }}
-            if contract.get("requires_confirmation"):
-                payload["confirm"] = True
-            calls += [f"### `{name}` · {contract.get('title') or name}", "```bash",
-                      "bash scripts/submit.sh --json '" + json.dumps(payload, ensure_ascii=False) + "'", "```", ""]
-        relationships = _capability_relationship_section(m)
-        return f"""# {m.title} · 速查
-
-本 Skill 有多个独立能力，必须显式选择 capability；不会默认执行写操作。
-
-## 自检
-```bash
-bash scripts/submit.sh --diagnose
-```
-
-## 能力调用
-{chr(10).join(calls)}
-{relationships}
-
-## 常见状态
-`succeeded` / `partial_success` / `need_select` / `need_confirm` / `failed`
-"""
-    flags = _flags(m)
-    cflag = " --confirm" if m.requires_confirmation else ""
-    capability = _capability(m)
-    return f"""# {m.title} · 速查
-
-正常用脚本入口,不要手拼 curl。
-默认 capability:`{capability}`;需要覆盖时加 `--capability <capability>`。
-
-## 自检
-```bash
-bash scripts/submit.sh --diagnose
-```
-
-## 提交
-```bash
-bash scripts/submit.sh {flags}{cflag}
-```
-
-## 常见状态(末行 JSON)
-```json
-{{"status": "succeeded", "state": "completed", "output": {{}}}}
-{{"status": "partial_success", "state": "partially_completed", "output": {{}}}}
-{{"status": "need_confirm"}}
-{{"status": "failed", "reason": "..."}}
-```
-"""
-
-
 def _options_md(m: SkillManifest) -> str | None:
     """references/OPTIONS.md:选择型字段的**候选值清单**(快照进 skill,让 agent 从真实选项里选,不凭空猜)。
     无任何选择型候选 → 返回 None(不产生空文件)。提交时 Dano 仍按名字现查内部 ID(选项更新以运行期为准)。"""
@@ -1178,18 +1184,6 @@ def _options_md(m: SkillManifest) -> str | None:
     return ("# 可选值参考\n\n选择型字段的候选值。多能力 Skill 必须同时指定 `--capability`。\n"
             + source_note + snapshot_note + "\n"
             + "\n\n".join(blocks) + "\n")
-
-
-def _readme(m: SkillManifest) -> str:
-    return f"""# {m.title} · 导出文件导航
-
-- `../SKILL.md`:面向 Agent 的使用、交互、确认和结果处置说明。
-- `QUICKREF.md`:常用命令速查。
-- `CONTRACT.json`:无损机器契约，包含全部 capabilities、relations、input/output schema、确认与验证要求。
-- `OPTIONS.md`:存在静态或动态选择型字段时生成；动态选项仍以运行期查询结果为准。
-
-`source: dano:{m.name}` · 风险 `{m.risk_level}`。契约冲突时以 `CONTRACT.json` 和运行时校验结果为准。
-"""
 
 
 # ─────────────────────────── scripts ───────────────────────────
@@ -1628,28 +1622,37 @@ def _write_skill(out_dir: Path, m: SkillManifest,
     docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
     _validate_reference_markdown(docs)
     slug = _slug(m.name)
-    folder = out_dir / slug
-    (folder / "scripts").mkdir(parents=True, exist_ok=True)
-    (folder / "references").mkdir(parents=True, exist_ok=True)
-    _remove_legacy_reference_copy(folder)
-    (folder / "SKILL.md").write_text(_skill_md(m, slug), encoding="utf-8")
-    (folder / "references" / "QUICKREF.md").write_text(_quickref(m), encoding="utf-8")
-    (folder / "references" / "README.md").write_text(_readme(m), encoding="utf-8")
-    (folder / "references" / "CONTRACT.json").write_text(
-        json.dumps(m.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    opts_md = _options_md(m)                          # 选择型候选值清单(让 agent 从真实选项里选,问题1)
-    if opts_md:
-        (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
-    py = folder / "scripts" / "dano_call.py"
-    py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
-    _chmod_x(py)
-    sh = folder / "scripts" / "submit.sh"
-    sh.write_text(_SUBMIT_SH, encoding="utf-8", newline="\n")
-    _chmod_x(sh)
-    (folder / "scripts" / "submit.ps1").write_text(_SUBMIT_PS1, encoding="utf-8")
-    return folder
+    target = out_dir / slug
+    folder = _stage_folder(out_dir, slug)
+    try:
+        for child in ("agents", "scripts", "references"):
+            (folder / child).mkdir(parents=True, exist_ok=True)
+        (folder / "SKILL.md").write_text(_skill_md(m, slug), encoding="utf-8")
+        (folder / "agents" / "openai.yaml").write_text(
+            _agents_openai_yaml(
+                slug, m.title or slug,
+                f"调用 Dano 执行“{m.title or slug}”已发布能力，支持参数收集、确认和结果处理",
+            ),
+            encoding="utf-8",
+        )
+        (folder / "references" / "CONTRACT.json").write_text(
+            json.dumps(m.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        opts_md = _options_md(m)
+        if opts_md:
+            (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
+        py = folder / "scripts" / "dano_call.py"
+        py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
+        _chmod_x(py)
+        sh = folder / "scripts" / "submit.sh"
+        sh.write_text(_SUBMIT_SH, encoding="utf-8", newline="\n")
+        _chmod_x(sh)
+        (folder / "scripts" / "submit.ps1").write_text(_SUBMIT_PS1, encoding="utf-8")
+        return _publish_folder(folder, target, slug)
+    except Exception:
+        _abort_stage(folder)
+        raise
 
 
 # ─────────────────────────── 业务剧本 skill(多操作合成一本)───────────────────────────
@@ -1690,46 +1693,6 @@ python "$dir/__ENTRY__.py" --diagnose
 """
 
 
-def _biz_quickref(business: str, manifests: list[SkillManifest]) -> str:
-    label = _biz_label(business, manifests)
-    command_lines: list[str] = []
-    for m in manifests:
-        contracts = _capability_contracts(m)
-        if len(contracts) == 1:
-            command_lines.append(
-                f"# {m.title}\nbash scripts/{m.action}.sh {_flags(m)}"
-                f"{' --confirm' if m.requires_confirmation else ''}"
-            )
-            continue
-        for name, contract in contracts.items():
-            command_lines.append(
-                f"# {m.title} / {contract.get('title') or name}\n"
-                f"bash scripts/{m.action}.sh --capability {name} --json '<能力输入 JSON>'"
-                f"{' --confirm' if contract.get('requires_confirmation') else ''}"
-            )
-    lines = "\n".join(command_lines)
-    return f"""# {label} · 速查
-
-每个操作一个脚本(写操作加 `--confirm`):
-```bash
-{lines}
-```
-自检:`bash scripts/<操作>.sh --diagnose`
-"""
-
-
-def _biz_readme(subsystem: str, business: str, manifests: list[SkillManifest]) -> str:
-    label = _biz_label(business, manifests)
-    return f"""# {label} · 导出文件导航
-
-- `../SKILL.md`:业务操作选择、交互、确认和结果处置说明。
-- `QUICKREF.md`:各操作与 capability 的常用命令。
-- `CONTRACT.json`:无损机器契约，包含本业务全部 Skill、capabilities、relations 和 schema。
-
-`business: {business}` · 子系统 `{subsystem}` · 共 {len(manifests)} 个操作。契约冲突时以 `CONTRACT.json` 和运行时校验结果为准。
-"""
-
-
 def _business_skill_md(subsystem: str, business: str, manifests: list[SkillManifest], slug: str) -> str:
     """确定性渲染业务剧本 SKILL.md,不依赖已删除的 generation/playbook 包。"""
     label = _biz_label(business, manifests)
@@ -1759,13 +1722,10 @@ def _business_skill_md(subsystem: str, business: str, manifests: list[SkillManif
         f"\n\n{_interaction_section(m)}"
         for m in manifests
     )
+    description = f"{label}: Dano 导出的业务剧本,包含 {len(manifests)} 个已上架操作。用于办理或查询该业务时按脚本调用 Dano。"
     return f"""---
-name: {slug}
-description: {label}: Dano 导出的业务剧本,包含 {len(manifests)} 个已上架操作。用于办理或查询该业务时按脚本调用 Dano。
-metadata:
-  source: dano
-  subsystem: {subsystem}
-  business: {business}
+name: {json.dumps(slug, ensure_ascii=False)}
+description: {json.dumps(description, ensure_ascii=False)}
 ---
 
 # {label}
@@ -1802,40 +1762,50 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
     docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
     _validate_reference_markdown(docs)
     slug = _slug(f"{subsystem}.{business}")
-    folder = out_dir / slug
-    (folder / "scripts").mkdir(parents=True, exist_ok=True)
-    (folder / "references").mkdir(parents=True, exist_ok=True)
-    _remove_legacy_reference_copy(folder)
-    if md_text is None:
-        md_text = _business_skill_md(subsystem, business, manifests, slug)
-    (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
-    (folder / "references" / "QUICKREF.md").write_text(_biz_quickref(business, manifests), encoding="utf-8")
-    (folder / "references" / "README.md").write_text(_biz_readme(subsystem, business, manifests), encoding="utf-8")
-    bundle_contract = {
-        "protocol": "dano.skill_bundle.v1",
-        "subsystem": subsystem,
-        "business": business,
-        "skills": [manifest.model_dump(mode="json") for manifest in manifests],
-    }
-    (folder / "references" / "CONTRACT.json").write_text(
-        json.dumps(bundle_contract, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    entry = (manifests[0].action if manifests else "diagnose")   # 自检入口:转发任一操作的 --diagnose
-    (folder / "scripts" / "diagnose.sh").write_text(
-        _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")
-    _chmod_x(folder / "scripts" / "diagnose.sh")
-    (folder / "scripts" / "diagnose.ps1").write_text(
-        _DIAGNOSE_PS1.replace("__ENTRY__", entry), encoding="utf-8")
-    for m in manifests:                                       # 每操作一个脚本入口(像 lanxin)
-        py = folder / "scripts" / f"{m.action}.py"
-        py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
-        _chmod_x(py)
-        sh = folder / "scripts" / f"{m.action}.sh"
-        sh.write_text(_op_sh(m.action), encoding="utf-8", newline="\n")
-        _chmod_x(sh)
-        (folder / "scripts" / f"{m.action}.ps1").write_text(_op_ps1(m.action), encoding="utf-8")
-    return folder
+    target = out_dir / slug
+    folder = _stage_folder(out_dir, slug)
+    try:
+        for child in ("agents", "scripts", "references"):
+            (folder / child).mkdir(parents=True, exist_ok=True)
+        if md_text is None:
+            md_text = _business_skill_md(subsystem, business, manifests, slug)
+        label = _biz_label(business, manifests)
+        (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
+        (folder / "agents" / "openai.yaml").write_text(
+            _agents_openai_yaml(
+                slug, label,
+                f"调用 Dano 办理或查询“{label}”业务，按已发布操作收集参数并处理结果",
+            ),
+            encoding="utf-8",
+        )
+        bundle_contract = {
+            "protocol": "dano.skill_bundle.v1",
+            "subsystem": subsystem,
+            "business": business,
+            "skills": [manifest.model_dump(mode="json") for manifest in manifests],
+        }
+        (folder / "references" / "CONTRACT.json").write_text(
+            json.dumps(bundle_contract, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        entry = (manifests[0].action if manifests else "diagnose")
+        (folder / "scripts" / "diagnose.sh").write_text(
+            _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")
+        _chmod_x(folder / "scripts" / "diagnose.sh")
+        (folder / "scripts" / "diagnose.ps1").write_text(
+            _DIAGNOSE_PS1.replace("__ENTRY__", entry), encoding="utf-8")
+        for m in manifests:
+            py = folder / "scripts" / f"{m.action}.py"
+            py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
+            _chmod_x(py)
+            sh = folder / "scripts" / f"{m.action}.sh"
+            sh.write_text(_op_sh(m.action), encoding="utf-8", newline="\n")
+            _chmod_x(sh)
+            (folder / "scripts" / f"{m.action}.ps1").write_text(_op_ps1(m.action), encoding="utf-8")
+        return _publish_folder(folder, target, slug)
+    except Exception:
+        _abort_stage(folder)
+        raise
 
 
 # ─────────────────────────── index 路由(总台,自动生成)───────────────────────────
@@ -1844,12 +1814,10 @@ def _index_md(entries: list[dict], slug: str) -> str:
     rows = "\n".join(f"| {e['label']} | `{e['folder']}` | {e['ops']} 个操作 |" for e in entries)
     table = "| 业务 | 剧本目录 | 规模 |\n|---|---|---|\n" + rows
     names = "、".join(e["label"] for e in entries) or "(暂无)"
+    description = f"OA 业务总台:统一入口,把用户意图路由到具体业务剧本({names})。当用户提到办理/查询任一 OA 业务时,先看本目录选对剧本。"
     return f"""---
-name: {slug}
-description: OA 业务总台:统一入口,把用户意图路由到具体业务剧本({names})。当用户提到办理/查询任一 OA 业务时,先看本目录选对剧本。
-metadata:
-  source: dano:index
-  businesses: {len(entries)}
+name: {json.dumps(slug, ensure_ascii=False)}
+description: {json.dumps(description, ensure_ascii=False)}
 ---
 
 # OA 业务剧本总台
@@ -1870,11 +1838,23 @@ def _write_index(out_dir: Path, entries: list[dict],
     docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
     _validate_reference_markdown(docs)
     slug = "dano-oa-index"
-    folder = out_dir / slug
-    folder.mkdir(parents=True, exist_ok=True)
-    _remove_legacy_reference_copy(folder)
-    (folder / "SKILL.md").write_text(_index_md(entries, slug), encoding="utf-8")
-    return slug
+    target = out_dir / slug
+    folder = _stage_folder(out_dir, slug)
+    try:
+        (folder / "agents").mkdir(parents=True, exist_ok=True)
+        (folder / "SKILL.md").write_text(_index_md(entries, slug), encoding="utf-8")
+        (folder / "agents" / "openai.yaml").write_text(
+            _agents_openai_yaml(
+                slug, "Dano OA 业务总台",
+                "根据用户目标选择正确的 Dano OA 业务 Skill，并进入对应已发布业务流程",
+            ),
+            encoding="utf-8",
+        )
+        _publish_folder(folder, target, slug)
+        return slug
+    except Exception:
+        _abort_stage(folder)
+        raise
 
 
 async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
