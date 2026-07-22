@@ -20,12 +20,14 @@ import argparse
 import asyncio
 import json
 import re
-from pathlib import Path
+import shutil
+from pathlib import Path, PureWindowsPath
 
 import structlog
 
 from dano.assets.repository import AssetRepository
 from dano.catalog.manifest import SkillManifest, build_manifests, tool_name_of
+from dano.config import get_settings
 from dano.orchestrator.skills import SkillRegistry
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import Subsystem
@@ -33,6 +35,68 @@ from dano.shared.enums import Subsystem
 log = structlog.get_logger(__name__)
 # 原型常量仅作空租户 / 无 DB 兜底;真实系统由 _tenant_subsystems 从该租户已发布资产发现(任意系统,不写死)。
 _PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _configured_reference_dir() -> Path:
+    """Resolve the configured, cross-platform relative reference directory."""
+    configured = str(get_settings().skill_reference_dir or "").strip()
+    if not configured:
+        raise ValueError("DANO_SKILL_REFERENCE_DIR 不能为空")
+    relative = Path(configured.replace("\\", "/"))
+    if relative.is_absolute() or PureWindowsPath(configured).is_absolute():
+        raise ValueError("DANO_SKILL_REFERENCE_DIR 必须是相对仓库根目录的路径")
+    project_root = _PROJECT_ROOT.resolve()
+    resolved = (project_root / relative).resolve()
+    try:
+        resolved.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("DANO_SKILL_REFERENCE_DIR 不得超出仓库根目录") from exc
+    return resolved
+
+
+def _load_reference_markdown(source_dir: Path) -> list[tuple[Path, str]]:
+    """Read every Markdown file recursively, preserving its relative path."""
+    source = source_dir.resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"Skill 参考目录不存在或不是文件夹: {source}")
+    files = sorted(
+        (path for path in source.rglob("*") if path.is_file() and path.suffix.lower() == ".md"),
+        key=lambda path: path.relative_to(source).as_posix().casefold(),
+    )
+    if not files:
+        raise ValueError(f"Skill 参考目录中没有 Markdown 文件: {source}")
+    try:
+        return [(path.relative_to(source), path.read_text(encoding="utf-8")) for path in files]
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Skill 参考 Markdown 必须使用 UTF-8 编码: {exc.object!r}") from exc
+
+
+def _validate_reference_markdown(reference_docs: list[tuple[Path, str]]) -> None:
+    """Validate the complete configured reference set before rendering Skills."""
+    combined = "\n\n".join(content for _, content in reference_docs)
+    required_terms = {
+        "ask_user_question": "原生提问工具",
+        "questions": "多字段 questions 数组",
+        "default": "推荐默认值",
+        "required": "必填规则",
+        "dateFormat": "日期格式",
+        "dataSource": "远程选项来源",
+        "confirm": "最终确认",
+        "cancelled": "取消结果",
+        "validation error": "参数校验错误处理",
+    }
+    missing = [label for term, label in required_terms.items() if term not in combined]
+    if missing:
+        names = ", ".join(path.as_posix() for path, _ in reference_docs) or "<空>"
+        raise ValueError(f"Skill 参考 Markdown 缺少必要的提问契约（{', '.join(missing)}）: {names}")
+
+
+def _remove_legacy_reference_copy(folder: Path) -> None:
+    """Remove reference files copied by the superseded export implementation."""
+    legacy = folder / "references" / "platform"
+    if legacy.is_dir():
+        shutil.rmtree(legacy)
 
 
 async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsystem]:
@@ -765,6 +829,7 @@ def _interaction_section(m: SkillManifest) -> str:
         "",
         "- 用户要求填写表单、办理业务或需要补充任何字段时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
         "- 每次回复最多原生调用一次 `ask_user_question`;多个相关缺失字段必须合并到这一次调用的 `questions` 数组里,不要逐字段拆成多轮打扰用户。",
+        "- 同一用户请求包含多个表单、多个表单分区或连续步骤时,必须先一次性汇总本轮所需的全部用户字段,再通过一次 `ask_user_question` 的一个 `questions[]` 统一展示和提交;不得按表单、分区、步骤或字段逐个提问。",
         "- 只收集一个非确认字段时使用顶层 `question` 及该字段自己的 `default`/`options`/`inputType`/`dateFormat`/`required`/`dataSource`/`multiple`;收集多个字段时只使用 `questions[]`。",
         "- `questions[]` 的每一项都必须把自己的 `id`、`question`、`default` 以及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple` 放在该项内部;使用 `questions` 时不要混入顶层字段配置或顶层 `confirm`。",
         "- 每个非确认问题都必须设置结合当前上下文的非空 `default`:优先使用用户已说出的值,其次使用契约中有证据的默认值或录制样例;禁止空字符串、`<字段>` 等占位值,也不得凭字段名臆造业务值。",
@@ -1558,11 +1623,15 @@ def _chmod_x(path: Path) -> None:
         pass
 
 
-def _write_skill(out_dir: Path, m: SkillManifest) -> Path:
+def _write_skill(out_dir: Path, m: SkillManifest,
+                 *, reference_docs: list[tuple[Path, str]] | None = None) -> Path:
+    docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
+    _validate_reference_markdown(docs)
     slug = _slug(m.name)
     folder = out_dir / slug
     (folder / "scripts").mkdir(parents=True, exist_ok=True)
     (folder / "references").mkdir(parents=True, exist_ok=True)
+    _remove_legacy_reference_copy(folder)
     (folder / "SKILL.md").write_text(_skill_md(m, slug), encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_quickref(m), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_readme(m), encoding="utf-8")
@@ -1724,15 +1793,19 @@ metadata:
 
 
 def _write_business_skill(out_dir: Path, subsystem: str, business: str,
-                          manifests: list[SkillManifest], *, md_text: str | None = None) -> Path:
+                          manifests: list[SkillManifest], *, md_text: str | None = None,
+                          reference_docs: list[tuple[Path, str]] | None = None) -> Path:
     """同业务多操作 → 一本剧本 skill(多操作脚本 + 六段式剧本 SKILL.md)。
 
     md_text 给定则用它;否则用本模块的确定性渲染。
     """
+    docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
+    _validate_reference_markdown(docs)
     slug = _slug(f"{subsystem}.{business}")
     folder = out_dir / slug
     (folder / "scripts").mkdir(parents=True, exist_ok=True)
     (folder / "references").mkdir(parents=True, exist_ok=True)
+    _remove_legacy_reference_copy(folder)
     if md_text is None:
         md_text = _business_skill_md(subsystem, business, manifests, slug)
     (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
@@ -1792,10 +1865,14 @@ metadata:
 """
 
 
-def _write_index(out_dir: Path, entries: list[dict]) -> str:
+def _write_index(out_dir: Path, entries: list[dict],
+                 *, reference_docs: list[tuple[Path, str]] | None = None) -> str:
+    docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
+    _validate_reference_markdown(docs)
     slug = "dano-oa-index"
     folder = out_dir / slug
     folder.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_reference_copy(folder)
     (folder / "SKILL.md").write_text(_index_md(entries, slug), encoding="utf-8")
     return slug
 
@@ -1812,6 +1889,8 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     repo = AssetRepository()
     subs = await _tenant_subsystems(repo, tenant)   # 发现该租户真实系统(任意系统),与网关一致
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
+    reference_docs = _load_reference_markdown(_configured_reference_dir())
+    _validate_reference_markdown(reference_docs)
     excluded = set(exclude_skill_ids or set())
     export_skills = [_upgrade_recorded_skill_for_export(skill) for skill in reg.skills]
     manifests = [m for m in build_manifests(export_skills) if m.name not in excluded]
@@ -1843,7 +1922,8 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
         try:                                                 # 每业务独立:一个崩不连累其它
             slug = _slug(f"{sub}.{biz}")
             md = _business_skill_md(sub, biz, ms, slug)
-            folder = _write_business_skill(out, sub, biz, ms, md_text=md)
+            folder = _write_business_skill(
+                out, sub, biz, ms, md_text=md, reference_docs=reference_docs)
             log.info("export.business_skill", business=biz, subsystem=sub,
                      ops=[m.action for m in ms], folder=folder.name)
             written.append(folder.name)
@@ -1852,11 +1932,11 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
             log.warning("export.business_skill_failed", business=biz, subsystem=sub, error=str(e))
     for m in standalone:
         try:
-            written.append(_write_skill(out, m).name)
+            written.append(_write_skill(out, m, reference_docs=reference_docs).name)
         except Exception as e:  # noqa: BLE001
             log.warning("export.standalone_failed", action=m.action, error=str(e))
     if index_entries:                                        # 自动生成 index 路由总台
-        written.append(_write_index(out, index_entries))
+        written.append(_write_index(out, index_entries, reference_docs=reference_docs))
     log.info("export.agent_skills", tenant=tenant, out=str(out),
              count=len(written), businesses=len(groups), standalone=len(standalone))
     return written

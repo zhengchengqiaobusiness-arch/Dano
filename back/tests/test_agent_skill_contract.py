@@ -84,6 +84,9 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "原生调用 `ask_user_question`" in markdown
     assert "`questions` 数组" in markdown
     assert "不要逐字段拆成多轮" in markdown
+    assert "多个表单" in markdown
+    assert "一次性汇总" in markdown
+    assert "不得按表单" in markdown
     assert "每次回复" in markdown and "一次" in markdown
     assert "只收集一个非确认字段" in markdown
     assert "业务上确实必填" in markdown
@@ -98,13 +101,16 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "`partial_success`" not in markdown
 
     interaction = manifest.call_protocol["interaction_protocol"]
-    assert interaction["source_contract"] == "back/doc/dano-tool-call-contract.md"
     assert interaction["max_calls_per_assistant_response"] == 1
     assert interaction["non_confirmation_default"]["string_must_be_non_empty"] is True
     assert interaction["confirmation"]["allowed_keys"] == ["question", "confirm"]
     assert interaction["result_statuses"] == ["answered", "cancelled"]
     assert interaction["single_field_collection"]["mode"] == "top_level"
     assert interaction["multi_field_collection"]["top_level_field_configuration_forbidden"] is True
+    assert interaction["multi_field_collection"]["aggregate_across"] == [
+        "forms", "form_sections", "workflow_steps",
+    ]
+    assert interaction["multi_field_collection"]["per_form_calls_forbidden"] is True
     assert interaction["field_rules"]["required_default"] is False
     assert interaction["field_rules"]["date"]["dateFormat_required"] is True
     assert interaction["field_rules"]["choices"] == {

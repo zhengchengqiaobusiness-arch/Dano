@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from dano.catalog.manifest import to_manifest
 from dano.export.agent_skills import (
     _PROTOTYPE_SUBSYSTEMS,
+    _configured_reference_dir,
+    _load_reference_markdown,
     _slug,
     _tenant_subsystems,
     _write_business_skill,
+    _write_index,
     _write_skill,
 )
 from dano.orchestrator.types import SkillSpec
@@ -81,18 +85,105 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     folder = _write_skill(tmp_path, manifest)
     contract = json.loads((folder / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     readme = (folder / "references" / "README.md").read_text(encoding="utf-8")
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
 
     assert contract == manifest.model_dump(mode="json")
     assert len(contract["capabilities"]) == 2
     assert contract["capability_relations"][0]["automatic"] is False
     assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
     assert "CONTRACT.json" in readme
+    assert "ask_user_question" in skill_md
+    assert not (folder / "references" / "platform").exists()
     assert "## 执行与判定" not in readme
 
     bundle = _write_business_skill(tmp_path, "A-OA", "日报", [manifest])
     bundle_contract = json.loads((bundle / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
     assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]
+
+
+def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path, monkeypatch):
+    import dano.export.agent_skills as agent_skills
+
+    source = tmp_path / "guidance"
+    (source / "nested").mkdir(parents=True)
+    (source / "contract.md").write_text(
+        "ask_user_question questions default required", encoding="utf-8")
+    (source / "nested" / "rules.MD").write_text(
+        "dateFormat dataSource confirm cancelled validation error", encoding="utf-8")
+    (source / "ignored.txt").write_text("not markdown", encoding="utf-8")
+    monkeypatch.setattr(agent_skills, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(skill_reference_dir="guidance"),
+    )
+
+    configured = _configured_reference_dir()
+    references = _load_reference_markdown(configured)
+    assert [path.as_posix() for path, _ in references] == ["contract.md", "nested/rules.MD"]
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.reference_export",
+        subsystem=Subsystem.OA,
+        action="reference_export",
+        risk_level=RiskLevel.L1,
+    ))
+    folder = _write_skill(tmp_path / "out", manifest, reference_docs=references)
+
+    assert not (folder / "references" / "platform").exists()
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "ask_user_question" in skill_md
+    assert "多个表单" in skill_md
+
+    legacy = folder / "references" / "platform"
+    legacy.mkdir(parents=True)
+    (legacy / "old.md").write_text("stale", encoding="utf-8")
+    _write_skill(tmp_path / "out", manifest, reference_docs=references)
+    assert not legacy.exists()
+
+    with pytest.raises(ValueError, match="日期格式"):
+        _write_skill(tmp_path / "out", manifest, reference_docs=references[:1])
+
+    bundle = _write_business_skill(
+        tmp_path / "out", "A-OA", "reference", [manifest], reference_docs=references)
+    assert not (bundle / "references" / "platform").exists()
+    assert "ask_user_question" in (bundle / "SKILL.md").read_text(encoding="utf-8")
+
+    index_slug = _write_index(
+        tmp_path / "out", [{"label": "reference", "folder": bundle.name, "ops": 1}],
+        reference_docs=references,
+    )
+    index = tmp_path / "out" / index_slug
+    assert not (index / "references" / "platform").exists()
+
+
+def test_reference_configuration_rejects_absolute_missing_and_empty_directories(tmp_path, monkeypatch):
+    import dano.export.agent_skills as agent_skills
+
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(skill_reference_dir=str(tmp_path.resolve())),
+    )
+    with pytest.raises(ValueError, match="必须是相对"):
+        _configured_reference_dir()
+
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(skill_reference_dir="../outside"),
+    )
+    with pytest.raises(ValueError, match="不得超出"):
+        _configured_reference_dir()
+
+    with pytest.raises(FileNotFoundError, match="不存在"):
+        _load_reference_markdown(tmp_path / "missing")
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="没有 Markdown"):
+        _load_reference_markdown(empty)
 
 
 def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_residue(tmp_path):

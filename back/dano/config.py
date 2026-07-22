@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 2_048
     llm_cache_ttl_s: int = 86_400             # 相同规范化输入跨会话/重启复用 24h
 
+    # ── Agent Skill 导出参考规范 ──
+    # 相对仓库根目录解析；使用相对路径可同时适配 Windows 开发机和 Linux 部署。
+    skill_reference_dir: str = Field(
+        default="doc",
+        description="Agent Skill 生成时读取的 Markdown 参考目录（相对仓库根目录）",
+    )
+
     # ── 录制 V2 浏览器设置 ──
     browser_headless: bool = True        # = DANO_BROWSER_HEADLESS:浏览器无头(调试可设 False 看界面)
     page_timeout_s: float = 120.0        # = DANO_PAGE_TIMEOUT_S:单次页面运行总超时(防卡死)

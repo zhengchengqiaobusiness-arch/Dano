@@ -436,6 +436,8 @@ def _ask_user_question_interaction_protocol() -> dict:
         "multi_field_collection": {
             "mode": "questions_array",
             "single_submit": True,
+            "aggregate_across": ["forms", "form_sections", "workflow_steps"],
+            "per_form_calls_forbidden": True,
             "field_configuration_location": "questions[]",
             "top_level_field_configuration_forbidden": True,
         },
@@ -473,7 +475,6 @@ def _ask_user_question_interaction_protocol() -> dict:
         "validation_error_behavior": "retry_silently_with_corrected_native_tool_call",
         "cancel_behavior": "stop_current_workflow_and_do_not_retry_until_new_explicit_user_request",
         "result_statuses": ["answered", "cancelled"],
-        "source_contract": "back/doc/dano-tool-call-contract.md",
     }
 
 
