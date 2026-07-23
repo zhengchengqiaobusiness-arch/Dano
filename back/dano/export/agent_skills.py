@@ -20,8 +20,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
@@ -110,9 +112,20 @@ def _stage_folder(out_dir: Path, slug: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f".{slug}-", dir=out_dir))
 
 
+def _make_export_tree_readable(root: Path) -> None:
+    """Generated Skills are read by a runtime container that may use another UID."""
+    for path in (root, *root.rglob("*")):
+        if path.is_dir():
+            mode = 0o755
+        else:
+            mode = 0o755 if path.stat().st_mode & stat.S_IXUSR else 0o644
+        os.chmod(path, mode)
+
+
 def _publish_folder(stage: Path, target: Path, slug: str) -> Path:
     """Validate then atomically replace one exporter-owned Skill folder."""
     _validate_generated_skill(stage, slug)
+    _make_export_tree_readable(stage)
     backup = target.with_name(f".{target.name}.old-{uuid.uuid4().hex}")
     had_target = target.exists()
     if had_target:
@@ -1619,8 +1632,6 @@ exit $LASTEXITCODE
 
 def _chmod_x(path: Path) -> None:
     try:
-        import os
-        import stat
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     except OSError:
         pass

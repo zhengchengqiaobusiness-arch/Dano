@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ from dano.export.agent_skills import (
     _PROTOTYPE_SUBSYSTEMS,
     _configured_reference_dir,
     _load_reference_markdown,
+    _publish_folder,
     _slug,
     _tenant_subsystems,
     _write_business_skill,
@@ -39,6 +42,36 @@ def test_slug_is_portable_when_internal_id_is_long():
     slug = _slug("A-OA." + "very_long_action_name_" * 5)
     assert len(slug) <= 64
     assert slug == _slug("A-OA." + "very_long_action_name_" * 5)
+
+
+def test_publish_folder_makes_generated_tree_readable_by_runtime_user(tmp_path, monkeypatch):
+    """Linux 导出后会由另一个容器用户读取，目录不能保留 mkdtemp 的 0700。"""
+    stage = tmp_path / ".dano-test-stage"
+    target = tmp_path / "dano-test"
+    nested = stage / "references"
+    nested.mkdir(parents=True)
+    (stage / "SKILL.md").write_text("test", encoding="utf-8")
+    (nested / "CONTRACT.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "dano.export.agent_skills._validate_generated_skill",
+        lambda *_args, **_kwargs: None,
+    )
+    permissions: dict[str, int] = {}
+    monkeypatch.setattr(
+        os,
+        "chmod",
+        lambda path, mode: permissions.__setitem__(
+            str(path).replace("\\", "/").split("/")[-1],
+            stat.S_IMODE(mode),
+        ),
+    )
+
+    _publish_folder(stage, target, "dano-test")
+
+    assert permissions[".dano-test-stage"] == 0o755
+    assert permissions["references"] == 0o755
+    assert permissions["SKILL.md"] == 0o644
+    assert permissions["CONTRACT.json"] == 0o644
 
 
 class _FakeRepo:
