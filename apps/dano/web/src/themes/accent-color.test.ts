@@ -12,7 +12,7 @@ describe("Theme Color", () => {
     expect(ACCENT_COLOR_PRESETS).toEqual({
       default: "#53b559",
       blue: "#7aa2f7",
-      gray: "#e9e9e980",
+      gray: "#c4c4c4",
       yellow: "#d79921",
       pink: "#eb6f92",
       purple: "#cba6f7",
@@ -22,7 +22,7 @@ describe("Theme Color", () => {
   it.each([
     ["default", "#53b559", "#ffffff"],
     ["blue", "#7aa2f7", "#ffffff"],
-    ["gray", "#e9e9e980", "#0d1117"],
+    ["gray", "#c4c4c4", "#0d1117"],
     ["yellow", "#d79921", "#ffffff"],
     ["pink", "#eb6f92", "#ffffff"],
     ["purple", "#cba6f7", "#ffffff"],
