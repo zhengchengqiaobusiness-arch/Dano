@@ -1,10 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { ACCENT_COLOR_PRESETS } from "./accent-color";
 import { PI_BASE46_DARK_THEME } from "./dark";
-import { resolveAppThemeVars } from "./index";
+import { resolveAppThemeVars, resolveShikiTheme } from "./index";
 import { PI_BASE46_LIGHT_THEME } from "./light";
 
 describe("resolveAppThemeVars", () => {
+  it("exports semantic overlay layer tokens", () => {
+    const vars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
+    const layers = [
+      "--layer-popover",
+      "--layer-dialog-overlay",
+      "--layer-dialog",
+      "--layer-notification",
+    ].map(variable => Number(vars[variable]));
+
+    expect(layers.every(Number.isFinite)).toBe(true);
+    expect(layers).toEqual([...layers].sort((a, b) => a - b));
+    expect(new Set(layers).size).toBe(layers.length);
+  });
+
   it("does not emit a separate send button background token", () => {
     const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
     const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
@@ -39,12 +53,12 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--on-accent"]).toBe("#ffffff");
   });
 
-  it("uses one white send-button icon token across theme modes", () => {
+  it("does not emit a separate send button icon token", () => {
     const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
     const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
 
-    expect(darkVars["--send-button-icon"]).toBe("#ffffff");
-    expect(lightVars["--send-button-icon"]).toBe("#ffffff");
+    expect(darkVars).not.toHaveProperty("--send-button-icon");
+    expect(lightVars).not.toHaveProperty("--send-button-icon");
   });
 
   it("derives accent hover from Theme Color while keeping panel semantics", () => {
@@ -106,17 +120,17 @@ describe("resolveAppThemeVars", () => {
     },
   );
 
-  it("preserves an alpha Theme Color in derived state opacity", () => {
+  it("derives visible states for the gray Theme Color", () => {
     const vars = resolveAppThemeVars(
       PI_BASE46_LIGHT_THEME,
       ACCENT_COLOR_PRESETS.gray,
     );
 
-    expect(vars["--accent"]).toBe("#e9e9e980");
-    expect(vars["--surface-active"]).toBe("rgba(233, 233, 233, 0.0703)");
-    expect(vars["--focus-ring"]).toBe("rgba(233, 233, 233, 0.1405)");
-    expect(vars["--selection-bg"]).toBe("rgba(233, 233, 233, 0.0803)");
-    expect(vars["--on-accent"]).toBe("#0d1117");
+    expect(vars["--accent"]).toBe("#c4c4c4");
+    expect(vars["--surface-active"]).toBe("rgba(196, 196, 196, 0.14)");
+    expect(vars["--focus-ring"]).toBe("rgba(196, 196, 196, 0.28)");
+    expect(vars["--selection-bg"]).toBe("rgba(196, 196, 196, 0.16)");
+    expect(vars["--on-accent"]).toBe("#ffffff");
   });
 
   it("changes every derived state when the Theme Color changes", () => {
@@ -167,6 +181,21 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--code-bg"]).toBe("#ffffff");
     expect(lightVars["--on-accent"]).toBe("#ffffff");
     expect(darkVars["--bg"]).toBe("#0d1117");
+  });
+
+  it("derives the Shiki selection background from Theme Color", () => {
+    const darkTheme = resolveShikiTheme(PI_BASE46_DARK_THEME, "#7aa2f7");
+    const lightTheme = resolveShikiTheme(PI_BASE46_LIGHT_THEME, "#e9e9e980");
+
+    expect(darkTheme.colors?.["editor.selectionBackground"]).toBe(
+      "rgba(122, 162, 247, 0.22)",
+    );
+    expect(lightTheme.colors?.["editor.selectionBackground"]).toBe(
+      "rgba(233, 233, 233, 0.0803)",
+    );
+    expect(darkTheme.name).not.toBe(
+      resolveShikiTheme(PI_BASE46_DARK_THEME, "#eb6f92").name,
+    );
   });
 
   it("uses a dark shadow source in the light theme", () => {

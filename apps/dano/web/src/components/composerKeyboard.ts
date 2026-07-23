@@ -1,12 +1,27 @@
 const ENTER_INSERTS_NEWLINE_QUERY =
-  "(hover: none) and (pointer: coarse), (max-width: 768px)";
+  "(hover: none) and (pointer: coarse)";
+const TOUCH_ONLY_INPUT_QUERY =
+  "(any-hover: none) and (any-pointer: coarse)";
+
+type ComposerKeyboardEnvironment = {
+  matchMedia: (query: string) => Pick<MediaQueryList, "matches">;
+  navigator: Pick<Navigator, "maxTouchPoints">;
+};
 
 export function shouldEnterInsertNewline(
-  win: Pick<Window, "matchMedia"> | undefined =
+  environment: ComposerKeyboardEnvironment | undefined =
     typeof window === "undefined" ? undefined : window,
 ): boolean {
-  if (typeof win?.matchMedia !== "function") return false;
-  return win.matchMedia(ENTER_INSERTS_NEWLINE_QUERY).matches;
+  if (
+    typeof environment?.matchMedia !== "function" ||
+    environment.navigator.maxTouchPoints <= 0
+  ) {
+    return false;
+  }
+  return (
+    environment.matchMedia(ENTER_INSERTS_NEWLINE_QUERY).matches &&
+    environment.matchMedia(TOUCH_ONLY_INPUT_QUERY).matches
+  );
 }
 
 export function shouldSubmitComposerEnter(

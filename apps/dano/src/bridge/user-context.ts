@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import type { IncomingHttpHeaders } from "node:http";
 import * as path from "node:path";
 import type { BridgeUserSummary } from "../../types/protocol.js";
+import { ensureSafeDirectory } from "./safe-directory.js";
 
 const USER_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/;
 const DEFAULT_COOKIE_NAME = "dano_auth";
@@ -213,7 +214,11 @@ function safeAvatarUrl(value: unknown): string | undefined {
 }
 
 async function ensureUserFolder(usersRootPath: string, userId: string): Promise<string> {
-  await ensureDirectoryIsNotSymlink(usersRootPath);
+  await ensureSafeDirectory(usersRootPath, {
+    recursive: true,
+    unsafeDirectoryError: () =>
+      new UserContextError(403, "Users root is not a safe directory"),
+  });
   const realUsersRoot = await fs.promises.realpath(usersRootPath);
   const realRuntimeRoot = await fs.promises.realpath(path.dirname(usersRootPath));
   if (realUsersRoot !== path.join(realRuntimeRoot, path.basename(usersRootPath))) {
@@ -223,38 +228,15 @@ async function ensureUserFolder(usersRootPath: string, userId: string): Promise<
   if (!isInside(candidate, realUsersRoot)) {
     throw new UserContextError(403, "User Folder is outside the users root");
   }
-  await ensureDirectoryIsNotSymlink(candidate, false, "User Folder");
+  await ensureSafeDirectory(candidate, {
+    unsafeDirectoryError: () =>
+      new UserContextError(403, "User Folder is not a safe directory"),
+  });
   const realCandidate = await fs.promises.realpath(candidate);
   if (!isInside(realCandidate, realUsersRoot)) {
     throw new UserContextError(403, "User Folder is outside the users root");
   }
   return realCandidate;
-}
-
-async function ensureDirectoryIsNotSymlink(
-  directoryPath: string,
-  recursive = true,
-  label = "Users root",
-): Promise<void> {
-  try {
-    const stats = await fs.promises.lstat(directoryPath);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new UserContextError(403, `${label} is not a safe directory`);
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    try {
-      await fs.promises.mkdir(directoryPath, { recursive, mode: 0o700 });
-    } catch (mkdirError) {
-      if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw mkdirError;
-      }
-    }
-    const stats = await fs.promises.lstat(directoryPath);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new UserContextError(403, `${label} is not a safe directory`);
-    }
-  }
 }
 
 function isInside(candidate: string, root: string): boolean {

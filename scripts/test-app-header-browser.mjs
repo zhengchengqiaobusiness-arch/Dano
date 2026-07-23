@@ -1,74 +1,18 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { createServer as createNetServer } from "node:net";
 import { resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
+import {
+  availablePort,
+  findChromeExecutable,
+  startService,
+  stopService,
+  waitForHttp,
+} from "./browser-test-harness.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const chromeCandidates = [
-  process.env.DANO_CHROME_EXECUTABLE,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter(Boolean);
-
 let vite;
 let browser;
 const serviceOutput = [];
-
-async function availablePort() {
-  const server = createNetServer();
-  await new Promise((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  await new Promise((resolveClose, reject) =>
-    server.close(error => error ? reject(error) : resolveClose()),
-  );
-  return address.port;
-}
-
-async function waitForHttp(url) {
-  const deadline = Date.now() + 30_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-      lastError = new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    if (vite?.exitCode !== null) {
-      throw new Error(`Vite exited with ${vite.exitCode}`);
-    }
-    await delay(100);
-  }
-  throw new Error(`Vite did not become ready: ${lastError?.message ?? "timeout"}`);
-}
-
-async function stopVite() {
-  if (!vite || vite.exitCode !== null || vite.signalCode !== null) return;
-  const exited = new Promise(resolveExit => vite.once("exit", resolveExit));
-  try {
-    process.kill(-vite.pid, "SIGTERM");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  if (await Promise.race([exited.then(() => true), delay(3_000, false)])) return;
-  try {
-    process.kill(-vite.pid, "SIGKILL");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  await exited;
-}
 
 function headerMetrics(page) {
   return page.evaluate(() => {
@@ -109,6 +53,7 @@ function headerMetrics(page) {
       };
     };
     const newSession = rect(".new-session-button");
+    const leading = rect(".header-leading");
     const trailing = rect(".header-trailing");
     return {
       viewportWidth: innerWidth,
@@ -121,13 +66,15 @@ function headerMetrics(page) {
         : null,
       newSessionIcon: rect(".new-session-button svg"),
       newSessionStroke: element(".new-session-button svg")?.getAttribute("stroke-width"),
+      leading,
+      leadingStyle: style(".header-leading"),
       trailing,
       trailingStyle: style(".header-trailing"),
       connection: rect(".connection-status"),
       connectionStyle: style(".connection-status"),
       menuButton: rect(".menu-button"),
       menuButtonStyle: style(".menu-button"),
-      overlap: Boolean(newSession && trailing && newSession.right > trailing.x),
+      overlap: Boolean(leading && trailing && leading.right > trailing.x),
     };
   });
 }
@@ -172,33 +119,32 @@ function assertUtilityGeometry(metrics, viewportWidth) {
   assert.equal(metrics.header.right, viewportWidth - 10);
   assert.equal(metrics.headerStyle.position, "fixed");
   assert.equal(metrics.headerStyle.gap, "12px");
-  assert.equal(metrics.trailingStyle.gap, "8px");
+  assert.equal(metrics.leadingStyle.gap, "8px");
+  assert.equal(metrics.trailingStyle.gap, "12px");
   assert.equal(metrics.connection.height, 26);
   assert.deepEqual(
     [metrics.menuButton.width, metrics.menuButton.height],
     [26, 26],
   );
   assert.equal(metrics.connection.y + metrics.connection.height / 2, metrics.menuButton.y + 13);
+  assert.ok(metrics.menuButton.x < metrics.connection.x);
+  if (metrics.newSession) assert.ok(metrics.newSession.x > metrics.connection.right);
   assert.equal(metrics.connectionStyle.backdropFilter, "blur(2px)");
   assert.equal(metrics.menuButtonStyle.backdropFilter, "blur(2px)");
   assert.equal(metrics.overlap, false);
 }
 
 async function run() {
-  const executablePath = chromeCandidates.find(candidate => existsSync(candidate));
+  const executablePath = findChromeExecutable();
   assert.ok(executablePath, "No system Chrome/Chromium found");
   const port = await availablePort();
   const origin = `http://localhost:${port}`;
-  vite = spawn(
+  vite = startService(
     "pnpm",
     ["-C", "apps/dano", "exec", "vite", "--port", String(port), "--strictPort"],
-    { cwd: repoRoot, detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: repoRoot, output: serviceOutput },
   );
-  for (const stream of [vite.stdout, vite.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", chunk => serviceOutput.push(chunk));
-  }
-  await waitForHttp(`${origin}/app-header-test.html`);
+  await waitForHttp(`${origin}/app-header-test.html`, { services: [vite] });
 
   browser = await chromium.launch({ executablePath, headless: true });
   const page = await browser.newPage({ viewport: { width: 879, height: 863 } });
@@ -219,7 +165,7 @@ async function run() {
   await menu.waitFor();
   const openMenu = await menuMetrics(page);
   assert.equal(openMenu.menu.width, 248);
-  assert.equal(openMenu.menu.right, 869);
+  assert.equal(openMenu.menu.x, 10);
   assert.equal(openMenu.menu.y - openMenu.menuButton.y - openMenu.menuButton.height, 8);
   assert.deepEqual(openMenu.padding, ["6px", "6px", "6px", "6px"]);
   assert.equal(openMenu.borderRadius, "16px");
@@ -315,5 +261,5 @@ try {
   process.exitCode = 1;
 } finally {
   await browser?.close().catch(() => {});
-  await stopVite().catch(() => {});
+  await stopService(vite).catch(() => {});
 }

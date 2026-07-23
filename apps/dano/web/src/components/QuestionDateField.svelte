@@ -292,8 +292,7 @@
   }
 
   :global(.question-date-popover) {
-    z-index: 20;
-    width: var(--question-date-picker-width);
+    width: var(--question-date-picker-width, 260px);
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -439,19 +438,6 @@
 
   .question-date-native {
     width: 100%;
-    padding-right: 40px;
-  }
-
-  .question-date-native::-webkit-calendar-picker-indicator {
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 40px;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    opacity: 0;
-    cursor: pointer;
   }
 
   .question-date-native-placeholder {
@@ -469,25 +455,25 @@
     white-space: nowrap;
   }
 
+  .question-date-native-icon {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    bottom: 1px;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    border-radius: 0 9px 9px 0;
+    background: var(--control-bg);
+    color: var(--text-subtle);
+    pointer-events: none;
+  }
+
   .question-date-native:focus + .question-date-native-placeholder {
     opacity: 0;
   }
 
-  .question-date-native-control.disabled .question-date-native-placeholder {
-    opacity: 0.5;
-  }
-
-  .question-date-native-icon {
-    position: absolute;
-    top: 50%;
-    right: 12px;
-    display: grid;
-    place-items: center;
-    color: var(--text-subtle);
-    pointer-events: none;
-    transform: translateY(-50%);
-  }
-
+  .question-date-native-control.disabled .question-date-native-placeholder,
   .question-date-native-control.disabled .question-date-native-icon {
     opacity: 0.5;
   }

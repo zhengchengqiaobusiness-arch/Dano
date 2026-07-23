@@ -970,7 +970,7 @@
     border-radius: 999px;
     border: none;
     background: var(--accent);
-    color: var(--send-button-icon);
+    color: var(--on-accent);
     cursor: pointer;
     transition:
       background 0.15s ease,
@@ -989,7 +989,7 @@
 
   .send-btn.stop {
     background: color-mix(in srgb, var(--accent) 72%, black);
-    color: var(--send-button-icon);
+    color: var(--on-accent);
   }
 
   .send-btn.stop:hover:not(:disabled) {

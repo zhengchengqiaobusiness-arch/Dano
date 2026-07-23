@@ -57,32 +57,6 @@
 
 <header class="app-header">
   <div class="header-leading">
-    {#if showNewSession}
-      <button
-        class="new-session-button"
-        type="button"
-        aria-label={t("appHeader.newSession")}
-        title={t("appHeader.newSession")}
-        disabled={newSessionPending}
-        onclick={() => onNewSession?.()}
-      >
-        <SquarePen size={18} strokeWidth={2.5} aria-hidden="true" />
-        <span>{t("appHeader.newSession")}</span>
-      </button>
-    {/if}
-  </div>
-  <div class="header-trailing">
-    <button
-      class={`connection-status ${statusMeta.className}`}
-      type="button"
-      title={title}
-      onclick={() => {
-        if (connectionStatus === "disconnected") onReconnect?.();
-      }}
-    >
-      <span class="status-dot" aria-hidden="true"></span>
-      <span>{statusMeta.label}</span>
-    </button>
     <Popover.Root open={menuOpen} onOpenChange={(open) => (menuOpen = open)}>
       <Popover.Trigger
         class="menu-button"
@@ -125,6 +99,32 @@
         </div>
       </Popover.Content>
     </Popover.Root>
+    <button
+      class={`connection-status ${statusMeta.className}`}
+      type="button"
+      title={title}
+      onclick={() => {
+        if (connectionStatus === "disconnected") onReconnect?.();
+      }}
+    >
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>{statusMeta.label}</span>
+    </button>
+  </div>
+  <div class="header-trailing">
+    {#if showNewSession}
+      <button
+        class="new-session-button"
+        type="button"
+        aria-label={t("appHeader.newSession")}
+        title={t("appHeader.newSession")}
+        disabled={newSessionPending}
+        onclick={() => onNewSession?.()}
+      >
+        <SquarePen size={18} strokeWidth={2.5} aria-hidden="true" />
+        <span>{t("appHeader.newSession")}</span>
+      </button>
+    {/if}
   </div>
 </header>
 
@@ -191,7 +191,7 @@
   .header-leading {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     height: 100%;
     min-width: 0;
   }
@@ -199,7 +199,7 @@
   .header-trailing {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
     flex: 0 0 auto;
   }
 
@@ -277,7 +277,7 @@
 
   :global(.header-menu) {
     box-sizing: border-box;
-    z-index: 30;
+    z-index: var(--layer-popover);
     width: 248px;
     padding: 6px;
     border: 0;

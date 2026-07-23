@@ -29,7 +29,7 @@ describe("composer keyboard enter handling", () => {
     ).toBe(false);
   });
 
-  it("keeps Enter as a newline on touch or narrow inputs", () => {
+  it("keeps Enter as a newline when the environment policy requests it", () => {
     expect(shouldSubmitComposerEnter(keyEvent(), false, true)).toBe(false);
   });
 
@@ -49,13 +49,45 @@ describe("composer keyboard enter handling", () => {
     ).toBe(false);
   });
 
-  it("detects touch or narrow input environments without user agent checks", () => {
+  it("keeps Enter as a newline only in touch-only input environments", () => {
     const matchMedia = vi.fn().mockReturnValue({ matches: true });
 
-    expect(shouldEnterInsertNewline({ matchMedia })).toBe(true);
-    expect(matchMedia).toHaveBeenCalledWith(
-      "(hover: none) and (pointer: coarse), (max-width: 768px)",
-    );
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia,
+        navigator: { maxTouchPoints: 5 },
+      }),
+    ).toBe(true);
+    expect(matchMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits Enter without an active touch pointer", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn().mockReturnValue({ matches: true }),
+        navigator: { maxTouchPoints: 0 },
+      }),
+    ).toBe(false);
+  });
+
+  it("submits Enter when a hover-capable pointer is also available", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn((query: string) => ({
+          matches: query === "(hover: none) and (pointer: coarse)",
+        })),
+        navigator: { maxTouchPoints: 5 },
+      }),
+    ).toBe(false);
+  });
+
+  it("submits Enter when the primary pointer is not touch-oriented", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn().mockReturnValue({ matches: false }),
+        navigator: { maxTouchPoints: 5 },
+      }),
+    ).toBe(false);
   });
 
   it("falls back to desktop behavior when matchMedia is unavailable", () => {

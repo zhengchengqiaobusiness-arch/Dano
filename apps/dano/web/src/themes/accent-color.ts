@@ -8,7 +8,7 @@ import {
 export const ACCENT_COLOR_PRESETS = Object.freeze({
   default: "#53b559",
   blue: "#7aa2f7",
-  gray: "#e9e9e980",
+  gray: "#c4c4c4",
   yellow: "#d79921",
   pink: "#eb6f92",
   purple: "#cba6f7",
@@ -31,7 +31,7 @@ type RgbaColor = Readonly<{
 
 const WHITE = "#ffffff";
 const DARK = "#0d1117";
-const MINIMUM_WHITE_CONTRAST = 2;
+const MINIMUM_WHITE_CONTRAST = 1.5;
 const THEME_BACKGROUNDS = [
   PI_BASE46_LIGHT_THEME.base30.black,
   PI_BASE46_DARK_THEME.base30.black,

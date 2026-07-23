@@ -65,7 +65,7 @@
     position: fixed;
     top: 56px;
     right: 16px;
-    z-index: 900;
+    z-index: var(--layer-notification);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -85,7 +85,7 @@
   }
 
   .toast-item.error {
-    background: var(--error-bg);
+    background: color-mix(in srgb, var(--error-text) 10%, var(--panel));
     border-color: var(--error-border);
   }
 
