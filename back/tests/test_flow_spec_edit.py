@@ -5849,6 +5849,220 @@ def test_initial_pi_cannot_merge_rule_boundaries_without_grounded_dependency():
     assert out.meta["capability_model"]["source"] == "pi_agent_patch"
 
 
+def test_initial_pi_cannot_merge_distinct_write_actions_through_data_link():
+    spec = FlowSpec(
+        flow_id="submit-then-delete",
+        steps=[
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                path="/hotel-apply/submit-process",
+                response_json={"code": 0, "data": "hotel-1"},
+                source_meta={
+                    "trigger_action_id": "action_submit",
+                    "trigger_transaction_id": "tx_submit",
+                    "trigger_op": "click",
+                    "trigger_locator": "role=button[name=提交]",
+                },
+            ),
+            FlowStep(
+                step_id="delete",
+                method="DELETE",
+                path="/hotel-apply/delete",
+                params=[ParamField(
+                    path="query.id",
+                    key="id",
+                    value="hotel-1",
+                    type="string",
+                )],
+                source_meta={
+                    "trigger_action_id": "action_delete",
+                    "trigger_transaction_id": "tx_delete",
+                    "trigger_op": "click",
+                    "trigger_locator": "role=button[name=删除]",
+                },
+            ),
+        ],
+        links=[FlowLink(
+            source_step_id="submit",
+            source_path="data",
+            target_step_id="delete",
+            target_path="query.id",
+            confirmed=True,
+            confidence=0.99,
+        )],
+    )
+    semantic_plan = {
+        "business_understanding": {
+            "business_name": "酒店申请",
+            "summary": "提交并删除酒店申请",
+        },
+        "request_roles": [
+            {"step_id": "submit", "role": "business_write", "name": "提交酒店申请"},
+            {"step_id": "delete", "role": "business_write", "name": "删除酒店申请"},
+        ],
+        "field_semantics": [],
+        "capabilities": [{
+            "name": "submit_hotel_apply",
+            "title": "提交酒店申请",
+            "kind": "submit",
+            "intent": "提交后删除酒店申请",
+            "step_ids": ["submit", "delete"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": semantic_plan, "ops": []},
+        generation_mode="initial",
+    ))
+
+    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
+        frozenset({"submit"}),
+        frozenset({"delete"}),
+    }
+    assert [(link.source_step_id, link.target_step_id) for link in out.links] == [
+        ("submit", "delete"),
+    ]
+
+    bad_existing = spec.model_copy(deep=True)
+    bad_existing.capabilities = [FlowCapability(
+        name="submit_hotel_apply",
+        title="删除酒店申请",
+        kind="submit",
+        step_ids=["submit", "delete"],
+    )]
+    bad_existing.meta["capability_model"] = {"source": "pi_agent_patch"}
+    reoptimized = asyncio.run(orchestrate_flow_capabilities(
+        bad_existing,
+        submission={"semantic_plan": semantic_plan, "ops": []},
+        generation_mode="optimize",
+    ))
+
+    assert {frozenset(capability.step_ids) for capability in reoptimized.capabilities} == {
+        frozenset({"submit"}),
+        frozenset({"delete"}),
+    }
+
+
+def test_optimize_prunes_previously_materialized_auth_refresh_step():
+    spec = FlowSpec(
+        flow_id="stale-auth-plan",
+        steps=[
+            FlowStep(
+                step_id="auth",
+                method="POST",
+                url="/admin-api/system/auth/refresh-token?refreshToken=old",
+                path="/admin-api/system/auth/refresh-token?refreshToken=old",
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                path="/hotel-apply/submit-process",
+                params=[ParamField(path="body.hotelName", key="酒店名称")],
+                source_meta={
+                    "trigger_action_id": "action_submit",
+                    "trigger_transaction_id": "tx_submit",
+                    "trigger_op": "click",
+                    "trigger_locator": "role=button[name=提交]",
+                },
+            ),
+            FlowStep(
+                step_id="submit-retry",
+                method="POST",
+                path="/hotel-apply/submit-process",
+                params=[ParamField(path="body.hotelName", key="酒店名称")],
+                source_meta={
+                    "trigger_action_id": "action_submit_retry",
+                    "trigger_transaction_id": "tx_submit_retry",
+                    "trigger_op": "click",
+                    "trigger_locator": "role=button[name=提交]",
+                },
+            ),
+            FlowStep(
+                step_id="delete",
+                method="DELETE",
+                path="/hotel-apply/delete?id=hotel-1",
+                source_meta={"trigger_action_id": "action_delete"},
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="delete_hotel_apply",
+            title="删除酒店申请",
+            kind="submit",
+            nodes=_call_nodes(["auth", "submit", "submit-retry", "delete"]),
+        )],
+        request_facts=RequestFacts.model_validate({
+            "requests": [
+                {
+                    "request_id": "req-auth",
+                    "method": "POST",
+                    "url": "/admin-api/system/auth/refresh-token?refreshToken=old",
+                    "path": "/admin-api/system/auth/refresh-token",
+                },
+                {
+                    "request_id": "req-submit-retry",
+                    "method": "POST",
+                    "path": "/hotel-apply/submit-process",
+                },
+            ],
+            "analysis": {
+                "req-auth": {
+                    "request_id": "req-auth",
+                    "role": "business_write",
+                    "keep": True,
+                    "confidence": 0.9,
+                },
+                "req-submit-retry": {
+                    "request_id": "req-submit-retry",
+                    "role": "business_write",
+                    "keep": True,
+                    "confidence": 0.95,
+                },
+            },
+            "usage": {
+                "req-auth": {
+                    "request_id": "req-auth",
+                    "materialized_step_id": "auth",
+                    "state": "materialized",
+                    "used_by_capabilities": ["delete_hotel_apply"],
+                },
+                "req-submit-retry": {
+                    "request_id": "req-submit-retry",
+                    "materialized_step_id": "submit-retry",
+                    "state": "materialized",
+                    "used_by_capabilities": ["delete_hotel_apply"],
+                },
+            },
+        }),
+        meta={"capability_model": {"source": "pi_agent_patch"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"ops": []},
+        generation_mode="optimize",
+    ))
+
+    assert {step.step_id for step in optimized.steps} == {
+        "submit", "submit-retry", "delete",
+    }
+    assert all(
+        not {"auth", "submit-retry"} & set(capability.step_ids)
+        for capability in optimized.capabilities
+    )
+    assert optimized.request_facts.analysis["req-auth"].role == "auth"
+    assert optimized.request_facts.analysis["req-auth"].keep is False
+    assert optimized.request_facts.usage["req-auth"].materialized_step_id == ""
+    assert (
+        optimized.request_facts.analysis["req-submit-retry"].role
+        == "duplicate_observation"
+    )
+    assert optimized.meta["pruned_auth_step_count"] == 1
+
+
 def test_initial_pi_applies_all_field_semantic_axes_without_overwriting_wire_facts():
     param = ParamField(
         path="body.roomCount",

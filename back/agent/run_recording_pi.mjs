@@ -76,7 +76,7 @@ function resolveModel() {
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: envInt("DANO_PI_CONTEXT_WINDOW", 128000, 1024),
-        maxTokens: envInt("DANO_PI_MAX_TOKENS", 8192, 1),
+        maxTokens: envInt("DANO_PI_MAX_TOKENS", 32768, 1),
       }],
     });
   } else if (apiKey) {
@@ -91,12 +91,12 @@ function resolveModel() {
 function createSettingsManager() {
   // Retry and compaction are Pi-native. This runtime does not implement either behavior.
   return SettingsManager.inMemory({
+    httpIdleTimeoutMs: 0,
     retry: {
       enabled: true,
       maxRetries: envInt("DANO_RECORDING_PI_MAX_RETRIES", 3, 0),
       baseDelayMs: envInt("DANO_RECORDING_PI_RETRY_BASE_DELAY_MS", 2000, 0),
       provider: {
-        timeoutMs: envInt("DANO_RECORDING_PI_PROVIDER_TIMEOUT_MS", 120000, 1),
         maxRetries: envInt("DANO_RECORDING_PI_PROVIDER_MAX_RETRIES", 2, 0),
         maxRetryDelayMs: envInt("DANO_RECORDING_PI_PROVIDER_MAX_RETRY_DELAY_MS", 30000, 0),
       },

@@ -1844,7 +1844,7 @@ async def record_ws(ws: WebSocket) -> None:
                             f" recording_id={recording_id}"
                             + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
                             + _analysis_screenshot_guidance(analysis_screenshots),
-                            timeout_s=3000,
+                            timeout_s=0,
                         ))
                     delivered_image_count = _verified_pi_image_count(
                         pi_result, len(analysis_screenshots),

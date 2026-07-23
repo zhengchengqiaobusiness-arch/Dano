@@ -24,8 +24,11 @@ _READ_NOISE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", 
 # 鉴权/基建写请求识别(P0#3:用「URL 路径段 + 请求体内容」判,**绝不写死任何系统的业务路径**)。
 # 这类录制时放行真发、也绝不当成"提交候选"。提交请求改由"带最多用户填入值"识别(因果/值驱动,见 pick_submit_request)。
 # ① URL 路径**整段**命中通用鉴权/上传/流概念(跨框架通用,非某系统专属;整段匹配避免 'lesson' 含 'sso' 之类误伤):
-_INFRA_PATH_SEGS = frozenset({"login", "logout", "signin", "sign-in", "sso", "oauth", "oauth2",
-                              "token", "refresh", "captcha", "upload", "sse", "socket", "ws"})
+_INFRA_PATH_SEGS = frozenset({
+    "login", "logout", "signin", "sign-in", "sso", "oauth", "oauth2", "auth",
+    "token", "refresh", "refresh-token", "refresh_token", "refreshtoken",
+    "access-token", "id-token", "captcha", "upload", "sse", "socket", "ws",
+})
 # ② 或请求体里带密码/验证码/凭证/OAuth 字段(按内容判,最稳:登录体必带这些,跨系统通用):
 _AUTH_BODY_HINTS = ("password", "passwd", "captcha", "verifycode", "vcode", "credential",
                     "refreshtoken", "grant_type", "client_secret", "clientsecret")

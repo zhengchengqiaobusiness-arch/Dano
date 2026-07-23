@@ -2960,7 +2960,7 @@ def test_generic_write_endpoint_splits_from_locator_without_action_ids():
     assert {tuple(cap.step_ids) for cap in capabilities} == {("approve",), ("reject",)}
 
 
-def test_dependency_merges_only_connected_action_groups_and_keeps_independent_capability():
+def test_dependency_keeps_distinct_write_actions_as_independent_capabilities():
     def write(step_id: str) -> FlowStep:
         return FlowStep(
             step_id=step_id, method="POST", path="/rpc/execute",
@@ -2981,7 +2981,51 @@ def test_dependency_merges_only_connected_action_groups_and_keeps_independent_ca
     capabilities = build_default_flow_capabilities(spec)
     memberships = {frozenset(cap.step_ids) for cap in capabilities}
 
-    assert memberships == {frozenset({"prepare", "confirm"}), frozenset({"archive"})}
+    assert memberships == {
+        frozenset({"prepare"}),
+        frozenset({"confirm"}),
+        frozenset({"archive"}),
+    }
+
+
+def test_unanchored_dependency_group_cannot_bridge_distinct_write_actions():
+    def action(step_id: str) -> FlowStep:
+        return FlowStep(
+            step_id=step_id,
+            method="POST" if step_id == "submit" else "DELETE",
+            path=f"/api/{step_id}",
+            source_meta={
+                "trigger_action_id": f"action_{step_id}",
+                "trigger_op": "click",
+                "trigger_locator": f"role=button[name={step_id}]",
+            },
+        )
+
+    spec = FlowSpec(
+        steps=[
+            action("submit"),
+            FlowStep(step_id="bridge", method="POST", path="/infra/refresh"),
+            action("delete"),
+        ],
+        links=[
+            FlowLink(
+                source_step_id="submit", source_path="data.token",
+                target_step_id="bridge", target_path="token",
+            ),
+            FlowLink(
+                source_step_id="bridge", source_path="data.id",
+                target_step_id="delete", target_path="id",
+            ),
+        ],
+    )
+
+    capabilities = build_default_flow_capabilities(spec)
+
+    assert not any(
+        {"submit", "delete"}.issubset(set(capability.step_ids))
+        for capability in capabilities
+    )
+
 
 def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field():
     spec = FlowSpec(

@@ -665,6 +665,110 @@ def test_write_with_body_and_query_preserves_both_parameter_contracts() -> None:
     assert step["query_template"]["force"]
 
 
+def test_auth_refresh_is_excluded_and_repeated_write_observations_share_one_capability() -> None:
+    from dano.execution.page.flow_spec import orchestrate_flow_capabilities, to_flow_spec
+
+    requests = [
+        {
+            "request_id": "req_auth_1",
+            "index": 1,
+            "method": "POST",
+            "url": "https://example.test/admin-api/system/auth/refresh-token?refreshToken=old",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.9},
+        },
+        {
+            "request_id": "req_submit_1",
+            "index": 2,
+            "method": "POST",
+            "url": "https://example.test/admin-api/oa/hotel-apply/submit-process",
+            "post_data": '{"hotelName":"酒店 A"}',
+            "response_json": {"code": 0, "data": "hotel-1"},
+            "trigger_op": "click",
+            "trigger_action_id": "action_submit_1",
+            "trigger_transaction_id": "tx_submit_1",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        },
+        {
+            "request_id": "req_auth_2",
+            "index": 3,
+            "method": "POST",
+            "url": "https://example.test/admin-api/system/auth/refresh-token?refreshToken=new",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.9},
+        },
+        {
+            "request_id": "req_submit_2",
+            "index": 4,
+            "method": "POST",
+            "url": "https://example.test/admin-api/oa/hotel-apply/submit-process",
+            "post_data": '{"hotelName":"酒店 A"}',
+            "response_json": {"code": 0, "data": "hotel-1"},
+            "trigger_op": "click",
+            "trigger_action_id": "action_submit_2",
+            "trigger_transaction_id": "tx_submit_2",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        },
+        {
+            "request_id": "req_delete",
+            "index": 5,
+            "method": "DELETE",
+            "url": "https://example.test/admin-api/oa/hotel-apply/delete?id=hotel-1",
+            "trigger_op": "click",
+            "trigger_action_id": "action_delete",
+            "trigger_transaction_id": "tx_delete",
+            "trigger_locator": "role=button[name=删除]",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.98},
+        },
+    ]
+
+    spec = to_flow_spec(
+        captured_requests=requests,
+        samples={"酒店名称": "酒店 A", "id": "hotel-1"},
+    )
+
+    assert [(step.method, step.path) for step in spec.steps] == [
+        ("POST", "/admin-api/oa/hotel-apply/submit-process"),
+        ("POST", "/admin-api/oa/hotel-apply/submit-process"),
+        ("DELETE", "/admin-api/oa/hotel-apply/delete?id=hotel-1"),
+    ]
+    assert spec.request_facts.usage["req_submit_1"].materialized_step_id
+    assert spec.request_facts.usage["req_submit_2"].materialized_step_id
+    assert (
+        spec.request_facts.usage["req_submit_1"].materialized_step_id
+        != spec.request_facts.usage["req_submit_2"].materialized_step_id
+    )
+    assert "req_auth_1" not in spec.request_facts.analysis
+    assert "req_auth_2" not in spec.request_facts.analysis
+
+    planned = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"ops": []},
+    ))
+    executable_submit_step_id = next(
+        step.step_id
+        for step in planned.steps
+        if step.method == "POST"
+        and not (step.source_meta or {}).get("duplicate_observation_of")
+    )
+    duplicate_submit = next(
+        step
+        for step in planned.steps
+        if (step.source_meta or {}).get("duplicate_observation_of")
+    )
+    assert (
+        duplicate_submit.source_meta["duplicate_observation_of"]
+        == executable_submit_step_id
+    )
+    delete_step_id = next(
+        step.step_id for step in planned.steps if step.method == "DELETE"
+    )
+    assert {frozenset(cap.step_ids) for cap in planned.capabilities} == {
+        frozenset({executable_submit_step_id}),
+        frozenset({delete_step_id}),
+    }
+
+
 def test_delete_path_parameter_is_replayed_from_grounded_user_sample() -> None:
     from dano.execution.page.flow_spec import flow_spec_to_api_request, to_flow_spec
     from dano.execution.page.request_capture import execute_api_request

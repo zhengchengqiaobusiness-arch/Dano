@@ -1861,6 +1861,9 @@ def test_pick_submit_excludes_auth_by_content_not_path():
     # 整段匹配避免子串误伤:'lesson' 不因含 'sso' 被当鉴权;'/oauth/token' 命中
     assert looks_like_auth_write("http://x/lesson/submit", '{"reason":"r"}') is False
     assert looks_like_auth_write("http://x/oauth/token", "{}") is True
+    assert looks_like_auth_write(
+        "http://x/admin-api/system/auth/refresh-token?refreshToken=old",
+    ) is True
     assert looks_like_auth_write("http://x/biz/token-apply", '{"reason":"r"}') is False
 
 

@@ -251,7 +251,7 @@ class RecordingPiSession:
         })
         return env
 
-    async def prompt(self, text: str, *, timeout_s: float | None = None) -> dict[str, Any]:
+    async def prompt(self, text: str, *, timeout_s: float | None = 0) -> dict[str, Any]:
         """Append one turn to the same Pi session; no Python message history exists."""
         if not text.strip():
             raise ValueError("Pi prompt must not be empty")

@@ -5728,6 +5728,14 @@ def to_flow_spec(
 
     request_roles = []
     for request in captured_requests:
+        if looks_like_auth_write(
+            request.get("url") or request.get("path") or "",
+            request.get("post_data"),
+        ):
+            request_roles.append(
+                classify_network_request(request, captured_requests, samples)
+            )
+            continue
         recorded = request.get("_request_role") if isinstance(request.get("_request_role"), dict) else None
         if recorded is None and request.get("role"):
             recorded = {
@@ -5747,7 +5755,6 @@ def to_flow_spec(
         if (role_by_key.get(_request_role_key(c), {}).get("keep")
             and role_by_key.get(_request_role_key(c), {}).get("role") in {"submit_anchor", "business_write"})
     ]
-
     # 2) 前置读候选：business_get 直接进入候选；存在写锚点时，把 read_context
     # 也交给后续数据/控制依赖闭包判断。这里不再用 keep 先删掉事实，否则审批详情
     # 这类“响应不直接进入 POST”的控制前置永远没有机会被识别。
@@ -6192,6 +6199,7 @@ def to_flow_spec(
             "schema_version": 1,
         },
     )
+    _mark_repeated_write_observations(spec)
     _infer_computed_runtime_fields(spec)
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
@@ -7455,8 +7463,77 @@ def _capability_call_nodes(steps: list[FlowStep]) -> list[dict[str, Any]]:
     return nodes
 
 
+def _repeated_write_command_signature(step: FlowStep) -> tuple[Any, ...] | None:
+    """Identify one reusable command without relying on vendor path names."""
+    if not _is_write_step(step):
+        return None
+    meta = step.source_meta or {}
+    trigger_op = str(meta.get("trigger_op") or "").lower()
+    locator = re.sub(
+        r"\s+", "", str(meta.get("trigger_locator") or "").casefold(),
+    )
+    if trigger_op not in {"click", "submit", "select", "pick"} or not locator:
+        return None
+    raw_path = str(step.path or step.url or "")
+    return (
+        (step.method or "GET").upper(),
+        urlparse(raw_path).path or raw_path.split("?", 1)[0],
+        tuple(sorted(param.path for param in step.params)),
+        str(meta.get("page_id") or meta.get("page_url") or ""),
+        str(meta.get("frame_id") or meta.get("frame_url") or ""),
+        locator,
+    )
+
+
+def _mark_repeated_write_observations(spec: FlowSpec) -> None:
+    """Keep repeated facts/steps for audit, but execute one reusable command."""
+    representatives: dict[tuple[Any, ...], tuple[FlowStep, str]] = {}
+    for step in spec.steps:
+        signature = _repeated_write_command_signature(step)
+        if signature is None:
+            continue
+        meta = step.source_meta or {}
+        action_ref = str(
+            meta.get("trigger_transaction_id")
+            or meta.get("trigger_action_id")
+            or ""
+        ).strip()
+        if not action_ref:
+            continue
+        previous = representatives.get(signature)
+        if previous is None:
+            representatives[signature] = (step, action_ref)
+            continue
+        representative, representative_action = previous
+        if action_ref == representative_action:
+            continue
+        step.source_meta = {
+            **meta,
+            "role": "duplicate_observation",
+            "duplicate_observation_of": representative.step_id,
+        }
+        request_ids = [
+            request_id
+            for request_id, usage in spec.request_facts.usage.items()
+            if usage.materialized_step_id == step.step_id
+        ]
+        for request_id in request_ids:
+            analysis = spec.request_facts.analysis.get(request_id)
+            if analysis is None:
+                continue
+            analysis.role = "duplicate_observation"
+            analysis.keep = False
+            analysis.reason = (
+                f"同一页面命令与接口契约的重复录制，复用步骤 {representative.step_id}"
+            )
+
+
 def _write_steps(spec: FlowSpec) -> list[FlowStep]:
-    return [s for s in spec.steps if _is_write_step(s)]
+    return [
+        step for step in spec.steps
+        if _is_write_step(step)
+        and not (step.source_meta or {}).get("duplicate_observation_of")
+    ]
 
 
 def _option_source_step_ids(spec: FlowSpec) -> set[str]:
@@ -7826,11 +7903,17 @@ def _partition_steps_by_business_key(
 def _merge_partition_groups_by_links(
     groups: list[tuple[str, list[FlowStep]]],
     links: list[FlowLink],
+    *,
+    preserve_action_boundaries: bool = False,
 ) -> list[tuple[str, list[FlowStep]]]:
     """Merge only action groups connected by real data dependencies."""
     if len(groups) < 2:
         return groups
     parents = list(range(len(groups)))
+    action_boundaries = [
+        {key} if key.startswith("action_") else set()
+        for key, _steps in groups
+    ]
 
     def find(index: int) -> int:
         while parents[index] != index:
@@ -7840,8 +7923,13 @@ def _merge_partition_groups_by_links(
 
     def union(left: int, right: int) -> None:
         left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
+        if left_root == right_root:
+            return
+        boundaries = action_boundaries[left_root] | action_boundaries[right_root]
+        if preserve_action_boundaries and len(boundaries) > 1:
+            return
+        parents[right_root] = left_root
+        action_boundaries[left_root] = boundaries
 
     group_by_step = {
         step.step_id: index
@@ -7876,13 +7964,21 @@ def _build_complex_default_capabilities(
         _partition_steps_by_business_key(independent_status, query_operations=True),
         spec.links,
     )
+    write_partitions = _partition_steps_by_business_key(
+        write_steps, write_operations=True,
+    )
+    # A data link may join legacy writes that have no action evidence. When
+    # both ends have distinct grounded actions, it remains a relation between
+    # public abilities instead of erasing those operation boundaries, even
+    # through an unanchored intermediary.
     write_groups = _merge_partition_groups_by_links(
-        _partition_steps_by_business_key(write_steps, write_operations=True),
+        write_partitions,
         spec.links,
+        preserve_action_boundaries=True,
     )
 
-    # Dependency-connected action groups are one transaction. Independent
-    # actions remain separate even when another pair is connected.
+    # Grounded write actions are public operation boundaries. Read groups may
+    # still combine linked requests triggered by one visible query command.
     split_queries = len(query_groups) > 1
     split_writes = len(write_groups) > 1
     if not split_queries and not split_writes:
@@ -7902,8 +7998,11 @@ def _build_complex_default_capabilities(
             and step.step_id not in option_source_ids
         ]
         for key, anchors in write_groups:
-            ids = _dependency_closure_step_ids(spec, {step.step_id for step in anchors if step.step_id})
             anchor_ids = {step.step_id for step in anchors if step.step_id}
+            ids = _dependency_closure_step_ids(spec, anchor_ids)
+            # Dependency closure may supply read preflights, but a later write
+            # anchored to another user action remains its own public ability.
+            ids.difference_update(all_submit_ids - anchor_ids)
             for step in preflights:
                 explicit_targets = {
                     str(value) for value in (
@@ -10164,6 +10263,55 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
+def _prune_auth_materializations(spec: FlowSpec) -> None:
+    """Repair plans produced before compound auth paths were recognized."""
+    auth_step_ids = {
+        step.step_id
+        for step in spec.steps
+        if looks_like_auth_write(step.url or step.path)
+    }
+    if auth_step_ids:
+        spec.steps = [
+            step for step in spec.steps if step.step_id not in auth_step_ids
+        ]
+        spec.links = [
+            link for link in spec.links
+            if link.source_step_id not in auth_step_ids
+            and link.target_step_id not in auth_step_ids
+        ]
+        _normalize_capability_references(spec)
+        spec.meta = {
+            **(spec.meta or {}),
+            "pruned_auth_step_count": (
+                int((spec.meta or {}).get("pruned_auth_step_count") or 0)
+                + len(auth_step_ids)
+            ),
+        }
+    for fact in spec.request_facts.requests or []:
+        request_id = str(fact.request_id or "")
+        if not request_id or not looks_like_auth_write(
+            fact.url or fact.path, fact.post_data
+        ):
+            continue
+        analysis = spec.request_facts.analysis.get(request_id) or RequestAnalysis(
+            request_id=request_id
+        )
+        analysis.role = "auth"
+        analysis.keep = False
+        analysis.reason = "登录/鉴权/令牌刷新请求，只作为身份来源，不进入业务流程"
+        analysis.confidence = max(float(analysis.confidence or 0), 0.96)
+        spec.request_facts.analysis[request_id] = analysis
+        usage = spec.request_facts.usage.get(request_id) or RequestUsage(
+            request_id=request_id
+        )
+        if usage.materialized_step_id in auth_step_ids:
+            usage.materialized_step_id = ""
+            usage.state = "captured"
+            usage.used_by_capabilities = []
+            usage.capability_memberships = []
+        spec.request_facts.usage[request_id] = usage
+
+
 def _remove_capability_step_nodes(nodes: list[dict[str, Any]], step_id: str) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     for node in nodes or []:
@@ -10562,6 +10710,10 @@ def _planner_patch_edits(
             step_id = str(edit.get("step_id") or "")
             if not step_id or step_id not in existing_steps:
                 continue
+            if (step_by_id[step_id].source_meta or {}).get(
+                "duplicate_observation_of"
+            ):
+                continue
             cap_name = str(edit.get("capability_name") or edit.get("capability") or "")
             if _capability_step_was_removed(spec, cap_name, step_id):
                 continue
@@ -10836,6 +10988,8 @@ async def orchestrate_flow_capabilities(
     _validate_recording_agent_ops(submission.get("ops") or [])
     screenshot_analysis = bool(int(submission.get("_analysis_screenshot_count") or 0))
     original = spec.model_copy(deep=True)
+    _prune_auth_materializations(original)
+    _mark_repeated_write_observations(original)
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)

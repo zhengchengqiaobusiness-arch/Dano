@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,18 @@ RECORDING_ONE = f"recording_{'1' * 32}"
 RECORDING_TWO = f"recording_{'2' * 32}"
 RECORDING_THREE = f"recording_{'3' * 32}"
 RECORDING_SAFE = f"recording_{'4' * 32}"
+
+
+def test_recording_pi_runtime_has_no_automatic_deadline() -> None:
+    timeout = inspect.signature(recording_pi.RecordingPiSession.prompt).parameters["timeout_s"]
+    runtime_source = (
+        Path(recording_pi.__file__).parents[2] / "agent" / "run_recording_pi.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert timeout.default == 0
+    assert "httpIdleTimeoutMs: 0" in runtime_source
+    assert "DANO_RECORDING_PI_PROVIDER_TIMEOUT_MS" not in runtime_source
+    assert 'DANO_PI_MAX_TOKENS", 32768' in runtime_source
 
 
 class _FakeServer:

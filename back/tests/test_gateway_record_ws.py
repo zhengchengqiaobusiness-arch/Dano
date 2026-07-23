@@ -110,7 +110,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     pi_start = branch.index("pi_session = await _ensure_recording_pi()")
     assert baseline_start < pi_start
     assert 'generation_mode="initial"' in branch
-    assert "timeout_s=3000" in branch
+    assert "timeout_s=0" in branch
     identity_check = branch.index("check_fingerprint=False")
     replay_check = branch.index("if await _replay_costly(msg):")
     fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
@@ -210,11 +210,11 @@ def test_recording_operation_identity_requires_the_full_snapshot(
     assert "截图未分析" in conflict["detail"]
 
 
-def test_every_recording_pi_button_has_a_finite_timeout() -> None:
+def test_recording_pi_plan_has_no_artificial_deadline() -> None:
     source = inspect.getsource(gateway.record_ws)
 
-    assert "timeout_s=0" not in source
-    assert "timeout_s=3000" in source
+    assert "timeout_s=3000" not in source
+    assert "timeout_s=0" in source
 
 
 @pytest.mark.parametrize(
