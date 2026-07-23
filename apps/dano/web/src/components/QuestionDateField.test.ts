@@ -25,6 +25,12 @@ describe("QuestionDateField", () => {
     expect(questionDateFieldSource).not.toContain('from "bits-ui"');
   });
 
+  it("keeps the date popover above the centered form overlay", () => {
+    expect(questionDateFieldSource).toMatch(
+      /:global\(\.question-date-popover\)\s*\{[\s\S]*?z-index:\s*30;/,
+    );
+  });
+
   it("keeps the formatted desktop trigger and disabled state", async () => {
     mockMobilePicker(false);
     const target = document.createElement("div");
