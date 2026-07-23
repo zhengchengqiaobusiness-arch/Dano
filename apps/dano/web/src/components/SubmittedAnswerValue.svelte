@@ -40,6 +40,8 @@
   .submitted-field-value {
     display: flex;
     align-items: center;
+    background: var(--panel-2);
+    color: var(--text-muted);
   }
 
   .submitted-field-value-text {
