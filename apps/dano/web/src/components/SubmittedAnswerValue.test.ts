@@ -22,7 +22,7 @@ describe("SubmittedAnswerValue", () => {
     }
   });
 
-  it("vertically centers the single-line confirmation value", () => {
+  it("renders the confirmation value as a disabled single-line control", () => {
     const containerRule = submittedAnswerValueSource.match(
       /\.submitted-field-value \{([\s\S]*?)\n  \}/,
     )?.[1];
@@ -32,6 +32,8 @@ describe("SubmittedAnswerValue", () => {
 
     expect(containerRule).toContain("display: flex;");
     expect(containerRule).toContain("align-items: center;");
+    expect(containerRule).toContain("background: var(--panel-2);");
+    expect(containerRule).toContain("color: var(--text-muted);");
     expect(textRule).toContain("min-width: 0;");
     expect(textRule).toContain("overflow: hidden;");
     expect(textRule).toContain("text-overflow: ellipsis;");
