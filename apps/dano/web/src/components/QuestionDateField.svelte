@@ -165,9 +165,6 @@
           {placeholder}
         </span>
       {/if}
-      <span class="question-date-native-icon" aria-hidden="true">
-        <ChevronDown size={16} />
-      </span>
     </div>
   {:else}
     <DatePicker.Root
@@ -441,18 +438,6 @@
     padding-right: 40px;
   }
 
-  .question-date-native::-webkit-calendar-picker-indicator {
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 40px;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    opacity: 0;
-    cursor: pointer;
-  }
-
   .question-date-native-placeholder {
     position: absolute;
     inset: 1px 40px 1px 1px;
@@ -473,21 +458,6 @@
   }
 
   .question-date-native-control.disabled .question-date-native-placeholder {
-    opacity: 0.5;
-  }
-
-  .question-date-native-icon {
-    position: absolute;
-    top: 50%;
-    right: 12px;
-    display: grid;
-    place-items: center;
-    color: var(--text-subtle);
-    pointer-events: none;
-    transform: translateY(-50%);
-  }
-
-  .question-date-native-control.disabled .question-date-native-icon {
     opacity: 0.5;
   }
 

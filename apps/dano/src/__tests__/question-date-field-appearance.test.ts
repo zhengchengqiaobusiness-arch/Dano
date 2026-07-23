@@ -39,8 +39,8 @@ describe("QuestionDateField time picker appearance", () => {
     expect(source).toContain('type={includesTime ? "datetime-local" : "date"}');
     expect(source).toContain("parseNativeDateInputValue");
     expect(source).toContain("if (useNativePicker) open = false");
-    expect(source).toContain('class="question-date-native-icon"');
-    expect(source).toContain(".question-date-native::-webkit-calendar-picker-indicator");
+    expect(source).not.toContain('class="question-date-native-icon"');
+    expect(source).not.toContain(".question-date-native::-webkit-calendar-picker-indicator");
     expect(source).not.toContain('class="question-button secondary question-date-clear"');
   });
 
