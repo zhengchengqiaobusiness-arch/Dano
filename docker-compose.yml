@@ -69,11 +69,17 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    environment:
+      NGINX_ENVSUBST_FILTER: ^DANO_
+      DANO_AUTH_COOKIE_NAME: ${DANO_AUTH_COOKIE_NAME:-dano_auth}
+      DANO_DEMO_JWT: ${DANO_DEMO_JWT:-}
+      DANO_DEMO_COOKIE_EXPIRES: ${DANO_DEMO_COOKIE_EXPIRES:-}
     depends_on:
       app:
         condition: service_healthy
     volumes:
       - ${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf.template}:/etc/nginx/templates/default.conf.template:ro
+      - ${DANO_NGINX_DEMO_AUTH_CONF:-/opt/dano/deploy/nginx/demo-auth.conf.template}:/etc/nginx/templates/demo-auth.conf.template:ro
       - ${DANO_NGINX_SHARED_DIR:-/opt/dano/deploy/nginx/shared}:/etc/nginx/dano:ro
     networks:
       - default

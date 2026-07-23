@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.1.137",
+  "version": "0.1.138",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -25,6 +25,7 @@
     "deploy:check-bash": "node scripts/check-bash-acceptance.mjs",
     "deploy:check-bash:container": "sh scripts/check-bash-acceptance-container.sh",
     "deploy:check-exposure": "node scripts/check-deploy-exposure.mjs",
+    "deploy:init-demo-auth": "node scripts/init-demo-auth.mjs",
     "dev:server": "pnpm -C apps/dano dev:server",
     "dev:web": "pnpm -C apps/dano dev:web",
     "secret:set": "node scripts/set-env-secret.mjs",
@@ -32,6 +33,7 @@
     "start": "pnpm -C apps/dano start",
     "test": "vitest run",
     "test:browser:header": "node scripts/test-app-header-browser.mjs",
+    "test:browser:demo-auth": "node scripts/test-demo-auth-browser.mjs",
     "test:browser:theme-color": "node scripts/test-theme-color-browser.mjs",
     "test:browser:question-tool": "node scripts/test-question-tool-card-browser.mjs",
     "test:browser:multi-tab": "node scripts/test-multi-tab-prompt-browser.mjs",

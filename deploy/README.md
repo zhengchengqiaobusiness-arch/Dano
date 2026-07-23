@@ -51,6 +51,38 @@ symlink folder boundaries, invalid signatures, and client-supplied identity
 fields. Without a configured verifier or a verified token, Dano does not
 invent an anonymous User and does not expose a User Folder.
 
+Production releases initialize one fixed Demo identity in the Deploy Control
+Directory before Compose starts. On the first release,
+`scripts/init-demo-auth.mjs` creates a random `DANO_AUTH_JWT_SECRET` and one
+HS256 `DANO_DEMO_JWT` for `demo-user` / `演示用户`, then stores both in
+`/opt/dano/deploy/.env` with mode `0600`. Later releases verify the signature,
+identity claims, and expiration and reuse the exact pair. A one-sided pair,
+expired token, invalid signature, or changed Demo identity stops the release;
+the release never repairs the state by overwriting or rotating credentials.
+When `DANO_AUTH_JWT_ISSUER` or `DANO_AUTH_JWT_AUDIENCE` is configured, first
+initialization includes the matching claim and later releases reject a token
+that is incompatible with the active verifier constraints.
+
+For a manual Compose deployment, initialize the same persisted pair before
+starting the stack:
+
+```bash
+pnpm run deploy:init-demo-auth -- --file /opt/dano/deploy/.env
+```
+
+When `DANO_DEMO_JWT` is present, nginx sets `dano_auth` on proxied HTML
+responses so a new browser authenticates before its first API request. The
+cookie is `Path=/`, `HttpOnly`, and `SameSite=Lax`; HTTPS responses also add
+`Secure`. Its persistent `Expires` value is derived from the signed JWT `exp`
+and never exceeds the token lifetime. Without `DANO_DEMO_JWT`, nginx does not
+emit the authentication cookie and Dano keeps its existing no-fallback
+behavior. `DANO_DEMO_COOKIE_EXPIRES` is derived metadata and should not be
+edited independently.
+
+The JWT is provided only to nginx and the app receives only the signing Secret.
+Neither value belongs in the Dockerfile, browser code, image build arguments,
+or Git.
+
 The app container runs as the non-root `node` user (`1000:1000`) with
 `HOME=/home/node`. The image installs `/usr/bin/bwrap` setuid (`4755`) because
 the verified production Docker host rejects non-setuid Bubblewrap with `bwrap
@@ -85,6 +117,15 @@ These commands use Podman and keep local runtime data outside the source
 checkout under the system temporary directory. Start the Podman machine first
 when it is not already running. Run `smoke:deploy` and the browser acceptance
 steps below after `container:up` when validating a change.
+
+For the fixed Demo authentication flow, run the external browser regression
+against that deployment. It starts with an empty browser context, verifies the
+server-set HttpOnly cookie and `演示用户`, changes and reloads the theme, then
+restores the original theme preference:
+
+```bash
+DANO_BROWSER_BASE_URL=http://localhost:18082 pnpm run test:browser:demo-auth
+```
 
 ```bash
 cp .env.example .env
@@ -258,8 +299,9 @@ manual `podman run` only receives the environment values explicitly passed with
 ## Production Server Run
 
 The release script builds from a temporary source checkout, copies only deploy
-inputs to `/opt/dano/deploy`, starts the prebuilt image, runs the smoke test,
-and removes `/tmp/dano-build-*` even when a step fails:
+inputs to `/opt/dano/deploy`, initializes or verifies the persisted Demo
+authentication pair, starts the prebuilt image, runs the smoke test, and removes
+`/tmp/dano-build-*` even when a step fails:
 
 ```bash
 DANO_REPO_URL=git@github.com:zhengchengqiaobusiness-arch/Dano.git \

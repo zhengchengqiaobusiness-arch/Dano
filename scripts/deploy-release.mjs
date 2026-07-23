@@ -3,16 +3,15 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
+import { readEnvValues, updateEnvFile } from "./deploy-env-file.mjs";
 
 const composeBin = process.env.DANO_COMPOSE || "docker";
 const composeArgs = composeBin === "podman" ? ["compose"] : ["compose"];
@@ -22,6 +21,7 @@ const runtimeDir = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
 const secretsDir = process.env.DANO_SECRETS_DIR || join(deployDir, ".secrets");
 const nginxConf =
   process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf.template");
+const nginxDemoAuthConf = join(deployDir, "nginx/demo-auth.conf.template");
 const nginxSharedDir = join(deployDir, "nginx/shared");
 const exposureComposeFile = join(deployDir, "docker-compose.exposure.yml");
 const envPath = join(deployDir, ".env");
@@ -82,31 +82,6 @@ function requireValue(name, value) {
   return value;
 }
 
-function serializeEnvValue(value) {
-  const text = String(value);
-  if (/[\r\n]/.test(text)) {
-    throw new Error("deployment environment values cannot contain newlines");
-  }
-  if (/^[a-zA-Z0-9_./:@+-]+$/.test(text)) return text;
-  return `'${text.replaceAll("'", "\\'")}'`;
-}
-
-function updateEnvFile(values) {
-  const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  const lines = current.split(/\r?\n/).filter(line => line.length > 0);
-  const seen = new Set();
-  const next = lines.map(line => {
-    const match = line.match(/^([A-Z0-9_]+)=/);
-    if (!match || !(match[1] in values)) return line;
-    seen.add(match[1]);
-    return `${match[1]}=${serializeEnvValue(values[match[1]])}`;
-  });
-  for (const [key, value] of Object.entries(values)) {
-    if (!seen.has(key)) next.push(`${key}=${serializeEnvValue(value)}`);
-  }
-  writeFileSync(envPath, `${next.join("\n")}\n`, { mode: 0o600 });
-}
-
 function prepareRuntimeDir() {
   mkdirSync(runtimeDir, { recursive: true });
   chmodSync(runtimeDir, 0o755);
@@ -151,18 +126,39 @@ try {
     join(buildDir, `deploy/nginx/${exposure.mode}.conf.template`),
     nginxConf,
   );
+  cpSync(
+    join(buildDir, "deploy/nginx/demo-auth.conf.template"),
+    nginxDemoAuthConf,
+  );
   cpSync(join(buildDir, "deploy/nginx/shared"), nginxSharedDir, {
     recursive: true,
   });
-  updateEnvFile({
+  updateEnvFile(envPath, {
     DANO_IMAGE: image,
     DANO_RUNTIME_DIR: runtimeDir,
     DANO_SECRETS_DIR: secretsDir,
     DANO_NGINX_CONF: nginxConf,
+    DANO_NGINX_DEMO_AUTH_CONF: nginxDemoAuthConf,
     DANO_NGINX_SHARED_DIR: nginxSharedDir,
     DANO_EXPOSURE_MODE: exposure.mode,
     ...exposure.tlsEnv,
   });
+  run(process.execPath, [
+    new URL("./init-demo-auth.mjs", import.meta.url).pathname,
+    "--file",
+    envPath,
+  ]);
+  process.loadEnvFile(envPath);
+  const persistedEnv = readEnvValues(readFileSync(envPath, "utf8"));
+  for (const name of [
+    "DANO_AUTH_JWT_SECRET",
+    "DANO_DEMO_JWT",
+    "DANO_DEMO_COOKIE_EXPIRES",
+  ]) {
+    const value = persistedEnv.get(name);
+    if (!value) throw new Error(`${name} was not persisted by Demo authentication`);
+    process.env[name] = value;
+  }
 
   run(
     composeBin,
