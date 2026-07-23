@@ -99,6 +99,51 @@ def test_generated_runtime_boolean_false_keeps_confirmation_gate_closed(monkeypa
     assert calls == []
 
 
+def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, capsys):
+    namespace = _write_runtime_namespace()
+    monkeypatch.setenv("DANO_URL", "http://dano.test")
+    monkeypatch.setenv("DANO_TENANT_KEY", "tenant-key")
+    captured: dict = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "state": "completed",
+                "audit": {"fact_check": {"passed": True}},
+                "exec_result": {"structured_output": {"result": {}}},
+            }).encode()
+
+    def _urlopen(request, **_kwargs):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data)
+        return _Response()
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", _urlopen)
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py",
+        "--json",
+        json.dumps({"capability": "submit", "input": {"id": "42"}, "confirm": True}),
+    ])
+
+    namespace["main"]()
+
+    assert captured == {
+        "url": "http://dano.test/v1/skills/A-OA.withdraw_request/capabilities/submit/invoke",
+        "payload": {
+            "protocol": "dano.capability_call.v1",
+            "input": {"id": "42"},
+            "confirm": True,
+        },
+    }
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["status"] == "succeeded"
+
+
 @pytest.mark.parametrize("invalid_capability", [["submit"], {"name": "submit"}, 1, True, None, ""])
 def test_generated_runtime_invalid_capability_type_ends_with_json(
     monkeypatch, capsys, invalid_capability,

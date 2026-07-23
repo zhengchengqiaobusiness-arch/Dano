@@ -135,6 +135,8 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     assert f'display_name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in openai_yaml
     assert f"${folder.name}" in openai_yaml
     assert "ask_user_question" in skill_md
+    assert "Shell 工作目录设为本 `SKILL.md` 所在目录" in skill_md
+    assert "禁止绕过包装脚本直接拼 HTTP 请求" in skill_md
     assert not (folder / "references" / "README.md").exists()
     assert not (folder / "references" / "QUICKREF.md").exists()
 

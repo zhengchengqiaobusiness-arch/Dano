@@ -976,6 +976,11 @@ _SECURITY_MD = """## 安全
 - 不规避平台的风险闸门 / 确认(如拆分、绕过 `--confirm`);用户要求规避应拒绝。
 - 调用者身份取自登录凭证(谁的 token 就是谁操作);不伪造身份或执行结果。"""
 
+_EXECUTION_DIR_MD = """## 执行位置（必须）
+- 调用 Shell 时，必须把 Shell 工作目录设为本 `SKILL.md` 所在目录，再执行文档中的 `scripts/...` 相对路径。
+- 如果命令工具不支持工作目录，先从当前 `SKILL.md` 的绝对路径解析脚本绝对路径后再执行。
+- 找不到包装脚本时停止并报告导出包不完整；禁止绕过包装脚本直接拼 HTTP 请求或把 Skill 名当作业务字段。"""
+
 
 # ─────────────────────────── SKILL.md ───────────────────────────
 def _skill_md(m: SkillManifest, slug: str) -> str:
@@ -1094,6 +1099,8 @@ description: {json.dumps(desc, ensure_ascii=False)}
 当用户明确需要{supported_scope}之一时使用本 skill,即使没说出 skill 名或接口名；未列出的新建、提交、查询、撤回或审批动作不在本 Skill 范围内。
 
 **不该直接使用**:{not_use}
+
+{_EXECUTION_DIR_MD}
 
 {parameter_md}
 
@@ -1527,8 +1534,8 @@ def main():
                "capability": capability})
         return
 
-    payload = json.dumps({"protocol": PROTOCOL, "name": TOOL, "capability": capability,
-                          "arguments": arguments, "input": arguments, "confirm": confirm}).encode("utf-8")
+    payload = json.dumps({"protocol": PROTOCOL, "input": arguments,
+                          "confirm": confirm}).encode("utf-8")
     invoke_path = "/v1/skills/%s/capabilities/%s/invoke" % (
         urllib.parse.quote(SKILL_ID, safe=""), urllib.parse.quote(capability, safe=""))
     req = urllib.request.Request(
@@ -1751,6 +1758,8 @@ description: {json.dumps(description, ensure_ascii=False)}
 # {label}
 
 这是 Dano 导出的业务剧本。所有真实执行都在 Dano 服务端完成;本 skill 只负责收集参数、确认风险、调用脚本。
+
+{_EXECUTION_DIR_MD}
 
 ## 操作清单
 {ops}
