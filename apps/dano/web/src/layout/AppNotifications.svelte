@@ -85,7 +85,7 @@
   }
 
   .toast-item.error {
-    background: var(--error-bg);
+    background: color-mix(in srgb, var(--error-text) 10%, var(--panel));
     border-color: var(--error-border);
   }
 
