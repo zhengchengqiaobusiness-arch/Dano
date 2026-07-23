@@ -2825,11 +2825,31 @@ def _render_query_template(query_template, fields: dict, defaults: dict | None =
     return {str(k): v for k, v in rendered.items() if v is not None}
 
 
-def _merge_query_into_url(url: str, query: dict | None) -> str:
-    if not query:
+def _drop_unspecified_parameters(node, names: set[str]):
+    """Remove optional read filters that still contain an unresolved parameter."""
+    if isinstance(node, str) and any("{{" + name + "}}" in node for name in names):
+        return _PATH_MISSING
+    if isinstance(node, dict):
+        cleaned = {}
+        for key, value in node.items():
+            item = _drop_unspecified_parameters(value, names)
+            if item is not _PATH_MISSING:
+                cleaned[key] = item
+        return cleaned
+    if isinstance(node, list):
+        cleaned = [_drop_unspecified_parameters(value, names) for value in node]
+        return [value for value in cleaned if value is not _PATH_MISSING]
+    return node
+
+
+def _merge_query_into_url(url: str, query: dict | None, *, drop_keys: set[str] | None = None) -> str:
+    if not query and not drop_keys:
         return url
+    query = query or {}
     parsed = urlparse(url or "")
     existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for key in drop_keys or set():
+        existing.pop(key, None)
     merged = {**existing, **query}
     encoded = urlencode(merged, doseq=True)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, encoded, parsed.fragment))
@@ -3504,6 +3524,20 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     body_template = api_request.get("body_template")
     body = substitute(body_template, fields, api_request.get("sample_inputs") or {}) if isinstance(body_template, (dict, list)) else None
     query = _render_query_template(api_request.get("query_template"), fields, api_request.get("sample_inputs") or {})
+    omitted = set(api_request.get("omit_unspecified_params") or [])
+    drop_query_keys: set[str] = set()
+    if omitted:
+        drop_query_keys = {
+            str(key)
+            for key, value in (api_request.get("query_template") or {}).items()
+            if _drop_unspecified_parameters(value, omitted) is _PATH_MISSING
+        }
+        body = _drop_unspecified_parameters(body, omitted)
+        query = _drop_unspecified_parameters(query, omitted)
+        if body is _PATH_MISSING:
+            body = None
+        if query is _PATH_MISSING:
+            query = {}
     id_guarded: set[tuple] = set()
     id_write_failures: list[str] = []
     if body is not None:
@@ -3536,7 +3570,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     if send and id_write_failures:                              # C5:身份字段写入失败 → 必拒(避免以录制者身份写入)
         id_issues = list(id_issues) + [f"identity 字段路径不可达: {p}" for p in id_write_failures]
     body = _finalize_jsonstr(body) if body is not None else None  # identity/串联注入后,再把内层 JSON 压回字符串
-    url = _merge_query_into_url(url, query)
+    url = _merge_query_into_url(url, query, drop_keys=drop_query_keys)
     if not send:
         # **self_check 是唯一承重闸门**:它用哨兵填满每个参数,既查"残留 {{}}(参数未声明)"也查"参数填不进 body"。
         # 这里再用录制默认值看 leftover 只作信息——某参数**没有录制默认值**(运行期由 agent 提供)会留 {{}},
@@ -4259,6 +4293,46 @@ def _select_api_request_for_capability(api_request: dict, name: str | None) -> t
     return _workflow_with_steps(api_request, selected, cap), cap, ""
 
 
+def _apply_read_input_policy(api_request: dict, cap: dict | None) -> dict:
+    """Recorded read samples are UI recommendations, not implicit query filters."""
+    kind = str((cap or {}).get("kind") or (cap or {}).get("name") or "")
+    if kind not in {"query", "query_status", "list_options", "validate", "validate_batch", "preview", "inspect"}:
+        return api_request
+    schema = (cap or {}).get("input_schema") or (cap or {}).get("parameters") or {}
+    props = schema.get("properties") or {} if isinstance(schema, dict) else {}
+    required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
+    optional = {
+        str(name)
+        for name, field_schema in props.items()
+        if name not in required
+        and isinstance(field_schema, dict)
+        and field_schema.get("x-dano-apply-default") is not True
+    }
+    safe_defaults = {
+        str(name): field_schema.get("default")
+        for name, field_schema in props.items()
+        if isinstance(field_schema, dict)
+        and field_schema.get("x-dano-apply-default") is True
+        and "default" in field_schema
+    }
+    if not optional and not safe_defaults:
+        return api_request
+
+    def apply(node: dict) -> None:
+        samples = dict(node.get("sample_inputs") or {})
+        for name in optional:
+            samples.pop(name, None)
+        samples.update(safe_defaults)
+        node["sample_inputs"] = samples
+        node["omit_unspecified_params"] = sorted(optional)
+        for step in node.get("steps") or []:
+            if isinstance(step, dict):
+                apply(step)
+
+    apply(api_request)
+    return api_request
+
+
 async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str | None,
                             verify: bool, auth_headers: dict | None,
                             retries: int = 4, backoff: float = 0.6) -> tuple[bool, str]:
@@ -4381,7 +4455,7 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
                 verify=kw.get("verify", True),
             )
             return {"ok": True, "capability": capability, **options}
-        api_request = selected or api_request
+        api_request = _apply_read_input_policy(selected or api_request, cap)
     runner = execute_api_workflow if api_request.get("steps") else execute_api_request
     if cap and _capability_has_structured_plan(cap):
         out = await _execute_capability_plan(api_request, fields, cap=cap, kw=kw)

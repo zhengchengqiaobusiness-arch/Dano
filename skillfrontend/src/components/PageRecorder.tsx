@@ -1541,8 +1541,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   useEffect(() => {
     componentMountedRef.current = true;
+    const heartbeat = window.setInterval(() => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping", at: Date.now() }));
+      }
+    }, 20000);
     return () => {
       componentMountedRef.current = false;
+      window.clearInterval(heartbeat);
       if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
         intentionalCloseRef.current = true;
         wsRef.current?.close();
@@ -3577,7 +3584,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
                 <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再发布当前流程" : ""}>
                   <span><Button type="primary" loading={phase === "publishing"}
-                    disabled={!capabilities.length} onClick={publishRequest}>发布当前流程</Button></span>
+                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || !capabilities.length}
+                    onClick={publishRequest}>发布当前流程</Button></span>
                 </Tooltip>
               </Space>
             ),

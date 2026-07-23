@@ -11,6 +11,10 @@ from dano.agent_tools import materials
 log = structlog.get_logger(__name__)
 
 
+def _has_request_template(api_request: dict) -> bool:
+    return bool(api_request.get("body_template") or api_request.get("query_template") or api_request.get("steps"))
+
+
 async def _auto_goal(action: str, api_request: dict) -> dict:
     """LLM 就绪时自动提炼业务 Goal(随资产存档);未注入/失败 → {}。提议性质,不因 LLM 抖动阻断发布。"""
     try:
@@ -162,11 +166,11 @@ async def run_request_onboarding(
         params = list(api_request.get("params") or [])
         if not params and api_request.get("steps"):
             params = list((api_request["steps"][-1] or {}).get("params") or [])
-        # 没有可参数化的写请求体 → 无法做有意义的自检/真跑 → 诚实标 unsupported,不静默发空 skill
-        if not (api_request.get("body_template") or api_request.get("steps")):
-            log.warning("ingest.gate.unsupported", reason="no body_template/steps")
+        # 写请求由 body_template、查询请求由 query_template 参数化；两者都没有才是空 Skill。
+        if not _has_request_template(api_request):
+            log.warning("ingest.gate.unsupported", reason="no body_template/query_template/steps")
             return {"ok": False, "stage": "ingest", "status": IngestionStatus.UNSUPPORTED.value,
-                    "action": action, "reason": "没有可参数化的写请求体(无 body_template/steps)—— 无法安全自动化"}
+                    "action": action, "reason": "没有可参数化的请求模板(无 body_template/query_template/steps)—— 无法安全自动化"}
         # 请求角色只作为审计与风险元数据。DELETE、撤回、驳回等也可能是
         # 管理员刚刚真实执行的业务操作，不能仅凭方法或路径关键词在录入阶段拒发。
         from dano.execution.page.request_capture import classify_request_role

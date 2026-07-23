@@ -25,8 +25,14 @@ def _hotel_manifest():
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "pageNo": {"type": "integer", "default": 1},
-                        "pageSize": {"type": "integer", "default": 10},
+                        "pageNo": {
+                            "type": "integer", "default": 1,
+                            "x-dano-apply-default": True,
+                        },
+                        "pageSize": {
+                            "type": "integer", "default": 10,
+                            "x-dano-apply-default": True,
+                        },
                         "流程状态": {
                             "type": "string",
                             "format": "name-ref",
@@ -105,11 +111,23 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "`inputType: \"date\"`" in markdown
     assert "`question` 与 `confirm: true`" in markdown
     assert "`status=answered`" in markdown and "`answer=true`" in markdown
+    assert "HTTP 5xx、超时或结果不明" in markdown
+    assert "禁止用 curl、直连目标接口" in markdown
+    assert "禁止使用 curl、Python HTTP 客户端" in markdown
     assert "`partial_success`" not in markdown
 
     interaction = manifest.call_protocol["interaction_protocol"]
     assert interaction["max_calls_per_assistant_response"] == 1
     assert interaction["non_confirmation_default"]["string_must_be_non_empty"] is True
+    assert interaction["non_confirmation_default"]["recorded_schema_default_must_be_copied_exactly"] is True
+    assert interaction["parameter_identity"]["question_id_must_equal_input_key"] is True
+    assert interaction["query_input_policy"] == {
+        "explicit_business_filters_only": True,
+        "recorded_filter_defaults_forbidden": True,
+        "safe_defaults_require": "x-dano-apply-default=true",
+        "empty_filters_use_empty_input": True,
+        "nearest_capability_substitution_forbidden": True,
+    }
     assert interaction["confirmation"]["allowed_keys"] == ["question", "confirm"]
     assert interaction["result_statuses"] == ["answered", "cancelled"]
     assert interaction["single_field_collection"]["mode"] == "top_level"
@@ -124,6 +142,9 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
         "static": "options",
         "remote": "dataSource",
         "remote_input_types": ["select", "treeSelect"],
+        "invent_or_replace_forbidden": True,
+        "default_must_match_candidate": True,
+        "first_candidate_fallback_forbidden": True,
     }
     assert interaction["answer_mapping"]["multiple"].startswith("result.answer object")
     assert interaction["validation_error_behavior"].startswith("retry_silently")
@@ -133,13 +154,80 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
 
 def test_exported_skill_renders_schema_defaults_in_tables_and_examples():
     markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
+    query_example = markdown.split("### `query_hotel_apply`", 1)[1].split(
+        "### `withdraw_hotel_apply`", 1,
+    )[0]
+    write_example = markdown.split("### `withdraw_hotel_apply`", 1)[1]
 
     assert "推荐默认值" in markdown
     assert "录制推荐值，需用户确认" in markdown
-    assert '"pageNo": 1' in markdown
-    assert '"pageSize": 10' in markdown
-    assert '"流程状态": "审批中"' in markdown
-    assert '"撤回原因": "行程变更"' in markdown
+    assert '"pageNo": 1' in query_example
+    assert '"pageSize": 10' in query_example
+    assert '"流程状态": "审批中"' not in query_example
+    assert '"撤回原因": "行程变更"' in write_example
+
+
+def test_exported_skill_forbids_query_filter_defaults_and_nearest_capability_guessing():
+    markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
+
+    assert "查询 input 只能包含用户本轮明确指定的业务筛选条件" in markdown
+    assert "录制推荐值不得作为查询筛选条件自动提交" in markdown
+    assert "没有筛选条件时传空 input" in markdown
+    assert "查询能力不得为可选筛选字段主动提问" in markdown
+    assert "录制参考值，禁止自动作为查询条件" in markdown
+    assert "实体目录/候选列表" in markdown
+    assert "不得用最相近的能力代替" in markdown
+
+
+def test_exported_skill_locks_question_ids_defaults_and_enum_candidates_to_schema():
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.hotel_defaults",
+        subsystem=Subsystem.OA,
+        action="hotel_defaults",
+        title="酒店申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_hotel_apply",
+            "kind": "submit",
+            "title": "提交酒店申请",
+            "requires_human_confirm": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "房间类型": {
+                        "type": "string",
+                        "format": "name-ref",
+                        "default": "标准间",
+                        "x-enum-options": [
+                            {"label": "标准间", "value": "1"},
+                            {"label": "大床房", "value": "2"},
+                        ],
+                    },
+                    "房间等级": {
+                        "type": "string",
+                        "format": "name-ref",
+                        "default": "豪华",
+                        "enum": ["普通", "舒适", "豪华", "行政"],
+                    },
+                },
+                "required": ["房间类型", "房间等级"],
+            },
+        }],
+    ))
+
+    markdown = _skill_md(manifest, "dano-a-oa-hotel-defaults")
+
+    assert "参数名逐字一致" in markdown
+    assert "禁止翻译、改名或改成 snake_case" in markdown
+    assert "字段配置表是唯一表单来源" in markdown
+    assert "存在录制推荐值时必须逐字复制" in markdown
+    assert "禁止自行生成、替换、增删候选项" in markdown
+    assert "枚举默认值必须与候选项逐字一致" in markdown
+    assert "禁止回落为候选第一项" in markdown
+    assert '`options: ["标准间", "大床房"]`' in markdown
+    assert '`"标准间"`（录制推荐值，需用户确认）' in markdown
+    assert '`options: ["普通", "舒适", "豪华", "行政"]`' in markdown
+    assert '`"豪华"`（录制推荐值，需用户确认）' in markdown
 
 
 def test_options_reference_only_claims_live_lookup_with_grounded_source():

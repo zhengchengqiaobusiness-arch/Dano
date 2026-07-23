@@ -564,6 +564,25 @@ def _schema_example_value(name: str, schema: dict):  # noqa: ANN001
     return f"<{name}>"
 
 
+def _capability_example_input(contract: dict) -> dict:
+    """Never teach callers to turn recorded query samples into live filters."""
+    props = ((contract.get("parameters") or {}).get("properties") or {})
+    if contract.get("kind") in _READ_CAPABILITY_KINDS:
+        return {
+            field: schema.get("default")
+            for field, schema in props.items()
+            if isinstance(schema, dict)
+            and schema.get("x-dano-apply-default") is True
+            and "default" in schema
+        }
+    required = set(contract.get("required") or [])
+    return {
+        field: _schema_example_value(field, schema)
+        for field, schema in props.items()
+        if field in required
+    }
+
+
 def _schema_default_text(schema: dict) -> str:
     """Keep recorded samples as recommendations while marking silent-safe defaults."""
     schema = schema or {}
@@ -571,6 +590,17 @@ def _schema_default_text(schema: dict) -> str:
         return "运行时按用户上下文给出非空推荐值"
     label = "安全默认值" if schema.get("x-dano-apply-default") is True else "录制推荐值，需用户确认"
     return f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`（{label}）"
+
+
+def _query_default_text(schema: dict) -> str:
+    if schema.get("x-dano-apply-default") is True:
+        return _schema_default_text(schema)
+    if "default" not in schema or schema.get("default") in (None, ""):
+        return "无；仅在用户明确指定该筛选条件时传入"
+    return (
+        f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`"
+        "（录制参考值，禁止自动作为查询条件）"
+    )
 
 
 def _capability_contract_section(m: SkillManifest) -> str:
@@ -588,9 +618,14 @@ def _capability_contract_section(m: SkillManifest) -> str:
             rows = ["| 参数 | 类型 | 必填 | 推荐默认值 | 说明 |", "|---|---|---|---|---|"]
             for field, prop in props.items():
                 desc = str((prop or {}).get("description") or (prop or {}).get("label") or field).replace("|", "\\|")
+                default_text = (
+                    _query_default_text(prop)
+                    if contract.get("kind") in _READ_CAPABILITY_KINDS
+                    else _schema_default_text(prop)
+                )
                 rows.append(
                     f"| `{field}` | {_schema_type_text(prop)} | {'是' if field in required else '否'} | "
-                    f"{_schema_default_text(prop)} | {desc} |"
+                    f"{default_text} | {desc} |"
                 )
                 item_props = (((prop or {}).get("items") or {}).get("properties") or {})
                 item_required = set((((prop or {}).get("items") or {}).get("required") or []))
@@ -610,9 +645,7 @@ def _capability_contract_section(m: SkillManifest) -> str:
         )
         blocks.append(f"\n输出与验证:{verification}{batch_note}。完整 output schema:")
         blocks += ["```json", json.dumps(contract.get("output_schema") or {}, ensure_ascii=False, indent=2), "```"]
-        payload = {"capability": name, "input": {
-            field: _schema_example_value(field, field_schema) for field, field_schema in props.items()
-        }}
+        payload = {"capability": name, "input": _capability_example_input(contract)}
         if contract.get("requires_confirmation"):
             payload["confirm"] = True
         blocks += ["", "调用示例:", "```bash",
@@ -627,10 +660,15 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "## 操作步骤(SOP)",
         "",
         "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。",
+        "   用户意图必须同时匹配能力的业务对象和动作；实体目录/候选列表不等于业务申请记录，"
+        "未发布对应能力时必须说明不支持，不得用最相近的能力代替。",
         "2. 读取所选 capability 的完整 `input_schema`；对动态选择项先运行 "
         "`bash scripts/submit.sh --capability <能力名> --list-options <字段名>` 获取实时候选。",
-        "3. **一次性收集所选能力的全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
-        "把所有字段放在同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
+        "   查询 input 只能包含用户本轮明确指定的业务筛选条件；录制推荐值不得作为查询筛选条件自动提交。"
+        "没有筛选条件时传空 input，由脚本仅应用 `x-dano-apply-default: true` 的分页等安全默认值。",
+        "3. **一次性收集本次所需字段。** 写能力必须收集全部必填表单项；查询能力只收集必填字段和"
+        "用户明确要求的可选筛选条件，不得为其他可选筛选字段主动提问。原生调用 `ask_user_question` "
+        "且本轮只调用一次，把所需字段放在同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
         "不得逐字段、逐分区或逐表单多轮追问。",
         "   每个问题必须使用下表给出的参数名作为 `id`、业务标签作为 `question`，并设置对应的 "
         "`inputType`、`required`、非空推荐 `default` 及 `options`/`dataSource`。录制默认值只作推荐，"
@@ -761,6 +799,7 @@ def _question_control(schema: dict) -> str:
         or schema.get("enum")
         or schema.get("x-options")
         or schema.get("x-options-snapshot")
+        or schema.get("x-enum-options")
         or schema.get("x-options-source")
     )
     if selectable:
@@ -819,7 +858,12 @@ def _question_collection_block(name: str, contract: dict) -> list[str]:
     """Render the exact parameter-to-question mapping for one capability."""
     schema = contract.get("parameters") or {}
     rows = _question_rows(schema)
-    lines = [f"   `{name}`（{contract.get('title') or name}）字段配置："]
+    suffix = (
+        "可用查询字段（可选筛选条件仅在用户明确指定时加入问题）"
+        if contract.get("kind") in _READ_CAPABILITY_KINDS else
+        "字段配置"
+    )
+    lines = [f"   `{name}`（{contract.get('title') or name}）{suffix}："]
     if not rows:
         lines.append("   - 无需收集业务字段。")
         return lines
@@ -891,15 +935,28 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         "",
         f"1. 确认用户要执行 `{name}`（{contract.get('title') or m.title or name}），"
         "而不是未发布的查询、撤回或审批动作。",
+        "   用户意图必须同时匹配业务对象和动作；实体目录/候选列表不等于业务申请记录，"
+        "未发布对应能力时必须说明不支持，不得用最相近的能力代替。",
         "2. 读取该能力完整 `input_schema`；动态选择项先运行 "
         f"`bash scripts/submit.sh --capability {name} --list-options <字段名>` 获取实时候选，"
         "不得猜测选项名称或内部 ID。",
-        "3. **一次性收集全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
-        "把所有字段放进同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
-        "不得逐字段、逐分区或逐表单多轮追问。每项都必须设置字段名 `id`、业务 `label/question`、"
-        "控件 `inputType`、`required`、非空推荐 `default`，以及适用的 `options`、"
-        "`dataSource`、`multiple`、`dateFormat`。",
+        (
+            "3. **只收集本次所需查询字段。** 必填字段必须收集；可选筛选条件仅在用户明确指定时收集，"
+            "不得主动补入、提问或提交其他录制筛选值。原生调用 `ask_user_question` 且本轮只调用一次，"
+            if contract.get("kind") in _READ_CAPABILITY_KINDS else
+            "3. **一次性收集全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
+        ) + (
+            "把所有字段放进同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
+            "不得逐字段、逐分区或逐表单多轮追问。每项都必须设置字段名 `id`、业务 `label/question`、"
+            "控件 `inputType`、`required`、非空推荐 `default`，以及适用的 `options`、"
+            "`dataSource`、`multiple`、`dateFormat`。"
+        ),
     ]
+    if contract.get("kind") in _READ_CAPABILITY_KINDS:
+        L += [
+            "   查询 input 只能包含用户本轮明确指定的业务筛选条件；录制推荐值不得作为查询筛选条件自动提交。"
+            "没有筛选条件时传空 input，由脚本仅应用 `x-dano-apply-default: true` 的分页等安全默认值。",
+        ]
     L.extend(_question_collection_block(name, contract))
     L += [
         "4. `ask_user_question` 返回 `status=answered` 后，按 `answer` 对象的 `id` "
@@ -1016,9 +1073,18 @@ def _interaction_section(m: SkillManifest) -> str:
         "### SOP 第3—5步的表单工具硬约束",
         "",
         "- 填表或补字段时必须原生调用 `ask_user_question`；每次回复最多一次，多个字段放入同一 `questions` 数组，不要逐字段拆成多轮。",
+        "- 查询能力不得为可选筛选字段主动提问、自动使用录制推荐值或补造条件；没有用户筛选条件时直接使用空 input。",
         "- 多个表单、分区或连续步骤先一次性汇总；不得按表单、分区、步骤或字段分别提问。只收集一个非确认字段时才使用顶层 `question`。",
         "- `questions[]` 每项内放自己的 `id`、`question`、`default` 及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple`。",
-        "- `default` 必须结合上下文且非空：优先用户已提供值，其次契约默认值或录制样例；录制样例必须保留为推荐值，禁止空字符串或 `<字段>` 占位。",
+        "- `questions[].id` 必须与所选 capability 的参数名逐字一致；禁止翻译、改名或改成 snake_case，回答也必须按原始 id 映射。",
+        "- SOP 第3步的字段配置表是唯一表单来源；`id`、`question`、`inputType`、`required`、"
+        "`default`、`options`/`dataSource` 必须逐项照抄，任一不一致都必须在展示前修正。",
+        "- 用户已明确提供字段值时可用该值作为 `default`；否则，契约存在录制推荐值时必须逐字复制，"
+        "禁止自行改成另一个城市、金额、日期、枚举或业务示例。契约没有默认值时才按真实上下文给出非空推荐值。",
+        "- 禁止把“请填写…”“例如…”“待确认”或其他提示语当作 `default` 或最终业务值。",
+        "- `options`/`dataSource` 必须逐字取自字段配置或 `--list-options` 结果；禁止自行生成、替换、增删候选项。"
+        "枚举默认值必须与候选项逐字一致，禁止回落为候选第一项。",
+        "- 录制样例必须保留为推荐值，禁止空字符串或 `<字段>` 占位。",
         "- 推荐默认值只用于 `ask_user_question` 展示；仅 `x-dano-apply-default: true` 可静默应用，其余必须等用户回答。",
         "- 只有业务上确实必填的字段设置 `required: true`。日期使用 `inputType: \"date\"` 和 `dateFormat`；动态选项使用真实 `dataSource` 或先 `--list-options`。",
         "- 返回 `status=answered` 后，单题取 `answer`，多题按 questions 的 `id` 合并参数；用户取消时立即停止。",
@@ -1058,7 +1124,7 @@ _ERRORS_MD = """## 错误处理(据末行 status)
 - `failed` 且 reason 涉及凭证 / 401:目标系统登录态失效,让部署方在 Dano 重配 token,**不要重试**。
 - `failed` 且 `事实核查未过`:疑似空操作(接口 200 但没真生效),把原始返回给用户,**勿报成功**。
 - `need_confirm`:写操作未确认被拦,向用户确认后**带 `--confirm` 重跑**。
-- **超时 / 结果不明**:**不要自动重试写操作**(可能已生效,重试会造成重复执行);先让用户或运维核对实际状态。"""
+- 写操作返回 **HTTP 5xx、超时或结果不明**:一律视为“可能已经生效”，禁止用 curl、直连目标接口、换脚本或重复提交同一载荷；必须先用已发布只读能力/事实核查确认不存在，无法核实时停止并报告。"""
 
 _SECURITY_MD = """## 安全
 - 不在回复 / 日志里输出完整 token 或凭证。
@@ -1068,7 +1134,7 @@ _SECURITY_MD = """## 安全
 _EXECUTION_DIR_MD = """## 执行位置（必须）
 - 调用 Shell 时，必须把 Shell 工作目录设为本 `SKILL.md` 所在目录，再执行文档中的 `scripts/...` 相对路径。
 - 如果命令工具不支持工作目录，先从当前 `SKILL.md` 的绝对路径解析脚本绝对路径后再执行。
-- 找不到包装脚本时停止并报告导出包不完整；禁止绕过包装脚本直接拼 HTTP 请求或把 Skill 名当作业务字段。"""
+- 找不到或调用包装脚本失败时停止并报告；禁止绕过包装脚本直接拼 HTTP 请求，禁止使用 curl、Python HTTP 客户端或其他方式直连 Dano/目标系统，也禁止把 Skill 名当作业务字段。"""
 
 _LIST_OUTPUT_MD = """## 列表输出要求
 - 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --json '<output JSON>'` 格式化。
@@ -1160,9 +1226,11 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     protocol_example = (
         {"capability": "<capability>", "input": {}, "confirm": False}
         if multi_capability
-        else {"capability": default_capability, "input": {
-            field: _schema_example_value(field, schema) for field, schema in props.items()
-        }, "confirm": confirm}
+        else {
+            "capability": default_capability,
+            "input": _capability_example_input(next(iter(contracts.values()))),
+            "confirm": confirm,
+        }
     )
     platform_guards = "业务编排与风险闸门"
     if has_fact_verification:

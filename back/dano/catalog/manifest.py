@@ -446,6 +446,19 @@ def _ask_user_question_interaction_protocol() -> dict:
             "string_must_be_non_empty": True,
             "purpose": "recommended_prefill",
             "placeholder_forbidden": True,
+            "precedence": ["explicit_user_value", "recorded_schema_default", "grounded_context"],
+            "recorded_schema_default_must_be_copied_exactly": True,
+        },
+        "parameter_identity": {
+            "question_id_must_equal_input_key": True,
+            "translation_or_renaming_forbidden": True,
+        },
+        "query_input_policy": {
+            "explicit_business_filters_only": True,
+            "recorded_filter_defaults_forbidden": True,
+            "safe_defaults_require": "x-dano-apply-default=true",
+            "empty_filters_use_empty_input": True,
+            "nearest_capability_substitution_forbidden": True,
         },
         "field_rules": {
             "required_default": False,
@@ -459,6 +472,9 @@ def _ask_user_question_interaction_protocol() -> dict:
                 "static": "options",
                 "remote": "dataSource",
                 "remote_input_types": ["select", "treeSelect"],
+                "invent_or_replace_forbidden": True,
+                "default_must_match_candidate": True,
+                "first_candidate_fallback_forbidden": True,
             },
         },
         "confirmation": {

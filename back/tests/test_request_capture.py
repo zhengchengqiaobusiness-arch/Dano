@@ -2034,6 +2034,87 @@ async def test_execute_api_routes_by_capability_without_running_full_workflow():
     assert submitted["final"]["body"] == {"reason": "日报"}
 
 
+async def test_query_capability_omits_recorded_optional_filters_but_keeps_safe_defaults():
+    wf = {
+        "steps": [{
+            "step_id": "query",
+            "method": "GET",
+            "url": (
+                "http://x/api/hotel/page?pageNo=1&pageSize=10"
+                "&hotelName=%E5%BD%95%E5%88%B6%E9%85%92%E5%BA%97"
+                "&processStatus=%E5%AE%A1%E6%89%B9%E4%B8%AD"
+            ),
+            "path": "/api/hotel/page",
+            "query_template": {
+                "pageNo": "{{pageNo}}",
+                "pageSize": "{{pageSize}}",
+                "hotelName": "{{酒店名称}}",
+                "processStatus": "{{流程状态}}",
+            },
+            "params": ["pageNo", "pageSize", "酒店名称", "流程状态"],
+            "sample_inputs": {
+                "pageNo": 1,
+                "pageSize": 10,
+                "酒店名称": "录制酒店",
+                "流程状态": "审批中",
+            },
+        }],
+        "capabilities": [{
+            "name": "query_hotel_apply",
+            "kind": "query_status",
+            "step_ids": ["query"],
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pageNo": {
+                        "type": "integer",
+                        "default": 1,
+                        "x-dano-apply-default": True,
+                    },
+                    "pageSize": {
+                        "type": "integer",
+                        "default": 10,
+                        "x-dano-apply-default": True,
+                    },
+                    "酒店名称": {"type": "string", "default": "录制酒店"},
+                    "流程状态": {"type": "string", "default": "审批中"},
+                },
+                "required": [],
+            },
+        }],
+    }
+
+    unfiltered = await execute_api(wf, {"__capability": "query_hotel_apply"}, send=False)
+    filtered = await execute_api(
+        wf,
+        {"__capability": "query_hotel_apply", "酒店名称": "用户指定酒店"},
+        send=False,
+    )
+
+    assert unfiltered["final"]["query"] == {"pageNo": 1, "pageSize": 10}
+    assert "hotelName=" not in unfiltered["final"]["url"]
+    assert "processStatus=" not in unfiltered["final"]["url"]
+    assert filtered["final"]["query"] == {
+        "pageNo": 1,
+        "pageSize": 10,
+        "hotelName": "用户指定酒店",
+    }
+    assert "%E7%94%A8%E6%88%B7%E6%8C%87%E5%AE%9A%E9%85%92%E5%BA%97" in filtered["final"]["url"]
+
+    post_wf = json.loads(json.dumps(wf, ensure_ascii=False))
+    post_step = post_wf["steps"][0]
+    post_step["method"] = "POST"
+    post_step["url"] = "http://x/api/hotel/search"
+    post_step["body_template"] = post_step.pop("query_template")
+    post_result = await execute_api(
+        post_wf,
+        {"__capability": "query_hotel_apply"},
+        send=False,
+    )
+
+    assert post_result["final"]["body"] == {"pageNo": 1, "pageSize": 10}
+
+
 async def test_execute_submit_batch_capability_repeats_entries():
     wf = {
         "steps": [{
@@ -3141,6 +3222,13 @@ async def test_onboarding_unsupported_when_no_writeable_body():
     out = await run_request_onboarding(tenant="t-x", subsystem="reimburse", action="noop",
                                        api_request={"method": "POST", "url": "http://x/y"})
     assert out["ok"] is False and out["status"] == "unsupported"
+
+
+def test_onboarding_gate_accepts_parameterized_get_query_template():
+    from dano.onboarding.page_onboard import _has_request_template
+
+    assert _has_request_template({"method": "GET", "query_template": {"pageNo": "{{pageNo}}"}})
+    assert not _has_request_template({"method": "POST", "url": "http://x/y"})
 
 
 # ─────────── P0:零依赖属性模糊 —— 对不变量、不对系统,把 B1/B2/B3/blob 各形状一次锁死 ───────────

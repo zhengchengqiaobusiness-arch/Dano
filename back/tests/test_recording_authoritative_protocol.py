@@ -259,11 +259,15 @@ def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
     assert "pauseFlowOperationForReconnect()" in source[close_start:close_end]
 
 
-def test_frontend_does_not_fill_the_websocket_queue_with_application_pings() -> None:
+def test_frontend_keeps_proxied_websocket_alive() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    assert "heartbeatTimerRef" not in source
-    assert 'type: "ping"' not in source
+    lifecycle_start = source.index("useEffect(() => {\n    componentMountedRef.current = true;")
+    lifecycle_end = source.index("}, []);", lifecycle_start)
+    lifecycle = source[lifecycle_start:lifecycle_end]
+    assert 'ws.send(JSON.stringify({ type: "ping", at: Date.now() }))' in lifecycle
+    assert "}, 20000)" in lifecycle
+    assert "window.clearInterval(heartbeat)" in lifecycle
 
 
 def test_frontend_reconnects_after_component_refresh_instead_of_staying_disconnected() -> None:
@@ -354,6 +358,15 @@ def test_frontend_only_starts_flow_operation_on_connected_websocket() -> None:
 
     button_start = source.index('loading={orchestrateBusy || autoFixBusy}')
     button_source = source[button_start:button_start + 220]
+    assert 'disabled={connectionState !== "connected"' in button_source
+    assert "reconnectedSessionNeedsCapture" in button_source
+
+
+def test_frontend_only_publishes_on_connected_resumable_websocket() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    button_start = source.index('loading={phase === "publishing"}')
+    button_source = source[button_start:button_start + 280]
     assert 'disabled={connectionState !== "connected"' in button_source
     assert "reconnectedSessionNeedsCapture" in button_source
 
