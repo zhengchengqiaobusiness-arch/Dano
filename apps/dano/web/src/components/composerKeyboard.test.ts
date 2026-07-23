@@ -49,7 +49,7 @@ describe("composer keyboard enter handling", () => {
     ).toBe(false);
   });
 
-  it("keeps Enter as a newline only in mobile touch environments", () => {
+  it("keeps Enter as a newline only in touch-only input environments", () => {
     const matchMedia = vi.fn().mockReturnValue({ matches: true });
 
     expect(
