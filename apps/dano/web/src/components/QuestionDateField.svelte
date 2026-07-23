@@ -292,7 +292,7 @@
   }
 
   :global(.question-date-popover) {
-    z-index: 20;
+    z-index: 30;
     width: var(--question-date-picker-width);
     padding: 10px;
     border: 1px solid var(--border);
