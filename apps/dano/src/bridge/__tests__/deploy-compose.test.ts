@@ -76,6 +76,7 @@ appendFileSync(process.env.DANO_COMPOSE_LOG, JSON.stringify(process.argv.slice(2
 import { writeFileSync } from "node:fs";
 writeFileSync(process.env.DANO_COMPOSE_ENV_LOG, JSON.stringify({
   DANO_NGINX_CONF: process.env.DANO_NGINX_CONF,
+  DANO_NGINX_DEMO_AUTH_CONF: process.env.DANO_NGINX_DEMO_AUTH_CONF,
   DANO_NGINX_SHARED_DIR: process.env.DANO_NGINX_SHARED_DIR,
 }));
 `,
@@ -178,6 +179,10 @@ function runRelease(
   writeFileSync(
     join(fakeRepo, "deploy/nginx/both-no-redirect-http.conf.template"),
     "server { listen 80; }\nserver { listen 443 ssl; }\n",
+  );
+  writeFileSync(
+    join(fakeRepo, "deploy/nginx/demo-auth.conf.template"),
+    "map \"${DANO_DEMO_JWT}\" $dano_demo_cookie { default \"\"; }\n",
   );
   writeFileSync(
     join(fakeRepo, "deploy/nginx/shared/proxy-server.conf"),
@@ -451,6 +456,9 @@ writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
     expect(lastComposeEnv.DANO_NGINX_SHARED_DIR).toBe(
       join(deployRoot, "nginx/shared"),
     );
+    expect(lastComposeEnv.DANO_NGINX_DEMO_AUTH_CONF).toBe(
+      join(deployRoot, "nginx/demo-auth.conf.template"),
+    );
   });
 
   it("rejects an unknown exposure mode", () => {
@@ -496,6 +504,9 @@ writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
     expect(compose).not.toContain(":/tmp/dano");
     expect(compose).toContain(
       "${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf.template}",
+    );
+    expect(compose).toContain(
+      "${DANO_NGINX_DEMO_AUTH_CONF:-/opt/dano/deploy/nginx/demo-auth.conf.template}",
     );
     expect(compose).not.toContain("DANO_HTTPS_PORT");
     expect(compose).not.toContain("DANO_TLS_CERT_PATH");
@@ -996,10 +1007,19 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     ).toContain("80:80");
     expect(readFileSync(nginxConf, "utf8")).toContain("listen 80");
     expect(
+      readFileSync(join(deployDir, "nginx/demo-auth.conf.template"), "utf8"),
+    ).toContain("DANO_DEMO_JWT");
+    expect(
       readFileSync(join(deployDir, "nginx/shared/proxy-server.conf"), "utf8"),
     ).toContain("location /");
     expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
       `DANO_RUNTIME_DIR=${runtimeDir}`,
+    );
+    expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
+      "DANO_AUTH_JWT_SECRET=",
+    );
+    expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
+      "DANO_DEMO_JWT=",
     );
     expect(JSON.parse(logLines[0])).toEqual([
       "build",

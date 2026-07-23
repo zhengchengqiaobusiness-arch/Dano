@@ -1,0 +1,14 @@
+map "${DANO_DEMO_JWT}" $dano_demo_cookie_base {
+  ""      "";
+  default "${DANO_AUTH_COOKIE_NAME}=${DANO_DEMO_JWT}; Path=/; HttpOnly; SameSite=Lax; Expires=${DANO_DEMO_COOKIE_EXPIRES}";
+}
+
+map $scheme $dano_demo_cookie_secure {
+  default "";
+  https "; Secure";
+}
+
+map "$dano_demo_cookie_base:$upstream_http_content_type" $dano_demo_set_cookie {
+  default "";
+  "~^.+:text/html(?:;|$)" "$dano_demo_cookie_base$dano_demo_cookie_secure";
+}

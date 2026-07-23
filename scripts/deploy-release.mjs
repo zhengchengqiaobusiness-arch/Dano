@@ -22,6 +22,7 @@ const runtimeDir = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
 const secretsDir = process.env.DANO_SECRETS_DIR || join(deployDir, ".secrets");
 const nginxConf =
   process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf.template");
+const nginxDemoAuthConf = join(deployDir, "nginx/demo-auth.conf.template");
 const nginxSharedDir = join(deployDir, "nginx/shared");
 const exposureComposeFile = join(deployDir, "docker-compose.exposure.yml");
 const envPath = join(deployDir, ".env");
@@ -151,6 +152,10 @@ try {
     join(buildDir, `deploy/nginx/${exposure.mode}.conf.template`),
     nginxConf,
   );
+  cpSync(
+    join(buildDir, "deploy/nginx/demo-auth.conf.template"),
+    nginxDemoAuthConf,
+  );
   cpSync(join(buildDir, "deploy/nginx/shared"), nginxSharedDir, {
     recursive: true,
   });
@@ -159,10 +164,16 @@ try {
     DANO_RUNTIME_DIR: runtimeDir,
     DANO_SECRETS_DIR: secretsDir,
     DANO_NGINX_CONF: nginxConf,
+    DANO_NGINX_DEMO_AUTH_CONF: nginxDemoAuthConf,
     DANO_NGINX_SHARED_DIR: nginxSharedDir,
     DANO_EXPOSURE_MODE: exposure.mode,
     ...exposure.tlsEnv,
   });
+  run(process.execPath, [
+    new URL("./init-demo-auth.mjs", import.meta.url).pathname,
+    "--file",
+    envPath,
+  ]);
 
   run(
     composeBin,
