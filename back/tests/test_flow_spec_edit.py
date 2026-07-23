@@ -3587,6 +3587,107 @@ def test_high_confidence_duplicate_path_is_treated_as_already_covered():
     assert cap_report["unused_high_confidence_requests"] == []
 
 
+def test_validation_blocks_retained_business_write_without_materialized_step():
+    request_facts = RequestFacts.model_validate({
+        "requests": [{
+            "request_id": "req-delete", "request_index": 2, "method": "DELETE",
+            "url": "/api/hotel/delete?id=1", "path": "/api/hotel/delete",
+        }],
+        "analysis": {"req-delete": {
+            "request_id": "req-delete", "role": "business_write", "keep": True,
+            "confidence": 0.98,
+        }},
+        "usage": {"req-delete": {"request_id": "req-delete", "state": "captured"}},
+    })
+    query = FlowStep(step_id="query", method="GET", url="/api/hotel/page", path="/api/hotel/page")
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[query],
+        request_facts=request_facts,
+        capabilities=[FlowCapability(
+            name="query", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+    )
+
+    report = validate_flow_spec(spec)["capability_validation"]
+
+    assert report["passed"] is False
+    assert any(
+        item["code"] == "unmaterialized_business_request"
+        for item in report["materialization_integrity"]["errors"]
+    )
+
+
+def test_validation_blocks_materialized_business_write_without_capability_membership():
+    request_facts = RequestFacts.model_validate({
+        "requests": [{
+            "request_id": "req-delete", "request_index": 2, "method": "DELETE",
+            "url": "/api/hotel/delete?id=1", "path": "/api/hotel/delete",
+        }],
+        "analysis": {"req-delete": {
+            "request_id": "req-delete", "role": "business_write", "keep": True,
+            "confidence": 0.98,
+        }},
+        "usage": {"req-delete": {
+            "request_id": "req-delete", "state": "materialized", "materialized_step_id": "delete",
+        }},
+    })
+    query = FlowStep(step_id="query", method="GET", url="/api/hotel/page", path="/api/hotel/page")
+    delete = FlowStep(
+        step_id="delete", method="DELETE", url="/api/hotel/delete?id=1", path="/api/hotel/delete",
+        source_meta={"request_id": "req-delete", "request_index": 2},
+    )
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[query, delete],
+        request_facts=request_facts,
+        capabilities=[FlowCapability(
+            name="query", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+    )
+
+    report = validate_flow_spec(spec)["capability_validation"]
+
+    assert report["passed"] is False
+    assert any(
+        item["code"] == "unassigned_business_step"
+        for item in report["materialization_integrity"]["errors"]
+    )
+
+
+def test_validation_blocks_materialized_internal_read_without_capability_membership():
+    request_facts = RequestFacts.model_validate({
+        "requests": [{
+            "request_id": "req-options", "request_index": 1, "method": "GET",
+            "url": "/api/hotels/options", "path": "/api/hotels/options",
+        }],
+        "analysis": {"req-options": {
+            "request_id": "req-options", "role": "read_option", "keep": True,
+            "confidence": 0.96,
+        }},
+        "usage": {"req-options": {
+            "request_id": "req-options", "state": "materialized",
+            "materialized_step_id": "options",
+        }},
+    })
+    options = FlowStep(
+        step_id="options", method="GET", url="/api/hotels/options",
+        path="/api/hotels/options",
+        source_meta={"request_id": "req-options", "request_index": 1},
+    )
+    spec = FlowSpec(flow_id="f", steps=[options], request_facts=request_facts)
+
+    report = validate_flow_spec(spec)["capability_validation"]
+
+    assert report["passed"] is False
+    assert any(
+        item["code"] == "unassigned_materialized_step"
+        for item in report["materialization_integrity"]["errors"]
+    )
+
+
 def test_capability_validation_drops_stale_missing_node_step():
     spec = FlowSpec(
         flow_id="f",
@@ -5084,10 +5185,11 @@ def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_the
     assert "submit_batch" in by_name
     assert "query_status" in by_name
     assert by_name["submit_batch"].title == "完善后的批量提交"
-    # remove_request_from_capability is not in the Pi whitelist, while the
-    # already materialized status interface is allowed into the re-analysis.
+    # The materialized status request remains available as its own capability;
+    # without a grounded link it must not be folded into the submit operation.
     assert "submit" in by_name["submit_batch"].step_ids
-    assert "status" in by_name["submit_batch"].step_ids
+    assert "status" not in by_name["submit_batch"].step_ids
+    assert "status" in by_name["query_status"].step_ids
 
 
 def test_manual_field_axes_are_preserved_against_planner_overwrite():
@@ -5690,7 +5792,7 @@ def test_initial_planner_can_split_multiple_write_capabilities_without_family_me
     }
 
 
-def test_initial_pi_can_merge_rule_boundaries_into_one_semantic_capability():
+def test_initial_pi_cannot_merge_rule_boundaries_without_grounded_dependency():
     spec = FlowSpec(
         flow_id="draft-then-submit",
         steps=[
@@ -5739,9 +5841,11 @@ def test_initial_pi_can_merge_rule_boundaries_into_one_semantic_capability():
         generation_mode="initial",
     ))
 
-    assert len(out.capabilities) == 1
-    assert out.capabilities[0].name == "submit_request"
-    assert out.capabilities[0].step_ids == ["create_draft", "start_process"]
+    assert len(out.capabilities) == 2
+    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
+        frozenset({"create_draft"}),
+        frozenset({"start_process"}),
+    }
     assert out.meta["capability_model"]["source"] == "pi_agent_patch"
 
 

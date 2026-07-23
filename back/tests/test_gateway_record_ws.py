@@ -81,6 +81,9 @@ def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
         assert axis in protocol
     assert "every materialized request field" in protocol
     assert "actively apply" in protocol
+    assert "materialized_step_id" in protocol
+    assert "blocking unresolved" in protocol
+    assert "do not claim the plan is complete" in protocol
 
 
 def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:

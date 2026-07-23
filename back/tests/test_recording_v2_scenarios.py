@@ -2773,6 +2773,38 @@ def test_initial_planner_cannot_merge_distinct_same_family_action_boundaries():
     assert any("save" in scope for scope in scopes)
     assert any("submit" in scope for scope in scopes)
 
+
+def test_distinct_fill_transactions_remain_separate_write_capabilities():
+    first = FlowStep(
+        step_id="withdraw_first", method="DELETE", path="/orders/withdraw",
+        body_source='{"id":"1","reason":"a"}',
+        source_meta={
+            "trigger_action_id": "fill_reason_first",
+            "trigger_transaction_id": "tx_first",
+            "trigger_op": "fill",
+            "trigger_locator": "label=撤回原因",
+        },
+    )
+    second = FlowStep(
+        step_id="withdraw_second", method="DELETE", path="/orders/withdraw",
+        body_source='{"id":"2","reason":"b"}',
+        source_meta={
+            "trigger_action_id": "fill_reason_second",
+            "trigger_transaction_id": "tx_second",
+            "trigger_op": "fill",
+            "trigger_locator": "label=撤回原因",
+        },
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[first, second]), submission={"ops": []}, generation_mode="initial",
+    ))
+
+    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
+        frozenset({"withdraw_first"}),
+        frozenset({"withdraw_second"}),
+    }
+
 def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capability():
     step = FlowStep(
         step_id="submit", method="POST", path="/leave/submit",

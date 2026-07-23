@@ -13,7 +13,7 @@ import copy
 import json
 import logging
 import re as _re
-from urllib.parse import parse_qsl, urlencode, unquote, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlunparse
 
 _log = logging.getLogger("dano.request_capture")
 
@@ -228,15 +228,21 @@ def looks_like_read_request(url: str, body=None) -> bool:
     return _body_has_read_shape(body)
 
 
-def json_write_requests(requests: list[dict]) -> list[dict]:
-    """抓到的请求里所有「带 JSON body 的写请求」(候选提交请求),保序。供前端列出来手选用哪个。
-    """
+def write_requests(requests: list[dict]) -> list[dict]:
+    """Return every non-read HTTP write, regardless of where its parameters live."""
     out: list[dict] = []
     for r in requests:
-        if ((r.get("method") or "").upper() in _WRITE and _parse_body(r.get("post_data")) is not None
-                and not looks_like_read_request(r.get("url") or "", r.get("post_data"))):
+        if (
+            (r.get("method") or "").upper() in _WRITE
+            and not looks_like_read_request(r.get("url") or "", r.get("post_data"))
+        ):
             out.append(r)
     return out
+
+
+def json_write_requests(requests: list[dict]) -> list[dict]:
+    """Backward-compatible name for :func:`write_requests`."""
+    return write_requests(requests)
 
 
 # 读响应里"候选列表"的常见包装键(若依/通用):rows/records/list/data/content/items/result
@@ -2825,6 +2831,17 @@ def _render_query_template(query_template, fields: dict, defaults: dict | None =
     return {str(k): v for k, v in rendered.items() if v is not None}
 
 
+def _render_url_template(url_template: str, fields: dict, defaults: dict | None = None) -> str:
+    defaults = defaults or {}
+
+    def replace(match: _re.Match) -> str:
+        key = match.group(1)
+        value = fields[key] if key in fields else defaults.get(key, match.group(0))
+        return quote(str(value), safe="")
+
+    return _re.sub(r"\{\{([^{}]+)\}\}", replace, str(url_template or ""))
+
+
 def _drop_unspecified_parameters(node, names: set[str]):
     """Remove optional read filters that still contain an unresolved parameter."""
     if isinstance(node, str) and any("{{" + name + "}}" in node for name in names):
@@ -2918,13 +2935,15 @@ def self_check(api_request: dict) -> list[str]:
 
     templ = api_request.get("body_template")
     query_templ = api_request.get("query_template")
+    url_templ = api_request.get("url_template")
     has_body = isinstance(templ, (dict, list))
     has_query = isinstance(query_templ, dict)
+    has_url_template = bool(url_templ)
     params = list(api_request.get("params") or [])
     problems: list[str] = []
-    if not has_body and not has_query:
+    if not has_body and not has_query and not has_url_template:
         for p in params:
-            problems.append(f"参数 `{p}` 没有 body_template/query_template 落点 —— agent 改了也不生效")
+            problems.append(f"参数 `{p}` 没有 body_template/query_template/url_template 落点 —— agent 改了也不生效")
         return problems
 
     # (b)+(c):每个参数一个唯一哨兵 → 跑完整构造流水线(substitute→finalize)→ 哨兵必须都出现在最终 body
@@ -2937,18 +2956,21 @@ def self_check(api_request: dict) -> list[str]:
     all_probes = {**probes, **runtime_probes}
     nested = substitute(templ, all_probes, {}) if has_body else None          # 不喂 defaults:逼出"参数无占位"的问题
     query = _render_query_template(query_templ, all_probes, {}) if has_query else {}
+    rendered_url = _render_url_template(url_templ, all_probes, {}) if has_url_template else ""
     final_parts: list[str] = []
     if has_body:
         final_parts.append(json.dumps(_finalize_jsonstr(nested), ensure_ascii=False))
     if has_query:
         final_parts.append(json.dumps(query, ensure_ascii=False))
+    if has_url_template:
+        final_parts.append(rendered_url)
     final_str = "\n".join(final_parts)
     if "{{" in final_str:
         problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template/query_template 不一致(有参数没填上)")
     for p, probe in probes.items():
         cnt = final_str.count(probe)
         if cnt == 0:
-            problems.append(f"参数 `{p}` 填入的值进不了最终请求体/查询参数(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
+            problems.append(f"参数 `{p}` 填入的值进不了最终请求体/查询/路径(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
         elif cnt > 1:
             problems.append(f"参数 `{p}` 同时填入 {cnt} 处(疑似扁平/嵌套键路径歧义,一个参数替换了多个字段)")
 
@@ -3521,6 +3543,10 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     path = api_request.get("path") or ""
     # 优先用录制时的完整 url(同一 OA host 不变);否则 base_url + path
     url = api_request.get("url") or (path if path.startswith("http") else (base_url or "").rstrip("/") + path)
+    if api_request.get("url_template"):
+        url = _render_url_template(
+            api_request.get("url_template"), fields, api_request.get("sample_inputs") or {},
+        )
     body_template = api_request.get("body_template")
     body = substitute(body_template, fields, api_request.get("sample_inputs") or {}) if isinstance(body_template, (dict, list)) else None
     query = _render_query_template(api_request.get("query_template"), fields, api_request.get("sample_inputs") or {})

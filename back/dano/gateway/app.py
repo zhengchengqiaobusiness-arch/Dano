@@ -158,9 +158,15 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     contract_rule = (
         " Pi must actively apply the semantic decisions, not merely audit or describe them. "
-        "Classify every materialized request in request_roles. Build the correct business capability boundaries "
+        "Classify every materialized request in request_roles. First verify that every retained business_write or "
+        "submit_anchor captured request has a materialized_step_id. If one is missing, emit a blocking unresolved "
+        "item and do not claim the plan is complete. Build the correct business capability boundaries "
         "from exact recorded step_ids: repeated calls are not automatically separate capabilities, while independent "
-        "business operations must remain separate. Emit every grounded cross-capability dependency in "
+        "business operations must remain separate unless recorded data or control evidence proves one atomic operation. "
+        "Use transaction, action, locator, page, sequence, dependency, and request semantics as grouping evidence; "
+        "none of them alone may erase a retained request. Auxiliary reads from an operation stay internal to that "
+        "capability unless independent business-call evidence proves a public capability. Emit every grounded "
+        "cross-capability dependency in "
         "capability_relations with concrete from_capability/from_output and to_capability/to_input endpoints. "
         "Emit one field_semantics item for every materialized request field, including unchanged fields. Each item "
         "must cover path,name,default_value,type,category,source,required; contain exact step_id and wire_path, "

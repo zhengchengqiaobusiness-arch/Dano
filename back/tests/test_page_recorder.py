@@ -504,6 +504,220 @@ def test_actual_recording_keeps_repeated_request_facts_for_pi_boundary_analysis(
     assert len(spec.request_facts.requests) == 4
 
 
+def test_real_business_writes_are_materialized_before_pi_boundary_analysis() -> None:
+    """Body/anchor shape must not decide whether a retained write exists."""
+    from dano.execution.page.flow_spec import (
+        orchestrate_flow_capabilities,
+        _semantic_fact_snapshot,
+        to_flow_spec,
+        validate_flow_spec,
+    )
+
+    requests = [
+        {
+            "request_id": "req_query",
+            "index": 1,
+            "sequence": 1,
+            "method": "GET",
+            "url": "https://example.test/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10",
+            "response_json": {"code": 0, "data": {"list": []}},
+            "trigger_op": "click",
+            "trigger_action_id": "action_query",
+            "trigger_transaction_id": "tx_query",
+            "trigger_locator": "role=button[name=查询]",
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 0.94},
+        },
+        {
+            "request_id": "req_definition",
+            "index": 2,
+            "sequence": 2,
+            "method": "GET",
+            "url": "https://example.test/admin-api/bpm/process-definition/get?key=hotel_apply",
+            "response_json": {"code": 0, "data": {"id": "definition-1"}},
+            "trigger_op": "click",
+            "trigger_action_id": "action_submit",
+            "trigger_transaction_id": "tx_submit",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "read_context", "keep": True, "confidence": 0.91},
+        },
+        {
+            "request_id": "req_approval",
+            "index": 3,
+            "sequence": 3,
+            "method": "GET",
+            "url": "https://example.test/admin-api/bpm/process-instance/get-approval-detail?definitionId=definition-1",
+            "response_json": {"code": 0, "data": {"nodes": []}},
+            "trigger_op": "click",
+            "trigger_action_id": "action_submit",
+            "trigger_transaction_id": "tx_submit",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "read_context", "keep": True, "confidence": 0.91},
+        },
+        {
+            "request_id": "req_submit",
+            "index": 4,
+            "sequence": 4,
+            "method": "POST",
+            "url": "https://example.test/admin-api/oa/hotel-apply/submit-process",
+            "post_data": '{"hotelName":"酒店 A","definitionId":"definition-1"}',
+            "response_json": {"code": 0, "data": "hotel-1"},
+            "trigger_op": "click",
+            "trigger_action_id": "action_submit",
+            "trigger_transaction_id": "tx_submit",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.86},
+        },
+        {
+            "request_id": "req_withdraw",
+            "index": 5,
+            "sequence": 5,
+            "method": "DELETE",
+            "url": "https://example.test/admin-api/bpm/process-instance/cancel-by-start-user",
+            "post_data": '{"id":"hotel-1","reason":"撤回原因"}',
+            "response_json": {"code": 0},
+            "trigger_op": "fill",
+            "trigger_action_id": "action_withdraw_reason",
+            "trigger_transaction_id": "tx_withdraw",
+            "trigger_locator": "label=请输入撤回原因",
+        },
+        {
+            "request_id": "req_delete",
+            "index": 6,
+            "sequence": 6,
+            "method": "DELETE",
+            "url": "https://example.test/admin-api/oa/hotel-apply/delete?id=hotel-1",
+            "response_json": {"code": 0},
+            "trigger_op": "click",
+            "trigger_action_id": "action_delete",
+            "trigger_transaction_id": "tx_delete",
+            "trigger_locator": "role=button[name=删除]",
+        },
+    ]
+
+    spec = to_flow_spec(
+        captured_requests=requests,
+        reads=[],
+        samples={"酒店名称": "酒店 A", "撤回原因": "撤回原因", "id": "hotel-1"},
+    )
+
+    assert [step.source_meta.get("request_id") for step in spec.steps] == [
+        "req_query", "req_definition", "req_approval", "req_submit", "req_withdraw", "req_delete",
+    ]
+    assert all(
+        spec.request_facts.usage[request_id].materialized_step_id
+        for request_id in ("req_submit", "req_withdraw", "req_delete")
+    )
+    step_by_request = {
+        step.source_meta.get("request_id"): step for step in spec.steps
+    }
+    assert {param.path for param in step_by_request["req_withdraw"].params} == {"id", "reason"}
+    assert {param.path for param in step_by_request["req_delete"].params} == {"query.id"}
+
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    assert len(planned.capabilities) == 4
+    capability_steps = [set(capability.step_ids) for capability in planned.capabilities]
+    assert {frozenset(step_ids) for step_ids in capability_steps} == {
+        frozenset({step_by_request["req_query"].step_id}),
+        frozenset({
+            step_by_request["req_definition"].step_id,
+            step_by_request["req_approval"].step_id,
+            step_by_request["req_submit"].step_id,
+        }),
+        frozenset({step_by_request["req_withdraw"].step_id}),
+        frozenset({step_by_request["req_delete"].step_id}),
+    }
+    assert all(
+        item["request_id"] not in {"req_submit", "req_withdraw", "req_delete"}
+        for item in validate_flow_spec(planned)["capability_validation"]["unused_high_confidence_requests"]
+    )
+    snapshot = _semantic_fact_snapshot(planned)
+    delete_fact = next(item for item in snapshot["captured_requests"] if item["request_id"] == "req_delete")
+    assert delete_fact["keep"] is True
+    assert delete_fact["state"] == "materialized"
+    assert delete_fact["materialized_step_id"] == step_by_request["req_delete"].step_id
+    assert any(item["request_id"] == "req_delete" for item in snapshot["steps"])
+
+
+def test_write_with_body_and_query_preserves_both_parameter_contracts() -> None:
+    from dano.execution.page.flow_spec import flow_spec_to_api_request, to_flow_spec
+
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_mixed",
+            "index": 1,
+            "method": "DELETE",
+            "url": "https://example.test/resource/item-7?force=true",
+            "post_data": '{"reason":"cleanup"}',
+            "response_json": {"ok": True},
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.98},
+        }],
+        reads=[],
+        samples={"删除原因": "cleanup", "强制删除": "true"},
+    )
+
+    assert len(spec.steps) == 1
+    assert {param.path for param in spec.steps[0].params} == {"reason", "query.force"}
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    assert api_request is not None
+    step = (api_request.get("steps") or [api_request])[0]
+    assert step["method"] == "DELETE"
+    assert step["query_template"]["force"]
+
+
+def test_delete_path_parameter_is_replayed_from_grounded_user_sample() -> None:
+    from dano.execution.page.flow_spec import flow_spec_to_api_request, to_flow_spec
+    from dano.execution.page.request_capture import execute_api_request
+
+    spec = to_flow_spec(
+        captured_requests=[{
+            "method": "DELETE",
+            "url": "https://example.test/resource/item-7",
+            "response_json": {"ok": True},
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.98},
+        }],
+        reads=[],
+        samples={"资源标识": "item-7"},
+    )
+
+    assert [param.path for param in spec.steps[0].params] == ["path.2"]
+    assert all(usage.materialized_step_id for usage in spec.request_facts.usage.values())
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    assert api_request is not None
+    dry = asyncio.run(execute_api_request(
+        api_request,
+        {"资源标识": "item-9"},
+        send=False,
+    ))
+    assert dry["ok"] is True
+    assert dry["url"] == "https://example.test/resource/item-9"
+
+
+def test_post_without_body_replays_query_parameters() -> None:
+    from dano.execution.page.flow_spec import flow_spec_to_api_request, to_flow_spec
+
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_approve",
+            "index": 1,
+            "method": "POST",
+            "url": "https://example.test/order/approve?id=order-7",
+            "response_json": {"ok": True},
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.96},
+        }],
+        reads=[],
+        samples={"订单标识": "order-7"},
+    )
+
+    assert [param.path for param in spec.steps[0].params] == ["query.id"]
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    assert api_request is not None
+    assert api_request["method"] == "POST"
+    assert api_request["query_template"]["id"]
+
+
 def test_observer_never_attaches_another_pages_last_action() -> None:
     sess = RecordSession()
     sess._on_record(None, json.dumps({

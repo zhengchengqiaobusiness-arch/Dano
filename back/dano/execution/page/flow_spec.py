@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from urllib.parse import urlparse, parse_qs, urlencode
+from urllib.parse import unquote, urlparse, parse_qs, urlencode
 
 # 复用 request_capture 的纯函数
 from dano.execution.page.request_capture import (
@@ -37,11 +37,10 @@ from dano.execution.page.request_capture import (
     extract_auth_headers,
     flatten_body,
     infer_success_rule,
-    json_write_requests,
+    write_requests,
     looks_internal_param_name,
     looks_like_auth_write,
     looks_like_read_request,
-    pick_submit_request,
     self_check,
     substitute,
     suggest_assignee_names,
@@ -50,7 +49,6 @@ from dano.execution.page.request_capture import (
     suggest_list_selects,
     suggest_select_names,
     suggest_selects,
-    suggest_workflow_steps,
     _is_idlike,
     _multipart_contains_file,
     _pick_label_key,
@@ -1639,14 +1637,25 @@ def _build_step_from_capture(
             field_evidence=field_evidence,
         )
 
+        # HTTP writes may carry a JSON/Form body and independent Query
+        # parameters at the same time. Preserve both contracts.
+        query_fields = _params_from_get_query(
+            req, grounded_samples, page_enum_options, field_evidence, required_labels,
+        )
+        flat_fields.extend(query_fields)
+
         # select/选人
         selects_raw = suggest_selects(pd, option_reads, grounded_samples, skip_paths=list_paths, fields=flat_fields) + list_selects
         apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
         selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
+        selects_raw += _detect_query_selects(
+            req, grounded_samples, option_reads, page_enum_options, field_evidence,
+        )
 
         # identity(运行期重取)
         iden_raw = suggest_identity(pd, storage_state, samples)
 
+    flat_fields.extend(_params_from_url_path(req, grounded_samples))
     _attach_select_field_projections(selects_raw, flat_fields, option_reads)
 
     # select 字段配中文名
@@ -2165,6 +2174,50 @@ def _params_from_get_query(
             "recorded_user_input": recorded_user_input,
             "field_aliases": list(control.get("field_aliases") or []),
             "control_kind": control_kind or "unknown",
+        })
+    return out
+
+
+def _params_from_url_path(req: dict, samples: dict | None = None) -> list[dict]:
+    """Ground path parameters only when a URL segment matches one unique user sample."""
+    parsed = urlparse(str(req.get("url") or req.get("path") or ""))
+    segments = parsed.path.split("/")
+    nonempty_positions = [index for index, segment in enumerate(segments) if segment]
+    if not nonempty_positions:
+        return []
+    last_position = nonempty_positions[-1]
+    sample_items = [
+        (str(label), value)
+        for label, value in (samples or {}).items()
+        if value not in (None, "") and not _looks_pagination_field(str(label), str(label))
+    ]
+    out: list[dict] = []
+    used_labels: set[str] = set()
+    for position in nonempty_positions:
+        segment = unquote(segments[position])
+        matches = [
+            (label, value) for label, value in sample_items
+            if label not in used_labels and str(value) == segment
+        ]
+        if len(matches) != 1 or (position != last_position and len(segment) < 4):
+            continue
+        label, value = matches[0]
+        used_labels.add(label)
+        out.append({
+            "path": f"path.{position}",
+            "key": label,
+            "suggest_name": label,
+            "value": value,
+            "raw_value": value,
+            "type": _infer_type_from_value(value),
+            "wire_type": _infer_type_from_value(value),
+            "required": True,
+            "confidence": 0.96,
+            "confidence_tier": "grounded",
+            "name_source": "sample",
+            "recorded_user_input": True,
+            "field_aliases": [label],
+            "control_kind": "unknown",
         })
     return out
 
@@ -2862,7 +2915,10 @@ def _request_fact_entry(req: dict, role: dict) -> dict[str, Any]:
     ]
     out = {
         "request_index": request_index,
-        "request_id": str(req.get("request_id") or req.get("id") or request_index or uuid.uuid4().hex[:8]),
+        # Leave the identity empty when the recorder supplied neither id nor
+        # index; _request_fact_key then derives the same stable signature every
+        # time this request is normalized.
+        "request_id": str(req.get("request_id") or req.get("id") or request_index or ""),
         "page_id": req.get("page_id") or req.get("pageId"),
         "frame_id": req.get("frame_id") or req.get("frameId"),
         "sequence": req.get("sequence", request_index),
@@ -5687,7 +5743,7 @@ def to_flow_spec(
 
     # 1) 业务写请求
     write_cands = [
-        c for c in json_write_requests(captured_requests)
+        c for c in write_requests(captured_requests)
         if (role_by_key.get(_request_role_key(c), {}).get("keep")
             and role_by_key.get(_request_role_key(c), {}).get("role") in {"submit_anchor", "business_write"})
     ]
@@ -5748,27 +5804,9 @@ def to_flow_spec(
         )
         return ensure_flow_version(refresh_review_items(empty_spec), "recorded", reason="录制生成空 FlowSpec")
 
-    # 3) 自动建议流程步
-    anchored_write_idxs = [
-        index for index, request in enumerate(write_cands)
-        if _request_has_command_anchor(request)
-    ]
-    # Observer command anchors are authoritative operation boundaries. If the
-    # session contains two explicit submit actions, both are intentional
-    # abilities; the legacy "pick the last workflow" heuristic silently
-    # discarded the earlier one.
-    write_idxs = (
-        anchored_write_idxs
-        if anchored_write_idxs
-        else (suggest_workflow_steps(write_cands, samples) if write_cands else [])
-    )
-    if not write_idxs:
-        if write_cands:
-            submit = pick_submit_request(write_cands, samples)
-            if submit is not None:
-                write_idxs = [write_cands.index(submit)]
-        if not write_idxs and write_cands:
-            write_idxs = [len(write_cands) - 1]
+    # 3) Materialize every retained business write. Action/transaction evidence
+    # decides capability membership later; it must never erase a captured fact.
+    write_idxs = list(range(len(write_cands)))
 
     selected_write_keys = {_request_role_key(write_cands[i]) for i in write_idxs if 0 <= i < len(write_cands)}
     # A command transaction is stronger boundary evidence than the request-role
@@ -5840,6 +5878,7 @@ def to_flow_spec(
         request_transaction = _request_transaction_id(request)
         for write_position in write_positions:
             write_request = potential_steps[write_position]
+            write_transaction = _request_transaction_id(write_request)
             context_match = any(
                 same_workflow_context(candidate, write_value)
                 for candidate in request_context
@@ -5847,9 +5886,14 @@ def to_flow_spec(
             )
             same_transaction = bool(
                 request_transaction
-                and request_transaction == _request_transaction_id(write_request)
+                and request_transaction == write_transaction
             )
-            if context_match or same_transaction:
+            # When both sides have Observer transaction IDs, they are the
+            # authoritative operation boundary. Semantic context is only the
+            # fallback for older/incomplete recordings.
+            if same_transaction or (
+                context_match and not (request_transaction and write_transaction)
+            ):
                 owners_by_position.setdefault(idx, set()).add(write_position)
     try:
         potential_links = discover_step_links(potential_steps)
@@ -5864,7 +5908,11 @@ def to_flow_spec(
             if not isinstance(source_pos, int) or not isinstance(target_pos, int):
                 continue
             target_owners = owners_by_position.get(target_pos, set())
-            if target_owners:
+            if (
+                target_owners
+                and 0 <= source_pos < len(potential_steps)
+                and _request_role_key(potential_steps[source_pos]) in preread_keys
+            ):
                 before = len(owners_by_position.get(source_pos, set()))
                 owners_by_position.setdefault(source_pos, set()).update(target_owners)
                 changed = changed or len(owners_by_position[source_pos]) != before
@@ -5967,6 +6015,11 @@ def to_flow_spec(
         step_objs.append(st)
         step_by_request_key[_request_role_key(req)] = st
         idx_to_step_id[pos] = st.step_id
+        request_id = _request_fact_key(_request_fact_entry(req, request_role))
+        usage = request_facts.usage.get(request_id) or RequestUsage(request_id=request_id)
+        usage.materialized_step_id = st.step_id
+        usage.state = "materialized"
+        request_facts.usage[request_id] = usage
     for request_key, owner_request_keys in preflight_owner_request_keys.items():
         step = step_by_request_key.get(request_key)
         if step is None:
@@ -7735,7 +7788,10 @@ def _write_operation_key(step: FlowStep) -> str:
     locator = re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold())
     trigger_op = str(meta.get("trigger_op") or "").lower()
     confidence = str(meta.get("causality_confidence") or "high").lower()
-    if (action_ref or locator) and trigger_op in {"click", "submit", "select", "pick"} and confidence in {"high", "medium"}:
+    grounded_action = trigger_op in {"click", "submit", "select", "pick"} or (
+        trigger_op == "fill" and bool(action_ref)
+    )
+    if (action_ref or locator) and grounded_action and confidence in {"high", "medium"}:
         page_scope = str(
             meta.get("page_id") or meta.get("page_url") or meta.get("document_url") or ""
         )
@@ -8223,6 +8279,8 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
         "steps": [
             {
                 "step_id": step.step_id,
+                "request_id": (step.source_meta or {}).get("request_id"),
+                "request_index": (step.source_meta or {}).get("request_index"),
                 "method": (step.method or "GET").upper(),
                 "path": step.path or step.url,
                 "page_id": _step_page_id_from_facts(spec, step),
@@ -8279,6 +8337,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "frame_id": request.get("frame_id"),
                 "sequence": request.get("sequence"),
                 "role": request.get("role"),
+                "keep": request.get("keep"),
                 "confidence": request.get("confidence"),
                 "reason": request.get("reason"),
                 "trigger_action_id": request.get("trigger_action_id"),
@@ -8290,6 +8349,9 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "causality_confidence": request.get("causality_confidence"),
                 "query_paths": list(request.get("query_paths") or []),
                 "body_paths": list(request.get("body_paths") or []),
+                "state": request.get("state"),
+                "materialized_step_id": request.get("materialized_step_id"),
+                "used_by_capabilities": list(request.get("used_by_capabilities") or []),
                 "response_schema": copy.deepcopy(request.get("response_schema") or {}),
             }
             for request in request_facts[:120]
@@ -9050,11 +9112,16 @@ def _semantic_plan_to_ops(
                 for capability in available
             )
         )
-        existing = None if kind in split_kinds or spans_existing_boundaries else next(
+        # Deterministic boundaries already incorporate grounded actions and
+        # real FlowLinks. Pi may split or rename them, but cannot merge two
+        # independent operations merely from prose semantics.
+        if spans_existing_boundaries:
+            continue
+        existing = None if kind in split_kinds else next(
             (capability for capability in available if capability.name == proposed_name),
             None,
         )
-        if existing is None and kind not in split_kinds and not spans_existing_boundaries:
+        if existing is None and kind not in split_kinds:
             existing = max(
                 available,
                 key=lambda capability: len(
@@ -9255,7 +9322,29 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         for step in spec.steps
         for param in step.params
     }
+    planned_memberships: dict[str, int] = {}
+    for capability in plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        for step_id in capability.get("step_ids") or []:
+            step_id = str(step_id or "")
+            if step_id:
+                planned_memberships[step_id] = planned_memberships.get(step_id, 0) + 1
+    required_business_steps: dict[str, bool] = {}
+    for item in _request_fact_items(spec):
+        is_write = _eligible_business_write_fact(item)
+        if not (is_write or _eligible_business_get_fact(item)):
+            continue
+        step_id = _materialized_step_id_for_request(spec, item)
+        if step_id:
+            required_business_steps[step_id] = is_write
     missing: list[str] = []
+    if any(
+        _eligible_business_write_fact(item)
+        and not _materialized_step_id_for_request(spec, item)
+        for item in _request_fact_items(spec)
+    ):
+        missing.append("request_materialization")
     if not required_steps.issubset(covered_steps):
         missing.append("request_roles")
     if any(
@@ -9292,6 +9381,13 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         for item in plan.get("capabilities") or [] if isinstance(item, dict)
     ):
         missing.append("capability_contracts")
+    if any(planned_memberships.get(step_id, 0) == 0 for step_id in required_business_steps):
+        missing.append("capability_membership")
+    if any(
+        is_write and planned_memberships.get(step_id, 0) > 1
+        for step_id, is_write in required_business_steps.items()
+    ):
+        missing.append("capability_membership")
     if not isinstance(plan.get("business_understanding"), dict) or not plan.get("business_understanding"):
         missing.append("business_understanding")
     if not isinstance(plan.get("capability_relations"), list):
@@ -10469,6 +10565,25 @@ def _planner_patch_edits(
             cap_name = str(edit.get("capability_name") or edit.get("capability") or "")
             if _capability_step_was_removed(spec, cap_name, step_id):
                 continue
+            target_cap = cap_by_name.get(cap_name)
+            current_owners = [
+                cap for cap in spec.capabilities
+                if step_id in set(_capability_node_step_ids(cap))
+            ]
+            if target_cap is not None and current_owners and target_cap not in current_owners:
+                target_ids = set(_capability_node_step_ids(target_cap))
+                linked = any(
+                    {link.source_step_id, link.target_step_id} & {step_id}
+                    and ({link.source_step_id, link.target_step_id} - {step_id}) & target_ids
+                    for link in spec.links
+                )
+                explicit_owners = {
+                    str(value) for value in (
+                        (step_by_id[step_id].source_meta or {}).get("control_preflight_for_write_ids") or []
+                    ) if str(value)
+                }
+                if not linked and not (explicit_owners & target_ids):
+                    continue
         if op == "upsert_capability":
             payload = dict(edit.get("capability") or {})
             name = str(edit.get("capability_name") or edit.get("capability") or edit.get("name") or "")
@@ -11056,6 +11171,44 @@ def _request_fact_key_from_entry(entry: dict[str, Any]) -> str:
     return f"sig:{(entry.get('method') or '').upper()} {_request_path(entry)}"
 
 
+def _eligible_business_write_fact(entry: dict[str, Any]) -> bool:
+    return bool(
+        entry.get("keep")
+        and str(entry.get("role") or "") in {"business_write", "submit_anchor"}
+        and str(entry.get("method") or "").upper() in _WRITE_METHODS
+        and str(entry.get("path") or entry.get("url") or "").strip()
+    )
+
+
+def _eligible_business_get_fact(entry: dict[str, Any]) -> bool:
+    return bool(
+        entry.get("keep")
+        and str(entry.get("role") or "") == "business_get"
+        and str(entry.get("method") or "GET").upper() in {"GET", "HEAD", "POST"}
+        and str(entry.get("path") or entry.get("url") or "").strip()
+    )
+
+
+def _materialized_step_id_for_request(spec: FlowSpec, entry: dict[str, Any]) -> str:
+    """Resolve only exact request identity; duplicate paths are distinct facts."""
+    step_ids = {step.step_id for step in spec.steps}
+    usage_id = str(entry.get("materialized_step_id") or "")
+    if usage_id in step_ids:
+        return usage_id
+    request_key = _request_fact_key_from_entry(entry)
+    if request_key.startswith(("id:", "idx:")):
+        return next(
+            (step.step_id for step in spec.steps if _step_request_key(step) == request_key),
+            "",
+        )
+    signature = _request_fact_signature_key(entry)
+    matches = [
+        step.step_id for step in spec.steps
+        if _step_request_signature_key(step) == signature
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
 def _capability_ref_key(value: Any) -> str:
     return str(value or "").strip()
 
@@ -11361,6 +11514,11 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
     request_items = _request_fact_items(spec)
     materialized_keys = {_step_request_key(s) for s in spec.steps}
     materialized_signatures = {_step_request_signature_key(s) for s in spec.steps}
+    unmaterialized_business = [
+        item for item in request_items
+        if _eligible_business_write_fact(item)
+        and not _materialized_step_id_for_request(spec, item)
+    ]
     high_conf_unused = [
         {
             "request_id": item.get("request_id"),
@@ -11402,7 +11560,83 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "relations": len(spec.capability_relations or []),
         },
     }
+    materialization_integrity = {
+        "passed": True,
+        "errors": [],
+        "unmaterialized_business_requests": [],
+        "unassigned_business_steps": [],
+        "unassigned_materialized_steps": [],
+        "duplicate_business_step_memberships": [],
+    }
+
+    def add_integrity_error(code: str, message: str, target: dict[str, Any]) -> None:
+        entry = {"code": code, "message": message, "target": target}
+        materialization_integrity["errors"].append(entry)
+        skill_level["errors"].append(entry)
+        errors.append(message)
+
+    for item in unmaterialized_business:
+        target = {
+            "kind": "captured_request",
+            "request_id": item.get("request_id"),
+            "request_index": item.get("request_index"),
+            "method": item.get("method"),
+            "path": item.get("path") or item.get("url"),
+        }
+        materialization_integrity["unmaterialized_business_requests"].append(target)
+        add_integrity_error(
+            "unmaterialized_business_request",
+            f"未物化业务操作：{item.get('method')} {item.get('path') or item.get('url')}",
+            target,
+        )
+
+    memberships_by_step: dict[str, set[str]] = {}
+    for capability in caps:
+        capability_name = capability.name or capability.capability_id or "<unnamed>"
+        for step_id in _capability_node_step_ids(capability):
+            memberships_by_step.setdefault(step_id, set()).add(capability_name)
+        for request_ref in capability.request_refs or []:
+            if request_ref.step_id:
+                memberships_by_step.setdefault(request_ref.step_id, set()).add(capability_name)
+    for item in request_items:
+        role = str(item.get("role") or "")
+        requires_membership = bool(
+            item.get("keep")
+            and role in {"business_write", "submit_anchor", "business_get", "read_context", "read_option"}
+        )
+        if not requires_membership:
+            continue
+        step_id = _materialized_step_id_for_request(spec, item)
+        if not step_id:
+            continue
+        memberships = memberships_by_step.get(step_id, set())
+        target = {
+            "kind": "flow_step",
+            "step_id": step_id,
+            "request_id": item.get("request_id"),
+            "method": item.get("method"),
+            "path": item.get("path") or item.get("url"),
+        }
+        if not memberships:
+            is_public_business = role in {"business_write", "submit_anchor", "business_get"}
+            bucket = "unassigned_business_steps" if is_public_business else "unassigned_materialized_steps"
+            materialization_integrity[bucket].append(target)
+            add_integrity_error(
+                "unassigned_business_step" if is_public_business else "unassigned_materialized_step",
+                f"已物化步骤未归属任何能力或内部用途：{item.get('method')} {item.get('path') or item.get('url')}",
+                target,
+            )
+        elif _eligible_business_write_fact(item) and len(set(memberships)) > 1:
+            target["capabilities"] = sorted(set(memberships))
+            materialization_integrity["duplicate_business_step_memberships"].append(target)
+            add_integrity_error(
+                "duplicate_business_step_membership",
+                f"业务写步骤同时归属多个能力：{item.get('method')} {item.get('path') or item.get('url')}",
+                target,
+            )
+    materialization_integrity["passed"] = not materialization_integrity["errors"]
     if spec.steps and not caps:
+        skill_level["passed"] = not skill_level["errors"]
         warnings.append("FlowSpec 未生成业务能力编排，前端只能按底层接口展示")
         _capability_warning(
             skill_level,
@@ -11422,6 +11656,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "capability_internal": capability_internal,
             "capability_relations": capability_relations,
             "skill_level": skill_level,
+            "materialization_integrity": materialization_integrity,
         }
 
     allowed_kinds = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
@@ -12102,6 +12337,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         "capability_internal": capability_internal,
         "capability_relations": capability_relations,
         "skill_level": skill_level,
+        "materialization_integrity": materialization_integrity,
     }
 
 
@@ -13111,6 +13347,37 @@ def _flow_step_query_template(
     return query_template, params, samples, field_types, runtime_fields
 
 
+def _flow_step_url_template(
+    step: FlowStep,
+) -> tuple[str, list[str], dict[str, Any], dict[str, str]]:
+    path_params = [param for param in step.params if param.path.startswith("path.")]
+    if not path_params:
+        return "", [], {}, {}
+    parsed = urlparse(step.url or step.path)
+    segments = parsed.path.split("/")
+    names: list[str] = []
+    samples: dict[str, Any] = {}
+    field_types: dict[str, str] = {}
+    for param in path_params:
+        try:
+            position = int(param.path.split(".", 1)[1])
+        except (TypeError, ValueError):
+            continue
+        if position < 0 or position >= len(segments):
+            continue
+        name = str(param.key or param.label or f"path_{position}").strip()
+        if not name:
+            continue
+        segments[position] = "{{" + name + "}}"
+        names.append(name)
+        if param.value not in (None, ""):
+            samples[name] = param.value
+        field_types[name] = param.type
+    if not names:
+        return "", [], {}, {}
+    return parsed._replace(path="/".join(segments)).geturl(), list(dict.fromkeys(names)), samples, field_types
+
+
 def flow_spec_user_params(spec: FlowSpec) -> list[str]:
     names: list[str] = []
     active_step_ids = _active_capability_step_ids(spec)
@@ -13283,22 +13550,31 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if runtime_errors:
         return None, runtime_errors
     if not step.body_source:
-        if step.method.upper() == "GET":
+        body_params = [
+            param for param in step.params
+            if not param.path.startswith(("query.", "path."))
+        ]
+        if body_params:
+            errors.append(f"步骤 `{step.name or step.path or step.step_id}` 缺少请求体，Body 字段没有可执行落点")
+            return None, errors
+        if step.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             query_template, params, samples, field_types, runtime_fields = _flow_step_query_template(step)
+            url_template, path_params, path_samples, path_types = _flow_step_url_template(step)
             selects = _runtime_select_bindings(step)
             apir = {
                 "step_id": step.step_id,
                 "step_name": step.name,
-                "method": "GET",
+                "method": step.method.upper(),
                 "url": step.url or step.path,
+                "url_template": url_template,
                 "path": step.path,
                 "content_type": step.content_type,
                 "body_template": None,
                 "query_template": query_template,
-                "params": params,
-                "sample_inputs": samples,
+                "params": list(dict.fromkeys([*params, *path_params])),
+                "sample_inputs": {**samples, **path_samples},
                 "auth_headers": extract_auth_headers(step.headers),
-                "field_types": field_types,
+                "field_types": {**field_types, **path_types},
                 "selects": selects,
                 "identity": [],
                 "system_values": [],
@@ -13311,7 +13587,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
             if step.response_json is not None:
                 apir["response_json"] = step.response_json
             return apir, errors
-        errors.append(f"步骤 `{step.name or step.path or step.step_id}` 缺少请求体，当前发布器暂不支持无 body 的步骤")
+        errors.append(f"步骤 `{step.name or step.path or step.step_id}` 使用了不支持的 HTTP 方法 `{step.method}`")
         return None, errors
     req = {
         "method": step.method,
@@ -13372,6 +13648,19 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if apir is None:
         errors.append(f"步骤 `{step.name or step.path or step.step_id}` 请求体无法解析，不能发布为请求型 Skill")
         return None, errors
+    query_template, query_params, query_samples, query_types, runtime_fields = _flow_step_query_template(step)
+    if query_template:
+        apir["query_template"] = query_template
+        apir["params"] = list(dict.fromkeys([*(apir.get("params") or []), *query_params]))
+        apir["sample_inputs"] = {**(apir.get("sample_inputs") or {}), **query_samples}
+        apir["field_types"] = {**(apir.get("field_types") or {}), **query_types}
+        apir["runtime_fields"] = [*(apir.get("runtime_fields") or []), *runtime_fields]
+    url_template, path_params, path_samples, path_types = _flow_step_url_template(step)
+    if url_template:
+        apir["url_template"] = url_template
+        apir["params"] = list(dict.fromkeys([*(apir.get("params") or []), *path_params]))
+        apir["sample_inputs"] = {**(apir.get("sample_inputs") or {}), **path_samples}
+        apir["field_types"] = {**(apir.get("field_types") or {}), **path_types}
     explicit_system_values = [item.model_dump(exclude_none=True) for item in step.system_values]
     for p in step.params:
         if p.category != "runtime_var" or p.source_kind not in {"system_time", "system_generated"}:
