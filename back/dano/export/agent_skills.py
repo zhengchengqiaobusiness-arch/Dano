@@ -1561,6 +1561,8 @@ def main():
     if fc is None and "fact_check_passed" in api_audit:
         fc = {"passed": _strict_boolean(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
     output = (res.get("exec_result") or {}).get("structured_output")
+    if isinstance(output, dict) and {"ok", "skill_id", "capability", "output"}.issubset(output):
+        output = output.get("output")
     partial_state = state in {"partially_completed", "partial_success", "completed_with_errors"} or res.get("status") == "partial_success"
     allow_partial = (contract.get("validation_requirements") or {}).get("allow_partial_success") is True
     if partial_state and not allow_partial:
