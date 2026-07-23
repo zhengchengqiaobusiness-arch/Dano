@@ -31,7 +31,7 @@ type RgbaColor = Readonly<{
 
 const WHITE = "#ffffff";
 const DARK = "#0d1117";
-const MINIMUM_WHITE_CONTRAST = 2;
+const MINIMUM_WHITE_CONTRAST = 1.5;
 const THEME_BACKGROUNDS = [
   PI_BASE46_LIGHT_THEME.base30.black,
   PI_BASE46_DARK_THEME.base30.black,
