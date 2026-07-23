@@ -3585,7 +3585,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           items={[
             { key: "abilities", label: `能力列表 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
             { key: "requests", label: `捕获接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
-            { key: "desc", label: "整体说明", children: renderDescriptionPanel() },
+            // { key: "desc", label: "整体说明", children: renderDescriptionPanel() },
             { key: "json", label: "高级 JSON", children: renderJsonPanel() },
           ]}
         />
