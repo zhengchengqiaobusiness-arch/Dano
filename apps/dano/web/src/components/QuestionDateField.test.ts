@@ -4,6 +4,8 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QuestionDateField from "./QuestionDateField.svelte";
 import questionDateFieldSource from "./QuestionDateField.svelte?raw";
+import datePickerContentSource from "./ui/date-picker/date-picker-content.svelte?raw";
+import datePickerIndexSource from "./ui/date-picker/index.ts?raw";
 
 function mockMobilePicker(matches: boolean) {
   vi.spyOn(window, "matchMedia").mockReturnValue({
@@ -12,6 +14,13 @@ function mockMobilePicker(matches: boolean) {
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   } as unknown as MediaQueryList);
+}
+
+function createAppTarget() {
+  const target = document.createElement("div");
+  target.className = "app-shell";
+  document.body.append(target);
+  return target;
 }
 
 describe("QuestionDateField", () => {
@@ -25,16 +34,22 @@ describe("QuestionDateField", () => {
     expect(questionDateFieldSource).not.toContain('from "bits-ui"');
   });
 
-  it("keeps the date popover above the centered form overlay", () => {
-    expect(questionDateFieldSource).toMatch(
-      /:global\(\.question-date-popover\)\s*\{[\s\S]*?z-index:\s*30;/,
+  it("delegates date popover layering to the shared portalled content", () => {
+    expect(datePickerIndexSource).toContain('from "./date-picker-content.svelte"');
+    expect(datePickerContentSource).toContain(
+      '<DatePickerPrimitive.Portal to=".app-shell">',
+    );
+    expect(datePickerContentSource).toMatch(
+      /:global\(\.date-picker-content\)\s*\{[\s\S]*?z-index:\s*30;/,
+    );
+    expect(questionDateFieldSource).not.toMatch(
+      /:global\(\.question-date-popover\)\s*\{[\s\S]*?z-index:/,
     );
   });
 
   it("keeps the formatted desktop trigger and disabled state", async () => {
     mockMobilePicker(false);
-    const target = document.createElement("div");
-    document.body.append(target);
+    const target = createAppTarget();
     const component = mount(QuestionDateField, {
       target,
       props: {
@@ -61,8 +76,7 @@ describe("QuestionDateField", () => {
   it("preserves the mobile native date input and clear behavior", async () => {
     mockMobilePicker(true);
     const onValueChange = vi.fn();
-    const target = document.createElement("div");
-    document.body.append(target);
+    const target = createAppTarget();
     const component = mount(QuestionDateField, {
       target,
       props: {
@@ -91,8 +105,7 @@ describe("QuestionDateField", () => {
   it("preserves the mobile datetime-local minute contract", async () => {
     mockMobilePicker(true);
     const onValueChange = vi.fn();
-    const target = document.createElement("div");
-    document.body.append(target);
+    const target = createAppTarget();
     const component = mount(QuestionDateField, {
       target,
       props: {

@@ -1,7 +1,7 @@
 /** @vitest-environment happy-dom */
 
 import { mount, tick, unmount } from "svelte";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolContentBlock } from "../utils/transcript";
 import QuestionToolCard from "./QuestionToolCard.svelte";
 import questionToolCardSource from "./QuestionToolCard.svelte?raw";
@@ -26,6 +26,16 @@ vi.stubGlobal("matchMedia", vi.fn(() => ({
   addEventListener: vi.fn(),
   removeEventListener: vi.fn(),
 })));
+
+beforeEach(() => {
+  const appShell = document.createElement("div");
+  appShell.className = "app-shell";
+  document.body.append(appShell);
+});
+
+afterEach(() => {
+  document.body.replaceChildren();
+});
 
 function submittedFormBlock(
   state?: "awaiting_confirmation" | "confirmed" | "cancelled" | "interrupted",
