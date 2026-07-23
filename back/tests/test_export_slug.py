@@ -212,6 +212,24 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     assert (index / "agents" / "openai.yaml").is_file()
 
 
+def test_reference_validation_accepts_structured_validation_failure_contract(tmp_path):
+    import dano.export.agent_skills as agent_skills
+
+    reference = tmp_path / "contract.md"
+    reference.write_text(
+        " ".join([
+            "ask_user_question", "questions", "default", "required",
+            "dateFormat", "dataSource", "confirm", "cancelled",
+            'code: "question_validation_failed"',
+        ]),
+        encoding="utf-8",
+    )
+
+    agent_skills._validate_reference_markdown(
+        [(reference.relative_to(tmp_path), reference.read_text(encoding="utf-8"))],
+    )
+
+
 def test_linux_reference_configuration_uses_deployment_root(tmp_path, monkeypatch):
     import dano.export.agent_skills as agent_skills
 

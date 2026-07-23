@@ -638,6 +638,128 @@ def test_real_business_writes_are_materialized_before_pi_boundary_analysis() -> 
     assert any(item["request_id"] == "req_delete" for item in snapshot["steps"])
 
 
+@pytest.mark.parametrize(
+    ("trigger_op", "trigger_locator", "definition_url", "approval_url"),
+    [
+        (
+            "click",
+            "text=新增",
+            "https://example.test/admin-api/bpm/process-definition/get?key=hotel_apply",
+            "https://example.test/admin-api/bpm/process-instance/get-approval-detail?definitionId=definition-1",
+        ),
+        (
+            "control_open",
+            "label=单据编号",
+            "https://example.test/custom-engine/workflow/template?code=hotel_apply",
+            "https://example.test/custom-engine/workflow/nodes?templateId=definition-1",
+        ),
+    ],
+)
+def test_open_create_form_reads_do_not_become_unassigned_public_steps(
+    trigger_op: str,
+    trigger_locator: str,
+    definition_url: str,
+    approval_url: str,
+) -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    requests = [
+        {
+            "request_id": "req_definition",
+            "index": 1,
+            "sequence": 1,
+            "method": "GET",
+            "url": definition_url,
+            "response_json": {"code": 0, "data": {"id": "definition-1"}},
+            "trigger_op": trigger_op,
+            "trigger_action_id": "action_open_create",
+            "trigger_transaction_id": "tx_open_create",
+            "trigger_locator": trigger_locator,
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 0.94},
+        },
+        {
+            "request_id": "req_approval",
+            "index": 2,
+            "sequence": 2,
+            "method": "GET",
+            "url": approval_url,
+            "response_json": {"code": 0, "data": {"nodes": []}},
+            "trigger_op": trigger_op,
+            "trigger_action_id": "action_open_create",
+            "trigger_transaction_id": "tx_open_create",
+            "trigger_locator": trigger_locator,
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 0.94},
+        },
+        {
+            "request_id": "req_submit",
+            "index": 3,
+            "sequence": 3,
+            "method": "POST",
+            "url": "https://example.test/admin-api/oa/hotel-apply/submit-process",
+            "post_data": '{"hotelName":"酒店 A","processDefKey":"hotel_apply"}',
+            "response_json": {"code": 0, "data": "hotel-1"},
+            "trigger_op": "submit",
+            "trigger_action_id": "action_submit",
+            "trigger_transaction_id": "tx_submit",
+            "trigger_locator": "role=button[name=提交]",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        },
+    ]
+
+    spec = to_flow_spec(captured_requests=requests, samples={"酒店名称": "酒店 A"})
+
+    assert [step.source_meta.get("request_id") for step in spec.steps] == ["req_submit"]
+    assert spec.request_facts.usage["req_definition"].state != "materialized"
+    assert spec.request_facts.usage["req_approval"].state != "materialized"
+
+
+def test_seven_observed_operations_in_one_business_domain_stay_independent() -> None:
+    from dano.execution.page.flow_spec import orchestrate_flow_capabilities, to_flow_spec
+
+    operations = [
+        ("query", "GET", "/api/orders/page?status=pending", None, "查询待处理订单", "business_get"),
+        ("detail", "GET", "/api/orders/detail?id=order-1", None, "查看订单详情", "business_get"),
+        ("create", "POST", "/api/orders/create", '{"title":"Order A"}', "创建订单", "business_write"),
+        ("approve", "POST", "/api/orders/approve?id=order-1", None, "审批通过", "business_write"),
+        ("reject", "POST", "/api/orders/reject", '{"id":"order-2","reason":"invalid"}', "驳回订单", "business_write"),
+        ("delete", "DELETE", "/api/orders/delete?id=order-3", None, "删除订单", "business_write"),
+        ("archive", "POST", "/api/orders/archive?id=order-4", None, "归档订单", "business_write"),
+    ]
+    requests = []
+    for index, (name, method, url, body, label, role) in enumerate(operations, start=1):
+        request = {
+            "request_id": f"req_{name}",
+            "index": index,
+            "sequence": index,
+            "method": method,
+            "url": f"https://example.test{url}",
+            "response_json": {"code": 0, "data": {f"{name}Result": index}},
+            "trigger_op": "click",
+            "trigger_action_id": f"action_{name}",
+            "trigger_transaction_id": f"tx_{name}",
+            "trigger_locator": f"role=button[name={label}]",
+            "_request_role": {"role": role, "keep": True, "confidence": 0.96},
+        }
+        if body is not None:
+            request["post_data"] = body
+        requests.append(request)
+
+    spec = asyncio.run(orchestrate_flow_capabilities(
+        to_flow_spec(captured_requests=requests),
+        submission={"ops": []},
+    ))
+
+    assert len(spec.steps) == 7
+    assert len(spec.capabilities) == 7
+    owned_step_ids = [
+        step_id
+        for capability in spec.capabilities
+        for step_id in capability.step_ids
+    ]
+    assert sorted(owned_step_ids) == sorted(step.step_id for step in spec.steps)
+    assert len(set(owned_step_ids)) == 7
+
+
 def test_write_with_body_and_query_preserves_both_parameter_contracts() -> None:
     from dano.execution.page.flow_spec import flow_spec_to_api_request, to_flow_spec
 

@@ -90,18 +90,26 @@ def _load_reference_markdown(source_dir: Path) -> list[tuple[Path, str]]:
 def _validate_reference_markdown(reference_docs: list[tuple[Path, str]]) -> None:
     """Validate the complete configured reference set before rendering Skills."""
     combined = "\n\n".join(content for _, content in reference_docs)
-    required_terms = {
-        "ask_user_question": "原生提问工具",
-        "questions": "多字段 questions 数组",
-        "default": "推荐默认值",
-        "required": "必填规则",
-        "dateFormat": "日期格式",
-        "dataSource": "远程选项来源",
-        "confirm": "最终确认",
-        "cancelled": "取消结果",
-        "validation error": "参数校验错误处理",
+    required_contracts = {
+        "原生提问工具": ("ask_user_question",),
+        "多字段 questions 数组": ("questions",),
+        "推荐默认值": ("default",),
+        "必填规则": ("required",),
+        "日期格式": ("dateFormat",),
+        "远程选项来源": ("dataSource",),
+        "最终确认": ("confirm",),
+        "取消结果": ("cancelled",),
+        "参数校验错误处理": (
+            "validation error",
+            "question_validation_failed",
+            "invalid_question_arguments",
+        ),
     }
-    missing = [label for term, label in required_terms.items() if term not in combined]
+    missing = [
+        label
+        for label, alternatives in required_contracts.items()
+        if not any(term in combined for term in alternatives)
+    ]
     if missing:
         names = ", ".join(path.as_posix() for path, _ in reference_docs) or "<空>"
         raise ValueError(f"Skill 参考 Markdown 缺少必要的提问契约（{', '.join(missing)}）: {names}")

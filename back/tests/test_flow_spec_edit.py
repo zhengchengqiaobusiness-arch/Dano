@@ -1760,7 +1760,7 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
     assert post_fact.trigger_action_id == "action_3"
 
 
-def test_observer_anchor_is_required_for_auto_confirming_discovered_links():
+def test_different_observer_actions_do_not_auto_link_by_value_alone():
     captured = [
         {
             "index": 1,
@@ -1794,8 +1794,7 @@ def test_observer_anchor_is_required_for_auto_confirming_discovered_links():
     ]
 
     anchored = to_flow_spec(captured, page_events=events)
-    assert anchored.links and anchored.links[0].confirmed is True
-    assert anchored.links[0].evidence["target_action_id"] == "action_2"
+    assert anchored.links == []
 
     unanchored_requests = [dict(item) for item in captured]
     for key in ("trigger_action_id", "trigger_locator", "causality_confidence"):
@@ -7090,6 +7089,76 @@ def test_unrelated_one_row_business_list_does_not_bind_by_value_alone() -> None:
 
     assert flow_spec_module._repair_structural_option_bindings(spec) == 0
     assert target.params[0].source_kind == "user_input"
+
+
+def test_business_records_do_not_become_options_for_same_named_text_field() -> None:
+    street = ParamField(
+        path="street",
+        key="所在街道",
+        label="所在街道",
+        value="2",
+        type="string",
+        wire_type="string",
+        category="user_param",
+        source_kind="user_input",
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/hotel/submit",
+        params=[street],
+        source_meta={"role": "business_write"},
+    )
+    records = FlowStep(
+        step_id="records",
+        method="GET",
+        path="/api/hotel/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"list": [
+            {"id": "hotel-1", "street": "2", "applyTitle": "Old request"},
+            {"id": "hotel-2", "street": "3", "applyTitle": "Another request"},
+        ]}},
+    )
+
+    assert flow_spec_module._repair_structural_option_bindings(
+        FlowSpec(steps=[submit, records]),
+    ) == 0
+    assert (street.type, street.source_kind) == ("string", "user_input")
+
+
+def test_generic_name_column_does_not_bind_unrelated_text_field() -> None:
+    hotel_name = ParamField(
+        path="hotelName",
+        key="酒店名称",
+        label="酒店名称",
+        value=1,
+        type="string",
+        wire_type="string",
+        category="user_param",
+        source_kind="user_input",
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/hotel/submit",
+        params=[hotel_name],
+        source_meta={"role": "business_write"},
+    )
+    tenants = FlowStep(
+        step_id="tenants",
+        method="GET",
+        path="/api/system/tenant/simple-list",
+        source_meta={"role": "read_option"},
+        response_json={"data": [
+            {"id": 1, "name": "Tenant A"},
+            {"id": 2, "name": "Tenant B"},
+        ]},
+    )
+
+    assert flow_spec_module._repair_structural_option_bindings(
+        FlowSpec(steps=[submit, tenants]),
+    ) == 0
+    assert (hotel_name.type, hotel_name.source_kind) == ("string", "user_input")
 
 
 @pytest.mark.parametrize(

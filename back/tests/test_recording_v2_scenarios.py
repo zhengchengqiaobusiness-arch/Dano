@@ -1717,6 +1717,61 @@ def test_value_equality_without_causal_evidence_does_not_keep_flow_link():
     assert links == []
 
 
+def test_value_match_across_independent_actions_restores_delete_id_to_user_input():
+    source = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/hotel/submit",
+        response_json={"data": "HOTEL-1"},
+        source_meta={
+            "sequence": 1,
+            "trigger_action_id": "action_submit",
+            "trigger_transaction_id": "transaction_submit",
+        },
+    )
+    target_param = ParamField(
+        path="query.id",
+        key="id",
+        value="HOTEL-1",
+        category="runtime_var",
+        source_kind="previous_response",
+        source={"link_id": "wrong-cross-action-link"},
+        exposed_to_user=False,
+    )
+    target = FlowStep(
+        step_id="delete",
+        method="DELETE",
+        path="/hotel/delete?id=HOTEL-1",
+        params=[target_param],
+        source_meta={
+            "sequence": 2,
+            "trigger_action_id": "action_delete",
+            "trigger_transaction_id": "transaction_delete",
+        },
+    )
+    links = [FlowLink(
+        link_id="wrong-cross-action-link",
+        source_step_id="submit",
+        source_path="data",
+        target_step_id="delete",
+        target_path="query.id",
+        confirmed=True,
+        confidence=0.98,
+        evidence={
+            "kind": "value_match",
+            "source_action_id": "action_submit",
+            "target_action_id": "action_delete",
+        },
+    )]
+
+    flow_spec_module._sync_link_sources([source, target], links)
+
+    assert links == []
+    assert target_param.category == "user_param"
+    assert target_param.source_kind == "user_input"
+    assert target_param.exposed_to_user is True
+
+
 def test_generic_relation_builder_does_not_create_named_field_special_case():
     spec = FlowSpec(capabilities=[
         FlowCapability(

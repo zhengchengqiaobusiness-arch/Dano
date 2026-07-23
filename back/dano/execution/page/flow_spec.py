@@ -2581,7 +2581,10 @@ def _list_payload_has_conventional_option_contract(payload: Any) -> bool:
 def _request_has_option_endpoint_hint(req: dict) -> bool:
     leaf = _request_path(req).rstrip("/").rsplit("/", 1)[-1].casefold()
     normalized = re.sub(r"[^a-z0-9]+", "", leaf)
-    return bool(re.search(r"(?:simplelist|options?|candidates?|dictionary|dict|tree|list)$", normalized))
+    return bool(re.search(
+        r"(?:simplelist|options?|candidates?|dictionary|dict|tree|list|select)$",
+        normalized,
+    ))
 
 
 def _request_has_reference_entity_hint(req: dict) -> bool:
@@ -2606,7 +2609,19 @@ def _response_has_scalar_business_value(payload: Any) -> bool:
     return False
 
 
-_QUERY_ACTION_RE = re.compile(r"(?:查询|搜索|筛选|检索|\bquery\b|\bsearch\b|\bfilter\b)", re.I)
+_QUERY_ACTION_RE = re.compile(
+    r"(?:查询|搜索|筛选|检索|查看|详情|预览|刷新|列表|导出|"
+    r"\bquery\b|\bsearch\b|\bfilter\b|\bview\b|\bdetail\b|\bpreview\b|\brefresh\b|\blist\b|\bexport\b)",
+    re.I,
+)
+_INTERNAL_WORKFLOW_READ_RE = re.compile(
+    r"(?:process-definition|approval-detail|form-config|permissions?|current-user|auth)",
+    re.I,
+)
+_BUSINESS_QUERY_PATH_RE = re.compile(
+    r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)",
+    re.I,
+)
 
 
 def _has_query_action_evidence(trigger_op: Any, trigger_locator: Any) -> bool:
@@ -5540,6 +5555,16 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
             "response_projection", "request_dependency", "causal_transaction", "explicit_projection",
         }
     )
+    separate_observed_operations = bool(
+        (source_action and target_action and source_action != target_action)
+        or (
+            source_transaction
+            and target_transaction
+            and source_transaction != target_transaction
+        )
+    )
+    if separate_observed_operations and not causal:
+        return False
     source_leaf = re.sub(r"[^a-z0-9]+", "", source_path.split(".")[-1].casefold())
     target_leaf = re.sub(
         r"[^a-z0-9]+", "", str(target_param.path or target_param.key).split(".")[-1].casefold(),
@@ -5957,10 +5982,18 @@ def to_flow_spec(
         for request in preread_cands
         if str((role_by_key.get(_request_role_key(request)) or {}).get("role") or "") == "business_get"
         and (
-            _request_has_command_anchor(request)
+            _has_query_action_evidence(
+                request.get("trigger_op"),
+                " ".join(filter(None, (
+                    str(request.get("trigger_action_id") or ""),
+                    str(request.get("trigger_locator") or ""),
+                ))),
+            )
             or (
-                _request_transaction_id(request)
+                not _request_has_command_anchor(request)
+                and _request_transaction_id(request)
                 and _business_filter_count(request) > 0
+                and _BUSINESS_QUERY_PATH_RE.search(_request_path(request))
                 and float((role_by_key.get(_request_role_key(request)) or {}).get("confidence") or 0.0) >= 0.9
             )
             or (
@@ -7591,10 +7624,7 @@ def _business_query_evidence_score(step: FlowStep) -> int:
     role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
     if role in {"read_option", "option_source", "explicit_read_option"}:
         return -10
-    if re.search(
-        r"(?:process-definition|approval-detail|form-config|permissions?|current-user|auth)",
-        path,
-    ):
+    if _INTERNAL_WORKFLOW_READ_RE.search(path):
         return -10
     if role != "business_get" and (
         re.search(
@@ -7610,7 +7640,7 @@ def _business_query_evidence_score(step: FlowStep) -> int:
         (step.source_meta or {}).get("trigger_locator"),
     ):
         score += 4
-    if re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
+    if _BUSINESS_QUERY_PATH_RE.search(path):
         score += 2
     response = step.response_json
     if isinstance(response, list):
@@ -15237,7 +15267,7 @@ def _option_binding_tokens(value: Any) -> set[str]:
         "list", "simple", "options", "option", "query", "page", "get",
         # These words describe generic payloads/endpoints and cannot establish
         # that a caller-entered field owns an option source.
-        "info", "information",
+        "info", "information", "name", "title", "label", "text",
     }
 
 
@@ -15344,7 +15374,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
-                or _list_payload_has_reference_contract(source.response_json)
+                or (
+                    _list_payload_has_reference_contract(source.response_json)
+                    and (
+                        _request_has_option_endpoint_hint(read)
+                        or _request_has_reference_entity_hint(read)
+                    )
+                )
             )
         ):
             candidates.append({
@@ -15414,7 +15450,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
-                or _list_payload_has_reference_contract(fact.response_json)
+                or (
+                    _list_payload_has_reference_contract(fact.response_json)
+                    and (
+                        _request_has_option_endpoint_hint(read)
+                        or _request_has_reference_entity_hint(read)
+                    )
+                )
             )
         ):
             candidates.append({
