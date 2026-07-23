@@ -53,6 +53,7 @@ function headerMetrics(page) {
       };
     };
     const newSession = rect(".new-session-button");
+    const leading = rect(".header-leading");
     const trailing = rect(".header-trailing");
     return {
       viewportWidth: innerWidth,
@@ -65,13 +66,15 @@ function headerMetrics(page) {
         : null,
       newSessionIcon: rect(".new-session-button svg"),
       newSessionStroke: element(".new-session-button svg")?.getAttribute("stroke-width"),
+      leading,
+      leadingStyle: style(".header-leading"),
       trailing,
       trailingStyle: style(".header-trailing"),
       connection: rect(".connection-status"),
       connectionStyle: style(".connection-status"),
       menuButton: rect(".menu-button"),
       menuButtonStyle: style(".menu-button"),
-      overlap: Boolean(newSession && trailing && newSession.right > trailing.x),
+      overlap: Boolean(leading && trailing && leading.right > trailing.x),
     };
   });
 }
@@ -116,13 +119,16 @@ function assertUtilityGeometry(metrics, viewportWidth) {
   assert.equal(metrics.header.right, viewportWidth - 10);
   assert.equal(metrics.headerStyle.position, "fixed");
   assert.equal(metrics.headerStyle.gap, "12px");
-  assert.equal(metrics.trailingStyle.gap, "8px");
+  assert.equal(metrics.leadingStyle.gap, "8px");
+  assert.equal(metrics.trailingStyle.gap, "12px");
   assert.equal(metrics.connection.height, 26);
   assert.deepEqual(
     [metrics.menuButton.width, metrics.menuButton.height],
     [26, 26],
   );
   assert.equal(metrics.connection.y + metrics.connection.height / 2, metrics.menuButton.y + 13);
+  assert.ok(metrics.menuButton.x < metrics.connection.x);
+  if (metrics.newSession) assert.ok(metrics.newSession.x > metrics.connection.right);
   assert.equal(metrics.connectionStyle.backdropFilter, "blur(2px)");
   assert.equal(metrics.menuButtonStyle.backdropFilter, "blur(2px)");
   assert.equal(metrics.overlap, false);
@@ -159,7 +165,7 @@ async function run() {
   await menu.waitFor();
   const openMenu = await menuMetrics(page);
   assert.equal(openMenu.menu.width, 248);
-  assert.equal(openMenu.menu.right, 869);
+  assert.equal(openMenu.menu.x, 10);
   assert.equal(openMenu.menu.y - openMenu.menuButton.y - openMenu.menuButton.height, 8);
   assert.deepEqual(openMenu.padding, ["6px", "6px", "6px", "6px"]);
   assert.equal(openMenu.borderRadius, "16px");

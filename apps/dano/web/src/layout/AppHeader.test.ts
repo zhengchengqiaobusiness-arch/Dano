@@ -39,16 +39,19 @@ describe("AppHeader", () => {
     document.body.replaceChildren();
   });
 
-  it("keeps the conversation action on the left and utilities on the right", async () => {
+  it("keeps Menu and status on the left and the conversation action on the right", async () => {
     const { component, target } = await renderHeader({ showNewSession: true });
 
     try {
       const header = target.querySelector("header")!;
       expect(header.firstElementChild?.classList.contains("header-leading")).toBe(true);
       expect(header.lastElementChild?.classList.contains("header-trailing")).toBe(true);
-      expect(header.querySelector(".header-leading .new-session-button")).not.toBeNull();
-      expect(header.querySelector(".header-trailing .connection-status")).not.toBeNull();
-      expect(header.querySelector(".header-trailing .menu-button")).not.toBeNull();
+      const leadingButtons = header.querySelectorAll<HTMLButtonElement>(
+        ".header-leading button",
+      );
+      expect(leadingButtons[0]?.classList.contains("menu-button")).toBe(true);
+      expect(leadingButtons[1]?.classList.contains("connection-status")).toBe(true);
+      expect(header.querySelector(".header-trailing .new-session-button")).not.toBeNull();
     } finally {
       await unmount(component);
     }
@@ -59,8 +62,8 @@ describe("AppHeader", () => {
 
     try {
       expect(target.querySelector(".new-session-button")).toBeNull();
-      expect(target.querySelector(".header-trailing .connection-status")).not.toBeNull();
-      expect(target.querySelector(".header-trailing .menu-button")).not.toBeNull();
+      expect(target.querySelector(".header-leading .connection-status")).not.toBeNull();
+      expect(target.querySelector(".header-leading .menu-button")).not.toBeNull();
     } finally {
       await unmount(component);
     }
