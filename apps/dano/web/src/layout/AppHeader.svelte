@@ -277,7 +277,7 @@
 
   :global(.header-menu) {
     box-sizing: border-box;
-    z-index: 30;
+    z-index: var(--layer-popover);
     width: 248px;
     padding: 6px;
     border: 0;

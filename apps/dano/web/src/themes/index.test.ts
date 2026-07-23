@@ -5,6 +5,20 @@ import { resolveAppThemeVars, resolveShikiTheme } from "./index";
 import { PI_BASE46_LIGHT_THEME } from "./light";
 
 describe("resolveAppThemeVars", () => {
+  it("exports semantic overlay layer tokens", () => {
+    const vars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
+    const layers = [
+      "--layer-popover",
+      "--layer-dialog-overlay",
+      "--layer-dialog",
+      "--layer-notification",
+    ].map(variable => Number(vars[variable]));
+
+    expect(layers.every(Number.isFinite)).toBe(true);
+    expect(layers).toEqual([...layers].sort((a, b) => a - b));
+    expect(new Set(layers).size).toBe(layers.length);
+  });
+
   it("does not emit a separate send button background token", () => {
     const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
     const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);

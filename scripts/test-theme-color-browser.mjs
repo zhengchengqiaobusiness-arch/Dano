@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright-core";
 import {
+  availablePort,
   findChromeExecutable,
   startService,
   stopService,
@@ -12,8 +13,6 @@ import {
 } from "./browser-test-harness.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const origin = "http://localhost:5173";
-const serverOrigin = "http://localhost:8080";
 const authSecret = "dano-theme-color-browser-test-secret";
 const userId = "theme-color-browser-user";
 const runtimeRoot = mkdtempSync(join(tmpdir(), "dano-theme-color-browser-"));
@@ -125,6 +124,10 @@ function assertDialogContract(metrics, options) {
 async function run() {
   const executablePath = findChromeExecutable();
   assert.ok(executablePath, "No system Chrome/Chromium found");
+  const backendPort = await availablePort();
+  const webPort = await availablePort();
+  const serverOrigin = `http://localhost:${backendPort}`;
+  const origin = `http://localhost:${webPort}`;
 
   backend = startService(
     "pnpm",
@@ -134,14 +137,27 @@ async function run() {
       output: serviceOutput,
       env: {
         ...process.env,
+        DANO_PORT: String(backendPort),
         DANO_RUNTIME_DIR: runtimeRoot,
         DANO_AUTH_JWT_SECRET: authSecret,
       },
     },
   );
-  web = startService("pnpm", ["run", "dev:web"], {
+  web = startService("pnpm", [
+    "-C",
+    "apps/dano",
+    "exec",
+    "vite",
+    "--port",
+    String(webPort),
+    "--strictPort",
+  ], {
     cwd: repoRoot,
     output: serviceOutput,
+    env: {
+      ...process.env,
+      DANO_DEV_BACKEND_ORIGIN: serverOrigin,
+    },
   });
   await Promise.all([
     waitForHttp(serverOrigin, {

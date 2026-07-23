@@ -65,7 +65,7 @@
     position: fixed;
     top: 56px;
     right: 16px;
-    z-index: 2000;
+    z-index: var(--layer-notification);
     display: flex;
     flex-direction: column;
     gap: 8px;

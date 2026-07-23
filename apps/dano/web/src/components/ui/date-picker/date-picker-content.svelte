@@ -21,6 +21,6 @@
 
 <style>
   :global(.date-picker-content) {
-    z-index: 30;
+    z-index: var(--layer-popover);
   }
 </style>

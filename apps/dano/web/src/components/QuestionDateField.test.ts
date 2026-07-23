@@ -39,9 +39,7 @@ describe("QuestionDateField", () => {
     expect(datePickerContentSource).toContain(
       '<DatePickerPrimitive.Portal to=".app-shell">',
     );
-    expect(datePickerContentSource).toMatch(
-      /:global\(\.date-picker-content\)\s*\{[\s\S]*?z-index:\s*30;/,
-    );
+    expect(datePickerContentSource).toContain("z-index: var(--layer-popover)");
     expect(questionDateFieldSource).not.toMatch(
       /:global\(\.question-date-popover\)\s*\{[\s\S]*?z-index:/,
     );
@@ -92,8 +90,12 @@ describe("QuestionDateField", () => {
 
     try {
       const input = target.querySelector<HTMLInputElement>('input[type="date"]');
+      const icon = target.querySelector<HTMLElement>(".question-date-native-icon");
       expect(input?.value).toBe("2026-08-01");
       expect(input?.required).toBe(true);
+      expect(target.querySelectorAll(".question-date-native-icon")).toHaveLength(1);
+      expect(icon?.querySelectorAll("svg")).toHaveLength(1);
+      expect(icon?.getAttribute("aria-hidden")).toBe("true");
       input!.value = "";
       input!.dispatchEvent(new Event("input", { bubbles: true }));
       expect(onValueChange).toHaveBeenLastCalledWith(undefined);

@@ -1,22 +1,12 @@
 const ENTER_INSERTS_NEWLINE_QUERY =
   "(hover: none) and (pointer: coarse)";
+const TOUCH_ONLY_INPUT_QUERY =
+  "(any-hover: none) and (any-pointer: coarse)";
 
 type ComposerKeyboardEnvironment = {
   matchMedia: (query: string) => Pick<MediaQueryList, "matches">;
-  navigator: Pick<Navigator, "userAgent"> & {
-    userAgentData?: { mobile?: boolean };
-  };
+  navigator: Pick<Navigator, "maxTouchPoints">;
 };
-
-const MOBILE_BROWSER_PATTERN =
-  /Android|iPhone|iPad|iPod|IEMobile|Opera Mini|Mobile/i;
-
-function isMobileBrowser(navigator: ComposerKeyboardEnvironment["navigator"]): boolean {
-  return (
-    navigator.userAgentData?.mobile ??
-    MOBILE_BROWSER_PATTERN.test(navigator.userAgent)
-  );
-}
 
 export function shouldEnterInsertNewline(
   environment: ComposerKeyboardEnvironment | undefined =
@@ -24,11 +14,14 @@ export function shouldEnterInsertNewline(
 ): boolean {
   if (
     typeof environment?.matchMedia !== "function" ||
-    !isMobileBrowser(environment.navigator)
+    environment.navigator.maxTouchPoints <= 0
   ) {
     return false;
   }
-  return environment.matchMedia(ENTER_INSERTS_NEWLINE_QUERY).matches;
+  return (
+    environment.matchMedia(ENTER_INSERTS_NEWLINE_QUERY).matches &&
+    environment.matchMedia(TOUCH_ONLY_INPUT_QUERY).matches
+  );
 }
 
 export function shouldSubmitComposerEnter(

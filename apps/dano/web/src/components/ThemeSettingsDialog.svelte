@@ -94,7 +94,7 @@
   :global(.theme-dialog-overlay) {
     position: fixed;
     inset: 0;
-    z-index: 1000;
+    z-index: var(--layer-dialog-overlay);
     background: var(--overlay);
   }
 
@@ -103,7 +103,7 @@
     position: fixed;
     top: 50%;
     left: 50%;
-    z-index: 1001;
+    z-index: var(--layer-dialog);
     width: min(380px, calc(100vw - 40px));
     max-height: calc(100vh - 40px);
     padding: 14px;

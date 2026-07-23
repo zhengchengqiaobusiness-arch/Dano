@@ -29,7 +29,7 @@ describe("composer keyboard enter handling", () => {
     ).toBe(false);
   });
 
-  it("keeps Enter as a newline on touch or narrow inputs", () => {
+  it("keeps Enter as a newline when the environment policy requests it", () => {
     expect(shouldSubmitComposerEnter(keyEvent(), false, true)).toBe(false);
   });
 
@@ -55,42 +55,39 @@ describe("composer keyboard enter handling", () => {
     expect(
       shouldEnterInsertNewline({
         matchMedia,
-        navigator: { userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" },
+        navigator: { maxTouchPoints: 5 },
       }),
     ).toBe(true);
-    expect(matchMedia).toHaveBeenCalledWith(
-      "(hover: none) and (pointer: coarse)",
-    );
+    expect(matchMedia).toHaveBeenCalledTimes(2);
   });
 
-  it("submits Enter on desktop even with a coarse pointer", () => {
+  it("submits Enter without an active touch pointer", () => {
     expect(
       shouldEnterInsertNewline({
         matchMedia: vi.fn().mockReturnValue({ matches: true }),
-        navigator: { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X)" },
+        navigator: { maxTouchPoints: 0 },
       }),
     ).toBe(false);
   });
 
-  it("submits Enter on mobile browsers without a touch-primary pointer", () => {
+  it("submits Enter when a hover-capable pointer is also available", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn((query: string) => ({
+          matches: query === "(hover: none) and (pointer: coarse)",
+        })),
+        navigator: { maxTouchPoints: 5 },
+      }),
+    ).toBe(false);
+  });
+
+  it("submits Enter when the primary pointer is not touch-oriented", () => {
     expect(
       shouldEnterInsertNewline({
         matchMedia: vi.fn().mockReturnValue({ matches: false }),
-        navigator: { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)" },
+        navigator: { maxTouchPoints: 5 },
       }),
     ).toBe(false);
-  });
-
-  it("uses user-agent client hints when available", () => {
-    expect(
-      shouldEnterInsertNewline({
-        matchMedia: vi.fn().mockReturnValue({ matches: true }),
-        navigator: {
-          userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
-          userAgentData: { mobile: true },
-        },
-      }),
-    ).toBe(true);
   });
 
   it("falls back to desktop behavior when matchMedia is unavailable", () => {

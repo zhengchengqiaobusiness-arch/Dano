@@ -67,6 +67,28 @@ function assertActionMetrics(metrics, height) {
   }
 }
 
+function mobileDateArrowMetrics(page) {
+  return page.evaluate(() => {
+    const control = document.querySelector(".question-date-native-control");
+    const input = control?.querySelector(".question-date-native");
+    const icon = control?.querySelector(".question-date-native-icon");
+    if (!control || !input || !icon) {
+      throw new Error("mobile native date control is missing");
+    }
+    const rect = icon.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+    );
+    return {
+      icons: control.querySelectorAll(".question-date-native-icon").length,
+      svgs: control.querySelectorAll(".question-date-native-icon svg").length,
+      pointerEvents: getComputedStyle(icon).pointerEvents,
+      hitIsInput: hit === input,
+    };
+  });
+}
+
 async function visibleForegrounds(page) {
   return page.evaluate(() => ({
     token: getComputedStyle(document.documentElement)
@@ -127,20 +149,26 @@ async function run() {
   assert.equal(desktop.submittedGridColumns.split(" ").length, 2);
 
   const gray = await visibleForegrounds(page);
-  assert.equal(gray.token, "#0d1117");
-  assert.deepEqual(gray.primaryButtons, ["rgb(13, 17, 23)", "rgb(13, 17, 23)"]);
-  assert.equal(gray.submittedIcon, "rgb(13, 17, 23)");
+  assert.equal(gray.token, "#ffffff");
+  assert.deepEqual(gray.primaryButtons, ["rgb(255, 255, 255)", "rgb(255, 255, 255)"]);
+  assert.equal(gray.submittedIcon, "rgb(255, 255, 255)");
 
   await page.setViewportSize({ width: 640, height: 900 });
   const narrow = await actionMetrics(page);
   assert.equal(narrow.viewportWidth, 640);
   assertActionMetrics(narrow, 44);
+  assert.deepEqual(await mobileDateArrowMetrics(page), {
+    icons: 1,
+    svgs: 1,
+    pointerEvents: "none",
+    hitIsInput: true,
+  });
 
   await page.setViewportSize({ width: 641, height: 900 });
   for (const [preset, expectedToken, expectedRgb] of [
     ["default", "#ffffff", "rgb(255, 255, 255)"],
     ["blue", "#ffffff", "rgb(255, 255, 255)"],
-    ["gray", "#0d1117", "rgb(13, 17, 23)"],
+    ["gray", "#ffffff", "rgb(255, 255, 255)"],
     ["yellow", "#ffffff", "rgb(255, 255, 255)"],
     ["pink", "#ffffff", "rgb(255, 255, 255)"],
     ["purple", "#ffffff", "rgb(255, 255, 255)"],
