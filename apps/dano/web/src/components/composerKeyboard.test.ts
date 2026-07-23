@@ -49,13 +49,48 @@ describe("composer keyboard enter handling", () => {
     ).toBe(false);
   });
 
-  it("detects touch or narrow input environments without user agent checks", () => {
+  it("keeps Enter as a newline only in mobile touch environments", () => {
     const matchMedia = vi.fn().mockReturnValue({ matches: true });
 
-    expect(shouldEnterInsertNewline({ matchMedia })).toBe(true);
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia,
+        navigator: { userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" },
+      }),
+    ).toBe(true);
     expect(matchMedia).toHaveBeenCalledWith(
-      "(hover: none) and (pointer: coarse), (max-width: 768px)",
+      "(hover: none) and (pointer: coarse)",
     );
+  });
+
+  it("submits Enter on desktop even with a coarse pointer", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn().mockReturnValue({ matches: true }),
+        navigator: { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X)" },
+      }),
+    ).toBe(false);
+  });
+
+  it("submits Enter on mobile browsers without a touch-primary pointer", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn().mockReturnValue({ matches: false }),
+        navigator: { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)" },
+      }),
+    ).toBe(false);
+  });
+
+  it("uses user-agent client hints when available", () => {
+    expect(
+      shouldEnterInsertNewline({
+        matchMedia: vi.fn().mockReturnValue({ matches: true }),
+        navigator: {
+          userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+          userAgentData: { mobile: true },
+        },
+      }),
+    ).toBe(true);
   });
 
   it("falls back to desktop behavior when matchMedia is unavailable", () => {
