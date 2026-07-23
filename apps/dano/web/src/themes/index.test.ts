@@ -116,7 +116,7 @@ describe("resolveAppThemeVars", () => {
     expect(vars["--surface-active"]).toBe("rgba(196, 196, 196, 0.14)");
     expect(vars["--focus-ring"]).toBe("rgba(196, 196, 196, 0.28)");
     expect(vars["--selection-bg"]).toBe("rgba(196, 196, 196, 0.16)");
-    expect(vars["--on-accent"]).toBe("#0d1117");
+    expect(vars["--on-accent"]).toBe("#ffffff");
   });
 
   it("changes every derived state when the Theme Color changes", () => {

@@ -22,7 +22,7 @@ describe("Theme Color", () => {
   it.each([
     ["default", "#53b559", "#ffffff"],
     ["blue", "#7aa2f7", "#ffffff"],
-    ["gray", "#c4c4c4", "#0d1117"],
+    ["gray", "#c4c4c4", "#ffffff"],
     ["yellow", "#d79921", "#ffffff"],
     ["pink", "#eb6f92", "#ffffff"],
     ["purple", "#cba6f7", "#ffffff"],
@@ -50,8 +50,8 @@ describe("Theme Color", () => {
   });
 
   it("uses white at the visual threshold and dark below it", () => {
-    expect(resolveThemeColor("#b6b6b6").onAccent).toBe("#ffffff");
-    expect(resolveThemeColor("#b8b8b8").onAccent).toBe("#0d1117");
+    expect(resolveThemeColor("#d2d2d2").onAccent).toBe("#ffffff");
+    expect(resolveThemeColor("#d3d3d3").onAccent).toBe("#0d1117");
   });
 
   it.each(["", "53b559", "#fff", "#gggggg", "#123456789"])(
