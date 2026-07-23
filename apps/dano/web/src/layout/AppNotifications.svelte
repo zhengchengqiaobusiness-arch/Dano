@@ -65,7 +65,7 @@
     position: fixed;
     top: 56px;
     right: 16px;
-    z-index: 900;
+    z-index: 2000;
     display: flex;
     flex-direction: column;
     gap: 8px;
