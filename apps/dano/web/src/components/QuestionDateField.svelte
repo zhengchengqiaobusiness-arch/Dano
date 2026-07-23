@@ -165,6 +165,9 @@
           {placeholder}
         </span>
       {/if}
+      <span class="question-date-native-icon" aria-hidden="true">
+        <ChevronDown size={16} />
+      </span>
     </div>
   {:else}
     <DatePicker.Root
@@ -435,7 +438,6 @@
 
   .question-date-native {
     width: 100%;
-    padding-right: 40px;
   }
 
   .question-date-native-placeholder {
@@ -453,11 +455,26 @@
     white-space: nowrap;
   }
 
+  .question-date-native-icon {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    bottom: 1px;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    border-radius: 0 9px 9px 0;
+    background: var(--control-bg);
+    color: var(--text-subtle);
+    pointer-events: none;
+  }
+
   .question-date-native:focus + .question-date-native-placeholder {
     opacity: 0;
   }
 
-  .question-date-native-control.disabled .question-date-native-placeholder {
+  .question-date-native-control.disabled .question-date-native-placeholder,
+  .question-date-native-control.disabled .question-date-native-icon {
     opacity: 0.5;
   }
 
