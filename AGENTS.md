@@ -81,6 +81,20 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - When adding or changing a collection- or object-shaped model parameter, update the executable compatibility matrix and the sanitized captured model-deviation fixtures that exercise it. A schema, prompt, or prose-only change is not complete evidence.
 - Review such changes with [the model argument compatibility checklist](docs/agents/model-argument-compatibility-review.md), including canonical input, safe JSON strings, aliases, malformed or ambiguous input, partial-valid input, fallback, isolation/leakage, and the canonical browser projection.
 
+## `ask_user_question` model guide
+
+- Any change to `ask_user_question` capabilities, intended use, `description`,
+  `promptSnippet`, `promptGuidelines`, canonical parameters, JSON Schema,
+  defaults, validation, controls, field configuration, `dataSource`, results,
+  error codes, retry policy, confirmation lifecycle, or canonical Card Request
+  projection must check and update
+  `docs/skill-generator-ask-user-question-guide.md` in the same change.
+- Keep the guide's backend Skill-generator examples and capability coverage
+  matrix synchronized with the implementation. Every documented capability
+  must remain linked to at least one executable example.
+- If an `ask_user_question` change does not require a guide update, state that
+  review conclusion explicitly in the pull request validation notes.
+
 ## Frontend component library
 
 - Frontend feature components must use the project's shadcn-svelte components
