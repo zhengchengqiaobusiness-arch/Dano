@@ -59,6 +59,9 @@ HS256 `DANO_DEMO_JWT` for `demo-user` / `演示用户`, then stores both in
 identity claims, and expiration and reuse the exact pair. A one-sided pair,
 expired token, invalid signature, or changed Demo identity stops the release;
 the release never repairs the state by overwriting or rotating credentials.
+When `DANO_AUTH_JWT_ISSUER` or `DANO_AUTH_JWT_AUDIENCE` is configured, first
+initialization includes the matching claim and later releases reject a token
+that is incompatible with the active verifier constraints.
 
 For a manual Compose deployment, initialize the same persisted pair before
 starting the stack:
@@ -114,6 +117,15 @@ These commands use Podman and keep local runtime data outside the source
 checkout under the system temporary directory. Start the Podman machine first
 when it is not already running. Run `smoke:deploy` and the browser acceptance
 steps below after `container:up` when validating a change.
+
+For the fixed Demo authentication flow, run the external browser regression
+against that deployment. It starts with an empty browser context, verifies the
+server-set HttpOnly cookie and `演示用户`, changes and reloads the theme, then
+restores the original theme preference:
+
+```bash
+DANO_BROWSER_BASE_URL=http://localhost:18082 pnpm run test:browser:demo-auth
+```
 
 ```bash
 cp .env.example .env

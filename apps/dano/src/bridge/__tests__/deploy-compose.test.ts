@@ -190,7 +190,24 @@ function runRelease(
   );
   writeFileSync(
     join(fakeRepo, "scripts/smoke-dano-deploy.mjs"),
-    "import { appendFileSync } from 'node:fs'; appendFileSync(process.env.DANO_COMMAND_LOG, 'smoke\\n');\n",
+    `import { createHmac } from "node:crypto";
+import { appendFileSync } from "node:fs";
+if (!process.env.DANO_AUTH_JWT_SECRET || !process.env.DANO_DEMO_JWT) {
+  throw new Error("release did not load persisted Demo authentication");
+}
+const [header, payload, signature] = process.env.DANO_DEMO_JWT.split(".");
+const expected = createHmac("sha256", process.env.DANO_AUTH_JWT_SECRET)
+  .update(header + "." + payload)
+  .digest("base64url");
+const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+if (
+  signature !== expected ||
+  Date.parse(process.env.DANO_DEMO_COOKIE_EXPIRES) / 1000 !== claims.exp
+) {
+  throw new Error("release Demo authentication environment is inconsistent");
+}
+appendFileSync(process.env.DANO_COMMAND_LOG, "smoke\\n");
+`,
   );
   writeFileSync(
     join(fakeBin, "git"),

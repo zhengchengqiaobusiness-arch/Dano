@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 const exposureMode = process.env.DANO_EXPOSURE_MODE?.trim() || "http";
 const smokeUsesTls = exposureMode !== "http";
 const defaultSmokeUrl = smokeUsesTls
@@ -30,7 +32,13 @@ async function expectResponse(label, path, init, predicate) {
     fetch(url(path), { ...init, signal }),
   );
   if (!predicate(response)) {
-    throw new Error(`${label} returned ${response.status}`);
+    const detail = (await response.clone().text().catch(() => ""))
+      .replaceAll(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
+    throw new Error(
+      `${label} returned ${response.status}${detail ? `: ${detail}` : ""}`,
+    );
   }
   return response;
 }
@@ -98,17 +106,82 @@ function assert(condition, message) {
   }
 }
 
+function demoCookieFrom(response) {
+  const setCookie = response.headers.get("set-cookie");
+  if (!setCookie) return null;
+
+  const parts = setCookie.split(";").map(part => part.trim());
+  const separator = parts[0]?.indexOf("=") ?? -1;
+  assert(separator > 0, "Demo Set-Cookie header is malformed");
+  const name = parts[0].slice(0, separator);
+  const token = parts[0].slice(separator + 1);
+  const attributes = new Map(
+    parts.slice(1).map(part => {
+      const attributeSeparator = part.indexOf("=");
+      return attributeSeparator < 0
+        ? [part.toLowerCase(), true]
+        : [
+            part.slice(0, attributeSeparator).toLowerCase(),
+            part.slice(attributeSeparator + 1),
+          ];
+    }),
+  );
+  const expectedName = process.env.DANO_AUTH_COOKIE_NAME?.trim() || "dano_auth";
+  assert(name === expectedName, `Demo cookie name was ${name}`);
+  assert(token, "Demo cookie token is empty");
+  assert(attributes.get("path") === "/", "Demo cookie Path was not /");
+  assert(attributes.has("httponly"), "Demo cookie was not HttpOnly");
+  assert(attributes.get("samesite") === "Lax", "Demo cookie SameSite was not Lax");
+  assert(attributes.has("expires"), "Demo cookie was not persistent");
+  assert(
+    attributes.has("secure") === (baseUrl.protocol === "https:"),
+    "Demo cookie Secure did not match the deployment exposure",
+  );
+
+  let claims;
+  try {
+    const payload = token.split(".")[1];
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Demo cookie JWT payload is invalid");
+  }
+  const expiresSeconds = Date.parse(String(attributes.get("expires"))) / 1000;
+  assert(Number.isFinite(expiresSeconds), "Demo cookie Expires is invalid");
+  assert(Number.isInteger(claims.exp), "Demo cookie JWT exp is invalid");
+  assert(expiresSeconds <= claims.exp, "Demo cookie lifetime exceeds JWT exp");
+  const secret = process.env.DANO_AUTH_JWT_SECRET?.trim();
+  if (secret) {
+    const jwtParts = token.split(".");
+    const expected = createHmac("sha256", secret)
+      .update(`${jwtParts[0]}.${jwtParts[1]}`)
+      .digest();
+    const actual = Buffer.from(jwtParts[2], "base64url");
+    assert(
+      actual.length === expected.length && timingSafeEqual(actual, expected),
+      "Demo cookie JWT does not match the deployment Secret",
+    );
+  }
+
+  return `${name}=${token}`;
+}
+
+function requestHeaders(cookie, values = {}) {
+  return cookie ? { Cookie: cookie, ...values } : values;
+}
+
 console.log(`[smoke] base url: ${baseUrl.toString()}`);
 
 const root = await expectResponse("GET /", "/", {}, response => response.ok);
 const rootText = await root.text();
 assert(/<html/i.test(rootText), "GET / did not return HTML");
+const demoCookie = demoCookieFrom(root);
 console.log("[smoke] / loaded");
+if (demoCookie) console.log("[smoke] Demo authentication cookie verified");
 
 const health = await expectResponse(
   "GET /api/health",
   "/api/health",
-  {},
+  { headers: requestHeaders(demoCookie) },
   response => response.ok,
 );
 assert((await health.json()).status === "ok", "health status was not ok");
@@ -119,7 +192,7 @@ const createdResponse = await expectResponse(
   "/api/clients",
   {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: requestHeaders(demoCookie, { "Content-Type": "application/json" }),
     body: "{}",
   },
   response => response.status === 201,
@@ -128,12 +201,18 @@ const created = await createdResponse.json();
 assert(created.client?.id, "client id missing");
 assert(created.eventsUrl, "eventsUrl missing");
 assert(created.messagesUrl, "messagesUrl missing");
+if (demoCookie) {
+  assert(
+    created.currentUser?.username === "演示用户",
+    "Demo cookie did not resolve to 演示用户",
+  );
+}
 console.log("[smoke] client created");
 
 const sse = await expectResponse(
   "GET eventsUrl",
   created.eventsUrl,
-  {},
+  { headers: requestHeaders(demoCookie) },
   response =>
     response.ok &&
     response.headers.get("content-type")?.includes("text/event-stream"),
@@ -146,7 +225,7 @@ const posted = await expectResponse(
   created.messagesUrl,
   {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: requestHeaders(demoCookie, { "Content-Type": "application/json" }),
     body: JSON.stringify({
       type: "command",
       payload: { id: commandId, type: "get_state" },
@@ -172,7 +251,7 @@ await expectResponse(
   `/api/clients/${encodeURIComponent(created.client.id)}/disconnect`,
   {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: requestHeaders(demoCookie, { "Content-Type": "application/json" }),
     body: "{}",
   },
   response => response.status === 202,

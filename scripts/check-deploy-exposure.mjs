@@ -89,6 +89,7 @@ function probe(url, { rejectUnauthorized = true } = {}) {
           resolve({
             status: response.statusCode,
             location: response.headers.location,
+            setCookie: response.headers["set-cookie"],
             body,
             peerFingerprint,
           }),
@@ -154,11 +155,34 @@ if (args[0] === "clone") {
     join(fakeBin, "compose-runtime"),
     `#!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 const args = process.argv.slice(2);
 if (args[0] === "build") process.exit(0);
 if (args[0] !== "compose") process.exit(2);
 const result = spawnSync(process.env.DANO_ACCEPTANCE_RUNTIME, args, { stdio: "inherit", env: process.env });
 if (result.error) throw result.error;
+const upIndex = args.indexOf("up");
+if (result.status === 0 && upIndex >= 0 && process.env.DANO_AUTH_JWT_SECRET) {
+  const secretHash = spawnSync(
+    process.env.DANO_ACCEPTANCE_RUNTIME,
+    [
+      ...args.slice(0, upIndex),
+      "exec",
+      "-T",
+      "app",
+      "node",
+      "-e",
+      "process.stdout.write(require('node:crypto').createHash('sha256').update(process.env.DANO_AUTH_JWT_SECRET || '').digest('hex'))",
+    ],
+    { encoding: "utf8", env: process.env },
+  );
+  const expectedHash = createHash("sha256")
+    .update(process.env.DANO_AUTH_JWT_SECRET)
+    .digest("hex");
+  if (secretHash.status !== 0 || secretHash.stdout !== expectedHash) {
+    throw new Error("app container Secret does not match the persisted deployment Secret");
+  }
+}
 process.exit(result.status ?? 1);
 `,
   );
@@ -167,7 +191,7 @@ process.exit(result.status ?? 1);
   }
 }
 
-function compose(deployDir, args, { allowFailure = false } = {}) {
+function compose(deployDir, args, { allowFailure = false, env } = {}) {
   return run(runtimeBin, [
     "compose",
     "-p",
@@ -179,7 +203,35 @@ function compose(deployDir, args, { allowFailure = false } = {}) {
     "--env-file",
     ".env",
     ...args,
-  ], { cwd: deployDir, allowFailure });
+  ], { cwd: deployDir, allowFailure, env });
+}
+
+async function verifyUnconfiguredDemoAuth(deployDir, httpPort) {
+  compose(
+    deployDir,
+    ["up", "-d", "--no-build", "--force-recreate", "nginx"],
+    {
+      env: {
+        ...process.env,
+        DANO_DEMO_JWT: "",
+        DANO_NGINX_PORT: String(httpPort),
+      },
+    },
+  );
+  await waitForHealth(`http://127.0.0.1:${httpPort}/api/health`);
+  const root = await probe(`http://127.0.0.1:${httpPort}/`);
+  if (root.setCookie?.length) {
+    throw new Error("unconfigured nginx emitted a Demo authentication cookie");
+  }
+  const client = await fetch(`http://127.0.0.1:${httpPort}/api/clients`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (client.status !== 401) {
+    throw new Error(`unconfigured Demo authentication returned ${client.status}`);
+  }
+  console.log("[deploy-exposure] unconfigured Demo authentication: passed");
 }
 
 function release(mode, deployDir, runtimeDir, secretsDir, certPath, keyPath, httpPort, httpsPort) {
@@ -238,6 +290,7 @@ async function verifyMode(mode, certPath, keyPath, certificateFingerprint) {
     if (mode === "http") {
       await waitForHealth(httpHealth);
       await expectUnavailable(httpsHealth);
+      await verifyUnconfiguredDemoAuth(deployDir, httpPort);
     } else if (mode === "https") {
       const response = await waitForHealth(httpsHealth);
       if (response.peerFingerprint !== certificateFingerprint) {

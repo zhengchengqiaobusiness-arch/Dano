@@ -37,8 +37,23 @@ function createEnv(content = "DANO_PRODUCT_NAME=Dano\n") {
 }
 
 function initialize(envFile: string) {
-  execFileSync(process.execPath, [initScript, "--file", envFile]);
+  execFileSync(process.execPath, [initScript, "--file", envFile], {
+    env: demoAuthEnvironment(),
+  });
   return readEnv(envFile);
+}
+
+function demoAuthEnvironment(overrides: NodeJS.ProcessEnv = {}) {
+  const env = { ...process.env };
+  for (const name of [
+    "DANO_AUTH_JWT_SECRET",
+    "DANO_DEMO_JWT",
+    "DANO_AUTH_JWT_ISSUER",
+    "DANO_AUTH_JWT_AUDIENCE",
+  ]) {
+    delete env[name];
+  }
+  return { ...env, ...overrides };
 }
 
 function readEnv(envFile: string) {
@@ -89,6 +104,18 @@ describe("Demo authentication deployment initialization", () => {
     expect(Date.parse(env.DANO_DEMO_COOKIE_EXPIRES) / 1000).toBe(claims.exp);
   });
 
+  it("accepts the pnpm argument delimiter used by the deployment docs", () => {
+    const envFile = createEnv();
+    execFileSync(process.execPath, [initScript, "--", "--file", envFile], {
+      env: demoAuthEnvironment(),
+    });
+
+    expect(readEnv(envFile)).toMatchObject({
+      DANO_AUTH_JWT_SECRET: expect.any(String),
+      DANO_DEMO_JWT: expect.any(String),
+    });
+  });
+
   it("verifies and reuses the exact existing secret and JWT", () => {
     const envFile = createEnv();
     const first = initialize(envFile);
@@ -106,7 +133,7 @@ describe("Demo authentication deployment initialization", () => {
       const result = spawnSync(
         process.execPath,
         [initScript, "--file", createEnv(content)],
-        { encoding: "utf8" },
+        { encoding: "utf8", env: demoAuthEnvironment() },
       );
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("must both be set or both be absent");
@@ -158,6 +185,7 @@ describe("Demo authentication deployment initialization", () => {
     );
     const result = spawnSync(process.execPath, [initScript, "--file", envFile], {
       encoding: "utf8",
+      env: demoAuthEnvironment(),
     });
 
     expect(result.status).toBe(1);
@@ -165,6 +193,70 @@ describe("Demo authentication deployment initialization", () => {
     expect(readFileSync(envFile, "utf8")).toContain(
       `DANO_DEMO_JWT=${token(secret)}`,
     );
+  });
+
+  it("generates a token compatible with configured issuer and audience", () => {
+    const envFile = createEnv(
+      "DANO_AUTH_JWT_ISSUER=https://auth.example.test\nDANO_AUTH_JWT_AUDIENCE=dano-web\n",
+    );
+    const first = initialize(envFile);
+    const claims = JSON.parse(
+      Buffer.from(first.DANO_DEMO_JWT.split(".")[1], "base64url").toString("utf8"),
+    );
+
+    expect(claims).toMatchObject({
+      sub: "demo-user",
+      name: "演示用户",
+      iss: "https://auth.example.test",
+      aud: "dano-web",
+    });
+    expect(initialize(envFile).DANO_DEMO_JWT).toBe(first.DANO_DEMO_JWT);
+  });
+
+  it("uses deployment environment issuer and audience constraints", () => {
+    const envFile = createEnv();
+    execFileSync(process.execPath, [initScript, "--file", envFile], {
+      env: demoAuthEnvironment({
+        DANO_AUTH_JWT_ISSUER: "dano-demo",
+        DANO_AUTH_JWT_AUDIENCE: "dano-web",
+      }),
+    });
+    const token = readEnv(envFile).DANO_DEMO_JWT;
+    const claims = JSON.parse(
+      Buffer.from(token.split(".")[1], "base64url").toString("utf8"),
+    );
+
+    expect(claims).toMatchObject({ iss: "dano-demo", aud: "dano-web" });
+  });
+
+  it.each([
+    {
+      name: "issuer",
+      constraint: "DANO_AUTH_JWT_ISSUER=required-issuer\n",
+      error: "issuer is invalid",
+    },
+    {
+      name: "audience",
+      constraint: "DANO_AUTH_JWT_AUDIENCE=required-audience\n",
+      error: "audience is invalid",
+    },
+  ])("rejects an existing token with an incompatible $name", ({ constraint, error }) => {
+    const secret = "existing-secret";
+    const existingToken = signJwt(
+      { sub: "demo-user", name: "演示用户", exp: 4_102_444_800 },
+      secret,
+    );
+    const envFile = createEnv(
+      `${constraint}DANO_AUTH_JWT_SECRET=${secret}\nDANO_DEMO_JWT=${existingToken}\n`,
+    );
+    const result = spawnSync(process.execPath, [initScript, "--file", envFile], {
+      encoding: "utf8",
+      env: demoAuthEnvironment(),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(error);
+    expect(readFileSync(envFile, "utf8")).toContain(`DANO_DEMO_JWT=${existingToken}`);
   });
 });
 

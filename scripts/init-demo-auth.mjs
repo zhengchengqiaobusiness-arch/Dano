@@ -1,26 +1,33 @@
 #!/usr/bin/env node
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import {
+  readEnvValues,
+  updateEnvFile,
+} from "./deploy-env-file.mjs";
 
 const DEMO_SUBJECT = "demo-user";
 const DEMO_NAME = "演示用户";
 const DEMO_TOKEN_LIFETIME_SECONDS = 10 * 365 * 24 * 60 * 60;
 
-export function initializeDemoAuth(envFile, options = {}) {
-  const nowSeconds = Math.floor((options.now?.() ?? Date.now()) / 1000);
+export function initializeDemoAuth(envFile) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const current = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
   const values = readEnvValues(current);
   const fileSecret = values.get("DANO_AUTH_JWT_SECRET")?.trim() || "";
   const fileToken = values.get("DANO_DEMO_JWT")?.trim() || "";
-  const environment = options.env ?? process.env;
+  const environment = process.env;
   const envSecret = environment.DANO_AUTH_JWT_SECRET?.trim() || "";
   const envToken = environment.DANO_DEMO_JWT?.trim() || "";
+  const issuer = effectiveValue(
+    environment.DANO_AUTH_JWT_ISSUER,
+    values.get("DANO_AUTH_JWT_ISSUER"),
+  );
+  const audience = effectiveValue(
+    environment.DANO_AUTH_JWT_AUDIENCE,
+    values.get("DANO_AUTH_JWT_AUDIENCE"),
+  );
 
   if (Boolean(fileSecret) !== Boolean(fileToken)) {
     throw new Error(
@@ -47,26 +54,26 @@ export function initializeDemoAuth(envFile, options = {}) {
   let initialized = false;
   if (!nextSecret) {
     nextSecret = randomBytes(32).toString("base64url");
-    nextToken = signJwt(
-      {
-        sub: DEMO_SUBJECT,
-        name: DEMO_NAME,
-        exp: nowSeconds + DEMO_TOKEN_LIFETIME_SECONDS,
-      },
-      nextSecret,
-    );
+    nextToken = signJwt({
+      sub: DEMO_SUBJECT,
+      name: DEMO_NAME,
+      exp: nowSeconds + DEMO_TOKEN_LIFETIME_SECONDS,
+      ...(issuer ? { iss: issuer } : {}),
+      ...(audience ? { aud: audience } : {}),
+    }, nextSecret);
     initialized = true;
   }
 
-  const claims = verifyDemoJwt(nextToken, nextSecret, nowSeconds);
+  const claims = verifyDemoJwt(nextToken, nextSecret, nowSeconds, {
+    issuer,
+    audience,
+  });
   const expires = new Date(claims.exp * 1000).toUTCString();
-  const next = updateEnvFile(current, {
+  updateEnvFile(envFile, {
     DANO_AUTH_JWT_SECRET: nextSecret,
     DANO_DEMO_JWT: nextToken,
     DANO_DEMO_COOKIE_EXPIRES: expires,
   });
-  writeFileSync(envFile, next, { mode: 0o600 });
-  chmodSync(envFile, 0o600);
 
   return { initialized, expiresAt: claims.exp };
 }
@@ -79,7 +86,7 @@ function signJwt(claims, secret) {
   return `${input}.${signature}`;
 }
 
-function verifyDemoJwt(token, secret, nowSeconds) {
+function verifyDemoJwt(token, secret, nowSeconds, constraints) {
   const parts = token.split(".");
   if (parts.length !== 3 || parts.some(part => part.length === 0)) {
     throw new Error("DANO_DEMO_JWT is malformed");
@@ -106,6 +113,16 @@ function verifyDemoJwt(token, secret, nowSeconds) {
   if (claims.sub !== DEMO_SUBJECT || claims.name !== DEMO_NAME) {
     throw new Error("DANO_DEMO_JWT demo identity claims are invalid");
   }
+  if (constraints.issuer && claims.iss !== constraints.issuer) {
+    throw new Error("DANO_DEMO_JWT issuer is invalid");
+  }
+  if (
+    constraints.audience &&
+    claims.aud !== constraints.audience &&
+    !(Array.isArray(claims.aud) && claims.aud.includes(constraints.audience))
+  ) {
+    throw new Error("DANO_DEMO_JWT audience is invalid");
+  }
   if (!Number.isInteger(claims.exp)) {
     throw new Error("DANO_DEMO_JWT expiration is invalid");
   }
@@ -131,51 +148,16 @@ function decodeJwtPart(value, label) {
   }
 }
 
-function readEnvValues(content) {
-  const values = new Map();
-  for (const line of content.split(/\r?\n/)) {
-    const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
-    if (!match) continue;
-    values.set(match[1], parseEnvValue(match[2]));
-  }
-  return values;
-}
-
-function parseEnvValue(value) {
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1).replaceAll("\\'", "'");
-  }
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function serializeEnvValue(value) {
-  if (/^[a-zA-Z0-9_./:@+-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", "\\'")}'`;
-}
-
-function updateEnvFile(content, values) {
-  const lines = content.split(/\r?\n/).filter((line, index, all) => {
-    return line.length > 0 || index < all.length - 1;
-  });
-  const seen = new Set();
-  const next = lines.map(line => {
-    const match = line.match(/^([A-Z][A-Z0-9_]*)=/);
-    if (!match || !(match[1] in values)) return line;
-    seen.add(match[1]);
-    return `${match[1]}=${serializeEnvValue(values[match[1]])}`;
-  });
-  for (const [name, value] of Object.entries(values)) {
-    if (!seen.has(name)) next.push(`${name}=${serializeEnvValue(value)}`);
-  }
-  return `${next.join("\n")}\n`;
+function effectiveValue(environmentValue, fileValue) {
+  return environmentValue?.trim() || fileValue?.trim() || "";
 }
 
 function readEnvFileArg(args) {
-  if (args.length === 0) return ".env";
-  if (args.length === 2 && args[0] === "--file" && args[1]) return args[1];
+  const values = args[0] === "--" ? args.slice(1) : args;
+  if (values.length === 0) return ".env";
+  if (values.length === 2 && values[0] === "--file" && values[1]) {
+    return values[1];
+  }
   throw new Error("Usage: node scripts/init-demo-auth.mjs [--file .env]");
 }
 
