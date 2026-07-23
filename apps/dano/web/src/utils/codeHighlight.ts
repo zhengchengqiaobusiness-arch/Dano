@@ -7,6 +7,7 @@ import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import {
   readThemeModeFromDom,
   readThemePairFromDom,
+  readThemeColorFromDom,
   resolveShikiTheme,
   type ThemeMode,
   type ThemePair,
@@ -124,9 +125,10 @@ function sanitizeHighlightedHtml(html: string): string {
 
 function resolveHighlighterThemes(themePair?: ThemePair) {
   const pair = themePair ?? readThemePairFromDom();
+  const accentColor = readThemeColorFromDom();
   return {
-    light: resolveShikiTheme(pair.light),
-    dark: resolveShikiTheme(pair.dark),
+    light: resolveShikiTheme(pair.light, accentColor),
+    dark: resolveShikiTheme(pair.dark, accentColor),
   };
 }
 

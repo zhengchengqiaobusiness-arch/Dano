@@ -4,6 +4,7 @@
   import {
     readThemeModeFromDom,
     readThemePairFromDom,
+    readThemeColorFromDom,
     resolveShikiTheme,
   } from "../themes";
   import { t } from "../i18n";
@@ -138,19 +139,21 @@
     registerCustomTheme: DiffsModule["registerCustomTheme"],
   ) {
     const pair = readThemePairFromDom();
-    const darkName = `pi-web-diff-${pair.dark.id}`;
-    const lightName = `pi-web-diff-${pair.light.id}`;
+    const accentColor = readThemeColorFromDom();
+    const accentKey = accentColor.replace("#", "");
+    const darkName = `pi-web-diff-${pair.dark.id}-${accentKey}`;
+    const lightName = `pi-web-diff-${pair.light.id}-${accentKey}`;
 
     if (!REGISTERED_DIFF_THEMES.has(darkName)) {
       registerCustomTheme(darkName, async () => ({
-        ...resolveShikiTheme(pair.dark),
+        ...resolveShikiTheme(pair.dark, accentColor),
         name: darkName,
       }));
       REGISTERED_DIFF_THEMES.add(darkName);
     }
     if (!REGISTERED_DIFF_THEMES.has(lightName)) {
       registerCustomTheme(lightName, async () => ({
-        ...resolveShikiTheme(pair.light),
+        ...resolveShikiTheme(pair.light, accentColor),
         name: lightName,
       }));
       REGISTERED_DIFF_THEMES.add(lightName);
@@ -552,6 +555,7 @@
           "data-theme",
           "data-dark-theme",
           "data-light-theme",
+          "data-accent-color-preset",
         ],
       });
     }

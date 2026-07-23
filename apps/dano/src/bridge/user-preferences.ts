@@ -8,9 +8,11 @@ import {
   type BridgeThemeColorPreference,
 } from "../../types/protocol.js";
 import type { AuthenticatedUserContext } from "./user-context.js";
+import { ensureSafeDirectory } from "./safe-directory.js";
 
 const THEME_PREFERENCE_DIRECTORY = "preferences";
 const THEME_PREFERENCE_FILE = "theme.json";
+const themePreferenceSaveQueues = new Map<string, Promise<void>>();
 
 function isAccentColorPreset(value: unknown): value is AccentColorPreset {
   return (
@@ -47,11 +49,35 @@ export async function saveThemeColorPreference(
   userContext: AuthenticatedUserContext,
   preference: BridgeThemeColorPreference,
 ): Promise<void> {
+  const queueKey = userContext.folderPath;
+  const previousSave =
+    themePreferenceSaveQueues.get(queueKey) ?? Promise.resolve();
+  const save = previousSave
+    .catch(() => undefined)
+    .then(() => writeThemeColorPreference(userContext, preference));
+  themePreferenceSaveQueues.set(queueKey, save);
+
+  try {
+    await save;
+  } finally {
+    if (themePreferenceSaveQueues.get(queueKey) === save) {
+      themePreferenceSaveQueues.delete(queueKey);
+    }
+  }
+}
+
+async function writeThemeColorPreference(
+  userContext: AuthenticatedUserContext,
+  preference: BridgeThemeColorPreference,
+): Promise<void> {
   const directoryPath = path.join(
     userContext.folderPath,
     THEME_PREFERENCE_DIRECTORY,
   );
-  await ensurePreferenceDirectory(directoryPath);
+  await ensureSafeDirectory(directoryPath, {
+    unsafeDirectoryError: () =>
+      new Error("User preferences path is not a safe directory"),
+  });
   const filePath = themePreferencePath(userContext);
   const temporaryPath = path.join(
     directoryPath,
@@ -77,26 +103,4 @@ function themePreferencePath(userContext: AuthenticatedUserContext): string {
     THEME_PREFERENCE_DIRECTORY,
     THEME_PREFERENCE_FILE,
   );
-}
-
-async function ensurePreferenceDirectory(directoryPath: string): Promise<void> {
-  try {
-    const stats = await fs.promises.lstat(directoryPath);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new Error("User preferences path is not a safe directory");
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    try {
-      await fs.promises.mkdir(directoryPath, { mode: 0o700 });
-    } catch (mkdirError) {
-      if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw mkdirError;
-      }
-    }
-    const stats = await fs.promises.lstat(directoryPath);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new Error("User preferences path is not a safe directory");
-    }
-  }
 }

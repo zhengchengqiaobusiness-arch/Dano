@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
+import {
+  findChromeExecutable,
+  startService,
+  stopService,
+  waitForHttp,
+} from "./browser-test-harness.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const origin = "http://localhost:5173";
@@ -14,14 +18,6 @@ const authSecret = "dano-theme-color-browser-test-secret";
 const userId = "theme-color-browser-user";
 const runtimeRoot = mkdtempSync(join(tmpdir(), "dano-theme-color-browser-"));
 const preferenceDirectory = join(runtimeRoot, "users", userId, "preferences");
-const chromeCandidates = [
-  process.env.DANO_CHROME_EXECUTABLE,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-].filter(Boolean);
-
 let backend;
 let web;
 let browser;
@@ -38,55 +34,6 @@ function signTestUserToken() {
     .update(unsigned)
     .digest("base64url");
   return `${unsigned}.${signature}`;
-}
-
-async function waitForHttp(url) {
-  const deadline = Date.now() + 30_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.status < 500) return;
-      lastError = new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    if (backend?.exitCode !== null) throw new Error(`Backend exited with ${backend.exitCode}`);
-    if (web?.exitCode !== null) throw new Error(`Vite exited with ${web.exitCode}`);
-    await delay(100);
-  }
-  throw new Error(`Service did not become ready: ${lastError?.message ?? "timeout"}`);
-}
-
-function startService(command, args, env = process.env) {
-  const service = spawn(command, args, {
-    cwd: repoRoot,
-    detached: true,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  for (const stream of [service.stdout, service.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", chunk => serviceOutput.push(chunk));
-  }
-  return service;
-}
-
-async function stopService(service) {
-  if (!service || service.exitCode !== null || service.signalCode !== null) return;
-  const exited = new Promise(resolveExit => service.once("exit", resolveExit));
-  try {
-    process.kill(-service.pid, "SIGTERM");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  if (await Promise.race([exited.then(() => true), delay(3_000, false)])) return;
-  try {
-    process.kill(-service.pid, "SIGKILL");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  await exited;
 }
 
 async function waitForConnected(page) {
@@ -176,20 +123,33 @@ function assertDialogContract(metrics, options) {
 }
 
 async function run() {
-  const executablePath = chromeCandidates.find(candidate => existsSync(candidate));
+  const executablePath = findChromeExecutable();
   assert.ok(executablePath, "No system Chrome/Chromium found");
 
   backend = startService(
     "pnpm",
     ["run", "dev:server"],
     {
-      ...process.env,
-      DANO_RUNTIME_DIR: runtimeRoot,
-      DANO_AUTH_JWT_SECRET: authSecret,
+      cwd: repoRoot,
+      output: serviceOutput,
+      env: {
+        ...process.env,
+        DANO_RUNTIME_DIR: runtimeRoot,
+        DANO_AUTH_JWT_SECRET: authSecret,
+      },
     },
   );
-  web = startService("pnpm", ["run", "dev:web"]);
-  await Promise.all([waitForHttp(serverOrigin), waitForHttp(origin)]);
+  web = startService("pnpm", ["run", "dev:web"], {
+    cwd: repoRoot,
+    output: serviceOutput,
+  });
+  await Promise.all([
+    waitForHttp(serverOrigin, {
+      services: [backend],
+      isReady: response => response.status < 500,
+    }),
+    waitForHttp(origin, { services: [web] }),
+  ]);
 
   browser = await chromium.launch({ executablePath, headless: true });
   const context = await browser.newContext({

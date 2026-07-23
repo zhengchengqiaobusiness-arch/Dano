@@ -144,15 +144,21 @@ export function resolveAppThemeVars(
   };
 }
 
-export function resolveShikiTheme(theme: Base46Theme): ThemeRegistration {
-  const cached = SHIKI_THEME_CACHE.get(theme.id);
+export function resolveShikiTheme(
+  theme: Base46Theme,
+  accentColor: string = ACCENT_COLOR_PRESETS[DEFAULT_ACCENT_COLOR_PRESET],
+): ThemeRegistration {
+  const themeColor = resolveThemeColor(accentColor);
+  const cacheKey = `${theme.id}:${themeColor.accent}`;
+  const themeName = `${theme.id}-${themeColor.accent.slice(1)}`;
+  const cached = SHIKI_THEME_CACHE.get(cacheKey);
   if (cached) {
     return cached;
   }
 
   const { base16, base30, label, mode } = theme;
   const shikiTheme: ThemeRegistration = {
-    name: theme.id,
+    name: themeName,
     displayName: label,
     type: mode,
     fg: base16.base05,
@@ -160,8 +166,8 @@ export function resolveShikiTheme(theme: Base46Theme): ThemeRegistration {
     colors: {
       "editor.background": base16.base00,
       "editor.foreground": base16.base05,
-      "editor.selectionBackground": toRgba(
-        base16.base0D,
+      "editor.selectionBackground": withThemeColorOpacity(
+        themeColor.accent,
         mode === "dark" ? 0.22 : 0.16,
       ),
       "editor.lineHighlightBackground": toRgba(
@@ -279,8 +285,18 @@ export function resolveShikiTheme(theme: Base46Theme): ThemeRegistration {
     ],
   };
 
-  SHIKI_THEME_CACHE.set(theme.id, shikiTheme);
+  SHIKI_THEME_CACHE.set(cacheKey, shikiTheme);
   return shikiTheme;
+}
+
+export function readThemeColorFromDom(): string {
+  const shell = document.querySelector<HTMLElement>(".app-shell");
+  const inlineAccent = shell?.style.getPropertyValue("--accent").trim();
+  if (inlineAccent) return inlineAccent;
+  const renderedAccent = shell && typeof getComputedStyle === "function"
+    ? getComputedStyle(shell).getPropertyValue("--accent").trim()
+    : "";
+  return renderedAccent || ACCENT_COLOR_PRESETS[DEFAULT_ACCENT_COLOR_PRESET];
 }
 
 export function readThemeModeFromDom(): ThemeMode {
