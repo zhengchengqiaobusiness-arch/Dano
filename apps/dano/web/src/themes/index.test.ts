@@ -106,16 +106,16 @@ describe("resolveAppThemeVars", () => {
     },
   );
 
-  it("preserves an alpha Theme Color in derived state opacity", () => {
+  it("derives visible states for the gray Theme Color", () => {
     const vars = resolveAppThemeVars(
       PI_BASE46_LIGHT_THEME,
       ACCENT_COLOR_PRESETS.gray,
     );
 
-    expect(vars["--accent"]).toBe("#e9e9e980");
-    expect(vars["--surface-active"]).toBe("rgba(233, 233, 233, 0.0703)");
-    expect(vars["--focus-ring"]).toBe("rgba(233, 233, 233, 0.1405)");
-    expect(vars["--selection-bg"]).toBe("rgba(233, 233, 233, 0.0803)");
+    expect(vars["--accent"]).toBe("#c4c4c4");
+    expect(vars["--surface-active"]).toBe("rgba(196, 196, 196, 0.14)");
+    expect(vars["--focus-ring"]).toBe("rgba(196, 196, 196, 0.28)");
+    expect(vars["--selection-bg"]).toBe("rgba(196, 196, 196, 0.16)");
     expect(vars["--on-accent"]).toBe("#0d1117");
   });
 
