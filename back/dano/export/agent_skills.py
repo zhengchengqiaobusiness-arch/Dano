@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
@@ -122,9 +123,9 @@ def _make_export_tree_readable(root: Path) -> None:
         os.chmod(path, mode)
 
 
-def _publish_folder(stage: Path, target: Path, slug: str) -> Path:
+def _publish_folder(stage: Path, target: Path, slug: str, skill_name: str | None = None) -> Path:
     """Validate then atomically replace one exporter-owned Skill folder."""
-    _validate_generated_skill(stage, slug)
+    _validate_generated_skill(stage, skill_name or slug)
     _make_export_tree_readable(stage)
     backup = target.with_name(f".{target.name}.old-{uuid.uuid4().hex}")
     had_target = target.exists()
@@ -311,6 +312,11 @@ def _slug(skill_id: str) -> str:
     return s
 
 
+def _skill_name(title: str, fallback: str) -> str:
+    """Use the business title in frontmatter while keeping a portable folder slug."""
+    return str(title or "").strip() or fallback
+
+
 def _agents_openai_yaml(slug: str, display_name: str, short_description: str) -> str:
     """Render the standard UI metadata without adding product-specific guesses."""
     short = short_description.strip()
@@ -328,8 +334,8 @@ def _agents_openai_yaml(slug: str, display_name: str, short_description: str) ->
 
 def _validate_generated_skill(folder: Path, expected_name: str) -> None:
     """Fail export before publication when the generated package is not portable."""
-    if not re.fullmatch(r"[a-z0-9-]{1,64}", expected_name):
-        raise ValueError(f"Skill name 不符合 lowercase-hyphen 规范: {expected_name}")
+    if not expected_name.strip() or "\n" in expected_name or "\r" in expected_name:
+        raise ValueError("Skill name 必须是非空单行标题")
     skill_path = folder / "SKILL.md"
     text = skill_path.read_text(encoding="utf-8")
     parts = text.split("---", 2)
@@ -343,7 +349,7 @@ def _validate_generated_skill(folder: Path, expected_name: str) -> None:
     except json.JSONDecodeError:
         actual_name = raw_name
     if actual_name != expected_name:
-        raise ValueError(f"Skill name 与目录不一致: {actual_name!r} != {expected_name!r}")
+        raise ValueError(f"Skill name 与业务标题不一致: {actual_name!r} != {expected_name!r}")
     if len(text.splitlines()) > 500:
         raise ValueError("SKILL.md 超过 500 行，违反渐进式披露约束")
     if not (folder / "agents" / "openai.yaml").is_file():
@@ -402,8 +408,19 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
         name = str(raw.get("name") or raw.get("kind") or raw.get("capability_id") or "").strip()
         if not name:
             continue
-        schema = raw.get("parameters") or raw.get("input_schema") or {"type": "object", "properties": {}, "required": []}
+        schema = copy.deepcopy(
+            raw.get("parameters") or raw.get("input_schema")
+            or {"type": "object", "properties": {}, "required": []}
+        )
         props = dict((schema or {}).get("properties") or {})
+        field_labels: dict[str, str] = {}
+        for field in [*(raw.get("inputs") or []), *(raw.get("fields") or [])]:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or field.get("path") or "").split(".")[-1]
+            label = str(field.get("display_name") or field.get("label") or "").strip()
+            if key and label:
+                field_labels[key] = label
         kind = str(raw.get("kind") or name)
         contracts[name] = {
             "name": name,
@@ -425,6 +442,7 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
             "validation_requirements": dict(raw.get("validation_requirements") or {}),
             "call_protocol": dict(raw.get("call_protocol") or {}),
             "caller_responsibilities": list(raw.get("caller_responsibilities") or []),
+            "field_labels": field_labels,
         }
     if contracts:
         return contracts
@@ -604,31 +622,43 @@ def _capability_contract_section(m: SkillManifest) -> str:
 
 
 def _multi_capability_sop(m: SkillManifest) -> str:
-    lines = ["## 操作步骤(SOP)", "", "1. 根据用户目标选择明确的 capability；多个能力不会静默默认到写操作。"]
-    step_no = 2
-    for name, contract in _capability_contracts(m).items():
-        required = "、".join(f"`{field}`" for field in (contract.get("required") or [])) or "无"
-        confirmation = "；整理内容后单独取得最终确认" if contract.get("requires_confirmation") else ""
-        lines.append(
-            f"{step_no}. `{name}`({contract.get('title') or name}):补齐该能力必填输入 {required}{confirmation}，"
-            f"再以 `--capability {name}` 调用。"
-        )
-        step_no += 1
-    lines.append(f"{step_no}. 只读能力返回的数据由调用方用于展示、确认或组织下一次能力调用；Skill 不擅自执行后续写能力。")
-    step_no += 1
-    lines.append(f"{step_no}. 写能力只有在明确 `confirm=true` 后执行；超时或结果不明时不得自动重试。")
-    step_no += 1
+    contracts = _capability_contracts(m)
+    lines = [
+        "## 操作步骤(SOP)",
+        "",
+        "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。",
+        "2. 读取所选 capability 的完整 `input_schema`；对动态选择项先运行 "
+        "`bash scripts/submit.sh --capability <能力名> --list-options <字段名>` 获取实时候选。",
+        "3. **一次性收集所选能力的全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
+        "把所有字段放在同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
+        "不得逐字段、逐分区或逐表单多轮追问。",
+        "   每个问题必须使用下表给出的参数名作为 `id`、业务标签作为 `question`，并设置对应的 "
+        "`inputType`、`required`、非空推荐 `default` 及 `options`/`dataSource`。录制默认值只作推荐，"
+        "除非契约标记 `x-dano-apply-default: true`，否则必须等待用户回答。",
+    ]
+    for name, contract in contracts.items():
+        lines.extend(_question_collection_block(name, contract))
+    lines += [
+        "4. `ask_user_question` 返回 `status=answered` 后，按 `answer` 对象的 `id` "
+        "映射回所选 capability 参数；日期按 `dateFormat` 转换，数值转 JSON 数字，"
+        "数组/复合字段按 input_schema 组装。返回 `cancelled` 时立即停止。",
+        "5. 校验必填字段、类型和候选值。写能力需要把完整参数摘要再用一次独立的 "
+        "`ask_user_question({question, confirm: true})` 确认；只有 `answer=true` 才能继续。",
+        "6. 使用 `bash scripts/submit.sh --capability <能力名> --json '<能力输入 JSON>'` 调用；"
+        "写能力同时带 `--confirm`。一次调用由 Dano 完成内部接口编排。",
+        "7. 按末行 JSON 的 `status` 处理结果。列表结果必须先运行 "
+        "`python scripts/format_list.py --json '<output JSON>'`，再以 Markdown 表格呈现；"
+        "不要重复输出原始 JSON。",
+    ]
     has_batch = any(
         contract.get("kind") in {"submit_batch", "validate_batch"}
-        for contract in _capability_contracts(m).values()
+        for contract in contracts.values()
     )
     if has_batch:
         lines.append(
-            f"{step_no}. 批量输入按 `entries[]` 逐项校验；任一条失败都要保留原索引和原因，"
+            "8. 批量输入按 `entries[]` 逐项校验；任一条失败都要保留原索引和原因，"
             "不得把部分成功折叠成全部成功。"
         )
-        step_no += 1
-    lines.append(f"{step_no}. 按末行 JSON 的 `status` 处理结果，不能把 HTTP 200 单独当成业务成功。")
     return "\n".join(lines)
 
 
@@ -720,6 +750,102 @@ def _label(props: dict, k: str) -> str:
     return p.get("label") or p.get("description") or k
 
 
+def _question_control(schema: dict) -> str:
+    """Map the published field contract to an ask_user_question control."""
+    schema = schema or {}
+    business_type = str(schema.get("x-dano-business-type") or schema.get("type") or "").lower()
+    item = schema.get("items") if isinstance(schema.get("items"), dict) else {}
+    selectable = bool(
+        schema.get("format") == "name-ref"
+        or item.get("format") == "name-ref"
+        or schema.get("enum")
+        or schema.get("x-options")
+        or schema.get("x-options-snapshot")
+        or schema.get("x-options-source")
+    )
+    if selectable:
+        return "treeSelect" if schema.get("x-dano-tree") or schema.get("childrenField") else "select"
+    if business_type in {"textarea", "rich_text"}:
+        return "textarea"
+    if schema.get("format") in {"date", "date-time"} or business_type in {"date", "datetime"}:
+        return "date"
+    if business_type == "boolean":
+        return "radio"
+    return "text"
+
+
+def _question_option_source(schema: dict) -> str:
+    schema = schema or {}
+    source = schema.get("x-options-source-meta") if isinstance(schema.get("x-options-source-meta"), dict) else {}
+    endpoint = str(
+        source.get("endpoint") or source.get("source_url") or source.get("url") or ""
+    ).strip()
+    if schema.get("x-options-source") and endpoint:
+        data_source = {"type": "api", "endpoint": endpoint}
+        method = str(source.get("method") or source.get("source_method") or "GET").upper()
+        if method in {"GET", "POST"}:
+            data_source["method"] = method
+        for source_key, target_key in (
+            ("result_path", "resultPath"), ("value_key", "idField"),
+            ("label_key", "labelField"), ("children_key", "childrenField"),
+        ):
+            if source.get(source_key):
+                data_source[target_key] = source[source_key]
+        return f"`dataSource: {json.dumps(data_source, ensure_ascii=False)}`"
+    options = _option_labels(schema)
+    if options:
+        return f"`options: {json.dumps(options, ensure_ascii=False)}`"
+    if schema.get("x-options-source"):
+        return "先运行 `--list-options <字段名>`，再把返回候选放入 `options`"
+    return "无；自由输入"
+
+
+def _question_rows(schema: dict, *, prefix: str = "") -> list[tuple[str, dict, bool]]:
+    rows: list[tuple[str, dict, bool]] = []
+    required = set((schema or {}).get("required") or [])
+    for field, prop in ((schema or {}).get("properties") or {}).items():
+        if not isinstance(prop, dict):
+            continue
+        path = f"{prefix}.{field}" if prefix else str(field)
+        item = prop.get("items") if isinstance(prop.get("items"), dict) else {}
+        if prop.get("type") == "array" and isinstance(item.get("properties"), dict):
+            rows.extend(_question_rows(item, prefix=f"{path}[]"))
+        else:
+            rows.append((path, prop, field in required))
+    return rows
+
+
+def _question_collection_block(name: str, contract: dict) -> list[str]:
+    """Render the exact parameter-to-question mapping for one capability."""
+    schema = contract.get("parameters") or {}
+    rows = _question_rows(schema)
+    lines = [f"   `{name}`（{contract.get('title') or name}）字段配置："]
+    if not rows:
+        lines.append("   - 无需收集业务字段。")
+        return lines
+    lines += [
+        "",
+        "   | 参数名 / `id` | label / `question` | 控件 `inputType` | 必填 | 推荐默认值 | 候选配置 |",
+        "   |---|---|---|---|---|---|",
+    ]
+    for field, prop, required in rows:
+        field_key = field.removesuffix("[]").split(".")[-1]
+        label = str(
+            (contract.get("field_labels") or {}).get(field_key)
+            or prop.get("label") or prop.get("description") or field
+        ).replace("|", "\\|")
+        control = _question_control(prop)
+        date_format = (
+            f" / `{prop.get('dateFormat') or ('yyyy-MM-dd HH:mm' if prop.get('format') == 'date-time' else 'yyyy-MM-dd')}`"
+            if control == "date" else ""
+        )
+        lines.append(
+            f"   | `{field}` | {label} | `{control}`{date_format} | {'是' if required else '否'} | "
+            f"{_schema_default_text(prop)} | {_question_option_source(prop)} |"
+        )
+    return lines
+
+
 def _approval_section(meta: dict) -> str:
     """从 business_meta(x-flow)渲染审批链 / 金额阈值;没有就返回空(不臆造)。"""
     if not isinstance(meta, dict):
@@ -754,90 +880,61 @@ def _approval_section(meta: dict) -> str:
 
 
 def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
-    """操作步骤(SOP):**纯函数渲染,数据全取自 manifest**(parameters / flow / business_meta),
-    **零业务/框架字面量**——步数取 `flow.step_count`、计算取 `flow.computes`、前置取 `flow.preconditions`、
-    审批取 `business_meta`。任意业务/任意框架自然适配;源为空则该段省略,绝不臆造。
-    """
-    keys, required, props = _fields(m)
-    numset = set(_numeric_fields(props))
+    """Render one executable, schema-grounded SOP for a single capability."""
     f = m.flow or {}
     n = int(f.get("step_count", 1) or 1)
     write = m.requires_confirmation
-    bm = m.business_meta or {}
-    has_appr = bool(bm.get("approvalChain") or bm.get("approval_chain") or bm.get("thresholds"))
-    L: list[str] = ["## 操作步骤(SOP)", "",
-                    "按序执行;每步依据都来自本 Skill 的契约,不要自行加戏。", ""]
-
-    # 阶段1 · 识别与前置自检
-    L += ["### 阶段1 · 识别与前置自检",
-          f"- 确认这是「{m.title}」({m.subsystem}),不是查询/咨询/代他人审批 → 否则停(见「不该直接使用」)。"]
+    contracts = _capability_contracts(m)
+    name, contract = next(iter(contracts.items()))
+    L: list[str] = [
+        "## 操作步骤(SOP)",
+        "",
+        f"1. 确认用户要执行 `{name}`（{contract.get('title') or m.title or name}），"
+        "而不是未发布的查询、撤回或审批动作。",
+        "2. 读取该能力完整 `input_schema`；动态选择项先运行 "
+        f"`bash scripts/submit.sh --capability {name} --list-options <字段名>` 获取实时候选，"
+        "不得猜测选项名称或内部 ID。",
+        "3. **一次性收集全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
+        "把所有字段放进同一个 `questions[]`；多个表单也必须合并，不得在普通文本中提问，"
+        "不得逐字段、逐分区或逐表单多轮追问。每项都必须设置字段名 `id`、业务 `label/question`、"
+        "控件 `inputType`、`required`、非空推荐 `default`，以及适用的 `options`、"
+        "`dataSource`、`multiple`、`dateFormat`。",
+    ]
+    L.extend(_question_collection_block(name, contract))
+    L += [
+        "4. `ask_user_question` 返回 `status=answered` 后，按 `answer` 对象的 `id` "
+        "映射为能力参数；日期按 `dateFormat` 转换，数值转 JSON 数字，数组/复合字段按 "
+        "`input_schema` 组装并再次校验。返回 `cancelled` 时立即停止。",
+    ]
+    if write:
+        L.append(
+            "5. 逐项汇总用户回答，再单独调用一次 "
+            "`ask_user_question({question: <完整提交摘要>, confirm: true})`；"
+            "只有返回 `status=answered` 且 `answer=true` 才允许执行。"
+        )
+    else:
+        L.append("5. 这是只读能力，不需要最终 `confirm: true`；参数齐全后直接执行。")
+    L += [
+        f"6. 运行 `bash scripts/submit.sh {flags}{cflag}`，或在 Windows 运行对应 "
+        "`scripts/submit.ps1`。一次调用由 Dano 完成内部接口编排。",
+    ]
     pre = f.get("preconditions") or []
     if pre:
-        L.append("- 前置自检(Dano 会再校验一遍,你先自检免得白跑):")
+        L.append("   执行前必须满足：")
         for p in pre:
             msg = (p.get("message") or "").strip() or p.get("check")
-            L.append(f"  · {msg}(`{p.get('check')}`)")
-        L.append("  不满足 → 不要提交,向用户说明缺口。")
-
-    # 阶段2 · 信息收集
-    L += ["", "### 阶段2 · 信息收集(逐字段,缺则追问,不臆造)"]
-    if keys:
-        for k in keys:
-            tag = "必填" if k in required else "可选"
-            L.append(f"- `{k}`:{_label(props, k)}({_ptype(k, props, numset)}·{tag})")
-    else:
-        L.append("- 本动作无业务参数。")
-    for c in (f.get("computes") or []):
-        L.append(f"- `{c['out']}` 由系统按 `{c['expr']}` 计算,通常不必用户提供;用户给了则需与计算值一致。")
-    sel = _select_fields(props)
-    if sel:
-        has_opts = any((props.get(k) or {}).get("x-options") for k in sel)
-        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传**名字/选项文字**(勿传 ID/编号)。"
-                 "**选这类字段前,先运行 `bash scripts/submit.sh --list-options <字段名>` 实时拉它当前可选项**"
-                 "(直接调来源接口,最准),从返回的 `options` 里选准确名字再提交"
-                 + ("(离线快照见 `references/OPTIONS.md`)" if has_opts else "") + "。")
-    num = [k for k in keys if k in numset]
-    if num:
-        L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})传 JSON **数字**"
-                 "(脚本会自动转;字符串会让 Dano 的数值条件判断失效)。")
-
-    # 阶段3 · 提交前预演(写操作)
-    if write:
-        L += ["", "### 阶段3 · 提交前预演(取得用户同意)",
-              "- 向用户**逐项复述**将提交的字段值,取得明确同意后才提交:"]
-        if keys:
-            L.append("  ```text")
-            L += [f"  {_label(props, k)}:<{k}>" for k in keys]
-            L.append("  ```")
-        if has_appr:
-            L.append("- 并告知审批走向(见上方「审批路径」),让用户知道这单大概要谁批、会不会触发更高审批。")
-        L.append("- 仅当用户明确说「提交 / 办理 / 发起 / 直接办」才进入下一步;只说「看看怎么填」则**只出草稿,不调用**。")
-
-    # 阶段4 · 受控提交。抓请求型多接口(有 step_paths)→ **显式列出编排的各步接口**(你一次调用,Dano 服务端按序调)
-    L += ["", "### 阶段4 · 受控提交",
-          f"- 运行:`bash scripts/submit.sh {flags}{cflag}`(或 `pwsh scripts/submit.ps1 …`);自检 `--diagnose`。"]
+            L.append(f"   - {msg}（`{p.get('check')}`）")
     sp = f.get("step_paths") or []
-    head = (f"{n} 步受控编排" + ("" if sp else "(各步对调用方隐藏)")) if n > 1 else "一步受控调用"
-    detail = [head]
-    if f.get("judged_by_code"):
-        detail.append("成败以业务返回码判定(不认 HTTP 字面成功)")
-    if f.get("verify"):
-        detail.append("执行后回查确认真生效(堵空操作)")
-    L.append(f"- Dano 侧:{';'.join(detail)}。你不必自己做,但要理解以便解读结果。")
-    if n > 1 and sp:        # 多接口业务:你**一次调用**即可,Dano 在服务端**按序调用下面这些接口**
-        L.append(f"- 这 {n} 个接口由 Dano 服务端**按序自动调用**(步间 taskId/实例号/草稿号等自动串联),"
-                 "你**一次调用即可,不必、也不应**自己逐个调:")
+    if n > 1 and sp:
+        L.append(f"   Dano 将按序执行以下 {n} 个接口，调用方不得拆开执行：")
         for i, s in enumerate(sp, 1):
-            L.append(f"  {i}. `{s['method']} {s['path']}`")
-
-    # 阶段5 · 结果处置
-    L += ["", "### 阶段5 · 结果处置(读末行 JSON 的 status)",
-          "- `succeeded` → 告知成功 + `output` 里的业务标识;提示可去目标系统查后续进度。",
-          "- `need_confirm` → 漏带 `--confirm`,向用户确认后重跑。",
-          "- `need_select` → 出现多候选,把 `candidates` 给用户选,用 `--json` 带选中项的 `bind` 重跑。",
-          "- `failed` → 按 `reason` 分流:凭证/401=登录失效(别重试);回查未过=疑似空操作(**勿报成功**);缺字段=补齐。"]
-    if write:
-        L.append("- 超时 / 结果不明 → **绝不自动重跑**(可能已生效),让用户或运维核对实际状态后再决定。")
+            L.append(f"   {i}. `{s['method']} {s['path']}`")
+    L += [
+        "7. 读取脚本末行 JSON：`succeeded` 才报告成功；`need_select` 补充候选；"
+        "`need_confirm` 重新确认；`failed` 按 `reason` 处理。列表结果必须运行 "
+        "`python scripts/format_list.py --json '<output JSON>'`，最终只用 Markdown 表格呈现，"
+        "不要重复粘贴原始 JSON。写操作超时或结果不明时不得自动重试。",
+    ]
     return "\n".join(L)
 
 
@@ -910,25 +1007,22 @@ def _quality_section(m: SkillManifest) -> str:
 
 
 def _interaction_section(m: SkillManifest) -> str:
-    """Keep generated Skills aligned with doc/dano-tool-call-contract.md."""
+    """Render only the non-negotiable ask_user_question rules used by the SOP."""
     contracts = _capability_contracts(m)
     keys, required, props = _fields(m)
     reqs = [k for k in keys if k in required]
     write = m.requires_confirmation
     lines = [
-        "## 调用方交互约束",
+        "### SOP 第3—5步的表单工具硬约束",
         "",
-        "- 用户要求填写表单、办理业务或需要补充任何字段时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
-        "- 每次回复最多原生调用一次 `ask_user_question`;多个相关缺失字段必须合并到这一次调用的 `questions` 数组里,不要逐字段拆成多轮打扰用户。",
-        "- 同一用户请求包含多个表单、多个表单分区或连续步骤时,必须先一次性汇总本轮所需的全部用户字段,再通过一次 `ask_user_question` 的一个 `questions[]` 统一展示和提交;不得按表单、分区、步骤或字段逐个提问。",
-        "- 只收集一个非确认字段时使用顶层 `question` 及该字段自己的 `default`/`options`/`inputType`/`dateFormat`/`required`/`dataSource`/`multiple`;收集多个字段时只使用 `questions[]`。",
-        "- `questions[]` 的每一项都必须把自己的 `id`、`question`、`default` 以及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple` 放在该项内部;使用 `questions` 时不要混入顶层字段配置或顶层 `confirm`。",
-        "- 每个非确认问题都必须设置结合当前上下文的非空 `default`:优先使用用户已说出的值,其次使用契约中有证据的默认值或录制样例;录制样例必须保留为推荐值供用户直接确认或修改,禁止空字符串、`<字段>` 等占位值,也不得凭字段名臆造业务值。",
-        "- 推荐默认值只用于 `ask_user_question` 展示,不等于用户已回答。只有 `x-dano-apply-default: true` 的安全默认值才允许脚本在缺参时自动应用,其他录制推荐值必须经过用户回答后才能进入调用参数。",
-        "- 只有业务上确实必填的字段才设置 `required: true`;可选字段使用 `required: false` 或省略。工具返回 `status=answered` 后,单题取 `answer`,多题按 questions 的 `id` 从 answer 对象合并到能力参数。",
-        "- 日期字段使用 `inputType: \"date\"` 并提供 `dateFormat`(如 `yyyy-MM-dd` 或 `yyyy-MM-dd HH:mm`);下游格式不同由调用方在提交前转换。",
-        "- 选择型字段只使用参数契约、完整 DOM/JS 证据或真实来源接口提供的候选。API 选项使用 `inputType: \"select\"`/`treeSelect` 与有真实 endpoint 的 `dataSource`;否则先按参数说明或 `--list-options <字段名>` 获取已证实候选,不得猜测枚举或来源接口。",
-        "- 如果用户取消 `ask_user_question`,立即停止当前流程;除非用户之后主动重新发起,不要自动追问或重试。工具返回校验错误时,应修正参数后静默重试原生工具调用,不要在普通文本中模拟纠错提问。",
+        "- 填表或补字段时必须原生调用 `ask_user_question`；每次回复最多一次，多个字段放入同一 `questions` 数组，不要逐字段拆成多轮。",
+        "- 多个表单、分区或连续步骤先一次性汇总；不得按表单、分区、步骤或字段分别提问。只收集一个非确认字段时才使用顶层 `question`。",
+        "- `questions[]` 每项内放自己的 `id`、`question`、`default` 及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple`。",
+        "- `default` 必须结合上下文且非空：优先用户已提供值，其次契约默认值或录制样例；录制样例必须保留为推荐值，禁止空字符串或 `<字段>` 占位。",
+        "- 推荐默认值只用于 `ask_user_question` 展示；仅 `x-dano-apply-default: true` 可静默应用，其余必须等用户回答。",
+        "- 只有业务上确实必填的字段设置 `required: true`。日期使用 `inputType: \"date\"` 和 `dateFormat`；动态选项使用真实 `dataSource` 或先 `--list-options`。",
+        "- 返回 `status=answered` 后，单题取 `answer`，多题按 questions 的 `id` 合并参数；用户取消时立即停止。",
+        "- 工具返回校验错误时修正参数后静默重试原生工具调用，不在普通文本中模拟提问。",
     ]
     if len(contracts) > 1:
         lines.append("- 先根据用户目标选择一个明确 capability；不同能力的必填字段不能混用。")
@@ -946,22 +1040,17 @@ def _interaction_section(m: SkillManifest) -> str:
     if len(contracts) > 1:
         write_names = [name for name, contract in contracts.items() if contract.get("requires_confirmation")]
         lines += [
-            f"- 写能力({', '.join('`' + name + '`' for name in write_names) or '无'})执行前，"
-            "必须使用**单独一次** `ask_user_question`，且只带 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
-            "- 只有最终确认工具返回 `status=answered` 且 `answer=true` 时才允许带 `--confirm` 调用；返回 `cancelled`、`false` 或其他值都必须停止。",
-            "- 只读能力无需最终确认；查询完成后由调用方决定是否询问用户并调用写能力，Skill 不自动越过确认边界。",
-            "- 用户没有明确确认、只是询问/预览/修改草稿时，不得调用写能力。",
+            f"- 写能力({', '.join('`' + name + '`' for name in write_names) or '无'})执行前，单独一次调用只带 "
+            "`question` 与 `confirm: true`；仅 `status=answered` 且 `answer=true` 时带 `--confirm` 执行。",
         ]
     elif write:
         recap = "、".join(f"`{k}`" for k in keys) if keys else "本次动作"
         lines += [
-            "- 整理好申请/提交内容后,必须再用**单独一次** `ask_user_question` 做最终确认;这次调用只能包含 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
-            f"- 最终确认的 `question` 要逐项复述将提交的内容({recap})以及风险提示;只有用户确认后才允许带 `--confirm` 调用脚本。",
-            "- 只有最终确认工具返回 `status=answered` 且 `answer=true` 时才算确认；返回 `cancelled`、`false` 或其他值都必须停止。",
-            "- 用户没有明确确认、只是询问/预览/修改草稿时,不得调用写操作。",
+            f"- 最终确认用单独一次 `ask_user_question`，只带 `question` 与 `confirm: true`，"
+            f"逐项复述 {recap}；仅 `status=answered` 且 `answer=true` 时带 `--confirm` 执行。",
         ]
     else:
-        lines.append("- 只读查询不需要最终 `confirm: true`,但仍要用 `ask_user_question` 补齐必要查询条件。")
+        lines.append("- 只读能力无需最终 `confirm: true`，但仍用 `ask_user_question` 补齐必要查询条件。")
     return "\n".join(lines)
 
 
@@ -980,6 +1069,11 @@ _EXECUTION_DIR_MD = """## 执行位置（必须）
 - 调用 Shell 时，必须把 Shell 工作目录设为本 `SKILL.md` 所在目录，再执行文档中的 `scripts/...` 相对路径。
 - 如果命令工具不支持工作目录，先从当前 `SKILL.md` 的绝对路径解析脚本绝对路径后再执行。
 - 找不到包装脚本时停止并报告导出包不完整；禁止绕过包装脚本直接拼 HTTP 请求或把 Skill 名当作业务字段。"""
+
+_LIST_OUTPUT_MD = """## 列表输出要求
+- 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --json '<output JSON>'` 格式化。
+- 最终回复使用脚本生成的 Markdown 表格；无数据时明确显示“无数据”，不要重复粘贴原始 JSON。
+- 非列表对象仍按能力的 `output_schema` 解读，不要为了套表格丢失业务字段。"""
 
 
 # ─────────────────────────── SKILL.md ───────────────────────────
@@ -1034,7 +1128,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     approval_md = (approval + "\n\n") if approval else ""
     parameter_md = _capability_contract_section(m) if multi_capability else f"## 参数\n{table}"
     sop = _multi_capability_sop(m) if multi_capability else _sop_section(m, flags, cflag)
-    interaction = _interaction_section(m)           # 上层 Agent 调用约束:追问/确认必须走原生工具
+    interaction = _interaction_section(m)
     quality = _multi_capability_quality_section(m) if multi_capability else _quality_section(m)
     relationships = _capability_relationship_section(m)
     default_capability = _export_default_capability(m)
@@ -1087,7 +1181,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
         if has_batch_capability else ""
     )
     return f"""---
-name: {json.dumps(slug, ensure_ascii=False)}
+name: {json.dumps(_skill_name(m.title, slug), ensure_ascii=False)}
 description: {json.dumps(desc, ensure_ascii=False)}
 ---
 
@@ -1102,17 +1196,19 @@ description: {json.dumps(desc, ensure_ascii=False)}
 
 {_EXECUTION_DIR_MD}
 
+{approval_md}{sop}
+
+{interaction}
+
 {parameter_md}
 
 {relationships}
 
 > 流程句柄/模板、调用者身份(取自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
 
-{interaction}
-
-{approval_md}{sop}
-
 {quality}
+
+{_LIST_OUTPUT_MD}
 
 ## 输出契约(脚本末行 JSON)
 | status | 含义 | 你应做的 |
@@ -1638,6 +1734,80 @@ python "$dir/dano_call.py" @args
 exit $LASTEXITCODE
 """
 
+_FORMAT_LIST_PY = r'''#!/usr/bin/env python3
+"""Convert a Dano result or ordinary JSON list to a Markdown table."""
+import argparse
+import json
+import sys
+
+
+def _list_rows(value):
+    if isinstance(value, dict) and "output" in value:
+        return _list_rows(value["output"])
+    if isinstance(value, dict):
+        for key in ("records", "rows", "items", "list"):
+            if isinstance(value.get(key), list):
+                return value[key]
+        if isinstance(value.get("data"), (dict, list)):
+            nested = _list_rows(value["data"])
+            if nested is not None:
+                return nested
+        return [value]
+    return value if isinstance(value, list) else [value]
+
+
+def _cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", "<br>")
+
+
+def format_table(value):
+    rows = _list_rows(value)
+    if not rows:
+        return "无数据"
+    if not any(isinstance(row, dict) for row in rows):
+        rows = [{"值": row} for row in rows]
+    else:
+        rows = [row if isinstance(row, dict) else {"值": row} for row in rows]
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    if not columns:
+        return "无数据"
+    header = "| " + " | ".join(_cell(column) for column in columns) + " |"
+    divider = "| " + " | ".join("---" for _ in columns) + " |"
+    body = [
+        "| " + " | ".join(_cell(row.get(column)) for column in columns) + " |"
+        for row in rows
+    ]
+    return "\n".join([header, divider, *body])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="把 JSON 列表格式化为 Markdown 表格")
+    parser.add_argument("--json", dest="raw")
+    parser.add_argument("--file")
+    args = parser.parse_args()
+    if args.raw is not None:
+        raw = args.raw
+    elif args.file:
+        with open(args.file, encoding="utf-8") as handle:
+            raw = handle.read()
+    else:
+        raw = sys.stdin.read()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        print("JSON 解析失败: %s" % error, file=sys.stderr)
+        raise SystemExit(2)
+    print(format_table(value))
+
+
+if __name__ == "__main__":
+    main()
+'''
+
 
 def _chmod_x(path: Path) -> None:
     try:
@@ -1678,7 +1848,10 @@ def _write_skill(out_dir: Path, m: SkillManifest,
         sh.write_text(_SUBMIT_SH, encoding="utf-8", newline="\n")
         _chmod_x(sh)
         (folder / "scripts" / "submit.ps1").write_text(_SUBMIT_PS1, encoding="utf-8")
-        return _publish_folder(folder, target, slug)
+        formatter = folder / "scripts" / "format_list.py"
+        formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
+        _chmod_x(formatter)
+        return _publish_folder(folder, target, slug, _skill_name(m.title, slug))
     except Exception:
         _abort_stage(folder)
         raise
@@ -1747,13 +1920,15 @@ def _business_skill_md(subsystem: str, business: str, manifests: list[SkillManif
     scripts = "\n".join(script_lines)
     fields = "\n\n".join(
         f"### {m.title or m.action}\n"
-        f"{_multi_capability_quality_section(m) if len(_capability_contracts(m)) > 1 else _quality_section(m)}"
+        f"{_multi_capability_sop(m) if len(_capability_contracts(m)) > 1 else _sop_section(m, _flags(m), ' --confirm' if m.requires_confirmation else '')}"
         f"\n\n{_interaction_section(m)}"
+        f"\n\n{_capability_contract_section(m)}"
+        f"\n\n{_multi_capability_quality_section(m) if len(_capability_contracts(m)) > 1 else _quality_section(m)}"
         for m in manifests
     )
     description = f"{label}: Dano 导出的业务剧本,包含 {len(manifests)} 个已上架操作。用于办理或查询该业务时按脚本调用 Dano。"
     return f"""---
-name: {json.dumps(slug, ensure_ascii=False)}
+name: {json.dumps(_skill_name(label, slug), ensure_ascii=False)}
 description: {json.dumps(description, ensure_ascii=False)}
 ---
 
@@ -1780,6 +1955,8 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 ## 操作细则
 {fields}
+
+{_LIST_OUTPUT_MD}
 """
 
 
@@ -1833,7 +2010,10 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
             sh.write_text(_op_sh(m.action), encoding="utf-8", newline="\n")
             _chmod_x(sh)
             (folder / "scripts" / f"{m.action}.ps1").write_text(_op_ps1(m.action), encoding="utf-8")
-        return _publish_folder(folder, target, slug)
+        formatter = folder / "scripts" / "format_list.py"
+        formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
+        _chmod_x(formatter)
+        return _publish_folder(folder, target, slug, _skill_name(label, slug))
     except Exception:
         _abort_stage(folder)
         raise
@@ -1847,7 +2027,7 @@ def _index_md(entries: list[dict], slug: str) -> str:
     names = "、".join(e["label"] for e in entries) or "(暂无)"
     description = f"OA 业务总台:统一入口,把用户意图路由到具体业务剧本({names})。当用户提到办理/查询任一 OA 业务时,先看本目录选对剧本。"
     return f"""---
-name: {json.dumps(slug, ensure_ascii=False)}
+name: "Dano OA 业务总台"
 description: {json.dumps(description, ensure_ascii=False)}
 ---
 
@@ -1881,7 +2061,7 @@ def _write_index(out_dir: Path, entries: list[dict],
             ),
             encoding="utf-8",
         )
-        _publish_folder(folder, target, slug)
+        _publish_folder(folder, target, slug, "Dano OA 业务总台")
         return slug
     except Exception:
         _abort_stage(folder)

@@ -130,7 +130,8 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     assert len(contract["capabilities"]) == 2
     assert contract["capability_relations"][0]["automatic"] is False
     assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
-    assert f'name: "{folder.name}"' in skill_md
+    assert f'name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in skill_md
+    assert (folder / "scripts" / "format_list.py").is_file()
     assert "metadata:" not in skill_md.split("---", 2)[1]
     assert f'display_name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in openai_yaml
     assert f"${folder.name}" in openai_yaml
@@ -145,6 +146,7 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
     assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]
     assert (bundle / "agents" / "openai.yaml").is_file()
+    assert (bundle / "scripts" / "format_list.py").is_file()
     assert not (bundle / "references" / "README.md").exists()
     assert not (bundle / "references" / "QUICKREF.md").exists()
 

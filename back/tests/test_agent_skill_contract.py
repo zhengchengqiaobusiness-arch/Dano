@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 from dano.catalog.manifest import to_manifest
-from dano.export.agent_skills import _export_contract_errors, _options_md, _skill_md
+from dano.export.agent_skills import _export_contract_errors, _options_md, _skill_md, _write_skill
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel, Subsystem
 
@@ -172,3 +176,84 @@ def test_options_reference_only_claims_live_lookup_with_grounded_source():
     assert dynamic_markdown is not None
     assert "实时接口" in dynamic_markdown
     assert "--list-options 申请人" in dynamic_markdown
+
+
+def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.action-c5b324fc580c4d5fb2847a5d5fb6973c",
+        subsystem=Subsystem.OA,
+        action="action-c5b324fc580c4d5fb2847a5d5fb6973c",
+        title="酒店申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_hotel_apply",
+            "kind": "submit",
+            "title": "提交酒店申请",
+            "requires_human_confirm": True,
+            "inputs": [
+                {"key": "hotelName", "display_name": "酒店名称"},
+                {"key": "city", "display_name": "城市", "source_kind": "api_option",
+                 "source": {"source_url": "/api/cities", "source_method": "GET",
+                            "value_key": "id", "label_key": "name"}},
+                {"key": "remark", "display_name": "申请说明"},
+            ],
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hotelName": {
+                        "type": "string", "description": "酒店名称", "default": "杭州酒店",
+                    },
+                    "city": {
+                        "type": "string", "format": "name-ref", "description": "城市",
+                        "default": "杭州", "x-options-source": True,
+                        "x-options-source-meta": {
+                            "source_url": "/api/cities", "source_method": "GET",
+                            "value_key": "id", "label_key": "name",
+                        },
+                    },
+                    "remark": {
+                        "type": "string", "x-dano-business-type": "textarea",
+                        "description": "申请说明", "default": "出差住宿",
+                    },
+                },
+                "required": ["hotelName", "city", "remark"],
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {
+                            "id": {"type": "string"}, "status": {"type": "string"},
+                        }},
+                    },
+                },
+            },
+        }],
+    ))
+
+    folder = _write_skill(tmp_path, manifest)
+    markdown = (folder / "SKILL.md").read_text(encoding="utf-8")
+
+    assert 'name: "酒店申请"' in markdown
+    assert "3. **一次性收集全部表单项。**" in markdown
+    assert "`submit_hotel_apply`" in markdown
+    assert "| `hotelName` | 酒店名称 | `text`" in markdown
+    assert "| `city` | 城市 | `select`" in markdown
+    assert '"endpoint": "/api/cities"' in markdown
+    assert "| `remark` | 申请说明 | `textarea`" in markdown
+    assert "按 `answer` 对象的 `id` 映射为能力参数" in markdown
+    assert "Markdown 表格呈现" in markdown
+
+    formatter = folder / "scripts" / "format_list.py"
+    result = subprocess.run(
+        [sys.executable, str(formatter), "--json", json.dumps({
+            "output": {"records": [{"id": "H1", "status": "审批中"}]},
+        }, ensure_ascii=False)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert "| id | status |" in result.stdout
+    assert "| H1 | 审批中 |" in result.stdout
