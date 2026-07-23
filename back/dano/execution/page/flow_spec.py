@@ -4752,6 +4752,20 @@ def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _grounded_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
+    screenshot = _screenshot_control_evidence(raw)
+    if screenshot is not None:
+        return screenshot
+    return next((
+        item for item in reversed(raw.get("evidence") or [])
+        if isinstance(item, dict)
+        and str(item.get("source") or item.get("kind") or "").strip().lower()
+        in {"recorder_dom", "page", "page_snapshot", "page_control"}
+        and str(item.get("control_kind") or "").strip().lower()
+        in _SCREENSHOT_CONTROL_KINDS
+    ), None)
+
+
 def _grounded_screenshot_query_path(
     step: FlowStep,
     raw: dict[str, Any],
@@ -4953,7 +4967,7 @@ def _apply_capability_field_to_param(
     if automated and _param_has_full_lock(param):
         return True
 
-    screenshot_control = _screenshot_control_evidence(raw) if automated else None
+    screenshot_control = _grounded_control_evidence(raw) if automated else None
     screenshot_name_axis = _screenshot_control_supports_axis(screenshot_control, "name")
     screenshot_type_axis = _screenshot_control_supports_axis(screenshot_control, "type")
     screenshot_category_axis = _screenshot_control_supports_axis(
@@ -9024,11 +9038,23 @@ def _semantic_plan_to_ops(
             )
         ]
         proposed_name = str(item.get("name") or kind)
-        existing = None if kind in split_kinds else next(
+        spans_existing_boundaries = bool(
+            len([
+                capability for capability in available
+                if set(_capability_node_step_ids(capability)) & set(proposed_steps)
+            ]) > 1
+            and not any(
+                set(proposed_steps).issubset(
+                    set(_capability_node_step_ids(capability))
+                )
+                for capability in available
+            )
+        )
+        existing = None if kind in split_kinds or spans_existing_boundaries else next(
             (capability for capability in available if capability.name == proposed_name),
             None,
         )
-        if existing is None and kind not in split_kinds:
+        if existing is None and kind not in split_kinds and not spans_existing_boundaries:
             existing = max(
                 available,
                 key=lambda capability: len(
@@ -10362,7 +10388,7 @@ def _prune_empty_capabilities(spec: FlowSpec) -> FlowSpec:
 
 
 def _drop_superseded_baseline_capabilities(spec: FlowSpec, baseline_ids: set[str]) -> FlowSpec:
-    """Pi 将通用基线完整拆成多个能力后，移除被覆盖的基线而不合并同类能力。"""
+    """Remove generated baselines fully covered by Pi's semantic boundaries."""
     remove_ids: set[str] = set()
     for baseline in spec.capabilities or []:
         if baseline.capability_id not in baseline_ids:
@@ -10375,12 +10401,13 @@ def _drop_superseded_baseline_capabilities(spec: FlowSpec, baseline_ids: set[str
             if cap.capability_id not in baseline_ids
             and _capability_kind_family(cap.kind) == _capability_kind_family(baseline.kind)
             and set(_capability_node_step_ids(cap))
-            and set(_capability_node_step_ids(cap)).issubset(baseline_steps)
+            and set(_capability_node_step_ids(cap)) & baseline_steps
         ]
         covered = {
             step_id
             for cap in alternatives
             for step_id in _capability_node_step_ids(cap)
+            if step_id in baseline_steps
         }
         if alternatives and covered == baseline_steps:
             remove_ids.add(baseline.capability_id)
@@ -10395,34 +10422,11 @@ def _drop_superseded_baseline_capabilities(spec: FlowSpec, baseline_ids: set[str
 def _planner_patch_edits(
     spec: FlowSpec,
     edits: list[dict[str, Any]],
-    *,
-    initial_membership: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Accept only edits grounded in already materialized FlowSpec facts."""
     existing_steps = {step.step_id for step in spec.steps}
     step_by_id = {step.step_id: step for step in spec.steps}
     cap_by_name = {cap.name: cap for cap in spec.capabilities if cap.name}
-    planned_cap_families = {
-        str((edit.get("capability") or {}).get("name") or ""): _capability_kind_family(
-            str((edit.get("capability") or {}).get("kind") or "")
-        )
-        for edit in (edits or [])
-        if str(edit.get("op") or "") == "upsert_capability"
-        and isinstance(edit.get("capability"), dict)
-    }
-    planned_steps_by_capability: dict[str, set[str]] = {}
-    for edit in edits or []:
-        if str(edit.get("op") or "") != "add_request_to_capability":
-            continue
-        capability_name = str(edit.get("capability_name") or edit.get("capability") or "")
-        step_id = str(edit.get("step_id") or "")
-        if capability_name and step_id:
-            planned_steps_by_capability.setdefault(capability_name, set()).add(step_id)
-    deterministic_boundaries = [
-        (set(_capability_node_step_ids(capability)), _capability_kind_family(capability.kind))
-        for capability in spec.capabilities or []
-        if _capability_node_step_ids(capability)
-    ]
     safe: list[dict[str, Any]] = []
     scope_ops = {
         "add_request_step", "add_candidate_step", "promote_request",
@@ -10463,21 +10467,8 @@ def _planner_patch_edits(
             if not step_id or step_id not in existing_steps:
                 continue
             cap_name = str(edit.get("capability_name") or edit.get("capability") or "")
-            target = cap_by_name.get(cap_name)
-            if initial_membership is None and _capability_step_was_removed(spec, cap_name, step_id):
+            if _capability_step_was_removed(spec, cap_name, step_id):
                 continue
-            if initial_membership is not None:
-                target = cap_by_name.get(cap_name)
-                target_family = _capability_kind_family(target.kind) if target is not None else planned_cap_families.get(cap_name, "")
-                proposed_steps = planned_steps_by_capability.get(cap_name) or {step_id}
-                # A semantic plan may refine/split one deterministic boundary,
-                # but it may never merge steps that the recorder placed in
-                # separate action/API boundaries.
-                if not target_family or not any(
-                    proposed_steps.issubset(boundary_steps) and target_family == boundary_family
-                    for boundary_steps, boundary_family in deterministic_boundaries
-                ):
-                    continue
         if op == "upsert_capability":
             payload = dict(edit.get("capability") or {})
             name = str(edit.get("capability_name") or edit.get("capability") or edit.get("name") or "")
@@ -10658,7 +10649,38 @@ def _semantic_candidate_gate(
         reasons.append("wire_contract_changed")
     before_dry = dry_run_flow_spec(before)
     after_dry = dry_run_flow_spec(candidate)
-    if bool(before_dry.get("ok")) and not bool(after_dry.get("ok")):
+    grounded_required_fields = {
+        param.key
+        for step in candidate.steps
+        for param in step.params
+        if param.required
+        and any(
+            isinstance(evidence, dict)
+            and (
+                evidence.get("required") is True
+                or (
+                    evidence.get("source") == "manual_edit"
+                    and evidence.get("field") == "required"
+                    and evidence.get("value") is True
+                )
+            )
+            for evidence in (param.evidence or [])
+        )
+    }
+    missing_after = set(after_dry.get("missing_params") or [])
+    required_input_only = bool(
+        missing_after
+        and missing_after.issubset(grounded_required_fields)
+        and not after_dry.get("build_errors")
+        and not after_dry.get("self_check")
+        and not after_dry.get("construct_errors")
+        and bool((after_dry.get("fact_check") or {}).get("passed"))
+    )
+    if (
+        bool(before_dry.get("ok"))
+        and not bool(after_dry.get("ok"))
+        and not required_input_only
+    ):
         reasons.append("dry_run_regressed")
     audit = {
         "accepted": not reasons,
@@ -10738,19 +10760,11 @@ async def orchestrate_flow_capabilities(
             spec=current,
             allow_new=True,
         )
-    # Once the zero-capability initializer has established interface
-    # boundaries, the Planner may enrich names/schemas/maps but may not merge
-    # requests back into a single capability during that same first run.
+    # The deterministic baseline guarantees a runnable fallback. Pi may replace
+    # its generated boundaries, but still cannot invent steps or override human
+    # memberships because planner edits are fact-checked below.
     initial_scope_established = bool(initial_generation and current.capabilities)
     baseline_ids = {cap.capability_id for cap in current.capabilities} if initial_generation and not had_existing else set()
-    initial_membership = ({
-        step_id: {
-            _capability_kind_family(cap.kind)
-            for cap in current.capabilities
-            if step_id in set(_capability_node_step_ids(cap))
-        }
-        for step_id in {step.step_id for step in current.steps}
-    } if initial_scope_established else None)
     current = _prune_empty_capabilities(current)
     source = "deterministic_reanalysis" if had_existing else "deterministic"
     reason = ""
@@ -10839,7 +10853,6 @@ async def orchestrate_flow_capabilities(
         field_edits = _planner_patch_edits(
             proposal_baseline,
             _autofix_ops_to_edits(proposal_baseline, field_ops),
-            initial_membership=initial_membership,
         )
         if field_edits:
             candidate = apply_flow_edits(
@@ -10862,7 +10875,6 @@ async def orchestrate_flow_capabilities(
         edits = _planner_patch_edits(
             current,
             _autofix_ops_to_edits(current, combined_ops),
-            initial_membership=initial_membership,
         )
         if edits:
             current = apply_flow_edits(current, [{**edit, "actor": "planner"} for edit in edits])
@@ -10963,8 +10975,8 @@ async def orchestrate_flow_capabilities(
                 _upsert_capability_relation(
                     current, relation.model_dump(exclude_none=True),
                 )
-    semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
     current = _apply_semantic_business_understanding(current, semantic_plan)
+    semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
     semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)

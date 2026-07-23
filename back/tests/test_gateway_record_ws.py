@@ -75,7 +75,12 @@ def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
 def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert gateway._normalize_analysis_screenshots(None) == []
     assert gateway._analysis_screenshot_guidance([]) == ""
-    assert "screenshot-derived" not in gateway._recording_plan_protocol_guidance(has_screenshots=False)
+    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=False)
+    assert "screenshot-derived" not in protocol
+    for axis in ("path", "name", "default_value", "type", "category", "source", "required"):
+        assert axis in protocol
+    assert "every materialized request field" in protocol
+    assert "actively apply" in protocol
 
 
 def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
@@ -97,8 +102,10 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert "原配置保持不变" in branch
     assert "orchestrate_flow_capabilities" in branch
     assert "if not before_operation.capabilities:" in branch
-    assert "needs_pi = bool(before_operation.capabilities or analysis_screenshots)" in branch
-    assert "if needs_pi:" in branch
+    assert "needs_pi =" not in branch
+    baseline_start = branch.index("if not before_operation.capabilities:")
+    pi_start = branch.index("pi_session = await _ensure_recording_pi()")
+    assert baseline_start < pi_start
     assert 'generation_mode="initial"' in branch
     assert "timeout_s=3000" in branch
     identity_check = branch.index("check_fingerprint=False")

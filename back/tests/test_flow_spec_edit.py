@@ -5690,6 +5690,145 @@ def test_initial_planner_can_split_multiple_write_capabilities_without_family_me
     }
 
 
+def test_initial_pi_can_merge_rule_boundaries_into_one_semantic_capability():
+    spec = FlowSpec(
+        flow_id="draft-then-submit",
+        steps=[
+            FlowStep(
+                step_id="create_draft", method="POST",
+                path="/drafts/save",
+                source_meta={"trigger_action_id": "save_action"},
+            ),
+            FlowStep(
+                step_id="start_process", method="POST",
+                path="/workflow/start-process",
+                source_meta={"trigger_action_id": "submit_action"},
+            ),
+        ],
+    )
+    semantic_plan = {
+        "business_understanding": {
+            "business_name": "提交申请",
+            "summary": "先保存申请草稿，再发起审批流程",
+        },
+        "request_roles": [
+            {
+                "step_id": "create_draft", "role": "business_write",
+                "name": "保存申请草稿", "reason": "提交前必须持久化草稿",
+            },
+            {
+                "step_id": "start_process", "role": "business_write",
+                "name": "发起审批流程", "reason": "完成同一提交操作",
+            },
+        ],
+        "field_semantics": [],
+        "capabilities": [{
+            "name": "submit_request",
+            "title": "提交申请",
+            "kind": "submit",
+            "intent": "保存草稿并发起审批",
+            "step_ids": ["create_draft", "start_process"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": semantic_plan, "ops": []},
+        generation_mode="initial",
+    ))
+
+    assert len(out.capabilities) == 1
+    assert out.capabilities[0].name == "submit_request"
+    assert out.capabilities[0].step_ids == ["create_draft", "start_process"]
+    assert out.meta["capability_model"]["source"] == "pi_agent_patch"
+
+
+def test_initial_pi_applies_all_field_semantic_axes_without_overwriting_wire_facts():
+    param = ParamField(
+        path="body.roomCount",
+        key="roomCount",
+        label="roomCount",
+        value=1,
+        default_value=1,
+        type="enum",
+        wire_type="number",
+        category="system_const",
+        source_kind="fixed",
+        required=False,
+        evidence=[{
+            "source": "recorder_dom",
+            "control_kind": "number",
+            "editable": True,
+            "axes": ["path", "name", "default_value", "type", "category", "source", "required"],
+        }],
+    )
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/hotel/submit",
+        body_source='{"roomCount":1}', params=[param],
+    )])
+    semantic_plan = {
+        "business_understanding": {
+            "business_name": "提交酒店申请",
+            "summary": "提交酒店申请表单",
+        },
+        "request_roles": [{
+            "step_id": "submit", "role": "business_write",
+            "name": "提交酒店申请", "reason": "表单提交接口",
+        }],
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "body.roomCount",
+            "public_name": "房间数量",
+            "default_value": 1,
+            "business_type": "number",
+            "category": "user_param",
+            "source_kind": "user_input",
+            "required": True,
+            "confidence": 0.98,
+            "axis_status": {
+                "path": "preserved_fact",
+                "name": "grounded",
+                "default_value": "preserved_fact",
+                "type": "grounded",
+                "category": "grounded",
+                "source": "grounded",
+                "required": "grounded",
+            },
+            "evidence": [{
+                "source": "recorder_dom",
+                "control_kind": "number",
+                "editable": True,
+                "required": True,
+                "axes": ["path", "name", "default_value", "type", "category", "source", "required"],
+            }],
+        }],
+        "capabilities": [{
+            "name": "submit_hotel",
+            "title": "提交酒店申请",
+            "kind": "submit",
+            "intent": "提交酒店申请表单",
+            "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": semantic_plan, "ops": []},
+        generation_mode="initial",
+    ))
+
+    field = out.steps[0].params[0]
+    assert (field.key, field.type, field.category, field.source_kind, field.required) == (
+        "房间数量", "number", "user_param", "user_input", True,
+    )
+    assert field.path == "body.roomCount"
+    assert field.default_value == 1
+
+
 def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top_level():
     shared = FlowStep(
         step_id="query",

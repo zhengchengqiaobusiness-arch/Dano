@@ -156,10 +156,24 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 
 
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
-    evidence_rule = (
-        " For every confidently matched visible control that changes the current contract, field_semantics should contain public_name, business_type, category, "
-        "source_kind, required, "
-        "enum_options when visible, and numeric confidence from 0 to 1, " +
+    contract_rule = (
+        " Pi must actively apply the semantic decisions, not merely audit or describe them. "
+        "Classify every materialized request in request_roles. Build the correct business capability boundaries "
+        "from exact recorded step_ids: repeated calls are not automatically separate capabilities, while independent "
+        "business operations must remain separate. Emit every grounded cross-capability dependency in "
+        "capability_relations with concrete from_capability/from_output and to_capability/to_input endpoints. "
+        "Emit one field_semantics item for every materialized request field, including unchanged fields. Each item "
+        "must cover path,name,default_value,type,category,source,required; contain exact step_id and wire_path, "
+        "public_name, recorded default_value, business_type, category, source_kind, required, confidence, axis_status, "
+        "and evidence whose axes cover all seven axes. Path and default_value are recorded wire facts: preserve their "
+        "exact values and mark them preserved_fact unless stronger recorded API facts prove otherwise. Use Pi to "
+        "actively apply grounded corrections to name, type, category, source, required, capability membership, and "
+        "relations. If evidence is insufficient for one axis, preserve the recorded value and mark that axis "
+        "preserved_fact instead of omitting the field or inventing a value. "
+    )
+    screenshot_rule = (
+        " For every confidently matched visible control, field_semantics should use screenshot evidence with "
+        "enum_options when visible, numeric confidence from 0 to 1, " +
         "and evidence objects shaped as {source:'screenshot',screenshot_name,detail,visible_label,control_kind,"
         "editable,disabled,read_only,multiple,required,options}. control_kind must be one of "
         "text,textarea,rich_text,number,date,"
@@ -187,9 +201,9 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         if has_screenshots else ""
     )
     if has_screenshots:
-        evidence_rule += (
-            " For each changed screenshot field, include public_name, "
-            "business_type, category, source_kind, required, confidence, axis_status, and evidence. "
+        screenshot_rule += (
+            " For each screenshot-matched field, include public_name, business_type, category, source_kind, "
+            "required, confidence, axis_status, and evidence. "
             "axis_status belongs inside every field_semantics item; never emit a top-level field_semantic_axes. "
             "axis_status may mark path,name,default_value,type,category,source,required as "
             "grounded,image_matched,preserved_fact,locked,or unresolved. Every evidence object should declare "
@@ -199,10 +213,11 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
         "capabilities,capability_relations,unresolved_items},ops:[]}. Never submit flow_spec or plan.flow_spec."
-        " After reading state, call submit_recording_plan immediately with no explanatory text. Keep the payload below the model output limit: "
-        "do not repeat unchanged fields, capabilities, or relations; use empty arrays for unchanged sections. Prefer compact "
-        "semicolon key=value field_semantics strings; use object records only when nested enum options or relation endpoints are required."
-        + evidence_rule
+        " After reading state, call submit_recording_plan immediately with no explanatory text. "
+        "The semantic_plan must be complete rather than changes-only; use empty arrays only when that section is truly empty. "
+        "Keep the payload compact, but never omit a materialized request, request field, capability, or grounded relation."
+        + contract_rule
+        + screenshot_rule
     )
 
 
@@ -1798,40 +1813,39 @@ async def record_ws(ws: WebSocket) -> None:
                     _checkpoint_resume()
                     pi_session = None
                     delivered_image_count = 0
-                    needs_pi = bool(before_operation.capabilities or analysis_screenshots)
                     if not before_operation.capabilities:
                         # Always establish the runnable fact baseline first.
-                        # A screenshot is an optional semantic overlay and must
-                        # not decide whether the first capabilities exist.
+                        # Pi then owns the semantic boundary/field intervention,
+                        # with the baseline retained only as a safe fallback.
                         pending_flow_spec = await orchestrate_flow_capabilities(
                             before_operation,
                             submission={"ops": []},
                             generation_mode="initial",
                         )
-                    if needs_pi:
-                        pi_session = await _ensure_recording_pi()
-                        pi_session.bind_flow_spec(pending_flow_spec)
-                        pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
-                        async with _recording_operation_keepalive(
-                            sender,
-                            operation="plan",
-                            operation_id=operation_id,
-                        ):
-                            pi_result = await _responsive_prompt(pi_session.prompt(
-                                "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
-                                "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
-                                "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
-                                f" recording_id={recording_id}"
-                                + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
-                                + _analysis_screenshot_guidance(analysis_screenshots),
-                                timeout_s=3000,
-                            ))
-                        delivered_image_count = _verified_pi_image_count(
-                            pi_result, len(analysis_screenshots),
-                        )
-                        if pi_session.last_submission_kind != "plan":
-                            raise RuntimeError("Pi 未提交 recording plan")
-                        pending_flow_spec = pi_session.current_flow_spec()
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
+                    async with _recording_operation_keepalive(
+                        sender,
+                        operation="plan",
+                        operation_id=operation_id,
+                    ):
+                        pi_result = await _responsive_prompt(pi_session.prompt(
+                            "生成/优化当前录制能力。必须先调用 get_recording_state；Pi 必须直接介入并提交完整修改："
+                            "正确划分所有能力及其真实接口成员，建立有具体输入输出端点的能力关系，"
+                            "并逐字段处理名称、路径、默认值、类型、分类、来源、必填性。"
+                            "保留录制事实和人工修改，不得编造接口、字段、值或关系。最后必须调用 submit_recording_plan。"
+                            f" recording_id={recording_id}"
+                            + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
+                            + _analysis_screenshot_guidance(analysis_screenshots),
+                            timeout_s=3000,
+                        ))
+                    delivered_image_count = _verified_pi_image_count(
+                        pi_result, len(analysis_screenshots),
+                    )
+                    if pi_session.last_submission_kind != "plan":
+                        raise RuntimeError("Pi 未提交 recording plan")
+                    pending_flow_spec = pi_session.current_flow_spec()
                     operation = "plan"
                     operation_report = flow_operation_report(
                         before_operation, pending_flow_spec, operation=operation,

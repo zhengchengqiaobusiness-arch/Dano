@@ -467,6 +467,43 @@ def test_actual_recording_keeps_same_rpc_requests_from_distinct_actions() -> Non
     }
 
 
+def test_actual_recording_keeps_repeated_request_facts_for_pi_boundary_analysis() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    sess = RecordSession()
+    now = int(time.time() * 1000)
+    actions = [
+        ("action_query", "role=button[name=查询]", "GET",
+         "https://example.test/hotel/page?pageNo=1&pageSize=10", None),
+        ("action_create", "role=button[name=申请]", "POST",
+         "https://example.test/hotel/create", '{"hotelName":"酒店 A"}'),
+        ("action_delete_1", "role=button[name=删除]", "DELETE",
+         "https://example.test/hotel/delete", '{"id":"hotel-1"}'),
+        ("action_delete_2", "role=button[name=删除]", "DELETE",
+         "https://example.test/hotel/delete", '{"id":"hotel-2"}'),
+    ]
+    for index, (action_id, locator, method, url, body) in enumerate(actions):
+        sess._on_record(None, json.dumps({
+            "op": "click",
+            "action_id": action_id,
+            "locator": locator,
+            "observed_at": now + index * 10,
+        }))
+        sess._record_all(method, url, pd=body)
+
+    spec = to_flow_spec(
+        captured_requests=sess.captured_all_requests(),
+        reads=[],
+        samples={"酒店名称": "酒店 A", "id": "hotel-2"},
+        page_events=sess.recorded_page_events(),
+    )
+    assert [step.method for step in spec.steps] == ["GET", "POST", "DELETE", "DELETE"]
+    assert {step.source_meta.get("trigger_action_id") for step in spec.steps} == {
+        action_id for action_id, *_ in actions
+    }
+    assert len(spec.request_facts.requests) == 4
+
+
 def test_observer_never_attaches_another_pages_last_action() -> None:
     sess = RecordSession()
     sess._on_record(None, json.dumps({
