@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { AccentColorPreset } from "@dano/types/protocol";
+  import {
+    ACCENT_COLOR_PRESET_KEYS,
+    type AccentColorPreset,
+  } from "@dano/types/protocol";
   import Check from "lucide-svelte/icons/check";
   import Palette from "lucide-svelte/icons/palette";
   import X from "lucide-svelte/icons/x";
@@ -21,17 +24,9 @@
     onSelectPreset?: (preset: AccentColorPreset) => void;
   } = $props();
 
-  const presets = [
-    { key: "default", label: "themeColor.default" },
-    { key: "blue", label: "themeColor.blue" },
-    { key: "gray", label: "themeColor.gray" },
-    { key: "yellow", label: "themeColor.yellow" },
-    { key: "pink", label: "themeColor.pink" },
-    { key: "purple", label: "themeColor.purple" },
-  ] as const satisfies ReadonlyArray<{
-    key: AccentColorPreset;
-    label: Parameters<typeof t>[0];
-  }>;
+  function presetLabel(preset: AccentColorPreset): Parameters<typeof t>[0] {
+    return `themeColor.${preset}` as Parameters<typeof t>[0];
+  }
 
   function handleOpenChange(nextOpen: boolean) {
     if (!nextOpen && open) onClose();
@@ -68,23 +63,23 @@
       </header>
 
       <div class="theme-color-list">
-        {#each presets as preset (preset.key)}
+        {#each ACCENT_COLOR_PRESET_KEYS as preset (preset)}
           <button
             class="theme-color-row"
-            class:selected={selectedPreset === preset.key}
+            class:selected={selectedPreset === preset}
             type="button"
-            data-theme-color-preset={preset.key}
-            aria-pressed={selectedPreset === preset.key}
-            onclick={() => onSelectPreset(preset.key)}
+            data-theme-color-preset={preset}
+            aria-pressed={selectedPreset === preset}
+            onclick={() => onSelectPreset(preset)}
           >
             <span
               class="theme-color-swatch"
-              style={`background: ${ACCENT_COLOR_PRESETS[preset.key]}`}
+              style={`background: ${ACCENT_COLOR_PRESETS[preset]}`}
               aria-hidden="true"
             ></span>
-            <span>{t(preset.label)}</span>
+            <span>{t(presetLabel(preset))}</span>
             <span class="theme-color-check-slot" aria-hidden="true">
-              {#if selectedPreset === preset.key}
+              {#if selectedPreset === preset}
                 <Check class="theme-color-check" size={16} strokeWidth={2.5} />
               {/if}
             </span>

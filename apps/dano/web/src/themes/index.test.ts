@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ACCENT_COLOR_PRESETS } from "./accent-color";
 import { PI_BASE46_DARK_THEME } from "./dark";
-import { resolveAppThemeVars } from "./index";
+import { resolveAppThemeVars, resolveShikiTheme } from "./index";
 import { PI_BASE46_LIGHT_THEME } from "./light";
 
 describe("resolveAppThemeVars", () => {
@@ -167,6 +167,21 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--code-bg"]).toBe("#ffffff");
     expect(lightVars["--on-accent"]).toBe("#ffffff");
     expect(darkVars["--bg"]).toBe("#0d1117");
+  });
+
+  it("derives the Shiki selection background from Theme Color", () => {
+    const darkTheme = resolveShikiTheme(PI_BASE46_DARK_THEME, "#7aa2f7");
+    const lightTheme = resolveShikiTheme(PI_BASE46_LIGHT_THEME, "#e9e9e980");
+
+    expect(darkTheme.colors?.["editor.selectionBackground"]).toBe(
+      "rgba(122, 162, 247, 0.22)",
+    );
+    expect(lightTheme.colors?.["editor.selectionBackground"]).toBe(
+      "rgba(233, 233, 233, 0.0803)",
+    );
+    expect(darkTheme.name).not.toBe(
+      resolveShikiTheme(PI_BASE46_DARK_THEME, "#eb6f92").name,
+    );
   });
 
   it("uses a dark shadow source in the light theme", () => {
