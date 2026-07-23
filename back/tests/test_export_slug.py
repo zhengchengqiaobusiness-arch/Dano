@@ -175,9 +175,39 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     assert (index / "agents" / "openai.yaml").is_file()
 
 
+def test_linux_reference_configuration_uses_deployment_root(tmp_path, monkeypatch):
+    import dano.export.agent_skills as agent_skills
+
+    deployment_root = tmp_path / "opt" / "skillmanner" / "Dano"
+    reference_dir = deployment_root / "doc"
+    reference_dir.mkdir(parents=True)
+    monkeypatch.setattr(agent_skills.sys, "platform", "linux")
+    monkeypatch.setattr(agent_skills, "_LINUX_PROJECT_ROOT", deployment_root)
+
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(skill_reference_dir="doc"),
+    )
+    assert _configured_reference_dir() == reference_dir.resolve()
+
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(skill_reference_dir="/opt/skillmanner/Dano/doc"),
+    )
+    monkeypatch.setattr(
+        agent_skills,
+        "_LINUX_PROJECT_ROOT",
+        agent_skills.Path("/opt/skillmanner/Dano"),
+    )
+    assert _configured_reference_dir().as_posix().endswith("/opt/skillmanner/Dano/doc")
+
+
 def test_reference_configuration_rejects_absolute_missing_and_empty_directories(tmp_path, monkeypatch):
     import dano.export.agent_skills as agent_skills
 
+    monkeypatch.setattr(agent_skills.sys, "platform", "win32")
     monkeypatch.setattr(
         agent_skills,
         "get_settings",

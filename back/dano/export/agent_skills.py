@@ -22,6 +22,7 @@ import asyncio
 import json
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path, PureWindowsPath
@@ -39,22 +40,30 @@ log = structlog.get_logger(__name__)
 # 原型常量仅作空租户 / 无 DB 兜底;真实系统由 _tenant_subsystems 从该租户已发布资产发现(任意系统,不写死)。
 _PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_LINUX_PROJECT_ROOT = Path("/opt/skillmanner/Dano")
 
 
 def _configured_reference_dir() -> Path:
-    """Resolve the configured, cross-platform relative reference directory."""
+    """Resolve the configured reference directory for local and Linux layouts."""
     configured = str(get_settings().skill_reference_dir or "").strip()
     if not configured:
         raise ValueError("DANO_SKILL_REFERENCE_DIR 不能为空")
     relative = Path(configured.replace("\\", "/"))
-    if relative.is_absolute() or PureWindowsPath(configured).is_absolute():
-        raise ValueError("DANO_SKILL_REFERENCE_DIR 必须是相对仓库根目录的路径")
-    project_root = _PROJECT_ROOT.resolve()
-    resolved = (project_root / relative).resolve()
+    windows_absolute = PureWindowsPath(configured).is_absolute()
+    if sys.platform.startswith("linux"):
+        if windows_absolute:
+            raise ValueError("Linux 的 DANO_SKILL_REFERENCE_DIR 不能使用 Windows 绝对路径")
+        project_root = _LINUX_PROJECT_ROOT.resolve()
+        resolved = relative.resolve() if relative.is_absolute() else (project_root / relative).resolve()
+    else:
+        if relative.is_absolute() or windows_absolute:
+            raise ValueError("DANO_SKILL_REFERENCE_DIR 必须是相对仓库根目录的路径")
+        project_root = _PROJECT_ROOT.resolve()
+        resolved = (project_root / relative).resolve()
     try:
         resolved.relative_to(project_root)
     except ValueError as exc:
-        raise ValueError("DANO_SKILL_REFERENCE_DIR 不得超出仓库根目录") from exc
+        raise ValueError("DANO_SKILL_REFERENCE_DIR 不得超出项目根目录") from exc
     return resolved
 
 
