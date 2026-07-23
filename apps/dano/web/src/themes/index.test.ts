@@ -39,12 +39,12 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--on-accent"]).toBe("#ffffff");
   });
 
-  it("uses one white send-button icon token across theme modes", () => {
+  it("does not emit a separate send button icon token", () => {
     const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
     const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
 
-    expect(darkVars["--send-button-icon"]).toBe("#ffffff");
-    expect(lightVars["--send-button-icon"]).toBe("#ffffff");
+    expect(darkVars).not.toHaveProperty("--send-button-icon");
+    expect(lightVars).not.toHaveProperty("--send-button-icon");
   });
 
   it("derives accent hover from Theme Color while keeping panel semantics", () => {
