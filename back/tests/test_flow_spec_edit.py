@@ -7876,6 +7876,181 @@ def test_screenshot_can_add_query_field_grounded_by_unique_response_leaf():
     assert added.need_human_confirm is True
 
 
+@pytest.mark.parametrize(
+    ("path", "key", "name_source"),
+    [
+        ("query.pageNo", "pageNo", "auto"),
+        ("body.approvalStatus", "approvalStatus", "auto"),
+        ("query.key", "process_definition_key", "planner"),
+    ],
+)
+def test_automatic_wire_key_is_not_treated_as_a_grounded_public_name(
+    path, key, name_source,
+):
+    param = ParamField(
+        path=path,
+        key=key,
+        label=key,
+        confidence_tier="grounded",
+        name_source=name_source,
+    )
+
+    assert flow_spec_module._param_has_grounded_public_name(param) is False
+
+
+def test_planner_can_replace_an_automatic_wire_key_with_a_business_name():
+    param = ParamField(
+        path="query.pageNo",
+        key="pageNo",
+        label="pageNo",
+        confidence_tier="grounded",
+        name_source="auto",
+        category="user_param",
+        source_kind="user_input",
+    )
+    step = FlowStep(
+        step_id="query", method="GET", path="/api/items",
+        params=[param],
+    )
+    spec = FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="query_items", kind="query_status",
+            nodes=_call_nodes(["query"]),
+        )],
+    )
+
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "query",
+            "path": "query.pageNo",
+            "key": "页码",
+            "display_name": "页码",
+            "type": "number",
+        },
+        scope="input",
+        actor="planner",
+    ) is True
+    assert (param.key, param.label, param.name_source) == ("页码", "页码", "planner")
+
+
+def test_image_free_plan_drops_fabricated_screenshot_evidence():
+    cleaned = flow_spec_module._remove_unavailable_screenshot_claims({
+        "field_semantics": [{
+            "step_id": "query",
+            "wire_path": "query.pageNo",
+            "public_name": "页码",
+            "axis_status": {
+                "name": "image_matched",
+                "path": "preserved_fact",
+            },
+            "evidence": [
+                {
+                    "source": "screenshot",
+                    "screenshot_name": "not-uploaded.png",
+                    "control_kind": "number",
+                },
+                {
+                    "source": "recorder_dom",
+                    "control_kind": "number",
+                },
+            ],
+        }],
+    })
+
+    field = cleaned["field_semantics"][0]
+    assert field["evidence"] == [{
+        "source": "recorder_dom",
+        "control_kind": "number",
+    }]
+    assert field["axis_status"] == {
+        "name": "unresolved",
+        "path": "preserved_fact",
+    }
+
+
+def test_image_free_orchestration_never_persists_fabricated_screenshot_evidence():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="query",
+        method="GET",
+        path="/api/items",
+        params=[ParamField(
+            path="query.pageNo",
+            key="pageNo",
+            label="pageNo",
+            value="1",
+            type="number",
+            wire_type="number",
+            category="user_param",
+            source_kind="user_input",
+            name_source="auto",
+        )],
+    )])
+    semantic_plan = {
+        "business_understanding": {
+            "business_name": "查询记录",
+            "summary": "分页查询记录",
+        },
+        "request_roles": [{
+            "step_id": "query",
+            "role": "business_get",
+            "name": "查询记录",
+            "reason": "查询接口",
+        }],
+        "field_semantics": [{
+            "step_id": "query",
+            "wire_path": "query.pageNo",
+            "public_name": "页码",
+            "default_value": "1",
+            "business_type": "number",
+            "category": "user_param",
+            "source_kind": "user_input",
+            "required": False,
+            "confidence": 0.98,
+            "axis_status": {
+                "path": "preserved_fact",
+                "name": "image_matched",
+                "default_value": "preserved_fact",
+                "type": "preserved_fact",
+                "category": "preserved_fact",
+                "source": "preserved_fact",
+                "required": "preserved_fact",
+            },
+            "evidence": [{
+                "source": "screenshot",
+                "screenshot_name": "not-uploaded.png",
+                "visible_label": "页码",
+                "control_kind": "number",
+                "editable": True,
+            }],
+        }],
+        "capabilities": [{
+            "name": "query_items",
+            "title": "查询记录",
+            "kind": "query_status",
+            "intent": "分页查询记录",
+            "step_ids": ["query"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": semantic_plan, "ops": []},
+        generation_mode="initial",
+    ))
+
+    param = out.steps[0].params[0]
+    assert (param.key, param.label) == ("页码", "页码")
+    assert not any(
+        str(item.get("source") or "").lower() == "screenshot"
+        for item in param.evidence
+        if isinstance(item, dict)
+    )
+
+
 def test_screenshot_does_not_invent_query_field_without_unique_response_leaf():
     query = FlowStep(
         step_id="query", method="GET", path="/api/leave/page",

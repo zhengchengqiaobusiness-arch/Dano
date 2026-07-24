@@ -4723,8 +4723,13 @@ def _param_has_grounded_public_name(param: ParamField) -> bool:
     if _param_has_full_lock(param) or param.name_source in {"manual", "sample", "assignee"}:
         return True
     public_name = str(param.label or param.key or "").strip()
+    # Planner/LLM names are proposals, not recorder/operator facts. Let later
+    # analyses refine them even when an earlier plan marked its own confidence
+    # as grounded.
+    model_owned_name = param.name_source in {"", "auto", "planner", "llm", "optimizer"}
     if (
-        param.confidence_tier in {"grounded", "linked", "manual"}
+        not model_owned_name
+        and param.confidence_tier in {"grounded", "linked", "manual"}
         and public_name
         and not looks_internal_param_name(public_name)
     ):
@@ -10994,6 +10999,41 @@ def _semantic_candidate_gate(
     return not reasons, audit
 
 
+def _remove_unavailable_screenshot_claims(
+    semantic_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop image claims when the request did not deliver an image."""
+    cleaned = copy.deepcopy(semantic_plan)
+    screenshot_sources = {
+        "screenshot", "reference_screenshot", "uploaded_screenshot", "image",
+    }
+    for field in cleaned.get("field_semantics") or []:
+        if not isinstance(field, dict):
+            continue
+        field["evidence"] = [
+            item for item in (field.get("evidence") or [])
+            if not (
+                isinstance(item, dict)
+                and (
+                    str(item.get("source") or item.get("kind") or "").strip().lower()
+                    in screenshot_sources
+                    or item.get("canonical_screenshot_control") is True
+                )
+            )
+        ]
+        axis_status = field.get("axis_status")
+        if isinstance(axis_status, dict):
+            field["axis_status"] = {
+                axis: (
+                    "unresolved"
+                    if str(status).strip().lower() == "image_matched"
+                    else status
+                )
+                for axis, status in axis_status.items()
+            }
+    return cleaned
+
+
 async def orchestrate_flow_capabilities(
     spec: FlowSpec,
     *,
@@ -11089,6 +11129,15 @@ async def orchestrate_flow_capabilities(
         submission.get("semantic_plan") if isinstance(submission.get("semantic_plan"), dict)
         else (submission.get("plan") if isinstance(submission.get("plan"), dict) else {})
     )
+    if proposed_semantic_plan and not screenshot_analysis:
+        proposed_semantic_plan = _remove_unavailable_screenshot_claims(
+            proposed_semantic_plan
+        )
+        submission = copy.deepcopy(submission)
+        if isinstance(submission.get("semantic_plan"), dict):
+            submission["semantic_plan"] = proposed_semantic_plan
+        else:
+            submission["plan"] = proposed_semantic_plan
     complete_semantic_submission = bool(
         proposed_semantic_plan.get("capabilities")
         and isinstance(proposed_semantic_plan.get("request_roles"), list)

@@ -713,17 +713,28 @@ def test_open_create_form_reads_do_not_become_unassigned_public_steps(
     assert spec.request_facts.usage["req_approval"].state != "materialized"
 
 
-def test_seven_observed_operations_in_one_business_domain_stay_independent() -> None:
+@pytest.mark.parametrize(
+    "base_path",
+    [
+        "/api/orders",
+        "/svc/hr/leave",
+        "/gateway/assets",
+        "/custom/v9/work-items",
+    ],
+)
+def test_seven_observed_operations_in_one_business_domain_stay_independent(
+    base_path: str,
+) -> None:
     from dano.execution.page.flow_spec import orchestrate_flow_capabilities, to_flow_spec
 
     operations = [
-        ("query", "GET", "/api/orders/page?status=pending", None, "查询待处理订单", "business_get"),
-        ("detail", "GET", "/api/orders/detail?id=order-1", None, "查看订单详情", "business_get"),
-        ("create", "POST", "/api/orders/create", '{"title":"Order A"}', "创建订单", "business_write"),
-        ("approve", "POST", "/api/orders/approve?id=order-1", None, "审批通过", "business_write"),
-        ("reject", "POST", "/api/orders/reject", '{"id":"order-2","reason":"invalid"}', "驳回订单", "business_write"),
-        ("delete", "DELETE", "/api/orders/delete?id=order-3", None, "删除订单", "business_write"),
-        ("archive", "POST", "/api/orders/archive?id=order-4", None, "归档订单", "business_write"),
+        ("query", "GET", f"{base_path}/page?status=pending", None, "查询待处理记录", "business_get"),
+        ("detail", "GET", f"{base_path}/detail?id=item-1", None, "查看记录详情", "business_get"),
+        ("create", "POST", f"{base_path}/create", '{"title":"Item A"}', "创建记录", "business_write"),
+        ("approve", "POST", f"{base_path}/approve?id=item-1", None, "审批通过", "business_write"),
+        ("reject", "POST", f"{base_path}/reject", '{"id":"item-2","reason":"invalid"}', "驳回记录", "business_write"),
+        ("delete", "DELETE", f"{base_path}/delete?id=item-3", None, "删除记录", "business_write"),
+        ("archive", "POST", f"{base_path}/archive?id=item-4", None, "归档记录", "business_write"),
     ]
     requests = []
     for index, (name, method, url, body, label, role) in enumerate(operations, start=1):

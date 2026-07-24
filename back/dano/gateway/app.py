@@ -172,7 +172,10 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         "must cover path,name,default_value,type,category,source,required; contain exact step_id and wire_path, "
         "public_name, recorded default_value, business_type, category, source_kind, required, confidence, axis_status, "
         "and evidence whose axes cover all seven axes. Path and default_value are recorded wire facts: preserve their "
-        "exact values and mark them preserved_fact unless stronger recorded API facts prove otherwise. Use Pi to "
+        "exact values and mark them preserved_fact unless stronger recorded API facts prove otherwise. public_name "
+        "must be the caller-facing business label. A wire key or path leaf is not by itself a grounded public name; "
+        "when no DOM/manual label exists, derive a concise business name from the page, request role, and field "
+        "semantics, or mark only the name axis unresolved when that meaning is genuinely ambiguous. Use Pi to "
         "actively apply grounded corrections to name, type, category, source, required, capability membership, and "
         "relations. If evidence is insufficient for one axis, preserve the recorded value and mark that axis "
         "preserved_fact instead of omitting the field or inventing a value. "
@@ -204,7 +207,11 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         "visible_default or visible_value may be reported for identity matching only and must never overwrite the "
         "recorded default_value. "
         "Visible fields with no grounded recorded match must go to unresolved_items instead of being invented."
-        if has_screenshots else ""
+        if has_screenshots else (
+            " No reference screenshot was supplied. Pi must not emit or cite screenshot evidence, screenshot names, "
+            "visible controls, or image_matched axis status; use only recorded request, response, DOM/page, action, "
+            "dependency, and operator evidence. "
+        )
     )
     if has_screenshots:
         screenshot_rule += (

@@ -2573,7 +2573,7 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
             nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
         )],
     )
-    submission = {"semantic_plan": {
+    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
         "business_understanding": {"business_name": "公章申请", "summary": "根据页面填写日期后提交公章申请"},
         "request_roles": [{
             "step_id": "submit", "role": "business_write", "name": "提交公章申请", "reason": "页面提交按钮",
@@ -3110,7 +3110,7 @@ def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field
     )
 
     def submission(evidence: list[dict]) -> dict:
-        return {"semantic_plan": {
+        return {"_analysis_screenshot_count": 1 if evidence else 0, "semantic_plan": {
             "business_understanding": {"summary": "Submit a leave request"},
             "request_roles": [{
                 "step_id": "submit",

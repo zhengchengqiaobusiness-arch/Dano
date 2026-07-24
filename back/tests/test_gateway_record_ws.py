@@ -84,6 +84,8 @@ def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert "materialized_step_id" in protocol
     assert "blocking unresolved" in protocol
     assert "do not claim the plan is complete" in protocol
+    assert "must not emit or cite screenshot evidence" in protocol
+    assert "wire key or path leaf is not by itself a grounded public name" in protocol
 
 
 def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
