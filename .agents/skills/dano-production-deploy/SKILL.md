@@ -142,7 +142,16 @@ Do not treat smoke success as full acceptance.
 
 ## Phase 8: Real production browser acceptance
 
-Use the Codex in-app Browser on exactly `https://1.15.173.22/`. Record the initial theme and restore it after testing if changed. Reuse or reclaim the correct in-app tab; do not switch browser surfaces just because a navigation or connection times out.
+Use the Codex in-app Browser on exactly `https://1.15.173.22/`. Reuse or reclaim the correct in-app tab; do not switch browser surfaces just because a navigation or connection times out.
+
+Theme acceptance is not part of the baseline deployment run. Do not open the theme picker, inspect theme-specific presentation, or change the current user's theme unless at least one release PR explicitly changes theme-related code or lists theme behavior in its acceptance criteria. When theme acceptance is applicable:
+
+1. Read and record the current user's effective theme from the production UI before making any change.
+2. Exercise only the theme behavior required by the release PR.
+3. Restore the exact recorded theme after testing.
+4. Reload or open a fresh in-app Browser tab and verify that the restored theme remains effective.
+
+If the current theme cannot be determined reliably, do not change it. Treat the required theme acceptance as incomplete and follow the incomplete-acceptance disposition below.
 
 Complete all of these on the new deployment:
 
