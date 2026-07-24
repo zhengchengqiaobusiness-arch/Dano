@@ -3406,11 +3406,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const records = enumOptionRecordsForParam(step, p);
     return records.length > 0 && records.every((item) => item.value !== undefined);
   }
-  function enumMissingValueLabelsForParam(step: FlowStepData, p: FlowParam) {
-    return enumOptionRecordsForParam(step, p)
-      .filter((item) => item.value === undefined)
-      .map((item) => item.label);
-  }
   function parseEnumOptionsText(text: string): { options: Array<{ label: string; value?: any }>; optionMap: Record<string, any> | null; mappingComplete: boolean } {
     const chunks = text.includes("\n") ? text.split(/\n/) : text.split(/[,，]/);
     const seen = new Set<string>();
@@ -3803,7 +3798,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const selectBinding = selectBindingForParam(step, p);
     const enumOptions = enumOptionsForParam(step, p);
     const enumMappingComplete = enumMappingCompleteForParam(step, p);
-    const enumMissingValueLabels = enumMissingValueLabelsForParam(step, p);
     const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
     const isApiOption = p.source_kind === "api_option";
     const isTypedEnum = p.type === "enum" || p.type === "list-enum";
@@ -3840,9 +3834,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {linked && <Tag color="cyan">依赖字段</Tag>}
                 {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                 {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
-                {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && (
-                  <Tag color="orange">未映射值：{enumMissingValueLabels.join("、")}</Tag>
-                )}
                 {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
               </Space>
@@ -3928,9 +3919,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
                         {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
                         {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
-                        {enumOptions.length > 0 && !enumMappingComplete && (
-                          <Tag color="orange">未映射实际提交值：{enumMissingValueLabels.join("、")}</Tag>
-                        )}
                       </Space>
                       {isApiOption && (
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, alignItems: "end" }}>
@@ -3988,14 +3976,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             rows={3}
                             value={enumOptionsTextForParam(step, p)}
                             placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
-                            onDraftChange={(v) => {
-                              const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
-                              patchLocalParam(step.step_id, p, {
-                                enum_options: options,
-                                enum_value_map: optionMap,
-                                need_human_confirm: !mappingComplete,
-                              });
-                            }}
                             onSave={(v) => {
                               const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
                               upsertSelectBinding(
