@@ -422,11 +422,23 @@ const PARAM_TYPE_LABELS: Record<string, string> = {
 const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
   .map((x) => ({ label: PARAM_TYPE_LABELS[x] || x, value: x }));
 const CAPABILITY_KIND_OPTIONS = [
+  { label: "查询", value: "query" },
   { label: "状态查询", value: "query_status" },
   { label: "选项列表", value: "list_options" },
+  { label: "校验", value: "validate" },
   { label: "批量校验", value: "validate_batch" },
+  { label: "预览", value: "preview" },
+  { label: "查看详情", value: "inspect" },
+  { label: "导出", value: "export" },
+  { label: "新增", value: "create" },
+  { label: "更新", value: "update" },
+  { label: "保存草稿", value: "save_draft" },
   { label: "批量提交", value: "submit_batch" },
   { label: "提交", value: "submit" },
+  { label: "审批通过", value: "approve" },
+  { label: "驳回", value: "reject" },
+  { label: "撤回", value: "withdraw" },
+  { label: "删除", value: "delete" },
 ];
 const CAPABILITY_USAGE_OPTIONS: Array<{ label: string; value: CapabilityUsage }> = [
   { label: "执行", value: "execute" },
@@ -1371,6 +1383,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const analysisScreenshotGenerationRef = useRef(0);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
   const [showAllAnalysisChanges, setShowAllAnalysisChanges] = useState(false);
+  const [showAllPublishIssues, setShowAllPublishIssues] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -3471,6 +3484,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // warnings before the operator has generated abilities.
     const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
+    const publishIssueCount = publishIssueGroups.reduce((count, group) => count + group.items.length, 0);
+    let remainingVisibleIssues = showAllPublishIssues ? Number.POSITIVE_INFINITY : 3;
+    const visiblePublishIssueGroups = publishIssueGroups.map((group) => {
+      const items = group.items.slice(0, remainingVisibleIssues);
+      remainingVisibleIssues -= items.length;
+      return { ...group, items };
+    }).filter((group) => group.items.length > 0);
+    const hasAutoFixableIssue = publishIssueGroups.some(
+      (group) => group.items.some((item) => item.auto_fixable === true),
+    );
     const publishFailed = result?.ok === false;
     const publishPending = phase === "publishing" && !!publishOperationRef.current;
     const validationRefreshing = !checkReport;
@@ -3511,13 +3534,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {renderLatestOperationDetail()}
                   <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
                 </Space>
-              ) : <Space direction="vertical" size={2}>
+              ) : <Space direction="vertical" size={2} style={{ maxHeight: 320, overflowY: "auto", width: "100%" }}>
                 {!result?.ok && renderLatestOperationDetail()}
-                <Typography.Text style={{ fontSize: 12 }}>
-                  Skill 参数：{checkReport.api_preview?.params?.length ? checkReport.api_preview.params.join(", ") : "无"}
-                  {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
-                  {checkReport.dry_run?.request_count != null ? ` · ${checkReport.dry_run.request_count} 步` : ""}
-                </Typography.Text>
                 {result && !publishPending && (
                   <Space direction="vertical" size={2}>
                     <Typography.Text type={result.ok ? "success" : "danger"}>
@@ -3533,15 +3551,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   </Space>
                 )}
                 <Space direction="vertical" size={4}>
-                  {publishIssueGroups.map((group) => (
+                  {visiblePublishIssueGroups.map((group) => (
                     <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
                       <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
                       <Space direction="vertical" size={2}>
                         {group.items.map((item, issueIdx) => (
-                          <Space key={item.issue_id || `${group.key}-${issueIdx}`} wrap size={4}>
+                          <Space key={item.issue_id || `${group.key}-${issueIdx}`} size={4} style={{ width: "100%", flexWrap: "nowrap" }}>
                             {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
                             {item.blocking === false && <Tag color="gold">不阻塞</Tag>}
-                            <Typography.Text type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
+                            <Typography.Text ellipsis={{ tooltip: item.message }} type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
                               {item.message}
                             </Typography.Text>
                             {item.target && Object.keys(item.target).length > 0 && (
@@ -3556,9 +3574,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     </div>
                   ))}
                 </Space>
-                {hasPublishAdvice && (
+                {publishIssueCount > 3 && (
+                  <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
+                    onClick={() => setShowAllPublishIssues((value) => !value)}>
+                    {showAllPublishIssues ? "收起告警" : `展开其余 ${publishIssueCount - 3} 项`}
+                  </Button>
+                )}
+                {hasAutoFixableIssue && (
                   <Button size="small" icon={<RobotOutlined />} loading={autoFixBusy} onClick={autoFixFlow}>
-                    自动处理可修复项
+                    修复可自动处理项
                   </Button>
                 )}
               </Space>

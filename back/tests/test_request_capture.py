@@ -2843,7 +2843,7 @@ def test_control_identity_maps_repeated_hotel_values_without_guessing_order():
 
     assert (fields["applyTitle"]["suggest_name"], fields["applyTitle"]["type"]) == ("申请标题", "string")
     assert (fields["totalAmt"]["suggest_name"], fields["totalAmt"]["type"]) == ("预计金额", "number")
-    assert (fields["roomType"]["suggest_name"], fields["roomType"]["type"]) == ("房间类型", "number")
+    assert (fields["roomType"]["suggest_name"], fields["roomType"]["type"]) == ("房间类型", "enum")
     assert (fields["useTime"]["suggest_name"], fields["useTime"]["type"]) == ("入住时间", "datetime")
     assert (fields["remark"]["suggest_name"], fields["remark"]["type"]) == ("备注", "string")
 

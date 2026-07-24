@@ -380,7 +380,7 @@ class FlowCapability(BaseModel):
     name: str = ""
     title: str = ""
     intent: str = ""
-    kind: str = "submit"  # query_status / list_options / validate_batch / submit_batch / submit
+    kind: str = "submit"  # query/export/create/update/save_draft/submit/withdraw/delete/...
     capability_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     request_refs: list[CapabilityRequestRef] = Field(default_factory=list)
     step_ids: list[str] = Field(default_factory=list)
@@ -1069,6 +1069,21 @@ def _param_source_guess(
     # match is unsafe because unrelated query parameters often share 0/1; it
     # previously exposed an option-source's fixed ``status=0`` merely because
     # another control recorded the same value.
+    early_control_kind = str(field.get("control_kind") or "unknown").lower()
+    if (
+        early_control_kind in {"select", "combobox"}
+        and not bool(field.get("control_disabled") or field.get("control_read_only"))
+    ):
+        return {
+            "category": "user_param",
+            "source_kind": "form_option",
+            "source": {"kind": "form_option", "path": path},
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "页面快照证明该字段是可编辑选择控件；候选来自表单控件，不能降级为手动文本",
+            "need_human_confirm": False,
+        }
+
     recorded_user_input = bool(field.get("recorded_user_input")) or bool(
         not field.get("control_evidence_available")
         and method != "GET"
@@ -1089,6 +1104,16 @@ def _param_source_guess(
     control_kind = str(field.get("control_kind") or "unknown").lower()
     has_control = bool(field.get("field_aliases")) or control_kind != "unknown"
     control_locked = bool(field.get("control_disabled") or field.get("control_read_only"))
+    if has_control and control_kind in {"select", "combobox"} and not control_locked:
+        return {
+            "category": "user_param",
+            "source_kind": "form_option",
+            "source": {"kind": "form_option", "path": path},
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "页面快照证明该字段是可编辑选择控件；候选来自表单控件，不能降级为手动文本",
+            "need_human_confirm": False,
+        }
     if has_control and control_kind in {"text", "textarea", "number", "date", "datetime", "time", "checkbox", "radio"}:
         if not control_locked:
             return {
@@ -2395,6 +2420,15 @@ def _detect_query_selects(req: dict, samples: dict | None,
 
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+READ_CAPABILITY_KINDS = frozenset({
+    "query", "query_status", "list_options", "validate", "validate_batch",
+    "preview", "inspect", "export",
+})
+WRITE_CAPABILITY_KINDS = frozenset({
+    "create", "update", "save_draft", "submit", "submit_batch",
+    "approve", "reject", "withdraw", "delete",
+})
+ALLOWED_CAPABILITY_KINDS = READ_CAPABILITY_KINDS | WRITE_CAPABILITY_KINDS
 _NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".map", ".woff", ".woff2", ".ico")
 _NOISE_SEGS = {
     "heartbeat", "metrics", "metric", "track", "trace", "analytics",
@@ -2815,7 +2849,33 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
 
 
 def _request_role_key(req: dict) -> Any:
-    return req.get("index") if req.get("index") is not None else id(req)
+    request_id = str(req.get("request_id") or "").strip()
+    if request_id:
+        return ("request_id", request_id)
+    if req.get("index") is not None:
+        return ("index", req.get("index"))
+    # Raw browser fixtures and legacy callers may not carry a durable request
+    # id/index. Keep those request objects distinct here; semantic de-duplication
+    # happens later and must not make every repeated URL select every duplicate.
+    return ("object", id(req))
+
+
+def _request_order_value(request: dict) -> float | None:
+    for key in ("sequence", "request_index", "index", "started_at_ms", "timestamp"):
+        value = request.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _request_precedes(left: dict, right: dict) -> bool:
+    left_order = _request_order_value(left)
+    right_order = _request_order_value(right)
+    return left_order is not None and right_order is not None and left_order < right_order
 
 
 _WORKFLOW_CONTEXT_TOKENS = (
@@ -5384,7 +5444,12 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 continue
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
-            p.category = "runtime_var"
+            caller_editable = bool(
+                _param_has_editable_control_evidence(p)
+                and p.category == "user_param"
+                and p.exposed_to_user
+            )
+            p.category = "user_param" if caller_editable else "runtime_var"
             p.source_kind = "previous_response"
             p.source = {
                 "kind": "previous_response",
@@ -5393,14 +5458,20 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 "response_path": lk.source_path,
                 "target_path": target_path,
                 "link_id": lk.link_id,
+                "allow_caller_override": caller_editable,
             }
-            # 运行期绑定不等于只读；用户仍可在工作台解除或改写来源。
             p.editable = True
-            p.exposed_to_user = False
-            p.reason = (
-                f"该字段由上一步 `{source.name or source.path}` 的响应 `{lk.source_path}` 提供，"
-                "运行期自动注入，不能使用录制旧值"
-            )
+            p.exposed_to_user = caller_editable
+            if caller_editable:
+                p.reason = (
+                    f"编辑场景默认来自上一步 `{source.name or source.path}` 的响应 `{lk.source_path}`；"
+                    "调用方仍可修改该字段，显式输入优先于上游默认值"
+                )
+            else:
+                p.reason = (
+                    f"该字段由上一步 `{source.name or source.path}` 的响应 `{lk.source_path}` 提供，"
+                    "运行期自动注入，不能使用录制旧值"
+                )
             p.need_human_confirm = not bool(lk.confirmed)
             p.confidence = max(float(p.confidence or 0.0), float(lk.confidence or 0.0))
             p.confidence_tier = "linked"
@@ -5504,8 +5575,22 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
         return False
     if param.category == "user_param" or param.source_kind == "user_input" or _looks_user_entered_business_field(param.key, param.path):
         # A recorded value or a similar field name cannot prove that an editable
-        # business field is supplied by an earlier response.  Manual links have
-        # already returned above; automatic links need a real runtime contract.
+        # business field is supplied by an earlier response.  The exception is
+        # an exact field projection observed in the same action chain: edit
+        # forms use that value as an overrideable default, not as a hidden
+        # runtime-only field.
+        evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
+        if (
+            lk is not None
+            and lk.confirmed
+            and float(lk.confidence or 0.0) >= 0.95
+            and evidence.get("same_action_chain") is True
+            and _param_has_editable_control_evidence(param)
+            and _dependency_match_score(param, source_path) >= 40
+        ):
+            return True
+        # Manual links have already returned above; other automatic links need
+        # a real runtime contract.
         return False
     if param is not None and lk is not None and lk.confirmed and float(lk.confidence or 0.0) >= 0.95:
         source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
@@ -5860,6 +5945,7 @@ def to_flow_spec(
         if (transaction := _request_transaction_id(request))
     }
     operation_reads: list[dict] = []
+    post_write_read_keys: set[Any] = set()
     for request, role_info in zip(captured_requests, request_roles):
         if not selected_transactions or _request_transaction_id(request) not in selected_transactions:
             continue
@@ -5878,6 +5964,18 @@ def to_flow_spec(
         if method not in {"GET", "HEAD", "POST"} or not json_like:
             continue
         if role in {"auth", "unsupported_upload", "unsupported_graphql"}:
+            continue
+        transaction_writes = [
+            write for write in write_cands
+            if _request_role_key(write) in selected_write_keys
+            and _request_transaction_id(write) == _request_transaction_id(request)
+        ]
+        if transaction_writes and not any(
+            _request_precedes(request, write) for write in transaction_writes
+        ):
+            # A refresh/list request emitted after a write is an observation of
+            # the result, not a preflight dependency of that write.
+            post_write_read_keys.add(_request_role_key(request))
             continue
         operation_reads.append(request)
     if operation_reads:
@@ -5928,8 +6026,9 @@ def to_flow_spec(
             # When both sides have Observer transaction IDs, they are the
             # authoritative operation boundary. Semantic context is only the
             # fallback for older/incomplete recordings.
-            if same_transaction or (
+            if (same_transaction and _request_precedes(request, write_request)) or (
                 context_match and not (request_transaction and write_transaction)
+                and _request_precedes(request, write_request)
             ):
                 owners_by_position.setdefault(idx, set()).add(write_position)
     try:
@@ -5986,6 +6085,7 @@ def to_flow_spec(
         _request_role_key(request)
         for request in preread_cands
         if str((role_by_key.get(_request_role_key(request)) or {}).get("role") or "") == "business_get"
+        and _request_role_key(request) not in post_write_read_keys
         and (
             _has_query_action_evidence(
                 request.get("trigger_op"),
@@ -6119,16 +6219,29 @@ def to_flow_spec(
                     r"[^a-z0-9]+", "", str(target_path or "").split(".")[-1].lower()
                 )
                 strong_id_dependency = strong_unique_match and source_leaf == "id" and target_leaf.endswith("id")
-                if not strong_id_dependency and not _auto_dependency_link_allowed(
-                    target_param, str(lk.get("source_path") or ""),
-                ):
-                    continue
                 source_request = cands[src_pos]
                 target_request = cands[tgt_pos]
                 source_action = str(source_request.get("trigger_action_id") or "")
                 target_action = str(target_request.get("trigger_action_id") or "")
                 causal_supported = bool(target_action)
                 same_action_chain = bool(source_action and source_action == target_action)
+                editable_prefill_dependency = bool(
+                    target_param is not None
+                    and _param_has_editable_control_evidence(target_param)
+                    and strong_unique_match
+                    and same_action_chain
+                    and _dependency_match_score(
+                        target_param, str(lk.get("source_path") or "")
+                    ) >= 40
+                )
+                if (
+                    not strong_id_dependency
+                    and not editable_prefill_dependency
+                    and not _auto_dependency_link_allowed(
+                        target_param, str(lk.get("source_path") or ""),
+                    )
+                ):
+                    continue
                 auto_confirmed = bool(strong_unique_match and (not page_events or causal_supported))
                 link_objs.append(FlowLink(
                     source_step_id=idx_to_step_id[src_pos],
@@ -6668,7 +6781,17 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
 
 def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapability) -> None:
     """Align Planner capabilities with the recorded request evidence before validation."""
-    public_names = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+    by_id = {step.step_id: step for step in spec.steps}
+    steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
+    writes = [step for step in steps if _is_write_step(step)]
+    if not cap.locked and writes and cap.kind != "submit_batch":
+        grounded_kinds = {_capability_operation_kind(step) for step in writes}
+        if len(grounded_kinds) == 1:
+            # The recorded button/path decides whether a write is draft,
+            # create, update, submit, withdraw or delete. A stale Pi ``submit``
+            # label cannot flatten those distinct operations.
+            cap.kind = next(iter(grounded_kinds))
+    public_names = set(ALLOWED_CAPABILITY_KINDS)
     if cap.name in public_names and cap.kind in public_names and cap.name != cap.kind:
         cap.name = cap.kind
         if cap.kind == "submit" and "批量" in str(cap.title or ""):
@@ -6679,11 +6802,8 @@ def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapabilit
     needs_batch_audit = cap.kind in {"submit_batch", "validate_batch"}
     if cap.locked or (not cap.evidence and not duplicate_generated_name and not needs_batch_audit):
         return
-    by_id = {step.step_id: step for step in spec.steps}
-    steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
     if not steps:
         return
-    writes = [step for step in steps if _is_write_step(step)]
     if cap.kind in {"submit", "submit_batch", "validate_batch"} and writes:
         actual_batch = _write_contract_is_batch(spec, writes, cap)
         if cap.kind == "submit_batch" and not actual_batch:
@@ -6706,7 +6826,7 @@ def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapabilit
 
 def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
     """Atomically align public names and every cross-capability reference."""
-    public_names = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+    public_names = set(ALLOWED_CAPABILITY_KINDS)
     renamed: dict[str, str] = {}
     for cap in spec.capabilities or []:
         old_name = str(cap.name or "")
@@ -7880,6 +8000,7 @@ def _query_operation_key(step: FlowStep) -> str:
     when Observer proves a command anchor.
     """
     business = _capability_business_key(step)
+    operation_kind = _capability_operation_kind(step)
     meta = step.source_meta or {}
     locator = re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold())
     anchored = bool(
@@ -7888,9 +8009,17 @@ def _query_operation_key(step: FlowStep) -> str:
         and str(meta.get("causality_confidence") or "high").lower() in {"high", "medium"}
     )
     if not anchored:
-        return business
+        return (
+            "__".join(part for part in (business, operation_kind) if part)
+            if operation_kind != "query_status"
+            else business
+        )
     action_key = hashlib.sha1(locator.encode("utf-8")).hexdigest()[:10]
-    return "__".join(part for part in (business, f"action_{action_key}") if part)
+    return "__".join(part for part in (
+        business,
+        operation_kind if operation_kind != "query_status" else "",
+        f"action_{action_key}",
+    ) if part)
 
 
 def _write_operation_key(step: FlowStep) -> str:
@@ -8072,6 +8201,11 @@ def _build_complex_default_capabilities(
         sub.capabilities = []
         sub.capability_relations = []
         for capability in build_default_flow_capabilities(sub):
+            anchors = [step for step in steps if _is_write_step(step)]
+            primary = anchors[-1] if anchors else steps[-1]
+            inferred_kind = _capability_operation_kind(primary)
+            if capability.kind != "submit_batch":
+                capability.kind = inferred_kind
             capability.name = _flow_capability_id(capability.kind, key)
             capability.capability_id = _stable_capability_id(
                 capability.name, capability.kind, _capability_node_step_ids(capability),
@@ -8100,18 +8234,19 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     submit_step_ids = {s.step_id for s in submit_steps}
     independent_status_steps = [s for s in status_steps if s.step_id not in submit_step_ids]
     if independent_status_steps:
+        query_kind = _capability_operation_kind(independent_status_steps[-1])
         query_confidence = min(
             float((step.source_meta or {}).get("confidence") or 0.68)
             for step in independent_status_steps
         )
         caps.append(FlowCapability(
-            name="query_status",
-            capability_id=_stable_capability_id("query_status", "query_status", _capability_step_ids(independent_status_steps)),
+            name=query_kind,
+            capability_id=_stable_capability_id(query_kind, query_kind, _capability_step_ids(independent_status_steps)),
             title="查询流程状态",
             intent="查询流程、审批或上下文详情，用于判断业务当前状态，并把结果返回给调用方决定下一步。",
-            kind="query_status",
+            kind=query_kind,
             step_ids=_capability_step_ids(independent_status_steps),
-            nodes=_default_capability_nodes(independent_status_steps, kind="query_status"),
+            nodes=_default_capability_nodes(independent_status_steps, kind=query_kind),
             input_schema=_json_schema_for_params([p for st in independent_status_steps for p in st.params]),
             output_schema={
                 "type": "object",
@@ -8135,7 +8270,11 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         ))
 
     if write_steps:
-        kind = "submit_batch" if _write_contract_is_batch(spec, write_steps) else "submit"
+        kind = (
+            "submit_batch"
+            if _write_contract_is_batch(spec, write_steps)
+            else _capability_operation_kind(write_steps[-1])
+        )
         submit_input_schema = (
             _batch_capability_input_schema(submit_steps)
             if kind == "submit_batch"
@@ -8555,7 +8694,7 @@ def _semantic_fact_hash(spec: FlowSpec) -> str:
 def _capability_from_agent(raw: dict[str, Any], step_ids: set[str], used_names: set[str]) -> FlowCapability | None:
     if not isinstance(raw, dict):
         return None
-    allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
+    allowed_kinds = ALLOWED_CAPABILITY_KINDS
     kind = str(raw.get("kind") or "submit").strip()
     if kind not in allowed_kinds:
         return None
@@ -8812,6 +8951,8 @@ def _forget_removed_capability_step(spec: FlowSpec, cap_name: str, step_id: str)
 
 
 def _capability_kind_family(kind: str) -> str:
+    # Only the legacy single/batch submit pair is interchangeable. Draft,
+    # submit, withdraw and delete are separate caller-visible operations.
     return "write" if kind in {"submit", "submit_batch"} else str(kind or "")
 
 
@@ -8827,7 +8968,7 @@ def _merge_capability_lists(
     removed_families = {
         _capability_kind_family(name)
         for name in removed_capabilities
-        if name in {"submit", "submit_batch", "query_status", "list_options", "validate_batch"}
+        if name in ALLOWED_CAPABILITY_KINDS
     } | {
         str(x) for x in (((spec.meta or {}).get("removed_capability_kinds") or []) if spec is not None else [])
     }
@@ -8862,9 +9003,9 @@ def _planned_capability_has_public_anchor(
             if recorded_role != "business_get":
                 continue
         method = (step.method or "GET").upper()
-        if kind in {"submit", "submit_batch"} and method in _WRITE_METHODS:
+        if kind in WRITE_CAPABILITY_KINDS and method in _WRITE_METHODS:
             return True
-        if kind in {"query_status", "validate_batch"} and _is_business_query_step(step):
+        if kind in READ_CAPABILITY_KINDS and _is_business_query_step(step):
             return True
     return False
 
@@ -9134,7 +9275,7 @@ def _semantic_plan_to_ops(
 
     for item in plan_capabilities:
         kind = str(item.get("kind") or "")
-        if kind not in {"query_status", "validate_batch", "submit_batch", "submit"}:
+        if kind not in ALLOWED_CAPABILITY_KINDS:
             continue
         memberships: list[dict[str, Any]] = []
         raw_memberships = (
@@ -9181,6 +9322,45 @@ def _semantic_plan_to_ops(
                 "usage": "execute",
                 "origin": "planner",
             })
+        # Distinct recorded write actions are public operation boundaries.
+        # Pi may explain their relationship, but it cannot collapse separate
+        # buttons/transactions into one capability. Multiple HTTP writes remain
+        # together only when the recorder proves the same action boundary.
+        planned_writes = [
+            step_by_id[ref["step_id"]]
+            for ref in memberships
+            if ref["step_id"] in step_by_id
+            and _is_write_step(step_by_id[ref["step_id"]])
+        ]
+        write_groups = {
+            _write_operation_key(step)
+            for step in planned_writes
+            if _write_operation_key(step)
+        }
+        if len(write_groups) > 1:
+            matching_groups = {
+                _write_operation_key(step)
+                for step in planned_writes
+                if (
+                    _capability_operation_kind(step) == kind
+                    or (
+                        kind == "submit_batch"
+                        and _capability_operation_kind(step) == "submit"
+                    )
+                )
+            }
+            selected_group = next(
+                iter(matching_groups),
+                _write_operation_key(planned_writes[0]),
+            )
+            memberships = [
+                ref for ref in memberships
+                if not (
+                    ref["step_id"] in step_by_id
+                    and _is_write_step(step_by_id[ref["step_id"]])
+                    and _write_operation_key(step_by_id[ref["step_id"]]) != selected_group
+                )
+            ]
         if kind in {"submit", "submit_batch"}:
             option_source_ids = _option_source_step_ids(spec)
             write_ids = {
@@ -9683,6 +9863,10 @@ def _locator_action_name(locator: str) -> str:
         return match.group(1).strip(" '\"")
     if text.startswith("text="):
         return text[5:].strip(" '\"")
+    if "=" in text:
+        prefix, value = text.split("=", 1)
+        if prefix.strip().lower() in {"button", "role", "label", "name"}:
+            return value.strip(" '\"")
     return ""
 
 
@@ -9690,6 +9874,54 @@ _ACTION_LABELS = (
     "撤回", "撤销", "作废", "取消", "删除", "驳回", "同意", "审批",
     "提交", "保存", "新增", "创建", "更新", "编辑", "导出", "查询", "搜索",
 )
+
+
+def _capability_operation_kind(step: FlowStep) -> str:
+    """Infer a public business operation from grounded request/action evidence."""
+    method = str(step.method or "GET").upper()
+    meta = step.source_meta or {}
+    locator = _locator_action_name(str(meta.get("trigger_locator") or "")).casefold()
+    signature = " ".join((
+        locator,
+        str(step.name or ""),
+        _request_path({"url": step.path or step.url}),
+    )).casefold()
+    is_query_action = _has_query_action_evidence(
+        meta.get("trigger_op"),
+        str(meta.get("trigger_locator") or ""),
+    )
+    if (
+        method in {"GET", "HEAD"}
+        or is_query_action
+        or str(meta.get("role") or step.semantic_role or "") == "business_get"
+    ):
+        if re.search(r"(?:^|[/_.\s-])(?:export|download|excel)(?:$|[/_.\s-])|导出|下载", signature):
+            return "export"
+        if is_query_action:
+            return "query_status"
+        if re.search(r"(?:detail|inspect|view)|详情|查看", signature):
+            return "inspect"
+        if re.search(r"(?:preview)|预览", signature):
+            return "preview"
+        return "query_status"
+    # Specific business verbs must win over generic edit/update markers.
+    if re.search(r"(?:cancel-by-start-user|withdraw|revoke)|撤回|撤销", signature):
+        return "withdraw"
+    if re.search(r"(?:delete|remove)|删除", signature):
+        return "delete"
+    if re.search(r"(?:reject)|驳回", signature):
+        return "reject"
+    if re.search(r"(?:approve|approval|pass)|审批|同意|通过", signature):
+        return "approve"
+    if re.search(r"(?:submit-process|submit|commit)|提交", signature):
+        return "submit"
+    if re.search(r"(?:draft|save-draft)|草稿|暂存", signature):
+        return "save_draft"
+    if re.search(r"(?:create|insert|add)|新增|创建", signature):
+        return "create"
+    if re.search(r"(?:update|edit|modify)|更新|编辑|保存", signature):
+        return "update"
+    return "submit"
 
 
 def _capability_action_label(spec: FlowSpec, capability: FlowCapability) -> str:
@@ -9723,13 +9955,25 @@ def _capability_action_label(spec: FlowSpec, capability: FlowCapability) -> str:
             return "审批"
         if re.search(r"(?:^|[/_.-])(?:save|draft)(?:[/_.-]|$)", signature):
             return "保存"
-    if capability.kind == "query_status":
-        return "查询"
-    if capability.kind == "validate_batch":
-        return "校验"
-    if capability.kind == "submit_batch":
-        return "批量提交"
-    return "提交"
+    return {
+        "query": "查询",
+        "query_status": "查询",
+        "list_options": "查询",
+        "validate": "校验",
+        "validate_batch": "校验",
+        "preview": "预览",
+        "inspect": "查看",
+        "export": "导出",
+        "create": "新增",
+        "update": "更新",
+        "save_draft": "保存草稿",
+        "submit": "提交",
+        "submit_batch": "批量提交",
+        "approve": "审批",
+        "reject": "驳回",
+        "withdraw": "撤回",
+        "delete": "删除",
+    }.get(capability.kind, "执行")
 
 
 def _capability_param_labels(spec: FlowSpec, capability: FlowCapability) -> list[str]:
@@ -9750,8 +9994,10 @@ def _capability_param_labels(spec: FlowSpec, capability: FlowCapability) -> list
 
 def _capability_fallback_title(business: str, action: str, kind: str) -> str:
     subject = business or "录制业务"
-    if kind == "query_status":
+    if kind in {"query", "query_status"}:
         return f"查询{subject}" if subject.endswith(("记录", "列表", "状态", "详情")) else f"查询{subject}记录"
+    if kind == "export":
+        return f"导出{subject}"
     if kind == "list_options":
         return f"获取{subject}选项"
     if kind == "validate_batch":
@@ -9776,7 +10022,7 @@ def _capability_fallback_intent(
         field_text += "等条件"
     elif field_text:
         field_text += "等条件"
-    if capability.kind in {"query_status", "list_options"}:
+    if capability.kind in READ_CAPABILITY_KINDS:
         prefix = f"按{field_text}" if field_text else "按调用方提供的查询条件"
         return f"{prefix}查询{business}记录，并返回可供调用方使用的业务结果。"
     prefix = f"根据调用方提供的{field_text}" if field_text else "根据调用方提供的业务信息"
@@ -9808,19 +10054,27 @@ def _capability_action_slug(action: str, kind: str) -> str:
         "导出": "export", "校验": "validate",
     }
     return mapping.get(action) or {
-        "query_status": "query", "validate_batch": "validate",
-        "submit_batch": "submit_batch", "submit": "submit",
+        "query": "query", "query_status": "query", "list_options": "list_options",
+        "validate": "validate", "validate_batch": "validate", "preview": "preview",
+        "inspect": "inspect", "export": "export", "create": "create",
+        "update": "update", "save_draft": "save_draft", "submit": "submit",
+        "submit_batch": "submit_batch", "approve": "approve", "reject": "reject",
+        "withdraw": "withdraw", "delete": "delete",
     }.get(kind, "execute")
 
 
 def _meaningful_planned_capability_name(value: str, kind: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_").lower()
     generic = {
-        "query_status", "list_options", "validate_batch", "submit_batch", "submit",
+        *ALLOWED_CAPABILITY_KINDS,
         "capability", "ability",
     }
-    if not name or name in generic or re.fullmatch(r"(?:capability|ability)_?\d*", name):
+    if not name or re.fullmatch(r"(?:capability|ability)_?\d*", name):
         return ""
+    if name in generic:
+        # With no page/business subject available, a precise operation name is
+        # still better than the historical catch-all ``submit``.
+        return name if name == kind and kind not in {"query_status", "submit", "submit_batch"} else ""
     # A semantic name must contain an action plus a subject, not just mirror an
     # endpoint verb such as ``cancel``.
     if "_" not in name or name in {kind, "query", "cancel", "withdraw", "submit"}:
@@ -9889,6 +10143,11 @@ def _ensure_capability_explanations(
             return exact
         cap_steps = set(_capability_node_step_ids(capability))
         candidates = [item for item in plan_items if str(item.get("kind") or "") == capability.kind]
+        # Deterministic analysis may refine a legacy Pi ``submit`` into a more
+        # precise draft/create/update/withdraw/delete kind. Preserve the Pi's
+        # business copy by matching the same recorded steps, not the stale kind.
+        if not candidates:
+            candidates = list(plan_items)
         scored = [
             (
                 len(cap_steps & {str(value) for value in (item.get("step_ids") or [])}),
@@ -9938,7 +10197,7 @@ def _ensure_capability_explanations(
             if page_slug else ""
         )
         current_generic = bool(
-            capability.name in {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+            capability.name in ALLOWED_CAPABILITY_KINDS
             or re.fullmatch(r"(?:capability|ability)_?\d*", str(capability.name or ""), re.I)
         )
         if current_generic and (planned_name or deterministic_name):
@@ -11892,7 +12151,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "materialization_integrity": materialization_integrity,
         }
 
-    allowed_kinds = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+    allowed_kinds = ALLOWED_CAPABILITY_KINDS
     allowed_nodes = {"call", "map", "filter", "condition", "foreach", "select", "return"}
     seen_names: set[str] = set()
     request_ids, request_indexes = _capability_request_indexes(spec)

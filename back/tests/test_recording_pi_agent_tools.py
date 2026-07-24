@@ -1085,7 +1085,7 @@ def test_recording_plan_rejects_semantic_fields_outside_semantic_plan():
         agent_tools_module._normalize_recording_plan_submission(malformed, FlowSpec())
 
 
-def test_recording_plan_requires_complete_semantic_contract():
+def test_recording_plan_accepts_incremental_semantic_contract():
     incomplete = {
         "semantic_plan": {
             "business_understanding": "发起请假申请单",
@@ -1093,8 +1093,14 @@ def test_recording_plan_requires_complete_semantic_contract():
         },
     }
 
-    with pytest.raises(ToolError, match="缺少必填字段"):
-        agent_tools_module._normalize_recording_plan_submission(incomplete, FlowSpec())
+    semantic = agent_tools_module._normalize_recording_plan_submission(
+        incomplete, FlowSpec(),
+    )["semantic_plan"]
+    assert semantic["request_roles"] == []
+    assert semantic["field_semantics"] == []
+    assert semantic["capabilities"] == []
+    assert semantic["capability_relations"] == []
+    assert semantic["unresolved_items"] == []
 
 def test_screenshot_normalization_replaces_stale_axes_for_all_control_types():
     controls = [
@@ -1316,13 +1322,12 @@ def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
     assert semantic["unresolved_items"][0]["reason"] == "字段引用不存在或不唯一"
 
 
-def test_transport_filled_semantic_keys_are_rejected_for_agent_retry():
-    with pytest.raises(ToolError, match="未实际提交完整字段.*field_semantics"):
-        agent_tools_module._require_complete_submitted_semantic_keys({
-            "_submitted_semantic_keys": [
-                "business_understanding", "capabilities",
-            ],
-        })
+def test_transport_allows_incremental_semantic_keys():
+    agent_tools_module._require_complete_submitted_semantic_keys({
+        "_submitted_semantic_keys": [
+            "business_understanding", "capabilities",
+        ],
+    })
 
     agent_tools_module._require_complete_submitted_semantic_keys({
         "_submitted_semantic_keys": [

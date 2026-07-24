@@ -1152,11 +1152,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 "plan 格式错误：以下字段必须位于 plan.semantic_plan 内："
                 + ", ".join(misplaced)
             )
-        missing = sorted(semantic_keys.difference(raw_semantic))
-        if missing:
-            raise ToolError(
-                "plan.semantic_plan 缺少必填字段：" + ", ".join(missing)
-            )
         unknown = sorted(set(raw_semantic).difference(semantic_keys))
         if unknown:
             raise ToolError(
@@ -1168,6 +1163,15 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     if not isinstance(semantic, dict):
         semantic = submission.get("plan") if isinstance(submission.get("plan"), dict) else {}
     semantic = deepcopy(semantic)
+    # Pi may submit only the axes it actually changed. The deterministic
+    # baseline below fills request/capability facts; omitted edit arrays mean
+    # "unchanged", not a malformed retry that burns another model turn.
+    semantic.setdefault("business_understanding", {})
+    for key in (
+        "request_roles", "field_semantics", "capabilities",
+        "capability_relations", "unresolved_items",
+    ):
+        semantic.setdefault(key, [])
     if isinstance(raw_plan.get("flow_spec"), dict) or isinstance(semantic.get("flow_spec"), dict):
         raise ToolError(
             "plan 格式错误：禁止提交 flow_spec；必须提交基于真实 step_id + wire_path 的 semantic_plan"
@@ -1220,7 +1224,11 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         semantic[key] = normalized_items
 
     from dano.execution.page.flow_spec import (
+        ALLOWED_CAPABILITY_KINDS,
+        READ_CAPABILITY_KINDS,
+        WRITE_CAPABILITY_KINDS,
         _build_initial_flow_capabilities,
+        _capability_operation_kind,
         _capability_node_step_ids,
         _option_source_step_ids,
         _param_field_manually_edited,
@@ -2015,7 +2023,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         fields.append(field)
     semantic["field_semantics"] = fields
 
-    allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
+    allowed_kinds = ALLOWED_CAPABILITY_KINDS
     allowed_usages = {"execute", "option_source", "fact_check", "preflight"}
     capabilities = []
     seen_boundaries: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
@@ -2193,30 +2201,35 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 str(step_by_id[value].method or "GET").upper()
                 for value in candidates
             }
+            anchor = next(
+                (step_by_id[value] for value in reversed(candidates) if value in step_by_id),
+                None,
+            )
             requested_kind = (
-                "submit"
-                if any(method not in {"GET", "HEAD", "OPTIONS"} for method in methods)
-                else "query_status"
+                _capability_operation_kind(anchor)
+                if anchor is not None
+                else ("submit" if any(method not in {"GET", "HEAD", "OPTIONS"} for method in methods) else "query_status")
             )
         execute_methods = {
             str(step_by_id[item["step_id"]].method or "GET").upper()
             for item in memberships if item["usage"] == "execute"
         }
-        if requested_kind == "query_status" and any(
+        if requested_kind in READ_CAPABILITY_KINDS and any(
             method not in {"GET", "HEAD", "OPTIONS"}
             for method in execute_methods
         ):
-            requested_kind = "submit"
-        elif requested_kind in {"submit", "submit_batch"} and execute_methods and all(
+            anchor = next((step_by_id[item["step_id"]] for item in reversed(memberships) if item["usage"] == "execute"), None)
+            requested_kind = _capability_operation_kind(anchor) if anchor is not None else "submit"
+        elif requested_kind in WRITE_CAPABILITY_KINDS and execute_methods and all(
             method in {"GET", "HEAD", "OPTIONS"}
             for method in execute_methods
         ):
             requested_kind = "query_status"
         if not raw_memberships and not raw_steps and candidates:
             same_family = (
-                {"submit", "submit_batch"}
-                if requested_kind in {"submit", "submit_batch"}
-                else {"query_status", "validate_batch"}
+                WRITE_CAPABILITY_KINDS
+                if requested_kind in WRITE_CAPABILITY_KINDS
+                else READ_CAPABILITY_KINDS
             )
             boundary = max(
                 (
@@ -2319,31 +2332,14 @@ def _require_complete_submitted_semantic_keys(
     *,
     allow_screenshot_field_overlay: bool = False,
 ) -> None:
-    """Reject transport-filled semantic plans so Pi can retry the real payload."""
+    """Validate incremental transport metadata without forcing empty sections."""
     submitted = raw_plan.get("_submitted_semantic_keys")
     if submitted is None:
         return
     if not isinstance(submitted, list):
         raise ToolError("plan._submitted_semantic_keys 必须是数组")
-    required = {
-        "business_understanding", "request_roles", "field_semantics",
-        "capabilities", "capability_relations", "unresolved_items",
-    }
-    missing = sorted(required.difference(str(key) for key in submitted))
-    if missing:
-        semantic = raw_plan.get("semantic_plan")
-        submitted_fields = (
-            semantic.get("field_semantics")
-            if isinstance(semantic, dict) else None
-        )
-        if allow_screenshot_field_overlay and isinstance(submitted_fields, list) and submitted_fields:
-            # Long multimodal tool calls can be truncated after the real field
-            # records.  Those records still pass their own grounding/quality
-            # gate; missing capability/relation arrays must not erase them.
-            return
-        raise ToolError(
-            "plan.semantic_plan 未实际提交完整字段：" + ", ".join(missing)
-        )
+    if any(not isinstance(key, str) for key in submitted):
+        raise ToolError("plan._submitted_semantic_keys 只能包含字符串")
 
 
 def _screenshot_field_only_plan(raw_plan: dict) -> dict | None:
@@ -2397,6 +2393,22 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
         raw_plan,
         allow_screenshot_field_overlay=bool(screenshot_count),
     )
+    if screenshot_count:
+        semantic = raw_plan.get("semantic_plan")
+        has_grounded_proposal = bool(
+            isinstance(semantic, dict)
+            and (
+                semantic.get("field_semantics")
+                or semantic.get("capabilities")
+                or semantic.get("capability_relations")
+                or semantic.get("unresolved_items")
+            )
+        )
+        if not has_grounded_proposal:
+            return await session.accept_unchanged_plan(
+                base_flow_version=params["base_flow_version"],
+                warning="截图与当前配置一致，未发现有证据支持的修改；当前配置未修改",
+            )
     try:
         submission = _normalize_recording_plan_submission(
             raw_plan, session.current_flow_spec()

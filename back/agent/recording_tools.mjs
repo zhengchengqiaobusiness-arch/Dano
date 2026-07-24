@@ -384,7 +384,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。plan.semantic_plan 保留六个标准键，但只列实际变化的字段/能力/关系；未变化数组用空数组。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。plan.semantic_plan 只提交实际变化的字段/能力/关系，未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

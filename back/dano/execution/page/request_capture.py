@@ -2372,6 +2372,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             return "date"
         if kind in {"datetime", "time"}:
             return "datetime"
+        if kind in {"select", "combobox"} and not bool(
+            (item or {}).get("disabled") or (item or {}).get("read_only")
+        ):
+            return "enum"
         if kind in {"checkbox", "radio"}:
             return "boolean"
         return fallback
@@ -3744,7 +3748,10 @@ def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dic
     out["sample_inputs"] = samples
     out["field_types"] = field_types
     kind = str(cap.get("kind") or "")
-    if kind not in {"query_status", "list_options", "validate_batch"}:
+    if kind not in {
+        "query", "query_status", "list_options", "validate", "validate_batch",
+        "preview", "inspect", "export",
+    }:
         checks = [st.get("fact_check") for st in steps if isinstance(st.get("fact_check"), dict)]
         unique_checks = {
             json.dumps(check, ensure_ascii=False, sort_keys=True, default=str): check
@@ -4284,7 +4291,10 @@ def _select_api_request_for_capability(api_request: dict, name: str | None) -> t
         out["capability"] = cap.get("name") or kind
         out["capability_kind"] = kind
         out["capabilities"] = [cap]
-        if kind in {"query_status", "list_options", "validate_batch"}:
+        if kind in {
+            "query", "query_status", "list_options", "validate", "validate_batch",
+            "preview", "inspect", "export",
+        }:
             out.pop("fact_check", None)
         return out, cap, ""
 
@@ -4325,7 +4335,7 @@ def _select_api_request_for_capability(api_request: dict, name: str | None) -> t
 def _apply_read_input_policy(api_request: dict, cap: dict | None) -> dict:
     """Recorded read samples are UI recommendations, not implicit query filters."""
     kind = str((cap or {}).get("kind") or (cap or {}).get("name") or "")
-    if kind not in {"query", "query_status", "list_options", "validate", "validate_batch", "preview", "inspect"}:
+    if kind not in {"query", "query_status", "list_options", "validate", "validate_batch", "preview", "inspect", "export"}:
         return api_request
     schema = (cap or {}).get("input_schema") or (cap or {}).get("parameters") or {}
     props = schema.get("properties") or {} if isinstance(schema, dict) else {}
