@@ -132,11 +132,15 @@ def test_write_skill_exports_runtime_contract_and_compact_navigation(tmp_path):
     assert interaction["multi_field_collection"]["top_level_required"] == ["title", "questions"]
     assert interaction["confirmation"]["allowed_keys"] == ["formIds", "confirm"]
     assert interaction["confirmation"]["continue_only_when_status"] == "confirmed"
+    frontend = contract["call_protocol"]["frontend_output"]
+    assert frontend["success"]["request_link"]["target"] == "_blank"
+    assert frontend["success"]["request_link"]["rel"] == "noopener noreferrer"
     assert len(contract["capabilities"]) == 2
     assert contract["capability_relations"][0]["automatic"] is False
     assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
-    assert f'name: {json.dumps(folder.name, ensure_ascii=False)}' in skill_md
+    assert f'name: {json.dumps(manifest.title, ensure_ascii=False)}' in skill_md
     assert (folder / "scripts" / "format_list.py").is_file()
+    assert (folder / "scripts" / "format_list.ps1").is_file()
     assert (folder / "references" / "CAPABILITIES.md").is_file()
     assert "metadata:" not in skill_md.split("---", 2)[1]
     assert f'display_name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in openai_yaml
@@ -156,6 +160,7 @@ def test_write_skill_exports_runtime_contract_and_compact_navigation(tmp_path):
     assert (bundle / "agents" / "openai.yaml").is_file()
     assert (bundle / "references" / "CAPABILITIES.md").is_file()
     assert (bundle / "scripts" / "format_list.py").is_file()
+    assert (bundle / "scripts" / "format_list.ps1").is_file()
     assert "`scripts/export_contract.sh`" in bundle_md
     assert "`bash scripts/<action>.sh" in bundle_md
     assert "HTTP 5xx、超时或结果不明" in bundle_md

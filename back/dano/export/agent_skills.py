@@ -9,6 +9,7 @@
   references/CAPABILITIES.md / CONTRACT.json / OPTIONS.md —— 人读能力参考 + 无损契约 + 选择项参考
   scripts/dano_call.py  —— 真逻辑:能力级参数校验 + --confirm + --diagnose,POST Dano capability invoke,末行打印稳定 JSON 状态
   scripts/submit.sh / submit.ps1     —— 转发到 dano_call.py 的薄壳
+  scripts/format_list.py / format_list.ps1 —— 跨平台把列表结果格式化为稳定 Markdown 表格
 
 真执行(Dano→目标系统 + 三模型闸门 + 事实核查)都在 Dano 侧;本端无业务逻辑、不碰 OA 凭证,
 只带 X-Tenant-Key 调 Dano。密钥经环境变量(DANO_URL / DANO_TENANT_KEY),不写进文件。
@@ -324,8 +325,8 @@ def _slug(skill_id: str) -> str:
 
 
 def _skill_name(title: str, fallback: str) -> str:
-    """Keep frontmatter portable; the business title lives in the heading/UI metadata."""
-    return fallback
+    """Use the user-facing Chinese business title; keep ``fallback`` only for untitled assets."""
+    return str(title or "").strip() or fallback
 
 
 def _agents_openai_yaml(slug: str, display_name: str, short_description: str) -> str:
@@ -353,13 +354,37 @@ def _trigger_description(m: SkillManifest, contracts: dict[str, dict]) -> str:
     ))
     triggers = "、".join(titles) or (m.title or m.action)
     return (
-        f"用户要处理“{object_name}”并需要{triggers}时使用。"
-        "仅调用这里列出的 Dano 已发布能力；咨询或未覆盖动作不要触发。"
+        f"用于“{object_name}”业务。用户明确要求执行“{triggers}”中的任一已发布操作时使用；"
+        "负责选择正确能力、一次性收集表单参数、确认写操作并返回执行结果。"
+        "仅咨询、业务对象不一致或要求未列出的操作时不要触发。"
     )
 
 
+def _frontend_output_protocol() -> dict:
+    """Stable renderer contract for successful generated-Skill calls."""
+    return {
+        "format": "markdown",
+        "success": {
+            "title": "操作成功",
+            "body": "按 output_schema 展示业务结果；数组使用 Markdown 表格且表格行之间不得插入空行",
+            "request_link": {
+                "source": "request_link",
+                "label": "查看原始请求",
+                "target": "_blank",
+                "rel": "noopener noreferrer",
+                "only_when_status": "succeeded",
+            },
+        },
+        "failure": {
+            "title": "操作未完成",
+            "body_source": "reason",
+            "show_request_link": False,
+        },
+    }
+
+
 def _validate_generated_skill(folder: Path, expected_name: str) -> None:
-    """Fail export before publication when the generated package is not portable."""
+    """Fail export before publication when the generated package is incomplete."""
     if not expected_name.strip() or "\n" in expected_name or "\r" in expected_name:
         raise ValueError("Skill name 必须是非空单行标题")
     skill_path = folder / "SKILL.md"
@@ -375,7 +400,7 @@ def _validate_generated_skill(folder: Path, expected_name: str) -> None:
     except json.JSONDecodeError:
         actual_name = raw_name
     if actual_name != expected_name:
-        raise ValueError(f"Skill name 与目录标识不一致: {actual_name!r} != {expected_name!r}")
+        raise ValueError(f"Skill name 与预期业务名不一致: {actual_name!r} != {expected_name!r}")
     if len(text.splitlines()) > 500:
         raise ValueError("SKILL.md 超过 500 行，违反渐进式披露约束")
     if not (folder / "agents" / "openai.yaml").is_file():
@@ -504,6 +529,7 @@ def _export_contract(m: SkillManifest) -> dict:
         schema = copy.deepcopy(contract["parameters"])
         call_protocol = copy.deepcopy(raw.get("call_protocol") or {})
         call_protocol["interaction_protocol"] = copy.deepcopy(interaction)
+        call_protocol["frontend_output"] = _frontend_output_protocol()
         call_protocol["input_schema"] = copy.deepcopy(schema)
         call_protocol["output_schema"] = copy.deepcopy(contract["output_schema"])
         exported_capabilities.append({
@@ -540,6 +566,7 @@ def _export_contract(m: SkillManifest) -> dict:
     }
     root_protocol = payload["call_protocol"]
     root_protocol["interaction_protocol"] = copy.deepcopy(interaction)
+    root_protocol["frontend_output"] = _frontend_output_protocol()
 
     if len(contracts) == 1:
         name, contract = next(iter(contracts.items()))
@@ -579,6 +606,17 @@ def _export_contract(m: SkillManifest) -> dict:
                 "capability": {"type": "string", "enum": capability_names},
                 "output": {"type": "object"},
                 "reason": {"type": "string"},
+                "request_url": {"type": "string", "format": "uri"},
+                "request_link": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "url": {"type": "string", "format": "uri"},
+                        "target": {"type": "string", "const": "_blank"},
+                        "rel": {"type": "string", "const": "noopener noreferrer"},
+                    },
+                    "required": ["label", "url", "target", "rel"],
+                },
             },
             "required": ["status"],
         }
@@ -842,7 +880,8 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "Windows PowerShell 使用 `scripts/submit.ps1` 传入同样参数。写能力同时带 `--confirm`。"
         "一次调用由 Dano 完成内部接口编排。",
         "7. 按末行 JSON 的 `status` 处理结果。列表结果必须先运行 "
-        "`python scripts/format_list.py --json '<output JSON>'`；PowerShell 可把 JSON 通过管道传给脚本。"
+        "`python scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
+        "`scripts/format_list.ps1 '<output JSON>'`。"
         "再以 Markdown 表格呈现；"
         "不要重复输出原始 JSON。",
     ]
@@ -1015,6 +1054,23 @@ def _question_options(schema: dict) -> list[dict]:
 
 def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
     schema = schema or {}
+    data_source = _question_data_source(schema)
+    if data_source:
+        return f"`dataSource: {json.dumps(data_source, ensure_ascii=False)}`"
+    options = _question_options(schema)
+    if options:
+        return f"`options: {json.dumps(options, ensure_ascii=False)}`"
+    if schema.get("x-options-source"):
+        return (
+            f"先运行 `--list-options {field}`；把返回的 `options` 对象数组原样用于表单，"
+            "用户选择后按所选 `id` 找回 `label`，name-ref 参数提交 `label`"
+        )
+    return "无；自由输入"
+
+
+def _question_data_source(schema: dict) -> dict | None:
+    """Return only a complete ask_user_question remote-option contract."""
+    schema = schema or {}
     source = schema.get("x-options-source-meta") if isinstance(schema.get("x-options-source-meta"), dict) else {}
     endpoint = str(
         source.get("endpoint") or source.get("source_url") or source.get("url") or ""
@@ -1045,16 +1101,8 @@ def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
         ):
             if source.get(source_key):
                 data_source[target_key] = source[source_key]
-        return f"`dataSource: {json.dumps(data_source, ensure_ascii=False)}`"
-    options = _question_options(schema)
-    if options:
-        return f"`options: {json.dumps(options, ensure_ascii=False)}`"
-    if schema.get("x-options-source"):
-        return (
-            f"先运行 `--list-options {field}`；把返回的 `options` 对象数组原样用于表单，"
-            "用户选择后按所选 `id` 找回 `label`，name-ref 参数提交 `label`"
-        )
-    return "无；自由输入"
+        return data_source
+    return None
 
 
 def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
@@ -1108,6 +1156,77 @@ def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
         f"`{json.dumps(form_value, ensure_ascii=False)}`"
         f"（{safe}；录制值 `{json.dumps(recorded, ensure_ascii=False)}`{note}）"
     )
+
+
+def _question_form_default(schema: dict, control: str):  # noqa: ANN001
+    """Convert a recorded value to the exact value accepted by the form control."""
+    if "default" not in schema or schema.get("default") in (None, ""):
+        return "<调用前替换为基于用户上下文的非空推荐值>"
+    recorded = schema.get("default")
+    if control == "radio" and isinstance(recorded, bool):
+        return "true" if recorded else "false"
+    if schema.get("type") in {"array", "object"} and control == "textarea":
+        return json.dumps(recorded, ensure_ascii=False, separators=(",", ":"))
+    options = _question_options(schema)
+    match = next(
+        (
+            option for option in options
+            if recorded == option.get("id") or str(recorded) == str(option.get("label"))
+        ),
+        None,
+    )
+    if match is not None:
+        return match["id"]
+    if (
+        control == "date"
+        and schema.get("format") == "date-time"
+        and isinstance(recorded, str)
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:00", recorded)
+    ):
+        return recorded[:-3]
+    return recorded
+
+
+def _question_request_template(name: str, contract: dict) -> dict:
+    """Render a schema-valid grouped form request for the selected capability."""
+    schema = contract.get("parameters") or {}
+    required = set(schema.get("required") or [])
+    query = contract.get("kind") in _READ_CAPABILITY_KINDS
+    questions: list[dict] = []
+    for field, prop in (schema.get("properties") or {}).items():
+        if not isinstance(prop, dict) or (query and field not in required):
+            continue
+        control = _question_control(prop)
+        question = {
+            "id": field,
+            "question": str(
+                (contract.get("field_labels") or {}).get(field)
+                or prop.get("label") or prop.get("description") or field
+            ),
+            "inputType": control,
+            "required": field in required,
+            "default": _question_form_default(prop, control),
+        }
+        data_source = _question_data_source(prop)
+        options = _question_options(prop)
+        if data_source:
+            question["dataSource"] = data_source
+        elif options:
+            question["options"] = options
+        elif prop.get("x-options-source"):
+            question["options"] = [{
+                "id": "<调用前替换为 --list-options 返回的稳定 id>",
+                "label": "<调用前替换为同一候选的 label>",
+            }]
+        if control in {"select", "treeSelect"}:
+            question["multiple"] = bool(prop.get("multiple") or prop.get("type") == "array")
+        if control == "date":
+            question["dateFormat"] = str(
+                prop.get("dateFormat")
+                or ("yyyy-MM-dd HH:mm" if prop.get("format") == "date-time" else "yyyy-MM-dd")
+            )
+        questions.append(question)
+    return {"title": str(contract.get("title") or name), "questions": questions}
 
 
 def _question_rows(schema: dict, *, prefix: str = "") -> list[tuple[str, dict, bool]]:
@@ -1183,6 +1302,30 @@ def _question_collection_block(name: str, contract: dict) -> list[str]:
     return lines
 
 
+def _question_request_block(name: str, contract: dict, heading: str) -> list[str]:
+    """Add one copyable request shape without inventing fields outside the contract."""
+    request = _question_request_template(name, contract)
+    lines = ["", heading, ""]
+    if not request["questions"]:
+        lines += [
+            "该查询没有必填筛选项：用户未明确给筛选条件时不要调用表单，直接提交空 `input`；"
+            "用户明确给出可选筛选条件时，只从上表选取这些字段并按同一 `title + questions[]` 结构组装。",
+        ]
+        return lines
+    lines += [
+        "以下 JSON 是调用 `ask_user_question` 的固定结构。"
+        "出现“调用前替换”占位值时，必须先根据当前上下文或 `--list-options` 结果完成替换，禁止原样发送：",
+        "",
+        "```json",
+        json.dumps(request, ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "前端必须按 `questions[]` 原顺序和 `inputType` 渲染为一个分组表单；"
+        "不得展示原始 JSON，不得拆成逐字段聊天问答。",
+    ]
+    return lines
+
+
 def _capability_reference_md(m: SkillManifest) -> str:
     """Human-readable per-capability reference; CONTRACT.json remains authoritative."""
     lines = [
@@ -1212,6 +1355,7 @@ def _capability_reference_md(m: SkillManifest) -> str:
             line[3:] if line.startswith("   ") else line
             for line in block[1:]
         ]]
+        lines += _question_request_block(name, contract, "### 固定表单请求")
         nested_rows = _nested_field_rows(contract.get("parameters") or {})
         if nested_rows:
             lines += [
@@ -1258,6 +1402,7 @@ def _business_capability_reference_md(manifests: list[SkillManifest]) -> str:
                 line[3:] if line.startswith("   ") else line
                 for line in block[1:]
             ]]
+            lines += _question_request_block(name, contract, "#### 固定表单请求")
             nested_rows = _nested_field_rows(contract.get("parameters") or {})
             if nested_rows:
                 lines += [
@@ -1385,7 +1530,8 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
     L += [
         "7. 读取脚本末行 JSON：`succeeded` 才报告成功；`need_select` 补充候选；"
         "`need_confirm` 重新确认；`failed` 按 `reason` 处理。列表结果必须运行 "
-        "`python scripts/format_list.py --json '<output JSON>'`；PowerShell 可把 JSON 通过管道传给脚本。"
+        "`python scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
+        "`scripts/format_list.ps1 '<output JSON>'`。"
         "最终只用 Markdown 表格呈现，"
         "不要重复粘贴原始 JSON。写操作超时或结果不明时不得自动重试。",
     ]
@@ -1521,8 +1667,17 @@ _EXECUTION_DIR_MD = """## 执行位置（必须）
 
 _LIST_OUTPUT_MD = """## 列表输出要求
 - 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --json '<output JSON>'` 格式化。
+- Windows PowerShell 使用 `scripts/format_list.ps1 '<output JSON>'`，避免管道编码破坏中文。
 - 最终回复使用脚本生成的 Markdown 表格；无数据时明确显示“无数据”，不要重复粘贴原始 JSON。
+- Markdown 表头、分隔行和数据行之间不得插入空行；单元格内换行统一使用 `<br>`。
 - 非列表对象仍按能力的 `output_schema` 解读，不要为了套表格丢失业务字段。"""
+
+_FRONTEND_OUTPUT_MD = """## 固定返回展示
+- `succeeded`：先显示“操作成功”，再按 `output_schema` 展示业务结果；数组只显示格式化后的 Markdown 表格。
+- 成功结果含 `request_link` 时，必须使用其中的 `url` 渲染“查看原始请求”链接，并设置
+  `target="_blank"`、`rel="noopener noreferrer"`，让用户点击后在新窗口打开。
+- 不得猜测、改写或自行拼接链接；没有 `request_link` 时不显示链接。
+- 非成功状态不显示成功链接，展示脚本返回的原因或下一步。"""
 
 
 # ─────────────────────────── SKILL.md ───────────────────────────
@@ -1571,7 +1726,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     )
     partial_status_row = (
         "| `partial_success` | 批量能力仅部分条目成功 | 逐项报告成功/失败及原索引；"
-        "不得笼统宣称全部成功，也不得自动重试成功项 |"
+        "不得笼统宣称全部成功，也不得自动重试成功项 |\n"
         if has_batch_capability else ""
     )
     return f"""---
@@ -1606,12 +1761,13 @@ description: {json.dumps(desc, ensure_ascii=False)}
 
 {_LIST_OUTPUT_MD}
 
+{_FRONTEND_OUTPUT_MD}
+
 ## 输出契约(脚本末行 JSON)
 | status | 含义 | 你应做的 |
 |---|---|---|
 | `succeeded` | {success_meaning} | 按该能力的 output_schema 解读 `output` |
-{partial_status_row}
-| `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
+{partial_status_row}| `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason`) | 按错误处理处置，勿谎报成功 |
 
@@ -1718,6 +1874,30 @@ def _emit(obj):
 def _strict_boolean(value):
     """Only JSON booleans are booleans; strings/numbers must never open a gate."""
     return value if isinstance(value, bool) else None
+
+
+def _original_request_link(api_audit):
+    """Find the actual successful request URL from direct or workflow audit output."""
+    if not isinstance(api_audit, dict):
+        return None
+    candidates = [api_audit]
+    for key in ("final", "step_result", "raw"):
+        if isinstance(api_audit.get(key), dict):
+            candidates.append(api_audit[key])
+    steps = api_audit.get("step_results")
+    if isinstance(steps, list):
+        candidates.extend(item for item in reversed(steps) if isinstance(item, dict))
+    for item in candidates:
+        url = item.get("url")
+        if not isinstance(url, str) or not re.match(r"^https?://", url.strip(), re.I):
+            continue
+        return {
+            "label": "查看原始请求",
+            "url": url.strip(),
+            "target": "_blank",
+            "rel": "noopener noreferrer",
+        }
+    return None
 
 
 def _coerce_arguments(obj):
@@ -2127,8 +2307,14 @@ def main():
             _emit({"status": "failed", "state": state,
                    "reason": "输出不符合 output_schema: %s" % e, "output": output})
             sys.exit(1)
-        _emit({"status": "partial_success" if partial else "succeeded", "state": state,
-               "output": output, "fact_check": fc})
+        result = {"status": "partial_success" if partial else "succeeded", "state": state,
+                  "output": output, "fact_check": fc}
+        if not partial:
+            request_link = _original_request_link(api_audit)
+            if request_link:
+                result["request_url"] = request_link["url"]
+                result["request_link"] = request_link
+        _emit(result)
     elif state == "needs_select":
         sel = audit.get("select") or {}
         _emit({"status": "need_select", "state": state, "message": res.get("message"),
@@ -2176,6 +2362,9 @@ exec "$PY" "$DIR/dano_call.py" "$@"
 """
 
 _SUBMIT_PS1 = """# 由 Dano 自动生成:转发到 dano_call.py(真逻辑)。
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $forward = [System.Collections.Generic.List[string]]::new()
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -2244,9 +2433,19 @@ def format_table(value):
 def main():
     parser = argparse.ArgumentParser(description="把 JSON 列表格式化为 Markdown 表格")
     parser.add_argument("--json", dest="raw")
+    parser.add_argument("--json-base64", dest="raw_base64")
     parser.add_argument("--file")
     args = parser.parse_args()
-    if args.raw is not None:
+    if args.raw is not None and args.raw_base64 is not None:
+        parser.error("--json 与 --json-base64 不能同时使用")
+    if args.raw_base64 is not None:
+        import base64
+        try:
+            raw = base64.b64decode(args.raw_base64, validate=True).decode("utf-8")
+        except Exception as error:
+            print("Base64 JSON 解码失败: %s" % error, file=sys.stderr)
+            raise SystemExit(2)
+    elif args.raw is not None:
         raw = args.raw
     elif args.file:
         with open(args.file, encoding="utf-8-sig") as handle:
@@ -2264,6 +2463,18 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+_FORMAT_LIST_PS1 = """# 保留 Windows PowerShell 中的 UTF-8 JSON，再交给格式化脚本。
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$raw = if ($args.Count -gt 0) { [string]$args[0] } else { [Console]::In.ReadToEnd() }
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($raw)
+$encoded = [System.Convert]::ToBase64String($bytes)
+python "$dir/format_list.py" --json-base64 $encoded
+exit $LASTEXITCODE
+"""
 
 
 def _chmod_x(path: Path) -> None:
@@ -2312,6 +2523,7 @@ def _write_skill(out_dir: Path, m: SkillManifest,
         formatter = folder / "scripts" / "format_list.py"
         formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
         _chmod_x(formatter)
+        (folder / "scripts" / "format_list.ps1").write_text(_FORMAT_LIST_PS1, encoding="utf-8")
         return _publish_folder(folder, target, slug, _skill_name(m.title, slug))
     except Exception:
         _abort_stage(folder)
@@ -2329,6 +2541,9 @@ def _op_sh(action: str) -> str:
 
 def _op_ps1(action: str) -> str:
     return ("# 由 Dano 自动生成:转发到 %s.py。\n"
+            "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+            "$OutputEncoding = [Console]::OutputEncoding\n"
             "$dir = Split-Path -Parent $MyInvocation.MyCommand.Path\n"
             "$forward = [System.Collections.Generic.List[string]]::new()\n"
             "for ($i = 0; $i -lt $args.Count; $i++) {\n"
@@ -2392,7 +2607,11 @@ def _business_skill_md(subsystem: str, business: str, manifests: list[SkillManif
             for name, contract in _capability_contracts(manifest).items()
         )
     )
-    description = f"调用 Dano 执行“{label}”已发布操作。用户要{titles or label}时使用；仅覆盖这些操作。"
+    description = (
+        f"用于“{label}”业务。用户明确要求执行“{titles or label}”中的任一已发布操作时使用；"
+        "负责选择正确操作、一次性收集参数、确认写操作并返回结果。"
+        "仅咨询或要求未列出的操作时不要触发。"
+    )
     return f"""---
 name: {json.dumps(_skill_name(label, slug), ensure_ascii=False)}
 description: {json.dumps(description, ensure_ascii=False)}
@@ -2425,6 +2644,8 @@ description: {json.dumps(description, ensure_ascii=False)}
    `failed`、`partial_success` 或结果不明时不得宣称全部成功或自动重复提交。
 
 {_LIST_OUTPUT_MD}
+
+{_FRONTEND_OUTPUT_MD}
 
 {_errors_md(has_fact_verification)}
 
@@ -2489,6 +2710,7 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
         formatter = folder / "scripts" / "format_list.py"
         formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
         _chmod_x(formatter)
+        (folder / "scripts" / "format_list.ps1").write_text(_FORMAT_LIST_PS1, encoding="utf-8")
         return _publish_folder(folder, target, slug, _skill_name(label, slug))
     except Exception:
         _abort_stage(folder)
@@ -2502,19 +2724,19 @@ def _index_md(entries: list[dict], slug: str) -> str:
     table = "| 业务 | 剧本目录 | 规模 |\n|---|---|---|\n" + rows
     description = "用户要办理或查询已接入 Dano 的业务、但尚未确定具体 Skill 时使用。"
     return f"""---
-name: {json.dumps(slug, ensure_ascii=False)}
+name: {json.dumps("Dano 业务 Skill 索引", ensure_ascii=False)}
 description: {json.dumps(description, ensure_ascii=False)}
 ---
 
 # Dano 业务 Skill 索引
 
 这是所有已生成业务剧本的**路由目录**。用户说要办什么,在下表里找到对应业务,
-打开它的剧本目录(各自一本自包含 skill),按那本剧本的六段流程办。
+打开它的剧本目录(各自一本自包含 skill),严格按对应 Skill 的操作步骤执行。
 
 ## 业务目录
 {table}
 
-> 每本剧本都含:①自检 ②办理前校验 ③办理(需确认) ④错误处置 ⑤事后确认 ⑥缺失恢复。
+> 每本剧本都包含能力选择、表单收集、写前确认、执行、结果展示与错误处理。
 > 找不到对应业务就如实告知用户"没有这个业务的 skill",**不要臆造**。
 """
 
@@ -2536,7 +2758,7 @@ def _write_index(out_dir: Path, entries: list[dict],
             ),
             encoding="utf-8",
         )
-        _publish_folder(folder, target, slug, slug)
+        _publish_folder(folder, target, slug, "Dano 业务 Skill 索引")
         return slug
     except Exception:
         _abort_stage(folder)

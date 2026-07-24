@@ -448,7 +448,7 @@ def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tm
         folder / "references" / "CAPABILITIES.md"
     ).read_text(encoding="utf-8")
 
-    assert f'name: "{folder.name}"' in markdown
+    assert 'name: "酒店申请"' in markdown
     assert "3. **一次性收集全部表单项。**" in markdown
     assert "`submit_hotel_apply`" in markdown
     assert "| `hotelName` | 酒店名称 | `text`" in capability_reference
@@ -457,8 +457,17 @@ def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tm
     assert '"params": {"type": "hotel_city"}' in capability_reference
     assert '"resultPath": "data.records"' in capability_reference
     assert "| `remark` | 申请说明 | `textarea`" in capability_reference
+    assert "### 固定表单请求" in capability_reference
+    assert '"title": "提交酒店申请"' in capability_reference
+    assert '"id": "hotelName"' in capability_reference
+    assert '"question": "酒店名称"' in capability_reference
+    assert '"inputType": "textarea"' in capability_reference
+    assert "不得展示原始 JSON" in capability_reference
     assert "按 `answer` 对象的 `id` 映射为能力参数" in markdown
     assert "Markdown 表格呈现" in markdown
+    assert "target=\"_blank\"" in markdown
+    assert "\n\n| `need_select`" not in markdown
+    assert (folder / "scripts" / "format_list.ps1").is_file()
 
 
 def test_exported_skill_is_compact_and_routes_details_to_references(tmp_path):
@@ -495,8 +504,10 @@ def test_exported_description_is_a_compact_trigger_index():
     markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
     frontmatter = markdown.split("---", 2)[1]
 
-    assert "用户要处理“酒店申请”并需要查询酒店申请记录、撤回酒店申请时使用" in frontmatter
-    assert "咨询或未覆盖动作不要触发" in frontmatter
+    assert "用于“酒店申请”业务" in frontmatter
+    assert "用户明确要求执行“查询酒店申请记录、撤回酒店申请”中的任一已发布操作时使用" in frontmatter
+    assert "负责选择正确能力、一次性收集表单参数、确认写操作并返回执行结果" in frontmatter
+    assert "仅咨询、业务对象不一致或要求未列出的操作时不要触发" in frontmatter
     assert "仅用于这些已发布能力" not in frontmatter
 
 
@@ -585,6 +596,9 @@ def test_datetime_recommendations_match_question_control_format():
     assert '`"2026-07-01 16:00"`（录制推荐值，需用户确认；录制值 `"2026-07-01 16:00:00"`）' in reference
     assert "| `精确时间` | 精确时间 | `text` | datetime" in reference
     assert '`"2026-07-01 16:00:30"`（录制推荐值，需用户确认）' in reference
+    assert '"inputType": "date"' in reference
+    assert '"dateFormat": "yyyy-MM-dd HH:mm"' in reference
+    assert '"default": "2026-07-01 16:00"' in reference
 
 
 def test_generated_runtime_converts_form_values_without_changing_contract(tmp_path):
@@ -650,6 +664,12 @@ def test_generated_runtime_converts_form_values_without_changing_contract(tmp_pa
     }
     assert namespace["_apply_safe_defaults"](arguments, contract)["pageNo"] == 1
     assert contract["parameters"] == manifest.capabilities[0]["input_schema"]
+    reference = (folder / "references" / "CAPABILITIES.md").read_text(encoding="utf-8")
+    assert '"inputType": "select"' in reference
+    assert '"id": "room-1"' in reference
+    assert '"label": "标准间"' in reference
+    assert '"default": "room-1"' in reference
+    assert '"default": "[{\\"date\\":\\"2026-07-01\\"}]"' in reference
 
 
 def test_windows_wrapper_preserves_json_and_formatter_accepts_bom(tmp_path):
@@ -686,3 +706,17 @@ def test_windows_wrapper_preserves_json_and_formatter_accepts_bom(tmp_path):
         env=env,
     )
     assert json.loads(result.stdout)["status"] == "need_confirm"
+
+    formatted = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-File",
+            str(folder / "scripts" / "format_list.ps1"),
+            json.dumps({"records": [{"名称": "杭州酒店"}]}, ensure_ascii=False),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert "| 名称 |" in formatted.stdout
+    assert "| 杭州酒店 |" in formatted.stdout

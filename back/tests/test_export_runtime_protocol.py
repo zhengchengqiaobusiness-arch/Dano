@@ -115,7 +115,13 @@ def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, 
         def read(self):
             return json.dumps({
                 "state": "completed",
-                "audit": {"fact_check": {"passed": True}},
+                "audit": {
+                    "fact_check": {"passed": True},
+                    "api": {
+                        "method": "POST",
+                        "url": "https://oa.example.test/requests/42",
+                    },
+                },
                 "exec_result": {"structured_output": {"result": {}}},
             }).encode()
 
@@ -141,7 +147,32 @@ def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, 
             "confirm": True,
         },
     }
-    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["status"] == "succeeded"
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result["status"] == "succeeded"
+    assert result["request_url"] == "https://oa.example.test/requests/42"
+    assert result["request_link"] == {
+        "label": "查看原始请求",
+        "url": "https://oa.example.test/requests/42",
+        "target": "_blank",
+        "rel": "noopener noreferrer",
+    }
+
+
+def test_generated_runtime_finds_original_url_in_workflow_final_step():
+    namespace = _write_runtime_namespace()
+
+    assert namespace["_original_request_link"]({
+        "step_results": [
+            {"method": "GET", "url": "https://oa.example.test/options"},
+            {"method": "POST", "url": "https://oa.example.test/requests"},
+        ],
+        "final": {"method": "POST", "url": "https://oa.example.test/requests"},
+    }) == {
+        "label": "查看原始请求",
+        "url": "https://oa.example.test/requests",
+        "target": "_blank",
+        "rel": "noopener noreferrer",
+    }
 
 
 def test_generated_runtime_unwraps_normalized_capability_output_before_schema_check(
