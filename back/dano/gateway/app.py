@@ -560,6 +560,30 @@ async def _start_recording_pi_candidate(factory):  # noqa: ANN001, ANN201
     return candidate
 
 
+def _recording_publish_review_failure(error: Exception) -> dict[str, object]:
+    detail = str(error) or error.__class__.__name__
+    missing_submission = "submit_recording_review" in detail
+    return {
+        "ok": False,
+        "stage": "recording_pi_review",
+        "reason": (
+            "发布审核未完成：Pi 未提交结构化发布审核"
+            if missing_submission
+            else f"发布审核执行失败：{detail}"
+        ),
+        "clarifications": [
+            (
+                "原因：模型响应流在完成 submit_recording_review 前中断；"
+                "这不是能力配置或字段校验不通过。"
+                if missing_submission
+                else f"原因：{detail}"
+            ),
+            "处理：当前能力配置未修改，无需重新录制或重新生成能力；"
+            "请重新点击“发布当前流程”，系统会使用新的独立 Pi 上下文重新审核。",
+        ],
+    }
+
+
 def _checkpoint_accepted_recording_pi_submission(
     resume_state: dict,
     flow_spec,
@@ -1503,9 +1527,12 @@ async def record_ws(ws: WebSocket) -> None:
             ):
                 pending_flow_spec = flow_spec.model_copy(deep=True)
 
-        async def _ensure_recording_pi():
-            """Lazily start the sole AgentSession used by this websocket."""
+        async def _ensure_recording_pi(*, fresh: bool = False):
+            """Keep the browser connected while isolating independent Pi operations."""
             nonlocal recording_pi
+            if fresh and recording_pi is not None:
+                await recording_pi.close()
+                recording_pi = None
             if recording_pi is None:
                 from dano.onboarding.recording_pi import RecordingPiSession
 
@@ -1514,6 +1541,7 @@ async def record_ws(ws: WebSocket) -> None:
                     tenant=str(init.get("tenant") or ""),
                     subsystem=str(init.get("subsystem") or "A-报销"),
                     recording_id=recording_id,
+                    resume_history=not fresh,
                     on_submission_accepted=_accepted_pi_submission,
                     )
                 )
@@ -1835,7 +1863,7 @@ async def record_ws(ws: WebSocket) -> None:
                             submission={"ops": []},
                             generation_mode="initial",
                         )
-                    pi_session = await _ensure_recording_pi()
+                    pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
                     pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
                     async with _recording_operation_keepalive(
@@ -2093,7 +2121,7 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import flow_operation_report
 
                     before_operation = pending_flow_spec.model_copy(deep=True)
-                    pi_session = await _ensure_recording_pi()
+                    pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
                     await _responsive_prompt(pi_session.prompt(
                         "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
@@ -2130,7 +2158,7 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 try:
 
-                    pi_session = await _ensure_recording_pi()
+                    pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
                     await _responsive_prompt(pi_session.prompt(
                         "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
@@ -2156,7 +2184,7 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 try:
 
-                    pi_session = await _ensure_recording_pi()
+                    pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
                     await _responsive_prompt(pi_session.prompt(
                         "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
@@ -2310,7 +2338,7 @@ async def record_ws(ws: WebSocket) -> None:
                 # 发布审核仍使用同一录制 Pi Session。缺少三角色审核、版本
                 # 不匹配或任一角色拒绝都必须硬失败，禁止回退到 ReviewBoard。
                 try:
-                    pi_session = await _ensure_recording_pi()
+                    pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
                     review_version = int((pending_flow_spec.meta or {}).get("current_version") or 0)
                     await _responsive_prompt(pi_session.prompt(
@@ -2343,11 +2371,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "type": "result",
                         "operation": "publish",
                         "operation_id": msg.get("operation_id"),
-                        "report": {
-                            "ok": False,
-                            "stage": "recording_pi_review",
-                            "reason": str(e),
-                        },
+                        "report": _recording_publish_review_failure(e),
                         **_recording_flow_projection(pending_flow_spec),
                         **({"pi_session": recording_pi.descriptor} if recording_pi is not None else {}),
                     })

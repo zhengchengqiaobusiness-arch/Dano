@@ -17,7 +17,6 @@ from dano.export.agent_skills import (
     _slug,
     _tenant_subsystems,
     _write_business_skill,
-    _write_index,
     _write_skill,
 )
 from dano.orchestrator.types import SkillSpec
@@ -97,6 +96,51 @@ async def test_export_falls_back_to_prototypes_when_empty_or_no_db():
     """发现为空 / DB 不可用 → 退回原型常量兜底(不致导出整体失败,行为与旧版一致)。"""
     assert await _tenant_subsystems(_FakeRepo([]), "acme") == _PROTOTYPE_SUBSYSTEMS
     assert await _tenant_subsystems(_FakeRepo(raises=True), "acme") == _PROTOTYPE_SUBSYSTEMS
+
+
+@pytest.mark.asyncio
+async def test_write_skills_removes_stale_business_index_without_regenerating_it(
+    tmp_path, monkeypatch,
+):
+    import dano.export.agent_skills as agent_skills
+
+    out = tmp_path / "out"
+    stale_index = out / "dano-business-index"
+    stale_index.mkdir(parents=True)
+    (stale_index / "SKILL.md").write_text("stale", encoding="utf-8")
+    manifest = SimpleNamespace(
+        name="A-OA.hotel",
+        subsystem="A-OA",
+        business="hotel",
+        action="submit_hotel",
+        title="酒店申请",
+    )
+
+    async def fake_subsystems(_repo, _tenant):
+        return [Subsystem.OA]
+
+    async def fake_registry(_repo, *, tenant, subsystems):  # noqa: ARG001
+        return SimpleNamespace(skills=[])
+
+    def fake_business_writer(out_dir, *_args, **_kwargs):
+        folder = out_dir / "dano-a-oa-hotel"
+        folder.mkdir()
+        return folder
+
+    monkeypatch.setattr(agent_skills, "AssetRepository", lambda: object())
+    monkeypatch.setattr(agent_skills, "_tenant_subsystems", fake_subsystems)
+    monkeypatch.setattr(agent_skills.SkillRegistry, "from_store", fake_registry)
+    monkeypatch.setattr(agent_skills, "_load_reference_markdown", lambda _path: [])
+    monkeypatch.setattr(agent_skills, "_validate_reference_markdown", lambda _docs: None)
+    monkeypatch.setattr(agent_skills, "build_manifests", lambda _skills: [manifest])
+    monkeypatch.setattr(agent_skills, "_export_contract_errors", lambda _manifest: [])
+    monkeypatch.setattr(agent_skills, "_business_skill_md", lambda *_args: "skill")
+    monkeypatch.setattr(agent_skills, "_write_business_skill", fake_business_writer)
+
+    written = await agent_skills.write_skills("tenant-a", str(out))
+
+    assert written == ["dano-a-oa-hotel"]
+    assert not stale_index.exists()
 
 
 def test_write_skill_exports_runtime_contract_and_compact_navigation(tmp_path):
@@ -220,15 +264,6 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
         tmp_path / "out", "A-OA", "reference", [manifest], reference_docs=references)
     assert not (bundle / "references" / "platform").exists()
     assert "ask_user_question" in (bundle / "SKILL.md").read_text(encoding="utf-8")
-
-    index_slug = _write_index(
-        tmp_path / "out", [{"label": "reference", "folder": bundle.name, "ops": 1}],
-        reference_docs=references,
-    )
-    index = tmp_path / "out" / index_slug
-    assert not (index / "references" / "platform").exists()
-    assert (index / "agents" / "openai.yaml").is_file()
-
 
 def test_reference_validation_accepts_structured_validation_failure_contract(tmp_path):
     import dano.export.agent_skills as agent_skills

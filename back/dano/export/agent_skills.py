@@ -2717,61 +2717,12 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
         raise
 
 
-# ─────────────────────────── index 路由(总台,自动生成)───────────────────────────
-def _index_md(entries: list[dict], slug: str) -> str:
-    """业务总台:列出所有业务剧本 + 触发词,把用户意图路由到对应剧本。无业务专属逻辑。"""
-    rows = "\n".join(f"| {e['label']} | `{e['folder']}` | {e['ops']} 个操作 |" for e in entries)
-    table = "| 业务 | 剧本目录 | 规模 |\n|---|---|---|\n" + rows
-    description = "用户要办理或查询已接入 Dano 的业务、但尚未确定具体 Skill 时使用。"
-    return f"""---
-name: {json.dumps("Dano 业务 Skill 索引", ensure_ascii=False)}
-description: {json.dumps(description, ensure_ascii=False)}
----
-
-# Dano 业务 Skill 索引
-
-这是所有已生成业务剧本的**路由目录**。用户说要办什么,在下表里找到对应业务,
-打开它的剧本目录(各自一本自包含 skill),严格按对应 Skill 的操作步骤执行。
-
-## 业务目录
-{table}
-
-> 每本剧本都包含能力选择、表单收集、写前确认、执行、结果展示与错误处理。
-> 找不到对应业务就如实告知用户"没有这个业务的 skill",**不要臆造**。
-"""
-
-
-def _write_index(out_dir: Path, entries: list[dict],
-                 *, reference_docs: list[tuple[Path, str]] | None = None) -> str:
-    docs = reference_docs if reference_docs is not None else _load_reference_markdown(_configured_reference_dir())
-    _validate_reference_markdown(docs)
-    slug = "dano-business-index"
-    target = out_dir / slug
-    folder = _stage_folder(out_dir, slug)
-    try:
-        (folder / "agents").mkdir(parents=True, exist_ok=True)
-        (folder / "SKILL.md").write_text(_index_md(entries, slug), encoding="utf-8")
-        (folder / "agents" / "openai.yaml").write_text(
-            _agents_openai_yaml(
-                slug, "Dano 业务 Skill 索引",
-                "根据用户目标选择正确的 Dano 业务 Skill，并进入对应已发布业务流程",
-            ),
-            encoding="utf-8",
-        )
-        _publish_folder(folder, target, slug, "Dano 业务 Skill 索引")
-        return slug
-    except Exception:
-        _abort_stage(folder)
-        raise
-
-
 async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
                        exclude_skill_ids: set[str] | None = None) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
     带 business 标签的操作**按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
     rich 参数保留兼容旧调用;当前导出只做确定性渲染。每业务独立 try/except,一个失败不连累其它。
-    最后自动生成 index 路由总台。
     """
     from collections import defaultdict
     repo = AssetRepository()
@@ -2798,6 +2749,11 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     manifests = valid_manifests
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    stale_index = out / "dano-business-index"
+    if stale_index.is_symlink() or stale_index.is_file():
+        stale_index.unlink()
+    elif stale_index.is_dir():
+        shutil.rmtree(stale_index)
     log.info("export.target", out_abs=str(out.resolve()), tenant=tenant)   # 落盘绝对路径(排查"看不到文件")
     groups: dict = defaultdict(list)
     standalone: list[SkillManifest] = []
@@ -2805,7 +2761,6 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
         (groups[(m.subsystem, m.business)].append(m) if getattr(m, "business", "")
          else standalone.append(m))
     written: list[str] = []
-    index_entries: list[dict] = []
     for (sub, biz), ms in groups.items():
         try:                                                 # 每业务独立:一个崩不连累其它
             slug = _slug(f"{sub}.{biz}")
@@ -2815,22 +2770,14 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
             log.info("export.business_skill", business=biz, subsystem=sub,
                      ops=[m.action for m in ms], folder=folder.name)
             written.append(folder.name)
-            index_entries.append({"label": _biz_label(biz, ms), "folder": folder.name, "ops": len(ms)})
         except Exception as e:  # noqa: BLE001
             log.warning("export.business_skill_failed", business=biz, subsystem=sub, error=str(e))
     for m in standalone:
         try:
             folder = _write_skill(out, m, reference_docs=reference_docs)
             written.append(folder.name)
-            index_entries.append({
-                "label": m.title or m.action,
-                "folder": folder.name,
-                "ops": len(_capability_contracts(m)),
-            })
         except Exception as e:  # noqa: BLE001
             log.warning("export.standalone_failed", action=m.action, error=str(e))
-    if index_entries:                                        # 自动生成 index 路由总台
-        written.append(_write_index(out, index_entries, reference_docs=reference_docs))
     log.info("export.agent_skills", tenant=tenant, out=str(out),
              count=len(written), businesses=len(groups), standalone=len(standalone))
     return written

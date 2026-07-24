@@ -346,6 +346,38 @@ async def test_recording_pi_session_file_survives_close_and_is_used_for_resume(m
 
 
 @pytest.mark.asyncio
+async def test_recording_pi_fresh_operation_does_not_resume_old_context(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    scope = hashlib.sha256(f"tenant-a\0A-OA\0{RECORDING_THREE}".encode()).hexdigest()[:32]
+    session_file = tmp_path / scope / "old-context.jsonl"
+    session_file.parent.mkdir()
+    session_file.write_text("persisted", encoding="utf-8")
+    process = _FakeProcess(str(tmp_path / scope / "fresh-context.jsonl"))
+
+    async def fake_tool_server():
+        return _FakeServer(), _FakeServerTask(), 54321
+
+    monkeypatch.setattr(recording_pi, "_start_tool_server", fake_tool_server)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", lambda *_a, **_kw: _await(process))
+    monkeypatch.setattr(
+        "dano.config.get_settings",
+        lambda: SimpleNamespace(pi_api_key="key", pi_base_url="", pi_model="model", pi_provider="provider"),
+    )
+
+    fresh = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+        resume_history=False,
+    )
+    await fresh.start()
+
+    assert process.stdin.commands[0]["session_file"] is None
+    assert fresh.resumed is False
+    await fresh.close()
+
+
+@pytest.mark.asyncio
 async def test_recording_pi_discovers_tenant_scoped_session_without_client_path(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     scope = hashlib.sha256(f"tenant-a\0A-OA\0{RECORDING_SAFE}".encode()).hexdigest()[:32]
     session_file = tmp_path / scope / "persisted.jsonl"

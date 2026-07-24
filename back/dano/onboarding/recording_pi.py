@@ -1,9 +1,9 @@
-"""Python owner for one recording-only Pi AgentSession sidecar.
+"""Python owner for a recording-only Pi AgentSession sidecar.
 
 The recording gateway talks to Pi exclusively through this JSONL bridge.  The
-bridge owns one long-lived Node process and one Pi session for the lifetime of
-the browser recording websocket; prompt history, retries and compaction remain
-inside Pi rather than being reconstructed in Python.
+bridge can resume a persisted conversation after reconnect, while independent
+planning/review operations may start with an empty model context.  FlowSpec
+state remains authoritative in Python rather than in Pi conversation history.
 """
 
 from __future__ import annotations
@@ -124,6 +124,7 @@ class RecordingPiSession:
         recording_id: str,
         session_root: str | Path | None = None,
         timeout_s: float = 180.0,
+        resume_history: bool = True,
         on_submission_accepted: Callable[[Any, str], None] | None = None,
     ) -> None:
         if not _OPAQUE_RECORDING_ID.fullmatch(recording_id):
@@ -134,6 +135,7 @@ class RecordingPiSession:
         self.run_id = f"recording-{uuid4().hex}"
         self.token = secrets.token_hex(16)
         self.timeout_s = timeout_s
+        self._resume_history = resume_history
         self.session_id: str | None = None
         # session_file is deliberately server-owned.  Callers (and therefore
         # browser payloads) can only present the opaque recording_id.
@@ -195,15 +197,16 @@ class RecordingPiSession:
             # persisted Pi JSONL inside the tenant-scoped server directory.
             # Resolve every candidate and reject symlinks/path escapes before
             # handing it to SessionManager.open.
-            candidates: list[Path] = []
-            for candidate in session_dir.glob("*.jsonl"):
-                resolved = candidate.resolve()
-                if resolved.parent == session_dir and resolved.is_file():
-                    candidates.append(resolved)
-            candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
-            if candidates:
-                self.session_file = str(candidates[0])
-                self.resumed = True
+            if self._resume_history:
+                candidates: list[Path] = []
+                for candidate in session_dir.glob("*.jsonl"):
+                    resolved = candidate.resolve()
+                    if resolved.parent == session_dir and resolved.is_file():
+                        candidates.append(resolved)
+                candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+                if candidates:
+                    self.session_file = str(candidates[0])
+                    self.resumed = True
             self._proc = await asyncio.create_subprocess_exec(
                 "node",
                 str(BACK_DIR / "agent" / "run_recording_pi.mjs"),

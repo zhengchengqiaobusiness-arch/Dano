@@ -239,7 +239,7 @@ def test_gateway_and_frontend_use_one_versioned_server_authoritative_protocol() 
 def test_publish_request_is_logged_before_expensive_review() -> None:
     source = inspect.getsource(gateway.record_ws)
     publish_start = source.index('elif t == "publish_request":')
-    review_start = source.index('pi_session = await _ensure_recording_pi()', publish_start)
+    review_start = source.index('pi_session = await _ensure_recording_pi(fresh=True)', publish_start)
 
     assert '"recording.operation_started"' in source[publish_start:review_start]
 

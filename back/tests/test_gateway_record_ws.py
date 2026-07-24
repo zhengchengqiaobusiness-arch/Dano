@@ -109,7 +109,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert "if not before_operation.capabilities:" in branch
     assert "needs_pi =" not in branch
     baseline_start = branch.index("if not before_operation.capabilities:")
-    pi_start = branch.index("pi_session = await _ensure_recording_pi()")
+    pi_start = branch.index("pi_session = await _ensure_recording_pi(fresh=True)")
     assert baseline_start < pi_start
     assert 'generation_mode="initial"' in branch
     assert "timeout_s=0" in branch
@@ -217,6 +217,25 @@ def test_recording_pi_plan_has_no_artificial_deadline() -> None:
 
     assert "timeout_s=3000" not in source
     assert "timeout_s=0" in source
+
+
+def test_independent_recording_operations_use_fresh_pi_context() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert "async def _ensure_recording_pi(*, fresh: bool = False):" in source
+    assert source.count("_ensure_recording_pi(fresh=True)") == 5
+    assert "resume_history=not fresh" in source
+
+
+def test_publish_review_failure_explains_cause_and_retry() -> None:
+    report = gateway._recording_publish_review_failure(
+        RuntimeError("Pi 未通过 submit_recording_review 提交发布审核"),
+    )
+
+    assert report["stage"] == "recording_pi_review"
+    assert "结构化发布审核" in report["reason"]
+    assert any("模型响应流" in item for item in report["clarifications"])
+    assert any("重新点击“发布当前流程”" in item for item in report["clarifications"])
 
 
 @pytest.mark.parametrize(
