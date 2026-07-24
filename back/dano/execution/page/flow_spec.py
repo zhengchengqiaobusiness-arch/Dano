@@ -14883,6 +14883,42 @@ def _field_source_review_issues(review_items: list[ReviewItem]) -> list[dict[str
     return issues
 
 
+def _enum_mapping_issues(steps: list[FlowStep]) -> list[dict[str, Any]]:
+    """Expose incomplete enum mappings in the single top-level warning area."""
+    issues: list[dict[str, Any]] = []
+    for step in steps:
+        for param in step.params:
+            if param.type not in {"enum", "list-enum"} or not param.enum_options:
+                continue
+            explicit = _explicit_enum_value_map(param.enum_options, param.enum_value_map)
+            labels = list(dict.fromkeys(
+                pair[0]
+                for pair in (_enum_label_value(option) for option in param.enum_options)
+                if pair is not None
+            ))
+            missing = [
+                label for label in labels
+                if label not in explicit or explicit[label] is None
+            ]
+            if not missing:
+                continue
+            path = param.path or param.key
+            digest = hashlib.sha1(f"{step.step_id}:{path}".encode("utf-8")).hexdigest()[:12]
+            issues.append({
+                "severity": "warning",
+                "message": f"枚举字段 `{param.key or path}` 存在未映射值：{'、'.join(missing)}",
+                "source": "enum_mapping",
+                "target": {"kind": "param", "step_id": step.step_id, "path": path},
+                "blocking": False,
+                "audience": "operator",
+                "actionable": True,
+                "auto_fixable": False,
+                "code": "enum_mapping_missing",
+                "issue_id": f"enum_mapping:{digest}",
+            })
+    return issues
+
+
 def _compiled_contract_issue_groups(
     spec: FlowSpec,
     api_request: dict[str, Any],
@@ -15296,6 +15332,9 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     field_source_issues = _field_source_review_issues(review_items)
     if field_source_issues:
         issue_groups.setdefault("field", []).extend(field_source_issues)
+    enum_mapping_issues = _enum_mapping_issues(active_steps)
+    if enum_mapping_issues:
+        issue_groups.setdefault("field", []).extend(enum_mapping_issues)
     for group, items in compiled_issue_groups.items():
         issue_groups.setdefault(group, []).extend(items)
     return {

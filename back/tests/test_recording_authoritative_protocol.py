@@ -86,15 +86,22 @@ def test_workbench_contract_uses_stable_field_identity_and_rolls_back_disconnect
     assert "failQueuedFlowMutation" in onclose
 
 
-def test_enum_mapping_warning_tracks_the_textarea_draft_before_blur() -> None:
+def test_enum_mapping_editor_persists_on_blur_without_mutating_the_authoritative_draft() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
     editor = source[source.index('<FieldControl label="枚举候选">'):source.index("</FieldControl>", source.index('<FieldControl label="枚举候选">'))]
 
-    assert "onDraftChange={(v) =>" in editor
-    assert "parseEnumOptionsText(v)" in editor
-    assert "patchLocalParam(step.step_id, p" in editor
-    assert "need_human_confirm: !mappingComplete" in editor
+    assert "onDraftChange={(v) =>" not in editor
+    assert "onSave={(v) =>" in editor
+    assert "upsertSelectBinding(" in editor
     assert 'if (local !== (value || "")) onSave(local);' in source
+
+
+def test_enum_mapping_warning_is_not_rendered_inside_the_field_card() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert '<Tag color="orange">未映射值：' not in source
+    assert '<Tag color="orange">未映射实际提交值：' not in source
+    assert 'const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];' in source
 
 
 def test_recorded_page_operations_are_never_intercepted() -> None:

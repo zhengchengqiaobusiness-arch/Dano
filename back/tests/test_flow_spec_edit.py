@@ -6997,7 +6997,7 @@ def test_suspected_internal_value_is_not_a_publish_issue():
     )
 
 
-def test_inferred_enum_mapping_does_not_block_publish_or_confirmation():
+def test_inferred_enum_mapping_is_a_locatable_non_blocking_field_issue():
     spec = _enum_policy_spec(ParamField(
         path="query.processStatus", key="流程状态", value="1", type="enum",
         category="user_param", source_kind="page_enum",
@@ -7006,9 +7006,24 @@ def test_inferred_enum_mapping_does_not_block_publish_or_confirmation():
     report = validate_flow_spec(spec)
     assert report["passed"] is True
     assert any("枚举字段" in item for item in report["suggestions"])
+    issues = [
+        item
+        for item in report["issue_groups"].get("field", [])
+        if item.get("code") == "enum_mapping_missing"
+    ]
+    assert len(issues) == 1
+    assert issues[0]["blocking"] is False
+    assert issues[0]["target"] == {
+        "kind": "param",
+        "step_id": "query",
+        "path": "query.processStatus",
+    }
+    assert "未提交、审批中" in issues[0]["message"]
+    spec.steps[0].params[0].enum_value_map = {"未提交": 0, "审批中": 1}
+    resolved_report = validate_flow_spec(spec)
     assert not any(
         item.get("code") == "enum_mapping_missing"
-        for items in report["issue_groups"].values() for item in items
+        for item in resolved_report["issue_groups"].get("field", [])
     )
     confirmed = apply_flow_edits(spec, [{
         "op": "update_capability", "capability_index": 0,
