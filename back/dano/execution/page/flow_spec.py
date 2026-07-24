@@ -14772,7 +14772,10 @@ def _field_source_review_issues(review_items: list[ReviewItem]) -> list[dict[str
     """
     issues: list[dict[str, Any]] = []
     for item in review_items:
-        if item.type not in {"field_source_unknown", "field_source_incomplete"} or item.resolved:
+        # "Unknown" is already visible on the field card and has no concrete
+        # action. Repeating a long generic explanation in the status panel only
+        # creates noise. Keep only explicitly selected but incomplete sources.
+        if item.type != "field_source_incomplete" or item.resolved:
             continue
         issues.append({
             "severity": "warning",

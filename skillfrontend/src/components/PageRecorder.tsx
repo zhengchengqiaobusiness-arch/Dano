@@ -2625,11 +2625,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setNewLink({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   }
   function bindParamToPreviousResponse(step: FlowStepData, p: FlowParam) {
-    if (!flowSpec) return;
+    const currentSpec = flowSpecRef.current;
+    if (!currentSpec) return;
     const key = paramDraftKey(step.step_id, p);
     const draft = bindDraft[key] || {};
     if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
-    const edits: any[] = flowSpec.links
+    const sourceStep = currentSpec.steps.find((item) => item.step_id === draft.source_step_id);
+    patchLocalParams(step.step_id, p, {
+      source_kind: "previous_response",
+      source: {
+        kind: "previous_response",
+        step_id: draft.source_step_id,
+        step_name: sourceStep?.name || "",
+        response_path: draft.source_path,
+        target_path: p.path,
+      },
+      need_human_confirm: false,
+      editable: true,
+    });
+    const edits: any[] = currentSpec.links
       .filter((l) => l.target_step_id === step.step_id && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
       .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
     edits.push({
@@ -3506,7 +3520,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             key="flow-status-panel"
             type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
             showIcon
-            style={{ marginBottom: 12, minHeight: 96 }}
+            style={{ marginBottom: 12, minHeight: 96, height: 320, overflow: "hidden" }}
             message={publishPending
               ? "正在审核并发布当前流程"
               : analysisPending
@@ -3530,11 +3544,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 : "发布校验需要处理"}
             description={
               !checkReport ? (
-                <Space direction="vertical" size={2}>
+                <Space direction="vertical" size={2} style={{ height: 230, overflowY: "auto", width: "100%" }}>
                   {renderLatestOperationDetail()}
                   <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
                 </Space>
-              ) : <Space direction="vertical" size={2} style={{ maxHeight: 320, overflowY: "auto", width: "100%" }}>
+              ) : <Space direction="vertical" size={2} style={{ height: 230, overflowY: "auto", width: "100%" }}>
                 {!result?.ok && renderLatestOperationDetail()}
                 {result && !publishPending && (
                   <Space direction="vertical" size={2}>

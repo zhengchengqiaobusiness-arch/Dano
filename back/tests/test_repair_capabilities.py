@@ -91,6 +91,21 @@ def test_caller_decision_relation_does_not_require_field_mapping():
     assert repaired["capability_relations"][0]["relation_id"] == "decision"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "query", "validate", "preview", "inspect", "export",
+        "create", "update", "save_draft", "approve", "reject", "withdraw", "delete",
+    ],
+)
+def test_all_public_capability_kinds_are_accepted_by_compiled_contract_repair(kind):
+    request = {"capabilities": [_capability(kind, kind)]}
+
+    findings = collect_capability_findings(request)
+
+    assert not any(item["kind"] == "capability_kind_invalid" for item in findings)
+
+
 def test_deterministic_repairs_complete_contract_and_keep_confirmed_relation_issue():
     query = _capability("query_status", outputs={"count": {"type": "number"}})
     batch = _capability("submit_batch", "submit_batch", inputs=[{

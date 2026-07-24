@@ -3124,6 +3124,14 @@ def test_user_confirmed_link_overrides_manual_source_then_reset_is_stable():
     assert bound_param.source["link_id"] == "manual-page-link"
     assert bound_param.source["step_id"] == "source"
     assert bound_param.source["response_path"] == "data.page"
+    assert bound_param.need_human_confirm is False
+    bound_report = validate_flow_spec(bound)
+    assert not any(
+        item.get("code") in {"field_source_unknown", "field_source_incomplete"}
+        and item.get("target", {}).get("path") == "query.pageNo"
+        for items in bound_report["issue_groups"].values()
+        for item in items
+    )
 
     removed = apply_flow_edits(bound, [{
         "op": "remove", "actor": "user", "link_id": "manual-page-link",
@@ -4908,7 +4916,7 @@ def test_unknown_source_review_is_hidden_until_a_capability_exists(capability_mo
     )
 
 
-def test_unknown_source_review_is_locatable_ignorable_and_non_blocking_after_capability_generation():
+def test_unknown_source_review_is_recorded_without_repetitive_operator_warning():
     spec = _make_spec()
     param = spec.steps[0].params[0]
     param.category = "runtime_var"
@@ -4951,31 +4959,17 @@ def test_unknown_source_review_is_locatable_ignorable_and_non_blocking_after_cap
     assert report["passed"] is True
     assert report["errors"] == []
     assert report["warnings"] == []
-    issue = next(
-        issue for issue in report["issue_groups"]["field"]
-        if issue["target"].get("path") == "form.userId"
+    assert not any(
+        issue.get("code") == "field_source_unknown"
+        for issues in report["issue_groups"].values()
+        for issue in issues
     )
-    assert issue["source"] == "review"
-    assert issue["blocking"] is False
-    assert issue["ignorable"] is True
-    assert issue["review_id"] == item.id
     accepted, gate = flow_spec_module._semantic_candidate_gate(new, new.model_copy(deep=True))
     assert accepted is True
     assert gate["reasons"] == []
 
-    ignored = apply_flow_edits(new, [{
-        "op": "resolve_review", "review_id": item.id, "resolved": True,
-    }])
-    ignored_report = validate_flow_spec(ignored)
-    assert not any(
-        issue.get("review_id") == item.id
-        for issues in ignored_report["issue_groups"].values()
-        for issue in issues
-    )
-
 
 @pytest.mark.parametrize(("source_kind", "source", "expected_code", "message_part"), [
-    ("unknown", {}, "field_source_unknown", "来源尚未识别"),
     ("previous_response", {"step_id": "upstream"}, "field_source_incomplete", "缺少步骤或响应字段"),
     ("request_header", {"kind": "request_header"}, "field_source_incomplete", "缺少 header 名称"),
     ("system_generated", {"strategy": "unsupported"}, "field_source_incomplete", "缺少有效生成策略"),
@@ -5047,7 +5041,7 @@ def test_source_warning_does_not_hide_unrelated_request_builder_error():
         path="/api/submit",
         params=[ParamField(
             path="runtimeId", key="运行期标识", value="",
-            category="runtime_var", source_kind="unknown", source={},
+            category="runtime_var", source_kind="request_header", source={},
             exposed_to_user=False,
         )],
     )], capabilities=[FlowCapability(
@@ -5061,6 +5055,7 @@ def test_source_warning_does_not_hide_unrelated_request_builder_error():
     assert report["passed"] is False
     assert any("缺少请求体" in message for message in report["errors"])
     assert report["issue_groups"]["execution"][0]["blocking"] is True
+    assert report["issue_groups"]["field"][0]["code"] == "field_source_incomplete"
     assert report["issue_groups"]["field"][0]["blocking"] is False
     assert report["issue_groups"]["field"][0]["ignorable"] is True
 
@@ -6592,8 +6587,8 @@ def test_remove_capability_cleans_relations_and_scopes_publish_findings():
     assert [item["type"] for item in removed_reviews] == ["field_source_unknown"]
     assert removed_reviews[0]["blocking"] is False
     assert removed_reviews[0]["ignorable"] is True
-    assert any(
-        item.get("review_id") == removed_reviews[0]["id"]
+    assert not any(
+        item.get("code") == "field_source_unknown"
         for item in report["issue_groups"].get("field", [])
     )
     assert "runtimeId" not in "\n".join(report["errors"] + report["warnings"])

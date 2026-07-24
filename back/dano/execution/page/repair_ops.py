@@ -20,8 +20,15 @@ _PLACEHOLDER_NAME_RE = re.compile(r"^(请输入|请选择|请填写|如\s|例如
 
 _FIX_OPS = {"drop_step", "reorder_steps", "set_success_rule", "parameterize",
             "link_step", "rename_param", "remap_field", "set_identity", "bind_placeholder"}
-_CAPABILITY_KINDS = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
 _BATCH_KINDS = {"validate_batch", "submit_batch"}
+
+
+def _capability_kinds() -> set[str]:
+    # Keep the compiled-contract repair gate on the same vocabulary as FlowSpec.
+    # A second hand-maintained list previously rejected valid draft/withdraw/delete abilities.
+    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
+
+    return set(ALLOWED_CAPABILITY_KINDS)
 
 
 def _schema_properties(schema: Any) -> dict:
@@ -80,6 +87,7 @@ def collect_capability_findings(api_request: dict) -> list[dict]:
     if not capabilities:
         return []
     out: list[dict] = []
+    capability_kinds = _capability_kinds()
     by_ref: dict[str, dict] = {}
     seen_names: set[str] = set()
     for index, cap in enumerate(capabilities):
@@ -91,7 +99,7 @@ def collect_capability_findings(api_request: dict) -> list[dict]:
         elif name in seen_names:
             out.append({"kind": "capability_name_duplicate", **target, "detail": f"Capability `{name}` 重名"})
         seen_names.add(name)
-        if kind not in _CAPABILITY_KINDS:
+        if kind not in capability_kinds:
             out.append({"kind": "capability_kind_invalid", **target,
                         "detail": f"Capability `{name or index}` kind `{kind}` 不合法"})
         for ref in _capability_refs(cap):
@@ -292,16 +300,17 @@ def apply_deterministic_repairs(api_request: dict) -> tuple[dict, list[dict]]:
     apir = copy.deepcopy(api_request)
     applied: list[dict] = []
     capabilities = [c for c in (apir.get("capabilities") or []) if isinstance(c, dict)]
+    capability_kinds = _capability_kinds()
     refs = {ref for cap in capabilities for ref in _capability_refs(cap)}
     used_names = {str(cap.get("name")) for cap in capabilities if cap.get("name")}
     for index, cap in enumerate(capabilities):
         kind = str(cap.get("kind") or "")
-        if not cap.get("name") and kind in _CAPABILITY_KINDS and kind not in used_names:
+        if not cap.get("name") and kind in capability_kinds and kind not in used_names:
             cap["name"] = kind
             used_names.add(kind)
             refs.add(kind)
             applied.append({"op": "derive_capability_name", "capability_index": index, "name": kind})
-        if kind not in _CAPABILITY_KINDS and str(cap.get("name") or "") in _CAPABILITY_KINDS:
+        if kind not in capability_kinds and str(cap.get("name") or "") in capability_kinds:
             kind = str(cap["name"])
             cap["kind"] = kind
             applied.append({"op": "derive_capability_kind", "capability": cap["name"], "kind": kind})
