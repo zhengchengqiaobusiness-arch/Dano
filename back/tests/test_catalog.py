@@ -443,7 +443,7 @@ def test_exported_agent_script_uses_capability_scoped_contracts_and_fact_check(m
     import sys
 
     from dano.catalog.manifest import to_manifest
-    from dano.export.agent_skills import _dano_call_py, _skill_md
+    from dano.export.agent_skills import _capability_reference_md, _dano_call_py, _skill_md
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel
 
@@ -489,9 +489,10 @@ def test_exported_agent_script_uses_capability_scoped_contracts_and_fact_check(m
     source = _dano_call_py(to_manifest(skill))
     manifest = to_manifest(skill)
     markdown = _skill_md(manifest, "dano-a-oa-daily-report")
-    assert "### `query_status` · 查询未填日期" in markdown
-    assert "### `submit_batch` · 批量填报日报" in markdown
-    assert "entries[].date" in markdown
+    reference = _capability_reference_md(manifest)
+    assert "**查询未填日期**（`query_status`，`query_status`，直接执行）" in markdown
+    assert "**批量填报日报**（`submit_batch`，`submit_batch`，执行前确认）" in markdown
+    assert "entries[].date" in reference
     assert "多个独立能力" in markdown
     assert "必须显式指定" in markdown
     namespace = {"__name__": "generated_test"}
@@ -871,7 +872,7 @@ def test_export_quality_gate_rejects_routing_only_batch_entries():
     assert any("人员列表误判" in error for error in _export_contract_errors(manifest))
 
 
-def test_export_quality_gate_rejects_internal_process_id_and_submit_routing_entries():
+def test_export_quality_gate_does_not_guess_internal_ids_but_rejects_routing_entries():
     from dano.catalog.manifest import to_manifest
     from dano.export.agent_skills import _export_contract_errors, _skill_md
     from dano.orchestrator.types import SkillSpec
@@ -898,7 +899,7 @@ def test_export_quality_gate_rejects_internal_process_id_and_submit_routing_entr
     ))
 
     errors = _export_contract_errors(manifest)
-    assert any("内部流程字段" in error for error in errors)
+    assert not any("内部流程字段" in error for error in errors)
     assert any("人员列表误判" in error for error in errors)
     markdown = _skill_md(manifest, "dano-a-oa-bad-submit")
     assert "compatibility:" not in markdown
@@ -1142,8 +1143,13 @@ def test_manifest_exposes_native_batched_question_and_separate_confirmation_prot
     assert protocol["native_tool_call_required"] is True
     assert protocol["multi_field_collection"]["mode"] == "questions_array"
     assert protocol["non_confirmation_default"]["required"] is True
-    assert protocol["confirmation"]["allowed_keys"] == ["question", "confirm"]
-    assert set(protocol["confirmation"]["forbidden_keys"]) == {"options", "multiple", "questions"}
+    assert protocol["multi_field_collection"]["top_level_required"] == ["title", "questions"]
+    assert protocol["confirmation"]["allowed_keys"] == ["formIds", "confirm"]
+    assert protocol["confirmation"]["same_assistant_turn"] is True
+    assert protocol["confirmation"]["continue_only_when_status"] == "confirmed"
+    assert set(protocol["confirmation"]["forbidden_keys"]) == {
+        "question", "options", "multiple", "questions", "default",
+    }
 
 
 def test_manifest_does_not_treat_string_false_as_safety_boolean():

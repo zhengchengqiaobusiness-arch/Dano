@@ -436,6 +436,7 @@ def _ask_user_question_interaction_protocol() -> dict:
         "multi_field_collection": {
             "mode": "questions_array",
             "single_submit": True,
+            "top_level_required": ["title", "questions"],
             "aggregate_across": ["forms", "form_sections", "workflow_steps"],
             "per_form_calls_forbidden": True,
             "field_configuration_location": "questions[]",
@@ -479,9 +480,15 @@ def _ask_user_question_interaction_protocol() -> dict:
         },
         "confirmation": {
             "separate_call": True,
+            "same_assistant_turn": True,
             "confirm": True,
-            "allowed_keys": ["question", "confirm"],
-            "forbidden_keys": ["options", "multiple", "questions"],
+            "source": "answered.formId",
+            "allowed_keys": ["formIds", "confirm"],
+            "forbidden_keys": [
+                "question", "options", "multiple", "questions", "default",
+            ],
+            "requires_answered_form_id": True,
+            "continue_only_when_status": "confirmed",
         },
         "answer_mapping": {
             "single": "result.answer scalar -> matching input field",
@@ -490,7 +497,7 @@ def _ask_user_question_interaction_protocol() -> dict:
         },
         "validation_error_behavior": "retry_silently_with_corrected_native_tool_call",
         "cancel_behavior": "stop_current_workflow_and_do_not_retry_until_new_explicit_user_request",
-        "result_statuses": ["answered", "cancelled"],
+        "result_statuses": ["answered", "confirmed", "cancelled"],
     }
 
 

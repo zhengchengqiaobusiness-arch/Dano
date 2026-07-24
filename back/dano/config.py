@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     llm_cache_ttl_s: int = 86_400             # 相同规范化输入跨会话/重启复用 24h
 
     # ── Agent Skill 导出参考规范 ──
-    # Windows 相对仓库根目录解析；Linux 相对 /opt/skillmanner/Dano 解析，也支持该目录内绝对路径。
+    # 始终相对当前安装的仓库根目录解析，Windows/Linux 使用同一配置。
     skill_reference_dir: str = Field(
         default="doc",
         description="Agent Skill 生成时读取的 Markdown 参考目录",

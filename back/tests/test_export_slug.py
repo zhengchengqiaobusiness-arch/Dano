@@ -99,7 +99,7 @@ async def test_export_falls_back_to_prototypes_when_empty_or_no_db():
     assert await _tenant_subsystems(_FakeRepo(raises=True), "acme") == _PROTOTYPE_SUBSYSTEMS
 
 
-def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
+def test_write_skill_exports_runtime_contract_and_compact_navigation(tmp_path):
     manifest = to_manifest(SkillSpec(
         skill_id="A-OA.export_contract",
         subsystem=Subsystem.OA,
@@ -126,12 +126,18 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
     openai_yaml = (folder / "agents" / "openai.yaml").read_text(encoding="utf-8")
 
-    assert contract == manifest.model_dump(mode="json")
+    assert contract["name"] == manifest.name
+    assert contract["action"] == manifest.action
+    interaction = contract["call_protocol"]["interaction_protocol"]
+    assert interaction["multi_field_collection"]["top_level_required"] == ["title", "questions"]
+    assert interaction["confirmation"]["allowed_keys"] == ["formIds", "confirm"]
+    assert interaction["confirmation"]["continue_only_when_status"] == "confirmed"
     assert len(contract["capabilities"]) == 2
     assert contract["capability_relations"][0]["automatic"] is False
     assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
-    assert f'name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in skill_md
+    assert f'name: {json.dumps(folder.name, ensure_ascii=False)}' in skill_md
     assert (folder / "scripts" / "format_list.py").is_file()
+    assert (folder / "references" / "CAPABILITIES.md").is_file()
     assert "metadata:" not in skill_md.split("---", 2)[1]
     assert f'display_name: {json.dumps(manifest.title or folder.name, ensure_ascii=False)}' in openai_yaml
     assert f"${folder.name}" in openai_yaml
@@ -143,10 +149,17 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
 
     bundle = _write_business_skill(tmp_path, "A-OA", "日报", [manifest])
     bundle_contract = json.loads((bundle / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    bundle_md = (bundle / "SKILL.md").read_text(encoding="utf-8")
+    bundle_reference = (bundle / "references" / "CAPABILITIES.md").read_text(encoding="utf-8")
     assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
-    assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]
+    assert bundle_contract["skills"] == [contract]
     assert (bundle / "agents" / "openai.yaml").is_file()
+    assert (bundle / "references" / "CAPABILITIES.md").is_file()
     assert (bundle / "scripts" / "format_list.py").is_file()
+    assert "`scripts/export_contract.sh`" in bundle_md
+    assert "`bash scripts/<action>.sh" in bundle_md
+    assert "HTTP 5xx、超时或结果不明" in bundle_md
+    assert "entries[].date" in bundle_reference
     assert not (bundle / "references" / "README.md").exists()
     assert not (bundle / "references" / "QUICKREF.md").exists()
 
@@ -157,7 +170,7 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     source = tmp_path / "guidance"
     (source / "nested").mkdir(parents=True)
     (source / "contract.md").write_text(
-        "ask_user_question questions default required", encoding="utf-8")
+        "ask_user_question title questions default required formIds confirmed", encoding="utf-8")
     (source / "nested" / "rules.MD").write_text(
         "dateFormat dataSource confirm cancelled validation error", encoding="utf-8")
     (source / "ignored.txt").write_text("not markdown", encoding="utf-8")
@@ -217,11 +230,11 @@ def test_reference_validation_accepts_structured_validation_failure_contract(tmp
 
     reference = tmp_path / "contract.md"
     reference.write_text(
-        " ".join([
-            "ask_user_question", "questions", "default", "required",
-            "dateFormat", "dataSource", "confirm", "cancelled",
-            'code: "question_validation_failed"',
-        ]),
+            " ".join([
+                "ask_user_question", "title", "questions", "default", "required",
+                "dateFormat", "dataSource", "confirm", "formIds", "confirmed", "cancelled",
+                'code: "question_validation_failed"',
+            ]),
         encoding="utf-8",
     )
 
@@ -230,14 +243,13 @@ def test_reference_validation_accepts_structured_validation_failure_contract(tmp
     )
 
 
-def test_linux_reference_configuration_uses_deployment_root(tmp_path, monkeypatch):
+def test_reference_configuration_is_relative_to_the_installed_project_root(tmp_path, monkeypatch):
     import dano.export.agent_skills as agent_skills
 
-    deployment_root = tmp_path / "opt" / "skillmanner" / "Dano"
+    deployment_root = tmp_path / "installed" / "Dano"
     reference_dir = deployment_root / "doc"
     reference_dir.mkdir(parents=True)
-    monkeypatch.setattr(agent_skills.sys, "platform", "linux")
-    monkeypatch.setattr(agent_skills, "_LINUX_PROJECT_ROOT", deployment_root)
+    monkeypatch.setattr(agent_skills, "_PROJECT_ROOT", deployment_root)
 
     monkeypatch.setattr(
         agent_skills,
@@ -251,18 +263,13 @@ def test_linux_reference_configuration_uses_deployment_root(tmp_path, monkeypatc
         "get_settings",
         lambda: SimpleNamespace(skill_reference_dir="/opt/skillmanner/Dano/doc"),
     )
-    monkeypatch.setattr(
-        agent_skills,
-        "_LINUX_PROJECT_ROOT",
-        agent_skills.Path("/opt/skillmanner/Dano"),
-    )
-    assert _configured_reference_dir().as_posix().endswith("/opt/skillmanner/Dano/doc")
+    with pytest.raises(ValueError, match="必须是相对"):
+        _configured_reference_dir()
 
 
 def test_reference_configuration_rejects_absolute_missing_and_empty_directories(tmp_path, monkeypatch):
     import dano.export.agent_skills as agent_skills
 
-    monkeypatch.setattr(agent_skills.sys, "platform", "win32")
     monkeypatch.setattr(
         agent_skills,
         "get_settings",
@@ -327,6 +334,6 @@ def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_resid
     assert "真正的业务编排、风险闸门与事实核查" not in skill_md
     assert "业务成功规则" in skill_md
     submit = next(cap for cap in contract["capabilities"] if cap["kind"] == "submit")
-    assert submit["inputs"][0]["required"] is True
-    assert "page_required" not in submit["inputs"][0]
-    assert "required_source" not in submit["inputs"][0]
+    assert submit["input_schema"]["required"] == ["申请标题"]
+    assert "page_required" not in submit["input_schema"]["properties"]["申请标题"]
+    assert "required_source" not in submit["input_schema"]["properties"]["申请标题"]

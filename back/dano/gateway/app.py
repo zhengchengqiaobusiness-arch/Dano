@@ -1883,10 +1883,21 @@ async def record_ws(ws: WebSocket) -> None:
                             operation_warning, delivery_warning,
                         )))
                     if operation_warning:
-                        analysis_application.update({
-                            "status": "needs_review",
-                            "summary": operation_warning,
-                        })
+                        if operation_report.get("changed"):
+                            analysis_application.update({
+                                "status": "applied",
+                                "summary": "；".join(filter(None, (
+                                    str(operation_report.get("summary") or ""),
+                                    operation_warning.replace(
+                                        "当前配置未修改", "Pi 未修改已生成的事实基线",
+                                    ),
+                                ))),
+                            })
+                        else:
+                            analysis_application.update({
+                                "status": "needs_review",
+                                "summary": operation_warning,
+                            })
                     log.info(
                         "recording.analysis_application",
                         status=analysis_application.get("status"),
@@ -2310,6 +2321,11 @@ async def record_ws(ws: WebSocket) -> None:
                         "审核不通过时设置 passed=false 并填写 reasons。录制事实中的撤回、删除、驳回、终止等"
                         "可能是管理员刚刚真实执行的合法业务写操作；不得仅凭 HTTP 方法、路径关键词或"
                         "destructive/L4 等风险标签拒绝，拒绝必须基于独立、具体且可定位的契约、权限或校验证据。"
+                        "Skill 文档由发布后的导出链路生成，不属于本轮 FlowSpec 审核对象；"
+                        "不得因缺少 Skill 级失败处理或异常边界说明而拒绝。"
+                        "不得仅凭字段名称、录制样例值像 ID 或短码而拒绝；必须以字段的 source_kind、category、"
+                        "expose_to_caller、枚举或接口来源绑定等结构化证据确认确有来源或暴露错误。"
+                        "每条拒绝理由必须写明具体能力、接口、字段及冲突证据。"
                         "提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}",
                     ))

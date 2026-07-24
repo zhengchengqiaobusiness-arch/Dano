@@ -705,6 +705,19 @@ def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     assert "未切换" not in source  # errors are surfaced; no hidden alternate model branch
 
 
+def test_publish_review_does_not_reject_downstream_skill_docs_or_field_names() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    publish_start = source.index('elif t == "publish_request":')
+    publish_end = source.index('elif t == "stop":', publish_start)
+    publish_source = source[publish_start:publish_end]
+
+    assert "Skill 文档由发布后的导出链路生成，不属于本轮 FlowSpec 审核对象" in publish_source
+    assert "不得因缺少 Skill 级失败处理或异常边界说明而拒绝" in publish_source
+    assert "不得仅凭字段名称、录制样例值像 ID 或短码而拒绝" in publish_source
+    assert "必须以字段的 source_kind、category、" in publish_source
+    assert "expose_to_caller、枚举或接口来源绑定等结构化证据" in publish_source
+
+
 def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
     source = inspect.getsource(gateway.record_ws)
 
