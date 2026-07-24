@@ -7630,40 +7630,65 @@ def _repeated_write_command_signature(step: FlowStep) -> tuple[Any, ...] | None:
     locator = re.sub(
         r"\s+", "", str(meta.get("trigger_locator") or "").casefold(),
     )
-    if trigger_op not in {"click", "submit", "select", "pick"} or not locator:
+    if trigger_op not in {"click", "submit", "select", "pick"}:
         return None
     raw_path = str(step.path or step.url or "")
     return (
         (step.method or "GET").upper(),
         urlparse(raw_path).path or raw_path.split("?", 1)[0],
         tuple(sorted(param.path for param in step.params)),
+        _write_command_discriminators(step),
         str(meta.get("page_id") or meta.get("page_url") or ""),
         str(meta.get("frame_id") or meta.get("frame_url") or ""),
         locator,
     )
 
 
+_WRITE_COMMAND_DISCRIMINATOR_RE = re.compile(
+    r"(?:^|[_-])(?:op|operation|action|command|event|intent|mode)(?:$|[_-])",
+    re.I,
+)
+
+
+def _write_command_discriminators(step: FlowStep) -> tuple[tuple[str, str], ...]:
+    """Keep RPC-style commands distinct while ignoring record-specific values."""
+    try:
+        body = _parse_body(step.body_source)
+    except Exception:
+        body = None
+    found: list[tuple[str, str]] = []
+
+    def visit(value: Any, prefix: str = "") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).casefold()
+                if (
+                    _WRITE_COMMAND_DISCRIMINATOR_RE.search(normalized_key)
+                    and isinstance(child, (str, int, float, bool))
+                ):
+                    found.append((path.casefold(), str(child).casefold()))
+                else:
+                    visit(child, path)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, prefix)
+
+    visit(body)
+    return tuple(sorted(set(found)))
+
+
 def _mark_repeated_write_observations(spec: FlowSpec) -> None:
     """Keep repeated facts/steps for audit, but execute one reusable command."""
-    representatives: dict[tuple[Any, ...], tuple[FlowStep, str]] = {}
+    representatives: dict[tuple[Any, ...], FlowStep] = {}
     for step in spec.steps:
         signature = _repeated_write_command_signature(step)
         if signature is None:
             continue
         meta = step.source_meta or {}
-        action_ref = str(
-            meta.get("trigger_transaction_id")
-            or meta.get("trigger_action_id")
-            or ""
-        ).strip()
-        if not action_ref:
-            continue
-        previous = representatives.get(signature)
-        if previous is None:
-            representatives[signature] = (step, action_ref)
-            continue
-        representative, representative_action = previous
-        if action_ref == representative_action:
+        representative = representatives.get(signature)
+        if representative is None:
+            representatives[signature] = step
             continue
         step.source_meta = {
             **meta,
@@ -8883,6 +8908,24 @@ def _capability_removed_step_refs(spec: FlowSpec | None, cap_name: str) -> set[s
         return set()
     removed = ((spec.meta or {}).get("capability_removed_steps") or {}).get(cap_name) or []
     return {str(x) for x in removed if str(x)}
+
+
+def _retired_capability_step_ids(spec: FlowSpec | None) -> set[str]:
+    if spec is None:
+        return set()
+    removed = (spec.meta or {}).get("capability_removed_steps") or {}
+    removed_step_ids = {
+        str(ref).removeprefix("step:")
+        for refs in removed.values()
+        for ref in (refs or [])
+        if str(ref).startswith("step:")
+    }
+    active_step_ids = {
+        step_id
+        for capability in (spec.capabilities or [])
+        for step_id in _capability_node_step_ids(capability)
+    }
+    return removed_step_ids - active_step_ids
 
 
 def _removed_capability_names(spec: FlowSpec | None) -> set[str]:
@@ -10613,6 +10656,8 @@ def _remove_capability_step_nodes(nodes: list[dict[str, Any]], step_id: str) -> 
             continue
         if node.get("type") == "call" and str(node.get("step_id") or "") == step_id:
             continue
+        if node.get("type") == "return" and str(node.get("from") or node.get("source") or "") == step_id:
+            continue
         copied = dict(node)
         for child_key in ("children", "steps", "then", "else", "otherwise"):
             if isinstance(copied.get(child_key), list):
@@ -10643,6 +10688,45 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
         )
         execute_refs.append(ref)
     cap.request_refs = execute_refs + auxiliary_refs
+
+
+def _sync_capability_output_after_step_removal(cap: FlowCapability) -> None:
+    valid_step_ids = set(cap.step_ids or [])
+    stale_mappings = [
+        dict(mapping)
+        for mapping in (cap.output_mapping or [])
+        if isinstance(mapping, dict)
+        and str(mapping.get("step_id") or "")
+        and str(mapping.get("step_id") or "") not in valid_step_ids
+    ]
+    cap.output_mapping = [
+        dict(mapping)
+        for mapping in (cap.output_mapping or [])
+        if isinstance(mapping, dict)
+        and (
+            not str(mapping.get("step_id") or "")
+            or str(mapping.get("step_id") or "") in valid_step_ids
+        )
+    ]
+    if valid_step_ids and not cap.output_mapping:
+        final_step_id = cap.step_ids[-1]
+        replacement = stale_mappings[0] if stale_mappings else {
+            "kind": "final_response",
+            "name": "result",
+            "response_path": "response",
+        }
+        replacement["step_id"] = final_step_id
+        cap.output_mapping = [replacement]
+    if cap.step_ids and not any(
+        node.get("type") == "return"
+        for node in _iter_capability_nodes(cap.nodes or [])
+    ):
+        cap.nodes.append({
+            "id": "return_final",
+            "type": "return",
+            "from": cap.step_ids[-1],
+            "path": "response",
+        })
 
 
 def _reorder_capability_call_nodes(
@@ -12083,6 +12167,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         )
 
     memberships_by_step: dict[str, set[str]] = {}
+    removed_capability_step_ids = _retired_capability_step_ids(spec)
     for capability in caps:
         capability_name = capability.name or capability.capability_id or "<unnamed>"
         for step_id in _capability_node_step_ids(capability):
@@ -12099,7 +12184,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         if not requires_membership:
             continue
         step_id = _materialized_step_id_for_request(spec, item)
-        if not step_id:
+        if not step_id or step_id in removed_capability_step_ids:
             continue
         memberships = memberships_by_step.get(step_id, set())
         target = {
@@ -12934,9 +13019,12 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
 
     # 来源建议属于能力合同的编辑反馈。尚未生成能力时，字段还没有发布
     # 边界和可定位的能力锚点，不能提前制造“待处理”告警。能力存在后仍
-    # 覆盖所有已物化字段（含未归属步骤），方便定位和人工忽略。
+    # 覆盖未归属步骤，但用户明确删除能力时，其原步骤已退出编辑范围。
     if spec.capabilities:
+        removed_step_ids = _retired_capability_step_ids(spec)
         for st in spec.steps:
+            if st.step_id in removed_step_ids:
+                continue
             for p in st.params:
                 target = {
                     "kind": "param",
@@ -12959,10 +13047,10 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                         target=target,
                         current_guess=guess,
                         suggested_action="configure_or_ignore_field_source",
-                        reason=(
-                            "系统会保留当前类型、分类和来源组合，不会自动改写或阻止保存、优化、发布；"
-                            "可补充明确来源，或确认当前人工配置后忽略此提示"
-                        ),
+                        # reason=(
+                        #     "系统会保留当前类型、分类和来源组合，不会自动改写或阻止保存、优化、发布；"
+                        #     "可补充明确来源，或确认当前人工配置后忽略此提示"
+                        # ),
                         confidence=p.confidence,
                         blocking=False,
                         ignorable=True,
@@ -17397,6 +17485,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             idx = _find_capability_index(new_spec, edit)
             cap = new_spec.capabilities.pop(idx)
             _remember_removed_capability(new_spec, cap.name, cap.kind)
+            for step_id in _capability_node_step_ids(cap):
+                _remember_removed_capability_step(new_spec, cap.name, step_id)
             removed_refs = {str(cap.name or ""), str(cap.capability_id or "")}
             new_spec.capability_relations = [
                 relation for relation in (new_spec.capability_relations or [])
@@ -17633,6 +17723,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             )
             _invalidate_capability_contract(new_spec.capabilities[idx])
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
+            _sync_capability_output_after_step_removal(new_spec.capabilities[idx])
             continue
 
         if op == "reorder_capability_steps":

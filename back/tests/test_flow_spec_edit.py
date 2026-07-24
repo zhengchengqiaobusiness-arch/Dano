@@ -4478,6 +4478,172 @@ def test_generate_capabilities_respects_removed_capability():
     assert regenerated.capabilities == []
 
 
+def test_removed_capability_steps_do_not_become_unassigned_or_keep_field_warnings():
+    spec = FlowSpec(
+        flow_id="removed-capability-scope",
+        steps=[
+            FlowStep(
+                step_id="keep",
+                method="GET",
+                url="/api/keep",
+                path="/api/keep",
+                params=[ParamField(
+                    path="query.keep",
+                    key="keep",
+                    value="",
+                    category="user_param",
+                    source_kind="user_input",
+                )],
+            ),
+            FlowStep(
+                step_id="removed",
+                method="POST",
+                url="/api/removed",
+                path="/api/removed",
+                params=[ParamField(
+                    path="body.id",
+                    key="id",
+                    value="recorded-id",
+                    category="runtime_var",
+                    source_kind="unknown",
+                    need_human_confirm=True,
+                )],
+            ),
+        ],
+        capabilities=[
+            FlowCapability(
+                name="keep_capability",
+                kind="query_status",
+                nodes=_call_nodes(["keep"]),
+            ),
+            FlowCapability(
+                name="removed_capability",
+                kind="submit",
+                nodes=_call_nodes(["removed"]),
+            ),
+        ],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "remove_capability",
+        "capability_name": "removed_capability",
+    }])
+    report = validate_flow_spec(edited)
+
+    assert "step:removed" in (
+        edited.meta["capability_removed_steps"]["removed_capability"]
+    )
+    assert not any(
+        (item.get("target") or {}).get("step_id") == "removed"
+        for item in report["review_items"]
+    )
+    integrity = report["capability_validation"]["materialization_integrity"]
+    assert not any(
+        item.get("step_id") == "removed"
+        for item in [
+            *integrity["unassigned_business_steps"],
+            *integrity["unassigned_materialized_steps"],
+        ]
+    )
+
+
+def test_repeated_write_without_locator_is_one_reusable_capability_step():
+    spec = flow_spec_module.to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "delete-1",
+                "index": 1,
+                "method": "DELETE",
+                "url": "/api/items/delete?id=item-1",
+                "trigger_op": "click",
+                "trigger_action_id": "action-delete",
+                "trigger_transaction_id": "transaction-delete",
+                "page_id": "items-page",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.98},
+            },
+            {
+                "request_id": "delete-2",
+                "index": 2,
+                "method": "DELETE",
+                "url": "/api/items/delete?id=item-2",
+                "trigger_op": "click",
+                "trigger_action_id": "action-delete",
+                "trigger_transaction_id": "transaction-delete",
+                "page_id": "items-page",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.98},
+            },
+        ],
+        samples={"id": "item-1"},
+    )
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    executable = next(
+        step for step in planned.steps
+        if not (step.source_meta or {}).get("duplicate_observation_of")
+    )
+    duplicate = next(
+        step for step in planned.steps
+        if (step.source_meta or {}).get("duplicate_observation_of")
+    )
+
+    assert duplicate.source_meta["duplicate_observation_of"] == executable.step_id
+    assert [
+        step_id
+        for capability in planned.capabilities
+        for step_id in capability.step_ids
+    ] == [executable.step_id]
+
+
+def test_removing_duplicate_capability_step_retargets_output_to_remaining_step():
+    spec = FlowSpec(
+        flow_id="remove-duplicate-step",
+        steps=[
+            FlowStep(step_id="delete-1", method="DELETE", url="/api/delete?id=1", path="/api/delete?id=1"),
+            FlowStep(step_id="delete-2", method="DELETE", url="/api/delete?id=2", path="/api/delete?id=2"),
+        ],
+        capabilities=[FlowCapability(
+            name="delete_item",
+            kind="delete",
+            nodes=[
+                {"id": "call-1", "type": "call", "step_id": "delete-1"},
+                {"id": "call-2", "type": "call", "step_id": "delete-2"},
+                {"id": "return-final", "type": "return", "from": "delete-2", "path": "response"},
+            ],
+            output_mapping=[{
+                "kind": "final_response",
+                "name": "result",
+                "step_id": "delete-2",
+                "response_path": "response",
+            }],
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "remove_capability_step",
+        "capability_name": "delete_item",
+        "step_id": "delete-2",
+    }])
+    report = validate_flow_spec(edited)
+    capability = edited.capabilities[0]
+
+    assert capability.step_ids == ["delete-1"]
+    assert capability.output_mapping == [{
+        "kind": "final_response",
+        "name": "result",
+        "step_id": "delete-1",
+        "response_path": "response",
+    }]
+    assert any(
+        node.get("type") == "return" and node.get("from") == "delete-1"
+        for node in capability.nodes
+    )
+    assert not any(
+        item.get("code") == "capability_output_step_missing"
+        for items in report["issue_groups"].values()
+        for item in items
+    )
+
+
 def test_batch_capability_exports_execution_contract_and_entries_schema():
     spec = FlowSpec(
         flow_id="f",
@@ -6584,9 +6750,7 @@ def test_remove_capability_cleans_relations_and_scopes_publish_findings():
         item for item in report["review_items"]
         if (item.get("target") or {}).get("step_id") == "removed"
     ]
-    assert [item["type"] for item in removed_reviews] == ["field_source_unknown"]
-    assert removed_reviews[0]["blocking"] is False
-    assert removed_reviews[0]["ignorable"] is True
+    assert removed_reviews == []
     assert not any(
         item.get("code") == "field_source_unknown"
         for item in report["issue_groups"].get("field", [])

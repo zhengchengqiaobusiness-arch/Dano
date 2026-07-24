@@ -210,6 +210,7 @@ interface FlowSpecData {
   meta?: {
     request_roles?: RequestRoleData[];
     capability_model?: { status?: string; source?: string; generated_count?: number };
+    capability_removed_steps?: Record<string, string[]>;
     capability_generation?: {
       protocol?: string; status?: string; initial_completed?: boolean; last_mode?: string;
       indexed_range_changes?: any[]; [k: string]: any;
@@ -1029,6 +1030,14 @@ function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
 }
 function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
   return capabilityNodeStepIds(cap?.nodes);
+}
+function removedCapabilityStepIds(spec?: FlowSpecData | null) {
+  return new Set(
+    Object.values(spec?.meta?.capability_removed_steps || {})
+      .flat()
+      .filter((ref) => ref.startsWith("step:"))
+      .map((ref) => ref.slice(5)),
+  );
 }
 function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined, stepId: string) {
   return (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
@@ -2840,7 +2849,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (!ok) return;
         const current = flowSpecRef.current;
         if (current) {
-          const next = { ...current, capabilities: (current.capabilities || []).filter((_, capIdx) => capIdx !== idx) };
+          const removed = current.capabilities?.[idx];
+          const removedName = String(removed?.name || removed?.capability_id || "");
+          const removedRefs = capabilityActualStepIds(removed).map((stepId) => `step:${stepId}`);
+          const removedSteps = {
+            ...(current.meta?.capability_removed_steps || {}),
+            ...(removedName ? {
+              [removedName]: Array.from(new Set([
+                ...(current.meta?.capability_removed_steps?.[removedName] || []),
+                ...removedRefs,
+              ])),
+            } : {}),
+          };
+          const next = {
+            ...current,
+            capabilities: (current.capabilities || []).filter((_, capIdx) => capIdx !== idx),
+            meta: { ...(current.meta || {}), capability_removed_steps: removedSteps },
+          };
           flowSpecRef.current = next;
           setFlowSpec(next);
         }
@@ -3520,7 +3545,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             key="flow-status-panel"
             type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
             showIcon
-            style={{ marginBottom: 12, minHeight: 96, height: 320, overflow: "hidden" }}
+            style={{ marginBottom: 12, minHeight: 96, height: 150, overflow: "hidden" }}
             message={publishPending
               ? "正在审核并发布当前流程"
               : analysisPending
@@ -3641,7 +3666,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderRequestsPanel() {
     const capturedTotal = allCapturedRequests(flowSpec).length;
     const assignedStepIds = new Set((flowSpec?.capabilities || []).flatMap((cap) => capabilityActualStepIds(cap)));
-    const unassignedSteps = (flowSpec?.steps || []).filter((step) => !assignedStepIds.has(step.step_id));
+    const removedStepIds = removedCapabilityStepIds(flowSpec);
+    const unassignedSteps = (flowSpec?.steps || []).filter(
+      (step) => !assignedStepIds.has(step.step_id) && !removedStepIds.has(step.step_id),
+    );
     return (
       <Collapse
         activeKey={expandedRequestPanels}
