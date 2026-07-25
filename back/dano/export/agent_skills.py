@@ -52,7 +52,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 def _configured_reference_dir() -> Path:
     """Resolve one portable path relative to the installed project root."""
-    configured = str(get_settings().skill_reference_dir or "").strip()
+    settings = get_settings()
+    configured = str(settings.skill_reference_dir or "").strip()
     if not configured:
         raise ValueError("DANO_SKILL_REFERENCE_DIR 不能为空")
     relative = Path(configured.replace("\\", "/"))
@@ -62,7 +63,11 @@ def _configured_reference_dir() -> Path:
         or re.match(r"^[A-Za-z]:[/\\]", configured)
     ):
         raise ValueError("DANO_SKILL_REFERENCE_DIR 必须是相对仓库根目录的路径")
-    project_root = _PROJECT_ROOT.resolve()
+    configured_root = str(getattr(settings, "skill_reference_root", "") or "").strip()
+    root = Path(configured_root).expanduser() if configured_root else _PROJECT_ROOT
+    if configured_root and not root.is_absolute():
+        raise ValueError("DANO_SKILL_REFERENCE_ROOT 必须是绝对路径")
+    project_root = root.resolve()
     resolved = (project_root / relative).resolve()
     try:
         resolved.relative_to(project_root)

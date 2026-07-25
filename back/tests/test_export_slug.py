@@ -307,6 +307,27 @@ def test_reference_configuration_is_relative_to_the_installed_project_root(tmp_p
         _configured_reference_dir()
 
 
+def test_reference_configuration_supports_separate_linux_install_root(tmp_path, monkeypatch):
+    import dano.export.agent_skills as agent_skills
+
+    packaged_backend = tmp_path / "app"
+    install_root = tmp_path / "opt" / "skillmanner" / "Dano"
+    reference_dir = install_root / "doc"
+    packaged_backend.mkdir()
+    reference_dir.mkdir(parents=True)
+    monkeypatch.setattr(agent_skills, "_PROJECT_ROOT", packaged_backend)
+    monkeypatch.setattr(
+        agent_skills,
+        "get_settings",
+        lambda: SimpleNamespace(
+            skill_reference_root=str(install_root),
+            skill_reference_dir="doc",
+        ),
+    )
+
+    assert _configured_reference_dir() == reference_dir.resolve()
+
+
 def test_reference_configuration_rejects_absolute_missing_and_empty_directories(tmp_path, monkeypatch):
     import dano.export.agent_skills as agent_skills
 
