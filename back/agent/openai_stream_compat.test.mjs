@@ -14,7 +14,7 @@ test("adds tool_calls finish_reason when a complete tool call ends without one",
     {
       id: "resp_1",
       object: "chat.completion.chunk",
-      model: "claude-opus-4-8",
+      model: "mimo-v2.5",
       choices: [{ index: 0, delta: { tool_calls: [{
         index: 0,
         id: "call_1",
