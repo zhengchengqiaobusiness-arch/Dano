@@ -1585,6 +1585,48 @@ async def test_records_visible_table_column_contract(tmp_path) -> None:  # noqa:
     assert all(column["table_complete"] is True for column in columns)
 
 
+_ASYNC_RESULT_TABLE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<button id="search">查询</button>
+<table>
+  <thead><tr>
+    <th>单据编号</th>
+    <th>申请时间</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+document.getElementById('search').onclick = function () {
+  setTimeout(function () {
+    document.getElementById('rows').innerHTML =
+      '<tr><td>QJD202607260001</td><td>2026-07-26 12:34:56</td></tr>';
+  }, 100);
+};
+</script>
+</body></html>"""
+
+
+async def test_records_table_evidence_after_async_query_render(tmp_path) -> None:  # noqa: ANN001
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    page = tmp_path / "async-result-table.html"
+    page.write_text(_ASYNC_RESULT_TABLE, encoding="utf-8")
+    sess = RecordSession()
+    try:
+        await sess.start(page.as_uri())
+        await sess.page.get_by_role("button", name="查询").click()
+        await sess.page.wait_for_timeout(900)
+        evidence = [
+            item for item in sess.recorded_field_evidence()
+            if item.get("control_kind") == "table_column"
+        ]
+    finally:
+        await sess.stop()
+
+    assert [item["label"] for item in evidence] == ["单据编号", "申请时间"]
+    assert evidence[0]["sample_values"] == ["QJD202607260001"]
+    assert evidence[1]["sample_values"] == ["2026-07-26 12:34:56"]
+
+
 _CARDS = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <div id="card" style="cursor:pointer;position:fixed;top:0;left:0;width:1280px;height:220px">出差申请</div>
 <div class="el-menu-item" style="cursor:pointer;position:fixed;top:300px;left:0;width:1280px;height:200px">我的</div>

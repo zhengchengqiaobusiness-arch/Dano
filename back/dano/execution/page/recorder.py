@@ -548,6 +548,14 @@ _RECORDER_JS = r"""() => {
       }));
     } catch (e) {}
   }
+  var evidenceSnapshotTimer = null;
+  function scheduleEvidenceSnapshot(delay) {
+    if (evidenceSnapshotTimer) return;
+    evidenceSnapshotTimer = setTimeout(function () {
+      evidenceSnapshotTimer = null;
+      emitFormSnapshot();
+    }, typeof delay === 'number' ? delay : 450);
+  }
   var actionSeq = 0;
   var mutationSeq = 0;
   var mutationBuffer = [];
@@ -586,12 +594,16 @@ _RECORDER_JS = r"""() => {
   try {
     new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) rememberMutation(mutations[i]);
+      // Query results and SPA tables render asynchronously after the click.
+      // Capture the settled DOM instead of relying only on the pre-click table.
+      if (mutations.length) scheduleEvidenceSnapshot();
     }).observe(document.documentElement || document, {
       subtree: true,
       childList: true,
       attributes: true,
       attributeFilter: ['hidden','disabled','required','aria-hidden','aria-disabled','aria-required','aria-expanded','aria-selected','aria-checked']
     });
+    scheduleEvidenceSnapshot(0);
   } catch (e) {}
   function emitDomEffect(actionId, startMutationSeq) {
     try {
@@ -1076,7 +1088,10 @@ _RECORDER_JS = r"""() => {
     var role = roleOf(el); var name = accName(el);
     var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
     var isFormCommand = role === 'button' && FORM_COMMAND.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
-    if (isFormCommand) emitFormSnapshot();
+    if (isFormCommand) {
+      emitFormSnapshot();
+      scheduleEvidenceSnapshot();
+    }
     emit(isSubmit ? 'submit' : 'click', loc, '', '');
   }, true);
 }"""
