@@ -799,6 +799,28 @@ def _step_paths(steps: list[dict]) -> list[dict]:
     return [{"method": (s.get("method") or "POST").upper(), "path": _req_path(s)} for s in steps]
 
 
+def _recorded_source_page_url(skill: SkillSpec) -> str:
+    """Return the browser page that originated the recorded business request."""
+    api = getattr(skill, "api_request", None) or {}
+    candidates: list[object] = [
+        (getattr(skill, "call_metadata", None) or {}).get("source_page_url"),
+        (getattr(skill, "call_metadata", None) or {}).get("page_url"),
+        ((api.get("_flow_spec") or {}).get("meta") or {}).get("page_context"),
+        ((((api.get("_release_snapshot") or {}).get("flow_spec") or {}).get("meta") or {})
+         .get("page_context")),
+    ]
+    candidates.extend(
+        evidence.get("trigger_page_context")
+        for evidence in ((api.get("goal") or {}).get("evidence") or [])
+        if isinstance(evidence, dict)
+    )
+    for candidate in candidates:
+        value = candidate.get("url") if isinstance(candidate, dict) else candidate
+        if isinstance(value, str) and re.match(r"^https?://", value.strip(), re.I):
+            return value.strip()
+    return ""
+
+
 def _flow_meta(skill: SkillSpec) -> dict:
     """执行画像:供导出 SOP 渲染的**通用 grounded 数据**——步数、前置、计算、是否回查、是否按业务码判成败。
 
@@ -827,13 +849,15 @@ def _flow_meta(skill: SkillSpec) -> dict:
             judged = bool(apir.get("success_rule") or last.get("success_rule"))
             return {"step_count": max(len(wf), 1), "preconditions": [], "computes": [],
                     "verify": verify, "judged_by_code": judged,
+                    "source_page_url": _recorded_source_page_url(skill),
                     "step_paths": _step_paths(wf or [apir]),
                     "release": {
                         key: value for key, value in dict(apir.get("_release_snapshot") or {}).items()
                         if key != "flow_spec"
                     }}   # 各步 接口(method+path),供 SOP 展示编排
         return {"step_count": 1, "preconditions": [], "computes": [],
-                "verify": bool(getattr(skill, "api_request", None)), "judged_by_code": False}
+                "verify": bool(getattr(skill, "api_request", None)), "judged_by_code": False,
+                "source_page_url": _recorded_source_page_url(skill)}
     # 普通连接器
     return {"step_count": 1, "preconditions": [], "computes": [],
             "verify": bool(getattr(skill, "fact_check_query", None) or getattr(skill, "fact_check_expr", None)),

@@ -374,7 +374,7 @@ def _frontend_output_protocol() -> dict:
             "body": "按 output_schema 展示业务结果；数组使用 Markdown 表格且表格行之间不得插入空行",
             "request_link": {
                 "source": "request_link",
-                "label": "查看原始请求",
+                "label": "打开原系统页面",
                 "target": "_blank",
                 "rel": "noopener noreferrer",
                 "only_when_status": "succeeded",
@@ -562,6 +562,7 @@ def _export_contract(m: SkillManifest) -> dict:
         "recording_mode": m.recording_mode,
         "verification_status": m.verification_status,
         "verification_basis": m.verification_basis,
+        "source_page_url": str((m.flow or {}).get("source_page_url") or ""),
         "capability": m.capability,
         "capabilities": exported_capabilities,
         "capability_relations": copy.deepcopy(getattr(m, "capability_relations", []) or []),
@@ -1677,9 +1678,20 @@ _LIST_OUTPUT_MD = """## 列表输出要求
 - Markdown 表头、分隔行和数据行之间不得插入空行；单元格内换行统一使用 `<br>`。
 - 非列表对象仍按能力的 `output_schema` 解读，不要为了套表格丢失业务字段。"""
 
+_IDENTIFIER_OUTPUT_MD = """## 标识字段规则
+- 标识语义只认 `output_schema` 字段的 `x-dano-identifier-role`：
+  `record`、`process_instance`、`business_document` 分别表示记录标识、流程实例标识和业务单据标识。
+- 脚本成功结果包含 `business_identifiers` 时，展示和后续操作必须按其中的 `label` 与 `value`
+  原样使用；不存在 `document_number` 时不得把 `record_id` 或 `process_instance_id` 写成“单据编号”。
+- 契约没有声明标识角色时保留原字段名，禁止根据字段名、值形状或当前业务场景猜测标识含义。
+- 后续操作需要哪一个参数，就只使用同名字段或 `capability_relations` 明确映射的字段；
+  用户给出另一类编号时，先用已发布查询能力定位同一条记录，再取目标能力要求的字段，禁止直接改名代入。
+- 面向用户隐藏哪些字段、字段顺序和标题均由 `output_schema` 的展示元数据决定；
+  包装脚本原始 `output` 始终保留完整结果供后续能力准确取值。"""
+
 _FRONTEND_OUTPUT_MD = """## 固定返回展示
 - `succeeded`：先显示“操作成功”，再按 `output_schema` 展示业务结果；数组只显示格式化后的 Markdown 表格。
-- 成功结果含 `request_link` 时，必须使用其中的 `url` 渲染“查看原始请求”链接，并设置
+- 成功结果含 `request_link` 时，必须使用其中的 `url` 渲染“打开原系统页面”链接，并设置
   `target="_blank"`、`rel="noopener noreferrer"`，让用户点击后在新窗口打开。
 - 不得猜测、改写或自行拼接链接；没有 `request_link` 时不显示链接。
 - 非成功状态不显示成功链接，展示脚本返回的原因或下一步。"""
@@ -1765,6 +1777,8 @@ description: {json.dumps(desc, ensure_ascii=False)}
 {relationships}
 
 {_LIST_OUTPUT_MD}
+
+{_IDENTIFIER_OUTPUT_MD}
 
 {_FRONTEND_OUTPUT_MD}
 
@@ -1865,6 +1879,7 @@ import urllib.request
 SKILL_ID = "__SKILL_ID__"
 TOOL = "__TOOL__"
 CAPABILITY = __CAPABILITY__
+SOURCE_PAGE_URL = __SOURCE_PAGE_URL__
 PROTOCOL = "dano.capability_call.v1"
 CAPABILITIES = __CAPABILITIES__
 FIELDS = __FIELDS__
@@ -1881,17 +1896,31 @@ def _strict_boolean(value):
     return value if isinstance(value, bool) else None
 
 
-def _original_request_link(api_audit):
-    """Find the actual successful request URL from direct or workflow audit output."""
+def _original_request_link(api_audit, source_page_url=""):
+    """Prefer the recorded business page; fall back to the successful API URL."""
+    if isinstance(source_page_url, str) and re.match(r"^https?://", source_page_url.strip(), re.I):
+        return {
+            "label": "打开原系统页面",
+            "url": source_page_url.strip(),
+            "target": "_blank",
+            "rel": "noopener noreferrer",
+        }
     if not isinstance(api_audit, dict):
         return None
-    candidates = [api_audit]
-    for key in ("final", "step_result", "raw"):
-        if isinstance(api_audit.get(key), dict):
-            candidates.append(api_audit[key])
-    steps = api_audit.get("step_results")
-    if isinstance(steps, list):
-        candidates.extend(item for item in reversed(steps) if isinstance(item, dict))
+    containers = [api_audit]
+    if isinstance(api_audit.get("api"), dict):
+        containers.append(api_audit["api"])
+    candidates = []
+    for container in containers:
+        for key in ("final", "step_result"):
+            if isinstance(container.get(key), dict):
+                candidates.append(container[key])
+        candidates.append(container)
+        steps = container.get("step_results")
+        if isinstance(steps, list):
+            candidates.extend(item for item in reversed(steps) if isinstance(item, dict))
+        if isinstance(container.get("raw"), dict):
+            candidates.append(container["raw"])
     for item in candidates:
         url = item.get("url")
         if not isinstance(url, str) or not re.match(r"^https?://", url.strip(), re.I):
@@ -1903,6 +1932,34 @@ def _original_request_link(api_audit):
             "rel": "noopener noreferrer",
         }
     return None
+
+
+def _business_identifiers(output, output_schema):
+    """Expose only identifier semantics explicitly declared by the capability."""
+    roles = {
+        "record": ("record_id", "记录ID"),
+        "process_instance": ("process_instance_id", "流程实例ID"),
+        "business_document": ("document_number", "业务编号"),
+    }
+    found = {}
+
+    def visit(value, schema):
+        if not isinstance(value, dict):
+            return
+        properties = (schema or {}).get("properties") or {}
+        for key, item in value.items():
+            field_schema = properties.get(key) or {}
+            role = str(field_schema.get("x-dano-identifier-role") or "").strip().lower()
+            mapped = roles.get(role)
+            if mapped and item not in (None, "") and mapped[0] not in found:
+                label = str(field_schema.get("title") or field_schema.get("label") or mapped[1])
+                found[mapped[0]] = {"label": label, "value": item}
+        for key, item in value.items():
+            if isinstance(item, dict):
+                visit(item, properties.get(key) or {})
+
+    visit(output, output_schema or {})
+    return found
 
 
 def _coerce_arguments(obj):
@@ -2313,9 +2370,12 @@ def main():
                    "reason": "输出不符合 output_schema: %s" % e, "output": output})
             sys.exit(1)
         result = {"status": "partial_success" if partial else "succeeded", "state": state,
-                  "output": output, "fact_check": fc}
+                  "capability": capability, "output": output, "fact_check": fc}
+        identifiers = _business_identifiers(output, contract.get("output_schema") or {})
+        if identifiers:
+            result["business_identifiers"] = identifiers
         if not partial:
-            request_link = _original_request_link(api_audit)
+            request_link = _original_request_link(audit, SOURCE_PAGE_URL)
             if request_link:
                 result["request_url"] = request_link["url"]
                 result["request_link"] = request_link
@@ -2352,6 +2412,7 @@ def _dano_call_py(m: SkillManifest) -> str:
             .replace("__SKILL_ID__", m.name)
             .replace("__TOOL__", tool_name_of(m.name))
             .replace("__CAPABILITY__", repr(_export_default_capability(m)))
+            .replace("__SOURCE_PAGE_URL__", repr(str((m.flow or {}).get("source_page_url") or "")))
             .replace("__CAPABILITIES__", repr(contracts))
             .replace("__FIELDS__", json.dumps(keys, ensure_ascii=False))
             .replace("__REQUIRED__", json.dumps([k for k in keys if k in required], ensure_ascii=False))
@@ -2386,10 +2447,17 @@ exit $LASTEXITCODE
 """
 
 _FORMAT_LIST_PY = r'''#!/usr/bin/env python3
-"""Convert a Dano result or ordinary JSON list to a Markdown table."""
+"""Convert a Dano result to a compact business-facing Markdown table."""
 import argparse
+import datetime
 import json
+import os
+import re
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+PRESENTATIONS = __PRESENTATIONS__
+DEFAULT_CAPABILITY = __DEFAULT_CAPABILITY__
 
 
 def _list_rows(value):
@@ -2407,6 +2475,84 @@ def _list_rows(value):
     return value if isinstance(value, list) else [value]
 
 
+def _row_schema(schema):
+    properties = (schema or {}).get("properties") or {}
+    for key in ("records", "rows", "items", "list"):
+        field = properties.get(key) or {}
+        if field.get("type") == "array":
+            return field.get("items") or {}
+    for field in properties.values():
+        if isinstance(field, dict) and field.get("type") == "array":
+            return field.get("items") or {}
+    return schema or {}
+
+
+def _presentation(value, requested):
+    capability = requested or (value.get("capability") if isinstance(value, dict) else None)
+    if capability in PRESENTATIONS:
+        return PRESENTATIONS[capability]
+    if DEFAULT_CAPABILITY in PRESENTATIONS:
+        return PRESENTATIONS[DEFAULT_CAPABILITY]
+    rows = _list_rows(value)
+    keys = set(next((row for row in rows if isinstance(row, dict)), {}))
+    ranked = []
+    for name, presentation in PRESENTATIONS.items():
+        props = set((_row_schema(presentation.get("output_schema")).get("properties") or {}))
+        ranked.append((len(keys & props), name, presentation))
+    return max(ranked, default=(0, "", {}))[2]
+
+
+def _label(key, schema):
+    explicit = str((schema or {}).get("title") or (schema or {}).get("label") or "").strip()
+    if explicit and explicit != str(key):
+        return explicit
+    return str(key)
+
+
+def _priority(index, schema):
+    declared = (schema or {}).get("x-dano-display-order")
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool):
+        return 0, declared, index
+    return 1, index, index
+
+
+def _hidden(schema):
+    if (
+        (schema or {}).get("x-dano-display") is False
+        or (schema or {}).get("x-dano-internal") is True
+        or (schema or {}).get("x-dano-visibility") == "internal"
+    ):
+        return True
+    return False
+
+
+def _time_value(value, schema):
+    value_format = str((schema or {}).get("x-dano-value-format") or "").lower()
+    if value_format not in {
+        "epoch-milliseconds", "unix-milliseconds", "timestamp-milliseconds",
+        "epoch-seconds", "unix-seconds", "timestamp-seconds",
+    }:
+        return value
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return value
+    seconds = value / 1000 if value_format.endswith("milliseconds") else value
+    try:
+        timezone_name = os.getenv("DANO_DISPLAY_TIMEZONE", "").strip()
+        timezone = ZoneInfo(timezone_name) if timezone_name else None
+        parsed = datetime.datetime.fromtimestamp(seconds, timezone)
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError, ZoneInfoNotFoundError):
+        return value
+
+
+def _display_value(key, value, presentation, schema):
+    labels = (presentation.get("value_labels") or {}).get(key) or {}
+    mapped = labels.get(str(value))
+    if mapped is not None:
+        return mapped
+    return _time_value(value, schema)
+
+
 def _cell(value):
     if value is None:
         return ""
@@ -2415,7 +2561,7 @@ def _cell(value):
     return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", "<br>")
 
 
-def format_table(value):
+def format_table(value, capability=None):
     rows = _list_rows(value)
     if not rows:
         return "无数据"
@@ -2423,13 +2569,36 @@ def format_table(value):
         rows = [{"值": row} for row in rows]
     else:
         rows = [row if isinstance(row, dict) else {"值": row} for row in rows]
+    presentation = _presentation(value, capability)
+    schema_properties = (_row_schema(presentation.get("output_schema")).get("properties") or {})
     columns = list(dict.fromkeys(key for row in rows for key in row))
+    columns = [
+        key for key in columns
+        if not _hidden(schema_properties.get(key) or {})
+    ]
+    columns = [
+        key for _index, key in sorted(
+            enumerate(columns),
+            key=lambda item: _priority(item[0], schema_properties.get(item[1]) or {}),
+        )
+    ]
     if not columns:
         return "无数据"
-    header = "| " + " | ".join(_cell(column) for column in columns) + " |"
+    header = "| " + " | ".join(
+        _cell(_label(column, schema_properties.get(column) or {}))
+        for column in columns
+    ) + " |"
     divider = "| " + " | ".join("---" for _ in columns) + " |"
     body = [
-        "| " + " | ".join(_cell(row.get(column)) for column in columns) + " |"
+        "| " + " | ".join(
+            _cell(_display_value(
+                column,
+                row.get(column),
+                presentation,
+                schema_properties.get(column) or {},
+            ))
+            for column in columns
+        ) + " |"
         for row in rows
     ]
     return "\n".join([header, divider, *body])
@@ -2440,6 +2609,7 @@ def main():
     parser.add_argument("--json", dest="raw")
     parser.add_argument("--json-base64", dest="raw_base64")
     parser.add_argument("--file")
+    parser.add_argument("--capability")
     args = parser.parse_args()
     if args.raw is not None and args.raw_base64 is not None:
         parser.error("--json 与 --json-base64 不能同时使用")
@@ -2462,12 +2632,70 @@ def main():
     except json.JSONDecodeError as error:
         print("JSON 解析失败: %s" % error, file=sys.stderr)
         raise SystemExit(2)
-    print(format_table(value))
+    print(format_table(value, args.capability))
 
 
 if __name__ == "__main__":
     main()
 '''
+
+
+def _format_list_py(manifests: list[SkillManifest]) -> str:
+    presentations: dict[str, dict] = {}
+
+    def row_properties(output_schema: dict) -> dict:
+        properties = (output_schema or {}).get("properties") or {}
+        for field in properties.values():
+            if isinstance(field, dict) and field.get("type") == "array":
+                return ((field.get("items") or {}).get("properties") or {})
+        return properties
+
+    def enum_labels(schema: dict) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for option in (
+            schema.get("x-enum-options")
+            or schema.get("x-options")
+            or schema.get("x-options-snapshot")
+            or []
+        ):
+            if isinstance(option, dict):
+                value = option.get("value", option.get("id", option.get("key")))
+                label = option.get("label") or option.get("text") or option.get("name")
+            else:
+                value = label = option
+            if value not in (None, "") and label not in (None, ""):
+                mapping[str(value)] = str(label)
+        for option in schema.get("oneOf") or []:
+            if isinstance(option, dict) and "const" in option:
+                label = option.get("title") or option.get("label")
+                if label not in (None, ""):
+                    mapping[str(option["const"])] = str(label)
+        for label, value in (schema.get("x-enum-value-map") or {}).items():
+            if value not in (None, "") and label not in (None, ""):
+                mapping[str(value)] = str(label)
+        return mapping
+
+    for manifest in manifests:
+        for name, contract in _capability_contracts(manifest).items():
+            output_schema = copy.deepcopy(contract.get("output_schema") or {})
+            presentations[name] = {
+                "output_schema": output_schema,
+                "value_labels": {
+                    field: labels
+                    for field, schema in row_properties(output_schema).items()
+                    if isinstance(schema, dict) and (labels := enum_labels(schema))
+                },
+            }
+    default = (
+        _export_default_capability(manifests[0])
+        if len(manifests) == 1
+        else None
+    )
+    return (
+        _FORMAT_LIST_PY
+        .replace("__PRESENTATIONS__", repr(presentations))
+        .replace("__DEFAULT_CAPABILITY__", repr(default))
+    )
 
 _FORMAT_LIST_PS1 = """# 保留 Windows PowerShell 中的 UTF-8 JSON，再交给格式化脚本。
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -2526,7 +2754,7 @@ def _write_skill(out_dir: Path, m: SkillManifest,
         _chmod_x(sh)
         (folder / "scripts" / "submit.ps1").write_text(_SUBMIT_PS1, encoding="utf-8")
         formatter = folder / "scripts" / "format_list.py"
-        formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
+        formatter.write_text(_format_list_py([m]), encoding="utf-8", newline="\n")
         _chmod_x(formatter)
         (folder / "scripts" / "format_list.ps1").write_text(_FORMAT_LIST_PS1, encoding="utf-8")
         return _publish_folder(folder, target, slug, _skill_name(m.title, slug))
@@ -2650,6 +2878,8 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 {_LIST_OUTPUT_MD}
 
+{_IDENTIFIER_OUTPUT_MD}
+
 {_FRONTEND_OUTPUT_MD}
 
 {_errors_md(has_fact_verification)}
@@ -2713,7 +2943,7 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
             _chmod_x(sh)
             (folder / "scripts" / f"{m.action}.ps1").write_text(_op_ps1(m.action), encoding="utf-8")
         formatter = folder / "scripts" / "format_list.py"
-        formatter.write_text(_FORMAT_LIST_PY, encoding="utf-8", newline="\n")
+        formatter.write_text(_format_list_py(manifests), encoding="utf-8", newline="\n")
         _chmod_x(formatter)
         (folder / "scripts" / "format_list.ps1").write_text(_FORMAT_LIST_PS1, encoding="utf-8")
         return _publish_folder(folder, target, slug, _skill_name(label, slug))

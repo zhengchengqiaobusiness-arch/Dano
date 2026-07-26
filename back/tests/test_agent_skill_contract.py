@@ -500,6 +500,99 @@ def test_exported_skill_is_compact_and_routes_details_to_references(tmp_path):
     assert "| H1 | 审批中 |" in result.stdout
 
 
+def test_exported_list_formatter_is_driven_by_output_schema_metadata(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-ERP.ticket_inspection",
+        subsystem=Subsystem("A-ERP"),
+        action="ticket_inspection",
+        title="工单检查",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "inspect_ticket",
+            "kind": "inspect",
+            "title": "检查工单",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {
+                            "privatePointer": {
+                                "type": "string",
+                                "x-dano-display": False,
+                                "x-dano-identifier-role": "record",
+                            },
+                            "workflowToken": {
+                                "type": "string",
+                                "x-dano-display": False,
+                                "x-dano-identifier-role": "process_instance",
+                            },
+                            "ticketNumber": {
+                                "type": "string",
+                                "title": "工单编号",
+                                "x-dano-display-order": 10,
+                                "x-dano-identifier-role": "business_document",
+                            },
+                            "lifecycleCode": {
+                                "type": "string",
+                                "title": "处理状态",
+                                "x-dano-display-order": 20,
+                                "x-enum-options": [
+                                    {"value": "P", "label": "处理中"},
+                                    {"value": "D", "label": "已完成"},
+                                ],
+                            },
+                            "openedAtValue": {
+                                "type": "number",
+                                "title": "创建时间",
+                                "x-dano-display-order": 30,
+                                "x-dano-value-format": "epoch-milliseconds",
+                            },
+                            "memoValue": {
+                                "type": "string",
+                                "title": "说明",
+                                "x-dano-display-order": 40,
+                            },
+                            "unclassifiedCode": {"type": "string"},
+                        }},
+                    },
+                    "total": {"type": "number"},
+                },
+            },
+        }],
+    ))
+    folder = _write_skill(tmp_path, manifest)
+    formatter = folder / "scripts" / "format_list.py"
+    result = subprocess.run(
+        [sys.executable, str(formatter), "--json", json.dumps({
+            "capability": "inspect_ticket",
+            "output": {"records": [{
+                "privatePointer": "internal-42",
+                "workflowToken": "workflow-42",
+                "memoValue": "跨系统验证",
+                "unclassifiedCode": "raw-42",
+                "openedAtValue": 1784955106000,
+                "lifecycleCode": "P",
+                "ticketNumber": "ERP-42",
+            }]},
+        }, ensure_ascii=False)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "DANO_DISPLAY_TIMEZONE": "Asia/Shanghai"},
+    )
+
+    assert "| 工单编号 | 处理状态 | 创建时间 | 说明 | unclassifiedCode |" in result.stdout
+    assert "| ERP-42 | 处理中 | 2026-07-25 12:51 | 跨系统验证 | raw-42 |" in result.stdout
+    assert "internal-42" not in result.stdout
+    assert "workflow-42" not in result.stdout
+    markdown = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "`x-dano-identifier-role`" in markdown
+    assert "禁止根据字段名、值形状或当前业务场景猜测" in markdown
+
+
 def test_exported_description_is_a_compact_trigger_index():
     markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
     frontmatter = markdown.split("---", 2)[1]

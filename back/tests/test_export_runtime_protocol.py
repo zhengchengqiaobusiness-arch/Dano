@@ -32,7 +32,26 @@ def _write_runtime_namespace() -> dict:
             },
             "output_schema": {
                 "type": "object",
-                "properties": {"result": {"type": "object"}},
+                "properties": {"result": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "title": "记录ID",
+                            "x-dano-identifier-role": "record",
+                        },
+                        "processInstanceId": {
+                            "type": "string",
+                            "title": "流程实例ID",
+                            "x-dano-identifier-role": "process_instance",
+                        },
+                        "billCode": {
+                            "type": "string",
+                            "title": "单据编号",
+                            "x-dano-identifier-role": "business_document",
+                        },
+                    },
+                }},
                 "required": ["result"],
             },
         }],
@@ -122,7 +141,11 @@ def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, 
                         "url": "https://oa.example.test/requests/42",
                     },
                 },
-                "exec_result": {"structured_output": {"result": {}}},
+                "exec_result": {"structured_output": {"result": {
+                    "id": "record-42",
+                    "processInstanceId": "process-42",
+                    "billCode": "QJD-42",
+                }}},
             }).encode()
 
     def _urlopen(request, **_kwargs):
@@ -156,6 +179,11 @@ def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, 
         "target": "_blank",
         "rel": "noopener noreferrer",
     }
+    assert result["business_identifiers"] == {
+        "record_id": {"label": "记录ID", "value": "record-42"},
+        "process_instance_id": {"label": "流程实例ID", "value": "process-42"},
+        "document_number": {"label": "单据编号", "value": "QJD-42"},
+    }
 
 
 def test_generated_runtime_finds_original_url_in_workflow_final_step():
@@ -170,6 +198,110 @@ def test_generated_runtime_finds_original_url_in_workflow_final_step():
     }) == {
         "label": "查看原始请求",
         "url": "https://oa.example.test/requests",
+        "target": "_blank",
+        "rel": "noopener noreferrer",
+    }
+
+
+def test_generated_runtime_keeps_identifier_meanings_separate():
+    namespace = _write_runtime_namespace()
+
+    assert namespace["_business_identifiers"]({
+        "data": {
+            "opaqueA": "record-42",
+            "opaqueB": "workflow-42",
+            "opaqueC": "ERP-42",
+        },
+    }, {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "opaqueA": {"x-dano-identifier-role": "record", "title": "记录键"},
+                    "opaqueB": {
+                        "x-dano-identifier-role": "process_instance",
+                        "title": "流程键",
+                    },
+                    "opaqueC": {
+                        "x-dano-identifier-role": "business_document",
+                        "title": "工单编号",
+                    },
+                },
+            },
+        },
+    }) == {
+        "record_id": {"label": "记录键", "value": "record-42"},
+        "process_instance_id": {"label": "流程键", "value": "workflow-42"},
+        "document_number": {"label": "工单编号", "value": "ERP-42"},
+    }
+    assert namespace["_business_identifiers"](
+        {"billCode": "looks-like-a-number"},
+        {"type": "object", "properties": {"billCode": {"type": "string"}}},
+    ) == {}
+
+
+def test_generated_runtime_returns_recorded_business_page_when_audit_has_no_url(
+    monkeypatch, capsys,
+):
+    skill = SkillSpec(
+        skill_id="A-OA.leave_request",
+        subsystem=Subsystem.OA,
+        action="leave_request",
+        title="请假申请",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        api_request={
+            "goal": {
+                "evidence": [{
+                    "trigger_page_context": {
+                        "url": "https://oa.example.test/oa/duty/leave",
+                    },
+                }],
+            },
+        },
+        capabilities=[{
+            "name": "query_leave",
+            "kind": "query_status",
+            "title": "查询请假申请",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "output_schema": {
+                "type": "object",
+                "properties": {"records": {"type": "array"}},
+                "required": ["records"],
+            },
+        }],
+    )
+    manifest = to_manifest(skill)
+    namespace = {"__name__": "generated_page_link_test"}
+    exec(compile(_dano_call_py(manifest), "<generated-page-link>", "exec"), namespace)  # noqa: S102
+    monkeypatch.setenv("DANO_URL", "http://dano.test")
+    monkeypatch.setenv("DANO_TENANT_KEY", "tenant-key")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "state": "completed",
+                "audit": {},
+                "exec_result": {"structured_output": {"records": []}},
+            }).encode()
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", lambda *_args, **_kwargs: _Response())
+    monkeypatch.setattr(sys, "argv", ["dano_call.py", "--json", "{}"])
+
+    namespace["main"]()
+
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result["request_url"] == "https://oa.example.test/oa/duty/leave"
+    assert result["request_link"] == {
+        "label": "打开原系统页面",
+        "url": "https://oa.example.test/oa/duty/leave",
         "target": "_blank",
         "rel": "noopener noreferrer",
     }
