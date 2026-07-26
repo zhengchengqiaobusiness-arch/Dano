@@ -467,6 +467,75 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return out.slice(0, 200);
   };
+  window.__danoTableColumnEvidence = function () {
+    var out = []; var seenRoots = [];
+    function visible(node) {
+      if (!node) return false;
+      var style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+      return !(style && (style.display === 'none' || style.visibility === 'hidden'));
+    }
+    function addRoot(root) {
+      if (!root || seenRoots.indexOf(root) >= 0 || !visible(root)) return;
+      seenRoots.push(root);
+    }
+    try {
+      var frameworkRoots = document.querySelectorAll(
+        '.el-table,.ant-table,.v-data-table,.q-table,[role="table"],[role="grid"]'
+      );
+      for (var i = 0; i < frameworkRoots.length; i++) addRoot(frameworkRoots[i]);
+      var nativeTables = document.querySelectorAll('table');
+      for (var j = 0; j < nativeTables.length; j++) {
+        if (!nativeTables[j].closest(
+          '.el-table,.ant-table,.v-data-table,.q-table,[role="table"],[role="grid"]'
+        )) addRoot(nativeTables[j]);
+      }
+      seenRoots.forEach(function (root, tableIndex) {
+        var headers = root.querySelectorAll(
+          'thead th,[role="columnheader"],.el-table__header th,.ant-table-thead th'
+        );
+        var rows = root.querySelectorAll(
+          'tbody tr,[role="row"],.el-table__body tr,.ant-table-tbody tr'
+        );
+        var usableHeaders = [];
+        for (var h = 0; h < headers.length; h++) {
+          var label = clean(headers[h].textContent || headers[h].getAttribute('aria-label') || '');
+          if (visible(headers[h]) && label) usableHeaders.push(headers[h]);
+        }
+        if (!usableHeaders.length) return;
+        usableHeaders.forEach(function (header, columnIndex) {
+          var label = clean(header.textContent || header.getAttribute('aria-label') || '');
+          var samples = [];
+          for (var r = 0; r < rows.length && samples.length < 5; r++) {
+            var cells = rows[r].querySelectorAll('td,[role="cell"],[role="gridcell"]');
+            if (columnIndex >= cells.length || !visible(cells[columnIndex])) continue;
+            var value = clean(cells[columnIndex].textContent || '');
+            if (value && samples.indexOf(value) < 0) samples.push(value);
+          }
+          var valueKind = samples.some(function (value) {
+            return /^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/.test(value);
+          }) ? 'datetime' : '';
+          var sampleEpochMs = valueKind ? samples.map(function (value) {
+            var parsed = Date.parse(value.replace(' ', 'T').replace(/\//g, '-'));
+            return isNaN(parsed) ? null : parsed;
+          }).filter(function (value) { return value !== null; }) : [];
+          out.push({
+            kind: 'table_column',
+            field: '',
+            label: label,
+            field_aliases: controlAliases(header),
+            control_kind: 'table_column',
+            display_order: columnIndex,
+            table_id: 'table_' + tableIndex,
+            table_complete: true,
+            sample_values: samples,
+            sample_epoch_ms: sampleEpochMs,
+            value_kind: valueKind
+          });
+        });
+      });
+    } catch (e) {}
+    return out.slice(0, 200);
+  };
   function emitFormSnapshot() {
     if (onLoginPage()) return;
     try {
@@ -474,6 +543,7 @@ _RECORDER_JS = r"""() => {
         op: 'form_snapshot',
         required_fields: window.__danoRequiredFields ? window.__danoRequiredFields() : [],
         fields: window.__danoFormFieldEvidence ? window.__danoFormFieldEvidence() : [],
+        output_fields: window.__danoTableColumnEvidence ? window.__danoTableColumnEvidence() : [],
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       }));
     } catch (e) {}
@@ -2854,7 +2924,10 @@ class RecordSession:
             )
             latest_snapshot_by_scope[scope] = snapshot
         for scope, snapshot in latest_snapshot_by_scope.items():
-            for field in snapshot.get("fields") or []:
+            for field in [
+                *(snapshot.get("fields") or []),
+                *(snapshot.get("output_fields") or []),
+            ]:
                 if not isinstance(field, dict):
                     continue
                 evidence.append({

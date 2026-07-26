@@ -178,7 +178,9 @@ def test_generated_runtime_sends_only_capability_endpoint_contract(monkeypatch, 
         "url": "https://oa.example.test/requests/42",
         "target": "_blank",
         "rel": "noopener noreferrer",
+        "markdown": "[查看原始请求](https://oa.example.test/requests/42)",
     }
+    assert result["request_markdown"] == "[查看原始请求](https://oa.example.test/requests/42)"
     assert result["business_identifiers"] == {
         "record_id": {"label": "记录ID", "value": "record-42"},
         "process_instance_id": {"label": "流程实例ID", "value": "process-42"},
@@ -200,6 +202,7 @@ def test_generated_runtime_finds_original_url_in_workflow_final_step():
         "url": "https://oa.example.test/requests",
         "target": "_blank",
         "rel": "noopener noreferrer",
+        "markdown": "[查看原始请求](https://oa.example.test/requests)",
     }
 
 
@@ -239,6 +242,46 @@ def test_generated_runtime_keeps_identifier_meanings_separate():
         {"billCode": "looks-like-a-number"},
         {"type": "object", "properties": {"billCode": {"type": "string"}}},
     ) == {}
+
+
+def test_generated_runtime_marks_untyped_output_as_non_semantic():
+    namespace = _write_runtime_namespace()
+
+    assert namespace["_presentation_policy"]({
+        "type": "object",
+        "properties": {
+            "result": {
+                "description": "接口原始响应",
+                "x-dano-untyped-response": True,
+            },
+        },
+    }) == {
+        "schema_grounded": False,
+        "forbid_inferred_labels": True,
+        "fallback_label": "接口返回值",
+    }
+
+
+def test_generated_runtime_does_not_invent_labels_for_typed_but_unlabeled_output():
+    namespace = _write_runtime_namespace()
+
+    assert namespace["_presentation_policy"]({
+        "type": "object",
+        "properties": {
+            "result": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "number"},
+                    "data": {"type": "string"},
+                },
+            },
+        },
+    }) == {
+        "schema_grounded": False,
+        "forbid_inferred_labels": True,
+        "fallback_label": "接口返回值",
+        "unlabeled_fields": ["result.code", "result.data"],
+    }
 
 
 def test_generated_runtime_returns_recorded_business_page_when_audit_has_no_url(
@@ -304,7 +347,11 @@ def test_generated_runtime_returns_recorded_business_page_when_audit_has_no_url(
         "url": "https://oa.example.test/oa/duty/leave",
         "target": "_blank",
         "rel": "noopener noreferrer",
+        "markdown": "[打开原系统页面](https://oa.example.test/oa/duty/leave)",
     }
+    assert result["request_markdown"] == (
+        "[打开原系统页面](https://oa.example.test/oa/duty/leave)"
+    )
 
 
 def test_generated_runtime_unwraps_normalized_capability_output_before_schema_check(

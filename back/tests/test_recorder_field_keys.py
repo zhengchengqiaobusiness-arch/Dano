@@ -186,3 +186,29 @@ def test_field_evidence_keeps_latest_snapshot_per_spa_route() -> None:
         ("/work-hours/search", "text"),
         ("/work-hours/form", "select"),
     ]
+
+
+def test_field_evidence_includes_recorded_output_columns() -> None:
+    session = RecordSession()
+    session.form_snapshots = [{
+        "page_id": "page-1",
+        "frame_id": "main",
+        "page_context": {"path": "/leave/search"},
+        "fields": [],
+        "output_fields": [{
+            "kind": "table_column",
+            "label": "单据编号",
+            "field_aliases": ["billCode"],
+            "control_kind": "table_column",
+            "display_order": 0,
+            "table_id": "table_0",
+            "table_complete": True,
+        }],
+    }]
+
+    evidence = session.recorded_field_evidence()
+
+    assert len(evidence) == 1
+    assert evidence[0]["kind"] == "table_column"
+    assert evidence[0]["field_aliases"] == ["billCode"]
+    assert evidence[0]["page_context"]["path"] == "/leave/search"

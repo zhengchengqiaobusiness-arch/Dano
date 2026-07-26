@@ -1551,6 +1551,40 @@ async def test_password_never_recorded_and_reset(tmp_path) -> None:  # noqa: ANN
         await sess.stop()
 
 
+_RESULT_TABLE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<table>
+  <thead><tr>
+    <th data-field="billCode">单据编号</th>
+    <th data-field="submitTime">申请时间</th>
+  </tr></thead>
+  <tbody><tr><td>QJD202607250007</td><td>2026-07-25 12:51:46</td></tr></tbody>
+</table>
+</body></html>"""
+
+
+async def test_records_visible_table_column_contract(tmp_path) -> None:  # noqa: ANN001
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    page = tmp_path / "result-table.html"
+    page.write_text(_RESULT_TABLE, encoding="utf-8")
+    sess = RecordSession()
+    try:
+        await sess.start(page.as_uri())
+        columns = await sess.page.evaluate("window.__danoTableColumnEvidence()")
+    finally:
+        await sess.stop()
+
+    assert [(column["label"], column["display_order"]) for column in columns] == [
+        ("单据编号", 0),
+        ("申请时间", 1),
+    ]
+    assert columns[0]["field_aliases"] == ["billCode"]
+    assert columns[1]["field_aliases"] == ["submitTime"]
+    assert columns[1]["value_kind"] == "datetime"
+    assert len(columns[1]["sample_epoch_ms"]) == 1
+    assert all(column["table_complete"] is True for column in columns)
+
+
 _CARDS = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <div id="card" style="cursor:pointer;position:fixed;top:0;left:0;width:1280px;height:220px">出差申请</div>
 <div class="el-menu-item" style="cursor:pointer;position:fixed;top:300px;left:0;width:1280px;height:200px">我的</div>

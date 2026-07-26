@@ -4,10 +4,14 @@ import asyncio
 
 from dano.execution.page.flow_spec import (
     FlowSpec,
+    FlowCapability,
     FlowStep,
     ParamField,
     _NO_SCHEMA_DEFAULT,
+    _apply_output_presentation_evidence,
     _schema_default_for_param,
+    _schema_from_response_value,
+    _sync_capability_io_schemas,
     orchestrate_flow_capabilities,
     to_flow_spec,
 )
@@ -78,6 +82,168 @@ def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_
     assert item_properties["id"]["type"] == "string"
     assert item_properties["hotelName"]["type"] == "string"
     assert item_properties["processStatus"]["type"] == "number"
+
+
+def test_query_output_schema_preserves_recorded_table_presentation():
+    response = {
+        "records": [{
+            "id": "opaque-record-id",
+            "processInstanceId": "OA-QJ-2026072500007",
+            "processStatus": 1,
+            "day": 8,
+            "billCode": "QJD202607250007",
+            "billType": "oa_duty_leave",
+            "processDefKey": "oa_duty_leave",
+            "submitTime": 1784955106000,
+        }],
+    }
+    evidence = [{
+        "label": "酒店名称",
+        "value": "test",
+        "field_aliases": ["hotelName"],
+        "control_kind": "text",
+    }, *[
+        {
+            "kind": "table_column",
+            "label": label,
+            "field_aliases": [field],
+            "display_order": order,
+            "control_kind": "table_column",
+            "table_id": "leave-list",
+            "table_complete": True,
+            **({"value_kind": "datetime"} if field == "submitTime" else {}),
+        }
+        for order, (field, label) in enumerate([
+            ("billCode", "单据编号"),
+            ("processStatus", "状态"),
+            ("day", "请假天数"),
+            ("submitTime", "申请时间"),
+        ])
+    ]]
+
+    schema = _schema_from_response_value(response)
+    _apply_output_presentation_evidence(schema, evidence)
+    fields = schema["properties"]["records"]["items"]["properties"]
+
+    assert fields["billCode"]["title"] == "单据编号"
+    assert fields["billCode"]["x-dano-display-order"] == 0
+    assert fields["processStatus"]["title"] == "状态"
+    assert fields["day"]["title"] == "请假天数"
+    assert fields["submitTime"]["title"] == "申请时间"
+    assert fields["submitTime"]["x-dano-value-format"] == "epoch-auto"
+    assert all(fields[name]["x-dano-display"] is False for name in (
+        "id", "processInstanceId", "billType", "processDefKey",
+    ))
+
+
+def test_query_output_presentation_matches_visible_samples_without_dom_field_aliases():
+    response = {
+        "records": [{
+            "id": "opaque-record-id",
+            "processStatus": 1,
+            "day": 8,
+            "billCode": "QJD202607250007",
+            "submitTime": 1784955106000,
+        }],
+    }
+    evidence = [
+        {
+            "kind": "table_column",
+            "label": label,
+            "field_aliases": [],
+            "display_order": order,
+            "control_kind": "table_column",
+            "table_id": "leave-list",
+            "table_complete": True,
+            "sample_values": [sample],
+            **({"sample_epoch_ms": [1784955106000], "value_kind": "datetime"}
+               if label == "申请时间" else {}),
+        }
+        for order, (label, sample) in enumerate([
+            ("单据编号", "QJD202607250007"),
+            ("状态", "审批中"),
+            ("请假天数", "8"),
+            ("申请时间", "2026-07-25 12:51:46"),
+        ])
+    ]
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "审批结果": {
+                "type": "string",
+                "x-flow-path": "query.processStatus",
+                "x-enum-value-map": {"审批中": 1, "已撤回": 4},
+            },
+        },
+    }
+
+    schema = _schema_from_response_value(response)
+    _apply_output_presentation_evidence(
+        schema,
+        evidence,
+        sample_output=response,
+        input_schema=input_schema,
+    )
+    fields = schema["properties"]["records"]["items"]["properties"]
+
+    assert [fields[name]["title"] for name in (
+        "billCode", "processStatus", "day", "submitTime",
+    )] == ["单据编号", "状态", "请假天数", "申请时间"]
+    assert fields["id"]["x-dano-display"] is False
+
+
+def test_capability_sync_writes_table_presentation_into_output_contract():
+    step = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/api/requests",
+        source_meta={"page_id": "page-1", "frame_id": "main", "role": "business_get"},
+        response_json={
+            "data": {
+                "list": [{"id": "internal", "billCode": "REQ-42", "day": 2}],
+                "total": 1,
+            },
+        },
+    )
+    spec = FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="query_requests",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+        )],
+        meta={"field_evidence": [
+            {
+                "kind": "table_column",
+                "label": "单据编号",
+                "field_aliases": ["billCode"],
+                "control_kind": "table_column",
+                "display_order": 0,
+                "table_id": "request-list",
+                "table_complete": True,
+                "page_id": "page-1",
+                "frame_id": "main",
+            },
+            {
+                "kind": "table_column",
+                "label": "天数",
+                "field_aliases": ["day"],
+                "control_kind": "table_column",
+                "display_order": 1,
+                "table_id": "request-list",
+                "table_complete": True,
+                "page_id": "page-1",
+                "frame_id": "main",
+            },
+        ]},
+    )
+    _sync_capability_io_schemas(spec)
+    fields = spec.capabilities[0].output_schema["properties"]["records"]["items"]["properties"]
+
+    assert fields["billCode"]["title"] == "单据编号"
+    assert fields["day"]["title"] == "天数"
+    assert fields["id"]["x-dano-display"] is False
 
 
 def test_recorded_select_keeps_choice_type_without_inventing_options():

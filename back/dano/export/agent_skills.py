@@ -374,6 +374,7 @@ def _frontend_output_protocol() -> dict:
             "body": "按 output_schema 展示业务结果；数组使用 Markdown 表格且表格行之间不得插入空行",
             "request_link": {
                 "source": "request_link",
+                "markdown_source": "request_markdown",
                 "label": "打开原系统页面",
                 "target": "_blank",
                 "rel": "noopener noreferrer",
@@ -453,6 +454,94 @@ def _schema_option_fields(schema: dict) -> list[str]:
     return fields
 
 
+def _wire_leaf(parameter: str, schema: dict) -> str:
+    path = str((schema or {}).get("x-flow-path") or parameter).strip()
+    leaf = path.rsplit(".", 1)[-1]
+    return re.sub(r"\[\d+\]$", "", leaf)
+
+
+def _business_label(parameter: str, schema: dict) -> str:
+    label = str((schema or {}).get("label") or (schema or {}).get("title") or "").strip()
+    if not label:
+        return ""
+    if label == parameter and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\[\]-]*", label):
+        return ""
+    return label
+
+
+def _enrich_output_schemas(contracts: dict[str, dict]) -> None:
+    """Reuse grounded field metadata by exact wire identity within one capability."""
+    sources: dict[str, dict[str, list[tuple[str, dict]]]] = {}
+    for capability, contract in contracts.items():
+        for parameter, schema in ((contract.get("parameters") or {}).get("properties") or {}).items():
+            if isinstance(schema, dict):
+                sources.setdefault(capability, {}).setdefault(
+                    _wire_leaf(parameter, schema), [],
+                ).append(
+                    (parameter, schema),
+                )
+
+    option_keys = (
+        "x-enum-options", "x-options", "x-options-snapshot", "x-enum-value-map",
+    )
+    copied_keys = (
+        "x-dano-display", "x-dano-internal", "x-dano-visibility",
+        "x-dano-display-order", "x-dano-identifier-role",
+    )
+    for capability, contract in contracts.items():
+        output_schema = copy.deepcopy(contract.get("output_schema") or {"type": "object"})
+        properties = output_schema.get("properties") or {}
+        row_properties = properties
+        for field_schema in properties.values():
+            if isinstance(field_schema, dict) and field_schema.get("type") == "array":
+                row_properties = ((field_schema.get("items") or {}).get("properties") or {})
+                break
+        for output_field, output_field_schema in row_properties.items():
+            if not isinstance(output_field_schema, dict):
+                continue
+            ordered = (sources.get(capability) or {}).get(output_field) or []
+            if not ordered:
+                continue
+            labels = [
+                label for parameter, schema in ordered
+                if (label := _business_label(parameter, schema))
+            ]
+            if labels and not (output_field_schema.get("title") or output_field_schema.get("label")):
+                output_field_schema["title"] = labels[0]
+            for key in option_keys:
+                if key in output_field_schema:
+                    continue
+                source_value = next(
+                    (schema.get(key) for _parameter, schema in ordered if schema.get(key)),
+                    None,
+                )
+                if source_value:
+                    output_field_schema[key] = copy.deepcopy(source_value)
+            for key in copied_keys:
+                if key in output_field_schema:
+                    continue
+                values = {
+                    json.dumps(schema.get(key), ensure_ascii=False, sort_keys=True)
+                    for _parameter, schema in ordered
+                    if schema.get(key) is not None
+                }
+                if len(values) == 1:
+                    output_field_schema[key] = copy.deepcopy(next(
+                        schema[key] for _parameter, schema in ordered if key in schema
+                    ))
+            if (
+                output_field_schema.get("type") in {"integer", "number"}
+                and "x-dano-value-format" not in output_field_schema
+                and any(
+                    schema.get("x-dano-business-type") in {"date", "datetime"}
+                    or schema.get("format") in {"date", "date-time"}
+                    for _parameter, schema in ordered
+                )
+            ):
+                output_field_schema["x-dano-value-format"] = "epoch-auto"
+        contract["output_schema"] = output_schema
+
+
 def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
     """Return the authoritative per-capability caller contracts used by exports."""
     contracts: dict[str, dict] = {}
@@ -499,10 +588,11 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
             "field_labels": field_labels,
         }
     if contracts:
+        _enrich_output_schemas(contracts)
         return contracts
     keys, required, props = _fields(m)
     name = _capability(m)
-    return {name: {
+    fallback = {name: {
         "name": name,
         "title": m.title,
         "kind": name,
@@ -517,6 +607,8 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
         "validation_requirements": {},
         "caller_responsibilities": [],
     }}
+    _enrich_output_schemas(fallback)
+    return fallback
 
 
 def _export_contract(m: SkillManifest) -> dict:
@@ -613,6 +705,7 @@ def _export_contract(m: SkillManifest) -> dict:
                 "output": {"type": "object"},
                 "reason": {"type": "string"},
                 "request_url": {"type": "string", "format": "uri"},
+                "request_markdown": {"type": "string"},
                 "request_link": {
                     "type": "object",
                     "properties": {
@@ -620,8 +713,9 @@ def _export_contract(m: SkillManifest) -> dict:
                         "url": {"type": "string", "format": "uri"},
                         "target": {"type": "string", "const": "_blank"},
                         "rel": {"type": "string", "const": "noopener noreferrer"},
+                        "markdown": {"type": "string"},
                     },
-                    "required": ["label", "url", "target", "rel"],
+                    "required": ["label", "url", "target", "rel", "markdown"],
                 },
             },
             "required": ["status"],
@@ -1691,9 +1785,12 @@ _IDENTIFIER_OUTPUT_MD = """## 标识字段规则
 
 _FRONTEND_OUTPUT_MD = """## 固定返回展示
 - `succeeded`：先显示“操作成功”，再按 `output_schema` 展示业务结果；数组只显示格式化后的 Markdown 表格。
-- 成功结果含 `request_link` 时，必须使用其中的 `url` 渲染“打开原系统页面”链接，并设置
-  `target="_blank"`、`rel="noopener noreferrer"`，让用户点击后在新窗口打开。
-- 不得猜测、改写或自行拼接链接；没有 `request_link` 时不显示链接。
+- 成功结果含 `request_markdown` 时，必须把该 Markdown 原样单独输出为可点击链接；禁止输出 `<a>` HTML
+  或把 Markdown 放进代码块。链接的 `target="_blank"`、`rel="noopener noreferrer"` 由结构化
+  `request_link` 提供给支持这些属性的宿主。
+- 不得猜测、改写或自行拼接链接；没有 `request_markdown` 时不显示链接。
+- `presentation.forbid_inferred_labels=true` 时，未类型化结果只能称“接口返回值”，禁止把其中的
+  `id`、`data` 或任意字符串擅自命名为申请编号、单据编号、流程编号等业务字段。
 - 非成功状态不显示成功链接，展示脚本返回的原因或下一步。"""
 
 
@@ -1898,13 +1995,18 @@ def _strict_boolean(value):
 
 def _original_request_link(api_audit, source_page_url=""):
     """Prefer the recorded business page; fall back to the successful API URL."""
-    if isinstance(source_page_url, str) and re.match(r"^https?://", source_page_url.strip(), re.I):
+    def link(label, url):
+        markdown_url = urllib.parse.quote(url, safe=":/?#[]@!$&'*+,;=%")
         return {
-            "label": "打开原系统页面",
-            "url": source_page_url.strip(),
+            "label": label,
+            "url": url,
             "target": "_blank",
             "rel": "noopener noreferrer",
+            "markdown": "[%s](%s)" % (label, markdown_url),
         }
+
+    if isinstance(source_page_url, str) and re.match(r"^https?://", source_page_url.strip(), re.I):
+        return link("打开原系统页面", source_page_url.strip())
     if not isinstance(api_audit, dict):
         return None
     containers = [api_audit]
@@ -1925,12 +2027,7 @@ def _original_request_link(api_audit, source_page_url=""):
         url = item.get("url")
         if not isinstance(url, str) or not re.match(r"^https?://", url.strip(), re.I):
             continue
-        return {
-            "label": "查看原始请求",
-            "url": url.strip(),
-            "target": "_blank",
-            "rel": "noopener noreferrer",
-        }
+        return link("查看原始请求", url.strip())
     return None
 
 
@@ -1960,6 +2057,50 @@ def _business_identifiers(output, output_schema):
 
     visit(output, output_schema or {})
     return found
+
+
+def _presentation_policy(output_schema):
+    """Tell the caller when the response has no grounded field semantics."""
+    properties = (output_schema or {}).get("properties") or {}
+    untyped = any(
+        isinstance(schema, dict) and schema.get("x-dano-untyped-response") is True
+        for schema in properties.values()
+    )
+    if untyped:
+        return {
+            "schema_grounded": False,
+            "forbid_inferred_labels": True,
+            "fallback_label": "接口返回值",
+        }
+    unlabeled = []
+
+    def visit(schema, path=""):
+        for name, field_schema in ((schema or {}).get("properties") or {}).items():
+            if not isinstance(field_schema, dict):
+                continue
+            field_path = "%s.%s" % (path, name) if path else name
+            nested = field_schema
+            if field_schema.get("type") == "array":
+                nested = field_schema.get("items") or {}
+            if (nested.get("properties") or {}):
+                visit(nested, field_path)
+            elif not (
+                field_schema.get("title")
+                or field_schema.get("label")
+                or field_schema.get("x-dano-identifier-role")
+            ):
+                unlabeled.append(field_path)
+
+    visit(output_schema or {})
+    grounded = not unlabeled
+    return {
+        "schema_grounded": grounded,
+        "forbid_inferred_labels": not grounded,
+        **({
+            "fallback_label": "接口返回值",
+            "unlabeled_fields": unlabeled,
+        } if unlabeled else {}),
+    }
 
 
 def _coerce_arguments(obj):
@@ -2371,6 +2512,7 @@ def main():
             sys.exit(1)
         result = {"status": "partial_success" if partial else "succeeded", "state": state,
                   "capability": capability, "output": output, "fact_check": fc}
+        result["presentation"] = _presentation_policy(contract.get("output_schema") or {})
         identifiers = _business_identifiers(output, contract.get("output_schema") or {})
         if identifiers:
             result["business_identifiers"] = identifiers
@@ -2379,6 +2521,7 @@ def main():
             if request_link:
                 result["request_url"] = request_link["url"]
                 result["request_link"] = request_link
+                result["request_markdown"] = request_link["markdown"]
         _emit(result)
     elif state == "needs_select":
         sel = audit.get("select") or {}
@@ -2531,11 +2674,15 @@ def _time_value(value, schema):
     if value_format not in {
         "epoch-milliseconds", "unix-milliseconds", "timestamp-milliseconds",
         "epoch-seconds", "unix-seconds", "timestamp-seconds",
+        "epoch-auto",
     }:
         return value
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return value
-    seconds = value / 1000 if value_format.endswith("milliseconds") else value
+    seconds = value / 1000 if (
+        value_format.endswith("milliseconds")
+        or value_format == "epoch-auto" and abs(value) >= 100000000000
+    ) else value
     try:
         timezone_name = os.getenv("DANO_DISPLAY_TIMEZONE", "").strip()
         timezone = ZoneInfo(timezone_name) if timezone_name else None

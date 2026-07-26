@@ -6694,6 +6694,172 @@ def _schema_from_response_value(value: Any) -> dict[str, Any]:
     return {"type": "string"}
 
 
+def _apply_output_presentation_evidence(
+    output_schema: dict[str, Any],
+    evidence: list[dict[str, Any]] | None,
+    *,
+    sample_output: Any = None,
+    input_schema: dict[str, Any] | None = None,
+) -> None:
+    """Project recorded table headers into a query result schema.
+
+    The page is authoritative for labels, order and visibility.  This function
+    deliberately does not translate transport field names or invent business
+    labels when the recorder did not observe a matching table column.
+    """
+    row_properties: dict[str, Any] = {}
+    for field_schema in (output_schema.get("properties") or {}).values():
+        if not isinstance(field_schema, dict) or field_schema.get("type") != "array":
+            continue
+        candidate = ((field_schema.get("items") or {}).get("properties") or {})
+        if candidate:
+            row_properties = candidate
+            break
+    if not row_properties:
+        return
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence or []:
+        if not isinstance(item, dict) or (
+            item.get("kind") != "table_column"
+            and item.get("control_kind") != "table_column"
+        ):
+            continue
+        groups.setdefault(str(item.get("table_id") or "table"), []).append(item)
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+    sample_rows: list[dict[str, Any]] = []
+
+    def find_rows(value: Any) -> None:
+        nonlocal sample_rows
+        if sample_rows:
+            return
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value[:5]):
+            sample_rows = value[:5]
+            return
+        if isinstance(value, dict):
+            for nested in value.values():
+                find_rows(nested)
+                if sample_rows:
+                    return
+
+    find_rows(sample_output)
+    enum_labels: dict[str, dict[str, str]] = {}
+    for input_field in ((input_schema or {}).get("properties") or {}).values():
+        if not isinstance(input_field, dict):
+            continue
+        output_name = str(input_field.get("x-flow-path") or "").split(".")[-1]
+        if output_name not in row_properties:
+            continue
+        labels: dict[str, str] = {}
+        for label, wire_value in (input_field.get("x-enum-value-map") or {}).items():
+            labels[str(wire_value)] = str(label)
+        for option_key in ("x-options", "x-options-snapshot"):
+            for option in input_field.get(option_key) or []:
+                if isinstance(option, dict) and option.get("label") not in (None, ""):
+                    wire_value = option.get("value", option.get("id"))
+                    if wire_value not in (None, ""):
+                        labels[str(wire_value)] = str(option["label"])
+        if labels:
+            enum_labels[output_name] = labels
+
+    best: tuple[int, int, list[tuple[str, dict[str, Any]]], list[dict[str, Any]]] | None = None
+    for columns in groups.values():
+        matched: list[tuple[str, dict[str, Any]]] = []
+        used: set[str] = set()
+        direct_matches = 0
+        sample_matches = 0
+        for column in sorted(columns, key=lambda item: int(item.get("display_order") or 0)):
+            aliases = {
+                normalized(alias)
+                for alias in [
+                    column.get("field"),
+                    column.get("key"),
+                    *(column.get("field_aliases") or []),
+                ]
+                if normalized(alias)
+            }
+            candidates = [
+                name for name in row_properties
+                if name not in used and normalized(name) in aliases
+            ]
+            direct = len(candidates) == 1
+            if not direct and sample_rows:
+                visible_values = {
+                    normalized(value)
+                    for value in (column.get("sample_values") or [])
+                    if normalized(value)
+                }
+                visible_epochs = {
+                    int(value)
+                    for value in (column.get("sample_epoch_ms") or [])
+                    if isinstance(value, (int, float))
+                }
+                candidates = []
+                for name in row_properties:
+                    if name in used:
+                        continue
+                    raw_values = [
+                        row.get(name) for row in sample_rows
+                        if row.get(name) not in (None, "")
+                    ]
+                    rendered = {normalized(value) for value in raw_values if normalized(value)}
+                    rendered.update(
+                        normalized(enum_labels.get(name, {}).get(str(value)))
+                        for value in raw_values
+                        if enum_labels.get(name, {}).get(str(value))
+                    )
+                    epoch_match = any(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and int(value if abs(value) >= 100000000000 else value * 1000) in visible_epochs
+                        for value in raw_values
+                    )
+                    if rendered.intersection(visible_values) or epoch_match:
+                        candidates.append(name)
+            if len(candidates) != 1:
+                continue
+            used.add(candidates[0])
+            matched.append((candidates[0], column))
+            if direct:
+                direct_matches += 1
+            else:
+                sample_matches += 1
+        score = direct_matches * 100 + sample_matches
+        if best is None or score > best[0]:
+            best = (score, direct_matches, matched, columns)
+    if best is None or best[0] == 0:
+        return
+
+    _score, direct_matches, matched, columns = best
+    visible_fields = {name for name, _column in matched}
+    for name, column in matched:
+        field_schema = row_properties[name]
+        label = str(column.get("label") or "").strip()
+        if label:
+            field_schema["title"] = label
+        field_schema["x-dano-display"] = True
+        field_schema["x-dano-display-order"] = int(column.get("display_order") or 0)
+        if (
+            field_schema.get("type") in {"integer", "number"}
+            and column.get("value_kind") == "datetime"
+        ):
+            field_schema["x-dano-value-format"] = "epoch-auto"
+
+    sample_matches = len(matched) - direct_matches
+    evidence_is_complete = bool(
+        direct_matches
+        or sample_matches >= min(2, len(row_properties))
+        or len(row_properties) == 1 and sample_matches == 1
+    )
+    if evidence_is_complete and all(column.get("table_complete") is True for column in columns):
+        for name, field_schema in row_properties.items():
+            if name not in visible_fields and isinstance(field_schema, dict):
+                field_schema["x-dano-display"] = False
+
+
 def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str) -> dict[str, Any]:
     write_steps = [s for s in steps if _is_write_step(s)]
     read_steps = [s for s in steps if not _is_write_step(s)]
@@ -7167,6 +7333,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         if cap.kind == "query_status":
             cap.output_mapping = _query_output_mappings(cap_steps)
         mapped_output_props: dict[str, Any] = {}
+        mapped_output_samples: dict[str, Any] = {}
         for mapping_idx, mapping in enumerate(cap.output_mapping or []):
             if not isinstance(mapping, dict):
                 continue
@@ -7179,7 +7346,9 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                 candidate = _flow_path_lookup(source_step.response_json, response_path)
                 if candidate is not _FLOW_PATH_MISSING:
                     mapped_value = candidate
-            mapped_output_props[_capability_output_name(mapping, mapping_idx)] = _schema_from_response_value(mapped_value)
+            output_name = _capability_output_name(mapping, mapping_idx)
+            mapped_output_props[output_name] = _schema_from_response_value(mapped_value)
+            mapped_output_samples[output_name] = mapped_value
         if mapped_output_props:
             cap.output_schema = reconcile_schema({
                 "type": "object",
@@ -7234,6 +7403,29 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                         "properties": fallback_props,
                         "required": [],
                     }, cap.output_schema or {})
+        if cap.kind == "query_status":
+            table_evidence = [
+                item for item in (spec.meta.get("field_evidence") or [])
+                if isinstance(item, dict)
+                and (
+                    item.get("kind") == "table_column"
+                    or item.get("control_kind") == "table_column"
+                )
+                and any(
+                    _recording_evidence_matches_request(step.source_meta or {}, item)
+                    for step in cap_steps
+                )
+            ]
+            sample_output = mapped_output_samples or next(
+                (step.response_json for step in reversed(cap_steps) if step.response_json is not None),
+                None,
+            )
+            _apply_output_presentation_evidence(
+                cap.output_schema,
+                table_evidence,
+                sample_output=sample_output,
+                input_schema=cap.input_schema,
+            )
     return sync_capability_scoped_views(spec)
 
 

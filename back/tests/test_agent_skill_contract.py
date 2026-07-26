@@ -593,6 +593,143 @@ def test_exported_list_formatter_is_driven_by_output_schema_metadata(tmp_path):
     assert "禁止根据字段名、值形状或当前业务场景猜测" in markdown
 
 
+def test_exported_list_formatter_reuses_grounded_metadata_within_capability(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="custom-system.request",
+        subsystem=Subsystem("custom-system"),
+        action="request",
+        title="业务申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {
+                "name": "query_request",
+                "kind": "query_status",
+                "title": "查询申请",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "状态筛选": {
+                            "type": "string",
+                            "label": "处理状态",
+                            "x-flow-path": "query.phaseCode",
+                            "x-options-snapshot": [
+                                {"value": "P", "label": "处理中"},
+                                {"value": "D", "label": "已完成"},
+                            ],
+                        },
+                        "创建时间": {
+                            "type": "string",
+                            "label": "创建时间",
+                            "x-flow-path": "query.openedValue",
+                            "x-dano-business-type": "datetime",
+                        },
+                    },
+                },
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "records": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "phaseCode": {"type": "string"},
+                                    "openedValue": {"type": "number"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        ],
+    ))
+    folder = _write_skill(tmp_path, manifest)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(folder / "scripts" / "format_list.py"),
+            "--capability",
+            "query_request",
+            "--json",
+            json.dumps({
+                "records": [{"phaseCode": "P", "openedValue": 1784955106000}],
+            }),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "DANO_DISPLAY_TIMEZONE": "Asia/Shanghai"},
+    )
+
+    assert "| 处理状态 | 创建时间 |" in result.stdout
+    assert "| 处理中 | 2026-07-25 12:51 |" in result.stdout
+
+
+def test_exported_list_formatter_does_not_alias_same_wire_name_across_capabilities(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="custom-system.request",
+        subsystem=Subsystem("custom-system"),
+        action="request",
+        title="业务申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {
+                "name": "query_request",
+                "kind": "query_status",
+                "title": "查询申请",
+                "input_schema": {"type": "object", "properties": {}},
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "records": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"id": {"type": "string"}},
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "name": "withdraw_request",
+                "kind": "withdraw",
+                "title": "撤回申请",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "流程实例ID": {
+                            "type": "string",
+                            "label": "流程实例ID",
+                            "x-flow-path": "id",
+                        },
+                    },
+                },
+                "output_schema": {"type": "object", "properties": {}},
+            },
+        ],
+    ))
+    folder = _write_skill(tmp_path, manifest)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(folder / "scripts" / "format_list.py"),
+            "--capability",
+            "query_request",
+            "--json",
+            json.dumps({"records": [{"id": "record-42"}]}),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert "| id |" in result.stdout
+    assert "流程实例ID" not in result.stdout
+
+
 def test_exported_description_is_a_compact_trigger_index():
     markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
     frontmatter = markdown.split("---", 2)[1]
