@@ -169,6 +169,17 @@ def test_exported_skill_summarizes_successful_writes_in_business_language():
     assert "裸 `true`、内部 ID 或空消息" in markdown
 
 
+def test_exported_skill_validates_field_content_before_confirmation():
+    markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
+
+    assert "## 字段格式与内容校验" in markdown
+    assert "确认前、执行前" in markdown
+    assert "金额、数量、人数" in markdown
+    assert "传输类型仍是字符串" in markdown
+    assert "不得进入确认或执行" in markdown
+    assert "不得臆造最小值、最大值" in markdown
+
+
 def test_exported_skill_renders_schema_defaults_in_tables_and_examples():
     reference = _capability_reference_md(_hotel_manifest())
     query_fields = reference.split(

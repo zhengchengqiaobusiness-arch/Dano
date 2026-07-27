@@ -1765,6 +1765,16 @@ _EXECUTION_DIR_MD = """## 执行位置（必须）
 - 如果命令工具不支持工作目录，先从当前 `SKILL.md` 的绝对路径解析脚本绝对路径后再执行。
 - 找不到或调用包装脚本失败时停止并报告；禁止绕过包装脚本直接拼 HTTP 请求，禁止使用 curl、Python HTTP 客户端或其他方式直连 Dano/目标系统，也禁止把 Skill 名当作业务字段。"""
 
+_FIELD_CONTENT_VALIDATION_MD = """## 字段格式与内容校验
+- 确认前、执行前逐字段校验内容；优先遵守 schema 的 `type`、`format`、`enum`、`pattern`
+  和边界约束，再结合字段 `title`、`label`、`description` 中明确的业务语义。
+- schema 仅声明宽泛字符串、但字段语义明确表示金额、数量、人数（amount/quantity/count）时，
+  仍须检查内容是否为对应的数字或整数；即使传输类型仍是字符串，也只保持字符串传输形式，不得接受明显非数字文本。
+- 日期时间必须符合声明格式，枚举值必须来自候选；标识、编码、电话号码等字符串不得擅自转成数字或去掉前导零。
+- 任一字段明显不符合格式时，指出字段和期望格式并要求用户修正；修正前不得进入确认或执行，
+  不得静默替换、猜值或自动重试。
+- schema 未提供依据时不得臆造最小值、最大值、精度、长度或业务范围，只拦截确定的格式冲突。"""
+
 _LIST_OUTPUT_MD = """## 列表输出要求
 - 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --json '<output JSON>'` 格式化。
 - Windows PowerShell 使用 `scripts/format_list.ps1 '<output JSON>'`，避免管道编码破坏中文。
@@ -1880,6 +1890,8 @@ description: {json.dumps(desc, ensure_ascii=False)}
 {relationships}
 
 {_LIST_OUTPUT_MD}
+
+{_FIELD_CONTENT_VALIDATION_MD}
 
 {_IDENTIFIER_OUTPUT_MD}
 
@@ -3030,6 +3042,8 @@ description: {json.dumps(description, ensure_ascii=False)}
    `failed`、`partial_success` 或结果不明时不得宣称全部成功或自动重复提交。
 
 {_LIST_OUTPUT_MD}
+
+{_FIELD_CONTENT_VALIDATION_MD}
 
 {_IDENTIFIER_OUTPUT_MD}
 
