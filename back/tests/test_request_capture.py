@@ -5,6 +5,7 @@ import json
 
 from dano.execution.page.request_capture import (
     _response_ok,
+    _grounded_recheck,
     _resolve_list_selects,
     _resolve_selects,
     as_list_payload,
@@ -1816,6 +1817,90 @@ async def test_execute_api_grounded_fact_check():
         assert out2["fact_check_passed"] is False and out2["ok"] is False  # 不入库 → 列表没有 → 空操作判失败
     finally:
         httpd.shutdown()
+
+
+async def test_grounded_fact_check_searches_beyond_first_page(monkeypatch):
+    """A successful write must not fail merely because its record is after page 1."""
+    import dano.execution.page.request_capture as capture
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import parse_qs, urlparse
+
+    china = timezone(timedelta(hours=8))
+    records = [{
+        "useTime": int(datetime(2026, 7, day, tzinfo=china).timestamp() * 1000)
+    } for day in range(1, 12)]
+    target = "2026-07-11 00:00:00"
+    requested_urls = []
+
+    async def paged_get(url, *args, **kwargs):
+        requested_urls.append(url)
+        query = parse_qs(urlparse(url).query)
+        page_no = int(query.get("pageNo", ["1"])[0])
+        page_size = int(query.get("pageSize", ["10"])[0])
+        start = (page_no - 1) * page_size
+        return {"code": 0, "data": {"list": records[start:start + page_size], "total": len(records)}}
+
+    monkeypatch.setattr(capture, "_get_json", paged_get)
+
+    passed, reason = await _grounded_recheck(
+        {
+            "endpoint": "/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10",
+            "param": "入住时间",
+            "match_field": "useTime",
+            "retries": 1,
+            "backoff_s": 0,
+        },
+        {"入住时间": target},
+        base_url="http://oa.test",
+        storage_state=None,
+        token_key=None,
+        verify=False,
+        auth_headers=None,
+    )
+
+    assert passed is True, reason
+    assert len(set(requested_urls)) > 1
+
+    batch = await capture._grounded_recheck_many(
+        {
+            "endpoint": "/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10",
+            "param": "入住时间",
+            "match_field": "useTime",
+            "retries": 1,
+            "backoff_s": 0,
+        },
+        [{"入住时间": "2026-07-01 00:00"}, {"入住时间": target}],
+        base_url="http://oa.test",
+        storage_state=None,
+        token_key=None,
+        verify=False,
+        auth_headers=None,
+    )
+    assert batch == [(True, ""), (True, "")]
+
+
+def test_fact_check_helpers_cover_common_paging_and_datetime_shapes():
+    import dano.execution.page.request_capture as capture
+    from urllib.parse import parse_qs, urlparse
+
+    for page_key in ("pageNo", "pageNum", "page", "current", "currentPage", "page_no"):
+        urls = capture._remaining_page_urls(
+            f"/api/records?tenant=A&{page_key}=1&pageSize=10",
+            total=25,
+            returned=10,
+        )
+        assert [
+            parse_qs(urlparse(url).query)[page_key][0]
+            for url in urls
+        ] == ["2", "3"]
+        assert all(parse_qs(urlparse(url).query)["tenant"] == ["A"] for url in urls)
+
+    assert capture._remaining_page_urls("/api/records?limit=10", total=25, returned=10) == []
+    assert capture._fact_value_equal(1783699200000, "2026-07-11 00:00:00")
+    assert capture._fact_value_equal(1783699200, "2026-07-11T00:00+08:00")
+    assert capture._fact_value_equal("2026-07-11 00:00", "2026-07-11 00:00:00")
+    assert not capture._fact_value_equal("01", "1")
+    assert not capture._fact_value_equal("hotel-2026-07-11", "2026-07-11")
 
 
 def test_response_ok_judges_business_code():

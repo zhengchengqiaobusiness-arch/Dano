@@ -4372,6 +4372,33 @@ def _apply_read_input_policy(api_request: dict, cap: dict | None) -> dict:
     return api_request
 
 
+def _fact_value_equal(actual, target) -> bool:
+    """Compare strictly, except for equivalent datetime wire representations."""
+    if str(actual) == str(target):
+        return True
+
+    def datetime_value(value):
+        text = str(value).strip()
+        is_epoch = text.lstrip("-").isdigit() and len(text.lstrip("-")) in {10, 12, 13}
+        is_date = bool(_re.fullmatch(
+            r"\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+            r"(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?",
+            text,
+        ))
+        if is_date:
+            try:
+                parsed = _dt.datetime.fromisoformat(text.replace("/", "-").replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    china = _dt.timezone(_dt.timedelta(hours=8))
+                    return parsed.astimezone(china).replace(tzinfo=None)
+            except ValueError:
+                pass
+        return _parse_dt(text) if is_epoch or is_date else None
+
+    actual_dt, target_dt = datetime_value(actual), datetime_value(target)
+    return actual_dt is not None and target_dt is not None and actual_dt == target_dt
+
+
 async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str | None,
                             verify: bool, auth_headers: dict | None,
                             retries: int = 4, backoff: float = 0.6) -> tuple[bool, str]:
@@ -4388,14 +4415,13 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
     target = fields.get(param)
     if not param or target is None:
         return False, f"事实核查缺少匹配字段 `{param or '<未配置>'}`，不能确认写操作已生效"
-    truncated, total = False, None                    # truncated:列表确有更多页未取(total>已取)→ 不武断判失败
+    truncated, total = False, None
     for i in range(max(1, retries)):
-        data = await _get_json(ep, base_url, storage_state, token_key, verify, auth_headers)
-        items = as_list_payload(data) or []
-        if any(isinstance(it, dict) and str(it.get(mf)) == str(target) for it in items):
+        items, total, truncated = await _fact_check_items(
+            ep, base_url, storage_state, token_key, verify, auth_headers,
+        )
+        if any(isinstance(it, dict) and _fact_value_equal(it.get(mf), target) for it in items):
             return True, ""                           # 找到刚提交的记录 → 强阳性,确认真生效
-        total = _extract_total(data)
-        truncated = total is not None and total > len(items)   # 仅"明确分页且还有更多页"才算证据不足
         if i < retries - 1:
             await asyncio.sleep(backoff)
     if truncated:
@@ -4404,6 +4430,63 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
         return False, f"事实核查证据不足:列表分页(共{total}条,仅取部分),未找到 {param}={target}"
     # 无分页(整表已取)却没有 → 真"空操作",一票否决(接地核查的价值所在)
     return False, f"回查未生效:记录列表里没找到 {param}={target}(疑似空操作)"
+
+
+_PAGE_NUMBER_KEYS = {"pageno", "pagenum", "page", "current", "currentpage"}
+_PAGE_SIZE_KEYS = {"pagesize", "size", "limit"}
+_FACT_CHECK_MAX_PAGES = 100
+
+
+def _remaining_page_urls(endpoint: str, total: int, returned: int) -> list[str]:
+    """Build the other pages only when the recorded endpoint exposes paging controls."""
+    parsed = urlparse(endpoint)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    page_pos = next(
+        (i for i, (key, _) in enumerate(query) if key.lower().replace("_", "") in _PAGE_NUMBER_KEYS),
+        None,
+    )
+    if page_pos is None:
+        return []
+    try:
+        current = int(query[page_pos][1])
+    except (TypeError, ValueError):
+        return []
+    page_size = returned
+    for key, value in query:
+        if key.lower().replace("_", "") in _PAGE_SIZE_KEYS:
+            try:
+                page_size = int(value)
+            except (TypeError, ValueError):
+                pass
+            break
+    if current < 1 or page_size < 1:
+        return []
+    page_count = min((total + page_size - 1) // page_size, _FACT_CHECK_MAX_PAGES)
+    urls = []
+    for page_no in range(1, page_count + 1):
+        if page_no == current:
+            continue
+        page_query = list(query)
+        page_query[page_pos] = (page_query[page_pos][0], str(page_no))
+        urls.append(urlunparse(parsed._replace(query=urlencode(page_query))))
+    return urls
+
+
+async def _fact_check_items(endpoint: str, base_url: str, storage_state, token_key: str | None,
+                            verify: bool, auth_headers: dict | None) -> tuple[list, int | None, bool]:
+    """Fetch every reachable page so a partial first page cannot cause a false failure."""
+    data = await _get_json(endpoint, base_url, storage_state, token_key, verify, auth_headers)
+    items = list(as_list_payload(data) or [])
+    total = _extract_total(data)
+    if total is None or total <= len(items):
+        return items, total, False
+    page_urls = _remaining_page_urls(endpoint, total, len(items))
+    if not page_urls:
+        return items, total, True
+    for page_url in page_urls:
+        page_data = await _get_json(page_url, base_url, storage_state, token_key, verify, auth_headers)
+        items.extend(as_list_payload(page_data) or [])
+    return items, total, len(items) < total
 
 
 async def _grounded_recheck_many(
@@ -4437,18 +4520,21 @@ async def _grounded_recheck_many(
     found: set[str] = set()
     truncated, total = False, None
     for attempt in range(max(1, retries)):
-        data = await _get_json(endpoint, base_url, storage_state, token_key, verify, auth_headers)
-        items = as_list_payload(data) or []
-        available = {
-            str(item.get(match_field))
+        items, total, truncated = await _fact_check_items(
+            endpoint, base_url, storage_state, token_key, verify, auth_headers,
+        )
+        available = [
+            item.get(match_field)
             for item in items
             if isinstance(item, dict) and item.get(match_field) is not None
-        }
-        found.update(str(target) for target in targets if str(target) in available)
+        ]
+        found.update(
+            str(target)
+            for target in targets
+            if any(_fact_value_equal(actual, target) for actual in available)
+        )
         if all(str(target) in found for target in targets):
             break
-        total = _extract_total(data)
-        truncated = total is not None and total > len(items)
         if attempt < retries - 1:
             await asyncio.sleep(backoff)
     results: list[tuple[bool, str]] = []
