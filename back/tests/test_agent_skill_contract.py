@@ -160,6 +160,15 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert _export_contract_errors(manifest) == []
 
 
+def test_exported_skill_summarizes_successful_writes_in_business_language():
+    markdown = _skill_md(_hotel_manifest(), "dano-a-oa-hotel-apply")
+
+    assert "成功的写操作使用能力标题给出业务化完成结论" in markdown
+    assert "`result.code`、`result.data`、`result.msg`" in markdown
+    assert "不得逐项展示" in markdown
+    assert "裸 `true`、内部 ID 或空消息" in markdown
+
+
 def test_exported_skill_renders_schema_defaults_in_tables_and_examples():
     reference = _capability_reference_md(_hotel_manifest())
     query_fields = reference.split(

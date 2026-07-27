@@ -1784,7 +1784,13 @@ _IDENTIFIER_OUTPUT_MD = """## 标识字段规则
   包装脚本原始 `output` 始终保留完整结果供后续能力准确取值。"""
 
 _FRONTEND_OUTPUT_MD = """## 固定返回展示
-- `succeeded`：先显示“操作成功”，再按 `output_schema` 展示业务结果；数组只显示格式化后的 Markdown 表格。
+- `succeeded`：查询结果按 `output_schema` 展示，数组只显示格式化后的 Markdown 表格；
+  写操作按下一条规则展示。
+- 成功的写操作使用能力标题给出业务化完成结论（例如“酒店申请已提交”“酒店申请已撤回”
+  “酒店申请记录已删除”）；不得逐项展示
+  `result.code`、`result.data`、`result.msg`，也不得向用户展示裸 `true`、内部 ID 或空消息。
+  技术响应仍保留在脚本 `output` 中供后续能力串联；只有带明确业务标题或
+  `x-dano-identifier-role` 的字段才补充展示。
 - 成功结果含 `request_markdown` 时，必须把该 Markdown 原样单独输出为可点击链接；禁止输出 `<a>` HTML
   或把 Markdown 放进代码块。链接的 `target="_blank"`、`rel="noopener noreferrer"` 由结构化
   `request_link` 提供给支持这些属性的宿主。
