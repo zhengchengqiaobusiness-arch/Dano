@@ -391,7 +391,8 @@ def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_resid
     contract = json.loads((folder / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
 
     assert "批量输入按 `entries[]`" not in skill_md
-    assert "`partial_success`" not in skill_md
+    assert "`partial_success`" in skill_md
+    assert "整批只确认一次" in skill_md
     assert "真正的业务编排、风险闸门与事实核查" not in skill_md
     assert "业务成功规则" in skill_md
     submit = next(cap for cap in contract["capabilities"] if cap["kind"] == "submit")

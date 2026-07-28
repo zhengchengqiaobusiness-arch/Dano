@@ -6689,6 +6689,8 @@ def _merge_response_schemas(left: dict[str, Any], right: dict[str, Any]) -> dict
     """Merge observed response shapes without treating the first row as universal."""
     if left == right:
         return copy.deepcopy(left)
+    if not left or not right:
+        return {}
     left_type = left.get("type")
     right_type = right.get("type")
     if left_type == right_type == "object":
@@ -6748,7 +6750,10 @@ def _schema_from_response_value(value: Any) -> dict[str, Any]:
             },
         }
     if value is None:
-        return {"type": "null"}
+        # A recorded null carries no evidence about the field's eventual scalar
+        # type.  Keeping it unconstrained prevents later non-null rows/pages
+        # from being rejected by a false ``null-only`` output contract.
+        return {}
     return {"type": "string"}
 
 
@@ -6791,7 +6796,9 @@ def _output_field_is_transport_only(name: Any, schema: dict[str, Any]) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
     return normalized in {
         "billtype", "processdefkey", "processdefinitionkey",
-        "tenantid", "deleted", "creator", "updater",
+        "tenantid", "userid", "deptid", "departmentid",
+        "organizationid", "orgid", "creatorid", "updaterid",
+        "deleted", "creator", "updater",
     }
 
 
@@ -6820,6 +6827,7 @@ def _apply_output_presentation_evidence(
     *,
     sample_output: Any = None,
     input_schema: dict[str, Any] | None = None,
+    field_labels: dict[str, str] | None = None,
 ) -> None:
     """Project recorded table headers into a query result schema.
 
@@ -6837,6 +6845,15 @@ def _apply_output_presentation_evidence(
             break
     if not row_properties:
         return
+
+    for name, field_schema in row_properties.items():
+        if not isinstance(field_schema, dict):
+            continue
+        label = str((field_labels or {}).get(name) or "").strip()
+        if label and not (field_schema.get("title") or field_schema.get("label")):
+            field_schema["title"] = label
+        if _output_field_is_transport_only(name, field_schema):
+            field_schema["x-dano-display"] = False
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for item in evidence or []:
@@ -7708,6 +7725,23 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         return merged
 
     by_id = {s.step_id: s for s in spec.steps}
+    recorded_label_candidates: dict[str, set[str]] = {}
+    for step in spec.steps:
+        for param in step.params or []:
+            wire_name = str(param.path or "").replace("[]", "").split(".")[-1]
+            label = str(param.label or param.key or "").strip()
+            if (
+                wire_name
+                and label
+                and re.sub(r"[\W_]+", "", label.casefold(), flags=re.UNICODE)
+                != re.sub(r"[\W_]+", "", wire_name.casefold(), flags=re.UNICODE)
+            ):
+                recorded_label_candidates.setdefault(wire_name, set()).add(label)
+    recorded_field_labels = {
+        name: next(iter(labels))
+        for name, labels in recorded_label_candidates.items()
+        if len(labels) == 1
+    }
     for cap in spec.capabilities:
         if cap.kind == "query_status":
             option_source_ids = _option_source_step_ids(spec)
@@ -7834,6 +7868,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                 table_evidence,
                 sample_output=sample_output,
                 input_schema=cap.input_schema,
+                field_labels=recorded_field_labels,
             )
     _ground_recorded_identifier_relations(spec, by_id)
     return sync_capability_scoped_views(spec)

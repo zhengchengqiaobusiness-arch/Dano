@@ -585,9 +585,7 @@ def test_response_array_schema_accepts_observed_mixed_scalar_types():
     assert fields["deptId"] == {
         "anyOf": [{"type": "string"}, {"type": "number"}],
     }
-    assert fields["userId"] == {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-    }
+    assert fields["userId"] == {}
     assert schema_issues(
         {"records": [
             {"deptId": "10", "userId": "20", "name": "甲"},
@@ -596,6 +594,69 @@ def test_response_array_schema_accepts_observed_mixed_scalar_types():
         schema,
         "output",
     ) == []
+
+
+def test_null_only_recording_sample_does_not_reject_later_identifier_values():
+    schema = _schema_from_response_value({
+        "records": [{"deptId": None, "userId": None, "name": "甲"}],
+    })
+
+    assert schema_issues(
+        {"records": [{"deptId": "10", "userId": 20, "name": "乙"}]},
+        schema,
+        "output",
+    ) == []
+
+
+def test_query_output_reuses_recorded_field_labels_and_hides_transport_ids():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/hotel/page",
+        response_json={"data": {"list": [{
+            "userId": "user-1",
+            "deptId": "dept-1",
+            "applyTitle": "出差住宿",
+            "useCity": "杭州",
+        }], "total": 1}},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/hotel/submit",
+        params=[
+            ParamField(
+                path="applyTitle", key="申请标题", label="申请标题",
+                value="出差住宿", required=True,
+            ),
+            ParamField(
+                path="useCity", key="使用城市", label="使用城市",
+                value="杭州", required=True,
+            ),
+        ],
+        response_json={"code": 0},
+    )
+    prepared = prepare_flow_spec_for_publish(FlowSpec(
+        steps=[query, submit],
+        capabilities=[
+            FlowCapability(
+                name="query_hotel", kind="query_status",
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="submit_hotel", kind="submit",
+                nodes=[{"id": "submit_call", "type": "call", "step_id": "submit"}],
+            ),
+        ],
+    ))
+    fields = (
+        prepared.capabilities[0].output_schema["properties"]["records"]["items"]["properties"]
+    )
+
+    assert fields["applyTitle"]["title"] == "申请标题"
+    assert fields["useCity"]["title"] == "使用城市"
+    assert fields["userId"]["x-dano-display"] is False
+    assert fields["deptId"]["x-dano-display"] is False
 
 
 def test_partial_table_presentation_keeps_unmatched_business_fields_visible():

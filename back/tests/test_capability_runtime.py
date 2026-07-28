@@ -244,6 +244,31 @@ def test_runtime_schema_validation_matches_exported_date_and_union_contracts():
     assert schema_issues([1, 1], {"type": "array", "uniqueItems": True})
 
 
+def test_legacy_null_only_output_field_does_not_reject_later_business_values():
+    legacy_schema = {
+        "type": "object",
+        "properties": {
+            "records": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "deptId": {"type": "null"},
+                        "userId": {"type": "null"},
+                    },
+                },
+            },
+        },
+    }
+
+    assert schema_issues(
+        {"records": [{"deptId": "10", "userId": 20}]},
+        legacy_schema,
+        "output",
+    ) == []
+    assert schema_issues("not-null", {"type": "null"}, "input.field")
+
+
 def test_external_transform_relation_is_caller_owned_and_never_automatic():
     skill = _skill()
     skill.capability_relations = [{

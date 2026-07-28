@@ -469,17 +469,30 @@ def _business_label(parameter: str, schema: dict) -> str:
     return label
 
 
+def _output_field_is_internal_transport(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
+    return normalized in {
+        "processinstanceid", "workflowinstanceid", "flowinstanceid",
+        "userid", "deptid", "departmentid", "organizationid", "orgid",
+        "tenantid", "creatorid", "updaterid", "billtype",
+        "processdefkey", "processdefinitionkey",
+    }
+
+
 def _enrich_output_schemas(contracts: dict[str, dict]) -> None:
-    """Reuse grounded field metadata by exact wire identity within one capability."""
+    """Reuse grounded field metadata by exact wire identity across the recorded flow."""
     sources: dict[str, dict[str, list[tuple[str, dict]]]] = {}
+    global_sources: dict[str, list[tuple[str, dict]]] = {}
     for capability, contract in contracts.items():
         for parameter, schema in ((contract.get("parameters") or {}).get("properties") or {}).items():
             if isinstance(schema, dict):
+                wire = _wire_leaf(parameter, schema)
                 sources.setdefault(capability, {}).setdefault(
-                    _wire_leaf(parameter, schema), [],
+                    wire, [],
                 ).append(
                     (parameter, schema),
                 )
+                global_sources.setdefault(wire, []).append((parameter, schema))
 
     option_keys = (
         "x-enum-options", "x-options", "x-options-snapshot", "x-enum-value-map",
@@ -499,14 +512,30 @@ def _enrich_output_schemas(contracts: dict[str, dict]) -> None:
         for output_field, output_field_schema in row_properties.items():
             if not isinstance(output_field_schema, dict):
                 continue
-            ordered = (sources.get(capability) or {}).get(output_field) or []
+            if (
+                _output_field_is_internal_transport(output_field)
+                and "x-dano-display" not in output_field_schema
+            ):
+                output_field_schema["x-dano-display"] = False
+            local_sources = (sources.get(capability) or {}).get(output_field) or []
+            normalized_output = re.sub(
+                r"[^a-z0-9]+", "", str(output_field or "").casefold(),
+            )
+            ordered = (
+                local_sources
+                or ([] if normalized_output.endswith("id") else global_sources.get(output_field))
+                or []
+            )
             if not ordered:
                 continue
-            labels = [
+            labels = list(dict.fromkeys(
                 label for parameter, schema in ordered
                 if (label := _business_label(parameter, schema))
-            ]
-            if labels and not (output_field_schema.get("title") or output_field_schema.get("label")):
+            ))
+            if (
+                len(labels) == 1
+                and not (output_field_schema.get("title") or output_field_schema.get("label"))
+            ):
                 output_field_schema["title"] = labels[0]
             for key in option_keys:
                 if key in output_field_schema:
@@ -811,6 +840,10 @@ def _export_contract_errors(m: SkillManifest) -> list[str]:
 
 
 _CAPABILITY_PUBLIC_KINDS = _READ_CAPABILITY_KINDS | {"submit", "submit_batch"}
+_MUTATION_CAPABILITY_KINDS = {
+    "submit", "create", "save", "update", "approve", "reject",
+    "withdraw", "delete", "operation",
+}
 
 
 def _relation_orchestration_policy(
@@ -841,7 +874,7 @@ def _relation_orchestration_policy(
             and source_output
             and target_input
             and source_contract.get("kind") in _READ_CAPABILITY_KINDS
-            and target_contract.get("kind") in {"withdraw", "delete"}
+            and target_contract.get("kind") in _MUTATION_CAPABILITY_KINDS
         ):
             continue
         rules.append({
@@ -871,10 +904,39 @@ def _relation_orchestration_policy(
                 "result": "per_record_with_partial_success",
             },
         })
+    related_targets = {
+        str(rule.get("target_capability") or "")
+        for rule in rules
+    }
+    for target, target_contract in capability_contracts.items():
+        kind = str(target_contract.get("kind") or "")
+        if (
+            target in related_targets
+            or kind in _READ_CAPABILITY_KINDS
+            or kind in {"submit_batch", "validate_batch"}
+            or not (
+                target_contract.get("requires_confirmation") is True
+                or kind in _MUTATION_CAPABILITY_KINDS
+            )
+        ):
+            continue
+        rules.append({
+            "target_capability": target,
+            "operation_kind": kind,
+            "input_collection": "one_grouped_form_with_repeated_entries",
+            "plural_reference": {
+                "requires_explicit_plural_intent": True,
+                "selection_scope": "all_entries_explicitly_provided_or_selected_by_user",
+                "confirmation": "one_combined_form_for_all_selected_records",
+                "execution": "sequential_single_capability_invocations",
+                "automatic_retry": False,
+                "result": "per_record_with_partial_success",
+            },
+        })
     if not rules:
         return {}
     return {
-        "protocol": "dano.relation_orchestration.v1",
+        "protocol": "dano.mutation_orchestration.v1",
         "mode": "caller_orchestrated",
         "rules": rules,
     }
@@ -937,29 +999,44 @@ def _related_mutation_sop(m: SkillManifest) -> str:
         "不是虚构新的批量 capability，也不改变任何能力输入契约。",
     ]
     for rule in rules:
-        source = rule["source_capability"]
-        source_output = rule["source_output"]
+        source = str(rule.get("source_capability") or "")
+        source_output = str(rule.get("source_output") or "")
         target = rule["target_capability"]
-        target_input = rule["target_input"]
-        action = "删除" if rule.get("operation_kind") == "delete" else "撤回"
+        target_input = str(rule.get("target_input") or "")
+        action = {
+            "submit": "提交", "create": "新增", "save": "保存",
+            "update": "更新", "approve": "审批", "reject": "驳回",
+            "withdraw": "撤回", "delete": "删除",
+        }.get(str(rule.get("operation_kind") or ""), "执行")
+        lines.append("")
+        if source:
+            lines += [
+                f"- 标识映射固定为 `{source}.{source_output}` → `{target}.{target_input}`。"
+                "只复制同一条记录的原值，禁止改用该记录的其他 ID、单据号、列表序号或录制样本。",
+                "- 执行前必须以查询结果复核同一条记录的当前状态；只有发布前置条件或当前状态证据"
+                "明确允许时才调用目标能力。明确不符合条件时直接说明原因，不得仍然调用后再伪报成功。",
+                f"- 用户说“{action}这个提交”“{action}刚刚那条”“{action}上一条”时："
+                "先读取本会话最后一次成功写操作的原始结果，再调用查询能力定位同一条记录；"
+                f"只有唯一匹配时才能取上述来源字段执行单条{action}。"
+                "匹配为零或多条时，必须让用户选择，禁止默认第一条。",
+                f"- 用户明确说“{action}这些”“{action}全部”“{action}所有提交”时："
+                f"调用 `{source}` 查询用户明确范围内的全部记录，并遍历所有分页，"
+                "不能只处理当前页或默认前 10 条。没有用户筛选条件时使用空查询 input，"
+                "不得带入录制筛选值。",
+                "- 批量选择与共享字段必须放进一次 `ask_user_question` 分组表单："
+                "记录选择使用 `checkbox` 与稳定 option id，其他字段继续使用"
+                f"`{target}` 的原参数名。将本地选择字段移除后，逐条构造合法的单条能力 input。",
+            ]
+        else:
+            lines += [
+                f"- 用户明确要求批量{action}时，把全部业务条目和共享字段放进一次 "
+                "`ask_user_question` 分组表单；每条业务条目都必须符合"
+                f"`{target}` 的单条输入契约，禁止把条目数组直接传给单条能力。",
+                f"- 用户只提供一条记录时正常执行单条{action}；未表达复数意图时不得自行扩展为批量。",
+            ]
         lines += [
-            "",
-            f"- 标识映射固定为 `{source}.{source_output}` → `{target}.{target_input}`。"
-            "只复制同一条记录的原值，禁止改用该记录的其他 ID、单据号、列表序号或录制样本。",
-            "- 执行前必须以查询结果复核同一条记录的当前状态；只有发布前置条件或当前状态证据"
-            "明确允许时才调用目标能力。明确不符合条件时直接说明原因，不得仍然调用后再伪报成功。",
-            f"- 用户说“{action}这个提交”“{action}刚刚那条”“{action}上一条”时："
-            "先读取本会话最后一次成功写操作的原始结果，再调用查询能力定位同一条记录；"
-            f"只有唯一匹配时才能取上述来源字段执行单条{action}。"
-            "匹配为零或多条时，必须让用户选择，禁止默认第一条。",
-            f"- 用户明确说“{action}这些”“{action}全部”“{action}所有提交”时："
-            f"调用 `{source}` 查询用户明确范围内的全部记录，并遍历所有分页，"
-            "不能只处理当前页或默认前 10 条。没有用户筛选条件时使用空查询 input，"
-            "不得带入录制筛选值。",
-            "- 批量选择与共享字段必须放进一次 `ask_user_question` 分组表单："
-            "记录选择使用 `checkbox` 与稳定 option id，其他字段继续使用"
-            f"`{target}` 的原参数名。将本地选择字段移除后，逐条构造合法的单条能力 input。",
-            "- 用户一次确认的是表单中列出的完整记录集合。确认后按查询顺序逐条调用"
+            "- 整批只确认一次：用户一次确认的是表单中列出的完整记录集合，"
+            "不得对每条记录重复发起确认。确认后按表单顺序逐条调用"
             f"`{target}`，每条都显式带 `--capability {target} --confirm`；"
             "不得并发、不得自动重试、不得因一条失败而重复已成功记录。",
             "- 最终逐条报告业务标识、成功或失败及原因：全部成功才报告成功，"
@@ -1114,9 +1191,19 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "映射回所选 capability 参数；name-ref 选择项按稳定 id 找回同一候选的 label 后提交，"
         "日期按 `dateFormat` 转换，数值转 JSON 数字，"
         "数组/复合字段按 input_schema 组装。返回 `cancelled`（用户取消）时立即停止。",
-        "5. 校验必填字段、类型和候选值。写能力必须在同一 Assistant Turn 内再次调用 "
-        "`ask_user_question({confirm: true, formIds: [<answered.formId>]})`；"
-        "只带 `formIds[]` 与 `confirm: true`，仅返回 `status=confirmed` 后继续，并以确认结果的 `answer` 为准。",
+        (
+            "5. 校验必填字段、类型和候选值。单条写操作按本次表单确认；"
+            "批量写操作把完整记录集合放在同一表单中，整批只调用一次 "
+            "`ask_user_question({confirm: true, formIds: [<answered.formId>]})`，"
+            "只带 `formIds[]` 与 `confirm: true`，不得对每条记录重复发起确认。"
+            "仅返回 `status=confirmed` 后继续，"
+            "并以确认结果的 `answer` 为准。"
+            if supports_related_mutation else
+            "5. 校验必填字段、类型和候选值。写能力必须在同一 Assistant Turn 内再次调用 "
+            "`ask_user_question({confirm: true, formIds: [<answered.formId>]})`；"
+            "只带 `formIds[]` 与 `confirm: true`，仅返回 `status=confirmed` 后继续，"
+            "并以确认结果的 `answer` 为准。"
+        ),
         "6. Linux/macOS 使用 `bash scripts/submit.sh --capability <能力名> --json '<能力输入 JSON>'`；"
         "Windows PowerShell 使用 `scripts/submit.ps1` 传入同样参数。写能力同时带 `--confirm`。"
         + (
@@ -1125,7 +1212,7 @@ def _multi_capability_sop(m: SkillManifest) -> str:
             "一次调用由 Dano 完成内部接口编排。"
         ),
         "7. 按末行 JSON 的 `status` 处理结果。列表结果必须先运行 "
-        "`python scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
+        "`python3 scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
         "`scripts/format_list.ps1 '<output JSON>'`。"
         "再以 Markdown 表格呈现；"
         "不要重复输出原始 JSON。",
@@ -1810,7 +1897,7 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
     L += [
         "7. 读取脚本末行 JSON：`succeeded` 才报告成功；`need_select` 补充候选；"
         "`need_confirm` 重新确认；`failed` 按 `reason` 处理。列表结果必须运行 "
-        "`python scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
+        "`python3 scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
         "`scripts/format_list.ps1 '<output JSON>'`。"
         "最终只用 Markdown 表格呈现，"
         "不要重复粘贴原始 JSON。写操作超时或结果不明时不得自动重试。",
@@ -1956,7 +2043,7 @@ _FIELD_CONTENT_VALIDATION_MD = """## 字段格式与内容校验
 - schema 未提供依据时不得臆造最小值、最大值、精度、长度或业务范围，只拦截确定的格式冲突。"""
 
 _LIST_OUTPUT_MD = """## 列表输出要求
-- 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --json '<output JSON>'` 格式化。
+- 查询结果、候选列表或任何数组数据必须先运行 `python3 scripts/format_list.py --json '<output JSON>'` 格式化。
 - Windows PowerShell 使用 `scripts/format_list.ps1 '<output JSON>'`，避免管道编码破坏中文。
 - 最终回复使用脚本生成的 Markdown 表格；无数据时明确显示“无数据”，不要重复粘贴原始 JSON。
 - Markdown 表头、分隔行和数据行之间不得插入空行；单元格内换行统一使用 `<br>`。

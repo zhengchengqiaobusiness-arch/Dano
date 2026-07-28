@@ -213,7 +213,7 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "HTTP 5xx、超时或结果不明" in markdown
     assert "禁止用 curl、直连目标接口" in markdown
     assert "禁止使用 curl、Python HTTP 客户端" in markdown
-    assert "`partial_success`" not in markdown
+    assert "`partial_success`" in markdown
 
     interaction = manifest.call_protocol["interaction_protocol"]
     assert interaction["max_calls_per_assistant_response"] == 1
@@ -359,6 +359,8 @@ def test_related_withdraw_supports_single_and_caller_orchestrated_batch(tmp_path
     assert "不能只处理当前页或默认前 10 条" in markdown
     assert "`checkbox`" in markdown
     assert "逐条调用`withdraw_seal_apply`" in markdown
+    assert "整批只确认一次" in markdown
+    assert "不得对每条记录重复发起确认" in markdown
     assert "不得并发、不得自动重试" in markdown
     assert "`partial_success`" in markdown
 
@@ -422,8 +424,117 @@ def test_related_delete_supports_single_and_caller_orchestrated_batch():
     assert "## 单条与批量关联操作" in markdown
     assert "删除这个提交" in markdown
     assert "删除全部" in markdown
+    assert "整批只确认一次" in markdown
+    assert "不得对每条记录重复发起确认" in markdown
     assert policy["rules"][0]["operation_kind"] == "delete"
     assert policy["rules"][0]["target_capability"] == "delete_seal_apply"
+
+
+def test_every_single_record_write_kind_has_caller_orchestrated_batch_support():
+    for kind in (
+        "submit", "create", "save", "update", "approve",
+        "reject", "withdraw", "delete", "operation",
+    ):
+        manifest = to_manifest(SkillSpec(
+            skill_id=f"A-OA.batch_{kind}",
+            subsystem=Subsystem.OA,
+            action=f"batch_{kind}",
+            title="业务申请",
+            risk_level=RiskLevel.L3,
+            capabilities=[{
+                "name": f"{kind}_application",
+                "kind": kind,
+                "title": "处理业务申请",
+                "requires_human_confirm": True,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"内容": {"type": "string"}},
+                    "required": ["内容"],
+                },
+            }],
+        ))
+
+        policy = _relation_orchestration_policy(manifest)
+        rule = policy["rules"][0]
+        markdown = _skill_md(manifest, f"dano-a-oa-batch-{kind}")
+
+        assert rule["target_capability"] == f"{kind}_application"
+        assert rule["plural_reference"]["confirmation"] == (
+            "one_combined_form_for_all_selected_records"
+        )
+        assert rule["plural_reference"]["execution"] == (
+            "sequential_single_capability_invocations"
+        )
+        assert "整批只确认一次" in markdown
+        assert "不得对每条记录重复发起确认" in markdown
+
+
+def test_export_reuses_labels_across_capabilities_and_hides_transport_ids(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.hotel_output_labels",
+        subsystem=Subsystem.OA,
+        action="hotel_output_labels",
+        title="酒店申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {
+                "name": "query_hotel", "kind": "query_status", "title": "查询酒店申请",
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+                "output_schema": {
+                    "type": "object",
+                    "properties": {"records": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {
+                            "userId": {"type": "string"},
+                            "deptId": {"type": "string"},
+                            "applyTitle": {"type": "string"},
+                            "useCity": {"type": "string"},
+                        }},
+                    }},
+                },
+            },
+            {
+                "name": "submit_hotel", "kind": "submit", "title": "提交酒店申请",
+                "requires_human_confirm": True,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "申请标题": {
+                            "type": "string", "title": "申请标题",
+                            "x-flow-path": "applyTitle",
+                        },
+                        "使用城市": {
+                            "type": "string", "title": "使用城市",
+                            "x-flow-path": "useCity",
+                        },
+                    },
+                    "required": ["申请标题", "使用城市"],
+                },
+            },
+        ],
+    ))
+
+    folder = _write_skill(tmp_path, manifest)
+    formatter = folder / "scripts" / "format_list.py"
+    result = subprocess.run(
+        [
+            sys.executable, str(formatter), "--capability", "query_hotel", "--json",
+            json.dumps({"records": [{
+                "userId": "user-1", "deptId": "dept-1",
+                "applyTitle": "出差住宿", "useCity": "杭州",
+            }]}, ensure_ascii=False),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert "| 申请标题 | 使用城市 |" in result.stdout
+    assert "userId" not in result.stdout
+    assert "deptId" not in result.stdout
+    assert "applyTitle" not in result.stdout
+    assert "useCity" not in result.stdout
 
 
 def test_exported_skill_does_not_rewrite_capability_field_types():
@@ -664,6 +775,18 @@ def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tm
     assert "不得展示原始 JSON" in capability_reference
     assert "按 `answer` 对象的 `id` 映射为能力参数" in markdown
     assert "Markdown 表格呈现" in markdown
+    assert "`python3 scripts/format_list.py" in markdown
+    assert "`python scripts/format_list.py" not in markdown
+    assert "用户明确要求批量提交时" in markdown
+    assert "整批只确认一次" in markdown
+    exported_contract = json.loads(
+        (folder / "references" / "CONTRACT.json").read_text(encoding="utf-8")
+    )
+    batch_rule = exported_contract["relation_orchestration"]["rules"][0]
+    assert batch_rule["target_capability"] == "submit_hotel_apply"
+    assert batch_rule["plural_reference"]["confirmation"] == (
+        "one_combined_form_for_all_selected_records"
+    )
     assert "target=\"_blank\"" in markdown
     assert "\n\n| `need_select`" not in markdown
     assert (folder / "scripts" / "format_list.ps1").is_file()

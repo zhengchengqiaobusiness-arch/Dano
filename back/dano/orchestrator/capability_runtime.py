@@ -158,7 +158,7 @@ def schema_issues(value: Any, schema: dict[str, Any] | None, path: str = "input"
         issues.append(f"Field `{path}` must be an integer")
     elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
         issues.append(f"Field `{path}` must be a number")
-    elif expected == "null" and value is not None:
+    elif expected == "null" and value is not None and not path.startswith("output."):
         issues.append(f"Field `{path}` must be null")
     if isinstance(value, str):
         if schema.get("minLength") is not None and len(value) < int(schema["minLength"]):
