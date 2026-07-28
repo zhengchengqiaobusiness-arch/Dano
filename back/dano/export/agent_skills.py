@@ -665,6 +665,20 @@ def _export_contract(m: SkillManifest) -> dict:
     root_protocol = payload["call_protocol"]
     root_protocol["interaction_protocol"] = copy.deepcopy(interaction)
     root_protocol["frontend_output"] = _frontend_output_protocol()
+    orchestration = _relation_orchestration_policy(m, contracts)
+    if orchestration:
+        payload["relation_orchestration"] = copy.deepcopy(orchestration)
+        root_protocol["relation_orchestration"] = copy.deepcopy(orchestration)
+        targets = {
+            str(rule.get("target_capability") or "")
+            for rule in orchestration.get("rules") or []
+            if isinstance(rule, dict)
+        }
+        for capability in exported_capabilities:
+            if capability.get("name") in targets:
+                capability["call_protocol"]["relation_orchestration"] = copy.deepcopy(
+                    orchestration
+                )
 
     if len(contracts) == 1:
         name, contract = next(iter(contracts.items()))
@@ -799,6 +813,68 @@ def _export_contract_errors(m: SkillManifest) -> list[str]:
 _CAPABILITY_PUBLIC_KINDS = _READ_CAPABILITY_KINDS | {"submit", "submit_batch"}
 
 
+def _relation_orchestration_policy(
+    m: SkillManifest,
+    contracts: dict[str, dict] | None = None,
+) -> dict:
+    """Describe safe caller-side repetition of a recorded single withdraw.
+
+    Some systems expose only a single-record withdraw endpoint.  That does not
+    remove the legitimate "withdraw these/all" workflow: the caller queries the
+    authoritative records, resolves the exact relation field, confirms the
+    complete scope once, and invokes the same published withdraw capability for
+    each selected record.
+    """
+    capability_contracts = contracts or _capability_contracts(m)
+    rules: list[dict] = []
+    for relation in getattr(m, "capability_relations", []) or []:
+        if not isinstance(relation, dict):
+            continue
+        source = str(relation.get("from_capability") or "").strip()
+        target = str(relation.get("to_capability") or "").strip()
+        source_output = str(relation.get("from_output") or "").strip()
+        target_input = str(relation.get("to_input") or "").strip()
+        source_contract = capability_contracts.get(source) or {}
+        target_contract = capability_contracts.get(target) or {}
+        if not (
+            source
+            and target
+            and source_output
+            and target_input
+            and source_contract.get("kind") in _READ_CAPABILITY_KINDS
+            and target_contract.get("kind") == "withdraw"
+        ):
+            continue
+        rules.append({
+            "source_capability": source,
+            "source_output": source_output,
+            "target_capability": target,
+            "target_input": target_input,
+            "identifier_mapping": "exact_value_only",
+            "single_reference": {
+                "resolve_from": "last_successful_write_then_current_query",
+                "require_unique_record": True,
+                "zero_or_multiple_matches": "ask_user_to_select",
+            },
+            "plural_reference": {
+                "requires_explicit_plural_intent": True,
+                "query_every_page": True,
+                "selection_scope": "all_records_matching_explicit_user_scope",
+                "confirmation": "one_combined_form_for_all_selected_records",
+                "execution": "sequential_single_capability_invocations",
+                "automatic_retry": False,
+                "result": "per_record_with_partial_success",
+            },
+        })
+    if not rules:
+        return {}
+    return {
+        "protocol": "dano.relation_orchestration.v1",
+        "mode": "caller_orchestrated",
+        "rules": rules,
+    }
+
+
 def _capability_relationship_section(m: SkillManifest) -> str:
     relations = [r for r in (getattr(m, "capability_relations", []) or []) if isinstance(r, dict)]
     if not relations:
@@ -824,7 +900,12 @@ def _capability_relationship_section(m: SkillManifest) -> str:
                 "录制样本只能用于辨认字段，不能作为执行值。"
             )
         return "\n".join(lines)
-    lines = ["## 能力关系", "", "能力关系只描述数据流建议，不会触发自动串联；每一步都必须显式选择 capability。"]
+    lines = [
+        "## 能力关系",
+        "",
+        "能力关系不会自行执行；调用方可以据此编排单条或批量操作，"
+        "但每一次真实调用都必须显式选择 capability。",
+    ]
     for relation in relations:
         source_ref = str(relation.get("from_capability") or "")
         target_ref = str(relation.get("to_capability") or "")
@@ -836,6 +917,46 @@ def _capability_relationship_section(m: SkillManifest) -> str:
         target = f"`{target_ref}`"
         lines.append(f"- {source} → {target}（`{relation.get('type') or 'suggested_call_chain'}`）")
         lines.append(f"  调用方责任：{relation.get('caller_responsibility') or '根据输出和用户意图决定是否继续调用。'}")
+    return "\n".join(lines)
+
+
+def _related_withdrawal_sop(m: SkillManifest) -> str:
+    policy = _relation_orchestration_policy(m)
+    rules = policy.get("rules") if isinstance(policy, dict) else []
+    if not rules:
+        return ""
+    lines = [
+        "## 单条与批量撤回编排",
+        "",
+        "以下是对已发布查询能力和单条撤回能力的调用方编排，"
+        "不是虚构新的批量 capability，也不改变任何能力输入契约。",
+    ]
+    for rule in rules:
+        source = rule["source_capability"]
+        source_output = rule["source_output"]
+        target = rule["target_capability"]
+        target_input = rule["target_input"]
+        lines += [
+            "",
+            f"- 标识映射固定为 `{source}.{source_output}` → `{target}.{target_input}`。"
+            "只复制同一条记录的原值，禁止改用该记录的其他 ID、单据号、列表序号或录制样本。",
+            "- 用户说“撤回这个提交”“撤回刚刚那条”“撤回上一条”时："
+            "先读取本会话最后一次成功写操作的原始结果，再调用查询能力定位同一条记录；"
+            "只有唯一匹配时才能取上述来源字段执行单条撤回。"
+            "匹配为零或多条时，必须让用户选择，禁止默认第一条。",
+            "- 用户明确说“撤回这些”“撤回全部”“撤回所有提交”时："
+            f"调用 `{source}` 查询用户明确范围内的全部记录，并遍历所有分页，"
+            "不能只处理当前页或默认前 10 条。没有用户筛选条件时使用空查询 input，"
+            "不得带入录制筛选值。",
+            "- 批量选择与共享字段必须放进一次 `ask_user_question` 分组表单："
+            "记录选择使用 `checkbox` 与稳定 option id，其他字段继续使用"
+            f"`{target}` 的原参数名。将本地选择字段移除后，逐条构造合法的单条能力 input。",
+            "- 用户一次确认的是表单中列出的完整记录集合。确认后按查询顺序逐条调用"
+            f"`{target}`，每条都显式带 `--capability {target} --confirm`；"
+            "不得并发、不得自动重试、不得因一条失败而重复已成功记录。",
+            "- 最终逐条报告业务标识、成功或失败及原因：全部成功才报告成功，"
+            "部分成功返回 `partial_success`，全部失败返回 `failed`。",
+        ]
     return "\n".join(lines)
 
 
@@ -938,10 +1059,18 @@ def _capability_contract_section(m: SkillManifest) -> str:
 
 def _multi_capability_sop(m: SkillManifest) -> str:
     contracts = _capability_contracts(m)
+    supports_related_withdrawal = bool(
+        _relation_orchestration_policy(m, contracts)
+    )
     lines = [
         "## 操作步骤(SOP)",
         "",
-        "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。",
+        (
+            "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。"
+            "用户明确要求关联撤回时，按“单条与批量撤回编排”显式调用来源查询和撤回能力。"
+            if supports_related_withdrawal else
+            "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。"
+        ),
         "   用户意图必须同时匹配能力的业务对象和动作；实体目录/候选列表不等于业务申请记录，"
         "未发布对应能力时必须说明不支持，不得用最相近的能力代替。",
         "2. 读取 `references/CAPABILITIES.md` 中所选能力小节和该 capability 的完整 `input_schema`；"
@@ -981,7 +1110,11 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "只带 `formIds[]` 与 `confirm: true`，仅返回 `status=confirmed` 后继续，并以确认结果的 `answer` 为准。",
         "6. Linux/macOS 使用 `bash scripts/submit.sh --capability <能力名> --json '<能力输入 JSON>'`；"
         "Windows PowerShell 使用 `scripts/submit.ps1` 传入同样参数。写能力同时带 `--confirm`。"
-        "一次调用由 Dano 完成内部接口编排。",
+        + (
+            "单条操作一次调用；关联批量撤回按已确认的记录集合逐条调用，不得把数组塞进单条输入。"
+            if supports_related_withdrawal else
+            "一次调用由 Dano 完成内部接口编排。"
+        ),
         "7. 按末行 JSON 的 `status` 处理结果。列表结果必须先运行 "
         "`python scripts/format_list.py --json '<output JSON>'`；Windows PowerShell 使用 "
         "`scripts/format_list.ps1 '<output JSON>'`。"
@@ -1841,7 +1974,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     has_batch_capability = any(
         contract.get("kind") in {"submit_batch", "validate_batch"}
         for contract in contracts.values()
-    )
+    ) or bool(_relation_orchestration_policy(m, contracts))
     multi_capability = len(contracts) > 1
     flags = _flags(m)
     cflag = " --confirm" if confirm else ""
@@ -1854,6 +1987,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     parameter_md = _capability_contract_section(m)
     sop = _multi_capability_sop(m) if multi_capability else _sop_section(m, flags, cflag)
     relationships = _capability_relationship_section(m)
+    withdrawal_orchestration = _related_withdrawal_sop(m)
     default_capability = _export_default_capability(m)
     if multi_capability:
         protocol_default = "本 Skill 有多个独立能力，调用时必须显式指定 `--capability`"
@@ -1910,6 +2044,8 @@ description: {json.dumps(desc, ensure_ascii=False)}
 {parameter_md}
 
 {relationships}
+
+{withdrawal_orchestration}
 
 {_LIST_OUTPUT_MD}
 

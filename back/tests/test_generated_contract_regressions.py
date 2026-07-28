@@ -35,6 +35,7 @@ def _get(index: int, url: str, response_json: dict) -> dict:
         "response_status": 200,
         "response_json": response_json,
         "trigger_op": "click",
+        "trigger_action_id": "query",
         "trigger_locator": "button[type=submit]",
         "trigger_transaction_id": f"txn-query-{index}",
     }
@@ -322,7 +323,7 @@ def test_withdraw_id_remains_explicit_user_input_and_is_never_silently_defaulted
     )
 
     spec = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[withdraw]), submission={"ops": []}))
-    capability = next(cap for cap in spec.capabilities if cap.kind == "submit")
+    capability = next(cap for cap in spec.capabilities if cap.kind == "withdraw")
     properties = capability.input_schema["properties"]
 
     assert set(capability.input_schema["required"]) == {"id", "撤回原因"}

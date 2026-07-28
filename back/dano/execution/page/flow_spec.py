@@ -15408,11 +15408,20 @@ def _field_source_review_issues(review_items: list[ReviewItem]) -> list[dict[str
 
 
 def _enum_mapping_issues(steps: list[FlowStep]) -> list[dict[str, Any]]:
-    """Expose incomplete enum mappings in the single top-level warning area."""
+    """Expose locatable warnings only for mappings inferred from the page.
+
+    Manual enums are operator-authored contract advice and already remain in
+    ``suggestions``. Promoting them again into ``issue_groups`` made generated
+    advice look like a newly detected recording defect.
+    """
     issues: list[dict[str, Any]] = []
     for step in steps:
         for param in step.params:
-            if param.type not in {"enum", "list-enum"} or not param.enum_options:
+            if (
+                param.type not in {"enum", "list-enum"}
+                or not param.enum_options
+                or param.source_kind != "page_enum"
+            ):
                 continue
             explicit = _explicit_enum_value_map(param.enum_options, param.enum_value_map)
             labels = list(dict.fromkeys(

@@ -88,6 +88,98 @@ def _hotel_manifest():
     ))
 
 
+def _withdraw_relation_manifest():
+    return to_manifest(SkillSpec(
+        skill_id="A-OA.seal_apply",
+        subsystem=Subsystem.OA,
+        action="seal_apply",
+        title="公章使用申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {
+                "name": "query_seal_apply",
+                "kind": "query_status",
+                "title": "查询公章使用申请",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "pageNo": {
+                            "type": "integer",
+                            "default": 1,
+                            "x-dano-apply-default": True,
+                        },
+                        "pageSize": {
+                            "type": "integer",
+                            "default": 10,
+                            "x-dano-apply-default": True,
+                        },
+                    },
+                    "required": [],
+                },
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "records": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "billCode": {
+                                        "type": "string",
+                                        "title": "单据编号",
+                                        "x-dano-identifier-role": "business_document",
+                                    },
+                                    "processInstanceId": {
+                                        "type": "string",
+                                        "x-dano-identifier-role": "process_instance",
+                                        "x-dano-display": False,
+                                    },
+                                },
+                            },
+                        },
+                        "total": {"type": "integer"},
+                    },
+                },
+            },
+            {
+                "name": "withdraw_seal_apply",
+                "kind": "withdraw",
+                "title": "撤回公章使用申请",
+                "requires_human_confirm": True,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "流程实例ID": {
+                            "type": "string",
+                            "x-flow-path": "id",
+                            "x-dano-identifier-role": "process_instance",
+                            "x-dano-derived-from-query": True,
+                            "x-dano-source-capability": "query_seal_apply",
+                            "x-dano-source-output": "records[].processInstanceId",
+                            "x-dano-require-current-value": True,
+                        },
+                        "撤回原因": {
+                            "type": "string",
+                            "default": "填写有误",
+                        },
+                    },
+                    "required": ["流程实例ID", "撤回原因"],
+                },
+                "output_schema": {"type": "object"},
+            },
+        ],
+        capability_relations=[{
+            "relation_id": "rel_query_withdraw",
+            "type": "external_transform",
+            "from_capability": "query_seal_apply",
+            "from_output": "records[].processInstanceId",
+            "to_capability": "withdraw_seal_apply",
+            "to_input": "流程实例ID",
+            "caller_responsibility": "从用户所选记录复制流程实例ID",
+        }],
+    ))
+
+
 def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope():
     manifest = _hotel_manifest()
     markdown = _skill_md(manifest, "dano-a-oa-hotel-apply")
@@ -250,6 +342,56 @@ def test_multi_capability_skill_does_not_invent_missing_relations():
     assert "当前发布契约未声明 `capability_relations`" in markdown
     assert "按**独立能力**处理" in markdown
     assert "不得自行编造自动串联、字段映射或执行顺序" in markdown
+
+
+def test_related_withdraw_supports_single_and_caller_orchestrated_batch(tmp_path):
+    manifest = _withdraw_relation_manifest()
+    markdown = _skill_md(manifest, "dano-a-oa-seal-apply")
+
+    assert "## 单条与批量撤回编排" in markdown
+    assert "撤回这个提交" in markdown
+    assert "本会话最后一次成功写操作" in markdown
+    assert "匹配为零或多条时" in markdown
+    assert "records[].processInstanceId" in markdown
+    assert "撤回全部" in markdown
+    assert "遍历所有分页" in markdown
+    assert "不能只处理当前页或默认前 10 条" in markdown
+    assert "`checkbox`" in markdown
+    assert "逐条调用`withdraw_seal_apply`" in markdown
+    assert "不得并发、不得自动重试" in markdown
+    assert "`partial_success`" in markdown
+
+    folder = _write_skill(tmp_path, manifest)
+    exported = json.loads(
+        (folder / "references" / "CONTRACT.json").read_text(encoding="utf-8")
+    )
+    policy = exported["relation_orchestration"]
+    rule = policy["rules"][0]
+    assert policy["mode"] == "caller_orchestrated"
+    assert rule["source_capability"] == "query_seal_apply"
+    assert rule["source_output"] == "records[].processInstanceId"
+    assert rule["target_capability"] == "withdraw_seal_apply"
+    assert rule["target_input"] == "流程实例ID"
+    assert rule["single_reference"]["require_unique_record"] is True
+    assert rule["plural_reference"] == {
+        "requires_explicit_plural_intent": True,
+        "query_every_page": True,
+        "selection_scope": "all_records_matching_explicit_user_scope",
+        "confirmation": "one_combined_form_for_all_selected_records",
+        "execution": "sequential_single_capability_invocations",
+        "automatic_retry": False,
+        "result": "per_record_with_partial_success",
+    }
+    withdraw = next(
+        capability
+        for capability in exported["capabilities"]
+        if capability["name"] == "withdraw_seal_apply"
+    )
+    assert (
+        withdraw["call_protocol"]["relation_orchestration"]
+        == exported["call_protocol"]["relation_orchestration"]
+        == policy
+    )
 
 
 def test_exported_skill_does_not_rewrite_capability_field_types():
