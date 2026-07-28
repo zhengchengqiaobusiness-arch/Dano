@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,74 @@ def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() ->
     assert client["request_facts"]["requests"][0]["post_data"] == ""
     assert client["steps"][0]["response_projection"]["truncated"] is True
     assert client["meta"]["current_fingerprint"] == flow_spec_fingerprint(spec)
+
+
+@pytest.mark.parametrize("fixture_name", [
+    "daily_report_flow_spec.json",
+    "leave_flow_spec.json",
+    "multi_capability_flow_spec.json",
+    "multi_enum_flow_spec.json",
+    "promoted_request_flow_spec.json",
+    "work_hours_flow_spec.json",
+])
+def test_complex_client_projection_fingerprint_can_immediately_edit_authoritative_spec(
+    fixture_name: str,
+) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "recording_v3" / fixture_name
+    spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
+    client_fingerprint = flow_spec_to_client(spec)["meta"]["current_fingerprint"]
+
+    updated = apply_client_flow_patch(
+        spec,
+        [{"op": "update_flow", "field": "title", "value": "请假申请"}],
+        expected_fingerprint=client_fingerprint,
+    )
+
+    assert updated.title == "请假申请"
+
+
+def test_complex_projection_supports_successive_interface_and_relation_edits() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "recording_v3" / "leave_flow_spec.json"
+    spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
+    submit = next(step for step in spec.steps if step.step_id == "submit_leave")
+    submit.selects = [SelectBinding(
+        path="type",
+        param="请假类型",
+        source_url="/admin-api/system/dict-data/simple-list",
+        value_key="id",
+        label_key="name",
+        id_path="type",
+    )]
+
+    updated = apply_client_flow_patch(
+        spec,
+        [{
+            "op": "upsert_select",
+            "step_id": "submit_leave",
+            "binding": {
+                "path": "type",
+                "param": "请假类型",
+                "source_url": "/admin-api/system/dict-data/simple-list",
+                "value_key": "id",
+                "label_key": "label",
+                "id_path": "type",
+            },
+        }],
+        expected_fingerprint=flow_spec_to_client(spec)["meta"]["current_fingerprint"],
+    )
+    assert updated.steps[1].selects[0].label_key == "label"
+
+    updated_again = apply_client_flow_patch(
+        updated,
+        [{
+            "op": "update",
+            "link_id": updated.links[0].link_id,
+            "field": "confirmed",
+            "value": False,
+        }],
+        expected_fingerprint=flow_spec_to_client(updated)["meta"]["current_fingerprint"],
+    )
+    assert updated_again.links[0].confirmed is False
 
 
 def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() -> None:

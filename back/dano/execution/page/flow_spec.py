@@ -16069,7 +16069,7 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     client_spec = sync_flow_spec_models(spec.model_copy(deep=True))
     _normalize_capability_references(client_spec)
     data = refresh_review_items(_sync_capability_io_schemas(client_spec)).model_dump()
-    data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(client_spec)}
+    data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(spec)}
     data["meta"].pop("request_graph", None)
     request_facts = data.get("request_facts") or {}
     for evidence_key in ("field_evidence", "option_sources", "page_events"):
