@@ -7,6 +7,7 @@ from dano.execution.page.flow_spec import (
     FlowCapability,
     FlowStep,
     ParamField,
+    SelectBinding,
     _NO_SCHEMA_DEFAULT,
     _apply_output_presentation_evidence,
     _schema_default_for_param,
@@ -22,6 +23,7 @@ from dano.export.agent_skills import (
     _upgrade_recorded_skill_for_export,
 )
 from dano.orchestrator.types import SkillSpec
+from dano.orchestrator.capability_runtime import schema_issues
 from dano.shared.enums import RiskLevel, Subsystem
 
 
@@ -423,15 +425,218 @@ def test_withdraw_id_is_grounded_to_the_exact_process_instance_field():
         "field_labels": {"单据编号": "单据编号"},
         "parameters": withdraw_cap.input_schema,
     }
-    question = _question_request_template("withdraw_seal_apply", contract)["questions"][0]
+    questions = _question_request_template("withdraw_seal_apply", contract)["questions"]
     field_table = "\n".join(_question_collection_block("withdraw_seal_apply", contract))
-    assert question["question"] == "流程实例ID"
-    assert (
-        question["default"]
-        == "<调用前替换为 query_seal_apply.records[].processInstanceId 中用户所选记录的原值>"
-    )
+    assert [question["question"] for question in questions] == ["撤回原因"]
     assert "OA-GZSY-42" not in field_table
     assert "query_seal_apply.records[].processInstanceId" in field_table
+
+
+def test_query_defaults_do_not_break_withdraw_identifier_relation():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/applications/page",
+        params=[
+            ParamField(
+                path="query.pageNo", key="页码", value=1, default_value=1,
+                type="number", required=False, source_kind="user_input",
+            ),
+            ParamField(
+                path="query.pageSize", key="每页条数", value=10, default_value=10,
+                type="number", required=False, source_kind="user_input",
+            ),
+            ParamField(
+                path="query.processStatus", key="流程状态", value=1, default_value=1,
+                type="number", required=False, source_kind="user_input",
+            ),
+        ],
+        response_json={"data": {"list": [{
+            "id": "record-42",
+            "billCode": "REQ-42",
+            "processInstanceId": "PROCESS-42",
+        }], "total": 1}},
+    )
+    withdraw = FlowStep(
+        step_id="withdraw",
+        method="DELETE",
+        path="/process/cancel",
+        params=[ParamField(
+            path="id", key="id", value="PROCESS-42", default_value="PROCESS-42",
+            required=True, source_kind="user_input",
+        )],
+        response_json={"code": 0},
+    )
+    prepared = prepare_flow_spec_for_publish(FlowSpec(
+        steps=[query, withdraw],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status",
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="withdraw_application", kind="withdraw",
+                nodes=[{"id": "withdraw_call", "type": "call", "step_id": "withdraw"}],
+            ),
+        ],
+    ))
+
+    target = prepared.capabilities[1].input_schema["properties"]["id"]
+    assert target["x-dano-derived-from-query"] is True
+    assert "default" not in target
+    assert prepared.capability_relations[0].from_output == "records[].processInstanceId"
+    questions = _question_request_template("withdraw_application", {
+        "kind": "withdraw",
+        "parameters": prepared.capabilities[1].input_schema,
+    })["questions"]
+    assert questions == []
+
+
+def test_api_enum_fields_remain_select_controls_and_long_text_fields_use_textarea():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/hotel/submit",
+        params=[
+            ParamField(
+                path="roomType", key="房间类型", label="房间类型",
+                value="standard", type="string", required=True,
+                source_kind="user_input",
+            ),
+            ParamField(
+                path="roomLevel", key="房间等级", label="房间等级",
+                value="normal", type="string", required=True,
+                source_kind="user_input",
+            ),
+            ParamField(
+                path="description", key="描述", label="描述",
+                value="出差住宿", type="string", required=True,
+                source_kind="user_input",
+            ),
+            ParamField(
+                path="remark", key="备注", label="备注",
+                value="靠近会场", type="string", required=False,
+                source_kind="user_input",
+            ),
+        ],
+        selects=[
+            SelectBinding(
+                param="房间类型", path="roomType", source_url="/room/types",
+                value_key="id", label_key="name", enum_source="api",
+                enum_confirmed=True,
+                options=[
+                    {"label": "标准间", "value": "standard"},
+                    {"label": "大床房", "value": "queen"},
+                ],
+            ),
+            SelectBinding(
+                param="房间等级", path="roomLevel", source_url="/room/levels",
+                value_key="id", label_key="name", enum_source="api",
+                enum_confirmed=True,
+                options=[
+                    {"label": "标准", "value": "normal"},
+                    {"label": "豪华", "value": "luxury"},
+                ],
+            ),
+        ],
+        response_json={"code": 0},
+    )
+    prepared = prepare_flow_spec_for_publish(FlowSpec(
+        steps=[submit],
+        capabilities=[FlowCapability(
+            name="submit_hotel", title="提交酒店申请", kind="submit",
+            nodes=[{"id": "submit_call", "type": "call", "step_id": "submit"}],
+        )],
+    ))
+    capability = prepared.capabilities[0]
+    contract = {
+        "kind": capability.kind,
+        "title": capability.title,
+        "parameters": capability.input_schema,
+    }
+    questions = {
+        question["question"]: question
+        for question in _question_request_template(capability.name, contract)["questions"]
+    }
+
+    assert questions["房间类型"]["inputType"] == "select"
+    assert questions["房间类型"]["options"] == [
+        {"id": "standard", "label": "标准间"},
+        {"id": "queen", "label": "大床房"},
+    ]
+    assert questions["房间等级"]["inputType"] == "select"
+    assert questions["房间等级"]["options"] == [
+        {"id": "normal", "label": "标准"},
+        {"id": "luxury", "label": "豪华"},
+    ]
+    assert questions["描述"]["inputType"] == "textarea"
+    assert questions["备注"]["inputType"] == "textarea"
+
+
+def test_response_array_schema_accepts_observed_mixed_scalar_types():
+    schema = _schema_from_response_value({
+        "records": [
+            {"deptId": "10", "userId": "20", "name": "甲"},
+            {"deptId": 11, "userId": None, "name": "乙"},
+        ],
+    })
+    fields = schema["properties"]["records"]["items"]["properties"]
+
+    assert fields["deptId"] == {
+        "anyOf": [{"type": "string"}, {"type": "number"}],
+    }
+    assert fields["userId"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+    }
+    assert schema_issues(
+        {"records": [
+            {"deptId": "10", "userId": "20", "name": "甲"},
+            {"deptId": 11, "userId": None, "name": "乙"},
+        ]},
+        schema,
+        "output",
+    ) == []
+
+
+def test_partial_table_presentation_keeps_unmatched_business_fields_visible():
+    response = {
+        "records": [{
+            "id": "internal",
+            "processInstanceId": "OA-HOTEL-1",
+            "billCode": "JDSQ202607250001",
+            "hotelName": "示例酒店",
+            "startTime": 1784908800000,
+            "endTime": 1784995200000,
+            "totalAmt": 500,
+            "processStatus": 1,
+        }],
+    }
+    evidence = [
+        {
+            "kind": "table_column",
+            "control_kind": "table_column",
+            "label": label,
+            "field_aliases": [field],
+            "display_order": order,
+            "table_id": "hotel-list",
+            "table_complete": True,
+        }
+        for order, (field, label) in enumerate([
+            ("billCode", "单据编号"),
+            ("startTime", "入住时间"),
+            ("processStatus", "流程状态"),
+        ])
+    ]
+
+    schema = _schema_from_response_value(response)
+    _apply_output_presentation_evidence(schema, evidence)
+    fields = schema["properties"]["records"]["items"]["properties"]
+
+    assert fields["id"]["x-dano-display"] is False
+    assert fields["processInstanceId"]["x-dano-display"] is False
+    assert fields["hotelName"].get("x-dano-display") is not False
+    assert fields["endTime"].get("x-dano-display") is not False
+    assert fields["totalAmt"].get("x-dano-display") is not False
 
 
 def test_identifier_relation_uses_record_id_when_that_is_the_exact_match():

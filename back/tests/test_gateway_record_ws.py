@@ -10,7 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from dano.agent_tools import tools as agent_tools_module
-from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
+from dano.execution.page.flow_spec import (
+    FlowCapability,
+    FlowSpec,
+    FlowStep,
+    ParamField,
+)
 from dano.gateway import app as gateway
 
 
@@ -1175,6 +1180,43 @@ def test_analysis_kind_uses_completed_operation_history_not_generation_metadata(
         screenshots=[], delivered_image_count=0, operation_id="second",
     )
     assert second["analysis_kind"] == "incremental"
+
+
+def test_completed_analysis_cache_reuses_only_the_exact_state_and_evidence() -> None:
+    spec = FlowSpec(
+        steps=[FlowStep(step_id="query", method="GET", path="/api/items")],
+        capabilities=[FlowCapability(
+            name="query_items",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+        )],
+    )
+    screenshots = [{
+        "name": "list.png",
+        "mimeType": "image/png",
+        "data": "recorded-image",
+    }]
+    spec.meta = {
+        **(spec.meta or {}),
+        "last_analysis_application": {"status": "applied"},
+        "last_analysis_cache": {
+            "flow_fingerprint": gateway._analysis_flow_fingerprint(spec),
+            "evidence_fingerprint": gateway._analysis_evidence_fingerprint(screenshots),
+        },
+    }
+
+    assert gateway._recording_analysis_cache_matches(spec, screenshots) is True
+    assert gateway._recording_analysis_cache_matches(spec, [{
+        **screenshots[0], "data": "changed-image",
+    }]) is False
+
+    spec.steps[0].path = "/api/other-items"
+    assert gateway._recording_analysis_cache_matches(spec, screenshots) is False
+
+    spec.steps[0].path = "/api/items"
+    spec.capabilities[0].title = "新的业务标题"
+    assert gateway._recording_analysis_cache_matches(spec, screenshots) is False
 
 
 def test_analysis_report_ignores_malformed_axis_status_instead_of_failing_operation() -> None:

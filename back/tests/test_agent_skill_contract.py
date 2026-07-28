@@ -10,6 +10,7 @@ from dano.export.agent_skills import (
     _capability_reference_md,
     _export_contract_errors,
     _options_md,
+    _relation_orchestration_policy,
     _skill_md,
     _write_skill,
 )
@@ -348,7 +349,7 @@ def test_related_withdraw_supports_single_and_caller_orchestrated_batch(tmp_path
     manifest = _withdraw_relation_manifest()
     markdown = _skill_md(manifest, "dano-a-oa-seal-apply")
 
-    assert "## 单条与批量撤回编排" in markdown
+    assert "## 单条与批量关联操作" in markdown
     assert "撤回这个提交" in markdown
     assert "本会话最后一次成功写操作" in markdown
     assert "匹配为零或多条时" in markdown
@@ -372,6 +373,12 @@ def test_related_withdraw_supports_single_and_caller_orchestrated_batch(tmp_path
     assert rule["source_output"] == "records[].processInstanceId"
     assert rule["target_capability"] == "withdraw_seal_apply"
     assert rule["target_input"] == "流程实例ID"
+    assert rule["operation_kind"] == "withdraw"
+    assert rule["preflight"] == {
+        "query_current_record": True,
+        "eligibility_source": "published_preconditions_or_explicit_current_state_only",
+        "ineligible_record": "do_not_invoke",
+    }
     assert rule["single_reference"]["require_unique_record"] is True
     assert rule["plural_reference"] == {
         "requires_explicit_plural_intent": True,
@@ -392,6 +399,31 @@ def test_related_withdraw_supports_single_and_caller_orchestrated_batch(tmp_path
         == exported["call_protocol"]["relation_orchestration"]
         == policy
     )
+
+
+def test_related_delete_supports_single_and_caller_orchestrated_batch():
+    manifest = _withdraw_relation_manifest()
+    target = next(
+        capability
+        for capability in manifest.capabilities
+        if capability["name"] == "withdraw_seal_apply"
+    )
+    target.update({
+        "name": "delete_seal_apply",
+        "kind": "delete",
+        "title": "删除公章使用申请",
+    })
+    relation = manifest.capability_relations[0]
+    relation["to_capability"] = "delete_seal_apply"
+
+    markdown = _skill_md(manifest, "dano-a-oa-seal-apply")
+    policy = _relation_orchestration_policy(manifest)
+
+    assert "## 单条与批量关联操作" in markdown
+    assert "删除这个提交" in markdown
+    assert "删除全部" in markdown
+    assert policy["rules"][0]["operation_kind"] == "delete"
+    assert policy["rules"][0]["target_capability"] == "delete_seal_apply"
 
 
 def test_exported_skill_does_not_rewrite_capability_field_types():
@@ -439,8 +471,8 @@ def test_exported_skill_does_not_rewrite_capability_field_types():
     assert "| `预计金额` | 预计金额 | `text` | string |" in markdown
     assert "| `房间数量` | 房间数量 | `text` | string |" in markdown
     assert "| `使用城市` | 使用城市 | `text` | number |" in markdown
-    assert "| `事项描述` | 事项描述 | `text` | string |" in markdown
-    assert "| `备注` | 备注 | `text` | string |" in markdown
+    assert "| `事项描述` | 事项描述 | `textarea` | string |" in markdown
+    assert "| `备注` | 备注 | `textarea` | string |" in markdown
 
 
 def test_exported_skill_forbids_query_filter_defaults_and_nearest_capability_guessing():
@@ -584,11 +616,15 @@ def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tm
                         },
                     },
                     "remark": {
-                        "type": "string", "x-dano-business-type": "textarea",
+                        "type": "string",
                         "description": "申请说明", "default": "出差住宿",
                     },
+                    "useInfo": {
+                        "type": "string",
+                        "title": "使用描述", "default": "会议使用",
+                    },
                 },
-                "required": ["hotelName", "city", "remark"],
+                "required": ["hotelName", "city", "remark", "useInfo"],
             },
             "output_schema": {
                 "type": "object",
@@ -619,11 +655,12 @@ def test_exported_hotel_skill_has_executable_question_sop_and_table_formatter(tm
     assert '"params": {"type": "hotel_city"}' in capability_reference
     assert '"resultPath": "data.records"' in capability_reference
     assert "| `remark` | 申请说明 | `textarea`" in capability_reference
+    assert "| `useInfo` | 使用描述 | `textarea`" in capability_reference
     assert "### 固定表单请求" in capability_reference
     assert '"title": "提交酒店申请"' in capability_reference
     assert '"id": "hotelName"' in capability_reference
     assert '"question": "酒店名称"' in capability_reference
-    assert '"inputType": "textarea"' in capability_reference
+    assert capability_reference.count('"inputType": "textarea"') == 2
     assert "不得展示原始 JSON" in capability_reference
     assert "按 `answer` 对象的 `id` 映射为能力参数" in markdown
     assert "Markdown 表格呈现" in markdown

@@ -13,6 +13,8 @@ import asyncio
 import base64
 import binascii
 from contextlib import asynccontextmanager
+import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -78,6 +80,45 @@ RECORDING_FLOW_PROTOCOL_VERSION = 2
 
 _ANALYSIS_SCREENSHOT_MAX_COUNT = 4
 _ANALYSIS_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _analysis_evidence_fingerprint(screenshots: list[dict] | None) -> str:
+    """Stable digest for deciding whether a completed analysis can be reused."""
+    rows = [
+        {
+            "name": str(item.get("name") or ""),
+            "mime": str(item.get("mimeType") or ""),
+            "data": hashlib.sha256(str(item.get("data") or "").encode("utf-8")).hexdigest(),
+        }
+        for item in (screenshots or [])
+        if isinstance(item, dict)
+    ]
+    raw = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _analysis_flow_fingerprint(flow_spec) -> str:  # noqa: ANN001
+    """Hash all analysis-relevant facts while excluding the cache record itself."""
+    payload = flow_spec.model_dump(mode="json", exclude_none=True)
+    meta = dict(payload.get("meta") or {})
+    meta.pop("last_analysis_application", None)
+    meta.pop("last_analysis_cache", None)
+    payload["meta"] = meta
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _recording_analysis_cache_matches(flow_spec, screenshots: list[dict] | None) -> bool:  # noqa: ANN001
+    """Reuse only a successful result for the exact executable state and evidence."""
+    meta = getattr(flow_spec, "meta", None) or {}
+    cache = dict(meta.get("last_analysis_cache") or {})
+    previous = dict(meta.get("last_analysis_application") or {})
+    return bool(
+        getattr(flow_spec, "capabilities", None)
+        and previous.get("status") in {"applied", "no_change"}
+        and cache.get("flow_fingerprint") == _analysis_flow_fingerprint(flow_spec)
+        and cache.get("evidence_fingerprint") == _analysis_evidence_fingerprint(screenshots)
+    )
 _ANALYSIS_SCREENSHOT_MAX_TOTAL_BYTES = 6 * 1024 * 1024
 _ANALYSIS_SCREENSHOT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -1851,6 +1892,50 @@ async def record_ws(ws: WebSocket) -> None:
                     )
 
                     analysis_screenshots = _normalize_analysis_screenshots(msg.get("analysis_screenshots"))
+                    evidence_fingerprint = _analysis_evidence_fingerprint(analysis_screenshots)
+                    previous_application = dict(
+                        (before_operation.meta or {}).get("last_analysis_application") or {}
+                    )
+                    if _recording_analysis_cache_matches(
+                        before_operation, analysis_screenshots,
+                    ):
+                        operation_report = flow_operation_report(
+                            before_operation, before_operation, operation="plan",
+                        )
+                        analysis_application = {
+                            **previous_application,
+                            "status": "no_change",
+                            "analysis_kind": "incremental",
+                            "summary": "录制事实、能力定义和分析证据均未变化，已复用最近一次分析结果",
+                            "operation_id": operation_id,
+                        }
+                        response = {
+                            "type": "flow_spec",
+                            "operation": "plan",
+                            "operation_id": operation_id,
+                            **_recording_flow_projection(before_operation),
+                            "operation_report": operation_report,
+                            "analysis_application": analysis_application,
+                            "analysis_evidence": {
+                                "screenshot_count": len(analysis_screenshots),
+                                "model_image_count": len(analysis_screenshots),
+                                "screenshot_names": [
+                                    item["name"] for item in analysis_screenshots
+                                ],
+                                "reused": True,
+                            },
+                        }
+                        _remember_costly(msg, response)
+                        log.info(
+                            "recording.operation_completed",
+                            action=session_action,
+                            operation="plan",
+                            operation_id=operation_id,
+                            changed=False,
+                            reused=True,
+                        )
+                        await sender.send_json(response)
+                        continue
                     _checkpoint_resume()
                     pi_session = None
                     delivered_image_count = 0
@@ -1937,6 +2022,14 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_flow_spec.meta = {
                         **(pending_flow_spec.meta or {}),
                         "last_analysis_application": analysis_application,
+                        **({
+                            "last_analysis_cache": {
+                                "flow_fingerprint": _analysis_flow_fingerprint(
+                                    pending_flow_spec,
+                                ),
+                                "evidence_fingerprint": evidence_fingerprint,
+                            },
+                        } if analysis_application.get("status") in {"applied", "no_change"} else {}),
                     }
                     _checkpoint_resume()
                     response = {

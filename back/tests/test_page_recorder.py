@@ -1585,6 +1585,38 @@ async def test_records_visible_table_column_contract(tmp_path) -> None:  # noqa:
     assert all(column["table_complete"] is True for column in columns)
 
 
+_SCROLLING_RESULT_TABLE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<div class="el-table">
+  <div class="el-table__body-wrapper" style="width:180px;overflow-x:auto">
+    <table style="width:600px">
+      <thead><tr>
+        <th data-field="billCode">单据编号</th>
+        <th data-field="hotelName">酒店名称</th>
+        <th data-field="startTime">入住时间</th>
+      </tr></thead>
+      <tbody><tr><td>JDSQ-1</td><td>示例酒店</td><td>2026-07-25</td></tr></tbody>
+    </table>
+  </div>
+</div>
+</body></html>"""
+
+
+async def test_horizontally_scrolling_table_is_not_claimed_complete(tmp_path) -> None:  # noqa: ANN001
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    page = tmp_path / "scrolling-result-table.html"
+    page.write_text(_SCROLLING_RESULT_TABLE, encoding="utf-8")
+    sess = RecordSession()
+    try:
+        await sess.start(page.as_uri())
+        columns = await sess.page.evaluate("window.__danoTableColumnEvidence()")
+    finally:
+        await sess.stop()
+
+    assert columns
+    assert all(column["table_complete"] is False for column in columns)
+
+
 _ASYNC_RESULT_TABLE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <button id="search">查询</button>
 <table>
@@ -1871,7 +1903,9 @@ async def test_token_auth_sets_login_cookie() -> None:
         hit = [c for c in cookies if c["name"] == "Admin-Token" and c["value"] == "tok123"]
         assert hit and hit[0]["domain"].endswith("oa.example.com")
     finally:
-        await ctx.close(); await b.close(); await pw.stop()
+        await ctx.close()
+        await b.close()
+        await pw.stop()
 
 
 # ── P0-1 真实浏览器集成:验证 all_requests / diagnostics 在真浏览器链路里真能抓到 ──

@@ -490,6 +490,16 @@ _RECORDER_JS = r"""() => {
         )) addRoot(nativeTables[j]);
       }
       seenRoots.forEach(function (root, tableIndex) {
+        var scrollNodes = root.querySelectorAll(
+          '.el-scrollbar__wrap,.el-table__body-wrapper,.ant-table-content,.v-table__wrapper,.q-table__middle'
+        );
+        var tableComplete = true;
+        for (var s = 0; s < scrollNodes.length; s++) {
+          if (scrollNodes[s].scrollWidth > scrollNodes[s].clientWidth + 2) {
+            tableComplete = false;
+            break;
+          }
+        }
         var headers = root.querySelectorAll(
           'thead th,[role="columnheader"],.el-table__header th,.ant-table-thead th'
         );
@@ -526,7 +536,7 @@ _RECORDER_JS = r"""() => {
             control_kind: 'table_column',
             display_order: columnIndex,
             table_id: 'table_' + tableIndex,
-            table_complete: true,
+            table_complete: tableComplete,
             sample_values: samples,
             sample_epoch_ms: sampleEpochMs,
             value_kind: valueKind
@@ -1088,10 +1098,8 @@ _RECORDER_JS = r"""() => {
     var role = roleOf(el); var name = accName(el);
     var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
     var isFormCommand = role === 'button' && FORM_COMMAND.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
-    if (isFormCommand) {
-      emitFormSnapshot();
-      scheduleEvidenceSnapshot();
-    }
+    if (isFormCommand) emitFormSnapshot();
+    if (isFormCommand) scheduleEvidenceSnapshot();
     emit(isSubmit ? 'submit' : 'click', loc, '', '');
   }, true);
 }"""

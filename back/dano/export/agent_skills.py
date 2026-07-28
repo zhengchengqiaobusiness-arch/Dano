@@ -817,13 +817,12 @@ def _relation_orchestration_policy(
     m: SkillManifest,
     contracts: dict[str, dict] | None = None,
 ) -> dict:
-    """Describe safe caller-side repetition of a recorded single withdraw.
+    """Describe safe caller-side repetition of a recorded single-record mutation.
 
-    Some systems expose only a single-record withdraw endpoint.  That does not
-    remove the legitimate "withdraw these/all" workflow: the caller queries the
-    authoritative records, resolves the exact relation field, confirms the
-    complete scope once, and invokes the same published withdraw capability for
-    each selected record.
+    Some systems expose only a single-record withdraw/delete endpoint. The
+    caller may still satisfy an explicit plural request by querying authoritative
+    records, resolving the exact relation field, confirming the complete scope
+    once, and invoking that same published capability sequentially.
     """
     capability_contracts = contracts or _capability_contracts(m)
     rules: list[dict] = []
@@ -842,7 +841,7 @@ def _relation_orchestration_policy(
             and source_output
             and target_input
             and source_contract.get("kind") in _READ_CAPABILITY_KINDS
-            and target_contract.get("kind") == "withdraw"
+            and target_contract.get("kind") in {"withdraw", "delete"}
         ):
             continue
         rules.append({
@@ -850,7 +849,13 @@ def _relation_orchestration_policy(
             "source_output": source_output,
             "target_capability": target,
             "target_input": target_input,
+            "operation_kind": target_contract.get("kind"),
             "identifier_mapping": "exact_value_only",
+            "preflight": {
+                "query_current_record": True,
+                "eligibility_source": "published_preconditions_or_explicit_current_state_only",
+                "ineligible_record": "do_not_invoke",
+            },
             "single_reference": {
                 "resolve_from": "last_successful_write_then_current_query",
                 "require_unique_record": True,
@@ -920,15 +925,15 @@ def _capability_relationship_section(m: SkillManifest) -> str:
     return "\n".join(lines)
 
 
-def _related_withdrawal_sop(m: SkillManifest) -> str:
+def _related_mutation_sop(m: SkillManifest) -> str:
     policy = _relation_orchestration_policy(m)
     rules = policy.get("rules") if isinstance(policy, dict) else []
     if not rules:
         return ""
     lines = [
-        "## 单条与批量撤回编排",
+        "## 单条与批量关联操作",
         "",
-        "以下是对已发布查询能力和单条撤回能力的调用方编排，"
+        "以下是对已发布查询能力和单条撤回/删除能力的调用方编排，"
         "不是虚构新的批量 capability，也不改变任何能力输入契约。",
     ]
     for rule in rules:
@@ -936,15 +941,18 @@ def _related_withdrawal_sop(m: SkillManifest) -> str:
         source_output = rule["source_output"]
         target = rule["target_capability"]
         target_input = rule["target_input"]
+        action = "删除" if rule.get("operation_kind") == "delete" else "撤回"
         lines += [
             "",
             f"- 标识映射固定为 `{source}.{source_output}` → `{target}.{target_input}`。"
             "只复制同一条记录的原值，禁止改用该记录的其他 ID、单据号、列表序号或录制样本。",
-            "- 用户说“撤回这个提交”“撤回刚刚那条”“撤回上一条”时："
+            "- 执行前必须以查询结果复核同一条记录的当前状态；只有发布前置条件或当前状态证据"
+            "明确允许时才调用目标能力。明确不符合条件时直接说明原因，不得仍然调用后再伪报成功。",
+            f"- 用户说“{action}这个提交”“{action}刚刚那条”“{action}上一条”时："
             "先读取本会话最后一次成功写操作的原始结果，再调用查询能力定位同一条记录；"
-            "只有唯一匹配时才能取上述来源字段执行单条撤回。"
+            f"只有唯一匹配时才能取上述来源字段执行单条{action}。"
             "匹配为零或多条时，必须让用户选择，禁止默认第一条。",
-            "- 用户明确说“撤回这些”“撤回全部”“撤回所有提交”时："
+            f"- 用户明确说“{action}这些”“{action}全部”“{action}所有提交”时："
             f"调用 `{source}` 查询用户明确范围内的全部记录，并遍历所有分页，"
             "不能只处理当前页或默认前 10 条。没有用户筛选条件时使用空查询 input，"
             "不得带入录制筛选值。",
@@ -1059,7 +1067,7 @@ def _capability_contract_section(m: SkillManifest) -> str:
 
 def _multi_capability_sop(m: SkillManifest) -> str:
     contracts = _capability_contracts(m)
-    supports_related_withdrawal = bool(
+    supports_related_mutation = bool(
         _relation_orchestration_policy(m, contracts)
     )
     lines = [
@@ -1067,8 +1075,8 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "",
         (
             "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。"
-            "用户明确要求关联撤回时，按“单条与批量撤回编排”显式调用来源查询和撤回能力。"
-            if supports_related_withdrawal else
+            "用户明确要求关联撤回或删除时，按“单条与批量关联操作”显式调用来源查询和目标能力。"
+            if supports_related_mutation else
             "1. 根据用户目标选择一个明确的 capability；查询和提交是不同能力，禁止默认选择写能力。"
         ),
         "   用户意图必须同时匹配能力的业务对象和动作；实体目录/候选列表不等于业务申请记录，"
@@ -1089,7 +1097,8 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "除非契约标记 `x-dano-apply-default: true`，否则必须等待用户回答。",
         "   字段标记 `x-dano-derived-from-query: true` 时，不得让用户猜测或自由填写标识："
         "必须先按 `x-dano-source-capability` 查询并定位用户所指的同一条记录，再把"
-        "`x-dano-source-output` 的原值预填到表单；不得使用同一记录的其他 `id`、单据号或录制样本。",
+        "`x-dano-source-output` 的原值保存在内部调用参数中；该字段不得进入 `questions[]`，"
+        "不得展示成需要用户确认或编辑的表单项，也不得使用同一记录的其他 `id`、单据号或录制样本。",
         "   所选能力参考小节是唯一表单来源，`questions[].id` 必须与参数名逐字一致，禁止翻译、改名或改成 snake_case。"
         "用户值优先；否则把能力参考小节“推荐默认值”列的主值逐字复制为表单 `default`；"
         "括号内录制值只用于溯源。候选项必须逐字来自能力参考小节或 `--list-options`，"
@@ -1111,8 +1120,8 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "6. Linux/macOS 使用 `bash scripts/submit.sh --capability <能力名> --json '<能力输入 JSON>'`；"
         "Windows PowerShell 使用 `scripts/submit.ps1` 传入同样参数。写能力同时带 `--confirm`。"
         + (
-            "单条操作一次调用；关联批量撤回按已确认的记录集合逐条调用，不得把数组塞进单条输入。"
-            if supports_related_withdrawal else
+            "单条操作一次调用；关联批量撤回/删除按已确认的记录集合逐条调用，不得把数组塞进单条输入。"
+            if supports_related_mutation else
             "一次调用由 Dano 完成内部接口编排。"
         ),
         "7. 按末行 JSON 的 `status` 处理结果。列表结果必须先运行 "
@@ -1221,7 +1230,13 @@ def _label(props: dict, k: str) -> str:
     return p.get("label") or p.get("description") or k
 
 
-def _question_control(schema: dict) -> str:
+_LONG_TEXT_FIELD_RE = re.compile(
+    r"(描述|备注|说明|详情|意见|补充信息|description|remark|comment|notes?|memo)",
+    re.IGNORECASE,
+)
+
+
+def _question_control(schema: dict, field: str = "") -> str:
     """Map the published field contract to an ask_user_question control."""
     schema = schema or {}
     business_type = str(schema.get("x-dano-business-type") or schema.get("type") or "").lower()
@@ -1238,6 +1253,14 @@ def _question_control(schema: dict) -> str:
     if selectable:
         return "treeSelect" if schema.get("x-dano-tree") or schema.get("childrenField") else "select"
     if business_type in {"textarea", "rich_text", "array", "object"}:
+        return "textarea"
+    semantic_text = " ".join(str(value or "") for value in (
+        field,
+        schema.get("title"),
+        schema.get("label"),
+        schema.get("description"),
+    ))
+    if business_type in {"string", "text", ""} and _LONG_TEXT_FIELD_RE.search(semantic_text):
         return "textarea"
     if schema.get("format") in {"date", "date-time"} or business_type in {"date", "datetime"}:
         default = schema.get("default")
@@ -1445,9 +1468,13 @@ def _question_request_template(name: str, contract: dict) -> dict:
     query = contract.get("kind") in _READ_CAPABILITY_KINDS
     questions: list[dict] = []
     for field, prop in (schema.get("properties") or {}).items():
-        if not isinstance(prop, dict) or (query and field not in required):
+        if (
+            not isinstance(prop, dict)
+            or prop.get("x-dano-derived-from-query") is True
+            or (query and field not in required)
+        ):
             continue
-        control = _question_control(prop)
+        control = _question_control(prop, field)
         question = {
             "id": field,
             "question": str(
@@ -1537,7 +1564,7 @@ def _question_collection_block(name: str, contract: dict) -> list[str]:
             or (contract.get("field_labels") or {}).get(field_key)
             or prop.get("description") or field
         ).replace("|", "\\|")
-        control = _question_control(prop)
+        control = _question_control(prop, field)
         date_format = (
             f" / `{prop.get('dateFormat') or ('yyyy-MM-dd HH:mm' if prop.get('format') == 'date-time' else 'yyyy-MM-dd')}`"
             if control == "date" else ""
@@ -1624,7 +1651,7 @@ def _capability_reference_md(m: SkillManifest) -> str:
             for field, prop, required in nested_rows:
                 lines.append(
                     f"| `{field}` | {_schema_type_text(prop)} | {'是' if required else '否'} | "
-                    f"{_question_default_text(prop, query=query, control=_question_control(prop))} |"
+                    f"{_question_default_text(prop, query=query, control=_question_control(prop, field))} |"
                 )
     return "\n".join(lines) + "\n"
 
@@ -1944,7 +1971,8 @@ _IDENTIFIER_OUTPUT_MD = """## 标识字段规则
 - 后续操作需要哪一个参数，就只使用同名字段或 `capability_relations` 明确映射的字段；
   用户给出另一类编号时，先用已发布查询能力定位同一条记录，再取目标能力要求的字段，禁止直接改名代入。
 - 输入字段标记 `x-dano-derived-from-query: true` 时，`x-dano-source-capability` 与
-  `x-dano-source-output` 是唯一允许的数据来源；先定位记录再预填表单，禁止让用户猜内部标识。
+  `x-dano-source-output` 是唯一允许的数据来源；先定位记录再写入内部调用参数，
+  禁止把该字段放进 `questions[]` 或让用户猜内部标识。
 - 面向用户隐藏哪些字段、字段顺序和标题均由 `output_schema` 的展示元数据决定；
   包装脚本原始 `output` 始终保留完整结果供后续能力准确取值。"""
 
@@ -1987,7 +2015,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     parameter_md = _capability_contract_section(m)
     sop = _multi_capability_sop(m) if multi_capability else _sop_section(m, flags, cflag)
     relationships = _capability_relationship_section(m)
-    withdrawal_orchestration = _related_withdrawal_sop(m)
+    withdrawal_orchestration = _related_mutation_sop(m)
     default_capability = _export_default_capability(m)
     if multi_capability:
         protocol_default = "本 Skill 有多个独立能力，调用时必须显式指定 `--capability`"

@@ -6685,13 +6685,60 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required}
 
 
+def _merge_response_schemas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Merge observed response shapes without treating the first row as universal."""
+    if left == right:
+        return copy.deepcopy(left)
+    left_type = left.get("type")
+    right_type = right.get("type")
+    if left_type == right_type == "object":
+        left_props = left.get("properties") if isinstance(left.get("properties"), dict) else {}
+        right_props = right.get("properties") if isinstance(right.get("properties"), dict) else {}
+        return {
+            "type": "object",
+            "properties": {
+                name: (
+                    _merge_response_schemas(left_props[name], right_props[name])
+                    if name in left_props and name in right_props
+                    else copy.deepcopy(left_props.get(name, right_props.get(name, {})))
+                )
+                for name in dict.fromkeys([*left_props, *right_props])
+            },
+        }
+    if left_type == right_type == "array":
+        return {
+            "type": "array",
+            "items": _merge_response_schemas(
+                left.get("items") if isinstance(left.get("items"), dict) else {},
+                right.get("items") if isinstance(right.get("items"), dict) else {},
+            ),
+        }
+    if {left_type, right_type} <= {"integer", "number"}:
+        return {"type": "number"}
+    alternatives: list[dict[str, Any]] = []
+    for schema in (left, right):
+        nested = schema.get("anyOf") if set(schema) == {"anyOf"} else None
+        candidates = nested if isinstance(nested, list) else [schema]
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate not in alternatives:
+                alternatives.append(copy.deepcopy(candidate))
+    return {"anyOf": alternatives}
+
+
 def _schema_from_response_value(value: Any) -> dict[str, Any]:
     if isinstance(value, bool):
         return {"type": "boolean"}
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return {"type": "number"}
     if isinstance(value, list):
-        return {"type": "array", "items": _schema_from_response_value(value[0]) if value else {}}
+        item_schema: dict[str, Any] = {}
+        for item in value[:80]:
+            observed = _schema_from_response_value(item)
+            item_schema = (
+                observed if not item_schema
+                else _merge_response_schemas(item_schema, observed)
+            )
+        return {"type": "array", "items": item_schema}
     if isinstance(value, dict):
         return {
             "type": "object",
@@ -6700,6 +6747,8 @@ def _schema_from_response_value(value: Any) -> dict[str, Any]:
                 for k, v in list(value.items())[:80]
             },
         }
+    if value is None:
+        return {"type": "null"}
     return {"type": "string"}
 
 
@@ -6732,6 +6781,18 @@ _IDENTIFIER_RELATION_TARGET_KINDS = {
 def _identifier_role_for_field(name: Any) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
     return _IDENTIFIER_ROLE_BY_FIELD.get(normalized, "")
+
+
+def _output_field_is_transport_only(name: Any, schema: dict[str, Any]) -> bool:
+    """Keep business response fields visible while suppressing transport identities."""
+    role = str((schema or {}).get("x-dano-identifier-role") or _identifier_role_for_field(name))
+    if role in {"record", "process_instance"}:
+        return True
+    normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
+    return normalized in {
+        "billtype", "processdefkey", "processdefinitionkey",
+        "tenantid", "deleted", "creator", "updater",
+    }
 
 
 def _schema_node_at_path(schema: dict[str, Any] | None, path: str) -> dict[str, Any] | None:
@@ -6892,7 +6953,7 @@ def _apply_output_presentation_evidence(
     if best is None or best[0] == 0:
         return
 
-    _score, direct_matches, matched, columns = best
+    _score, _direct_matches, matched, _columns = best
     visible_fields = {name for name, _column in matched}
     for name, column in matched:
         field_schema = row_properties[name]
@@ -6907,16 +6968,13 @@ def _apply_output_presentation_evidence(
         ):
             field_schema["x-dano-value-format"] = "epoch-auto"
 
-    sample_matches = len(matched) - direct_matches
-    evidence_is_complete = bool(
-        direct_matches
-        or sample_matches >= min(2, len(row_properties))
-        or len(row_properties) == 1 and sample_matches == 1
-    )
-    if evidence_is_complete and all(column.get("table_complete") is True for column in columns):
-        for name, field_schema in row_properties.items():
-            if name not in visible_fields and isinstance(field_schema, dict):
-                field_schema["x-dano-display"] = False
+    for name, field_schema in row_properties.items():
+        if (
+            name not in visible_fields
+            and isinstance(field_schema, dict)
+            and _output_field_is_transport_only(name, field_schema)
+        ):
+            field_schema["x-dano-display"] = False
 
 
 def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str) -> dict[str, Any]:
