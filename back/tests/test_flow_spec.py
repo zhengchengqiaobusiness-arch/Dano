@@ -2017,7 +2017,7 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
         {
             "applyTitle": "1", "totalAmt": 1, "roomType": 2,
             "roomCount": 1, "userCount": 1,
-            "useTime": 1784044800000, "remark": "1",
+            "useTime": 1784044800000, "reasonDes": "出差住宿", "remark": "1",
         },
         resp={"code": 0, "data": True},
     )
@@ -2031,6 +2031,7 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
         {"page_id": "hotel-form", "frame_id": "main", "label": "房间数量", "value": "1", "field_aliases": ["roomCount"], "control_kind": "number"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "入住人数", "value": "1", "field_aliases": ["userCount"], "control_kind": "number"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "入住时间", "value": "2026-07-14 00:00:00", "field_aliases": ["useTime"], "control_kind": "datetime"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "事项描述", "value": "出差住宿", "field_aliases": ["reasonDes"], "control_kind": "textarea"},
         {"page_id": "hotel-form", "frame_id": "main", "label": "备注", "value": "1", "field_aliases": ["remark"], "control_kind": "textarea"},
     ]
     page_enums = {
@@ -2066,7 +2067,13 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
     assert (params["roomCount"].key, params["roomCount"].type, params["roomCount"].source_kind) == ("房间数量", "number", "user_input")
     assert (params["userCount"].key, params["userCount"].type, params["userCount"].source_kind) == ("入住人数", "number", "user_input")
     assert (params["useTime"].key, params["useTime"].type, params["useTime"].source_kind) == ("入住时间", "datetime", "user_input")
+    assert (params["reasonDes"].key, params["reasonDes"].type, params["reasonDes"].source_kind) == ("事项描述", "string", "user_input")
     assert (params["remark"].key, params["remark"].type, params["remark"].source_kind) == ("备注", "string", "user_input")
+    schema = flow_spec_module._capability_input_schema([
+        params["reasonDes"], params["remark"],
+    ])
+    assert schema["properties"]["事项描述"]["x-dano-business-type"] == "textarea"
+    assert schema["properties"]["备注"]["x-dano-business-type"] == "textarea"
 
 
 if __name__ == "__main__":

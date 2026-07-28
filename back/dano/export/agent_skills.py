@@ -958,6 +958,9 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "   每个问题必须使用所选能力参考小节给出的参数名作为 `id`、业务标签作为 `question`，并设置对应的 "
         "`inputType`、`required`、非空推荐 `default` 及 `options`/`dataSource`。录制默认值只作推荐，"
         "除非契约标记 `x-dano-apply-default: true`，否则必须等待用户回答。",
+        "   字段标记 `x-dano-derived-from-query: true` 时，不得让用户猜测或自由填写标识："
+        "必须先按 `x-dano-source-capability` 查询并定位用户所指的同一条记录，再把"
+        "`x-dano-source-output` 的原值预填到表单；不得使用同一记录的其他 `id`、单据号或录制样本。",
         "   所选能力参考小节是唯一表单来源，`questions[].id` 必须与参数名逐字一致，禁止翻译、改名或改成 snake_case。"
         "用户值优先；否则把能力参考小节“推荐默认值”列的主值逐字复制为表单 `default`；"
         "括号内录制值只用于溯源。候选项必须逐字来自能力参考小节或 `--list-options`，"
@@ -1207,6 +1210,15 @@ def _question_data_source(schema: dict) -> dict | None:
 
 def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
     """Render a form-valid recommendation without changing the capability contract."""
+    if schema.get("x-dano-derived-from-query") is True:
+        source = ".".join(filter(None, (
+            str(schema.get("x-dano-source-capability") or ""),
+            str(schema.get("x-dano-source-output") or ""),
+        )))
+        return (
+            f"无固定默认值；必须使用本次查询结果 `{source}` 中用户所选记录的原值，"
+            "禁止使用录制样本或其他 ID"
+        )
     if schema.get("x-dano-require-current-value") is True:
         return _schema_default_text(schema)
     if "default" not in schema or schema.get("default") in (None, ""):
@@ -1260,6 +1272,12 @@ def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
 
 def _question_form_default(schema: dict, control: str):  # noqa: ANN001
     """Convert a recorded value to the exact value accepted by the form control."""
+    if schema.get("x-dano-derived-from-query") is True:
+        source = ".".join(filter(None, (
+            str(schema.get("x-dano-source-capability") or ""),
+            str(schema.get("x-dano-source-output") or ""),
+        )))
+        return f"<调用前替换为 {source} 中用户所选记录的原值>"
     if "default" not in schema or schema.get("default") in (None, ""):
         return "<调用前替换为基于用户上下文的非空推荐值>"
     recorded = schema.get("default")
@@ -1300,8 +1318,9 @@ def _question_request_template(name: str, contract: dict) -> dict:
         question = {
             "id": field,
             "question": str(
-                (contract.get("field_labels") or {}).get(field)
-                or prop.get("label") or prop.get("description") or field
+                prop.get("title") or prop.get("label")
+                or (contract.get("field_labels") or {}).get(field)
+                or prop.get("description") or field
             ),
             "inputType": control,
             "required": field in required,
@@ -1381,8 +1400,9 @@ def _question_collection_block(name: str, contract: dict) -> list[str]:
     for field, prop, required in rows:
         field_key = field.removesuffix("[]").split(".")[-1]
         label = str(
-            (contract.get("field_labels") or {}).get(field_key)
-            or prop.get("label") or prop.get("description") or field
+            prop.get("title") or prop.get("label")
+            or (contract.get("field_labels") or {}).get(field_key)
+            or prop.get("description") or field
         ).replace("|", "\\|")
         control = _question_control(prop)
         date_format = (
@@ -1790,6 +1810,8 @@ _IDENTIFIER_OUTPUT_MD = """## 标识字段规则
 - 契约没有声明标识角色时保留原字段名，禁止根据字段名、值形状或当前业务场景猜测标识含义。
 - 后续操作需要哪一个参数，就只使用同名字段或 `capability_relations` 明确映射的字段；
   用户给出另一类编号时，先用已发布查询能力定位同一条记录，再取目标能力要求的字段，禁止直接改名代入。
+- 输入字段标记 `x-dano-derived-from-query: true` 时，`x-dano-source-capability` 与
+  `x-dano-source-output` 是唯一允许的数据来源；先定位记录再预填表单，禁止让用户猜内部标识。
 - 面向用户隐藏哪些字段、字段顺序和标题均由 `output_schema` 的展示元数据决定；
   包装脚本原始 `output` 始终保留完整结果供后续能力准确取值。"""
 

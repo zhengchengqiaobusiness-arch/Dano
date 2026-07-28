@@ -13,9 +13,14 @@ from dano.execution.page.flow_spec import (
     _schema_from_response_value,
     _sync_capability_io_schemas,
     orchestrate_flow_capabilities,
+    prepare_flow_spec_for_publish,
     to_flow_spec,
 )
-from dano.export.agent_skills import _upgrade_recorded_skill_for_export
+from dano.export.agent_skills import (
+    _question_collection_block,
+    _question_request_template,
+    _upgrade_recorded_skill_for_export,
+)
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel, Subsystem
 
@@ -324,6 +329,219 @@ def test_withdraw_id_remains_explicit_user_input_and_is_never_silently_defaulted
     assert properties["id"]["default"] == "process-1"
     assert "x-dano-apply-default" not in properties["id"]
     assert spec.capability_relations == []
+
+
+def test_withdraw_id_is_grounded_to_the_exact_process_instance_field():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/admin-api/oa/seal-apply/page",
+        source_meta={"role": "business_get", "page_id": "seal-page"},
+        response_json={
+            "code": 0,
+            "data": {
+                "list": [{
+                    "id": "record-42",
+                    "billCode": "GZSY-42",
+                    "processInstanceId": "OA-GZSY-42",
+                }],
+                "total": 1,
+            },
+        },
+    )
+    withdraw = FlowStep(
+        step_id="withdraw",
+        method="DELETE",
+        path="/admin-api/bpm/process-instance/cancel-by-start-user",
+        source_meta={"role": "business_write", "page_id": "seal-page"},
+        params=[
+            ParamField(
+                path="id", key="单据编号", label="单据编号",
+                value="OA-GZSY-42", default_value="OA-GZSY-42",
+                type="string", required=True, category="user_param",
+                source_kind="user_input",
+            ),
+            ParamField(
+                path="reason", key="撤回原因", label="撤回原因",
+                value="填错了", type="string", required=True,
+                category="user_param", source_kind="user_input",
+            ),
+        ],
+        response_json={"code": 0, "msg": "success"},
+    )
+    spec = FlowSpec(
+        steps=[query, withdraw],
+        capabilities=[
+            FlowCapability(
+                name="query_seal_apply", title="查询公章使用申请",
+                kind="query_status", step_ids=["query"],
+                nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="withdraw_seal_apply", title="撤回公章使用申请",
+                kind="withdraw", step_ids=["withdraw"],
+                nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+                output_mapping=[{
+                    "kind": "final_response", "name": "result",
+                    "step_id": "withdraw", "response_path": "response",
+                }],
+            ),
+        ],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    query_cap, withdraw_cap = prepared.capabilities
+    process_field = (
+        query_cap.output_schema["properties"]["records"]["items"]["properties"]
+        ["processInstanceId"]
+    )
+    target_field = withdraw_cap.input_schema["properties"]["单据编号"]
+
+    assert process_field["x-dano-identifier-role"] == "process_instance"
+    assert target_field["x-dano-identifier-role"] == "process_instance"
+    assert target_field["x-dano-derived-from-query"] is True
+    assert target_field["title"] == "流程实例ID"
+    assert "default" not in target_field
+    assert [
+        (
+            relation.from_capability,
+            relation.from_output,
+            relation.to_capability,
+            relation.to_input,
+        )
+        for relation in prepared.capability_relations
+    ] == [(
+        "query_seal_apply",
+        "records[].processInstanceId",
+        "withdraw_seal_apply",
+        "单据编号",
+    )]
+    contract = {
+        "kind": "withdraw",
+        "title": "撤回公章使用申请",
+        "field_labels": {"单据编号": "单据编号"},
+        "parameters": withdraw_cap.input_schema,
+    }
+    question = _question_request_template("withdraw_seal_apply", contract)["questions"][0]
+    field_table = "\n".join(_question_collection_block("withdraw_seal_apply", contract))
+    assert question["question"] == "流程实例ID"
+    assert (
+        question["default"]
+        == "<调用前替换为 query_seal_apply.records[].processInstanceId 中用户所选记录的原值>"
+    )
+    assert "OA-GZSY-42" not in field_table
+    assert "query_seal_apply.records[].processInstanceId" in field_table
+
+
+def test_identifier_relation_uses_record_id_when_that_is_the_exact_match():
+    query = FlowStep(
+        step_id="query", method="GET", path="/applications/page",
+        response_json={"data": {"list": [{
+            "id": "record-42",
+            "processInstanceId": "process-42",
+        }]}},
+    )
+    delete = FlowStep(
+        step_id="delete", method="DELETE", path="/applications/delete",
+        params=[ParamField(
+            path="id", key="id", value="record-42", default_value="record-42",
+            required=True,
+        )],
+        response_json={"code": 0},
+    )
+    spec = FlowSpec(
+        steps=[query, delete],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status",
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="delete_application", kind="delete",
+                nodes=[{"id": "delete_call", "type": "call", "step_id": "delete"}],
+            ),
+        ],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    target = prepared.capabilities[1].input_schema["properties"]["id"]
+
+    assert target["x-dano-identifier-role"] == "record"
+    assert target["title"] == "记录ID"
+    assert prepared.capability_relations[0].from_output == "records[].id"
+
+
+def test_identifier_relation_is_not_generated_when_recorded_value_is_ambiguous():
+    query = FlowStep(
+        step_id="query", method="GET", path="/applications/page",
+        response_json={"data": {"list": [{
+            "id": "same-identifier",
+            "processInstanceId": "same-identifier",
+        }]}},
+    )
+    withdraw = FlowStep(
+        step_id="withdraw", method="DELETE", path="/process/cancel",
+        params=[ParamField(
+            path="id", key="id", value="same-identifier",
+            default_value="same-identifier", required=True,
+        )],
+        response_json={"code": 0},
+    )
+    spec = FlowSpec(
+        steps=[query, withdraw],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status",
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="withdraw_application", kind="withdraw",
+                nodes=[{"id": "withdraw_call", "type": "call", "step_id": "withdraw"}],
+            ),
+        ],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    target = prepared.capabilities[1].input_schema["properties"]["id"]
+
+    assert prepared.capability_relations == []
+    assert "x-dano-derived-from-query" not in target
+    assert target["default"] == "same-identifier"
+
+
+def test_identifier_relation_never_binds_an_unrelated_text_field_by_value():
+    query = FlowStep(
+        step_id="query", method="GET", path="/applications/page",
+        response_json={"data": {"list": [{"id": "record-42"}]}},
+    )
+    update = FlowStep(
+        step_id="update", method="PUT", path="/applications/update",
+        params=[ParamField(
+            path="remark", key="备注", value="record-42",
+            default_value="record-42", required=True,
+        )],
+        response_json={"code": 0},
+    )
+    spec = FlowSpec(
+        steps=[query, update],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status",
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="update_application", kind="update",
+                nodes=[{"id": "update_call", "type": "call", "step_id": "update"}],
+            ),
+        ],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+
+    assert prepared.capability_relations == []
+    assert "x-dano-derived-from-query" not in (
+        prepared.capabilities[1].input_schema["properties"]["备注"]
+    )
 
 
 def test_export_rebuilds_lossy_persisted_capabilities_from_frozen_recording_evidence():
