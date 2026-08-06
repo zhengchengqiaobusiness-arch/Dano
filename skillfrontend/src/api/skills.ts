@@ -84,6 +84,33 @@ export async function createTenant(tenant: string): Promise<{ tenant: string; ap
   return data;
 }
 
+export async function createTenantWithPassword(
+  tenant: string,
+  username: string,
+  password: string,
+): Promise<{ tenant: string; api_key: string }> {
+  const { data } = await api.post("/tenants", { tenant, username, password });
+  return data;
+}
+
+export async function login(
+  username: string,
+  password: string,
+): Promise<{ tenant: string; api_key: string }> {
+  const { data } = await api.post("/auth/login", { username, password });
+  return data;
+}
+
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  await api.post("/auth/change-password", {
+    old_password: oldPassword,
+    new_password: newPassword,
+  });
+}
+
 export async function listSkills(): Promise<SkillManifest[]> {
   const { data } = await api.get("/v1/skills");
   return data;

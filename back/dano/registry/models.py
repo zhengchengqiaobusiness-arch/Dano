@@ -65,4 +65,6 @@ class TenantRecord(BaseModel):
     deploy: str = ""
     worker_location: str = ""
     log_policy: str = ""
+    username: str = ""
+    password_hash: str = ""
     api_key: str = Field(default_factory=new_api_key)

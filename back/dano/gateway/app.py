@@ -31,6 +31,7 @@ from dano.catalog.manifest import build_function_tools, build_manifests, skill_i
 from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
 from dano.execution.harness.harness import Harness
+from dano.infra.passwords import hash_password, verify_password
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload
 from dano.orchestrator.skills import SkillRegistry
@@ -1146,12 +1147,62 @@ async def refresh_runtime_tokens(
 class TenantCreate(BaseModel):
     tenant: str
     display_name: str = ""
+    username: str = ""    # 后台登录账号名,空=取租户名
+    password: str = ""    # 初始密码,空=暂不启用密码登录(仅 api_key)
 
 
 @app.post("/tenants")
 async def create_tenant(req: TenantCreate) -> dict:
-    rec = await _registry.create_tenant(TenantRecord(**req.model_dump()))
+    payload = req.model_dump()
+    username = (payload.get("username") or req.tenant).strip()
+    password = (payload.get("password") or "").strip()
+    if username and password:
+        payload["username"] = username
+        payload["password_hash"] = hash_password(password)
+    rec = await _registry.create_tenant(TenantRecord(**payload))
     return rec.model_dump()
+
+
+# ── 后台登录(每租户一个用户名/密码账号)──
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest) -> dict:
+    """用户名+密码登录;成功返回该租户 api_key(前端沿用 X-Tenant-Key 访问)。"""
+    username = req.username.strip()
+    rec = await _registry.get_tenant_by_username(username)
+    if rec is None or not rec.password_hash:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    if not verify_password(req.password, rec.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    return {"tenant": rec.tenant, "api_key": rec.api_key}
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@app.post("/auth/change-password")
+async def auth_change_password(
+    req: ChangePasswordRequest,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """已登录租户修改自己的密码;需携带 X-Tenant-Key 确认身份。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    rec = await _registry.get_tenant_by_key(x_tenant_key)
+    if rec is None or not rec.password_hash:
+        raise HTTPException(status_code=403, detail="该租户未启用密码登录")
+    if not verify_password(req.old_password, rec.password_hash):
+        raise HTTPException(status_code=401, detail="原密码错误")
+    new_password = req.new_password.strip()
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="新密码至少 8 位")
+    await _registry.update_tenant_password(tenant, hash_password(new_password))
+    return {"status": "ok"}
 
 
 # ── 接入(pi 自主生成)──
