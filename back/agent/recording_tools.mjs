@@ -381,6 +381,46 @@ export const recordingTools = [
     parameters: Type.Object(RecordingIdentity, { additionalProperties: false }),
   }),
   proxyTool({
+    name: "replay_request",
+    label: "重放录制请求",
+    description: "按 request_id 重放当前录制中的一个请求。鉴权由执行器代持，返回内容已脱敏并附带后端生成的 verification_id。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      request_id: Type.String({ minLength: 1 }),
+      overrides: Type.Optional(Type.Object({
+        url_path: Type.Optional(Type.String()),
+        query: Type.Optional(Type.Record(Type.String(), Type.Any())),
+        body: Type.Optional(Type.Record(Type.String(), Type.Any())),
+        headers: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      }, { additionalProperties: false })),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "perturb_replay",
+    label: "扰动重放请求链",
+    description: "顺序重放请求链并只扰动第一条请求，返回响应差异和执行器生成的 verification_id。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      chain_request_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+      perturb: Type.Object({}, { additionalProperties: true }),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "list_link_candidates",
+    label: "读取值依赖候选",
+    description: "扫描任意响应叶子到后续请求路径、查询、请求体或非敏感请求头的强值候选，不直接修改 FlowSpec。",
+    parameters: Type.Object(RecordingIdentity, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "get_verification",
+    label: "读取验证记录",
+    description: "按 verification_id 读取执行器生成且已脱敏的验证证据。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      verification_id: Type.String({ minLength: 1 }),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:

@@ -3555,6 +3555,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
             api_request.get("url_template"), fields, api_request.get("sample_inputs") or {},
         )
     body_template = api_request.get("body_template")
+    raw_body = api_request.get("raw_body")
     body = substitute(body_template, fields, api_request.get("sample_inputs") or {}) if isinstance(body_template, (dict, list)) else None
     query = _render_query_template(api_request.get("query_template"), fields, api_request.get("sample_inputs") or {})
     omitted = set(api_request.get("omit_unspecified_params") or [])
@@ -3631,8 +3632,10 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     import httpx
     # 按录制时的编码发:form-urlencoded 走 data(httpx 自动 urlencode 扁平表单),否则 JSON body —— 通用,不挑系统
     is_form = "form-urlencoded" in ct.lower()
-    if method in ("GET", "HEAD") or body is None:
+    if method in ("GET", "HEAD") or (body is None and raw_body is None):
         send_kw = {}
+    elif raw_body is not None:
+        send_kw = {"content": raw_body.encode("utf-8") if isinstance(raw_body, str) else raw_body}
     else:
         send_kw = ({"data": {k: ("" if v is None else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
                                   if isinstance(v, (dict, list)) else str(v)) for k, v in (body or {}).items()}}

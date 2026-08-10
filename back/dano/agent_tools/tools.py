@@ -1132,6 +1132,91 @@ async def get_recording_state(run_id: str, params: dict) -> dict:
     return await _recording_session(run_id, params).get_recording_state()
 
 
+def _captured_recording_requests(session) -> list[dict]:  # noqa: ANN001
+    spec = session.current_flow_spec()
+    return [request.model_dump(mode="python") for request in spec.request_facts.requests]
+
+
+def _find_captured_requests(session, request_ids: list[str]) -> list[dict]:  # noqa: ANN001
+    requests = _captured_recording_requests(session)
+    by_id = {str(request.get("request_id") or ""): request for request in requests}
+    missing = [request_id for request_id in request_ids if request_id not in by_id]
+    if missing:
+        raise ToolError(f"录制请求不存在: {','.join(missing)}")
+    return [by_id[request_id] for request_id in request_ids]
+
+
+async def _recording_auth_headers(session, requests: list[dict]) -> dict:  # noqa: ANN001
+    from dano.execution.page.request_capture import extract_auth_headers
+    from dano.infra.token_store import get_token_headers
+
+    headers: dict = {}
+    for request in requests:
+        headers.update(extract_auth_headers(request.get("headers")))
+    headers.update(await get_token_headers(session.tenant, session.subsystem))
+    return headers
+
+
+async def replay_recording_request(run_id: str, params: dict) -> dict:
+    from dano.execution.page.replay import replay_request
+
+    _strict_recording_params(params, required={"request_id"}, optional={"recording_id", "flow_version", "overrides"})
+    session = _recording_session(run_id, params)
+    requests = _find_captured_requests(session, [str(params["request_id"])])
+    result = await replay_request(
+        requests[0],
+        overrides=params.get("overrides"),
+        auth_headers=await _recording_auth_headers(session, requests),
+    )
+    await session.add_verifications([result["verification_id"]])
+    return result
+
+
+async def perturb_recording_replay(run_id: str, params: dict) -> dict:
+    from dano.execution.page.replay import perturb_replay
+
+    _strict_recording_params(
+        params,
+        required={"chain_request_ids", "perturb"},
+        optional={"recording_id", "flow_version"},
+    )
+    request_ids = params["chain_request_ids"]
+    if not isinstance(request_ids, list) or not request_ids or not all(isinstance(item, str) and item for item in request_ids):
+        raise ToolError("chain_request_ids 必须是非空请求 ID 数组")
+    if not isinstance(params["perturb"], dict):
+        raise ToolError("perturb 必须是对象")
+    session = _recording_session(run_id, params)
+    requests = _find_captured_requests(session, request_ids)
+    result = await perturb_replay(
+        requests,
+        perturb=params["perturb"],
+        auth_headers=await _recording_auth_headers(session, requests),
+    )
+    await session.add_verifications(result["verification_ids"])
+    return result
+
+
+async def list_link_candidates(run_id: str, params: dict) -> dict:
+    from dano.execution.page.value_tracing import discover_value_links
+
+    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version"})
+    session = _recording_session(run_id, params)
+    return {"candidates": discover_value_links(_captured_recording_requests(session))}
+
+
+async def get_recording_verification(run_id: str, params: dict) -> dict:
+    from dano.execution.page.verification_log import find_verification
+
+    _strict_recording_params(params, required={"verification_id"}, optional={"recording_id", "flow_version"})
+    session = _recording_session(run_id, params)
+    spec = session.current_flow_spec()
+    record = find_verification(
+        str(params["verification_id"]),
+        list((spec.meta or {}).get("verification_log") or []),
+    )
+    return {"verification": record}
+
+
 def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ANN001
     """Adapt common Pi JSON variants without weakening fact/version gates."""
     semantic_keys = {
@@ -2555,6 +2640,10 @@ TOOLS = {
     "draft_policy": draft_policy,
     "test_policy_cases": test_policy_cases,
     "get_recording_state": get_recording_state,
+    "replay_request": replay_recording_request,
+    "perturb_replay": perturb_recording_replay,
+    "list_link_candidates": list_link_candidates,
+    "get_verification": get_recording_verification,
     "submit_recording_plan": submit_recording_plan,
     "get_validation_report": get_validation_report,
     "submit_recording_repair": submit_recording_repair,

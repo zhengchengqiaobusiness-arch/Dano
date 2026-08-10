@@ -340,6 +340,26 @@ class RecordingPiSession:
         async with self._state_lock:
             return recording_agent_validation(self.current_flow_spec())
 
+    async def add_verifications(self, verification_ids: list[str]) -> list[dict[str, Any]]:
+        """Attach executor-owned evidence to the bound FlowSpec without changing its edit version."""
+        from dano.execution.page.verification_log import get_verification
+
+        async with self._state_lock:
+            current = self.current_flow_spec()
+            current.meta = dict(current.meta or {})
+            log = [dict(item) for item in current.meta.get("verification_log") or [] if isinstance(item, dict)]
+            known = {str(item.get("verification_id") or "") for item in log}
+            added: list[dict[str, Any]] = []
+            for verification_id in verification_ids:
+                record = get_verification(verification_id)
+                if record is not None and verification_id not in known:
+                    log.append(record)
+                    known.add(verification_id)
+                    added.append(record)
+            current.meta["verification_log"] = log
+            self.flow_spec = current
+            return added
+
     async def apply_submission(
         self,
         submission: dict[str, Any],
