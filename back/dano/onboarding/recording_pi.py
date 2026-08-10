@@ -161,6 +161,9 @@ class RecordingPiSession:
         self.flow_spec: Any = None
         self._analysis_images: list[dict[str, str]] = []
         self._active_analysis_image_count = 0
+        self._live_recorder: Any = None
+        self._live_goal_text = ""
+        self._operator_asker: Callable[..., Any] | None = None
         self.last_submission_kind = ""
         self.last_submission_warning = ""
         self.last_review: dict[str, Any] = {}
@@ -317,6 +320,64 @@ class RecordingPiSession:
                 raise ValueError("Pi analysis image is invalid")
             normalized.append({"type": "image", "data": data, "mimeType": mime_type})
         self._analysis_images = normalized
+
+    def bind_live_recording(
+        self,
+        recorder: Any,
+        *,
+        goal_text: str = "",
+        operator_asker: Callable[..., Any] | None = None,
+    ) -> None:
+        """Bind the live recorder and websocket-backed operator question channel."""
+        self._live_recorder = recorder
+        self._live_goal_text = str(goal_text or "")
+        self._operator_asker = operator_asker
+
+    async def get_recording_delta(self, since_seq: int = 0) -> dict[str, Any]:
+        from dano.execution.page.recording_live import recording_delta
+
+        if self._live_recorder is None:
+            raise RecordingPiError("实时录制事实源尚未绑定")
+        return recording_delta(
+            self._live_recorder,
+            since_seq=since_seq,
+            goal_text=self._live_goal_text,
+        )
+
+    async def ask_operator(
+        self,
+        *,
+        text: str,
+        options: list[str] | None = None,
+        context_ref: str = "",
+    ) -> dict[str, Any]:
+        if self._operator_asker is None:
+            return {"answered": False, "reason": "operator_channel_unavailable"}
+        result = self._operator_asker(text=text, options=options or [], context_ref=context_ref)
+        if hasattr(result, "__await__"):
+            result = await result
+        return dict(result or {"answered": False})
+
+    async def notify_live_batch(self, delta: dict) -> dict[str, Any]:
+        """Ask the same Pi session to consume one triggered live batch."""
+        reason = str((delta or {}).get("reason") or "request_batch")
+        since_seq = max(0, int((delta or {}).get("since_seq") or 0))
+        finalizing = reason == "finalize"
+        goal_instruction = (
+            "若 goal_text 非空，先用 set_goal 写入结构化 RecordedGoal，并在 goal.evidence 中引用 goal_text。"
+            if self._live_goal_text
+            else "若目标仍不明确，可调用 ask_operator 一次；60 秒无回答则按最佳假设继续。"
+        )
+        return await self.prompt(
+            "你正在伴随分析网页录制。先调用 get_recording_state，再调用 "
+            f"get_recording_delta(since_seq={since_seq}) 拉取新增事实。触发原因={reason}。"
+            f"{goal_instruction}"
+            "基于操作与请求的时间、事务和值证据，提交 set_request_role、set_param_source、"
+            "propose_dependency、add_pitfall 等必要增量；依赖只能先提案，禁止标 verified。"
+            "参数来源只能归为 user_input/session_header/page_context/chained。"
+            + ("这是 finalize 边界，必须把可落地结论写入当前 FlowSpec。" if finalizing else "一次只问一个真正无法自答的问题。"),
+            timeout_s=None,
+        )
 
     @property
     def analysis_image_count(self) -> int:

@@ -38,6 +38,11 @@ function Button(props: ButtonProps) {
 }
 
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
+interface AgentQuestion {
+  question_id: string; text: string; options?: string[]; context_ref?: string;
+  answered?: boolean; answer?: string;
+}
+interface AgentInsight { kind: "role" | "param_source" | "link" | "goal"; text: string; refs?: string[] }
 interface AnalysisScreenshotPayload {
   name: string;
   mime_type: "image/jpeg" | "image/png" | "image/webp";
@@ -1327,6 +1332,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   const [startUrl, setStartUrl] = useState("");
+  const [goalText, setGoalText] = useState("");
   const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
   const [recordingStopped, setRecordingStopped] = useState(false);
   const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
@@ -1335,6 +1341,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const hasFrameRef = useRef(false);
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
   const [reqs, setReqs] = useState<RecReq[]>([]);
+  const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
+  const [agentInsights, setAgentInsights] = useState<AgentInsight[]>([]);
+  const [agentAnswerDrafts, setAgentAnswerDrafts] = useState<Record<string, string>>({});
   const [action, setAction] = useState(() => newRecordingActionName());
   const actionRef = useRef(action);
   useEffect(() => { actionRef.current = action; }, [action]);
@@ -1862,11 +1871,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
+    if (!subsystem.trim()) { message.error("请填写业务系统标识"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
-    setErr(""); setResult(null); setReqs([]); clearFrame();
+    setErr(""); setResult(null); setReqs([]); setAgentQuestions([]); setAgentInsights([]); setAgentAnswerDrafts({}); clearFrame();
     resetEditorState();
     const nextAction = newRecordingActionName();
     actionRef.current = nextAction;
@@ -1929,6 +1939,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (wsRef.current !== ws) return;
       send({
         type: "start", tenant, subsystem, start_url: targetUrl,
+        goal_text: goalText.trim(),
         base_url: baseUrl.trim() || undefined,
         storage_state: storageState.trim() || undefined,
         intercept: false,
@@ -2003,6 +2014,29 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setReqs((r) => [...r, m.request].slice(-40));
         // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
         setReconnectedSessionNeedsCapture(false);
+      }
+      else if (m.type === "agent_question") {
+        const question: AgentQuestion = {
+          question_id: String(m.question_id || ""),
+          text: String(m.text || ""),
+          options: Array.isArray(m.options) ? m.options.map(String) : [],
+          context_ref: String(m.context_ref || ""),
+        };
+        if (question.question_id && question.text) {
+          setAgentQuestions((items) => [
+            ...items.filter((item) => item.question_id !== question.question_id),
+            question,
+          ].slice(-20));
+        }
+      }
+      else if (m.type === "agent_insight") {
+        if (m.text) {
+          setAgentInsights((items) => [...items, {
+            kind: m.kind || "goal",
+            text: String(m.text),
+            refs: Array.isArray(m.refs) ? m.refs.map(String) : [],
+          }].slice(-60));
+        }
       }
       else if (m.type === "flow_spec") {
         const restoredAfterReconnect = !!reconnectRestoreOperationRef.current
@@ -4610,6 +4644,60 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
 
+  function answerAgentQuestion(questionId: string, answer: string) {
+    const normalized = answer.trim();
+    if (!normalized) return;
+    sendRaw({ type: "agent_answer", question_id: questionId, answer: normalized });
+    setAgentQuestions((items) => items.map((item) =>
+      item.question_id === questionId ? { ...item, answered: true, answer: normalized } : item));
+    setAgentAnswerDrafts((drafts) => ({ ...drafts, [questionId]: "" }));
+  }
+
+  function renderRecordingAssistant() {
+    const insightColor: Record<string, string> = {
+      goal: "blue", role: "purple", param_source: "cyan", link: "gold",
+    };
+    return (
+      <Card size="small" title={<Space><RobotOutlined />录制助手</Space>} style={{ height: "100%" }}>
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {agentQuestions.filter((item) => !item.answered).map((question) => (
+            <Card key={question.question_id} size="small" style={{ background: "#fafafa" }}>
+              <Typography.Paragraph style={{ marginBottom: 8 }}>{question.text}</Typography.Paragraph>
+              {!!question.options?.length && (
+                <Space wrap style={{ marginBottom: 8 }}>
+                  {question.options.map((option) => (
+                    <Button key={option} size="small" onClick={() => answerAgentQuestion(question.question_id, option)}>{option}</Button>
+                  ))}
+                </Space>
+              )}
+              {!question.options?.length && (
+                <Space.Compact style={{ width: "100%" }}>
+                  <Input value={agentAnswerDrafts[question.question_id] || ""}
+                    onChange={(event) => setAgentAnswerDrafts((drafts) => ({ ...drafts, [question.question_id]: event.target.value }))}
+                    onPressEnter={() => answerAgentQuestion(question.question_id, agentAnswerDrafts[question.question_id] || "")}
+                    placeholder="输入回答" />
+                  <Button type="primary" onClick={() => answerAgentQuestion(question.question_id, agentAnswerDrafts[question.question_id] || "")}>回答</Button>
+                </Space.Compact>
+              )}
+            </Card>
+          ))}
+          {agentInsights.length ? (
+            <List size="small" dataSource={agentInsights.slice(-20)} renderItem={(item) => (
+              <List.Item style={{ alignItems: "flex-start" }}>
+                <Space align="start">
+                  <Tag color={insightColor[item.kind] || "default"}>{item.kind}</Tag>
+                  <Typography.Text style={{ fontSize: 12 }}>{item.text}</Typography.Text>
+                </Space>
+              </List.Item>
+            )} />
+          ) : !agentQuestions.some((item) => !item.answered) && (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待实时分析" />
+          )}
+        </Space>
+      </Card>
+    );
+  }
+
   return (
     <ConfigProvider getPopupContainer={popupContainer}>
     <Card size="small" title="网页录制">
@@ -4618,6 +4706,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Form.Item label="业务页地址" required style={{ marginBottom: 12 }}>
             <Input value={startUrl} onChange={(e) => setStartUrl(e.target.value)}
               placeholder="https://oa.example.com/reimburse/new" onPressEnter={start} />
+          </Form.Item>
+          <Form.Item label="本次录制目标" required tooltip="建议填写；允许留空，录制助手会在必要时询问" style={{ marginBottom: 12 }}>
+            <Input.TextArea rows={3} value={goalText} onChange={(event) => setGoalText(event.target.value)}
+              placeholder="例如：创建一条申请，并确认列表中能查询到刚创建的记录" />
           </Form.Item>
           <Space align="center" wrap>
             <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
@@ -4661,6 +4753,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               </Button>
             </Space>
           </div>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 340px)", gap: 12, alignItems: "stretch" }}>
+          <div>
           <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "auto", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
             <canvas ref={frameCanvasRef} draggable={false} role="img" aria-label="录制画面"
               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
@@ -4683,6 +4777,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {frameMeta.deviceScaleFactor ? ` · DPR ${frameMeta.deviceScaleFactor}` : ""}
             </Typography.Text>
           )}
+          </div>
+          {renderRecordingAssistant()}
+          </div>
 
           {renderFlowWorkbench()}
 

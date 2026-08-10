@@ -1494,11 +1494,18 @@ async def record_ws(ws: WebSocket) -> None:
     costly_operation_results: dict[str, dict] = {}
     _checkpoint_resume = None
     receiver_task: asyncio.Task | None = None
+    live_analysis_tasks: set[asyncio.Task] = set()
+    agent_question_futures: dict[str, asyncio.Future] = {}
+    schedule_live_analysis = None
+    emitted_agent_insights = 0
+    live_agent_disabled = False
+    last_live_scheduled_count = 0
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
             await sender.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
+        goal_text = str(init.get("goal_text") or "").strip()
         incoming_messages: asyncio.Queue = asyncio.Queue()
         async def receive_pump() -> None:
             """Drain ASGI messages while Pi is busy so its small queue cannot overflow."""
@@ -1544,6 +1551,11 @@ async def record_ws(ws: WebSocket) -> None:
         from dano.execution.page.recorder import RecordSession
         def on_request(r: dict) -> None:                  # 诊断:抓到的写请求实时推给前端
             sender.send_background({"type": "request", "request": r})
+            if schedule_live_analysis is not None:
+                from dano.execution.page.request_capture import classify_request_role
+
+                if classify_request_role(r).get("semanticRole") == "workflow_submit":
+                    schedule_live_analysis("submit_candidate")
 
         sess = RecordSession(on_request=on_request,
                              intercept_submit=False,
@@ -1618,6 +1630,7 @@ async def record_ws(ws: WebSocket) -> None:
                 connection_generation=resume_generation,
             ):
                 pending_flow_spec = flow_spec.model_copy(deep=True)
+                _emit_agent_insights(pending_flow_spec)
 
         async def _ensure_recording_pi(*, fresh: bool = False):
             """Keep the browser connected while isolating independent Pi operations."""
@@ -1636,6 +1649,11 @@ async def record_ws(ws: WebSocket) -> None:
                     resume_history=not fresh,
                     on_submission_accepted=_accepted_pi_submission,
                     )
+                )
+                recording_pi.bind_live_recording(
+                    sess,
+                    goal_text=goal_text,
+                    operator_asker=_ask_operator,
                 )
             return recording_pi
 
@@ -1667,6 +1685,113 @@ async def record_ws(ws: WebSocket) -> None:
                 # losing its transport must not cancel that work.
                 return
 
+        def _emit_agent_insights(flow_spec) -> None:  # noqa: ANN001
+            nonlocal emitted_agent_insights
+            insights = [
+                item for item in (flow_spec.meta or {}).get("agent_insights") or []
+                if isinstance(item, dict)
+            ]
+            for insight in insights[emitted_agent_insights:]:
+                sender.send_background({"type": "agent_insight", **insight})
+            emitted_agent_insights = max(emitted_agent_insights, len(insights))
+
+        def _resolve_agent_answer(message: dict) -> bool:
+            question_id = str(message.get("question_id") or "")
+            future = agent_question_futures.get(question_id)
+            if future is None or future.done():
+                return False
+            answer = str(message.get("answer") or "").strip()
+            future.set_result({"answered": bool(answer), "answer": answer, "question_id": question_id})
+            return True
+
+        async def _ask_operator(*, text: str, options: list[str], context_ref: str = "") -> dict:
+            question_id = f"question_{uuid.uuid4().hex}"
+            future = asyncio.get_running_loop().create_future()
+            agent_question_futures[question_id] = future
+            await _send_live_message({
+                "type": "agent_question",
+                "question_id": question_id,
+                "text": str(text),
+                "options": [str(value) for value in options],
+                "context_ref": str(context_ref or ""),
+            })
+            try:
+                result = await asyncio.wait_for(future, timeout=60)
+                if pending_flow_spec is not None:
+                    pending_flow_spec.meta = dict(pending_flow_spec.meta or {})
+                    answers = list(pending_flow_spec.meta.get("agent_answers") or [])
+                    answers.append({"question_id": question_id, "answer": result.get("answer"), "context_ref": context_ref})
+                    pending_flow_spec.meta["agent_answers"] = answers[-100:]
+                return result
+            except asyncio.TimeoutError:
+                return {"answered": False, "question_id": question_id, "reason": "timeout"}
+            finally:
+                agent_question_futures.pop(question_id, None)
+
+        async def _run_live_analysis(reason: str, since_seq: int, *, bind_spec=None) -> None:  # noqa: ANN001
+            nonlocal pending_flow_spec, live_agent_disabled
+            if live_agent_disabled:
+                return
+            try:
+                pi_session = await _ensure_recording_pi()
+                if bind_spec is not None:
+                    pi_session.bind_flow_spec(bind_spec)
+                elif pi_session.flow_spec is None and pending_flow_spec is not None:
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                await pi_session.notify_live_batch({"reason": reason, "since_seq": since_seq})
+                pending_flow_spec = pi_session.current_flow_spec()
+                _checkpoint_resume()
+                _emit_agent_insights(pending_flow_spec)
+            except Exception as exc:  # noqa: BLE001 - recording remains usable without Pi
+                detail = str(exc)
+                live_agent_disabled = "no Pi model or credentials" in detail or "DANO_PI_API_KEY" in detail
+                log.warning("recording.live_agent_failed", reason=reason, error=str(exc))
+                await _send_live_message({
+                    "type": "agent_insight",
+                    "kind": "goal",
+                    "text": f"录制助手暂不可用，录制继续：{str(exc)[:160]}",
+                    "refs": [],
+                })
+
+        def _schedule_live_analysis(reason: str) -> None:
+            nonlocal last_live_scheduled_count
+            captured_all_requests = getattr(sess, "captured_all_requests", None)
+            if live_agent_disabled or not callable(captured_all_requests):
+                return
+            current_count = len(captured_all_requests())
+            since_seq = last_live_scheduled_count
+            last_live_scheduled_count = current_count
+            task = asyncio.create_task(
+                _run_live_analysis(reason, since_seq),
+                name=f"recording-live-agent-{reason}",
+            )
+            live_analysis_tasks.add(task)
+            task.add_done_callback(live_analysis_tasks.discard)
+
+        schedule_live_analysis = _schedule_live_analysis
+
+        def _maybe_schedule_live_analysis() -> None:
+            captured_all_requests = getattr(sess, "captured_all_requests", None)
+            if not callable(captured_all_requests):
+                return
+            current_count = len(captured_all_requests())
+            if current_count - last_live_scheduled_count >= 15:
+                _schedule_live_analysis("request_batch")
+                return
+            recorded_field_evidence = getattr(sess, "recorded_field_evidence", None)
+            evidence = recorded_field_evidence() if callable(recorded_field_evidence) else []
+            ambiguous = any(
+                bool(item.get("ambiguous") or item.get("need_human_confirm"))
+                or (
+                    isinstance(item.get("confidence"), (int, float))
+                    and float(item["confidence"]) < 0.6
+                )
+                for item in evidence
+                if isinstance(item, dict)
+            )
+            if ambiguous:
+                _schedule_live_analysis("ambiguous_field")
+
         async def _dispatch_recording_input(event: dict) -> None:
             try:
                 input_result = await sess.dispatch_input(event)
@@ -1689,6 +1814,8 @@ async def record_ws(ws: WebSocket) -> None:
                     "recoverable": bool(input_result.get("recoverable", True)),
                     "error_type": input_result.get("error_type") or "InputDispatchError",
                 })
+                return
+            _maybe_schedule_live_analysis()
 
         async def _pause_recording_capture() -> None:
             await sess.flush_recording()
@@ -1708,6 +1835,9 @@ async def record_ws(ws: WebSocket) -> None:
             if message_type == "stop":
                 await _pause_recording_capture()
                 return True
+            if message_type == "agent_answer":
+                _resolve_agent_answer(message)
+                return True
             return False
 
         async def _responsive_prompt(prompt) -> object:  # noqa: ANN001
@@ -1717,6 +1847,21 @@ async def record_ws(ws: WebSocket) -> None:
             return result
 
         deferred_messages: list[object] = []
+
+        if pending_flow_spec is None:
+            from dano.execution.page.flow_spec import FlowSpec, ensure_flow_version
+
+            pending_flow_spec = ensure_flow_version(
+                FlowSpec(
+                    tenant=str(init.get("tenant") or ""),
+                    subsystem=str(init.get("subsystem") or ""),
+                    meta={"recording_goal_text": goal_text},
+                ),
+                "recording_started",
+                reason="实时录制会话开始",
+            )
+            _checkpoint_resume()
+        _schedule_live_analysis("recording_started")
 
         while True:
             incoming = (
@@ -1729,9 +1874,33 @@ async def record_ws(ws: WebSocket) -> None:
             t = msg.get("type")
             if t == "input":
                 await _dispatch_recording_input(msg.get("event") or {})
+            elif t == "agent_answer":
+                _resolve_agent_answer(msg)
             elif t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
+                from dano.execution.page.flow_spec import FlowSpec, ensure_flow_version
+
+                preserved_goal = dict((pending_flow_spec.goal if pending_flow_spec is not None else {}) or {})
+                preserved_goal_ops = [
+                    dict(operation)
+                    for operation in ((pending_flow_spec.meta or {}).get("recording_agent_ops") if pending_flow_spec is not None else []) or []
+                    if isinstance(operation, dict) and operation.get("op") == "set_goal"
+                ]
+                pending_flow_spec = ensure_flow_version(
+                    FlowSpec(
+                        tenant=str(init.get("tenant") or ""),
+                        subsystem=str(init.get("subsystem") or ""),
+                        goal=preserved_goal,
+                        meta={"recording_goal_text": goal_text, "recording_agent_ops": preserved_goal_ops},
+                    ),
+                    "recording_reset",
+                    reason="登录后重新开始捕获",
+                )
+                if recording_pi is not None:
+                    recording_pi.bind_flow_spec(pending_flow_spec)
+                last_live_scheduled_count = 0
+                emitted_agent_insights = 0
                 resume_state["recording_paused"] = False
                 # “从这里开始录” normally follows a successful interactive
                 # login.  Capture that authenticated state immediately rather
@@ -1744,6 +1913,11 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "finalize":
                 if await _replay_costly(msg):
                     continue
+                if live_analysis_tasks:
+                    async def _finish_live_analysis_tasks() -> None:
+                        await asyncio.gather(*list(live_analysis_tasks), return_exceptions=True)
+
+                    await _responsive_prompt(_finish_live_analysis_tasks())
                 await sess.flush_recording()
                 observed_required_labels = await sess.observed_required_labels()
                 observed_page_context = await sess.observed_page_context()
@@ -1805,6 +1979,21 @@ async def record_ws(ws: WebSocket) -> None:
                         tenant=init.get("tenant", ""),
                         subsystem=init.get("subsystem", ""),
                     )
+                    if recording_pi is not None and recording_pi.flow_spec is not None:
+                        from dano.execution.page.recording_live import merge_live_agent_state
+
+                        pending_flow_spec = merge_live_agent_state(
+                            recording_pi.current_flow_spec(),
+                            pending_flow_spec,
+                        )
+                    finalize_since_seq = last_live_scheduled_count
+                    last_live_scheduled_count = len(all_caps)
+                    if not live_agent_disabled:
+                        await _responsive_prompt(_run_live_analysis(
+                            "finalize",
+                            finalize_since_seq,
+                            bind_spec=pending_flow_spec,
+                        ))
                     _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
@@ -2630,6 +2819,13 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        for future in agent_question_futures.values():
+            if not future.done():
+                future.set_result({"answered": False, "reason": "recording_closed"})
+        if live_analysis_tasks:
+            for task in live_analysis_tasks:
+                task.cancel()
+            await asyncio.gather(*tuple(live_analysis_tasks), return_exceptions=True)
         if receiver_task is not None:
             receiver_task.cancel()
             await asyncio.gather(receiver_task, return_exceptions=True)

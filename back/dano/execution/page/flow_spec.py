@@ -199,6 +199,7 @@ class FlowLink(BaseModel):
     confidence: float = 0.0
     reason: str = ""
     evidence: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
     locked: bool = False
 
 
@@ -5428,6 +5429,8 @@ def _remove_param_incoming_links(spec: FlowSpec, step: FlowStep, param: ParamFie
 def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
     by_id = {s.step_id: s for s in steps}
     for lk in links:
+        if (lk.meta or {}).get("actor") == "agent" and not (lk.meta or {}).get("verified"):
+            continue
         target = by_id.get(lk.target_step_id)
         source = by_id.get(lk.source_step_id)
         if target is None or source is None:
@@ -5518,6 +5521,8 @@ def _apply_user_link_source(steps: list[FlowStep], link: FlowLink) -> None:
 def _link_is_auto_generated(lk: FlowLink) -> bool:
     reason = str(lk.reason or "")
     evidence = lk.evidence if isinstance(lk.evidence, dict) else {}
+    if evidence.get("actor") == "agent" or (lk.meta or {}).get("actor") == "agent":
+        return False
     return (
         not getattr(lk, "locked", False)
         and (
@@ -18015,6 +18020,11 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
     for edit in edits:
         op = edit.get("op")
 
+        from dano.execution.page.recording_live import LIVE_RECORDING_AGENT_OPS, apply_recording_agent_edit
+        if op in LIVE_RECORDING_AGENT_OPS:
+            apply_recording_agent_edit(new_spec, edit)
+            continue
+
         if op == "resolve_reviews":
             resolved = bool(edit.get("resolved", True))
             severities = set(edit.get("severities") or [])
@@ -19384,6 +19394,8 @@ def _autofix_ops_to_edits(
     *,
     allow_scope_changes: bool = True,
 ) -> list[dict[str, Any]]:
+    from dano.execution.page.recording_live import LIVE_RECORDING_AGENT_OPS
+
     edits: list[dict[str, Any]] = []
     cap_by_name = {c.name: idx for idx, c in enumerate(spec.capabilities or []) if c.name}
     step_by_id = {step.step_id: step for step in spec.steps}
@@ -19566,6 +19578,8 @@ def _autofix_ops_to_edits(
                     "target_step": target_step,
                     "target_path": target_path,
                 })
+        elif kind in LIVE_RECORDING_AGENT_OPS:
+            edits.append({**op, "actor": "agent"})
     return edits
 
 
@@ -19578,6 +19592,7 @@ _RECORDING_AGENT_ALLOWED_OPS = {
     "upsert_computed_field", "upsert_output_field", "bind_dependency", "set_map",
     "set_condition", "set_output_mapping", "set_capability_relation",
     "add_request_to_capability", "remove_request_from_capability", "reject_dependency",
+    "set_goal", "set_request_role", "set_param_source", "propose_dependency", "add_pitfall",
 }
 
 
@@ -19916,6 +19931,15 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     """Return the deterministic validation/repair evidence for Pi tools."""
     current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     report = validate_flow_spec(current)
+    from dano.execution.page.recording_live import recording_agent_evidence_issues
+    evidence_issues = recording_agent_evidence_issues(current)
+    report["agent_evidence"] = {"ok": not evidence_issues, "issues": evidence_issues}
+    if evidence_issues:
+        report["errors"] = [
+            *(report.get("errors") or []),
+            *(f"agent evidence missing: {item['kind']} {item['target']}" for item in evidence_issues),
+        ]
+        report["passed"] = False
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "report": report,

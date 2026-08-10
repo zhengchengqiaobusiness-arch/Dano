@@ -381,6 +381,26 @@ export const recordingTools = [
     parameters: Type.Object(RecordingIdentity, { additionalProperties: false }),
   }),
   proxyTool({
+    name: "get_recording_delta",
+    label: "读取实时录制增量",
+    description: "按 since_seq 拉取新增且已脱敏的请求、页面事件和启发式候选。实时分析时必须以该事实增量为准。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      since_seq: Type.Optional(Type.Integer({ minimum: 0 })),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "ask_operator",
+    label: "询问录制操作人",
+    description: "仅在录制现场确有歧义且无法由事实自答时询问一个问题；60 秒无回答会返回 answered=false，不得阻塞后续判断。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      text: Type.String({ minLength: 1 }),
+      options: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      context_ref: Type.Optional(Type.String()),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
     name: "replay_request",
     label: "重放录制请求",
     description: "按 request_id 重放当前录制中的一个请求。鉴权由执行器代持，返回内容已脱敏并附带后端生成的 verification_id。",

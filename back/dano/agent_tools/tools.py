@@ -1132,6 +1132,30 @@ async def get_recording_state(run_id: str, params: dict) -> dict:
     return await _recording_session(run_id, params).get_recording_state()
 
 
+async def get_recording_delta(run_id: str, params: dict) -> dict:
+    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version", "since_seq"})
+    since_seq = params.get("since_seq", 0)
+    if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
+        raise ToolError("since_seq 必须是非负整数")
+    return await _recording_session(run_id, params).get_recording_delta(since_seq)
+
+
+async def ask_recording_operator(run_id: str, params: dict) -> dict:
+    _strict_recording_params(
+        params,
+        required={"text"},
+        optional={"recording_id", "flow_version", "options", "context_ref"},
+    )
+    options = params.get("options") or []
+    if not isinstance(options, list) or any(not isinstance(value, str) or not value.strip() for value in options):
+        raise ToolError("options 必须是非空字符串数组")
+    return await _recording_session(run_id, params).ask_operator(
+        text=str(params["text"]),
+        options=options,
+        context_ref=str(params.get("context_ref") or ""),
+    )
+
+
 def _captured_recording_requests(session) -> list[dict]:  # noqa: ANN001
     spec = session.current_flow_spec()
     return [request.model_dump(mode="python") for request in spec.request_facts.requests]
@@ -2640,6 +2664,8 @@ TOOLS = {
     "draft_policy": draft_policy,
     "test_policy_cases": test_policy_cases,
     "get_recording_state": get_recording_state,
+    "get_recording_delta": get_recording_delta,
+    "ask_operator": ask_recording_operator,
     "replay_request": replay_recording_request,
     "perturb_replay": perturb_recording_replay,
     "list_link_candidates": list_link_candidates,
