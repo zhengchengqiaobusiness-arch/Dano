@@ -1848,6 +1848,86 @@ async def record_ws(ws: WebSocket) -> None:
 
         deferred_messages: list[object] = []
 
+        async def _verify_finalized_recording(*, force: bool = False) -> dict:
+            nonlocal pending_flow_spec
+            from dano.onboarding.recording_verify import (
+                finalize_verification_state,
+                run_recording_verification,
+                verification_report,
+            )
+
+            if pending_flow_spec is None:
+                raise RuntimeError("没有可验证的 FlowSpec")
+            current = pending_flow_spec.model_copy(deep=True)
+            if force:
+                current.meta = dict(current.meta or {})
+                current.meta.pop("verification_run", None)
+                current.meta["unverified"] = []
+                for link in current.links:
+                    link.meta = {key: value for key, value in (link.meta or {}).items() if key != "unverified_reason"}
+                for step in current.steps:
+                    step.source_meta = {
+                        key: value for key, value in (step.source_meta or {}).items()
+                        if key != "unverified_reason"
+                    }
+                pending_flow_spec = current
+            existing = verification_report(current)
+            run_state = dict((current.meta or {}).get("verification_run") or {})
+            if run_state.get("complete") and not force:
+                return existing
+
+            async def emit_progress(payload: dict) -> None:
+                await _send_live_message({"type": "verify_progress", **payload})
+
+            if not existing["todos"]:
+                pending_flow_spec, report = finalize_verification_state(
+                    current,
+                    rounds=0,
+                    max_rounds=5,
+                )
+            elif live_agent_disabled:
+                pending_flow_spec, report = finalize_verification_state(
+                    current,
+                    rounds=0,
+                    max_rounds=5,
+                    errors=["录制 Agent 不可用"],
+                )
+            else:
+                try:
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(current)
+                    report = await run_recording_verification(
+                        pi_session,
+                        progress=emit_progress,
+                        prompt_runner=_responsive_prompt,
+                        max_rounds=5,
+                    )
+                    pending_flow_spec = pi_session.current_flow_spec()
+                except Exception as exc:  # noqa: BLE001 - publish continues with explicit unverified items
+                    pending_flow_spec, report = finalize_verification_state(
+                        current,
+                        rounds=0,
+                        max_rounds=5,
+                        errors=[str(exc)[:500]],
+                    )
+            await emit_progress({
+                "stage": "completed",
+                "detail": (
+                    "验证全部通过，准备自动发布"
+                    if report["all_verified"]
+                    else "验证结束，未决项已标注 unverified，准备发布"
+                ),
+                "round": int(((pending_flow_spec.meta or {}).get("verification_run") or {}).get("rounds") or 0),
+                "pending": 0,
+                "confirmed_links": report["confirmed_links"],
+                "verify_coverage": report["verify_coverage"],
+                "write_count": report["write_count"],
+            })
+            if recording_pi is not None:
+                recording_pi.bind_flow_spec(pending_flow_spec)
+            _checkpoint_resume()
+            return report
+
         if pending_flow_spec is None:
             from dano.execution.page.flow_spec import FlowSpec, ensure_flow_version
 
@@ -1994,16 +2074,30 @@ async def record_ws(ws: WebSocket) -> None:
                             finalize_since_seq,
                             bind_spec=pending_flow_spec,
                         ))
+                    verification_result = await _verify_finalized_recording()
                     _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
                         "action": session_action,
                         "operation": "finalize",
                         "operation_id": msg.get("operation_id"),
+                        "verification": verification_result,
                         **_recording_flow_projection(pending_flow_spec),
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
+                    from dano.execution.page.flow_spec import flow_spec_fingerprint
+                    from dano.onboarding.recording_verify import recorded_goal_slug
+
+                    deferred_messages.insert(0, {
+                        "type": "publish_request",
+                        "operation_id": f"auto-publish-{flow_spec_fingerprint(pending_flow_spec)[:16]}",
+                        "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
+                        "action": recorded_goal_slug(pending_flow_spec),
+                        "title": str((pending_flow_spec.goal or {}).get("intent") or pending_flow_spec.title or ""),
+                        "goal": pending_flow_spec.goal,
+                        "_auto_publish": True,
+                    })
                 except Exception as _fs_err:  # noqa: BLE001
                     log.warning("flow_spec.emit_failed", error=str(_fs_err))
                     await sender.send_json({"type": "result", "action": session_action,
@@ -2564,18 +2658,25 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
+                auto_publish = bool(msg.get("_auto_publish"))
+                if auto_publish and pending_flow_spec is not None:
+                    from dano.onboarding.recording_verify import recorded_goal_slug
+
+                    publish_action = recorded_goal_slug(pending_flow_spec)
+                else:
+                    publish_action = session_action
                 log.info(
                     "recording.operation_started",
-                    action=session_action,
+                    action=publish_action,
                     operation="publish",
                     operation_id=msg.get("operation_id"),
                 )
                 requested_action = str(msg.get("action") or "")
-                if requested_action and requested_action != session_action:
+                if requested_action and requested_action != publish_action:
                     log.info(
                         "recording.client_action_overridden",
                         requested_action=requested_action,
-                        action=session_action,
+                        action=publish_action,
                     )
                 # FlowSpec 工作台是录制发布唯一入口：步骤、字段、依赖、说明都以同一份可编辑 spec 为准。
                 if pending_flow_spec is None:
@@ -2604,6 +2705,32 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "工作台版本已变化，请使用最新版本重新发布",
                                 "expected_fingerprint": expected_fingerprint,
                                 "current_fingerprint": current_fingerprint,
+                            },
+                            **_recording_flow_projection(pending_flow_spec),
+                        })
+                        continue
+                    from dano.onboarding.recording_verify import require_verification_complete
+
+                    verification_run = dict((pending_flow_spec.meta or {}).get("verification_run") or {})
+                    if not bool(msg.get("skip_verify")) and (
+                        bool(msg.get("reverify")) or not verification_run.get("complete")
+                    ):
+                        await _verify_finalized_recording(force=bool(msg.get("reverify")))
+                        current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
+                    try:
+                        verification_gate = require_verification_complete(
+                            pending_flow_spec,
+                            skip_verify=bool(msg.get("skip_verify")),
+                        )
+                    except ValueError as exc:
+                        await sender.send_json({
+                            "type": "result",
+                            "operation": "publish",
+                            "operation_id": msg.get("operation_id"),
+                            "report": {
+                                "ok": False,
+                                "stage": "recording_verify",
+                                "reason": str(exc),
                             },
                             **_recording_flow_projection(pending_flow_spec),
                         })
@@ -2696,7 +2823,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     log.info(
                         "recording.publish_review_completed",
-                        action=session_action,
+                        action=publish_action,
                         operation_id=msg.get("operation_id"),
                     )
                 except Exception as e:  # noqa: BLE001
@@ -2723,7 +2850,7 @@ async def record_ws(ws: WebSocket) -> None:
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 try:
                     rep = await run_request_onboarding(
-                        tenant=init["tenant"], subsystem=sub, action=session_action,
+                        tenant=init["tenant"], subsystem=sub, action=publish_action,
                         title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
                         required=required,
                         goal=msg.get("goal") or pending_flow_spec.goal,
@@ -2739,7 +2866,7 @@ async def record_ws(ws: WebSocket) -> None:
                     # captured page and be able to retry from the same draft.
                     log.exception(
                         "recording.publish_failed",
-                        action=session_action,
+                        action=publish_action,
                         error=str(e),
                     )
                     rep = {
@@ -2749,32 +2876,33 @@ async def record_ws(ws: WebSocket) -> None:
                         "retryable": True,
                     }
                 if rep.get("ok"):
-                    skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
+                    skill_id = rep.get("skill_id") or f"{sub}.{publish_action}"
                     version = int(rep.get("asset_version") or 0)
                     if not version:
                         try:
                             version = await _latest_skill_version(
-                                init["tenant"], Subsystem(sub), session_action, {"integration": "page"},
+                                init["tenant"], Subsystem(sub), publish_action, {"integration": "page"},
                             )
                         except Exception as error:  # noqa: BLE001
                             log.warning(
                                 "recording.asset_version_lookup_failed",
-                                error=str(error), subsystem=sub, action=session_action,
+                                error=str(error), subsystem=sub, action=publish_action,
                             )
                             version = 1
                     lifecycle_result = await _lifecycle_reconciler.register_or_defer(
                         skill_id=skill_id,
                         subsystem=Subsystem(sub),
-                        action=session_action,
+                        action=publish_action,
                         asset_version=version,
                     )
                     rep = {**rep, **lifecycle_result}
                     await _auto_export(init["tenant"])
-                response = {"type": "result", "operation": "publish", "action": session_action,
+                response = {"type": "result", "operation": "publish", "action": publish_action,
                             "operation_id": msg.get("operation_id"),
                             "report": {**rep, "check_report": check_report,
                                        "release": release_candidate,
-                                       "recording_mode": recording_mode},
+                                       "recording_mode": recording_mode,
+                                       "verification": verification_gate},
                             **_recording_flow_projection(pending_flow_spec),
                             "parsed_steps": len(last_params), "via": "flow_spec",
                             "recording_mode": recording_mode,
@@ -2784,7 +2912,7 @@ async def record_ws(ws: WebSocket) -> None:
                 await sender.send_json(response)
                 log.info(
                     "recording.operation_completed",
-                    action=session_action,
+                    action=publish_action,
                     operation="publish",
                     operation_id=msg.get("operation_id"),
                     ok=bool(rep.get("ok")),

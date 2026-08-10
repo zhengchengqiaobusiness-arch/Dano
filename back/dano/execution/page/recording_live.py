@@ -16,6 +16,10 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
     "set_param_source",
     "propose_dependency",
     "add_pitfall",
+    "confirm_dependency",
+    "bind_verify_read",
+    "attach_enum_options",
+    "mark_unverified",
 })
 
 _PARAM_SOURCE_KINDS = frozenset({"user_input", "session_header", "page_context", "chained"})
@@ -128,6 +132,26 @@ def _record_agent_op(spec, edit: dict) -> None:  # noqa: ANN001
     _append_meta_list(spec, "recording_agent_ops", edit)
 
 
+def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict:  # noqa: ANN001
+    from dano.execution.page.verification_log import find_verification
+
+    record = find_verification(
+        verification_id,
+        list((spec.meta or {}).get("verification_log") or []),
+    )
+    if record is None or str(record.get("kind") or "") not in kinds:
+        raise ValueError("verification_id is missing or has the wrong kind")
+    evidence = record.get("evidence") or {}
+    if evidence.get("passed") is False:
+        raise ValueError("verification evidence did not pass")
+    return record
+
+
+def _step_request_id(spec, step_id: str) -> str:  # noqa: ANN001
+    step = next((item for item in spec.steps if item.step_id == step_id), None)
+    return str(((step.source_meta if step else {}) or {}).get("request_id") or "")
+
+
 def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None:  # noqa: ANN001
     """Apply one live-only op; unresolved early endpoints remain replayable at finalize."""
     from dano.execution.page.flow_spec import FlowLink, RecordedGoal, RequestAnalysis
@@ -135,7 +159,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
     kind = str(edit.get("op") or "")
     if kind not in LIVE_RECORDING_AGENT_OPS:
         raise ValueError(f"unsupported live recording op: {kind}")
-    if str(edit.get("actor") or "agent") not in {"agent", "planner"}:
+    if str(edit.get("actor") or "agent") not in {"agent", "planner", "repair"}:
         raise ValueError("live recording ops must be agent-authored")
 
     if kind == "set_goal":
@@ -252,6 +276,135 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         if not text:
             raise ValueError("add_pitfall requires text")
         _append_meta_list(spec, "pitfalls", {"text": text, "evidence_ref": str(edit.get("evidence_ref") or ""), "actor": "agent"})
+
+    elif kind == "confirm_dependency":
+        link_id = str(edit.get("link_id") or "")
+        verification_id = str(edit.get("verification_id") or "")
+        link = next((item for item in spec.links if item.link_id == link_id), None)
+        if link is None:
+            raise ValueError("confirm_dependency target link does not exist")
+        verification_record = _trusted_verification(spec, verification_id, {"perturb_link"})
+        subject = verification_record.get("subject") or {}
+        chain = [str(value) for value in subject.get("chain_request_ids") or []]
+        source_request_id = str((link.evidence or {}).get("source_request_id") or _step_request_id(spec, link.source_step_id))
+        target_request_id = str((link.evidence or {}).get("target_request_id") or _step_request_id(spec, link.target_step_id))
+        if not source_request_id or not target_request_id or source_request_id not in chain or target_request_id not in chain:
+            raise ValueError("perturb verification subject does not match dependency endpoints")
+        if chain.index(source_request_id) >= chain.index(target_request_id):
+            raise ValueError("perturb verification chain order does not match dependency")
+        if not ((verification_record.get("evidence") or {}).get("linked_paths") or subject.get("linked_paths")):
+            raise ValueError("perturb verification did not observe a linked value")
+        link.confirmed = True
+        link.confidence = 1.0
+        link.meta = {**(link.meta or {}), "verified": True, "actor": "agent", "verification_id": verification_id}
+        link.evidence = {**(link.evidence or {}), "actor": "agent", "verification_id": verification_id}
+
+    elif kind == "bind_verify_read":
+        write_step_id = str(edit.get("write_step_id") or "")
+        read_request_id = str(edit.get("read_request_id") or "")
+        verification_id = str(edit.get("verification_id") or "")
+        assertion = edit.get("assertion")
+        write_step = next((item for item in spec.steps if item.step_id == write_step_id), None)
+        read_fact = next((item for item in spec.request_facts.requests if item.request_id == read_request_id), None)
+        if write_step is None or read_fact is None or not isinstance(assertion, dict) or not assertion:
+            raise ValueError("bind_verify_read requires existing write/read endpoints and assertion")
+        verification_record = _trusted_verification(spec, verification_id, {"write_execute", "verify_read"})
+        subject = verification_record.get("subject") or {}
+        if str(subject.get("write_step_id") or "") != write_step_id or str(subject.get("verify_request_id") or "") != read_request_id:
+            raise ValueError("write verification subject does not match bind_verify_read endpoints")
+        if subject.get("assertion") != assertion:
+            raise ValueError("bind_verify_read assertion does not match executed assertion")
+        write_step.fact_check = {
+            "endpoint": read_fact.path or read_fact.url,
+            "source_request_id": read_request_id,
+            "assertion": deepcopy(assertion),
+            "verification_id": verification_id,
+            "verified": True,
+            "actor": "agent",
+        }
+        write_step.source_meta = {**(write_step.source_meta or {}), "verify_actor": "agent", "verification_id": verification_id}
+        write_request_id = str((write_step.source_meta or {}).get("request_id") or "")
+        analysis = (spec.request_facts.analysis or {}).get(write_request_id)
+        if analysis is not None:
+            analysis.evidence = {
+                **(analysis.evidence or {}),
+                "actor": "agent",
+                "reason": analysis.reason or "真实写入与读回验证通过",
+                "verification_id": verification_id,
+                "evidence_refs": [
+                    *list((analysis.evidence or {}).get("evidence_refs") or []),
+                    f"verification:{verification_id}",
+                ],
+            }
+
+    elif kind == "attach_enum_options":
+        from dano.execution.page.flow_spec import _bind_option_source
+
+        step_id = str(edit.get("step_id") or "")
+        path = str(edit.get("path") or "")
+        source_request_id = str(edit.get("source_request_id") or "")
+        verification_id = str(edit.get("verification_id") or "")
+        options = edit.get("options")
+        if not isinstance(options, list) or not options:
+            raise ValueError("attach_enum_options requires non-empty options")
+        verification_record = _trusted_verification(spec, verification_id, {"enum_snapshot"})
+        snapshot = ((verification_record.get("evidence") or {}).get("snapshot") or {})
+        observed_options = [
+            option
+            for element in snapshot.get("elements") or [] if isinstance(element, dict)
+            for option in element.get("options") or []
+        ]
+        if observed_options and not all(option in observed_options for option in options):
+            raise ValueError("enum options are not grounded in the verified snapshot")
+        source_fact = next((item for item in spec.request_facts.requests if item.request_id == source_request_id), None)
+        if source_fact is None:
+            raise ValueError("attach_enum_options source request does not exist")
+        _bind_option_source(
+            spec,
+            target_step_id=step_id,
+            target_path=path,
+            source_url=source_fact.path or source_fact.url,
+            source_request_id=source_request_id,
+            options=options,
+            actor="agent",
+        )
+        step = next(item for item in spec.steps if item.step_id == step_id)
+        binding = next(item for item in step.selects if item.path == path or item.id_path == path)
+        binding.actor = "agent"
+        binding.confidence = 1.0
+        binding.verification_id = verification_id
+        param = next(item for item in step.params if item.path == path)
+        param.evidence.append({"actor": "agent", "kind": "enum_options", "verification_id": verification_id})
+
+    elif kind == "mark_unverified":
+        target_kind = str(edit.get("target_kind") or "")
+        target_id = str(edit.get("target_id") or "")
+        reason = str(edit.get("reason") or "").strip()
+        if target_kind not in {"dependency", "write_verify", "enum"} or not target_id or not reason:
+            raise ValueError("mark_unverified requires target_kind, target_id and reason")
+        _append_meta_list(spec, "unverified", {
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "reason": reason,
+            "actor": "agent",
+        })
+        if target_kind == "dependency":
+            link = next((item for item in spec.links if item.link_id == target_id), None)
+            if link is None:
+                raise ValueError("mark_unverified dependency does not exist")
+            link.meta = {**(link.meta or {}), "verified": False, "unverified_reason": reason}
+        elif target_kind == "write_verify":
+            step = next((item for item in spec.steps if item.step_id == target_id), None)
+            if step is None:
+                raise ValueError("mark_unverified write step does not exist")
+            step.source_meta = {**(step.source_meta or {}), "unverified_reason": reason}
+        else:
+            if ":" not in target_id:
+                raise ValueError("mark_unverified enum target must be step_id:path")
+            step_id, path = target_id.split(":", 1)
+            step = next((item for item in spec.steps if item.step_id == step_id), None)
+            if step is None or not any(item.path == path for item in step.params):
+                raise ValueError("mark_unverified enum target does not exist")
 
     if record:
         stored = {**deepcopy(edit), "actor": "agent"}

@@ -124,6 +124,9 @@ class SelectBinding(BaseModel):
     id_path: str | None = None
     id_tokens: list[str | int] | None = None
     field_projections: dict[str, str] = Field(default_factory=dict)  # target request path -> selected item response path
+    actor: str = "heuristic"
+    confidence: float = 0.0
+    verification_id: str = ""
 
 
 class IdentityBinding(BaseModel):
@@ -2571,6 +2574,7 @@ def _role_row(req: dict, *, role: str, keep: bool, reason: str, confidence: floa
         "keep_reason": reason if keep else "",
         "filter_reason": "" if keep else reason,
         "confidence": confidence,
+        "actor": "heuristic",
     }
     if semantic:
         row.update({
@@ -3066,7 +3070,10 @@ def _request_analysis_from_entry(entry: dict[str, Any], role: dict[str, Any], bu
         "keep": bool(role.get("keep")),
         "reason": role.get("reason") or role.get("keep_reason") or role.get("filter_reason") or "",
         "confidence": float(role.get("confidence") or 0.0),
-        "evidence": dict(role.get("evidence") or {}),
+        "evidence": {
+            **dict(role.get("evidence") or {}),
+            "actor": str(role.get("actor") or "heuristic"),
+        },
         "bucket": bucket,
         "filter_reason": role.get("filter_reason") or "",
     })
@@ -6129,7 +6136,46 @@ def to_flow_spec(
         _request_role_key(request): role
         for request, role in zip(captured_requests, request_roles)
     }
-    selected_keys = selected_write_keys | selected_preread_keys | independent_business_keys
+    fact_check_read_keys: set[Any] = set()
+    for write_request in write_cands:
+        write_samples = dict(samples)
+        body = _parse_body(write_request.get("post_data"))
+        if body is not None:
+            for path, tokens, _string_value, raw_value in _leaf_paths(body):
+                key = str(tokens[-1]) if tokens else path
+                write_samples.setdefault(key, raw_value)
+        fact_check = suggest_fact_check(
+            write_samples,
+            flow_reads,
+            write_request=write_request,
+        )
+        source_request_id = str((fact_check or {}).get("source_request_id") or "")
+        source_sequence = (fact_check or {}).get("source_sequence")
+        source_endpoint = str((fact_check or {}).get("endpoint") or "")
+        source_request = next((
+            request for request in captured_requests
+            if (
+                source_request_id
+                and str(request.get("request_id") or "") == source_request_id
+            ) or (
+                not source_request_id
+                and source_sequence is not None
+                and _request_order_value(request) == float(source_sequence)
+                and str(request.get("url") or request.get("path") or "") == source_endpoint
+            )
+        ), None)
+        if source_request is not None:
+            fact_check_read_keys.add(_request_role_key(source_request))
+    # A same-transaction read emitted after a write is not a preflight, but it
+    # is still an executable verification step. Keep it materialized so the
+    # owning write can bind fact_check without moving that assertion onto the
+    # read itself.
+    selected_keys = (
+        selected_write_keys
+        | selected_preread_keys
+        | independent_business_keys
+        | fact_check_read_keys
+    )
     request_facts = _build_request_facts(
         captured_requests,
         request_roles,
@@ -6161,6 +6207,12 @@ def to_flow_spec(
             st.source_meta = {
                 **(st.source_meta or {}),
                 "control_preflight_for_write": True,
+            }
+        if _request_role_key(req) in fact_check_read_keys:
+            st.source_meta = {
+                **(st.source_meta or {}),
+                "verification_read": True,
+                "actor": "heuristic",
             }
         step_objs.append(st)
         step_by_request_key[_request_role_key(req)] = st
@@ -6278,6 +6330,7 @@ def to_flow_spec(
                         "same_action_chain": same_action_chain,
                         "observer_available": bool(page_events),
                     },
+                    meta={"actor": "heuristic", "verified": False},
                 ))
         except Exception:
             link_objs = []
@@ -14738,6 +14791,8 @@ def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
         if not _select_binding_is_runtime_executable(step, binding):
             continue
         item = binding.model_dump(exclude_none=True)
+        for metadata_key in ("actor", "confidence", "verification_id"):
+            item.pop(metadata_key, None)
         if not item.get("field_projections"):
             item.pop("field_projections", None)
         if binding.path in current_key_by_path:
@@ -17227,7 +17282,8 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                 confirmed=True,
                 confidence=0.97,
                 reason="promote 后重建依赖：目标字段录制值唯一命中上游响应字段，自动确认为运行期依赖",
-                evidence={"kind": "value_match", "value": value, "path_score": semantic_score, "auto_rebuilt": True},
+                evidence={"kind": "value_match", "value": value, "path_score": semantic_score, "auto_rebuilt": True, "actor": "heuristic"},
+                meta={"actor": "heuristic", "verified": False},
             ))
             existing.add(sig)
             added += 1
@@ -17581,6 +17637,8 @@ def _bind_option_source(
         sel.option_map = dict(option_map)
     sel.enum_source = "api"
     sel.enum_confirmed = True
+    sel.actor = normalized_actor if normalized_actor in {"user", "agent", "planner", "repair"} else "heuristic"
+    sel.confidence = max(float(sel.confidence or 0), 1.0 if normalized_actor == "user" else 0.8)
     _hydrate_select_source_contract(spec, sel)
     if normalized_actor == "user":
         manual_fields = [
@@ -19593,6 +19651,7 @@ _RECORDING_AGENT_ALLOWED_OPS = {
     "set_condition", "set_output_mapping", "set_capability_relation",
     "add_request_to_capability", "remove_request_from_capability", "reject_dependency",
     "set_goal", "set_request_role", "set_param_source", "propose_dependency", "add_pitfall",
+    "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
 }
 
 
@@ -19902,10 +19961,11 @@ async def auto_fix_flow_spec(
 def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
     """置信度超过 70% 的能力默认采纳，低置信能力仍可人工采纳。"""
     _normalize_capability_references(spec)
+    verification_complete = bool(((spec.meta or {}).get("verification_run") or {}).get("complete"))
     for cap in spec.capabilities or []:
         if cap.confirmed:
             continue
-        if float(cap.confidence or 0) <= 0.7:
+        if not verification_complete and float(cap.confidence or 0) <= 0.7:
             continue
         cap.confirmed = True
         cap.requires_human_confirm = False
@@ -19932,8 +19992,10 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     report = validate_flow_spec(current)
     from dano.execution.page.recording_live import recording_agent_evidence_issues
+    from dano.onboarding.recording_verify import verification_report
     evidence_issues = recording_agent_evidence_issues(current)
     report["agent_evidence"] = {"ok": not evidence_issues, "issues": evidence_issues}
+    report["recording_verification"] = verification_report(current)
     if evidence_issues:
         report["errors"] = [
             *(report.get("errors") or []),

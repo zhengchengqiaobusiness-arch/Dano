@@ -1220,6 +1220,86 @@ async def perturb_recording_replay(run_id: str, params: dict) -> dict:
     return result
 
 
+async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict:
+    from dano.execution.page.replay import execute_write_with_verify
+
+    _strict_recording_params(
+        params,
+        required={"write_step_id", "inputs", "verify_request_id", "assertion"},
+        optional={"recording_id", "flow_version", "cleanup_request_id"},
+    )
+    if not isinstance(params["inputs"], dict) or not isinstance(params["assertion"], dict):
+        raise ToolError("inputs 和 assertion 必须是对象")
+    session = _recording_session(run_id, params)
+    spec = session.current_flow_spec()
+    step = next((item for item in spec.steps if item.step_id == str(params["write_step_id"])), None)
+    if step is None or (step.method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        raise ToolError("write_step_id 必须指向当前 FlowSpec 的写步骤")
+    write_request_id = str((step.source_meta or {}).get("request_id") or "")
+    request_ids = [write_request_id, str(params["verify_request_id"])]
+    cleanup_request_id = str(params.get("cleanup_request_id") or "")
+    if cleanup_request_id:
+        request_ids.append(cleanup_request_id)
+    if not write_request_id:
+        raise ToolError("写步骤缺少录制 request_id，不能真实执行验证")
+    requests = _find_captured_requests(session, request_ids)
+    storage_state = None
+    recorder = getattr(session, "_live_recorder", None)
+    if recorder is not None and callable(getattr(recorder, "storage_state", None)):
+        storage_state = await recorder.storage_state()
+    result = await execute_write_with_verify(
+        requests[0],
+        requests[1],
+        write_step_id=step.step_id,
+        inputs=params["inputs"],
+        assertion=params["assertion"],
+        auth_headers=await _recording_auth_headers(session, requests),
+        cleanup_request=requests[2] if cleanup_request_id else None,
+        storage_state=storage_state,
+    )
+    await session.add_verifications(result["verification_ids"])
+    return result
+
+
+async def browser_recording_navigate(run_id: str, params: dict) -> dict:
+    _strict_recording_params(params, required={"url"}, optional={"recording_id", "flow_version"})
+    return await _recording_session(run_id, params).browser_navigate(str(params["url"]))
+
+
+async def browser_recording_snapshot(run_id: str, params: dict) -> dict:
+    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version"})
+    return await _recording_session(run_id, params).browser_snapshot()
+
+
+async def _browser_recording_act(run_id: str, params: dict, kind: str) -> dict:
+    _strict_recording_params(
+        params,
+        required={"locator"},
+        optional={"recording_id", "flow_version", "value"},
+    )
+    if not isinstance(params["locator"], dict):
+        raise ToolError("locator 必须是 role+name 或 text 的对象")
+    if kind in {"fill", "select"} and "value" not in params:
+        raise ToolError(f"browser_{kind} 需要 value")
+    return await _recording_session(run_id, params).browser_act(
+        kind,
+        params["locator"],
+        params.get("value"),
+    )
+
+
+async def browser_recording_click(run_id: str, params: dict) -> dict:
+    return await _browser_recording_act(run_id, params, "click")
+
+
+async def browser_recording_fill(run_id: str, params: dict) -> dict:
+    return await _browser_recording_act(run_id, params, "fill")
+
+
+async def browser_recording_select(run_id: str, params: dict) -> dict:
+    return await _browser_recording_act(run_id, params, "select")
+
+
 async def list_link_candidates(run_id: str, params: dict) -> dict:
     from dano.execution.page.value_tracing import discover_value_links
 
@@ -2668,6 +2748,12 @@ TOOLS = {
     "ask_operator": ask_recording_operator,
     "replay_request": replay_recording_request,
     "perturb_replay": perturb_recording_replay,
+    "execute_write_with_verify": execute_recording_write_with_verify,
+    "browser_navigate": browser_recording_navigate,
+    "browser_snapshot": browser_recording_snapshot,
+    "browser_click": browser_recording_click,
+    "browser_fill": browser_recording_fill,
+    "browser_select": browser_recording_select,
     "list_link_candidates": list_link_candidates,
     "get_verification": get_recording_verification,
     "submit_recording_plan": submit_recording_plan,

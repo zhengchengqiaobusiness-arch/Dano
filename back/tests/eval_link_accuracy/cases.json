@@ -1,0 +1,85 @@
+[
+  {
+    "name": "detail-id-to-update-body",
+    "requests": [
+      {"request_id": "detail", "sequence": 1, "method": "GET", "url": "/items/detail", "response_json": {"data": {"jobId": "JOB-998877"}}},
+      {"request_id": "update", "sequence": 2, "method": "POST", "url": "/items/update", "post_data": {"jobId": "JOB-998877"}}
+    ],
+    "truth": [["detail", "response.data.jobId", "update", "body.jobId"]]
+  },
+  {
+    "name": "start-instance-to-task-query",
+    "requests": [
+      {"request_id": "start", "sequence": 1, "method": "POST", "url": "/workflow/start", "response_json": {"data": {"instanceId": "WF-20260001"}}},
+      {"request_id": "task", "sequence": 2, "method": "GET", "url": "/workflow/task?instanceId=WF-20260001"}
+    ],
+    "truth": [["start", "response.data.instanceId", "task", "query.instanceId"]]
+  },
+  {
+    "name": "option-id-to-submit",
+    "requests": [
+      {"request_id": "options", "sequence": 1, "method": "GET", "url": "/reference/options", "response_json": {"data": [{"value": "OPTION-10001", "label": "Standard"}]}},
+      {"request_id": "submit", "sequence": 2, "method": "POST", "url": "/forms/submit", "post_data": {"categoryId": "OPTION-10001"}}
+    ],
+    "truth": [["options", "response.data[0].value", "submit", "body.categoryId"]]
+  },
+  {
+    "name": "create-id-to-path",
+    "requests": [
+      {"request_id": "create", "sequence": 1, "method": "POST", "url": "/documents/create", "response_json": {"documentId": "DOC-778899"}},
+      {"request_id": "read", "sequence": 2, "method": "GET", "url": "/documents/DOC-778899"}
+    ],
+    "truth": [["create", "response.documentId", "read", "url_path[1]"]]
+  },
+  {
+    "name": "secret-token-is-not-a-business-link",
+    "requests": [
+      {"request_id": "auth", "sequence": 1, "method": "POST", "url": "/auth", "response_json": {"accessToken": "Bearer top-secret-998877"}},
+      {"request_id": "profile", "sequence": 2, "method": "GET", "url": "/profile", "headers": {"Authorization": "Bearer top-secret-998877"}}
+    ],
+    "truth": []
+  },
+  {
+    "name": "timestamp-is-not-a-link",
+    "requests": [
+      {"request_id": "clock", "sequence": 1, "method": "GET", "url": "/clock", "response_json": {"now": 1760000000000}},
+      {"request_id": "query", "sequence": 2, "method": "GET", "url": "/events?at=1760000000000"}
+    ],
+    "truth": []
+  },
+  {
+    "name": "uuid-to-delete-query",
+    "requests": [
+      {"request_id": "lookup", "sequence": 1, "method": "GET", "url": "/records/latest", "response_json": {"id": "123e4567-e89b-42d3-a456-426614174000"}},
+      {"request_id": "remove", "sequence": 2, "method": "DELETE", "url": "/records/remove?id=123e4567-e89b-42d3-a456-426614174000"}
+    ],
+    "truth": [["lookup", "response.id", "remove", "query.id"]]
+  },
+  {
+    "name": "numeric-snowflake-to-body",
+    "requests": [
+      {"request_id": "allocate", "sequence": 1, "method": "POST", "url": "/allocate", "response_json": {"data": {"number": 998877665544}}},
+      {"request_id": "commit", "sequence": 2, "method": "POST", "url": "/commit", "post_data": {"number": 998877665544}}
+    ],
+    "truth": [["allocate", "response.data.number", "commit", "body.number"]]
+  },
+  {
+    "name": "cursor-read-chain",
+    "requests": [
+      {"request_id": "page1", "sequence": 1, "method": "GET", "url": "/records", "response_json": {"nextCursor": "CURSOR-2026-A1"}},
+      {"request_id": "page2", "sequence": 2, "method": "GET", "url": "/records?cursor=CURSOR-2026-A1"}
+    ],
+    "truth": [["page1", "response.nextCursor", "page2", "query.cursor"]]
+  },
+  {
+    "name": "two-independent-derived-values",
+    "requests": [
+      {"request_id": "context", "sequence": 1, "method": "GET", "url": "/context", "response_json": {"projectId": "PROJECT-445566", "ownerId": "OWNER-112233"}},
+      {"request_id": "save", "sequence": 2, "method": "POST", "url": "/save", "post_data": {"projectId": "PROJECT-445566", "ownerId": "OWNER-112233"}}
+    ],
+    "truth": [
+      ["context", "response.projectId", "save", "body.projectId"],
+      ["context", "response.ownerId", "save", "body.ownerId"]
+    ]
+  }
+]

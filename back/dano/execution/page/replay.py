@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import asyncio
 import json
 import re
 from time import perf_counter
@@ -211,4 +212,127 @@ async def perturb_replay(
         "linked_paths": linked_paths,
         "verification_id": verification_id,
         "verification_ids": [*replay_verification_ids, verification_id],
+    }
+
+
+def _assertion_value(response: object, path: str):  # noqa: ANN202
+    current = response
+    for token in re.findall(r"[^.\[\]]+", str(path or "")):
+        if isinstance(current, dict) and token in current:
+            current = current[token]
+        elif isinstance(current, list) and token.isdigit() and int(token) < len(current):
+            current = current[int(token)]
+        else:
+            return None
+    return current
+
+
+def evaluate_assertion(response: object, assertion: dict, inputs: dict) -> dict:
+    """Evaluate the small deterministic assertion contract used by write verification."""
+    if not isinstance(assertion, dict) or not assertion:
+        raise ValueError("assertion must be a non-empty object")
+    path = str(assertion.get("path") or assertion.get("response_path") or "")
+    actual = _assertion_value(response, path) if path else response
+    expected = assertion.get("equals", assertion.get("value"))
+    input_path = str(assertion.get("equals_input") or assertion.get("input_path") or "")
+    if input_path:
+        expected = _assertion_value(inputs, input_path)
+    operator = str(assertion.get("operator") or ("equals" if "equals" in assertion or "value" in assertion or input_path else "truthy"))
+    if operator in {"equals", "eq"}:
+        passed = actual == expected
+    elif operator in {"not_equals", "ne"}:
+        passed = actual != expected
+    elif operator == "contains":
+        passed = expected in actual if isinstance(actual, (str, list, tuple, set, dict)) else False
+    elif operator == "exists":
+        passed = actual is not None
+    elif operator == "truthy":
+        passed = bool(actual)
+    else:
+        raise ValueError(f"unsupported assertion operator: {operator}")
+    return {
+        "passed": bool(passed),
+        "path": path,
+        "operator": operator,
+        "actual": _redact(actual),
+        "expected": _redact(expected),
+    }
+
+
+async def execute_write_with_verify(
+    write_request: dict,
+    verify_request: dict,
+    *,
+    write_step_id: str,
+    inputs: dict,
+    assertion: dict,
+    auth_headers: dict,
+    cleanup_request: dict | None = None,
+    base_url: str = "",
+    storage_state: dict | None = None,
+    settle_ms: int = 250,
+) -> dict:
+    """Execute a real write, read it back, assert the result, then optionally clean up."""
+    write = await replay_request(
+        write_request,
+        overrides={"body": inputs} if inputs else None,
+        auth_headers=auth_headers,
+        base_url=base_url,
+        storage_state=storage_state,
+    )
+    if settle_ms:
+        await asyncio.sleep(max(0, min(int(settle_ms), 5000)) / 1000)
+    cleanup = None
+    try:
+        verify = await replay_request(
+            verify_request,
+            auth_headers=auth_headers,
+            base_url=base_url,
+            storage_state=storage_state,
+        )
+        check = evaluate_assertion(verify.get("response"), assertion, inputs)
+        verify_read_id = record_verification(
+            kind="verify_read",
+            subject={
+                "write_step_id": str(write_step_id),
+                "verify_request_id": str(verify_request.get("request_id") or ""),
+                "assertion": deepcopy(assertion),
+            },
+            evidence={"passed": bool(verify.get("ok") and check["passed"]), "verify": verify, "assertion": check},
+        )
+    finally:
+        if cleanup_request is not None:
+            cleanup = await replay_request(
+                cleanup_request,
+                auth_headers=auth_headers,
+                base_url=base_url,
+                storage_state=storage_state,
+            )
+    subject = {
+        "write_step_id": str(write_step_id),
+        "write_request_id": str(write_request.get("request_id") or ""),
+        "verify_request_id": str(verify_request.get("request_id") or ""),
+        "cleanup_request_id": str((cleanup_request or {}).get("request_id") or ""),
+        "assertion": deepcopy(assertion),
+    }
+    verification_id = record_verification(
+        kind="write_execute",
+        subject=subject,
+        evidence={"passed": bool(write.get("ok") and verify.get("ok") and check["passed"]), "write": write, "verify": verify, "assertion": check, "cleanup": cleanup},
+    )
+    return {
+        "ok": bool(write.get("ok") and verify.get("ok") and check["passed"]),
+        "write": write,
+        "verify": verify,
+        "assertion": check,
+        "cleanup": cleanup,
+        "verification_id": verification_id,
+        "verification_ids": [
+            write["verification_id"],
+            verify["verification_id"],
+            verify_read_id,
+            *([cleanup["verification_id"]] if cleanup else []),
+            verification_id,
+        ],
+        "verify_verification_id": verify_read_id,
     }

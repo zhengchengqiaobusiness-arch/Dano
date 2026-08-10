@@ -358,6 +358,29 @@ class RecordingPiSession:
             result = await result
         return dict(result or {"answered": False})
 
+    def _require_live_recorder(self):  # noqa: ANN202
+        if self._live_recorder is None:
+            raise RecordingPiError("实时录制浏览器尚未绑定")
+        return self._live_recorder
+
+    async def browser_navigate(self, url: str) -> dict[str, Any]:
+        return await self._require_live_recorder().agent_navigate(url)
+
+    async def browser_snapshot(self) -> dict[str, Any]:
+        from dano.execution.page.verification_log import record_verification
+
+        snapshot = await self._require_live_recorder().agent_snapshot()
+        verification_id = record_verification(
+            kind="enum_snapshot",
+            subject={"url": str(snapshot.get("url") or "")},
+            evidence={"snapshot": snapshot},
+        )
+        await self.add_verifications([verification_id])
+        return {**snapshot, "verification_id": verification_id}
+
+    async def browser_act(self, kind: str, locator: dict, value: Any = None) -> dict[str, Any]:
+        return await self._require_live_recorder().agent_act(kind, locator, value)
+
     async def notify_live_batch(self, delta: dict) -> dict[str, Any]:
         """Ask the same Pi session to consume one triggered live batch."""
         reason = str((delta or {}).get("reason") or "request_batch")

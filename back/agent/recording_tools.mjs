@@ -426,6 +426,49 @@ export const recordingTools = [
     }, { additionalProperties: false }),
   }),
   proxyTool({
+    name: "execute_write_with_verify",
+    label: "执行写入并读回验证",
+    description: "真实执行指定写步骤，等待后重放 verify 读请求、执行确定性断言并可选清理；返回执行器签发的 verification_id。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      write_step_id: Type.String({ minLength: 1 }),
+      inputs: Type.Record(Type.String(), Type.Any()),
+      verify_request_id: Type.String({ minLength: 1 }),
+      assertion: Type.Object({}, { additionalProperties: true }),
+      cleanup_request_id: Type.Optional(Type.String({ minLength: 1 })),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "browser_navigate",
+    label: "验证浏览器导航",
+    description: "使用录制会话仍存活的浏览器导航到 http(s) 页面，期间网络继续进入录制事实。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      url: Type.String({ minLength: 1 }),
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "browser_snapshot",
+    label: "读取验证页面快照",
+    description: "读取当前页可交互元素的 role/name/text 与下拉选项语义快照，并返回 enum_snapshot verification_id。",
+    parameters: Type.Object(RecordingIdentity, { additionalProperties: false }),
+  }),
+  ...["click", "fill", "select"].map((kind) => proxyTool({
+    name: `browser_${kind}`,
+    label: `验证浏览器${kind}`,
+    description: "用 role+name 或 text 语义定位执行浏览器动作；禁止使用坐标和任意 CSS 选择器。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      locator: Type.Object({
+        role: Type.Optional(Type.String({ minLength: 1 })),
+        name: Type.Optional(Type.String()),
+        text: Type.Optional(Type.String({ minLength: 1 })),
+        exact: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      ...(kind === "click" ? {} : { value: Type.Any() }),
+    }, { additionalProperties: false }),
+  })),
+  proxyTool({
     name: "list_link_candidates",
     label: "读取值依赖候选",
     description: "扫描任意响应叶子到后续请求路径、查询、请求体或非敏感请求头的强值候选，不直接修改 FlowSpec。",

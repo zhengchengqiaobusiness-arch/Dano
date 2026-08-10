@@ -2170,6 +2170,93 @@ class RecordSession:
                 "error_type": type(exc).__name__,
             }
 
+    async def agent_navigate(self, url: str) -> dict:
+        """Navigate the retained recording browser during autonomous verification."""
+        target = str(url or "").strip()
+        if urlparse(target).scheme not in {"http", "https"}:
+            raise ValueError("agent navigation requires an http(s) URL")
+        page = await self._input_page()
+        if page is None:
+            raise RuntimeError("no active recording page")
+        self._recording_paused = False
+        self._mark_active()
+        response = await page.goto(target, wait_until="domcontentloaded")
+        return {
+            "ok": True,
+            "url": page.url.split("?", 1)[0],
+            "status": response.status if response is not None else None,
+        }
+
+    async def agent_snapshot(self) -> dict:
+        """Return a bounded semantic snapshot without exposing entered values."""
+        page = await self._input_page()
+        if page is None:
+            raise RuntimeError("no active recording page")
+        elements = await page.locator(
+            "button, a, input, textarea, select, [role], [contenteditable='true']"
+        ).evaluate_all(r"""elements => elements.slice(0, 300).flatMap((element, index) => {
+          const style = window.getComputedStyle(element);
+          if (style.display === 'none' || style.visibility === 'hidden') return [];
+          const tag = element.tagName.toLowerCase();
+          const implicit = tag === 'button' ? 'button'
+            : tag === 'a' ? 'link'
+            : tag === 'select' ? 'combobox'
+            : tag === 'textarea' ? 'textbox'
+            : tag === 'input' ? ((element.type === 'checkbox') ? 'checkbox'
+              : (element.type === 'radio') ? 'radio' : 'textbox') : '';
+          const resolvedRole = element.getAttribute('role') || implicit;
+          const labelledBy = element.getAttribute('aria-labelledby');
+          const labelledText = labelledBy
+            ? labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent || '').join(' ')
+            : '';
+          const label = element.labels?.[0]?.textContent || '';
+          const name = element.getAttribute('aria-label') || labelledText || label
+            || element.getAttribute('placeholder') || element.getAttribute('name') || '';
+          const text = resolvedRole ? (element.textContent || '') : '';
+          const options = tag === 'select'
+            ? Array.from(element.options || []).slice(0, 500).map(option => ({
+                label: (option.textContent || '').trim(), value: option.value,
+              })) : undefined;
+          return [{ index, role: resolvedRole,
+            name: name.trim().slice(0, 200), text: text.trim().slice(0, 200), options }];
+        })""")
+        self._mark_active()
+        return {
+            "url": page.url.split("?", 1)[0],
+            "title": (await page.title())[:300],
+            "elements": elements,
+        }
+
+    async def agent_act(self, kind: str, locator: dict, value=None) -> dict:  # noqa: ANN001
+        """Perform one semantic Playwright action while normal capture remains active."""
+        action = str(kind or "")
+        if action not in {"click", "fill", "select"}:
+            raise ValueError(f"unsupported agent browser action: {action}")
+        if not isinstance(locator, dict):
+            raise TypeError("locator must be an object")
+        role = str(locator.get("role") or "").strip()
+        name = str(locator.get("name") or "").strip()
+        text = str(locator.get("text") or "").strip()
+        if not role and not text:
+            raise ValueError("locator requires role or text")
+        page = await self._input_page()
+        if page is None:
+            raise RuntimeError("no active recording page")
+        target = (
+            page.get_by_role(role, name=name or None, exact=bool(locator.get("exact")))
+            if role else page.get_by_text(text, exact=bool(locator.get("exact")))
+        ).first
+        self._recording_paused = False
+        self._mark_active()
+        if action == "click":
+            await target.click()
+        elif action == "fill":
+            await target.fill(str(value or ""))
+        else:
+            await target.select_option(value=value)
+        await page.wait_for_timeout(100)
+        return {"ok": True, "kind": action, "url": page.url.split("?", 1)[0]}
+
     async def flush_recording(self) -> None:
         """把页面端防抖中的 fill 立即推回 Python,用于 finalize/reset/stop 前收口。"""
         if self.page is None or self.page.is_closed():

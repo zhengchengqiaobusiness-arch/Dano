@@ -43,6 +43,10 @@ interface AgentQuestion {
   answered?: boolean; answer?: string;
 }
 interface AgentInsight { kind: "role" | "param_source" | "link" | "goal"; text: string; refs?: string[] }
+interface VerifyProgress {
+  stage: string; detail: string; round?: number; pending?: number;
+  confirmed_links?: number; verify_coverage?: number; write_count?: number;
+}
 interface AnalysisScreenshotPayload {
   name: string;
   mime_type: "image/jpeg" | "image/png" | "image/webp";
@@ -1343,6 +1347,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [reqs, setReqs] = useState<RecReq[]>([]);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentInsights, setAgentInsights] = useState<AgentInsight[]>([]);
+  const [verifyProgress, setVerifyProgress] = useState<VerifyProgress[]>([]);
   const [agentAnswerDrafts, setAgentAnswerDrafts] = useState<Record<string, string>>({});
   const [action, setAction] = useState(() => newRecordingActionName());
   const actionRef = useRef(action);
@@ -2038,6 +2043,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           }].slice(-60));
         }
       }
+      else if (m.type === "verify_progress") {
+        setVerifyProgress((items) => [...items, {
+          stage: String(m.stage || "verifying"),
+          detail: String(m.detail || "正在验证"),
+          round: Number(m.round || 0),
+          pending: Number(m.pending || 0),
+          confirmed_links: Number(m.confirmed_links || 0),
+          verify_coverage: Number(m.verify_coverage || 0),
+          write_count: Number(m.write_count || 0),
+        }].slice(-30));
+        setPhase("publishing");
+      }
       else if (m.type === "flow_spec") {
         const restoredAfterReconnect = !!reconnectRestoreOperationRef.current
           && m.operation_id === reconnectRestoreOperationRef.current;
@@ -2401,7 +2418,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!hasFrame && !reqs.length) { message.error("还没有可分析的页面画面或请求"); return; }
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
-    setResult(null); setPhase("publishing");
+    setResult(null); setVerifyProgress([]); setPhase("publishing");
     if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim() })) {
       finalizeOperationRef.current = null;
       setPhase("recording");
@@ -2431,7 +2448,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // Clearing it here made the base validator's green state look like an
     // instantaneous publish success while the backend was still reviewing.
     setPhase("publishing");
-    if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
+    if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle, reverify: true,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
       publishOperationRef.current = null;
       setPhase("recording");
@@ -3674,10 +3691,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
                 <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
-                <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再发布当前流程" : ""}>
+                <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再验证并发布当前流程" : ""}>
                   <span><Button type="primary" loading={phase === "publishing"}
-                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || !capabilities.length}
-                    onClick={publishRequest}>发布当前流程</Button></span>
+                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || !capabilities.length || result?.ok === true}
+                    onClick={publishRequest}>{result?.ok ? "已发布" : "重新验证并发布"}</Button></span>
                 </Tooltip>
               </Space>
             ),
@@ -4660,6 +4677,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Card size="small" title={<Space><RobotOutlined />录制助手</Space>} style={{ height: "100%" }}>
         <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {!!verifyProgress.length && (() => {
+            const latest = verifyProgress[verifyProgress.length - 1];
+            return (
+              <Alert type={latest.stage === "completed" ? "success" : "info"} showIcon
+                message={latest.detail}
+                description={`阶段 ${latest.stage} · 已确认依赖 ${latest.confirmed_links || 0} · verify ${latest.verify_coverage || 0}/${latest.write_count || 0}${latest.pending ? ` · 待办 ${latest.pending}` : ""}`} />
+            );
+          })()}
           {agentQuestions.filter((item) => !item.answered).map((question) => (
             <Card key={question.question_id} size="small" style={{ background: "#fafafa" }}>
               <Typography.Paragraph style={{ marginBottom: 8 }}>{question.text}</Typography.Paragraph>
