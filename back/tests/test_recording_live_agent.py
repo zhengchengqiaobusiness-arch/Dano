@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -47,6 +48,60 @@ async def test_cancelling_recording_prompt_also_cancels_the_sidecar_turn(monkeyp
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls == ["prompt", "cancel"]
+
+
+@pytest.mark.asyncio
+async def test_recording_state_projection_does_not_block_browser_event_loop(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "e" * 32,
+    )
+    session.bind_flow_spec(_flow())
+
+    def slow_projection(_spec):
+        time.sleep(0.08)
+        return {"flow_version": 0}
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec.recording_agent_state",
+        slow_projection,
+    )
+    operation = asyncio.create_task(session.get_recording_state())
+    started = time.monotonic()
+    await asyncio.sleep(0.01)
+    tick_elapsed = time.monotonic() - started
+    await operation
+
+    assert tick_elapsed < 0.04
+
+
+@pytest.mark.asyncio
+async def test_recording_plan_compilation_does_not_block_browser_event_loop(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "f" * 32,
+    )
+    session.bind_flow_spec(_flow())
+
+    async def slow_compilation(spec, **_kwargs):
+        time.sleep(0.08)
+        return spec.model_copy(deep=True)
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec.apply_recording_agent_submission",
+        slow_compilation,
+    )
+    operation = asyncio.create_task(session.apply_submission(
+        {"ops": []}, mode="plan", base_flow_version=0,
+    ))
+    started = time.monotonic()
+    await asyncio.sleep(0.01)
+    tick_elapsed = time.monotonic() - started
+    await operation
+
+    assert tick_elapsed < 0.04
 
 
 def _flow() -> FlowSpec:
@@ -473,6 +528,40 @@ def test_recording_state_compacts_large_response_schemas_without_mutating_facts(
     assert projected_schema["__truncated_keys__"] > 0
     assert len(json.dumps(state, ensure_ascii=False)) < 500_000
     assert spec.request_facts.requests[0].response_schema == before
+
+
+def test_recording_state_and_validation_are_bounded_for_large_realistic_capture():
+    spec = _flow()
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id=f"req-{index}",
+            request_index=index,
+            method="GET",
+            path=f"/items/{index}",
+            response_json={
+                "list": [
+                    {f"field_{field}": "x" * 200 for field in range(20)}
+                    for _row in range(10)
+                ],
+            },
+        )
+        for index in range(120)
+    ]
+    spec.request_facts.field_evidence = [
+        {
+            "request_id": f"req-{index}",
+            "path": f"query.field_{index}",
+            "visible_label": "业务字段" + ("很长" * 100),
+            "evidence": [{"text": "页面证据" * 100}],
+        }
+        for index in range(120)
+    ]
+
+    state = recording_agent_state(spec)
+    validation = recording_agent_validation(spec)
+
+    assert len(json.dumps(state, ensure_ascii=False)) < 120_000
+    assert len(json.dumps(validation, ensure_ascii=False)) < 120_000
 
 
 @pytest.mark.asyncio

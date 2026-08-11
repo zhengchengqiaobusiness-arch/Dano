@@ -229,7 +229,7 @@ def test_independent_recording_operations_use_fresh_pi_context() -> None:
 
     assert "async def _ensure_recording_pi(*, fresh: bool = False):" in source
     assert source.count("_ensure_recording_pi(fresh=True)") == 5
-    assert "resume_history=not fresh" in source
+    assert "resume_history=bool(resumed_flow_spec is not None and not fresh)" in source
 
 
 def test_publish_review_failure_explains_cause_and_retry() -> None:

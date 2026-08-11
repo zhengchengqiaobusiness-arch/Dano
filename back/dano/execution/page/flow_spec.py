@@ -20038,11 +20038,13 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
     report = validate_flow_spec(current)
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
-        "facts": _semantic_fact_snapshot(current),
-        "current_contract": compact_model_payload(
-            _semantic_mutable_context(current), max_depth=8, max_items=80, max_string=1000,
+        "facts": compact_model_payload(
+            _semantic_fact_snapshot(current), max_depth=8, max_items=40, max_string=500,
         ),
-        "validation": compact_model_payload(report, max_depth=7, max_items=80, max_string=1000),
+        "current_contract": compact_model_payload(
+            _semantic_mutable_context(current), max_depth=6, max_items=40, max_string=500,
+        ),
+        "validation": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
         "projection": {
             "bounded": True,
             "note": "Large collections and payload branches include explicit __truncated_* markers.",
@@ -20066,10 +20068,13 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         ]
         report["passed"] = False
     session_audit = dict((current.meta or {}).get("recording_agent_session") or {})
+    from dano.execution.page.recording_live import compact_model_payload
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
-        "report": report,
-        "repair_context": _flow_autofix_context(current, report),
+        "report": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
+        "repair_context": compact_model_payload(
+            _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
+        ),
         "op_results": list(session_audit.get("op_results") or []),
     }
 

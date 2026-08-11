@@ -433,13 +433,15 @@ class RecordingPiSession:
         from dano.execution.page.flow_spec import recording_agent_state
 
         async with self._state_lock:
-            return recording_agent_state(self.current_flow_spec())
+            current = self.current_flow_spec()
+            return await asyncio.to_thread(recording_agent_state, current)
 
     async def get_validation_report(self) -> dict[str, Any]:
         from dano.execution.page.flow_spec import recording_agent_validation
 
         async with self._state_lock:
-            return recording_agent_validation(self.current_flow_spec())
+            current = self.current_flow_spec()
+            return await asyncio.to_thread(recording_agent_validation, current)
 
     async def add_verifications(self, verification_ids: list[str]) -> list[dict[str, Any]]:
         """Attach executor-owned evidence to the bound FlowSpec without changing its edit version."""
@@ -531,10 +533,13 @@ class RecordingPiSession:
                 raise RecordingPiError(
                     f"录制版本冲突: base={base_flow_version}, current={actual_version}; 请重新读取状态"
                 )
-            updated = await apply_recording_agent_submission(
-                current,
-                submission=submission,
-                mode=mode,
+            updated = await asyncio.to_thread(
+                asyncio.run,
+                apply_recording_agent_submission(
+                    current,
+                    submission=submission,
+                    mode=mode,
+                ),
             )
             self.flow_spec = updated
             self.last_submission_kind = mode

@@ -1688,7 +1688,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 str(init.get("tenant") or ""), init.get("subsystem"),
                             ),
                             recording_id=recording_id,
-                            resume_history=not fresh,
+                            resume_history=bool(resumed_flow_spec is not None and not fresh),
                             on_submission_accepted=_accepted_pi_submission,
                         )
                     )
