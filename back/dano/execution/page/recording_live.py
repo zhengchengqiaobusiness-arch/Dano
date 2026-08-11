@@ -227,6 +227,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
 
     elif kind == "propose_dependency":
+        requested_link_id = str(edit.get("link_id") or "")
         source_request_id = str(edit.get("source_request_id") or "")
         target_request_id = str(edit.get("target_request_id") or "")
         target_step_id = str(edit.get("target_step_id") or edit.get("step_id") or "")
@@ -245,7 +246,11 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
                 link for link in spec.links
                 if (link.source_step_id, link.source_path, link.target_step_id, link.target_path) == signature
             ), None)
+            id_collision = next((link for link in spec.links if requested_link_id and link.link_id == requested_link_id), None)
+            if id_collision is not None and id_collision is not existing:
+                raise ValueError("propose_dependency link_id already belongs to another dependency")
             link = existing or FlowLink(
+                **({"link_id": requested_link_id} if requested_link_id else {}),
                 source_step_id=source_step.step_id,
                 source_path=source_path,
                 target_step_id=target_step.step_id,

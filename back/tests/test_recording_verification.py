@@ -25,6 +25,7 @@ from dano.onboarding.recording_verify import (
     require_verification_complete,
     run_recording_verification,
     verification_report,
+    verification_todos,
 )
 from dano.onboarding.recording_pi import RecordingPiSession
 
@@ -81,6 +82,85 @@ def _spec() -> FlowSpec:
             },
         ),
     )
+
+
+def _spec_with_unproposed_value_link() -> FlowSpec:
+    return FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="detail",
+                method="GET",
+                path="/items/detail",
+                source_meta={"request_id": "req-detail"},
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                path="/items/update",
+                source_meta={"request_id": "req-submit"},
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-detail",
+                request_index=1,
+                method="GET",
+                path="/items/detail",
+                response_json={"data": {"jobId": "JOB998877"}},
+            ),
+            RequestFact(
+                request_id="req-submit",
+                request_index=2,
+                method="POST",
+                path="/items/update",
+                post_data='{"jobId":"JOB998877"}',
+            ),
+        ]),
+    )
+
+
+def test_high_confidence_value_link_becomes_dependency_candidate_todo():
+    todos = verification_todos(_spec_with_unproposed_value_link())
+
+    candidate = next(item for item in todos if item["kind"] == "dependency_candidate")
+    assert candidate["target_id"] == candidate["link_id"]
+    assert candidate["source_request_id"] == "req-detail"
+    assert candidate["source_path"] == "response.data.jobId"
+    assert candidate["target_request_id"] == "req-submit"
+    assert candidate["target_path"] == "body.jobId"
+    assert candidate["suggested_tool"] == "perturb_replay"
+    assert candidate["completion_ops"] == ["propose_dependency", "confirm_dependency"]
+
+
+def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
+    spec = _spec_with_unproposed_value_link()
+    candidate = next(item for item in verification_todos(spec) if item["kind"] == "dependency_candidate")
+    verification_id = record_verification(
+        kind="perturb_link",
+        subject={"chain_request_ids": ["req-detail", "req-submit"]},
+        evidence={"linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}]},
+    )
+
+    updated = apply_flow_edits(spec, [
+        {
+            "op": "propose_dependency",
+            "link_id": candidate["link_id"],
+            "source_request_id": candidate["source_request_id"],
+            "source_path": candidate["source_path"],
+            "target_request_id": candidate["target_request_id"],
+            "target_path": candidate["target_path"],
+            "evidence": {"heuristic_candidate": True},
+        },
+        {
+            "op": "confirm_dependency",
+            "link_id": candidate["link_id"],
+            "verification_id": verification_id,
+        },
+    ])
+
+    assert updated.links[0].link_id == candidate["link_id"]
+    assert updated.links[0].confirmed is True
+    assert not any(item["kind"].startswith("dependency") for item in verification_todos(updated))
 
 
 def test_record_count_assertion_checks_the_verify_collection():

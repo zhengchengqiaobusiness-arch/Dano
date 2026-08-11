@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 from typing import Any, Awaitable, Callable
+
+from dano.execution.page.value_tracing import discover_value_links
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -17,6 +20,57 @@ def _unverified_targets(spec) -> set[tuple[str, str]]:  # noqa: ANN001
         for item in (spec.meta or {}).get("unverified") or []
         if isinstance(item, dict)
     }
+
+
+def _request_step_id(spec, request_id: str) -> str:  # noqa: ANN001
+    for step in spec.steps:
+        if str((step.source_meta or {}).get("request_id") or "") == request_id:
+            return step.step_id
+    usage = (spec.request_facts.usage or {}).get(request_id)
+    return str(usage.materialized_step_id or "") if usage is not None else ""
+
+
+def _candidate_link_id(candidate: dict[str, Any]) -> str:
+    signature = "\n".join(str(candidate.get(key) or "") for key in (
+        "source_request_id", "source_path", "target_request_id", "target_path",
+    ))
+    return f"candidate-{hashlib.sha256(signature.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dict[str, Any]]:  # noqa: ANN001
+    """Promote strong captured value links when no agent-authored link exists yet."""
+    if spec.links:
+        return []
+    rows = [fact.model_dump(mode="json") for fact in spec.request_facts.requests]
+    todos: list[dict[str, Any]] = []
+    for candidate in discover_value_links(rows):
+        source_request_id = str(candidate.get("source_request_id") or "")
+        target_request_id = str(candidate.get("target_request_id") or "")
+        source_step_id = _request_step_id(spec, source_request_id)
+        target_step_id = _request_step_id(spec, target_request_id)
+        if not source_step_id or not target_step_id:
+            continue
+        link_id = _candidate_link_id(candidate)
+        if ("dependency_candidate", link_id) in skipped:
+            continue
+        todos.append({
+            "kind": "dependency_candidate",
+            "target_id": link_id,
+            "link_id": link_id,
+            "source_step_id": source_step_id,
+            "source_request_id": source_request_id,
+            "source_path": str(candidate.get("source_path") or ""),
+            "target_step_id": target_step_id,
+            "target_request_id": target_request_id,
+            "target_path": str(candidate.get("target_path") or ""),
+            "chain_request_ids": [source_request_id, target_request_id],
+            "value_sample": str(candidate.get("value_sample") or "")[:128],
+            "occurrences": int(candidate.get("occurrences") or 1),
+            "confidence": 0.9,
+            "suggested_tool": "perturb_replay",
+            "completion_ops": ["propose_dependency", "confirm_dependency"],
+        })
+    return todos
 
 
 def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
@@ -38,6 +92,7 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
             "suggested_tool": "perturb_replay",
             "completion_op": "confirm_dependency",
         })
+    todos.extend(_dependency_candidate_todos(spec, skipped))
     for step in spec.steps:
         if (step.method or "").upper() not in _WRITE_METHODS:
             continue
@@ -297,6 +352,10 @@ async def run_recording_verification(
             " verification_todos。依赖用 perturb_replay，写步骤用 execute_write_with_verify，"
             "枚举/分支缺口用 browser_* 补采。只能使用工具返回的 verification_id，最后调用"
             " submit_recording_repair 提交 confirm_dependency、bind_verify_read、attach_enum_options。"
+            "dependency_candidate 是后端从真实请求值链发现的高置信候选：按其 chain_request_ids"
+            " 调用 perturb_replay，成功后在同一次 repair 中先用候选给定的 link_id 提交"
+            " propose_dependency，再用同一 link_id 和工具返回的 verification_id 提交"
+            " confirm_dependency。"
             "本轮不要提交 mark_unverified；重试耗尽由后端统一处理。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )
