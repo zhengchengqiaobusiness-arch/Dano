@@ -154,8 +154,10 @@ export async function resumeSkill(skillId: string): Promise<{ skill_id: string; 
 }
 
 // 导出本租户已上架 Skill 为 pi 文件式 skill(.agents/skills/),后端就地写入 out_dir
-export async function exportAgentSkills(out_dir: string): Promise<{ out_dir: string; count: number; written: string[]; removed_frozen_folders?: string[] }> {
-  const { data } = await api.post("/export/agent-skills", { out_dir });
+export type SkillExportMode = "proxy" | "package" | "both";
+
+export async function exportAgentSkills(out_dir: string, mode: SkillExportMode = "both"): Promise<{ out_dir: string; mode: SkillExportMode; count: number; written: string[]; removed_frozen_folders?: string[] }> {
+  const { data } = await api.post("/export/agent-skills", { out_dir, mode });
   return data;
 }
 

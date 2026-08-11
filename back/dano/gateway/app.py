@@ -1086,6 +1086,30 @@ async def get_runtime_token(
             "source": rec.get("source"), "updated_at": rec.get("updated_at")}
 
 
+@app.get("/v1/settings/token/raw")
+async def get_runtime_token_raw(
+    tenant: str,
+    subsystem: str,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """Internal self-contained-package fallback; authenticated and never masked."""
+    from dano.infra.token_store import get_token, normalize_headers
+
+    authenticated_tenant = await _auth_tenant(x_tenant_key)
+    if authenticated_tenant != tenant:
+        raise HTTPException(status_code=403, detail="不能读取其他租户的 token")
+    rec = await get_token(tenant, subsystem)
+    headers = normalize_headers((rec or {}).get("headers") or {})
+    return {
+        "tenant": tenant,
+        "subsystem": subsystem,
+        "has_token": bool(headers),
+        "headers": headers,
+        "source": (rec or {}).get("source"),
+        "updated_at": (rec or {}).get("updated_at"),
+    }
+
+
 @app.post("/v1/settings/token")
 async def post_runtime_token(
     req: TokenUpsertReq,
@@ -2977,17 +3001,22 @@ async def record_ws(ws: WebSocket) -> None:
             _release_recording_connection(connection_key, connection_lease)
 
 
-async def _auto_export(tenant: str) -> None:
+async def _auto_export(tenant: str, *, mode: Literal["proxy", "package", "both"] = "both") -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
     目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
     best-effort:导出失败不影响接入结果。
     """
     try:
-        from dano.export.agent_skills import write_skills
+        from dano.export.agent_skills import write_exports
         out = _current_export_dir()
-        written = await write_skills(tenant, out, exclude_skill_ids=await _frozen_skill_ids())
-        log.info("onboard.auto_export", tenant=tenant, out=out, count=len(written))
+        written = await write_exports(
+            tenant,
+            out,
+            mode=mode,
+            exclude_skill_ids=await _frozen_skill_ids(),
+        )
+        log.info("onboard.auto_export", tenant=tenant, out=out, mode=mode, count=len(written))
     except Exception as e:  # noqa: BLE001
         log.warning("onboard.auto_export_failed", error=str(e))
 
@@ -3310,6 +3339,7 @@ async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(de
 
 class ExportSkillsReq(BaseModel):
     out_dir: str                    # 目标目录(通常是 pi 仓库的 .agents/skills),后端本地写入
+    mode: Literal["proxy", "package", "both"] = "both"
 
 
 @app.post("/export/agent-skills")
@@ -3321,19 +3351,34 @@ async def export_agent_skills_ep(req: ExportSkillsReq,
     """
     tenant = await _auth_tenant(x_tenant_key)
     from dano.execution.page.sessions import save_export_dir
-    from dano.export.agent_skills import write_skills
+    from dano.export.agent_skills import write_exports
+    from dano.export.skill_package.renderer import package_slug
     out = req.out_dir
     frozen = await _frozen_skill_ids()
     frozen_manifests = [m for m in await _manifests_for_tenant(tenant) if m["name"] in frozen]
     try:
         removed = []
         for m in frozen_manifests:
-            removed.extend(_cleanup_export_folders(out, _export_slugs_for_manifest(m)))
-        written = await write_skills(tenant, out, exclude_skill_ids=frozen)
+            removed.extend(_cleanup_export_folders(
+                out,
+                [*_export_slugs_for_manifest(m), package_slug(m["name"])],
+            ))
+        written = await write_exports(
+            tenant,
+            out,
+            mode=req.mode,
+            exclude_skill_ids=frozen,
+        )
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"写入目录失败:{e}") from e
     save_export_dir(out)                                 # 记住此目录 → 录完自动发布落同一处
-    return {"out_dir": out, "count": len(written), "written": written, "removed_frozen_folders": removed}
+    return {
+        "out_dir": out,
+        "mode": req.mode,
+        "count": len(written),
+        "written": written,
+        "removed_frozen_folders": removed,
+    }
 
 
 @app.get("/assets/published")

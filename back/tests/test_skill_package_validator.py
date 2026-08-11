@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dano.export.skill_package.validator import validate_skill_package
+from dano.export.skill_package.validator import validate_skill_documents, validate_skill_package
 
 
 _SKILL = """---
@@ -31,6 +31,12 @@ _REFERENCE = """# Reference
 
 ## API chain
 - GET /items -> POST /items verification_id: 550e8400-e29b-41d4-a716-446655440000
+
+## Business hard rules
+Stop on failure.
+
+## Fallback browser steps
+1. Use visible role/name labels.
 """
 
 _SCRIPT = """import argparse
@@ -77,8 +83,34 @@ def test_validate_skill_package_rejects_plaintext_credentials(tmp_path):
     assert any(issue["code"] == "credential_leak" for issue in result["issues"])
 
 
-def test_incomplete_reference_package_can_be_inspected_as_warnings():
-    reference = Path(__file__).resolve().parents[2] / "_tmp_ref_zip" / "console-plugin-cdp-bug-pending-review"
+def test_model_docs_reject_invented_evidence_and_missing_capability_chain():
+    result = validate_skill_documents(
+        _SKILL,
+        _REFERENCE,
+        allowed_verification_ids={"550e8400-e29b-41d4-a716-446655440099"},
+        required_chain_names={"create_item"},
+    )
+    codes = {issue["code"] for issue in result["issues"]}
+    assert result["ok"] is False
+    assert codes == {"missing_api_chain", "ungrounded_verification"}
+
+
+def test_model_docs_must_label_unverified_write_chain():
+    reference = _REFERENCE.replace("GET /items", "create_item: GET /items")
+    result = validate_skill_documents(
+        _SKILL,
+        reference,
+        allowed_verification_ids={"550e8400-e29b-41d4-a716-446655440000"},
+        required_chain_names={"create_item"},
+        required_unverified_chains={"create_item"},
+    )
+    assert result["ok"] is False
+    assert {issue["code"] for issue in result["issues"]} == {"missing_unverified_marker"}
+
+
+def test_incomplete_reference_package_can_be_inspected_as_warnings(tmp_path):
+    reference = tmp_path / "incomplete-reference"
+    (reference / "scripts").mkdir(parents=True)
     result = validate_skill_package(reference, missing_as_warnings=True)
     assert result["ok"] is True
     assert result["issues"]

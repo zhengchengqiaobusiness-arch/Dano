@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
-import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm } from "antd";
+import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select } from "antd";
 import { PlayCircleOutlined, ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { listSkills, exportAgentSkills, deleteSkill, freezeSkill, resumeSkill, SkillManifest } from "../api/skills";
+import { listSkills, exportAgentSkills, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
 import InvokeDrawer from "../components/InvokeDrawer";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 
 const EXPORT_DIR_LS = "dano.exportDir";
-const DEFAULT_EXPORT_DIR = "/opt/dano/runtime-data/.agents/skills";
+const DEFAULT_EXPORT_DIR = "";
 
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
 const INTEG_LABEL: Record<string, string> = { workflow: "复合流程", api: "接口", page: "页面" };
@@ -54,6 +54,7 @@ export default function Skills() {
   const [invoke, setInvoke] = useState<SkillManifest | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportDir, setExportDir] = useState(localStorage.getItem(EXPORT_DIR_LS) || DEFAULT_EXPORT_DIR);
+  const [exportMode, setExportMode] = useState<SkillExportMode>("both");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);   // 打开运行期 token 弹窗的子系统
   const tenant = localStorage.getItem(TENANT_NAME) || "";
@@ -63,7 +64,7 @@ export default function Skills() {
     if (!exportDir.trim()) { message.error("请填目标目录"); return; }
     setExporting(true);
     try {
-      const r = await exportAgentSkills(exportDir.trim());
+      const r = await exportAgentSkills(exportDir.trim(), exportMode);
       localStorage.setItem(EXPORT_DIR_LS, exportDir.trim());
       message.success(`已导出 ${r.count} 个 skill 到 ${r.out_dir}`);
       setExportOpen(false);
@@ -215,8 +216,19 @@ export default function Skills() {
           placeholder="/opt/dano/runtime-data/.agents/skills"
           onPressEnter={doExport}
         />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 6 }}>导出模式:</Typography.Paragraph>
+        <Select<SkillExportMode>
+          value={exportMode}
+          onChange={setExportMode}
+          style={{ width: "100%" }}
+          options={[
+            { value: "both", label: "代理包 + 自包含包（默认）" },
+            { value: "package", label: "仅自包含包（直连业务 API）" },
+            { value: "proxy", label: "仅代理包（调用 Dano）" },
+          ]}
+        />
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
-          pi 端记得设环境变量 DANO_URL、DANO_TENANT_KEY(本租户 api_key)。
+          自包含包优先读取 DANO_AUTH_HEADERS；代理包使用 DANO_URL、DANO_TENANT_KEY。
         </Typography.Paragraph>
       </Modal>
     </div>

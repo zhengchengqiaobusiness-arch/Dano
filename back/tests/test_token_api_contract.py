@@ -55,6 +55,27 @@ async def test_token_read_requires_matching_tenant_and_masks_by_default(monkeypa
     assert exc.value.status_code == 403
 
 
+async def test_raw_token_read_is_tenant_scoped_and_returns_real_headers(monkeypatch) -> None:
+    monkeypatch.setattr(gateway, "_registry", _Registry())
+
+    async def get_token(_tenant, _subsystem):
+        return {
+            "headers": {"Authorization": "Bearer real-runtime-value", "Tenant-Id": "1"},
+            "source": "recording",
+            "updated_at": "2026-08-10T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(token_store, "get_token", get_token)
+    result = await gateway.get_runtime_token_raw("aaa", "A-OA", x_tenant_key="valid")
+    assert result["headers"] == {
+        "Authorization": "Bearer real-runtime-value",
+        "Tenant-Id": "1",
+    }
+    with pytest.raises(HTTPException) as exc:
+        await gateway.get_runtime_token_raw("other", "A-OA", x_tenant_key="valid")
+    assert exc.value.status_code == 403
+
+
 async def test_manual_update_is_tenant_scoped_and_uses_shared_store(monkeypatch) -> None:
     monkeypatch.setattr(gateway, "_registry", _Registry())
     saved = {}

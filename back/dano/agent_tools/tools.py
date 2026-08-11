@@ -2660,6 +2660,53 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
     )
 
 
+async def submit_skill_docs(run_id: str, params: dict) -> dict:
+    """Store package documentation authored inside the active recording session."""
+    from dano.execution.page.flow_spec import append_flow_version
+    from dano.export.skill_package import (
+        flow_spec_unverified_capability_names,
+        flow_spec_verification_ids,
+        validate_skill_documents,
+    )
+
+    _strict_recording_params(
+        params,
+        required={"skill_md", "reference_md"},
+        optional={"recording_id", "flow_version"},
+    )
+    skill_md = params.get("skill_md")
+    reference_md = params.get("reference_md")
+    if not isinstance(skill_md, str) or not isinstance(reference_md, str):
+        raise ToolError("skill_md 和 reference_md 必须是字符串")
+    if len(skill_md.encode("utf-8")) > 200_000 or len(reference_md.encode("utf-8")) > 300_000:
+        raise ToolError("skill 文档过大")
+    session = _recording_session(run_id, params)
+    spec = session.current_flow_spec()
+    validation = validate_skill_documents(
+        skill_md,
+        reference_md,
+        allowed_verification_ids=flow_spec_verification_ids(spec),
+        required_chain_names={cap.name for cap in spec.capabilities if cap.name},
+        required_unverified_chains=flow_spec_unverified_capability_names(spec),
+    )
+    spec.meta = {
+        **(spec.meta or {}),
+        "skill_docs": {
+            "skill_md": skill_md,
+            "reference_md": reference_md,
+            "actor": "agent",
+            "validation": validation,
+        },
+    }
+    spec = append_flow_version(spec, "skill_docs", reason="Pi 生成自包含 skill 文档")
+    session.bind_flow_spec(spec)
+    return {
+        "ok": validation["ok"],
+        "issues": validation["issues"],
+        "flow_version": spec.flow_version,
+    }
+
+
 async def submit_recording_review(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
@@ -2759,6 +2806,7 @@ TOOLS = {
     "submit_recording_plan": submit_recording_plan,
     "get_validation_report": get_validation_report,
     "submit_recording_repair": submit_recording_repair,
+    "submit_skill_docs": submit_skill_docs,
     "submit_recording_review": submit_recording_review,
     "request_review": request_review,
     "publish_asset": publish_asset,

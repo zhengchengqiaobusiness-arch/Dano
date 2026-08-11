@@ -12,7 +12,7 @@ import yaml
 
 _REQUIRED_SKILL_SECTIONS = ("Transport", "Preconditions", "Steps", "Branch exit", "Pitfalls")
 _VERIFICATION_ID_RE = re.compile(
-    r"\bverification_id\s*[:=]?\s*[`\[]?[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    r"\bverification_id\s*[:=]?\s*[`\[]?(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
     re.I,
 )
 _API_LINE_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD)\b|(?:->|→)", re.I)
@@ -76,17 +76,51 @@ def _check_skill(path: Path, text: str, issues: list[dict]) -> None:
         issues.append(_issue("done_when", "every documented step must include `Done when:`", path))
 
 
-def _check_reference(path: Path, text: str, issues: list[dict]) -> None:
+def _check_reference(
+    path: Path,
+    text: str,
+    issues: list[dict],
+    *,
+    missing_as_warnings: bool = False,
+) -> None:
+    for title in ("Business hard rules", "Fallback browser steps"):
+        if not _section(text, title):
+            issues.append(_issue(
+                "reference_section",
+                f"reference.md requires section: {title}",
+                path,
+                warning=missing_as_warnings,
+            ))
     chain = _section(text, "API chain")
     if not chain:
-        issues.append(_issue("api_chain", "reference.md requires a non-empty API chain section", path))
+        issues.append(_issue(
+            "api_chain",
+            "reference.md requires a non-empty API chain section",
+            path,
+            warning=missing_as_warnings,
+        ))
         return
     lines = [line.strip() for line in chain.splitlines() if _API_LINE_RE.search(line)]
     if not lines:
-        issues.append(_issue("api_chain", "API chain must describe at least one request chain", path))
+        issues.append(_issue(
+            "api_chain",
+            "API chain must describe at least one request chain",
+            path,
+            warning=missing_as_warnings,
+        ))
     for line in lines:
         if not _VERIFICATION_ID_RE.search(line) and "unverified" not in line.casefold():
-            issues.append(_issue("chain_evidence", f"API chain lacks verification_id or unverified marker: {line}", path))
+            issues.append(_issue(
+                "chain_evidence",
+                f"API chain lacks verification_id or unverified marker: {line}",
+                path,
+                warning=missing_as_warnings,
+            ))
+
+
+def _api_chain_lines(text: str) -> list[str]:
+    chain = _section(text, "API chain")
+    return [line.strip() for line in chain.splitlines() if _API_LINE_RE.search(line)]
 
 
 def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bool) -> None:
@@ -106,13 +140,20 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
             issues.append(_issue("missing_verify", f"missing verifier for {capability.name}", verify))
     for script in python_scripts:
         source = _read(script, issues, missing_as_warnings=False)
-        if source and not re.search(r"\bjson\.(?:dump|dumps)\s*\(", source):
+        emits_json = bool(re.search(r"\bjson\.(?:dump|dumps)\s*\(", source))
+        # Delegated emission: client.py owns json.dumps and exposes emit();
+        # capability/verify scripts satisfy the contract by calling it.
+        delegates_emit = bool(
+            re.search(r"(?m)^from\s+client\s+import\s+.*\bemit\b", source)
+            and re.search(r"(?<![\w.])emit\s*\(", source)
+        )
+        if source and not (emits_json or delegates_emit):
             issues.append(_issue("json_stdout", "script must emit operational JSON", script))
         try:
             completed = subprocess.run(
                 [sys.executable, str(script), "--help"],
                 cwd=str(scripts),
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -141,6 +182,114 @@ def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
                 break
 
 
+def flow_spec_verification_ids(spec) -> set[str]:  # noqa: ANN001
+    """Return only execution evidence identifiers attached to a FlowSpec."""
+    ids = {
+        str(item.get("verification_id"))
+        for item in (spec.meta or {}).get("verification_log") or []
+        if isinstance(item, dict) and item.get("verification_id")
+    }
+    ids.update(
+        str((link.meta or {}).get("verification_id"))
+        for link in spec.links
+        if (link.meta or {}).get("verified") is True
+        and (link.meta or {}).get("verification_id")
+    )
+    for step in spec.steps:
+        fact_check = step.fact_check or {}
+        if fact_check.get("verified") is True and fact_check.get("verification_id"):
+            ids.add(str(fact_check["verification_id"]))
+        ids.update(
+            str(binding.verification_id)
+            for binding in step.selects
+            if binding.enum_confirmed is True and binding.verification_id
+        )
+    return ids
+
+
+def flow_spec_unverified_capability_names(spec) -> set[str]:  # noqa: ANN001
+    """Identify public write capabilities without trusted read-back evidence."""
+    trusted = flow_spec_verification_ids(spec)
+    steps = {step.step_id: step for step in spec.steps}
+    unverified: set[str] = set()
+    for capability in spec.capabilities:
+        step_ids = [str(value) for value in capability.step_ids]
+        step_ids.extend(str(ref.step_id) for ref in capability.request_refs if ref.step_id)
+        step_ids.extend(
+            str(node.get("step_id"))
+            for node in capability.nodes
+            if isinstance(node, dict) and node.get("type") == "call" and node.get("step_id")
+        )
+        selected = [steps[step_id] for step_id in dict.fromkeys(step_ids) if step_id in steps]
+        if not selected:
+            selected = list(steps.values())
+        writes = [step for step in selected if (step.method or "GET").upper() not in {"GET", "HEAD"}]
+        if writes and any(
+            (step.fact_check or {}).get("verified") is not True
+            or str((step.fact_check or {}).get("verification_id") or "") not in trusted
+            for step in writes
+        ):
+            unverified.add(str(capability.name or capability.capability_id))
+    return unverified
+
+
+def validate_skill_documents(
+    skill_md: str,
+    reference_md: str,
+    *,
+    allowed_verification_ids: set[str] | None = None,
+    required_chain_names: set[str] | None = None,
+    required_unverified_chains: set[str] | None = None,
+) -> dict:
+    """Validate model-authored package documents before filesystem rendering."""
+    issues: list[dict] = []
+    skill_path = Path("SKILL.md")
+    reference_path = Path("reference.md")
+    if not isinstance(skill_md, str) or not skill_md.strip():
+        issues.append(_issue("missing_file", "missing required file: SKILL.md", skill_path))
+    else:
+        _check_skill(skill_path, skill_md, issues)
+    if not isinstance(reference_md, str) or not reference_md.strip():
+        issues.append(_issue("missing_file", "missing required file: reference.md", reference_path))
+    else:
+        _check_reference(reference_path, reference_md, issues)
+        chain_lines = _api_chain_lines(reference_md)
+        for name in sorted(required_chain_names or set()):
+            if not any(name.casefold() in line.casefold() for line in chain_lines):
+                issues.append(_issue(
+                    "missing_api_chain",
+                    f"API chain is missing capability: {name}",
+                    reference_path,
+                ))
+        for name in sorted(required_unverified_chains or set()):
+            matching = [line for line in chain_lines if name.casefold() in line.casefold()]
+            if matching and not any("unverified" in line.casefold() for line in matching):
+                issues.append(_issue(
+                    "missing_unverified_marker",
+                    f"unverified write capability must be marked unverified: {name}",
+                    reference_path,
+                ))
+        if allowed_verification_ids is not None:
+            allowed = {str(value) for value in allowed_verification_ids}
+            for match in _VERIFICATION_ID_RE.finditer(reference_md):
+                verification_id = match.group("id")
+                if verification_id not in allowed:
+                    issues.append(_issue(
+                        "ungrounded_verification",
+                        f"verification_id is not present in executor-owned FlowSpec evidence: {verification_id}",
+                        reference_path,
+                    ))
+    for path, text in ((skill_path, skill_md), (reference_path, reference_md)):
+        if not isinstance(text, str):
+            continue
+        for pattern in _PLAINTEXT_CREDENTIAL_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                issues.append(_issue("credential_leak", f"possible plaintext credential: {match.group(0)[:24]}", path))
+                break
+    return {"ok": not any(issue["severity"] == "error" for issue in issues), "issues": issues}
+
+
 def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) -> dict:
     """Validate one package and return ``{ok, issues}`` with stable issue codes."""
     root = Path(pkg_dir)
@@ -154,7 +303,12 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
     if skill:
         _check_skill(skill_path, skill, issues)
     if reference:
-        _check_reference(reference_path, reference, issues)
+        _check_reference(
+            reference_path,
+            reference,
+            issues,
+            missing_as_warnings=missing_as_warnings,
+        )
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
     _check_credentials(root, issues)
     return {"ok": not any(issue["severity"] == "error" for issue in issues), "issues": issues}

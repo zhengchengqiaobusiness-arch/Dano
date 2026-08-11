@@ -3458,12 +3458,42 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     return written
 
 
-async def export(tenant: str, out_dir: str) -> list[str]:
+async def write_exports(
+    tenant: str,
+    out_dir: str,
+    *,
+    mode: str = "both",
+    exclude_skill_ids: set[str] | None = None,
+) -> list[str]:
+    """Write proxy packages, self-contained packages, or both without collisions."""
+    if mode not in {"proxy", "package", "both"}:
+        raise ValueError("mode 必须是 proxy/package/both")
+    excluded = set(exclude_skill_ids or set())
+    written: list[str] = []
+    if mode in {"proxy", "both"}:
+        written.extend(await write_skills(tenant, out_dir, exclude_skill_ids=excluded))
+    if mode in {"package", "both"}:
+        from dano.export.skill_package.renderer import write_skill_packages
+
+        selected: list[str] | None = None
+        if excluded:
+            repo = AssetRepository()
+            subs = await _tenant_subsystems(repo, tenant)
+            registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
+            selected = [
+                skill.skill_id for skill in registry.skills
+                if skill.recording_asset_id is not None and skill.skill_id not in excluded
+            ]
+        written.extend(await write_skill_packages(tenant, out_dir, skill_ids=selected))
+    return written
+
+
+async def export(tenant: str, out_dir: str, *, mode: str = "both") -> list[str]:
     """命令行入口:自管连接池(init→write→close);返回写出的文件夹名列表。"""
     from dano.infra.db import close_pool, init_pool
     await init_pool()
     try:
-        return await write_skills(tenant, out_dir)
+        return await write_exports(tenant, out_dir, mode=mode)
     finally:
         await close_pool()
 
@@ -3472,8 +3502,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="导出已上架 Skill 为官方 skill-creator 格式 skill(.agents/skills/)")
     ap.add_argument("--tenant", required=True, help="租户名,如 demo-oa")
     ap.add_argument("--out", required=True, help="输出目录,通常是 <pi仓库>/.agents/skills")
+    ap.add_argument("--mode", choices=("proxy", "package", "both"), default="both", help="导出代理包、自包含包或两者")
     args = ap.parse_args()
-    written = asyncio.run(export(args.tenant, args.out))
+    written = asyncio.run(export(args.tenant, args.out, mode=args.mode))
     print(f"已导出 {len(written)} 个 skill 到 {args.out}:")
     for w in written:
         print("  -", w)
