@@ -1,6 +1,7 @@
 """Bounded autonomous verification for finalized page recordings."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import hashlib
 import json
@@ -12,6 +13,8 @@ from dano.execution.page.value_tracing import discover_value_links
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 PromptRunner = Callable[[Awaitable[Any]], Awaitable[Any]]
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_FINAL_ANALYSIS_TIMEOUT_S = 180.0
+_FINAL_ANALYSIS_TIMEOUT_MESSAGE = "录制最终分析超过总时限，剩余待办已标记为 unverified"
 
 
 def _unverified_targets(spec) -> set[tuple[str, str]]:  # noqa: ANN001
@@ -187,6 +190,24 @@ async def _emit(progress: ProgressCallback | None, payload: dict[str, Any]) -> N
         await result
 
 
+async def _prompt_before_deadline(
+    session,
+    prompt: str,
+    *,
+    deadline: float,
+    prompt_runner: PromptRunner | None,
+) -> Any:  # noqa: ANN001
+    """Run one Pi turn inside the single final-analysis deadline."""
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise asyncio.TimeoutError(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
+    session_timeout = float(getattr(session, "timeout_s", 0) or 0)
+    turn_timeout = remaining if session_timeout <= 0 else min(session_timeout, remaining)
+    operation = session.prompt(prompt, timeout_s=turn_timeout)
+    awaited = prompt_runner(operation) if prompt_runner is not None else operation
+    return await asyncio.wait_for(awaited, timeout=remaining)
+
+
 def _progress(stage: str, detail: str, report: dict[str, Any], *, round_number: int = 0) -> dict[str, Any]:
     return {
         "stage": stage,
@@ -249,6 +270,7 @@ async def generate_skill_documents(
     *,
     prompt_runner: PromptRunner | None = None,
     max_rounds: int = 3,
+    deadline: float | None = None,
 ) -> dict[str, Any]:  # noqa: ANN001
     """Ask the same Pi session for package docs, bounded by deterministic validation."""
     from dano.export.skill_package import (
@@ -261,6 +283,9 @@ async def generate_skill_documents(
     issues: list[dict[str, Any]] = []
     attempts = 0
     for attempt in range(1, max(1, min(int(max_rounds), 3)) + 1):
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
+            break
         attempts = attempt
         suffix = (
             "上轮校验问题=" + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
@@ -275,11 +300,26 @@ async def generate_skill_documents(
             "cookie、密码或录制凭证。" + suffix
         )
         try:
-            operation = session.prompt(prompt, timeout_s=None)
-            await (prompt_runner(operation) if prompt_runner is not None else operation)
+            if deadline is None:
+                operation = session.prompt(prompt, timeout_s=None)
+                await (prompt_runner(operation) if prompt_runner is not None else operation)
+            else:
+                await _prompt_before_deadline(
+                    session,
+                    prompt,
+                    deadline=deadline,
+                    prompt_runner=prompt_runner,
+                )
+        except asyncio.TimeoutError:
+            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
+            break
         except Exception as exc:  # noqa: BLE001 - renderer has a deterministic fallback
             errors.append(str(exc)[:500])
-            if "no Pi model or credentials" in str(exc) or "DANO_PI_API_KEY" in str(exc):
+            if (
+                "no Pi model or credentials" in str(exc)
+                or "DANO_PI_API_KEY" in str(exc)
+                or "超时" in str(exc)
+            ):
                 break
         docs = dict((session.current_flow_spec().meta or {}).get("skill_docs") or {})
         current = session.current_flow_spec()
@@ -331,10 +371,12 @@ async def run_recording_verification(
     progress: ProgressCallback | None = None,
     prompt_runner: PromptRunner | None = None,
     max_rounds: int = 5,
+    timeout_s: float = _FINAL_ANALYSIS_TIMEOUT_S,
 ) -> dict[str, Any]:  # noqa: ANN001
-    """Run at most five agent turns, then publish with explicit unverified annotations."""
+    """Run bounded agent turns under one deadline, then converge to publishable state."""
     errors: list[str] = []
     rounds = 0
+    deadline = asyncio.get_running_loop().time() + max(0.01, float(timeout_s))
     for round_number in range(1, max(1, min(int(max_rounds), 5)) + 1):
         current = session.current_flow_spec()
         report = verification_report(current)
@@ -360,11 +402,22 @@ async def run_recording_verification(
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )
         try:
-            operation = session.prompt(prompt, timeout_s=None)
-            await (prompt_runner(operation) if prompt_runner is not None else operation)
+            await _prompt_before_deadline(
+                session,
+                prompt,
+                deadline=deadline,
+                prompt_runner=prompt_runner,
+            )
+        except asyncio.TimeoutError:
+            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
+            break
         except Exception as exc:  # noqa: BLE001 - failures become explicit unverified output
             errors.append(str(exc)[:500])
-            if "no Pi model or credentials" in str(exc) or "DANO_PI_API_KEY" in str(exc):
+            if (
+                "no Pi model or credentials" in str(exc)
+                or "DANO_PI_API_KEY" in str(exc)
+                or "超时" in str(exc)
+            ):
                 break
         updated = verification_report(session.current_flow_spec())
         await _emit(progress, _progress(
@@ -382,7 +435,11 @@ async def run_recording_verification(
         errors=errors,
     )
     session.bind_flow_spec(current)
-    skill_docs = await generate_skill_documents(session, prompt_runner=prompt_runner)
+    skill_docs = await generate_skill_documents(
+        session,
+        prompt_runner=prompt_runner,
+        deadline=deadline,
+    )
     await _emit(progress, _progress(
         "completed",
         "验证全部通过，准备自动发布" if final_report["all_verified"] else "验证结束，未决项已标注 unverified，准备发布",

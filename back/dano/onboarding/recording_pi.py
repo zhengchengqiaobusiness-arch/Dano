@@ -294,6 +294,14 @@ class RecordingPiSession:
                         "录制 Pi 操作超时且取消确认失败；会话不可继续使用"
                     ) from cancel_exc
                 raise RecordingPiError("录制 Pi 操作超时，已取消；未切换到其他模型链路") from exc
+            except asyncio.CancelledError:
+                try:
+                    await asyncio.shield(
+                        self._command("cancel", timeout_s=min(self.timeout_s, 10.0)),
+                    )
+                except BaseException:  # noqa: BLE001 - preserve the caller's cancellation
+                    pass
+                raise
             finally:
                 self._active_analysis_image_count = 0
 

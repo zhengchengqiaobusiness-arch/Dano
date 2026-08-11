@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -18,6 +19,32 @@ from dano.execution.page.flow_spec import (
 )
 from dano.execution.page.recording_live import merge_live_agent_state, recording_delta
 from dano.onboarding.recording_pi import RecordingPiSession
+
+
+@pytest.mark.asyncio
+async def test_cancelling_recording_prompt_also_cancels_the_sidecar_turn(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "d" * 32,
+    )
+    session._proc = object()
+    calls = []
+
+    async def fake_command(command_type, **_kwargs):
+        calls.append(command_type)
+        if command_type == "prompt":
+            await asyncio.Event().wait()
+        return {"status": "cancelled"}
+
+    monkeypatch.setattr(session, "_command", fake_command)
+    task = asyncio.create_task(session.prompt("analyze"))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == ["prompt", "cancel"]
 
 
 def _flow() -> FlowSpec:

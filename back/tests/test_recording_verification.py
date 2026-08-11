@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from dano.execution.page.flow_spec import (
@@ -416,6 +419,25 @@ async def test_verification_exhaustion_marks_every_todo_and_still_completes():
     assert session.flow_spec.meta["verification_run"]["complete"] is True
     assert session.flow_spec.capabilities[0].confirmed is True
     assert progress[-1]["stage"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_final_verification_has_one_total_deadline_and_returns_publishable_state():
+    class HangingSession(_UnavailableSession):
+        async def prompt(self, *_args, **_kwargs):
+            await asyncio.Event().wait()
+
+    session = HangingSession(_spec())
+    started = time.monotonic()
+
+    report = await run_recording_verification(session, timeout_s=0.02)
+
+    assert time.monotonic() - started < 0.5
+    assert report["complete"] is True
+    assert report["all_verified"] is False
+    assert report["errors"]
+    assert session.flow_spec.meta["verification_run"]["complete"] is True
+    assert session.flow_spec.meta["skill_docs_generation"]["fallback_required"] is True
 
 
 @pytest.mark.asyncio
