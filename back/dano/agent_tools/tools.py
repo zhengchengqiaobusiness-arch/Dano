@@ -2733,7 +2733,7 @@ async def submit_skill_docs(run_id: str, params: dict) -> dict:
     return {
         "ok": validation["ok"],
         "issues": validation["issues"],
-        "flow_version": spec.flow_version,
+        "flow_version": int((spec.meta or {}).get("current_version") or 0),
     }
 
 
