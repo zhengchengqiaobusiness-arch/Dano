@@ -1823,6 +1823,8 @@ async def record_ws(ws: WebSocket) -> None:
             captured_all_requests = getattr(sess, "captured_all_requests", None)
             if live_agent_disabled or not callable(captured_all_requests):
                 return
+            if any(not task.done() for task in live_analysis_tasks):
+                return
             current_count = len(captured_all_requests())
             since_seq = last_live_scheduled_count
             last_live_scheduled_count = current_count
@@ -1840,6 +1842,8 @@ async def record_ws(ws: WebSocket) -> None:
             if not callable(captured_all_requests):
                 return
             current_count = len(captured_all_requests())
+            if current_count <= last_live_scheduled_count:
+                return
             if current_count - last_live_scheduled_count >= 15:
                 _schedule_live_analysis("request_batch")
                 return
@@ -2062,6 +2066,7 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "finalize":
                 if await _replay_costly(msg):
                     continue
+                await _pause_recording_capture()
                 if live_analysis_tasks:
                     async def _finish_live_analysis_tasks() -> None:
                         await asyncio.gather(*list(live_analysis_tasks), return_exceptions=True)

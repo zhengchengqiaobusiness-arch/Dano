@@ -756,6 +756,7 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
     class FakePiSession:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
             self.flow_spec = None
+            self.notify_calls = 0
             sessions.append(self)
 
         async def start(self):  # noqa: ANN201
@@ -769,7 +770,8 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
             self.flow_spec = flow_spec
 
         async def notify_live_batch(self, _delta: dict) -> None:
-            return None
+            self.notify_calls += 1
+            await asyncio.sleep(0.1)
 
         def current_flow_spec(self):  # noqa: ANN201
             return self.flow_spec
@@ -791,12 +793,15 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
             "pi_recording_id": recording_id,
         },
         {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
+        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
+        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
         {"type": "stop"},
     ])
 
     await gateway.record_ws(ws)
 
     assert len(sessions) == 1
+    assert sessions[0].notify_calls == 1
     assert any(
         message.get("type") == "agent_status"
         and message.get("state") == "analyzing"
@@ -845,6 +850,14 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
     assert source.count("recorded_page_enum_options()") == 1
     assert "recorded_page_options = sess.recorded_page_enum_options()" in source
     assert "_project_recorded_page_enum_options(" in source
+
+
+def test_finalize_freezes_capture_before_waiting_for_live_analysis() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    finalize = source[source.index('elif t == "finalize":'):]
+
+    assert finalize.index("await _pause_recording_capture()") < finalize.index("if live_analysis_tasks:")
+    assert finalize.index("await _pause_recording_capture()") < finalize.index("sess.captured_all_requests()")
 
 
 @pytest.mark.asyncio
