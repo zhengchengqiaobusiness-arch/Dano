@@ -406,11 +406,11 @@ class ToFlowSpecTest(unittest.TestCase):
             "value": "data.missing",
         }])
         broken_report = validate_flow_spec(broken)
-        self.assertTrue(broken_report["passed"])
+        self.assertFalse(broken_report["passed"])
         self.assertEqual(broken.links, [])
         self.assertFalse(any(i["type"] == "link_source_missing" for i in broken_report["review_items"]))
         self.assertFalse(any("data.missing" in e for e in broken_report["suggestions"]))
-        self.assertEqual(broken_report["errors"], [])
+        self.assertTrue(broken_report["errors"])
 
         confirmed = apply_flow_edits(spec, [{
             "op": "update",
@@ -523,8 +523,8 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(spec.steps[0].risk_level, "L4")
         self.assertEqual(spec.risk_level, "L4")
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
-        self.assertFalse(report["errors"])
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["errors"])
         self.assertTrue(report["suggestions"])
 
     def test_system_values_detected(self):
@@ -593,7 +593,7 @@ class ToFlowSpecTest(unittest.TestCase):
         # 至少 question 已被识别为用户参数;runtime_var 字段保留原值或被运行时覆盖
         self.assertIn("question", apir.get("body_template", {}))
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
+        self.assertFalse(report["passed"])
         self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
     def test_flow_spec_records_recording_mode_and_diagnostics(self):
@@ -627,8 +627,8 @@ class ToFlowSpecTest(unittest.TestCase):
         )
         report = validate_flow_spec(spec)
 
-        self.assertTrue(report["passed"])
-        self.assertEqual(report["errors"], [])
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["errors"])
         self.assertTrue(any("录制期业务请求失败" in e for e in report["suggestions"]))
 
     def test_summary_shape(self):
@@ -1683,7 +1683,7 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         ]
         spec = to_flow_spec(captured, reads=reads, samples={"type": "2", "reason": "123"})
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
+        self.assertFalse(report["passed"])
         self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
         spec = apply_flow_edits(spec, [{
@@ -1692,8 +1692,8 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
             "resolved": True,
         }])
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"],
-                        f"high review 已解决后应可发布,实际 errors: {report['errors']}")
+        self.assertFalse(report["passed"],
+                         "解决生成建议不能替代缺失的可调用能力编排")
         apir, errors = flow_spec_to_api_request(spec)
         self.assertIsNotNone(apir)
         self.assertFalse(any("运行期变量" in e for e in errors),
@@ -1725,7 +1725,7 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         self.assertEqual(by_path["wybs"].source_kind, "unknown")
         self.assertEqual(by_path["taskId"].category, "runtime_var")
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
+        self.assertFalse(report["passed"])
         self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
     def test_system_const_exposed_is_generation_advice(self):
@@ -1737,7 +1737,7 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         param = {p.path: p for p in spec.steps[0].params}["billType"]
         param.exposed_to_user = True
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
+        self.assertFalse(report["passed"])
         self.assertTrue(any("system_const" in e and "暴露给用户" in e for e in report["suggestions"]))
 
 
@@ -1845,7 +1845,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         p.enum_value_map = None
 
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
+        self.assertFalse(report["passed"])
         self.assertTrue(any("内部值/短码" in e and "类型" in e for e in report["suggestions"]))
 
         p.enum_options = [
@@ -1855,7 +1855,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         ]
         p.enum_value_map = {"事假": 1, "病假": 2, "婚假": 3}
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"], report["errors"])
+        self.assertFalse(report["passed"], "枚举修正后仍需生成可调用能力")
         api_req, errors = flow_spec_to_api_request(spec)
         self.assertEqual(errors, [])
         self.assertEqual(api_req["selects"][0]["option_map"], {"事假": 1, "病假": 2, "婚假": 3})

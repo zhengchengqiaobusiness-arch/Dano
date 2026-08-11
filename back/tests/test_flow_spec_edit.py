@@ -515,8 +515,8 @@ def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
         meta={"capability_model": {"status": "ready"}},
     )
     before = validate_flow_spec(spec)
-    assert before["passed"] is True
-    assert any("没有批量接口事实" in item for item in before["suggestions"])
+    assert before["passed"] is False
+    assert any("没有批量接口事实" in item for item in before["errors"])
 
     fixed = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="repair"))
 
@@ -734,8 +734,8 @@ def test_confirmed_capability_contract_change_is_advice_not_publish_policy():
     spec.steps[0].params[0].key = "事由"
     report = validate_flow_spec(spec)
 
-    assert not any("确认后合同已变化" in error for error in report["errors"])
-    assert any("确认后合同已变化" in item for item in report["suggestions"])
+    assert any("确认后合同已变化" in error for error in report["errors"])
+    assert not any("确认后合同已变化" in item for item in report["suggestions"])
 
 
 def test_generated_placeholder_output_name_is_normalized_to_stable_result():
@@ -3786,7 +3786,7 @@ def test_capability_validation_ignores_stale_scoped_copies_but_checks_active_out
     report = validate_flow_spec(spec)
     cap_report = report["capability_validation"]
 
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert "capability_internal" in cap_report
     assert "capability_relations" in cap_report
     assert "skill_level" in cap_report
@@ -4276,7 +4276,7 @@ def test_strict_skill_level_reports_advice_without_publish_veto():
     skill_level = report["capability_validation"]["skill_level"]
     codes = {item["code"] for item in skill_level["errors"]}
 
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert {"skill_description_missing", "skill_failure_handling_missing"} <= codes
 
 
@@ -4379,7 +4379,7 @@ def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
     report = validate_flow_spec(spec)
     relation_report = report["capability_validation"]["capability_relations"]
 
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert relation_report["passed"] is False
     assert relation_report["errors"][0]["code"] == "capability_relation_type_mismatch"
 
@@ -6785,7 +6785,7 @@ def test_publish_validation_does_not_promote_generated_field_advice_to_issues():
 
     report = validate_flow_spec(spec)
 
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert "field" not in report["issue_groups"]
     assert any("枚举字段" in item for item in report["suggestions"])
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -909,6 +910,58 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
     finally:
         if stage.exists():
             shutil.rmtree(stage)
+
+
+def validate_flow_spec_package(spec, *, tenant: str = "release-check") -> dict:  # noqa: ANN001
+    """Render and validate one frozen FlowSpec without publishing files.
+
+    This is the release gate's package-level check.  It deliberately uses the
+    same renderer and validator as the real export path, including script
+    ``--help`` checks and plaintext credential detection.
+    """
+    from dano.execution.page.flow_spec import (
+        flow_spec_release_payload,
+        flow_spec_required_params,
+        flow_spec_to_api_request,
+    )
+
+    api_request, build_errors = flow_spec_to_api_request(spec)
+    if api_request is None or build_errors:
+        return {
+            "ok": False,
+            "issues": [{
+                "severity": "error",
+                "code": "flow_spec_build",
+                "path": "FlowSpec",
+                "message": "; ".join(build_errors or ["FlowSpec cannot be compiled"]),
+            }],
+        }
+    api_request = dict(api_request)
+    api_request["_release_snapshot"] = {"flow_spec": flow_spec_release_payload(spec)}
+    skill = SimpleNamespace(
+        skill_id=f"release-check.{spec.flow_id}",
+        action=(spec.capabilities[0].name if spec.capabilities else "recording"),
+        title=spec.title or (spec.capabilities[0].title if spec.capabilities else "Recording"),
+        subsystem="release-check",
+        api_request=api_request,
+        capabilities=api_request.get("capabilities") or [],
+        required_fields=flow_spec_required_params(spec),
+    )
+    with tempfile.TemporaryDirectory(prefix="dano-release-check-") as folder:
+        stage = Path(folder)
+        try:
+            _render_folder(skill, stage, tenant=tenant)
+        except Exception as exc:  # noqa: BLE001 - converted into a stable gate result
+            return {
+                "ok": False,
+                "issues": [{
+                    "severity": "error",
+                    "code": "package_render",
+                    "path": str(stage),
+                    "message": str(exc),
+                }],
+            }
+        return validate_skill_package(stage)
 
 
 async def write_skill_packages(

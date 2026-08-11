@@ -2787,32 +2787,12 @@ async def record_ws(ws: WebSocket) -> None:
                             **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
-                    from dano.onboarding.recording_verify import require_verification_complete
-
                     verification_run = dict((pending_flow_spec.meta or {}).get("verification_run") or {})
                     if not bool(msg.get("skip_verify")) and (
                         bool(msg.get("reverify")) or not verification_run.get("complete")
                     ):
                         await _verify_finalized_recording(force=bool(msg.get("reverify")))
                         current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
-                    try:
-                        verification_gate = require_verification_complete(
-                            pending_flow_spec,
-                            skip_verify=bool(msg.get("skip_verify")),
-                        )
-                    except ValueError as exc:
-                        await sender.send_json({
-                            "type": "result",
-                            "operation": "publish",
-                            "operation_id": msg.get("operation_id"),
-                            "report": {
-                                "ok": False,
-                                "stage": "recording_verify",
-                                "reason": str(exc),
-                            },
-                            **_recording_flow_projection(pending_flow_spec),
-                        })
-                        continue
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
                     # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
                     if not pending_flow_spec.capabilities:
@@ -2825,11 +2805,31 @@ async def record_ws(ws: WebSocket) -> None:
                             },
                         })
                         continue
-                    pending_flow_spec, release_candidate = prepare_flow_release_candidate(pending_flow_spec)
-                    # Freeze manual edits in the reconnect cache before the
-                    # comparatively long Pi review begins.
+                    from dano.onboarding.recording_release import evaluate_recording_release
+
+                    release_decision = evaluate_recording_release(pending_flow_spec)
+                    verification_gate = release_decision.to_dict()
+                    if release_decision.callable_spec is None:
+                        await sender.send_json({
+                            "type": "result",
+                            "operation": "publish",
+                            "operation_id": msg.get("operation_id"),
+                            "report": {
+                                "ok": False,
+                                "stage": "verification_incomplete",
+                                "reason": "没有能力通过机器发布闸门；完整录制草稿已保留",
+                                "release_policy": verification_gate,
+                            },
+                            **_recording_flow_projection(pending_flow_spec),
+                        })
+                        continue
+                    release_flow_spec, release_candidate = prepare_flow_release_candidate(
+                        release_decision.callable_spec
+                    )
+                    # The full pending_flow_spec remains the editable draft;
+                    # only the independently verified callable subset is frozen.
                     _checkpoint_resume()
-                    check_report = validate_flow_spec(pending_flow_spec)
+                    check_report = validate_flow_spec(release_flow_spec)
                     if not check_report.get("passed"):
                         await sender.send_json({
                             "type": "result",
@@ -2843,7 +2843,7 @@ async def record_ws(ws: WebSocket) -> None:
                             **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
-                    apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
+                    apir, build_errors = flow_spec_to_api_request(release_flow_spec)
                     if build_errors or not apir:
                         await sender.send_json({
                             "type": "result",
@@ -2857,15 +2857,15 @@ async def record_ws(ws: WebSocket) -> None:
                             **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
-                    apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
+                    apir["_flow_spec"] = flow_spec_to_summary(release_flow_spec)
                     apir["_release_snapshot"] = {
                         **release_candidate,
                         # Persist the exact JSON form whose round-trip identity
                         # was asserted by prepare_flow_release_candidate.
-                        "flow_spec": flow_spec_release_payload(pending_flow_spec),
+                        "flow_spec": flow_spec_release_payload(release_flow_spec),
                     }
                     apir["recording_mode"] = recording_mode
-                    required = flow_spec_required_params(pending_flow_spec)
+                    required = flow_spec_required_params(release_flow_spec)
                     last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({"type": "result",
@@ -2877,14 +2877,15 @@ async def record_ws(ws: WebSocket) -> None:
                 # 不匹配或任一角色拒绝都必须硬失败，禁止回退到 ReviewBoard。
                 try:
                     pi_session = await _ensure_recording_pi(fresh=True)
-                    pi_session.bind_flow_spec(pending_flow_spec)
-                    review_version = int((pending_flow_spec.meta or {}).get("current_version") or 0)
+                    pi_session.bind_flow_spec(release_flow_spec)
+                    review_version = int((release_flow_spec.meta or {}).get("current_version") or 0)
                     await _responsive_prompt(pi_session.prompt(
                         "对当前录制发布候选执行最终审核。必须先调用 get_recording_state 和 "
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
                         "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
-                        "reasons(string[])、可选 model_id(string)，review 顶层只能包含这三个角色；"
-                        "审核不通过时设置 passed=false 并填写 reasons。录制事实中的撤回、删除、驳回、终止等"
+                        "reasons(string[])，model_id 由服务器记录；review 顶层还可包含 blocking_reasons。"
+                        "审核不通过时设置 passed=false 并填写 reasons，也可增加 blocking_reasons。"
+                        "录制事实中的撤回、删除、驳回、终止等"
                         "可能是管理员刚刚真实执行的合法业务写操作；不得仅凭 HTTP 方法、路径关键词或"
                         "destructive/L4 等风险标签拒绝，拒绝必须基于独立、具体且可定位的契约、权限或校验证据。"
                         "Skill 文档由发布后的导出链路生成，不属于本轮 FlowSpec 审核对象；"
@@ -2898,6 +2899,7 @@ async def record_ws(ws: WebSocket) -> None:
                     pi_session.require_publish_review(
                         flow_version=review_version,
                         flow_fingerprint=str(release_candidate["flow_fingerprint"]),
+                        machine_decision=release_decision,
                     )
                     log.info(
                         "recording.publish_review_completed",

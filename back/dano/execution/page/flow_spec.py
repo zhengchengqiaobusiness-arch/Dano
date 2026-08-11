@@ -16274,9 +16274,11 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     capability_validation = _capability_validation_report(spec)
     capability_errors = list(capability_validation.get("errors") or [])
     capability_warnings = list(capability_validation.get("warnings") or [])
-    # Capability boundaries, kinds and field ownership are generated proposals.
-    # The deterministic request builder below is the only hard publish gate.
-    suggestions.extend([*capability_errors, *capability_warnings])
+    # Capability validation describes the executable public contract.  A
+    # malformed boundary or illegal membership cannot be repaired by the
+    # lower-level request builder, so it is a hard publish error.
+    errors.extend(capability_errors)
+    suggestions.extend(capability_warnings)
     by_step_id = {step.step_id: step for step in spec.steps}
     for capability in spec.capabilities or []:
         cap_label = capability.title or capability.name or capability.capability_id

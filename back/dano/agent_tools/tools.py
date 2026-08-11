@@ -3000,34 +3000,30 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         or any(not isinstance(reason, str) for reason in blocking_reasons)
     ):
         raise ToolError("review.blocking_reasons 必须是字符串数组")
-    if blocking_reasons:
-        raise ToolError("review.blocking_reasons 非空，发布审核必须失败")
     verdicts: list[dict[str, object]] = []
+    server_model_id = str(getattr(session, "model_id", "pi-agent-session"))
     for role in ("acceptance", "security", "compliance"):
         raw = review.get(role)
-        if not isinstance(raw, dict) or set(raw) - {"passed", "reasons", "model_id"}:
-            raise ToolError(f"review.{role} 仅允许 passed/reasons/model_id")
+        if not isinstance(raw, dict) or set(raw) - {"passed", "reasons"}:
+            raise ToolError(f"review.{role} 仅允许 passed/reasons；model_id 由服务器记录")
         passed = raw.get("passed")
         reasons = raw.get("reasons") or []
         if not isinstance(passed, bool):
             raise ToolError(f"review.{role}.passed 必须是布尔值")
         if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
             raise ToolError(f"review.{role}.reasons 必须是字符串数组")
-        model_id = raw.get("model_id")
-        if model_id is not None and (not isinstance(model_id, str) or not model_id.strip()):
-            raise ToolError(f"review.{role}.model_id 必须是非空字符串")
         verdicts.append({
             "role": role,
             "passed": passed,
             "reasons": reasons,
-            "model_id": model_id or "pi-agent-session",
+            "model_id": server_model_id,
         })
     normalized = {
         "recording_id": str(params["recording_id"]),
         "base_flow_version": params["base_flow_version"],
         "verdicts": verdicts,
         "blocking_reasons": blocking_reasons,
-        "all_passed": all(bool(item["passed"]) for item in verdicts),
+        "all_passed": not blocking_reasons and all(bool(item["passed"]) for item in verdicts),
     }
     from dano.execution.page.flow_spec import flow_spec_fingerprint
 

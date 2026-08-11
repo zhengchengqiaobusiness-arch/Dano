@@ -168,6 +168,15 @@ class RecordingPiSession:
         self.last_submission_kind = ""
         self.last_submission_warning = ""
         self.last_review: dict[str, Any] = {}
+        # Review provenance is server-owned.  The model may decide pass/fail,
+        # but cannot claim a different identity in its tool payload.
+        from dano.config import get_settings
+
+        self.model_id = str(
+            os.environ.get("DANO_PI_MODEL")
+            or get_settings().pi_model
+            or "deepseek-ai/DeepSeek-V3.2"
+        )
         self._on_submission_accepted = on_submission_accepted
 
     async def start(self) -> "RecordingPiSession":
@@ -608,9 +617,19 @@ class RecordingPiSession:
         *,
         flow_version: int,
         flow_fingerprint: str,
+        machine_decision: Any | None = None,
     ) -> dict[str, Any]:
         """Validate review evidence against the exact bound release contract."""
         from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+        if machine_decision is not None and not bool(
+            getattr(machine_decision, "machine_passed", False)
+        ):
+            reasons = list(getattr(machine_decision, "blocking_reasons", ()) or ())
+            raise RecordingPiError(
+                "机器发布闸门未通过，模型审核不能覆盖: "
+                + "; ".join(map(str, reasons or ["verification_incomplete"]))
+            )
 
         if self.last_submission_kind != "review" or not self.last_review:
             raise RecordingPiError("Pi 未通过 submit_recording_review 提交发布审核")

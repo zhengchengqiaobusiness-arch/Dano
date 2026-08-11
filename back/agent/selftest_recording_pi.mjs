@@ -165,14 +165,17 @@ function verifyReviewToolSchema() {
   }
   const reviewSchema = reviewTool?.parameters?.properties?.review;
   assert(reviewSchema?.additionalProperties === false, "review schema must reject unknown top-level fields");
-  assert(!("blocking_reasons" in (reviewSchema?.properties || {})), "Pi review schema must use role verdicts for rejection");
+  assert(
+    Object.hasOwn(reviewSchema?.properties || {}, "blocking_reasons"),
+    "review must allow model-added blocking reasons",
+  );
   for (const role of ["acceptance", "security", "compliance"]) {
     const roleSchema = reviewSchema?.properties?.[role];
     assert(roleSchema?.additionalProperties === false, `review.${role} must reject unknown fields`);
     assert(
       JSON.stringify(Object.keys(roleSchema?.properties || {}).sort())
-        === JSON.stringify(["model_id", "passed", "reasons"]),
-      `review.${role} schema fields mismatch`,
+        === JSON.stringify(["passed", "reasons"]),
+        `review.${role} schema fields mismatch`,
     );
   }
 }

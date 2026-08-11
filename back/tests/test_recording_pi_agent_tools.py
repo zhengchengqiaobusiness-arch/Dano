@@ -705,6 +705,16 @@ def test_pi_review_is_strict_and_persisted_in_recording_state(monkeypatch):
     }))
     assert review["accepted"] is True
     assert session.last_review["all_passed"] is True
+    assert {item["model_id"] for item in session.last_review["verdicts"]} == {"pi-agent-session"}
+    with pytest.raises(ToolError, match="model_id 由服务器记录"):
+        asyncio.run(submit_recording_review("run-review", {
+            "recording_id": "rec-review",
+            "base_flow_version": 1,
+            "review": {
+                role: {"passed": True, "reasons": [], "model_id": "forged-model"}
+                for role in ("acceptance", "security", "compliance")
+            },
+        }))
     with pytest.raises(ToolError, match="review.security"):
         asyncio.run(submit_recording_review("run-review", {
             "recording_id": "rec-review",
@@ -859,22 +869,22 @@ def test_active_recording_review_missing_stale_or_duplicate_hard_fails(monkeypat
     assert store.recorded == []
 
 
-def test_pi_review_with_blocking_reasons_hard_fails_before_session_write(monkeypatch):
+def test_pi_review_can_add_blocking_reasons_and_publish_gate_rejects_them(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-review-blocked")
-    with pytest.raises(ToolError, match="blocking_reasons 非空"):
-        asyncio.run(submit_recording_review("run-review-blocked", {
-            "recording_id": "rec-review-blocked",
-            "base_flow_version": 1,
-            "review": {
-                **{
-                    role: {"passed": True, "reasons": []}
-                    for role in ("acceptance", "security", "compliance")
-                },
-                "blocking_reasons": ["仍有越权风险"],
+    result = asyncio.run(submit_recording_review("run-review-blocked", {
+        "recording_id": "rec-review-blocked",
+        "base_flow_version": 1,
+        "review": {
+            **{
+                role: {"passed": True, "reasons": []}
+                for role in ("acceptance", "security", "compliance")
             },
-        }))
-    assert session.last_review == {}
-    assert session.last_submission_kind == ""
+            "blocking_reasons": ["仍有越权风险"],
+        },
+    }))
+    assert result["accepted"] is True
+    assert session.last_review["all_passed"] is False
+    assert session.last_review["blocking_reasons"] == ["仍有越权风险"]
 
 
 @pytest.mark.parametrize("mode", ["plan", "repair"])

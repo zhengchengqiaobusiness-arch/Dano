@@ -763,18 +763,16 @@ export const recordingTools = [
             acceptance: Type.Object({
               passed: Type.Boolean(),
               reasons: Type.Optional(Type.Array(Type.String())),
-              model_id: Type.Optional(Type.String({ minLength: 1 })),
             }, { additionalProperties: false }),
             security: Type.Object({
               passed: Type.Boolean(),
               reasons: Type.Optional(Type.Array(Type.String())),
-              model_id: Type.Optional(Type.String({ minLength: 1 })),
             }, { additionalProperties: false }),
             compliance: Type.Object({
               passed: Type.Boolean(),
               reasons: Type.Optional(Type.Array(Type.String())),
-              model_id: Type.Optional(Type.String({ minLength: 1 })),
             }, { additionalProperties: false }),
+            blocking_reasons: Type.Optional(Type.Array(Type.String())),
           },
           { additionalProperties: false },
         ),
