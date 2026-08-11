@@ -157,6 +157,7 @@ class RecordingPiSession:
         self._pending: dict[str, asyncio.Future] = {}
         self._prompt_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
+        self._write_verification_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
         self.flow_spec: Any = None
         self._analysis_images: list[dict[str, str]] = []
@@ -448,6 +449,46 @@ class RecordingPiSession:
             current.meta["verification_log"] = log
             self.flow_spec = current
             return added
+
+    def write_verification_lock(self, step_id: str) -> asyncio.Lock:
+        """Serialize the one allowed real write verification for a step."""
+        return self._write_verification_locks.setdefault(str(step_id), asyncio.Lock())
+
+    async def claim_write_verification(self, step_id: str) -> dict[str, Any] | None:
+        """Persist a write-attempt reservation before touching the business API."""
+        async with self._state_lock:
+            current = self.current_flow_spec()
+            current.meta = dict(current.meta or {})
+            attempts = {
+                str(key): dict(value)
+                for key, value in (current.meta.get("write_verification_attempts") or {}).items()
+                if isinstance(value, dict)
+            }
+            existing = attempts.get(str(step_id))
+            if existing is not None:
+                return existing
+            attempts[str(step_id)] = {"status": "running"}
+            current.meta["write_verification_attempts"] = attempts
+            self.flow_spec = current
+            return None
+
+    async def finish_write_verification(
+        self,
+        step_id: str,
+        *,
+        status: str,
+        verification_id: str = "",
+    ) -> None:
+        async with self._state_lock:
+            current = self.current_flow_spec()
+            current.meta = dict(current.meta or {})
+            attempts = dict(current.meta.get("write_verification_attempts") or {})
+            attempts[str(step_id)] = {
+                "status": str(status),
+                **({"verification_id": str(verification_id)} if verification_id else {}),
+            }
+            current.meta["write_verification_attempts"] = attempts
+            self.flow_spec = current
 
     async def apply_submission(
         self,

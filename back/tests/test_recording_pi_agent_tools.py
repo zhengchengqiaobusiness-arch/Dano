@@ -13,6 +13,7 @@ import dano.agent_tools.tools as agent_tools_module
 from dano.agent_tools.tools import (
     ToolError,
     ask_recording_operator,
+    execute_recording_write_with_verify,
     perturb_recording_replay,
     get_recording_delta,
     get_recording_state,
@@ -35,6 +36,8 @@ from dano.execution.page.flow_spec import (
     flow_spec_fingerprint,
     prepare_flow_release_candidate,
 )
+from dano.execution.page.verification_log import record_verification
+from dano.onboarding.recording_pi import RecordingPiSession
 from dano.onboarding.page_onboard import run_request_onboarding
 
 
@@ -270,6 +273,111 @@ async def test_perturb_replay_rejects_request_id_keyed_overrides_before_executio
         })
 
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_write_verification_executes_each_step_only_once(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "d" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    calls = 0
+
+    async def fake_execute(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={
+                "write_step_id": kwargs["write_step_id"],
+                "verify_request_id": "req-verify",
+                "assertion": kwargs["assertion"],
+            },
+            evidence={"passed": True, "write": {}, "verify": {}, "assertion": {}},
+        )
+        return {
+            "ok": True,
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST"},
+            {"request_id": "req-verify", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+    params = {
+        "write_step_id": "submit",
+        "inputs": {"title": "demo"},
+        "verify_request_id": "req-verify",
+        "assertion": {"path": "data.id", "operator": "exists"},
+    }
+
+    first = await execute_recording_write_with_verify("run-recording", params)
+    second = await execute_recording_write_with_verify("run-recording", params)
+
+    assert calls == 1
+    assert second["duplicate"] is True
+    assert second["verification_id"] == first["verification_id"]
+
+
+@pytest.mark.asyncio
+async def test_failed_write_verification_is_not_reexecuted(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "e" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    calls = 0
+
+    async def fake_execute(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("read-back failed after write")
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST"},
+            {"request_id": "req-verify", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+    params = {
+        "write_step_id": "submit",
+        "inputs": {"title": "demo"},
+        "verify_request_id": "req-verify",
+        "assertion": {"path": "data.id", "operator": "exists"},
+    }
+
+    with pytest.raises(RuntimeError, match="read-back failed"):
+        await execute_recording_write_with_verify("run-recording", params)
+    with pytest.raises(ToolError, match="禁止重复执行"):
+        await execute_recording_write_with_verify("run-recording", params)
+
+    assert calls == 1
 
 
 def test_submit_skill_docs_returns_appended_flow_version(monkeypatch):

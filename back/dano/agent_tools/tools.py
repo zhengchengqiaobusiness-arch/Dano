@@ -1277,23 +1277,64 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
         request_ids.append(cleanup_request_id)
     if not write_request_id:
         raise ToolError("写步骤缺少录制 request_id，不能真实执行验证")
-    requests = _find_captured_requests(session, request_ids)
-    storage_state = None
-    recorder = getattr(session, "_live_recorder", None)
-    if recorder is not None and callable(getattr(recorder, "storage_state", None)):
-        storage_state = await recorder.storage_state()
-    result = await execute_write_with_verify(
-        requests[0],
-        requests[1],
-        write_step_id=step.step_id,
-        inputs=params["inputs"],
-        assertion=params["assertion"],
-        auth_headers=await _recording_auth_headers(session, requests),
-        cleanup_request=requests[2] if cleanup_request_id else None,
-        storage_state=storage_state,
-    )
-    await session.add_verifications(result["verification_ids"])
-    return result
+    async with session.write_verification_lock(step.step_id):
+        existing_attempt = await session.claim_write_verification(step.step_id)
+        if existing_attempt is not None:
+            records = [
+                dict(item)
+                for item in (session.current_flow_spec().meta or {}).get("verification_log") or []
+                if isinstance(item, dict)
+            ]
+            existing_record = next((
+                item for item in reversed(records)
+                if item.get("kind") == "write_execute"
+                and str((item.get("subject") or {}).get("write_step_id") or "") == step.step_id
+            ), None)
+            if existing_record is None:
+                raise ToolError(
+                    f"写步骤 {step.step_id} 已执行过真实验证且未形成可复用证据，禁止重复执行"
+                )
+            evidence = dict(existing_record.get("evidence") or {})
+            verification_id = str(existing_record.get("verification_id") or "")
+            return {
+                "ok": bool(evidence.get("passed")),
+                "write": deepcopy(evidence.get("write")),
+                "verify": deepcopy(evidence.get("verify")),
+                "assertion": deepcopy(evidence.get("assertion")),
+                "cleanup": deepcopy(evidence.get("cleanup")),
+                "verification_id": verification_id,
+                "verification_ids": [verification_id],
+                "verify_verification_id": verification_id,
+                "duplicate": True,
+                "write_executed": False,
+            }
+
+        try:
+            requests = _find_captured_requests(session, request_ids)
+            storage_state = None
+            recorder = getattr(session, "_live_recorder", None)
+            if recorder is not None and callable(getattr(recorder, "storage_state", None)):
+                storage_state = await recorder.storage_state()
+            result = await execute_write_with_verify(
+                requests[0],
+                requests[1],
+                write_step_id=step.step_id,
+                inputs=params["inputs"],
+                assertion=params["assertion"],
+                auth_headers=await _recording_auth_headers(session, requests),
+                cleanup_request=requests[2] if cleanup_request_id else None,
+                storage_state=storage_state,
+            )
+            await session.add_verifications(result["verification_ids"])
+        except BaseException:
+            await session.finish_write_verification(step.step_id, status="failed")
+            raise
+        await session.finish_write_verification(
+            step.step_id,
+            status="succeeded",
+            verification_id=str(result.get("verification_id") or ""),
+        )
+        return {**result, "duplicate": False, "write_executed": True}
 
 
 async def browser_recording_navigate(run_id: str, params: dict) -> dict:
