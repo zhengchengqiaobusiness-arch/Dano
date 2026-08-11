@@ -73,6 +73,44 @@ def _replace_url_path(url: str, path: str, base_url: str) -> str:
     return (base_url or "").rstrip("/") + "/" + path.lstrip("/")
 
 
+def _application_ok(response: object) -> bool:
+    if not isinstance(response, dict):
+        return True
+    if isinstance(response.get("success"), bool):
+        return bool(response["success"])
+    if isinstance(response.get("ok"), bool):
+        return bool(response["ok"])
+    for key in ("code", "statusCode", "status_code"):
+        if key not in response:
+            continue
+        value = response.get(key)
+        return value in {0, 200, "0", "200", "OK", "ok", "success", "SUCCESS"}
+    return True
+
+
+def _replay_outcome(result: dict, *, execution_error: str = "") -> tuple[str, bool, str]:
+    status_code = result.get("status")
+    try:
+        numeric_status = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        numeric_status = None
+    application_ok = _application_ok(result.get("response"))
+    if execution_error:
+        return "inconclusive", False, execution_error
+    if numeric_status is not None and numeric_status >= 400:
+        return "failed", False, f"HTTP {numeric_status}"
+    if not application_ok:
+        return "failed", False, "application result indicates failure"
+    if not bool(result.get("ok")):
+        reason = str(result.get("error") or "").strip()
+        return (
+            "failed" if numeric_status is not None else "inconclusive",
+            False,
+            reason or (f"HTTP {numeric_status}" if numeric_status is not None else "request result is unavailable"),
+        )
+    return "passed", True, ""
+
+
 async def replay_request(
     request: dict,
     *,
@@ -125,13 +163,18 @@ async def replay_request(
         "auth_headers": headers,
     }
     started = perf_counter()
-    result = await execute_api_request(
-        api_request,
-        {},
-        base_url=base_url,
-        storage_state=storage_state,
-        send=True,
-    )
+    execution_error = ""
+    try:
+        result = await execute_api_request(
+            api_request,
+            {},
+            base_url=base_url,
+            storage_state=storage_state,
+            send=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        execution_error = f"{type(exc).__name__}: {exc}"
+        result = {"ok": False, "status": None, "response": None, "error": execution_error, "url": url}
     elapsed_ms = round((perf_counter() - started) * 1000, 3)
     safe_result = _redact({**result, "url": _redact_url(str(result.get("url") or url))})
     subject = {
@@ -140,14 +183,27 @@ async def replay_request(
         "method": api_request["method"],
         "path": urlparse(url).path,
     }
+    verification_status, passed, failure_reason = _replay_outcome(
+        safe_result, execution_error=execution_error,
+    )
     verification_id = record_verification(
         kind="replay_read" if api_request["method"] in {"GET", "HEAD"} else "write_execute",
         subject=subject,
-        evidence={"elapsed_ms": elapsed_ms, "result": safe_result},
+        status=verification_status,
+        evidence={
+            "elapsed_ms": elapsed_ms,
+            "status_code": safe_result.get("status"),
+            "application_ok": _application_ok(safe_result.get("response")),
+            "result": safe_result,
+        },
+        failure_reason=failure_reason,
     )
     return {
-        "ok": bool(safe_result.get("ok")),
+        "ok": passed,
         "status": safe_result.get("status"),
+        "application_ok": _application_ok(safe_result.get("response")),
+        "verification_status": verification_status,
+        "failure_reason": failure_reason,
         "response": safe_result.get("response"),
         "elapsed_ms": elapsed_ms,
         "replay_id": verification_id,
@@ -202,16 +258,205 @@ async def perturb_replay(
         "chain_request_ids": [str(request.get("request_id") or f"req_{index}") for index, request in enumerate(chain)],
         "linked_paths": [{"request_id": item["request_id"], "path": item["path"]} for item in linked_paths],
     }
+    replay_statuses = [str(item.get("verification_status") or "inconclusive") for item in replays]
+    verification_status = (
+        "failed" if "failed" in replay_statuses
+        else "inconclusive" if "inconclusive" in replay_statuses
+        else "passed"
+    )
     verification_id = record_verification(
         kind="perturb_link",
         subject=subject,
+        status=verification_status,
         evidence={"replays": replays, "linked_paths": linked_paths},
+        failure_reason=(
+            "one or more replay requests failed"
+            if verification_status == "failed"
+            else "one or more replay requests were inconclusive"
+            if verification_status == "inconclusive"
+            else ""
+        ),
     )
     return {
         "replays": replays,
         "linked_paths": linked_paths,
         "verification_id": verification_id,
         "verification_ids": [*replay_verification_ids, verification_id],
+    }
+
+
+def _set_nested_value(target: dict, path: str, value: object) -> dict:
+    updated = deepcopy(target)
+    tokens = re.findall(r"[^.\[\]]+", str(path or ""))
+    if not tokens:
+        raise ValueError("target wire path is empty")
+    current: object = updated
+    for token in tokens[:-1]:
+        if not isinstance(current, dict):
+            raise ValueError("target wire path crosses a non-object value")
+        child = current.get(token)
+        if not isinstance(child, dict):
+            child = {}
+            current[token] = child
+        current = child
+    if not isinstance(current, dict):
+        raise ValueError("target wire path parent is not an object")
+    current[tokens[-1]] = deepcopy(value)
+    return updated
+
+
+def _dependency_override(request: dict, wire_path: str, value: object) -> dict:
+    path = str(wire_path or "").removeprefix("request.")
+    if path.startswith("body."):
+        return {"body": _set_nested_value({}, path.removeprefix("body."), value)}
+    if path.startswith("query."):
+        return {"query": {path.removeprefix("query."): deepcopy(value)}}
+    if path.startswith("headers."):
+        return {"headers": {path.removeprefix("headers."): deepcopy(value)}}
+    match = re.fullmatch(r"url_path\[(\d+)\]", path)
+    if match:
+        parsed = urlparse(str(request.get("url") or request.get("path") or ""))
+        parts = [part for part in parsed.path.split("/") if part]
+        index = int(match.group(1))
+        if index >= len(parts):
+            raise ValueError("url_path target index is outside the captured path")
+        parts[index] = str(value)
+        return {"url_path": "/" + "/".join(parts)}
+    raise ValueError(f"unsupported dependency target wire path: {path}")
+
+
+async def verify_dependency(
+    spec,
+    link_id: str,
+    captured_requests: list[dict],
+    *,
+    auth_headers: dict,
+    base_url: str = "",
+    storage_state: dict | None = None,
+) -> dict:
+    """Execute one proposed FlowLink without accepting model-supplied paths."""
+    link = next((item for item in spec.links if item.link_id == str(link_id or "")), None)
+    if link is None:
+        raise ValueError("dependency link does not exist")
+    from dano.execution.page.recording_live import dependency_link_signature
+
+    step_by_id = {step.step_id: step for step in spec.steps}
+    source_step = step_by_id.get(link.source_step_id)
+    target_step = step_by_id.get(link.target_step_id)
+    source_request_id = str(
+        (link.evidence or {}).get("source_request_id")
+        or ((source_step.source_meta if source_step else {}) or {}).get("request_id")
+        or ""
+    )
+    target_request_id = str(
+        (link.evidence or {}).get("target_request_id")
+        or ((target_step.source_meta if target_step else {}) or {}).get("request_id")
+        or ""
+    )
+    request_by_id = {
+        str(item.get("request_id") or ""): item
+        for item in captured_requests if isinstance(item, dict)
+    }
+    source_request = request_by_id.get(source_request_id)
+    target_request = request_by_id.get(target_request_id)
+    if source_request is None or target_request is None:
+        raise ValueError("dependency endpoints are not present in captured request facts")
+
+    link_kind = str((link.meta or {}).get("kind") or "value")
+    signature = dependency_link_signature(link)
+    subject = {
+        "link_id": link.link_id,
+        "signature": signature,
+        "kind": link_kind,
+        "source_request_id": source_request_id,
+        "target_request_id": target_request_id,
+    }
+    source = await replay_request(
+        source_request,
+        auth_headers=auth_headers,
+        base_url=base_url,
+        storage_state=storage_state,
+    )
+    verification_ids = [source["verification_id"]]
+    failure_status = str(source.get("verification_status") or "inconclusive")
+    failure_reason = str(source.get("failure_reason") or "source replay did not pass")
+    evidence: dict = {"source": source, "target": None}
+    if source.get("verification_status") == "passed":
+        try:
+            if link_kind in {"structure", "response_key_map"}:
+                meta = dict(link.meta or {})
+                collection_path = str(meta.get("source_collection_path") or link.source_path or "").removeprefix("response.")
+                collection = _assertion_value(source.get("response"), collection_path)
+                if not isinstance(collection, list) or not collection:
+                    raise ValueError("structure source collection is missing or empty")
+                key_path = str(meta.get("source_key_path") or "id")
+                keys = [_assertion_value(item, key_path) for item in collection]
+                if any(value in (None, "") for value in keys) or len(set(map(str, keys))) != len(keys):
+                    raise ValueError("structure source keys are missing or duplicated")
+                container_path = str(meta.get("target_container_path") or link.target_path or "")
+                stored_body = _request_body(target_request)
+                recorded_container = _assertion_value(
+                    stored_body,
+                    container_path.removeprefix("request.").removeprefix("body."),
+                )
+                if not isinstance(recorded_container, dict) or len(recorded_container) != len(keys):
+                    raise ValueError("dynamic key count does not match target value slot count")
+                slots = list(recorded_container.values())
+                injected_value = {str(key): deepcopy(slots[index]) for index, key in enumerate(keys)}
+                override = _dependency_override(target_request, container_path, injected_value)
+                evidence.update({
+                    "source_collection_path": collection_path,
+                    "source_keys": [str(value) for value in keys],
+                    "target_value_slots": len(slots),
+                    "injected_value": injected_value,
+                })
+            else:
+                source_path = str(link.source_path or "").removeprefix("response.")
+                extracted_value = _assertion_value(source.get("response"), source_path)
+                if extracted_value is None:
+                    raise ValueError("dependency source_path did not resolve in the replay response")
+                override = _dependency_override(target_request, str(link.target_path or ""), extracted_value)
+                injected_value = deepcopy(extracted_value)
+                evidence.update({
+                    "source_path": source_path,
+                    "extracted_value": _redact(extracted_value),
+                    "injected_value": _redact(injected_value),
+                    "injection_equal": injected_value == extracted_value,
+                })
+            target = await replay_request(
+                target_request,
+                overrides=override,
+                auth_headers=auth_headers,
+                base_url=base_url,
+                storage_state=storage_state,
+            )
+            verification_ids.append(target["verification_id"])
+            evidence["target"] = target
+            failure_status = str(target.get("verification_status") or "inconclusive")
+            failure_reason = str(target.get("failure_reason") or "target replay did not pass")
+            if target.get("verification_status") == "passed":
+                failure_status = "passed"
+                failure_reason = ""
+        except ValueError as exc:
+            failure_status = "failed"
+            failure_reason = str(exc)
+    status = failure_status if failure_status in {"passed", "failed", "inconclusive"} else "inconclusive"
+    verification_id = record_verification(
+        kind="dependency_execute",
+        subject=subject,
+        status=status,
+        evidence=evidence,
+        failure_reason=failure_reason,
+    )
+    return {
+        "ok": status == "passed",
+        "status": status,
+        "failure_reason": failure_reason,
+        "link_id": link.link_id,
+        "signature": signature,
+        "verification_id": verification_id,
+        "verification_ids": [*verification_ids, verification_id],
+        "evidence": evidence,
     }
 
 
@@ -230,6 +475,7 @@ def _assertion_value(response: object, path: str):  # noqa: ANN202
 _ASSERTION_KEYS = frozenset({
     "path", "response_path", "operator", "equals", "value",
     "equals_input", "input_path", "verify_records_min_count",
+    "collection_path", "where", "min_matches",
 })
 _RECORD_COLLECTION_KEYS = ("list", "records", "items", "rows", "content")
 
@@ -250,20 +496,76 @@ def _record_count(value: object) -> int:
                 return _record_count(nested)
             except ValueError:
                 pass
-    for key in ("total", "count"):
-        count = value.get(key)
-        if isinstance(count, (int, float)) and not isinstance(count, bool):
-            return max(0, int(count))
-    raise ValueError("verify_records_min_count could not find list/records/items/rows/content or total/count")
+    raise ValueError("verify_records_min_count could not find a concrete list/records/items/rows/content collection")
 
 
-def evaluate_assertion(response: object, assertion: dict, inputs: dict) -> dict:
-    """Evaluate the small deterministic assertion contract used by write verification."""
+def _validate_assertion_contract(assertion: dict) -> None:
     if not isinstance(assertion, dict) or not assertion:
         raise ValueError("assertion must be a non-empty object")
     unknown = sorted(set(assertion) - _ASSERTION_KEYS)
     if unknown:
         raise ValueError(f"unsupported assertion keys: {', '.join(unknown)}")
+    if "collection_path" in assertion or "where" in assertion or "min_matches" in assertion:
+        if not str(assertion.get("collection_path") or ""):
+            raise ValueError("collection assertion requires collection_path")
+        where = assertion.get("where")
+        if not isinstance(where, dict) or not where:
+            raise ValueError("collection assertion requires a non-empty where object")
+        minimum = assertion.get("min_matches")
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+            raise ValueError("collection assertion min_matches must be a positive integer")
+        incompatible = set(assertion) & {
+            "path", "response_path", "operator", "equals", "value",
+            "equals_input", "input_path", "verify_records_min_count",
+        }
+        if incompatible:
+            raise ValueError("collection assertion cannot be combined with scalar assertion operators")
+        for field_path, condition in where.items():
+            if not str(field_path or "") or not isinstance(condition, dict):
+                raise ValueError("collection assertion where entries must be field-path objects")
+            if set(condition) not in ({"equals_input"}, {"equals"}):
+                raise ValueError("collection assertion conditions support only equals_input or equals")
+        return
+    operator = str(assertion.get("operator") or "")
+    if operator and operator not in {"equals", "eq", "not_equals", "ne", "contains", "exists", "truthy"}:
+        raise ValueError(f"unsupported assertion operator: {operator}")
+
+
+def evaluate_assertion(response: object, assertion: dict, inputs: dict) -> dict:
+    """Evaluate the small deterministic assertion contract used by write verification."""
+    _validate_assertion_contract(assertion)
+    if "collection_path" in assertion:
+        collection_path = str(assertion["collection_path"])
+        collection = _assertion_value(response, collection_path)
+        if not isinstance(collection, list):
+            raise ValueError("collection_path does not resolve to a list")
+        where = dict(assertion["where"])
+        matches = 0
+        for record in collection:
+            if not isinstance(record, dict):
+                continue
+            matched = True
+            for field_path, condition in where.items():
+                actual_value = _assertion_value(record, str(field_path))
+                expected_value = (
+                    _assertion_value(inputs, str(condition["equals_input"]))
+                    if "equals_input" in condition
+                    else condition.get("equals")
+                )
+                if actual_value != expected_value:
+                    matched = False
+                    break
+            if matched:
+                matches += 1
+        minimum = int(assertion["min_matches"])
+        return {
+            "passed": matches >= minimum,
+            "collection_path": collection_path,
+            "operator": "collection_where",
+            "actual": matches,
+            "expected": minimum,
+            "where": deepcopy(where),
+        }
     path = str(assertion.get("path") or assertion.get("response_path") or "")
     actual = _assertion_value(response, path) if path else response
     if "verify_records_min_count" in assertion:
@@ -323,6 +625,8 @@ async def execute_write_with_verify(
     settle_ms: int = 250,
 ) -> dict:
     """Execute a real write, read it back, assert the result, then optionally clean up."""
+    # Reject an unknown assertion before the irreversible write request.
+    _validate_assertion_contract(assertion)
     write = await replay_request(
         write_request,
         overrides={"body": inputs} if inputs else None,
@@ -330,9 +634,40 @@ async def execute_write_with_verify(
         base_url=base_url,
         storage_state=storage_state,
     )
+    subject = {
+        "write_step_id": str(write_step_id),
+        "write_request_id": str(write_request.get("request_id") or ""),
+        "verify_request_id": str(verify_request.get("request_id") or ""),
+        "cleanup_request_id": str((cleanup_request or {}).get("request_id") or ""),
+        "assertion": deepcopy(assertion),
+    }
+    if write.get("verification_status") != "passed":
+        status = str(write.get("verification_status") or "inconclusive")
+        verification_id = record_verification(
+            kind="write_execute",
+            subject=subject,
+            status=status if status in {"failed", "inconclusive"} else "failed",
+            evidence={"passed": False, "write": write, "verify": None, "assertion": None, "cleanup": None},
+            failure_reason=str(write.get("failure_reason") or "write request failed"),
+        )
+        return {
+            "ok": False,
+            "write": write,
+            "verify": None,
+            "assertion": None,
+            "cleanup": None,
+            "verification_id": verification_id,
+            "verification_ids": [write["verification_id"], verification_id],
+            "verify_verification_id": "",
+        }
     if settle_ms:
         await asyncio.sleep(max(0, min(int(settle_ms), 5000)) / 1000)
     cleanup = None
+    verify = None
+    check = None
+    verify_read_id = ""
+    verification_status = "inconclusive"
+    failure_reason = ""
     try:
         verify = await replay_request(
             verify_request,
@@ -340,7 +675,17 @@ async def execute_write_with_verify(
             base_url=base_url,
             storage_state=storage_state,
         )
-        check = evaluate_assertion(verify.get("response"), assertion, inputs)
+        if verify.get("verification_status") != "passed":
+            verification_status = str(verify.get("verification_status") or "inconclusive")
+            failure_reason = str(verify.get("failure_reason") or "verify request failed")
+            check = {"passed": False, "reason": failure_reason}
+        else:
+            try:
+                check = evaluate_assertion(verify.get("response"), assertion, inputs)
+            except ValueError as exc:
+                check = {"passed": False, "reason": str(exc)}
+            verification_status = "passed" if check["passed"] else "failed"
+            failure_reason = "" if check["passed"] else str(check.get("reason") or "read-back assertion failed")
         verify_read_id = record_verification(
             kind="verify_read",
             subject={
@@ -348,7 +693,9 @@ async def execute_write_with_verify(
                 "verify_request_id": str(verify_request.get("request_id") or ""),
                 "assertion": deepcopy(assertion),
             },
+            status=verification_status,
             evidence={"passed": bool(verify.get("ok") and check["passed"]), "verify": verify, "assertion": check},
+            failure_reason=failure_reason,
         )
     finally:
         if cleanup_request is not None:
@@ -358,20 +705,15 @@ async def execute_write_with_verify(
                 base_url=base_url,
                 storage_state=storage_state,
             )
-    subject = {
-        "write_step_id": str(write_step_id),
-        "write_request_id": str(write_request.get("request_id") or ""),
-        "verify_request_id": str(verify_request.get("request_id") or ""),
-        "cleanup_request_id": str((cleanup_request or {}).get("request_id") or ""),
-        "assertion": deepcopy(assertion),
-    }
     verification_id = record_verification(
         kind="write_execute",
         subject=subject,
+        status=verification_status,
         evidence={"passed": bool(write.get("ok") and verify.get("ok") and check["passed"]), "write": write, "verify": verify, "assertion": check, "cleanup": cleanup},
+        failure_reason=failure_reason,
     )
     return {
-        "ok": bool(write.get("ok") and verify.get("ok") and check["passed"]),
+        "ok": verification_status == "passed",
         "write": write,
         "verify": verify,
         "assertion": check,

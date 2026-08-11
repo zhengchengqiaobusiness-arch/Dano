@@ -297,6 +297,7 @@ async def test_write_verification_executes_each_step_only_once(monkeypatch):
                 "verify_request_id": "req-verify",
                 "assertion": kwargs["assertion"],
             },
+            status="passed",
             evidence={"passed": True, "write": {}, "verify": {}, "assertion": {}},
         )
         return {

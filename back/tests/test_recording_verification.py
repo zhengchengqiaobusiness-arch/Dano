@@ -19,6 +19,7 @@ from dano.execution.page.flow_spec import (
     apply_flow_edits,
 )
 from dano.execution.page.replay import evaluate_assertion, execute_write_with_verify
+from dano.execution.page.recording_live import dependency_link_signature
 from dano.execution.page.verification_log import (
     _clear_verifications_for_tests,
     get_verification,
@@ -124,6 +125,17 @@ def _spec_with_unproposed_value_link() -> FlowSpec:
     )
 
 
+def _record_dependency_verification(spec: FlowSpec, link_id: str = "link-1", *, status: str = "passed") -> str:
+    link = next(item for item in spec.links if item.link_id == link_id)
+    return record_verification(
+        kind="dependency_execute",
+        subject={"link_id": link.link_id, "signature": dependency_link_signature(link)},
+        status=status,
+        evidence={"injection_equal": status == "passed"},
+        failure_reason="dependency verification failed" if status != "passed" else "",
+    )
+
+
 def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     todos = verification_todos(_spec_with_unproposed_value_link())
 
@@ -133,21 +145,14 @@ def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     assert candidate["source_path"] == "response.data.jobId"
     assert candidate["target_request_id"] == "req-submit"
     assert candidate["target_path"] == "body.jobId"
-    assert candidate["suggested_tool"] == "perturb_replay"
-    assert candidate["completion_ops"] == ["propose_dependency", "confirm_dependency"]
+    assert candidate["suggested_tool"] == "submit_recording_repair"
+    assert candidate["completion_ops"] == ["propose_dependency", "verify_dependency", "confirm_dependency"]
 
 
-def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
+def test_candidate_link_id_supports_propose_verify_then_confirm():
     spec = _spec_with_unproposed_value_link()
     candidate = next(item for item in verification_todos(spec) if item["kind"] == "dependency_candidate")
-    verification_id = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-detail", "req-submit"]},
-        evidence={"linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}]},
-    )
-
-    updated = apply_flow_edits(spec, [
-        {
+    proposed = apply_flow_edits(spec, [{
             "op": "propose_dependency",
             "link_id": candidate["link_id"],
             "source_request_id": candidate["source_request_id"],
@@ -155,13 +160,13 @@ def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
             "target_request_id": candidate["target_request_id"],
             "target_path": candidate["target_path"],
             "evidence": {"heuristic_candidate": True},
-        },
-        {
+        }])
+    verification_id = _record_dependency_verification(proposed, candidate["link_id"])
+    updated = apply_flow_edits(proposed, [{
             "op": "confirm_dependency",
             "link_id": candidate["link_id"],
             "verification_id": verification_id,
-        },
-    ])
+        }])
 
     assert updated.links[0].link_id == candidate["link_id"]
     assert updated.links[0].confirmed is True
@@ -170,8 +175,7 @@ def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
     ] == ["propose_dependency", "confirm_dependency"]
     assert not any(item["kind"].startswith("dependency") for item in verification_todos(updated))
 
-    replayed = apply_flow_edits(updated, [
-        {
+    replayed = apply_flow_edits(updated, [{
             "op": "propose_dependency",
             "link_id": candidate["link_id"],
             "source_request_id": candidate["source_request_id"],
@@ -179,13 +183,12 @@ def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
             "target_request_id": candidate["target_request_id"],
             "target_path": candidate["target_path"],
             "evidence": {"heuristic_candidate": True},
-        },
-        {
+        }])
+    replayed = apply_flow_edits(replayed, [{
             "op": "confirm_dependency",
             "link_id": candidate["link_id"],
             "verification_id": verification_id,
-        },
-    ])
+        }])
     assert len(replayed.links) == 1
     assert [
         item["op"] for item in (replayed.meta or {}).get("recording_agent_ops") or []
@@ -197,20 +200,10 @@ async def test_repair_submission_persists_candidate_propose_and_confirm_ops():
     spec = _spec_with_unproposed_value_link()
     spec.capabilities = []
     candidate = next(item for item in verification_todos(spec) if item["kind"] == "dependency_candidate")
-    verification_id = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-detail", "req-submit"]},
-        evidence={
-            "passed": True,
-            "linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}],
-        },
-    )
-
-    updated = await apply_recording_agent_submission(
+    proposed = await apply_recording_agent_submission(
         spec,
         mode="repair",
-        submission={"ops": [
-            {
+        submission={"ops": [{
                 "op": "propose_dependency",
                 "link_id": candidate["link_id"],
                 "source_request_id": candidate["source_request_id"],
@@ -218,13 +211,17 @@ async def test_repair_submission_persists_candidate_propose_and_confirm_ops():
                 "target_request_id": candidate["target_request_id"],
                 "target_path": candidate["target_path"],
                 "evidence": {"heuristic_candidate": True},
-            },
-            {
+            }]},
+    )
+    verification_id = _record_dependency_verification(proposed, candidate["link_id"])
+    updated = await apply_recording_agent_submission(
+        proposed,
+        mode="repair",
+        submission={"ops": [{
                 "op": "confirm_dependency",
                 "link_id": candidate["link_id"],
                 "verification_id": verification_id,
-            },
-        ]},
+            }]},
     )
 
     assert len(updated.links) == 1
@@ -267,6 +264,28 @@ def test_unknown_assertion_keys_are_rejected_instead_of_falling_back_to_truthy()
         )
 
 
+def test_collection_assertion_requires_a_matching_record_not_an_unrelated_total():
+    assertion = {
+        "collection_path": "data.list",
+        "where": {
+            "type": {"equals_input": "type"},
+            "reason": {"equals_input": "reason"},
+        },
+        "min_matches": 1,
+    }
+    response = {
+        "data": {
+            "list": [{"type": 1, "reason": "other"}, {"type": 2, "reason": "mine"}],
+            "total": 99,
+        },
+    }
+
+    assert evaluate_assertion(response, assertion, {"type": 2, "reason": "mine"})["passed"] is True
+    failed = evaluate_assertion(response, assertion, {"type": 2, "reason": "missing"})
+    assert failed["passed"] is False
+    assert failed["actual"] == 0
+
+
 def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
     with pytest.raises(ValueError, match="verification_id"):
         apply_flow_edits(_spec(), [{
@@ -276,11 +295,15 @@ def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
         }])
 
     wrong = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-other", "req-submit"]},
-        evidence={"linked_paths": [{"request_id": "req-other", "path": "response.id"}]},
+        kind="dependency_execute",
+        subject={
+            "link_id": "link-other",
+            "signature": dependency_link_signature(_spec().links[0]),
+        },
+        status="passed",
+        evidence={"injection_equal": True},
     )
-    with pytest.raises(ValueError, match="endpoints"):
+    with pytest.raises(ValueError, match="subject link_id"):
         apply_flow_edits(_spec(), [{
             "op": "confirm_dependency",
             "link_id": "link-1",
@@ -289,11 +312,7 @@ def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
 
 
 def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
-    link_verification = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-detail", "req-submit"]},
-        evidence={"linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}]},
-    )
+    link_verification = _record_dependency_verification(_spec())
     assertion = {"path": "data.kind", "equals_input": "kind"}
     write_verification = record_verification(
         kind="write_execute",
@@ -303,12 +322,14 @@ def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
             "verify_request_id": "req-verify",
             "assertion": assertion,
         },
+        status="passed",
         evidence={"passed": True},
     )
     options = [{"label": "甲", "value": "A"}, {"label": "乙", "value": "B"}]
     enum_verification = record_verification(
         kind="enum_snapshot",
         subject={"url": "https://example.test/items"},
+        status="passed",
         evidence={"snapshot": {"elements": [{"role": "combobox", "options": options}]}},
     )
     updated = apply_flow_edits(_spec(), [
@@ -343,7 +364,13 @@ async def test_execute_write_with_verify_records_one_grounded_composite(monkeypa
     async def fake_replay(request, **kwargs):
         calls.append((request["request_id"], kwargs))
         response = {"data": {"kind": "A"}} if request["request_id"] == "verify" else {"ok": True}
-        return {"ok": True, "response": response, "verification_id": f"verification-{request['request_id']}"}
+        return {
+            "ok": True,
+            "verification_status": "passed",
+            "failure_reason": "",
+            "response": response,
+            "verification_id": f"verification-{request['request_id']}",
+        }
 
     monkeypatch.setattr("dano.execution.page.replay.replay_request", fake_replay)
     result = await execute_write_with_verify(
@@ -370,6 +397,8 @@ async def test_execute_write_with_verify_does_not_verify_an_empty_readback(monke
         response = {"list": [], "total": 0} if request["request_id"] == "verify" else {"code": 0}
         return {
             "ok": True,
+            "verification_status": "passed",
+            "failure_reason": "",
             "response": response,
             "verification_id": f"verification-{request['request_id']}",
         }
@@ -388,6 +417,40 @@ async def test_execute_write_with_verify_does_not_verify_an_empty_readback(monke
     assert result["ok"] is False
     assert result["assertion"]["actual"] == 0
     assert get_verification(result["verification_id"])["evidence"]["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_execute_write_failure_stops_before_verify_and_cleanup(monkeypatch):
+    calls = []
+
+    async def fake_replay(request, **_kwargs):
+        calls.append(request["request_id"])
+        return {
+            "ok": False,
+            "verification_status": "failed",
+            "failure_reason": "HTTP 500",
+            "response": {"code": 500},
+            "verification_id": "verification-write",
+        }
+
+    monkeypatch.setattr("dano.execution.page.replay.replay_request", fake_replay)
+    result = await execute_write_with_verify(
+        {"request_id": "write", "method": "POST"},
+        {"request_id": "verify", "method": "GET"},
+        write_step_id="submit",
+        inputs={"kind": "A"},
+        assertion={"path": "data.kind", "equals_input": "kind"},
+        auth_headers={},
+        cleanup_request={"request_id": "cleanup", "method": "DELETE"},
+        settle_ms=0,
+    )
+
+    assert result["ok"] is False
+    assert result["verify"] is None
+    assert calls == ["write"]
+    record = get_verification(result["verification_id"])
+    assert record["status"] == "failed"
+    assert record["failure_reason"] == "HTTP 500"
 
 
 class _UnavailableSession:
@@ -445,20 +508,18 @@ async def test_zero_operator_verification_loop_completes_with_executor_evidence(
     spec = _spec()
     spec.goal = {"intent": "Update item"}
     assertion = {"path": "data.kind", "equals_input": "kind"}
-    link_id = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-detail", "req-submit"]},
-        evidence={"linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}]},
-    )
+    link_id = _record_dependency_verification(spec)
     write_id = record_verification(
         kind="write_execute",
         subject={"write_step_id": "submit", "verify_request_id": "req-verify", "assertion": assertion},
+        status="passed",
         evidence={"passed": True},
     )
     options = [{"label": "甲", "value": "A"}]
     enum_id = record_verification(
         kind="enum_snapshot",
         subject={"url": "https://example.test/items"},
+        status="passed",
         evidence={"snapshot": {"elements": [{"options": options}]}},
     )
 
@@ -544,11 +605,7 @@ def test_machine_publish_gate_rejects_unfinished_verification_but_has_debug_esca
 
 @pytest.mark.asyncio
 async def test_verification_ops_flow_through_the_agent_repair_submission_path():
-    verification_id = record_verification(
-        kind="perturb_link",
-        subject={"chain_request_ids": ["req-detail", "req-submit"]},
-        evidence={"linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}]},
-    )
+    verification_id = _record_dependency_verification(_spec())
     session = RecordingPiSession(
         tenant="tenant",
         subsystem="system",

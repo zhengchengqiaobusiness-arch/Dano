@@ -368,6 +368,12 @@ const RecordingBindingAssertion = Type.Object({
   equals_input: Type.Optional(Type.String()),
   input_path: Type.Optional(Type.String()),
   verify_records_min_count: Type.Optional(Type.Integer({ minimum: 0 })),
+  collection_path: Type.Optional(Type.String({ minLength: 1 })),
+  where: Type.Optional(Type.Record(Type.String(), Type.Union([
+    Type.Object({ equals_input: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+    Type.Object({ equals: Type.Any() }, { additionalProperties: false }),
+  ]))),
+  min_matches: Type.Optional(Type.Integer({ minimum: 1 })),
 }, { additionalProperties: false, minProperties: 1 });
 
 const LiveRecordingOperation = Type.Union([
@@ -603,6 +609,15 @@ export const recordingTools = [
       ...RecordingIdentity,
       chain_request_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
       perturb: ReplayOverrides,
+    }, { additionalProperties: false }),
+  }),
+  proxyTool({
+    name: "verify_dependency",
+    label: "验证步骤依赖",
+    description: "按 FlowSpec 中已提议的 link_id 执行来源步骤、提取响应值并注入目标步骤。步骤、字段路径和签名全部由执行器读取并签发，模型不得自行提交请求链或伪造验证证据。",
+    parameters: Type.Object({
+      ...RecordingIdentity,
+      link_id: Type.String({ minLength: 1 }),
     }, { additionalProperties: false }),
   }),
   proxyTool({

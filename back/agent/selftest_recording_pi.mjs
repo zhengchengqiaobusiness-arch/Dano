@@ -22,6 +22,7 @@ const expectedTools = [
   "ask_operator",
   "replay_request",
   "perturb_replay",
+  "verify_dependency",
   "execute_write_with_verify",
   "browser_navigate",
   "browser_snapshot",
@@ -194,6 +195,15 @@ function verifyPerturbReplaySchema() {
     JSON.stringify(Object.keys(perturb?.properties || {}).sort())
       === JSON.stringify(["body", "headers", "query", "url_path"]),
     "perturb replay override fields mismatch",
+  );
+}
+function verifyDependencySchema() {
+  const tool = recordingTools.find((item) => item.name === "verify_dependency");
+  assert(tool?.parameters?.additionalProperties === false, "dependency verification must reject unknown keys");
+  assert(
+    JSON.stringify(Object.keys(tool?.parameters?.properties || {}).sort())
+      === JSON.stringify(["link_id"]),
+    "dependency verification must accept only executor-owned link_id",
   );
 }
 function verifyDeltaPaginationSchema() {
@@ -434,6 +444,7 @@ try {
   verifyReviewToolSchema();
 verifyWriteAssertionSchema();
 verifyPerturbReplaySchema();
+verifyDependencySchema();
 verifyDeltaPaginationSchema();
   verifyServerOwnedRecordingContext();
   verifyPlanToolCompatibility();

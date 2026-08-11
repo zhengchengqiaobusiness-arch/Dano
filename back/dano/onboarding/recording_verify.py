@@ -70,8 +70,8 @@ def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dic
             "value_sample": str(candidate.get("value_sample") or "")[:128],
             "occurrences": int(candidate.get("occurrences") or 1),
             "confidence": 0.9,
-            "suggested_tool": "perturb_replay",
-            "completion_ops": ["propose_dependency", "confirm_dependency"],
+            "suggested_tool": "submit_recording_repair",
+            "completion_ops": ["propose_dependency", "verify_dependency", "confirm_dependency"],
         })
     return todos
 
@@ -93,7 +93,7 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
             "target_step_id": link.target_step_id,
             "target_request_id": str((link.evidence or {}).get("target_request_id") or ""),
             "target_path": link.target_path,
-            "suggested_tool": "perturb_replay",
+            "suggested_tool": "verify_dependency",
             "completion_op": "confirm_dependency",
         })
     todos.extend(_dependency_candidate_todos(spec, skipped))
@@ -392,13 +392,12 @@ async def run_recording_verification(
         ))
         prompt = (
             "进入录后自主验证。先调用 get_recording_state 和 get_validation_report，逐项处理下面的"
-            " verification_todos。依赖用 perturb_replay，写步骤用 execute_write_with_verify，"
+            " verification_todos。已提议的依赖只用 verify_dependency(link_id) 验证，写步骤用 execute_write_with_verify，"
             "枚举/分支缺口用 browser_* 补采。只能使用工具返回的 verification_id，最后调用"
             " submit_recording_repair 提交 confirm_dependency、bind_verify_read、attach_enum_options。"
-            "dependency_candidate 是后端从真实请求值链发现的高置信候选：按其 chain_request_ids"
-            " 调用 perturb_replay，成功后在同一次 repair 中先用候选给定的 link_id 提交"
-            " propose_dependency，再用同一 link_id 和工具返回的 verification_id 提交"
-            " confirm_dependency。"
+            "dependency_candidate 是后端从真实请求值链发现的高置信候选：先单独提交"
+            " propose_dependency；读取刷新后的验证报告后调用 verify_dependency(link_id)，"
+            "再用它返回的 verification_id 提交 confirm_dependency。"
             "本轮不要提交 mark_unverified；重试耗尽由后端统一处理。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )

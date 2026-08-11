@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import re
 from threading import RLock
+from typing import Literal
 from uuid import uuid4
 
 
@@ -18,6 +19,7 @@ VERIFICATION_KINDS = frozenset({
     "write_execute",
     "verify_read",
     "enum_snapshot",
+    "dependency_execute",
 })
 
 _LOCK = RLock()
@@ -40,18 +42,29 @@ def _sanitize(node, key_hint: str = ""):  # noqa: ANN001, ANN202
     return deepcopy(node)
 
 
-def record_verification(*, kind: str, subject: dict, evidence: dict) -> str:
+def record_verification(
+    *,
+    kind: str,
+    subject: dict,
+    status: Literal["passed", "failed", "inconclusive"],
+    evidence: dict,
+    failure_reason: str = "",
+) -> str:
     """Persist executor-generated evidence and return its unguessable id."""
     if kind not in VERIFICATION_KINDS:
         raise ValueError(f"unsupported verification kind: {kind}")
     if not isinstance(subject, dict) or not isinstance(evidence, dict):
         raise TypeError("verification subject and evidence must be objects")
+    if status not in {"passed", "failed", "inconclusive"}:
+        raise ValueError("verification status must be passed, failed or inconclusive")
     verification_id = str(uuid4())
     record = {
         "verification_id": verification_id,
         "kind": kind,
+        "status": status,
         "subject": _sanitize(subject),
         "evidence": _sanitize(evidence),
+        "failure_reason": str(failure_reason or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     with _LOCK:
@@ -66,15 +79,25 @@ def get_verification(verification_id: str) -> dict | None:
         return deepcopy(record) if record is not None else None
 
 
+def _normalize_record(record: dict) -> dict:
+    normalized = deepcopy(record)
+    if normalized.get("status") not in {"passed", "failed", "inconclusive"}:
+        normalized["status"] = "inconclusive"
+        normalized.setdefault("failure_reason", "legacy verification record has no explicit status")
+    else:
+        normalized.setdefault("failure_reason", "")
+    return normalized
+
+
 def find_verification(verification_id: str, verification_log: list[dict] | None = None) -> dict | None:
     """Resolve live evidence first, then a trusted persisted FlowSpec log."""
     record = get_verification(verification_id)
     if record is not None:
-        return record
+        return _normalize_record(record)
     target = str(verification_id or "")
     for item in verification_log or []:
         if isinstance(item, dict) and str(item.get("verification_id") or "") == target:
-            return deepcopy(item)
+            return _normalize_record(item)
     return None
 
 

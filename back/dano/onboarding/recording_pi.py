@@ -383,6 +383,7 @@ class RecordingPiSession:
         verification_id = record_verification(
             kind="enum_snapshot",
             subject={"url": str(snapshot.get("url") or "")},
+            status="passed",
             evidence={"snapshot": snapshot},
         )
         await self.add_verifications([verification_id])

@@ -1255,6 +1255,32 @@ async def perturb_recording_replay(run_id: str, params: dict) -> dict:
     return result
 
 
+async def verify_recording_dependency(run_id: str, params: dict) -> dict:
+    from dano.execution.page.replay import verify_dependency
+
+    _strict_recording_params(
+        params,
+        required={"link_id"},
+        optional={"recording_id", "flow_version"},
+    )
+    session = _recording_session(run_id, params)
+    spec = session.current_flow_spec()
+    requests = _captured_recording_requests(session)
+    recorder = getattr(session, "_live_recorder", None)
+    storage_state = None
+    if recorder is not None and callable(getattr(recorder, "storage_state", None)):
+        storage_state = await recorder.storage_state()
+    result = await verify_dependency(
+        spec,
+        str(params["link_id"]),
+        requests,
+        auth_headers=await _recording_auth_headers(session, requests),
+        storage_state=storage_state,
+    )
+    await session.add_verifications(result["verification_ids"])
+    return result
+
+
 async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict:
     from dano.execution.page.replay import execute_write_with_verify
 
@@ -1297,7 +1323,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
             evidence = dict(existing_record.get("evidence") or {})
             verification_id = str(existing_record.get("verification_id") or "")
             return {
-                "ok": bool(evidence.get("passed")),
+                "ok": existing_record.get("status") == "passed",
                 "write": deepcopy(evidence.get("write")),
                 "verify": deepcopy(evidence.get("verify")),
                 "assertion": deepcopy(evidence.get("assertion")),
@@ -3028,6 +3054,7 @@ TOOLS = {
     "ask_operator": ask_recording_operator,
     "replay_request": replay_recording_request,
     "perturb_replay": perturb_recording_replay,
+    "verify_dependency": verify_recording_dependency,
     "execute_write_with_verify": execute_recording_write_with_verify,
     "browser_navigate": browser_recording_navigate,
     "browser_snapshot": browser_recording_snapshot,

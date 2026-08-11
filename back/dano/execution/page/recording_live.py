@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -528,10 +529,29 @@ def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict: 
     )
     if record is None or str(record.get("kind") or "") not in kinds:
         raise ValueError("verification_id is missing or has the wrong kind")
-    evidence = record.get("evidence") or {}
-    if evidence.get("passed") is False:
-        raise ValueError("verification evidence did not pass")
+    if record.get("status") != "passed":
+        raise ValueError("verification evidence status is not passed")
     return record
+
+
+def dependency_link_signature(link) -> str:  # noqa: ANN001
+    """Stable signature covered by an executor-owned dependency verification."""
+    meta = dict(getattr(link, "meta", None) or {})
+    payload = {
+        "kind": str(meta.get("kind") or "value"),
+        "source_step_id": str(getattr(link, "source_step_id", "") or ""),
+        "source_path": str(getattr(link, "source_path", "") or "").removeprefix("response."),
+        "target_step_id": str(getattr(link, "target_step_id", "") or ""),
+        "target_path": str(getattr(link, "target_path", "") or "").removeprefix("request."),
+        "source_collection_path": str(meta.get("source_collection_path") or ""),
+        "source_key_path": str(meta.get("source_key_path") or ""),
+        "source_label_path": str(meta.get("source_label_path") or ""),
+        "target_container_path": str(meta.get("target_container_path") or ""),
+        "value_binding": meta.get("value_binding") or {},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def _step_request_id(spec, step_id: str) -> str:  # noqa: ANN001
@@ -1119,32 +1139,12 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         link = next((item for item in spec.links if item.link_id == link_id), None)
         if link is None:
             raise ValueError("confirm_dependency target link does not exist")
-        verification_record = _trusted_verification(spec, verification_id, {"perturb_link"})
+        verification_record = _trusted_verification(spec, verification_id, {"dependency_execute"})
         subject = verification_record.get("subject") or {}
-        chain = [str(value) for value in subject.get("chain_request_ids") or []]
-        source_request_id = str((link.evidence or {}).get("source_request_id") or _step_request_id(spec, link.source_step_id))
-        target_request_id = str((link.evidence or {}).get("target_request_id") or _step_request_id(spec, link.target_step_id))
-        if not source_request_id or not target_request_id or source_request_id not in chain or target_request_id not in chain:
-            raise ValueError("perturb verification subject does not match dependency endpoints")
-        if chain.index(source_request_id) >= chain.index(target_request_id):
-            raise ValueError("perturb verification chain order does not match dependency")
-        if not ((verification_record.get("evidence") or {}).get("linked_paths") or subject.get("linked_paths")):
-            raise ValueError("perturb verification did not observe a linked value")
-        if str((link.meta or {}).get("kind") or "") == "structure":
-            observed_paths = [
-                re.sub(r"\[\d+\]", "[*]", str(item.get("path") or "")).removeprefix("response.")
-                for item in (
-                    (verification_record.get("evidence") or {}).get("linked_paths")
-                    or subject.get("linked_paths")
-                    or []
-                )
-                if isinstance(item, dict)
-            ]
-            expected_path = re.sub(r"\[\d+\]", "[*]", str(link.source_path or "")).removeprefix("response.")
-            if expected_path not in observed_paths:
-                raise ValueError(
-                    "perturb verification did not observe the structure dependency source path"
-                )
+        if str(subject.get("link_id") or "") != link.link_id:
+            raise ValueError("dependency verification subject link_id does not match")
+        if str(subject.get("signature") or "") != dependency_link_signature(link):
+            raise ValueError("dependency verification signature does not match current link")
         link.confirmed = True
         link.confidence = 1.0
         link.meta = {**(link.meta or {}), "verified": True, "actor": "agent", "verification_id": verification_id}

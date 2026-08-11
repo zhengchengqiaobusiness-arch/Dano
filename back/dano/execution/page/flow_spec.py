@@ -16095,7 +16095,7 @@ def _executor_fact_check_is_verified(spec: FlowSpec, fact_check: dict) -> bool:
     record = find_verification(verification_id, log)
     if record is None:
         return False
-    return (record.get("evidence") or {}).get("passed") is not False
+    return record.get("status") == "passed"
 
 
 def _prune_invalid_fact_checks(spec: FlowSpec) -> None:

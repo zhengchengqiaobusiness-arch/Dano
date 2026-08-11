@@ -6,15 +6,17 @@ import pytest
 from aiohttp import web
 
 from dano.execution.page import value_tracing
-from dano.execution.page.replay import perturb_replay, replay_request
+from dano.execution.page.replay import perturb_replay, replay_request, verify_dependency
 from dano.execution.page.value_tracing import discover_value_links
 from dano.execution.page.verification_log import (
     _clear_verifications_for_tests,
+    find_verification,
     get_verification,
     record_verification,
 )
 from dano.agent_tools.tools import TOOLS
-from dano.execution.page.flow_spec import FlowSpec
+from dano.execution.page.flow_spec import FlowLink, FlowSpec, FlowStep, RequestFact, RequestFacts
+from dano.execution.page.recording_live import dependency_link_signature
 from dano.onboarding.recording_pi import RecordingPiSession
 
 
@@ -41,9 +43,18 @@ async def replay_server():
     async def get_state(_request):
         return web.json_response({"data": {"id": state["id"]}})
 
+    async def http_failure(_request):
+        return web.json_response({"code": 400, "message": "bad request"}, status=400)
+
+    async def business_failure(_request):
+        return web.json_response({"code": 500, "message": "business rejected"})
+
     app = web.Application()
     app.router.add_post("/state", set_state)
     app.router.add_get("/state", get_state)
+    app.router.add_get("/http-failure", http_failure)
+    app.router.add_post("/http-failure", http_failure)
+    app.router.add_get("/business-failure", business_failure)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -78,6 +89,7 @@ async def test_replay_request_uses_existing_executor_and_redacts_credentials(rep
     assert "live-secret-token" not in json.dumps(result)
     record = get_verification(result["verification_id"])
     assert record["kind"] == "write_execute"
+    assert record["status"] == "passed"
     assert record["subject"]["request_id"] == "req-write"
 
 
@@ -177,13 +189,137 @@ def test_verification_ids_are_executor_generated_and_defensively_copied():
     verification_id = record_verification(
         kind="enum_snapshot",
         subject={"request_id": "req-1"},
+        status="passed",
         evidence={"options": ["A"]},
     )
     first = get_verification(verification_id)
     first["evidence"]["options"].append("B")
     assert get_verification(verification_id)["evidence"]["options"] == ["A"]
     with pytest.raises(ValueError):
-        record_verification(kind="invented", subject={}, evidence={})
+        record_verification(kind="invented", subject={}, status="passed", evidence={})
+
+
+def test_legacy_verification_without_status_is_inconclusive():
+    record = find_verification("legacy", [{
+        "verification_id": "legacy",
+        "kind": "verify_read",
+        "subject": {},
+        "evidence": {"passed": True},
+    }])
+
+    assert record["status"] == "inconclusive"
+    assert "no explicit status" in record["failure_reason"]
+
+
+def test_new_verification_requires_an_explicit_status():
+    with pytest.raises(TypeError, match="status"):
+        record_verification(kind="enum_snapshot", subject={}, evidence={})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "expected_reason"),
+    [("/http-failure", "HTTP 400"), ("/business-failure", "application result")],
+)
+async def test_replay_http_or_business_failure_never_mints_passed_evidence(
+    replay_server, path, expected_reason,
+):
+    result = await replay_request(
+        {"request_id": "req-fail", "method": "GET", "url": replay_server + path},
+        auth_headers={},
+    )
+
+    assert result["ok"] is False
+    record = get_verification(result["verification_id"])
+    assert record["status"] == "failed"
+    assert expected_reason in record["failure_reason"]
+
+
+def _dependency_spec(target_url: str) -> tuple[FlowSpec, list[dict]]:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="source",
+                method="GET",
+                path="/state",
+                source_meta={"request_id": "req-source"},
+            ),
+            FlowStep(
+                step_id="target",
+                method="POST",
+                path="/state",
+                source_meta={"request_id": "req-target"},
+            ),
+        ],
+        links=[FlowLink(
+            link_id="link-state-id",
+            source_step_id="source",
+            source_path="response.data.id",
+            target_step_id="target",
+            target_path="body.id",
+            evidence={"source_request_id": "req-source", "target_request_id": "req-target"},
+            meta={"kind": "value", "verified": False},
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-source", method="GET", path="/state"),
+            RequestFact(request_id="req-target", method="POST", path="/state"),
+        ]),
+    )
+    captured = [
+        {"request_id": "req-source", "method": "GET", "url": target_url.rsplit("/", 1)[0] + "/state"},
+        {
+            "request_id": "req-target",
+            "method": "POST",
+            "url": target_url,
+            "content_type": "application/json",
+            "post_data": '{"id":"recorded-id"}',
+        },
+    ]
+    return spec, captured
+
+
+@pytest.mark.asyncio
+async def test_verify_dependency_uses_flowspec_paths_and_executor_signature(replay_server):
+    spec, captured = _dependency_spec(replay_server + "/state")
+
+    result = await verify_dependency(
+        spec,
+        "link-state-id",
+        captured,
+        auth_headers={},
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "passed"
+    record = get_verification(result["verification_id"])
+    assert record["kind"] == "dependency_execute"
+    assert record["status"] == "passed"
+    assert record["subject"] == {
+        "link_id": "link-state-id",
+        "signature": dependency_link_signature(spec.links[0]),
+        "kind": "value",
+        "source_request_id": "req-source",
+        "target_request_id": "req-target",
+    }
+    assert record["evidence"]["injection_equal"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_dependency_target_failure_never_confirms_evidence(replay_server):
+    spec, captured = _dependency_spec(replay_server + "/http-failure")
+
+    result = await verify_dependency(
+        spec,
+        "link-state-id",
+        captured,
+        auth_headers={},
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    record = get_verification(result["verification_id"])
+    assert record["status"] == "failed"
+    assert "HTTP 400" in record["failure_reason"]
 
 
 @pytest.mark.asyncio
@@ -197,6 +333,7 @@ async def test_recording_session_persists_executor_verification_in_flow_spec():
     verification_id = record_verification(
         kind="verify_read",
         subject={"request_id": "read"},
+        status="passed",
         evidence={"Authorization": "Bearer never-return-this-token"},
     )
     await session.add_verifications([verification_id])
@@ -206,4 +343,7 @@ async def test_recording_session_persists_executor_verification_in_flow_spec():
 
 
 def test_recording_execution_tools_are_registered():
-    assert {"replay_request", "perturb_replay", "list_link_candidates", "get_verification"} <= TOOLS.keys()
+    assert {
+        "replay_request", "perturb_replay", "verify_dependency",
+        "list_link_candidates", "get_verification",
+    } <= TOOLS.keys()
