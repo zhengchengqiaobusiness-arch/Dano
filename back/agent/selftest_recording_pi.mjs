@@ -185,6 +185,12 @@ function verifyWriteAssertionSchema() {
     "write assertion schema must expose verify_records_min_count",
   );
 }
+function verifyDeltaPaginationSchema() {
+  const tool = recordingTools.find((item) => item.name === "get_recording_delta");
+  const limit = tool?.parameters?.properties?.limit;
+  assert(limit?.type === "integer" && limit.maximum === 50, "delta tool must expose a bounded page limit");
+  assert(tool?.description?.includes("has_more"), "delta tool must explain cursor pagination to Pi");
+}
 function verifyServerOwnedRecordingContext() {
   for (const tool of recordingTools) {
     const properties = tool?.parameters?.properties || {};
@@ -481,6 +487,7 @@ try {
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
   verifyWriteAssertionSchema();
+  verifyDeltaPaginationSchema();
   verifyServerOwnedRecordingContext();
   verifyPlanToolCompatibility();
   verifyTruncatedPlanFallback();

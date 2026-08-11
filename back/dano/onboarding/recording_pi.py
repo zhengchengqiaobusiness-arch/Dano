@@ -333,7 +333,7 @@ class RecordingPiSession:
         self._live_goal_text = str(goal_text or "")
         self._operator_asker = operator_asker
 
-    async def get_recording_delta(self, since_seq: int = 0) -> dict[str, Any]:
+    async def get_recording_delta(self, since_seq: int = 0, *, limit: int = 25) -> dict[str, Any]:
         from dano.execution.page.recording_live import recording_delta
 
         if self._live_recorder is None:
@@ -341,6 +341,7 @@ class RecordingPiSession:
         return recording_delta(
             self._live_recorder,
             since_seq=since_seq,
+            limit=limit,
             goal_text=self._live_goal_text,
         )
 
@@ -394,6 +395,7 @@ class RecordingPiSession:
         return await self.prompt(
             "你正在伴随分析网页录制。先调用 get_recording_state，再调用 "
             f"get_recording_delta(since_seq={since_seq}) 拉取新增事实。触发原因={reason}。"
+            "若返回 has_more=true，必须继续用 next_seq 作为 since_seq 分页读取，直到 has_more=false。"
             f"{goal_instruction}"
             "基于操作与请求的时间、事务和值证据，提交 set_request_role、set_param_source、"
             "propose_dependency、add_pitfall 等必要增量；依赖只能先提案，禁止标 verified。"

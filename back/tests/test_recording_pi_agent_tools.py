@@ -13,6 +13,7 @@ import dano.agent_tools.tools as agent_tools_module
 from dano.agent_tools.tools import (
     ToolError,
     ask_recording_operator,
+    get_recording_delta,
     get_recording_state,
     get_validation_report,
     request_review,
@@ -170,6 +171,7 @@ class _Session:
         self.last_submission_kind = ""
         self.analysis_image_count = 0
         self.received_submission = None
+        self.received_delta = None
 
     def bind_flow_spec(self, spec):
         self.spec = spec.model_copy(deep=True)
@@ -181,6 +183,10 @@ class _Session:
 
     async def get_recording_state(self):
         return flow_module.recording_agent_state(self.spec)
+
+    async def get_recording_delta(self, since_seq=0, *, limit=25):
+        self.received_delta = (since_seq, limit)
+        return {"since_seq": since_seq, "next_seq": since_seq, "has_more": False, "requests": []}
 
     async def get_validation_report(self):
         return flow_module.recording_agent_validation(self.spec)
@@ -226,6 +232,17 @@ def _bind(monkeypatch, *, recording_id: str = "rec-1") -> _Session:
         lambda _run_id: session,
     )
     return session
+
+
+def test_recording_delta_tool_validates_and_forwards_page_limit(monkeypatch):
+    session = _bind(monkeypatch)
+
+    result = asyncio.run(get_recording_delta("run-recording", {"since_seq": 7, "limit": 12}))
+    assert result["since_seq"] == 7
+    assert session.received_delta == (7, 12)
+
+    with pytest.raises(ToolError, match="limit"):
+        asyncio.run(get_recording_delta("run-recording", {"since_seq": 0, "limit": 51}))
 
 
 def test_submit_skill_docs_returns_appended_flow_version(monkeypatch):

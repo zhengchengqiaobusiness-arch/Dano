@@ -12,6 +12,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     apply_flow_edits,
+    recording_agent_state,
     recording_agent_validation,
 )
 from dano.execution.page.recording_live import merge_live_agent_state, recording_delta
@@ -182,6 +183,65 @@ def test_recording_delta_is_incremental_and_fully_redacted():
     assert recording_delta(_Recorder(), since_seq=1)["requests"][0]["request_id"] == "req-1"
 
 
+class _LargeRecorder:
+    def captured_all_requests(self):
+        return [
+            {
+                "request_id": f"req-{index}",
+                "sequence": index,
+                "method": "GET",
+                "url": f"https://example.test/items/{index}",
+                "response_json": {
+                    "items": [
+                        {"description": "field-value-" + "x" * 1000}
+                        for _item in range(30)
+                    ],
+                },
+            }
+            for index in range(61)
+        ]
+
+    def recorded_page_events(self):
+        return []
+
+
+def test_recording_delta_pages_without_losing_requests_and_compacts_responses():
+    recorder = _LargeRecorder()
+    first = recording_delta(recorder, since_seq=0, limit=10)
+
+    assert first["since_seq"] == 0
+    assert first["next_seq"] == 10
+    assert first["total_seq"] == 61
+    assert first["has_more"] is True
+    assert len(first["requests"]) == 10
+    assert "__truncated_items__" in json.dumps(first["requests"][0]["response_json"])
+    assert len(json.dumps(first, ensure_ascii=False)) < 200_000
+
+    seen = []
+    cursor = 0
+    while True:
+        page = recording_delta(recorder, since_seq=cursor, limit=10)
+        seen.extend(item["request_id"] for item in page["requests"])
+        cursor = page["next_seq"]
+        if not page["has_more"]:
+            break
+    assert seen == [f"req-{index}" for index in range(61)]
+
+
+def test_recording_state_compacts_large_response_schemas_without_mutating_facts():
+    spec = _flow()
+    schema = {f"field_{index}": {"type": "string", "description": "x" * 2000} for index in range(200)}
+    spec.request_facts.requests[0].response_schema = schema
+    before = spec.request_facts.requests[0].response_schema.copy()
+
+    state = recording_agent_state(spec)
+    projected_schema = state["facts"]["captured_requests"][0]["response_schema"]
+
+    assert projected_schema["__truncated_keys__"] > 0
+    assert len(json.dumps(state, ensure_ascii=False)) < 500_000
+    assert spec.request_facts.requests[0].response_schema == before
+
+
 @pytest.mark.asyncio
 async def test_recording_session_delta_question_and_live_prompt_contract():
     questions = []
@@ -197,8 +257,9 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     )
     session.bind_flow_spec(_flow())
     session.bind_live_recording(_Recorder(), goal_text="更新记录", operator_asker=ask)
-    delta = await session.get_recording_delta(1)
-    assert delta["requests"][0]["request_id"] == "req-1"
+    delta = await session.get_recording_delta(0, limit=1)
+    assert delta["has_more"] is True
+    assert delta["requests"][0]["request_id"] == "req-0"
     answer = await session.ask_operator(text="选择？", options=["选项A"])
     assert answer == {"answered": True, "answer": "选项A"}
     assert questions[0]["text"] == "选择？"

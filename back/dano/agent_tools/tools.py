@@ -1133,11 +1133,18 @@ async def get_recording_state(run_id: str, params: dict) -> dict:
 
 
 async def get_recording_delta(run_id: str, params: dict) -> dict:
-    _strict_recording_params(params, required=set(), optional={"recording_id", "flow_version", "since_seq"})
+    _strict_recording_params(
+        params,
+        required=set(),
+        optional={"recording_id", "flow_version", "since_seq", "limit"},
+    )
     since_seq = params.get("since_seq", 0)
     if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
         raise ToolError("since_seq 必须是非负整数")
-    return await _recording_session(run_id, params).get_recording_delta(since_seq)
+    limit = params.get("limit", 25)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+        raise ToolError("limit 必须是 1 到 50 的整数")
+    return await _recording_session(run_id, params).get_recording_delta(since_seq, limit=limit)
 
 
 async def ask_recording_operator(run_id: str, params: dict) -> dict:

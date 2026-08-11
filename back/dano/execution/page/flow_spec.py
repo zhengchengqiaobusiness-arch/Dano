@@ -9241,6 +9241,8 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
+    from dano.execution.page.recording_live import compact_model_payload
+
     request_facts = _request_fact_items(spec)
     return {
         "protocol": "dano.recording-semantic-facts.v1",
@@ -9326,17 +9328,35 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "state": request.get("state"),
                 "materialized_step_id": request.get("materialized_step_id"),
                 "used_by_capabilities": list(request.get("used_by_capabilities") or []),
-                "response_schema": copy.deepcopy(request.get("response_schema") or {}),
+                "response_schema": compact_model_payload(
+                    request.get("response_schema") or {},
+                    max_depth=6,
+                    max_items=50,
+                    max_string=500,
+                ),
             }
             for request in request_facts[:120]
         ],
         "captured_request_count": len(request_facts),
+        "field_evidence_count": len(getattr(spec.request_facts, "field_evidence", []) or []),
         "field_evidence": _client_redact_sensitive(
-            copy.deepcopy((getattr(spec.request_facts, "field_evidence", []) or [])[-500:]),
+            compact_model_payload(
+                copy.deepcopy((getattr(spec.request_facts, "field_evidence", []) or [])[-120:]),
+                max_depth=6,
+                max_items=120,
+                max_string=800,
+            ),
         ),
+        "option_source_count": len(spec.request_facts.option_sources or []),
         "option_sources": _client_redact_sensitive(
-            copy.deepcopy((spec.request_facts.option_sources or [])[:120]),
+            compact_model_payload(
+                copy.deepcopy((spec.request_facts.option_sources or [])[-80:]),
+                max_depth=7,
+                max_items=80,
+                max_string=800,
+            ),
         ),
+        "page_event_count": len(spec.request_facts.page_events or []),
         "page_events": [
             {
                 key: event.get(key)
@@ -9347,7 +9367,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 )
                 if event.get(key) not in (None, "", [], {})
             }
-            for event in (spec.request_facts.page_events or [])[-300:]
+            for event in (spec.request_facts.page_events or [])[-120:]
             # Raw mutation batches describe framework repaint churn, not field
             # semantics.  Keeping them in the model state added tens of
             # thousands of characters per page without helping matching.
@@ -20001,13 +20021,21 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
 
 def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
     """Return the authoritative, redacted state available to Pi tools."""
+    from dano.execution.page.recording_live import compact_model_payload
+
     current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     report = validate_flow_spec(current)
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "facts": _semantic_fact_snapshot(current),
-        "current_contract": _semantic_mutable_context(current),
-        "validation": report,
+        "current_contract": compact_model_payload(
+            _semantic_mutable_context(current), max_depth=8, max_items=80, max_string=1000,
+        ),
+        "validation": compact_model_payload(report, max_depth=7, max_items=80, max_string=1000),
+        "projection": {
+            "bounded": True,
+            "note": "Large collections and payload branches include explicit __truncated_* markers.",
+        },
     }
 
 
