@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from dano.business_packs import system_templates_for
 from dano.shared.enums import Subsystem
@@ -63,3 +63,8 @@ class TenantRecord(BaseModel):
     username: str = ""
     password_hash: str = ""
     api_key: str = Field(default_factory=new_api_key)
+
+    @field_validator("password_hash", mode="before")
+    @classmethod
+    def normalize_legacy_null_password_hash(cls, value: str | None) -> str:
+        return value or ""

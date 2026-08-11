@@ -13,6 +13,7 @@ import dano.gateway.app as gateway_module
 from dano.gateway.app import app
 from dano.infra.passwords import hash_password, verify_password
 from dano.registry import InMemoryRegistry
+from dano.registry.models import TenantRecord
 
 
 @pytest_asyncio.fixture
@@ -38,6 +39,16 @@ async def test_password_hash_roundtrip():
     assert verify_password("s3cret!", stored)
     assert not verify_password("wrong", stored)
     assert not verify_password("s3cret!", "not-a-hash")
+
+
+def test_legacy_tenant_null_password_hash_is_normalized():
+    tenant = TenantRecord(
+        tenant="legacy",
+        api_key="dk_legacy",
+        password_hash=None,
+    )
+
+    assert tenant.password_hash == ""
 
 
 async def test_create_tenant_with_password(client):
