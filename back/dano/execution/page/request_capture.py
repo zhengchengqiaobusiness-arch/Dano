@@ -2654,6 +2654,27 @@ def _get_by_path(node, path: str):
     return node
 
 
+def _get_many_by_path(node, path: str) -> list:
+    """Resolve a response path containing ``[*]`` without adding a query language."""
+    text = str(path or "")
+    if "[*]" not in text:
+        value = _get_by_path(node, text)
+        return [] if value is None else (list(value) if isinstance(value, list) else [value])
+    before, after = text.split("[*]", 1)
+    collection = _get_by_path(node, before.rstrip("."))
+    if not isinstance(collection, list):
+        return []
+    tail = after.lstrip(".")
+    if not tail:
+        return list(collection)
+    values = []
+    for item in collection:
+        value = _get_by_path(item, tail)
+        if value is not None:
+            values.append(value)
+    return values
+
+
 def _set_by_path(node, path, value) -> bool:
     """返回是否写入成功(C5 修复:不再静默吞所有异常,区分 KeyError(路径错)与 TypeError(节点非容器))。
 
@@ -2792,6 +2813,40 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
     return out
 
 
+def _apply_structure_overrides(body, overrides: list[dict]) -> list[str]:  # noqa: ANN001
+    """Re-key recorded request maps from upstream response values.
+
+    The recorded container supplies the value layout (including resolved
+    assignee IDs); the upstream response supplies only the version-dependent
+    keys. Cardinality mismatch is a hard construction error rather than a
+    partial or silently stale request.
+    """
+    errors: list[str] = []
+    for item in overrides or []:
+        target_path = item.get("target_tokens") or item.get("target_path") or ""
+        keys = [value for value in (item.get("keys") or []) if value not in (None, "")]
+        container = _path_lookup(body, target_path)
+        if container is _PATH_MISSING:
+            errors.append(f"结构依赖目标 `{item.get('target_path') or target_path}` 不可达")
+            continue
+        if not isinstance(container, dict):
+            errors.append(f"结构依赖目标 `{item.get('target_path') or target_path}` 不是对象容器")
+            continue
+        if len(keys) != len(container):
+            errors.append(
+                f"结构依赖 `{item.get('target_path') or target_path}` 键数量不一致: "
+                f"上游={len(keys)} 录制值槽={len(container)}"
+            )
+            continue
+        rebuilt = {
+            str(key): value
+            for key, value in zip(keys, container.values(), strict=True)
+        }
+        if not _set_by_path(body, target_path, rebuilt):
+            errors.append(f"结构依赖目标 `{item.get('target_path') or target_path}` 写入失败")
+    return errors
+
+
 # ─────────── P0:发布前确定性自检(self_check) + 运行期换身后置审计 ───────────
 _PROBE_PREFIX = "__DANO_PROBE_"        # 唯一哨兵前缀;穿过 blob re-stringify 后在外层 dumps 里仍是连续子串
 _PATH_MISSING = object()               # "走不到"哨兵,区别于"值恰好是 None"
@@ -2920,6 +2975,26 @@ def _check_step_links(workflow: dict) -> list[str]:
             response_json = steps[source_step].get("response_json")
             if response_json is not None and _path_lookup(response_json, source_path) is _PATH_MISSING:
                 out.append(f"步骤{i + 1}:串联 `{disp}` 的来源路径 `{lk.get('source_path') or source_path}` 在上游响应样例里找不到")
+        for lk in st.get("structure_links") or []:
+            tp = lk.get("target_tokens") or lk.get("target_path", "")
+            disp = lk.get("target_path") or tp
+            source_step = lk.get("source_step")
+            source_path = lk.get("source_tokens") or lk.get("source_path", "")
+            container = _path_lookup(nested, tp) if has_body and tp else _PATH_MISSING
+            if container is _PATH_MISSING or not isinstance(container, dict):
+                out.append(f"步骤{i + 1}:结构依赖目标 `{disp}` 不是可重建的对象容器")
+                continue
+            if not isinstance(source_step, int) or source_step < 0 or source_step >= i:
+                out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的 source_step={source_step} 必须指向更早步骤")
+                continue
+            source_values = _get_many_by_path(steps[source_step].get("response_json"), source_path)
+            if not source_values:
+                out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的来源路径 `{source_path}` 在上游响应样例里找不到")
+            elif len(source_values) != len(container):
+                out.append(
+                    f"步骤{i + 1}:结构依赖 `{disp}` 的上游键数 {len(source_values)} "
+                    f"与录制值槽数 {len(container)} 不一致"
+                )
     return out
 
 
@@ -3529,7 +3604,8 @@ def _coerce_fields(fields: dict, api_request: dict) -> dict:
 async def execute_api_request(api_request: dict, fields: dict, *, base_url: str = "",
                               storage_state: dict | None = None, send: bool = True,
                               verify: bool = True, token_key: str | None = None,
-                              overrides: dict | None = None) -> dict:
+                              overrides: dict | None = None,
+                              structure_overrides: list[dict] | None = None) -> dict:
     """参数填回 body_template,带登录态发请求(send=True)或只校验参数齐全(send=False,dry,写安全)。
 
     P4:发真请求前 ① select 把参数里的名字换成内部 ID(选领导);② substitute 后用会话里的当前用户值
@@ -3600,6 +3676,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
             _set_by_path(query, query_tokens, v)
         elif body is not None:
             _set_by_path(body, p, v)
+    structure_issues = _apply_structure_overrides(body, structure_overrides or []) if body is not None else []
     id_issues = _identity_audit(body, api_request, storage_state) if send and body is not None else []   # 换身后置审计(blob 仍嵌套,可达)
     if send and id_write_failures:                              # C5:身份字段写入失败 → 必拒(避免以录制者身份写入)
         id_issues = list(id_issues) + [f"identity 字段路径不可达: {p}" for p in id_write_failures]
@@ -3610,7 +3687,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
         # 这里再用录制默认值看 leftover 只作信息——某参数**没有录制默认值**(运行期由 agent 提供)会留 {{}},
         # 但那不是缺陷(self_check 已证明该参数结构正确),不能因此拦发布(否则误报"参数没全填上")。
         leftover = "{{" in json.dumps(body, ensure_ascii=False) or "{{" in json.dumps(query, ensure_ascii=False)
-        problems = self_check(api_request)                        # P0:发布前确定性自检(skill 数据,承重闸门)
+        problems = [*self_check(api_request), *structure_issues]  # P0:发布前确定性自检(skill 数据,承重闸门)
         return {"ok": not problems, "dry": True, "method": method, "url": url, "body": body, "query": query,
                 "self_check": problems, "leftover_no_default": leftover,
                 "detail": ("；".join(problems) if problems else "请求可构造(dry,未真发)")}
@@ -3618,6 +3695,15 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
         return {"ok": False, "blocked": True, "method": method, "url": url,
                 "identity_issues": id_issues,
                 "detail": "；".join(id_issues) + " —— 已拒绝提交(避免以录制者身份写入)"}
+    if structure_issues:
+        return {
+            "ok": False,
+            "blocked": True,
+            "method": method,
+            "url": url,
+            "structure_issues": structure_issues,
+            "detail": "；".join(structure_issues) + " —— 已拒绝提交(避免使用过期动态键)",
+        }
     host = urlparse(url).hostname or ""
     ct = api_request.get("content_type") or "application/json"
     headers = {"Content-Type": ct} if body is not None else {}
@@ -3668,14 +3754,26 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
     last: dict = {}
     for i, step in enumerate(steps):
         overrides: dict = {}
+        structure_overrides: list[dict] = []
         for lk in step.get("links") or []:
             src = responses[lk["source_step"]] if 0 <= lk.get("source_step", -1) < len(responses) else None
             if src is not None:
                 val = _get_by_path(src, lk.get("source_tokens") or lk.get("source_path", ""))
                 if val is not None:                          # tokens 优先,且用元组(可 hash)做 overrides 键
                     overrides[tuple(_split_path(lk.get("target_tokens") or lk.get("target_path", "")))] = val
+        for lk in step.get("structure_links") or []:
+            source_index = lk.get("source_step", -1)
+            source = responses[source_index] if isinstance(source_index, int) and 0 <= source_index < len(responses) else None
+            structure_overrides.append({
+                **lk,
+                "keys": _get_many_by_path(
+                    source,
+                    lk.get("source_tokens") or lk.get("source_path", ""),
+                ) if source is not None else [],
+            })
         out = await execute_api_request(step, fields, base_url=base_url, storage_state=storage_state,
-                                        send=send, verify=verify, token_key=token_key, overrides=overrides)
+                                        send=send, verify=verify, token_key=token_key, overrides=overrides,
+                                        structure_overrides=structure_overrides)
         last = out
         step_results.append(out)
         if send:

@@ -89,6 +89,9 @@ class ParamField(BaseModel):
     # runtime_var: 运行期变量(录制时有值,但不能冻结,运行期自动填)
     category: str = "user_param"  # user_param / system_const / runtime_var
     source_kind: str = "unknown"   # user_input / previous_response / current_user / storage / cookie / page_context / system_time / constant / api_option / page_enum / static_enum / manual_enum / form_option / unknown
+    # 线上取值格式（与业务类型正交）：epoch_ms / epoch_s / datetime_text / date_text / ""。
+    # 从录制样例值推断，写进输入 schema，调用方据此传对格式（例如 datetime 业务类型但线上要毫秒时间戳）。
+    wire_format: str = ""
     source: dict[str, Any] = Field(default_factory=dict)
     editable: bool = True
     exposed_to_user: bool = True
@@ -302,6 +305,7 @@ class CapabilityField(BaseModel):
     key: str = ""
     type: str = "string"
     wire_type: str = ""
+    wire_format: str = ""
     required: bool = False
     request_id: str = ""
     request_index: Any = None
@@ -3495,6 +3499,7 @@ def _capability_field_from_param(
         key=param.key,
         type=param.type,
         wire_type=param.wire_type or _infer_type_from_value(param.value),
+        wire_format=param.wire_format or _infer_wire_format(param.value),
         required=bool(param.required),
         request_id=request_id,
         request_index=(step.source_meta or {}).get("request_index"),
@@ -3949,6 +3954,28 @@ def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
         }
 
 
+def _infer_wire_format(value: Any) -> str:
+    """Infer the on-wire value format from a recorded sample (deterministic)."""
+    if isinstance(value, bool) or value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return ""
+        if 10**12 <= number < 4 * 10**12:
+            return "epoch_ms"
+        if 10**9 <= number < 4 * 10**9:
+            return "epoch_s"
+        return ""
+    if isinstance(value, str):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?", value):
+            return "datetime_text"
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return "date_text"
+    return ""
+
+
 def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _upgrade_materialized_query_facts(spec)
     _enrich_materialized_response_shapes(spec)
@@ -3960,6 +3987,10 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
             if not param.field_id:
                 identity = f"{step.step_id}\0{param.path}".encode("utf-8")
                 param.field_id = f"pf_{hashlib.sha256(identity).hexdigest()[:16]}"
+            if not param.wire_format and param.type in {"date", "datetime", "time", "number", "string"}:
+                param.wire_format = _infer_wire_format(
+                    param.value if param.value not in (None, "") else param.default_value
+                )
         if (step.method or "GET").upper() in {"GET", "HEAD"}:
             # Legacy/imported specs may only carry query values in the URL. Put
             # them into ParamField first so request compilation, capability input
@@ -4187,7 +4218,18 @@ def _param_source_agent_classified(param: ParamField) -> bool:
         isinstance(item, dict)
         and item.get("actor") == "agent"
         and item.get("kind") == "param_source"
-        and item.get("source_kind") in {"user_input", "session_header", "page_context", "chained"}
+        and item.get("source_kind") in {
+            "user_input", "constant", "session_header", "page_context", "chained", "computed",
+        }
+        for item in (param.evidence or [])
+    )
+
+
+def _param_required_agent_classified(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("actor") == "agent"
+        and item.get("kind") == "param_required"
         for item in (param.evidence or [])
     )
 
@@ -4263,6 +4305,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             (step.method or "GET").upper() in {"GET", "HEAD"}
             and str(param.path or "").startswith("query.")
             and not _param_field_manually_edited(param, "required")
+            and not _param_required_agent_classified(param)
         ):
             # Legacy recordings marked every populated query filter required.
             # Preserve mandatory status only when the recorder captured an
@@ -4301,7 +4344,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 param.enum_value_map = None
             if not _param_field_manually_edited(param, "description"):
                 param.description = _strip_option_descriptions(param.description) or None
-            if not _param_field_manually_edited(param, "reason"):
+            if not _param_field_manually_edited(param, "reason") and not _param_source_agent_classified(param):
                 param.reason = "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖"
             continue
         if param.source_kind == "api_option":
@@ -4797,8 +4840,8 @@ _LEGACY_RECORDED_FORBIDDEN_ACTIONS = frozenset({"删除", "作废", "撤销", "�
 
 
 def _param_has_grounded_public_name(param: ParamField) -> bool:
-    """Return whether recorder/operator evidence already owns the public name."""
-    if _param_has_full_lock(param) or param.name_source in {"manual", "sample", "assignee"}:
+    """Return whether recorder/operator/agent evidence already owns the public name."""
+    if _param_has_full_lock(param) or param.name_source in {"manual", "sample", "assignee", "agent"}:
         return True
     public_name = str(param.label or param.key or "").strip()
     # Planner/LLM names are proposals, not recorder/operator facts. Let later
@@ -6574,6 +6617,11 @@ _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
 
 def _param_exposed_to_caller(param: ParamField) -> bool:
     """Whether the caller, rather than the workflow runtime, supplies a value."""
+    if (
+        param.source_kind == "page_context"
+        and bool((param.source or {}).get("caller_override"))
+    ):
+        return bool(param.category == "user_param" and param.exposed_to_user)
     return bool(
         param.category == "user_param"
         and param.exposed_to_user
@@ -6710,6 +6758,9 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
         props[key]["x-flow-path"] = p.path
         props[key]["x-dano-business-type"] = _business_type_for_param(p)
         props[key]["x-dano-wire-type"] = p.wire_type or _infer_type_from_value(p.value) or "string"
+        wire_format = p.wire_format or _infer_wire_format(p.value)
+        if wire_format:
+            props[key]["x-dano-wire-format"] = wire_format
         if p.label:
             props[key]["label"] = p.label
         if p.description or p.reason:
@@ -7123,9 +7174,14 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
     # FlowSpec 保持一致，否则发布层会把旧字段名误判成“Agent 臆造字段”并阻断。
     current_inputs = _recorded_user_param_names(goal_steps)
     goal["required_inputs"] = current_inputs
-    goal.setdefault("intent", fresh.get("intent") or spec.title)
-    goal.setdefault("success_criteria", fresh.get("success_criteria") or [])
-    goal.setdefault("output_expectation", fresh.get("output_expectation") or [])
+    # Empty axes count as missing: agent set_goal payloads and legacy specs may
+    # carry `[]`, and the publish completeness gate checks emptiness, not keys.
+    if not goal.get("intent"):
+        goal["intent"] = fresh.get("intent") or spec.title
+    if not goal.get("success_criteria"):
+        goal["success_criteria"] = fresh.get("success_criteria") or []
+    if not goal.get("output_expectation"):
+        goal["output_expectation"] = fresh.get("output_expectation") or []
     existing_forbidden = {
         str(item).strip() for item in (goal.get("forbidden_actions") or []) if str(item).strip()
     }
@@ -7133,9 +7189,10 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
         # Migrate the old generic deny-list.  A recorded withdraw/delete action
         # must not produce a goal that forbids its own observed business step.
         goal["forbidden_actions"] = list(_DEFAULT_RECORDED_FORBIDDEN_ACTIONS)
-    else:
-        goal.setdefault("forbidden_actions", fresh.get("forbidden_actions") or [])
-    goal.setdefault("risk_level", fresh.get("risk_level") or spec.risk_level or "L3")
+    elif not existing_forbidden:
+        goal["forbidden_actions"] = fresh.get("forbidden_actions") or []
+    if not goal.get("risk_level"):
+        goal["risk_level"] = fresh.get("risk_level") or spec.risk_level or "L3"
     actual_capabilities = [
         str(cap.name or cap.capability_id)
         for cap in (spec.capabilities or [])
@@ -9283,6 +9340,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                         "label": param.label,
                         "business_type": param.type,
                         "wire_type": param.wire_type,
+                        "wire_format": param.wire_format,
                         "category": param.category,
                         "source_kind": param.source_kind,
                         "default_value": _client_redact_sensitive(param.default_value, param.path),
@@ -9860,6 +9918,16 @@ def _semantic_plan_to_ops(
                 # response leaf is executable evidence, even if the model
                 # conservatively marked the unseen query path as unresolved.
                 confidence = max(confidence, 0.8)
+        # Field names, requiredness and enum mappings are recorder-owned axes.
+        # A semantic-plan paragraph cannot bypass the explicit live operations
+        # that return applied/skipped status and perform evidence checks.
+        if target_step is not None and target_param is not None and public_name:
+            from dano.execution.page.recording_live import _require_label_grounding
+
+            try:
+                _require_label_grounding(spec, target_step, target_param, public_name)
+            except ValueError:
+                public_name = str(target_param.label or target_param.key or target_param.path).strip()
         if step_id in step_ids and path and public_name and confidence >= 0.8:
             owning_capability = next((
                 capability for capability in spec.capabilities or []
@@ -10003,6 +10071,20 @@ def _semantic_plan_to_ops(
                     ):
                         source_kind = requested_source_kind
             operation = "upsert_input_field" if category == "user_param" else "upsert_internal_field"
+            grounded_required = bool(target_param.required) if target_param is not None else False
+            if target_param is not None and "required" in item:
+                from dano.execution.page.recording_live import _require_required_grounding
+
+                try:
+                    _require_required_grounding(
+                        spec, target_step, target_param, bool(item.get("required")),
+                    )
+                    grounded_required = bool(item.get("required"))
+                except ValueError:
+                    pass
+            grounded_enum_options = (
+                list(target_param.enum_options or []) if target_param is not None else []
+            )
             ops.append({
                 "op": operation,
                 "capability": owning_capability.name,
@@ -10014,8 +10096,8 @@ def _semantic_plan_to_ops(
                     "type": business_type,
                     "category": category,
                     "source_kind": source_kind,
-                    **({"required": bool(item.get("required"))} if "required" in item else {}),
-                    **({"enum_options": item.get("enum_options")} if isinstance(item.get("enum_options"), list) else {}),
+                    **({"required": grounded_required} if target_param is not None else {}),
+                    **({"enum_options": grounded_enum_options} if grounded_enum_options else {}),
                     "locked": False,
                     "confirmed": False,
                     "evidence": item.get("evidence") or [],
@@ -13697,6 +13779,23 @@ def _flow_path_lookup(node, path):
     return cur
 
 
+def _flow_path_set(node, path, value) -> bool:  # noqa: ANN001
+    tokens = _flow_path_tokens(path)
+    if not tokens:
+        return False
+    current = node
+    for token in tokens[:-1]:
+        try:
+            current = current[token]
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        current[tokens[-1]] = value
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
     """把 FlowSpec 中的低置信/高风险判断整理成人工确认项。"""
     items: list[ReviewItem] = []
@@ -14935,6 +15034,26 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if apir is None:
         errors.append(f"步骤 `{step.name or step.path or step.step_id}` 请求体无法解析，不能发布为请求型 Skill")
         return None, errors
+    body_runtime_fields: list[dict[str, Any]] = []
+    for param in step.params:
+        if (
+            param.source_kind != "computed"
+            or param.path.startswith(("query.", "path."))
+        ):
+            continue
+        runtime_name = f"__dano_runtime_{hashlib.sha1((step.step_id + ':' + param.path).encode()).hexdigest()[:10]}"
+        if not _flow_path_set(
+            apir.get("body_template"),
+            _strip_body_prefix(param.path),
+            "{{" + runtime_name + "}}",
+        ):
+            errors.append(
+                f"步骤 `{step.name or step.path or step.step_id}` 的计算字段 `{param.path}` 没有请求体落点"
+            )
+            continue
+        runtime_field = {"name": runtime_name, **dict(param.source or {})}
+        runtime_field["kind"] = str(runtime_field.get("strategy") or "")
+        body_runtime_fields.append(runtime_field)
     query_template, query_params, query_samples, query_types, runtime_fields = _flow_step_query_template(step)
     if query_template:
         apir["query_template"] = query_template
@@ -14942,6 +15061,8 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
         apir["sample_inputs"] = {**(apir.get("sample_inputs") or {}), **query_samples}
         apir["field_types"] = {**(apir.get("field_types") or {}), **query_types}
         apir["runtime_fields"] = [*(apir.get("runtime_fields") or []), *runtime_fields]
+    if body_runtime_fields:
+        apir["runtime_fields"] = [*(apir.get("runtime_fields") or []), *body_runtime_fields]
     url_template, path_params, path_samples, path_types = _flow_step_url_template(step)
     if url_template:
         apir["url_template"] = url_template
@@ -15143,6 +15264,17 @@ def flow_spec_to_api_request(
         source_path = _clean_path_prefix(lk.source_path, "response.")
         if not target_path or not source_path:
             errors.append(f"链接 `{lk.link_id}` 缺少 source_path 或 target_path")
+            continue
+        if str((lk.meta or {}).get("kind") or "") == "structure":
+            built_steps[target_idx].setdefault("structure_links", []).append({
+                "link_id": lk.link_id,
+                "target_path": target_path,
+                "target_tokens": lk.target_tokens,
+                "source_step": source_idx,
+                "source_path": source_path,
+                "source_tokens": lk.source_tokens,
+                "mode": "response_keys",
+            })
             continue
         built_steps[target_idx].setdefault("links", []).append({
             "target_path": target_path,
@@ -17748,6 +17880,8 @@ def _capability_schema_field(field: CapabilityField) -> dict[str, Any]:
     schema = _schema_for_param_type(field.type or "string")
     schema["x-dano-capability-owned"] = True
     schema["x-dano-operator-owned"] = bool(field.locked)
+    if field.wire_format:
+        schema["x-dano-wire-format"] = field.wire_format
     if field.enum_options:
         schema["enum"] = list(field.enum_options)
     if field.enum_value_map:
@@ -19704,7 +19838,7 @@ _RECORDING_AGENT_ALLOWED_OPS = {
     "upsert_computed_field", "upsert_output_field", "bind_dependency", "set_map",
     "set_condition", "set_output_mapping", "set_capability_relation",
     "add_request_to_capability", "remove_request_from_capability", "reject_dependency",
-    "set_goal", "set_request_role", "set_param_source", "set_param_required",
+    "set_goal", "set_request_role", "set_param_source", "set_param_required", "set_param_enum",
     "rename_field", "propose_dependency", "add_pitfall",
     "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
 }
@@ -20108,7 +20242,7 @@ async def apply_recording_agent_submission(
             apply_recording_agent_edit,
         )
 
-        field_ops = {"set_param_source", "set_param_required", "rename_field"}
+        field_ops = {"set_param_source", "set_param_required", "set_param_enum", "rename_field"}
 
         def op_target(operation: dict[str, Any]) -> str:
             step_id = str(operation.get("step_id") or operation.get("request_id") or "")

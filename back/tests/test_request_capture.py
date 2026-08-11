@@ -2059,6 +2059,65 @@ async def test_execute_api_workflow_dry_uses_recorded_response_for_links():
     assert out["final"]["body"]["sys_query"] == "分析销售"
 
 
+async def test_execute_api_workflow_rekeys_dynamic_request_structure_from_upstream_response():
+    workflow = {"steps": [
+        {
+            "method": "GET",
+            "url": "http://x/get-approval-detail",
+            "query_template": {},
+            "params": [],
+            "response_json": {
+                "data": {
+                    "activityNodes": [
+                        {"id": "Activity_runtime_leader"},
+                        {"id": "Activity_runtime_hr"},
+                    ],
+                },
+            },
+        },
+        {
+            "method": "POST",
+            "url": "http://x/submit",
+            "content_type": "application/json",
+            "body_template": {
+                "startUserSelectAssignees": {
+                    "Activity_recorded_a": ["{{领导审批人}}"],
+                    "Activity_recorded_b": ["{{人事审批人}}"],
+                },
+            },
+            "params": ["领导审批人", "人事审批人"],
+            "sample_inputs": {"领导审批人": 160, "人事审批人": 161},
+            "structure_links": [{
+                "source_step": 0,
+                "source_path": "data.activityNodes[*].id",
+                "target_path": "startUserSelectAssignees",
+            }],
+        },
+    ]}
+
+    out = await execute_api_workflow(workflow, {
+        "领导审批人": 200,
+        "人事审批人": 201,
+    }, send=False)
+
+    assert out["ok"] is True
+    assert out["final"]["body"]["startUserSelectAssignees"] == {
+        "Activity_runtime_leader": [200],
+        "Activity_runtime_hr": [201],
+    }
+
+    broken = json.loads(json.dumps(workflow, ensure_ascii=False))
+    broken["steps"][0]["response_json"]["data"]["activityNodes"] = [
+        {"id": "Activity_only_one"},
+    ]
+    rejected = await execute_api_workflow(broken, {
+        "领导审批人": 200,
+        "人事审批人": 201,
+    }, send=False)
+    assert rejected["ok"] is False
+    assert any("键数量不一致" in issue for issue in rejected["step_result"]["self_check"])
+
+
 def test_self_check_flags_missing_link_source_path_when_response_sample_exists():
     """link 的 source_path 若在上游响应样例里不存在,发布前就要拦住。"""
     workflow = {"steps": [
