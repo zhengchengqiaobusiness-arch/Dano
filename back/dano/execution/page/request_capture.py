@@ -3007,6 +3007,16 @@ def _check_step_links(workflow: dict) -> list[str]:
         if not has_body and not has_query:
             continue
         probes = {p: f"{_PROBE_PREFIX}{j}__" for j, p in enumerate(st.get("params") or [])}
+        for structure_link in st.get("structure_links") or []:
+            if str(structure_link.get("mode") or "") != "response_key_map":
+                continue
+            input_field = str((structure_link.get("value_binding") or {}).get("input_field") or "")
+            sample = (st.get("sample_inputs") or {}).get(input_field)
+            if input_field and isinstance(sample, dict):
+                # response_key_map consumes an object input. A scalar probe
+                # would make the self-check reject the same shape that the
+                # runtime interpreter accepts and deterministically rebuilds.
+                probes[input_field] = copy.deepcopy(sample)
         nested = substitute(templ, probes, {}) if has_body else None
         query = _render_query_template(query_templ, probes, {}) if has_query else {}
         for lk in st.get("links") or []:
@@ -4584,10 +4594,36 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
     """
     import asyncio
     param, mf, ep = fc.get("param"), fc.get("match_field"), fc.get("endpoint", "")
+    assertion = fc.get("assertion")
     retries = int(fc.get("retries", retries))
     backoff = float(fc.get("backoff_s", backoff))
     if not ep:
         return False, "事实核查配置缺少 endpoint，不能确认写操作已生效"
+    if assertion is not None:
+        from dano.execution.page.replay import evaluate_assertion
+
+        truncated, total = False, None
+        last_check: dict = {}
+        for i in range(max(1, retries)):
+            items, total, truncated = await _fact_check_items(
+                ep, base_url, storage_state, token_key, verify, auth_headers,
+            )
+            response = {"data": {"list": items, "total": total}, "list": items, "total": total}
+            try:
+                last_check = evaluate_assertion(response, assertion, fields)
+            except ValueError as exc:
+                return False, f"事实核查断言无效: {exc}"
+            if last_check.get("passed"):
+                return True, ""
+            if i < retries - 1:
+                await asyncio.sleep(backoff)
+        if truncated:
+            return False, f"事实核查证据不足:列表分页(共{total}条,仅取部分)"
+        return False, (
+            "回查断言未通过: "
+            f"operator={last_check.get('operator')}, actual={last_check.get('actual')}, "
+            f"expected={last_check.get('expected')}"
+        )
     target = fields.get(param)
     if not param or target is None:
         return False, f"事实核查缺少匹配字段 `{param or '<未配置>'}`，不能确认写操作已生效"
@@ -4681,8 +4717,46 @@ async def _grounded_recheck_many(
     import asyncio
 
     param, match_field, endpoint = fc.get("param"), fc.get("match_field"), fc.get("endpoint", "")
+    assertion = fc.get("assertion")
     if not endpoint:
         return [(False, "事实核查配置缺少 endpoint，不能确认写操作已生效") for _ in field_sets]
+    if assertion is not None:
+        from dano.execution.page.replay import evaluate_assertion
+
+        retries = int(fc.get("retries", retries))
+        backoff = float(fc.get("backoff_s", backoff))
+        passed = [False] * len(field_sets)
+        failures = ["尚未核查"] * len(field_sets)
+        truncated, total = False, None
+        for attempt in range(max(1, retries)):
+            items, total, truncated = await _fact_check_items(
+                endpoint, base_url, storage_state, token_key, verify, auth_headers,
+            )
+            response = {"data": {"list": items, "total": total}, "list": items, "total": total}
+            for index, fields in enumerate(field_sets):
+                if passed[index]:
+                    continue
+                try:
+                    check = evaluate_assertion(response, assertion, fields)
+                except ValueError as exc:
+                    return [(False, f"事实核查断言无效: {exc}") for _ in field_sets]
+                passed[index] = bool(check.get("passed"))
+                failures[index] = (
+                    "回查断言未通过: "
+                    f"operator={check.get('operator')}, actual={check.get('actual')}, "
+                    f"expected={check.get('expected')}"
+                )
+            if all(passed):
+                break
+            if attempt < retries - 1:
+                await asyncio.sleep(backoff)
+        return [
+            (True, "") if ok else (
+                False,
+                f"事实核查证据不足:列表分页(共{total}条,仅取部分)" if truncated else failures[index],
+            )
+            for index, ok in enumerate(passed)
+        ]
     if not param:
         return [(False, "事实核查缺少匹配字段，不能确认写操作已生效") for _ in field_sets]
     targets = [fields.get(param) for fields in field_sets]

@@ -1,0 +1,129 @@
+{
+  "protocol": "dano.sanitized_recording_trace.v1",
+  "source": {
+    "system": "Point-Lion OA",
+    "recorded_at": "2026-08-11T17:18:00+08:00",
+    "session": "5bab64c7-redacted",
+    "sanitized": true
+  },
+  "requests": [
+    {
+      "request_id": "req_45",
+      "index": 45,
+      "sequence": 45,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/system/dict-data/simple-list",
+      "path": "/admin-api/system/dict-data/simple-list",
+      "role": "read_option",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {
+        "code": 0,
+        "data": [
+          {"dictType": "oa_duty_leave_type", "value": 1, "label": "病假"},
+          {"dictType": "oa_duty_leave_type", "value": 2, "label": "事假"},
+          {"dictType": "oa_duty_leave_type", "value": 3, "label": "婚假"},
+          {"dictType": "bpm_process_instance_status", "value": 0, "label": "未提交"},
+          {"dictType": "bpm_process_instance_status", "value": 1, "label": "审批中"},
+          {"dictType": "bpm_process_instance_status", "value": 2, "label": "审批通过"},
+          {"dictType": "bpm_process_instance_status", "value": 3, "label": "审批不通过"},
+          {"dictType": "bpm_process_instance_status", "value": 4, "label": "已取消"}
+        ]
+      }
+    },
+    {
+      "request_id": "req_76",
+      "index": 76,
+      "sequence": 76,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/oa/duty-leave/page?pageNo=1&pageSize=10&type=2&processStatus=1&reason=%E6%B5%8B%E8%AF%95&createTime%5B0%5D=2026-08-01%2000%3A00%3A00&createTime%5B1%5D=2026-08-31%2023%3A59%3A59",
+      "path": "/admin-api/oa/duty-leave/page",
+      "role": "business_get",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {"code": 0, "data": {"list": [], "total": 0}}
+    },
+    {
+      "request_id": "req_96",
+      "index": 96,
+      "sequence": 96,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/bpm/process-definition/get?key=oa_duty_leave",
+      "path": "/admin-api/bpm/process-definition/get",
+      "role": "read_context",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {"code": 0, "data": {"id": "oa_duty_leave:version:redacted", "key": "oa_duty_leave"}}
+    },
+    {
+      "request_id": "req_98",
+      "index": 98,
+      "sequence": 98,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/bpm/process-instance/get-approval-detail?processDefinitionId=oa_duty_leave%3Aversion%3Aredacted&activityId=StartUserNode&processVariablesStr=%7B%22day%22%3A1%7D",
+      "path": "/admin-api/bpm/process-instance/get-approval-detail",
+      "role": "read_context",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {
+        "code": 0,
+        "data": {
+          "activityNodes": [
+            {"id": "Activity_recorded_leader", "name": "领导审批", "candidateStrategy": 35},
+            {"id": "Activity_recorded_hr", "name": "人力审批", "candidateStrategy": 35}
+          ]
+        }
+      }
+    },
+    {
+      "request_id": "req_110",
+      "index": 110,
+      "sequence": 110,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/system/dept/simple-list",
+      "path": "/admin-api/system/dept/simple-list",
+      "role": "read_option",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {"code": 0, "data": [{"id": 10, "name": "研发部"}]}
+    },
+    {
+      "request_id": "req_111",
+      "index": 111,
+      "sequence": 111,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/system/user/page?pageNo=1&pageSize=100&deptId=10",
+      "path": "/admin-api/system/user/page",
+      "role": "read_option",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {"code": 0, "data": {"list": [{"id": 501, "nickname": "测试负责人"}, {"id": 502, "nickname": "测试人事"}], "total": 2}}
+    },
+    {
+      "request_id": "req_116",
+      "index": 116,
+      "sequence": 116,
+      "method": "POST",
+      "url": "http://admin.example.test/admin-api/oa/duty-leave/submit-process",
+      "path": "/admin-api/oa/duty-leave/submit-process",
+      "role": "business_write",
+      "keep": true,
+      "content_type": "application/json",
+      "post_data": "{\"billType\":\"oa_duty_leave\",\"processDefKey\":\"oa_duty_leave\",\"type\":2,\"reason\":\"DANO_REAL_TRACE_SANITIZED\",\"startTime\":1785945600000,\"endTime\":1786032000000,\"startUserSelectAssignees\":{\"Activity_recorded_leader\":[501],\"Activity_recorded_hr\":[502]}}",
+      "response_status": 200,
+      "response_json": {"code": 0, "data": {"id": "leave-redacted", "processInstanceId": "process-redacted"}}
+    },
+    {
+      "request_id": "req_117",
+      "index": 117,
+      "sequence": 117,
+      "method": "GET",
+      "url": "http://admin.example.test/admin-api/oa/duty-leave/page?pageNo=1&pageSize=10&reason=DANO_REAL_TRACE_SANITIZED",
+      "path": "/admin-api/oa/duty-leave/page",
+      "role": "business_get",
+      "keep": true,
+      "response_status": 200,
+      "response_json": {"code": 0, "data": {"list": [{"id": "leave-redacted", "reason": "DANO_REAL_TRACE_SANITIZED", "processStatus": 1}], "total": 1}}
+    }
+  ]
+}

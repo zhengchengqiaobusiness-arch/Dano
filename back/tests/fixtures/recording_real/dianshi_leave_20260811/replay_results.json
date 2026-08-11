@@ -1,0 +1,11 @@
+{
+  "protocol": "dano.sanitized_replay_results.v1",
+  "results": [
+    {"target": "link-definition-detail", "kind": "dependency_execute", "status": "passed", "evidence": {"source_value": "oa_duty_leave:version:redacted", "target_injected": true}},
+    {"target": "link-dynamic-approvers", "kind": "dependency_execute", "status": "passed", "evidence": {"recorded_keys": ["Activity_recorded_leader", "Activity_recorded_hr"], "changed_keys": ["Activity_latest_leader", "Activity_latest_hr"], "labels_stable": ["领导审批", "人力审批"], "injection_equal": true}},
+    {"target": "step-submit", "kind": "write_execute", "status": "passed", "evidence": {"http_status": 200, "readback_total": 1, "matched_reason": "DANO_REAL_TRACE_SANITIZED"}},
+    {"target": "http-400-must-fail", "kind": "replay_read", "status": "failed", "evidence": {"http_status": 400}, "failure_reason": "HTTP 400"},
+    {"target": "missing-status-must-be-inconclusive", "kind": "replay_read", "status": "inconclusive", "evidence": {}, "failure_reason": "verification result omitted status"},
+    {"target": "dynamic-node-count-change", "kind": "dependency_execute", "status": "failed", "evidence": {"recorded_count": 2, "replayed_count": 3}, "failure_reason": "dynamic key count does not match target value slot count"}
+  ]
+}

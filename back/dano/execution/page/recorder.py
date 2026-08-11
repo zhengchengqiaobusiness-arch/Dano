@@ -387,7 +387,9 @@ _RECORDER_JS = r"""() => {
       control_kind: controlKind(el),
       input_type: String(el.type || '').toLowerCase(),
       disabled: !!(el.disabled || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
-      read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null))
+      read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null)),
+      minimum: el.getAttribute && el.getAttribute('min') !== null ? Number(el.getAttribute('min')) : null,
+      maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null
     };
   }
   window.__danoRequiredFields = function () {
@@ -461,7 +463,9 @@ _RECORDER_JS = r"""() => {
           control_kind: evidence.control_kind || 'unknown',
           input_type: evidence.input_type || '',
           disabled: !!evidence.disabled,
-          read_only: !!evidence.read_only
+          read_only: !!evidence.read_only,
+          minimum: evidence.minimum,
+          maximum: evidence.maximum
         });
       }
     } catch (e) {}
@@ -648,6 +652,8 @@ _RECORDER_JS = r"""() => {
         input_type: (evidence && evidence.input_type) || '',
         disabled: !!(evidence && evidence.disabled),
         read_only: !!(evidence && evidence.read_only),
+        minimum: evidence && evidence.minimum,
+        maximum: evidence && evidence.maximum,
         enum_source: (evidence && evidence.enum_source) || '',
         mapping_complete: !!(evidence && evidence.mapping_complete),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
@@ -3062,6 +3068,8 @@ class RecordSession:
                 "field_aliases": list(step.get("field_aliases") or []),
                 "control_kind": str(step.get("control_kind") or "unknown"),
                 "input_type": str(step.get("input_type") or ""),
+                "minimum": step.get("minimum"),
+                "maximum": step.get("maximum"),
                 "page_id": str(step.get("page_id") or ""),
                 "frame_id": str(step.get("frame_id") or ""),
                 "page_context": dict(step.get("page_context") or {}),

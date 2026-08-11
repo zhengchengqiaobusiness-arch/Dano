@@ -1772,7 +1772,14 @@ def _build_step_from_capture(
 
         # 字段中文名优先级
         nm = f.get("suggest_name") or f.get("key") or ""
-        if path in sel_names:
+        display_label = nm
+        if _looks_pagination_field(str(f.get("key") or ""), path):
+            # Pagination names are part of the public invocation contract. Keep
+            # their stable wire-facing key while retaining the localized DOM
+            # label separately for UI presentation.
+            nm = f.get("key") or nm
+            ns = "auto"
+        elif path in sel_names:
             nm = sel_names[path]
             ns = "sample"
         elif path in assignee_names and (nm == f.get("key") or _looks_internal(nm)):
@@ -1839,6 +1846,7 @@ def _build_step_from_capture(
                 "read_only": bool(f.get("control_read_only")),
                 "editable": not bool(f.get("control_disabled") or f.get("control_read_only")),
                 "request_path": path,
+                **dict(f.get("constraints") or {}),
             })
         if f.get("required"):
             # Persist the page marker as evidence instead of only persisting the
@@ -1871,7 +1879,7 @@ def _build_step_from_capture(
         params.append(ParamField(
             path=path,
             key=nm,
-            label=nm,
+            label=display_label,
             value=str(f.get("value") or ""),
             type=ptype,
             wire_type=wire_type,
@@ -2235,6 +2243,12 @@ def _params_from_get_query(
             "recorded_user_input": recorded_user_input,
             "field_aliases": list(control.get("field_aliases") or []),
             "control_kind": control_kind or "unknown",
+            "constraints": {
+                name: control.get(name)
+                for name in ("minimum", "maximum")
+                if isinstance(control.get(name), (int, float))
+                and not isinstance(control.get(name), bool)
+            },
         })
     return out
 
@@ -3917,12 +3931,18 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
             if str(param.path or "").startswith("query.")
         ):
             continue
+        current_query = (step.source_meta or {}).get("query")
         current = {
             "method": step.method,
             "url": step.url or step.path,
-            "query": dict((step.source_meta or {}).get("query") or {}),
             "index": (step.source_meta or {}).get("request_index"),
         }
+        # An explicitly empty derived query must not mask the real query string
+        # already present in the materialized URL. Doing so made this pass
+        # rebuild the same request as a "richer" candidate and discard all DOM
+        # names, required evidence and numeric constraints.
+        if isinstance(current_query, dict) and current_query:
+            current["query"] = dict(current_query)
         current_path = _request_path(current)
         candidates: list[tuple[RequestFact, RequestAnalysis | None, dict[str, Any], str]] = []
         for fact, raw in zip(spec.request_facts.requests or [], fact_rows):
@@ -3953,10 +3973,55 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
         step.response_json = fact.response_json
         if fact.headers:
             step.headers = extract_auth_headers(fact.headers)
-        step.params = [
+        old_query_params = [
+            param for param in (step.params or [])
+            if str(param.path or "").startswith("query.")
+        ]
+        non_query_params = [
             param for param in (step.params or [])
             if not str(param.path or "").startswith("query.")
         ]
+        grounded_request = {
+            **best,
+            "request_id": fact.request_id,
+            "request_index": fact.request_index,
+            "response_json": fact.response_json,
+        }
+        grounded_role = {
+            "role": best_role,
+            "keep": True,
+            "reason": analysis.reason if analysis is not None else "",
+            "confidence": analysis.confidence if analysis is not None else 0.0,
+            "evidence": analysis.evidence if analysis is not None else {},
+        }
+        rebuilt = _build_step_from_capture(
+            _attach_request_role(grounded_request, grounded_role),
+            reads=[],
+            samples={},
+            storage_state=None,
+            required_labels=set(),
+            page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
+            step_index=0,
+            field_evidence=list(getattr(spec.request_facts, "field_evidence", []) or []),
+        )
+        rebuilt_query_params = [
+            param for param in rebuilt.params
+            if str(param.path or "").startswith("query.")
+        ]
+        step.params = [*non_query_params, *rebuilt_query_params]
+        step.selects = [
+            binding for binding in (step.selects or [])
+            if not str(binding.path or binding.id_path or "").startswith("query.")
+        ] + [
+            binding for binding in rebuilt.selects
+            if str(binding.path or binding.id_path or "").startswith("query.")
+        ]
+        for param in old_query_params:
+            step.sample_inputs.pop(str(param.key or ""), None)
+        step.sample_inputs.update({
+            param.key: param.value for param in rebuilt_query_params
+            if param.key and param.value not in (None, "")
+        })
         for usage in spec.request_facts.usage.values():
             if usage.materialized_step_id == step.step_id:
                 usage.materialized_step_id = ""
@@ -4375,6 +4440,20 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
         if param.locked:
             continue
         normalized_path = param.path or ""
+        if param.source_kind == "dynamic_structure":
+            # Recorded dynamic-map leaves (for example BPMN Activity_* keys)
+            # describe one observed process version.  They are execution
+            # placeholders, never caller inputs or reusable enum bindings.
+            param.category = "runtime_var"
+            param.exposed_to_user = False
+            param.editable = False
+            param.required = False
+            param.need_human_confirm = False
+            if param.type in _ENUM_PARAM_TYPES:
+                param.type = param.wire_type or _infer_type_from_value(param.value)
+            param.enum_options = None
+            param.enum_value_map = None
+            continue
         if (
             (step.method or "GET").upper() in {"GET", "HEAD"}
             and str(param.path or "").startswith("query.")
@@ -5578,11 +5657,39 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
     for lk in links:
         if (lk.meta or {}).get("actor") == "agent" and not (lk.meta or {}).get("verified"):
             continue
+        link_kind = _flow_link_kind(lk)
         target = by_id.get(lk.target_step_id)
         source = by_id.get(lk.source_step_id)
         if target is None or source is None:
             continue
         target_path = lk.target_path
+        if link_kind == "response_key_map":
+            # The response supplies the *keys* of this request object, not its
+            # assignee values. Keep the stable label-to-value map as caller
+            # input while execution translates labels to the latest keys.
+            public = next((p for p in target.params if p.path == target_path), None)
+            input_field = str((lk.value_binding or {}).get("input_field") or "").strip()
+            if public is not None and input_field:
+                option_source = (lk.value_binding or {}).get("option_source")
+                public.key = input_field
+                public.type = "object"
+                public.wire_type = "object"
+                public.category = "user_param"
+                public.source_kind = "user_input"
+                public.source = {
+                    "kind": "dynamic_structure_input",
+                    "required_state": "required",
+                    **({"option_source": copy.deepcopy(option_source)} if isinstance(option_source, dict) else {}),
+                }
+                public.required = True
+                public.editable = True
+                public.exposed_to_user = True
+                public.need_human_confirm = False
+            continue
+        if link_kind == "structure":
+            # A structure link controls request keys only. It is not a value
+            # dependency and must not replace the request container itself.
+            continue
         for p in target.params:
             if p.path != target_path:
                 continue
@@ -5845,12 +5952,19 @@ def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> No
     links[:] = kept
 
 
+def _flow_link_kind(link: FlowLink) -> str:
+    declared = str(link.kind or "")
+    legacy = str((link.meta or {}).get("kind") or "")
+    return legacy if legacy and declared in {"", "value"} else declared or legacy or "value"
+
+
 def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
     _prune_unsafe_auto_links(steps, links)
     by_id = {step.step_id: step for step in steps}
     valid_targets = {
         (lk.link_id, lk.target_step_id, target_param.path)
         for lk in links
+        if _flow_link_kind(lk) == "value"
         if (target := by_id.get(lk.target_step_id)) is not None
         if (target_param := _resolve_param_reference(target, lk.target_path)) is not None
     }
@@ -6727,7 +6841,7 @@ def _business_type_for_param(param: ParamField) -> str:
 _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
     "previous_response", "current_user", "storage", "cookie", "page_context",
     "request_header", "system_time", "system_generated", "computed",
-    "constant", "loop_item", "selected_option_field",
+    "constant", "loop_item", "selected_option_field", "dynamic_structure",
 })
 
 
@@ -6885,6 +6999,16 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
         if isinstance(option_source, dict) and option_source:
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
         _apply_param_schema_default(props[key], p)
+        grounded_constraints = next((
+            item for item in (p.evidence or [])
+            if isinstance(item, dict)
+            and str(item.get("source") or "") == "recorder_dom"
+            and any(name in item for name in ("minimum", "maximum"))
+        ), {})
+        for constraint in ("minimum", "maximum"):
+            value = grounded_constraints.get(constraint)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                props[key][constraint] = value
         enum_input = p.type in {"enum", "list-enum"}
         dynamic_options = enum_input and p.source_kind == "api_option"
         enum_confirmed = (p.source or {}).get("enum_confirmed")
@@ -15605,6 +15729,27 @@ def _fact_check_report(api_request: dict | None) -> dict:
     if not fc:
         return {"configured": False, "passed": True, "reason": "未配置 fact_check，dry-run 仅做结构校验"}
     endpoint = fc.get("endpoint")
+    assertion = fc.get("assertion")
+    if assertion is not None:
+        from dano.execution.page.replay import _validate_assertion_contract
+
+        missing = [] if endpoint else ["endpoint"]
+        assertion_error = ""
+        try:
+            _validate_assertion_contract(assertion)
+        except ValueError as exc:
+            assertion_error = str(exc)
+        passed = not missing and not assertion_error
+        return {
+            "configured": True,
+            "passed": passed,
+            "missing": missing,
+            "spec": fc,
+            "reason": (
+                "fact_check 严格断言配置完整" if passed
+                else assertion_error or f"fact_check 缺少 {', '.join(missing)}"
+            ),
+        }
     match_field = fc.get("match_field")
     param = fc.get("param")
     missing = [name for name, value in {
@@ -17307,6 +17452,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             )
             if (
                 param.locked
+                or param.source_kind == "dynamic_structure"
                 or _param_has_manual_contract(param)
                 or _param_has_grounded_direct_input_contract(param)
                 or (

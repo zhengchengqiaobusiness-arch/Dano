@@ -998,11 +998,13 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             param.type = "enum"
             param.category = "user_param"
             param.source_kind = "page_enum"
+            required_state = str((param.source or {}).get("required_state") or "")
             param.source = {
                 "kind": "page_enum",
                 "dictionary_source": recorded_source or dictionary_source,
                 "enum_confirmed": True,
                 "actor": "agent",
+                **({"required_state": required_state} if required_state else {}),
             }
             param.exposed_to_user = True
             param.editable = True
@@ -1182,12 +1184,24 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 value_binding = {**value_binding, "value_shape": value_shape}
                 public_sample = dict(zip(source_labels, public_values, strict=True))
                 container_prefix = target_path.removeprefix("body.") + "."
+                dynamic_leaf_paths: set[str] = set()
                 for item_param in target_step.params:
                     if str(item_param.path or "").removeprefix("body.").startswith(container_prefix):
+                        dynamic_leaf_paths.add(str(item_param.path or ""))
                         item_param.category = "runtime_var"
                         item_param.source_kind = "dynamic_structure"
                         item_param.source = {"kind": "dynamic_structure_leaf", "actor": "agent"}
                         item_param.exposed_to_user = False
+                        item_param.editable = False
+                        item_param.required = False
+                        item_param.need_human_confirm = False
+                # Per-node selectors belong to the recorded BPMN version. If
+                # retained, model sync promotes Activity_* leaves back to
+                # caller-facing option fields and defeats the dynamic map.
+                target_step.selects = [
+                    binding for binding in (target_step.selects or [])
+                    if str(binding.path or binding.id_path or "") not in dynamic_leaf_paths
+                ]
                 public_param = next((
                     item for item in target_step.params
                     if str(item.path or "").removeprefix("body.") == target_path.removeprefix("body.")

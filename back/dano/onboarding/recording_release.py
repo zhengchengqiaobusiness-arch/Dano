@@ -237,6 +237,14 @@ def _field_errors(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
     steps = {step.step_id: step for step in spec.steps}
     member_ids = set(_member_step_ids(capability))
     compiled_names = set(_api_params(compiled))
+    compiled_paths = {
+        str(field.get("x-flow-path") or "").removeprefix("body.")
+        for raw_capability in compiled.get("capabilities") or []
+        if isinstance(raw_capability, dict)
+        and str(raw_capability.get("capability_id") or "") == capability.capability_id
+        for field in ((raw_capability.get("input_schema") or {}).get("properties") or {}).values()
+        if isinstance(field, dict) and field.get("x-flow-path")
+    }
     is_write = any(
         (steps[step_id].method or "GET").upper() not in _READ_METHODS
         for step_id in member_ids if step_id in steps
@@ -248,7 +256,12 @@ def _field_errors(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
         for param in step.params:
             if param.source_kind == "unknown":
                 errors.append(f"字段 `{step_id}:{param.path}` 来源为 unknown")
-            if _param_exposed_to_caller(param) and str(param.key or param.path) not in compiled_names:
+            normalized_path = str(param.path or "").removeprefix("body.")
+            if (
+                _param_exposed_to_caller(param)
+                and str(param.key or param.path) not in compiled_names
+                and normalized_path not in compiled_paths
+            ):
                 errors.append(f"调用方字段 `{step_id}:{param.path}` 未编译进实际请求")
             if is_write and _param_exposed_to_caller(param):
                 state = str((param.source or {}).get("required_state") or "")

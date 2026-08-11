@@ -476,11 +476,18 @@ const LiveRecordingOperation = Type.Union([
       value_binding: Type.Object({
         kind: Type.Literal("caller_map_by_label"),
         input_field: Type.String({ minLength: 1 }),
-        option_source: Type.Optional(Type.Object({
-          capability: Type.String({ minLength: 1 }),
-          value_path: Type.String({ minLength: 1 }),
-          label_path: Type.String({ minLength: 1 }),
-        }, { additionalProperties: false })),
+        option_source: Type.Optional(Type.Union([
+          Type.Object({
+            capability: Type.String({ minLength: 1 }),
+            value_path: Type.String({ minLength: 1 }),
+            label_path: Type.String({ minLength: 1 }),
+          }, { additionalProperties: false }),
+          Type.Object({
+            source_request_id: Type.String({ minLength: 1 }),
+            value_path: Type.String({ minLength: 1 }),
+            label_path: Type.String({ minLength: 1 }),
+          }, { additionalProperties: false }),
+        ])),
       }, { additionalProperties: false }),
       reason: Type.Optional(Type.String({ minLength: 1 })),
       confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),

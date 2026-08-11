@@ -1,0 +1,31 @@
+{
+  "protocol": "dano.recording_agent_submission.v1",
+  "semantic_plan": {
+    "business_understanding": {"summary": "按条件查询请假记录，并按当前流程定义动态组装审批人后提交请假申请。"},
+    "capabilities": [
+      {"name": "query_leave", "title": "查询请假", "kind": "query", "anchor_step_id": "step-query", "request_refs": [{"step_id": "step-query", "usage": "execute"}]},
+      {"name": "submit_leave", "title": "提交请假", "kind": "submit", "anchor_step_id": "step-submit", "request_refs": [{"step_id": "step-query", "usage": "preflight"}, {"step_id": "step-submit", "usage": "execute"}]}
+    ],
+    "unresolved_items": []
+  },
+  "ops": [
+    {"op": "rename_field", "request_id": "req_76", "wire_path": "query.reason", "label": "原因", "reason": "页面筛选控件标签", "evidence_refs": ["fe-query-reason"]},
+    {"op": "set_param_required", "request_id": "req_76", "wire_path": "query.pageNo", "required": false, "reason": "分页有录制默认值且可覆盖", "evidence_refs": ["fe-query-page"]},
+    {"op": "set_param_required", "request_id": "req_76", "wire_path": "query.pageSize", "required": false, "reason": "分页有录制默认值且可覆盖", "evidence_refs": ["fe-query-size"]},
+    {"op": "set_param_enum", "request_id": "req_76", "wire_path": "query.type", "dictionary_source": "oa_duty_leave_type", "options": [{"label": "病假", "value": 1}, {"label": "事假", "value": 2}, {"label": "婚假", "value": 3}], "reason": "录制字典响应与页面选项一致", "evidence_refs": ["fe-query-type", "req_45"]},
+    {"op": "set_param_enum", "request_id": "req_76", "wire_path": "query.processStatus", "dictionary_source": "bpm_process_instance_status", "options": [{"label": "未提交", "value": 0}, {"label": "审批中", "value": 1}, {"label": "审批通过", "value": 2}, {"label": "审批不通过", "value": 3}, {"label": "已取消", "value": 4}], "reason": "录制字典响应与页面选项一致", "evidence_refs": ["fe-query-status", "req_45"]},
+    {"op": "set_param_source", "request_id": "req_116", "wire_path": "body.billType", "source_kind": "constant", "reason": "录制中固定为 oa_duty_leave"},
+    {"op": "set_param_source", "request_id": "req_116", "wire_path": "body.processDefKey", "source_kind": "constant", "reason": "录制中固定为 oa_duty_leave"},
+    {"op": "set_param_source", "request_id": "req_116", "wire_path": "body.startTime", "source_kind": "user_input", "reason": "调用方提供开始时间"},
+    {"op": "set_param_source", "request_id": "req_116", "wire_path": "body.endTime", "source_kind": "user_input", "reason": "调用方提供结束时间"},
+    {"op": "set_param_source", "request_id": "req_116", "wire_path": "body.reason", "source_kind": "user_input", "reason": "调用方提供请假原因"},
+    {"op": "set_param_required", "request_id": "req_116", "wire_path": "body.startTime", "required": true, "reason": "页面控件标记必填", "evidence_refs": ["fe-submit-start"]},
+    {"op": "set_param_required", "request_id": "req_116", "wire_path": "body.endTime", "required": true, "reason": "页面控件标记必填", "evidence_refs": ["fe-submit-end"]},
+    {"op": "set_param_required", "request_id": "req_116", "wire_path": "body.reason", "required": true, "reason": "页面控件标记必填", "evidence_refs": ["fe-submit-reason"]},
+    {"op": "set_param_required", "request_id": "req_116", "wire_path": "body.type", "required": true, "reason": "页面控件标记必填", "evidence_refs": ["fe-submit-type"]},
+    {"op": "set_param_enum", "request_id": "req_116", "wire_path": "body.type", "dictionary_source": "oa_duty_leave_type", "options": [{"label": "病假", "value": 1}, {"label": "事假", "value": 2}, {"label": "婚假", "value": 3}], "reason": "录制字典响应与页面选项一致", "evidence_refs": ["fe-submit-type", "req_45"]},
+    {"op": "set_param_source", "request_id": "req_98", "wire_path": "query.processVariablesStr", "source_kind": "computed", "strategy": "date_span_days_json", "start_field": "startTime", "end_field": "endTime", "output_key": "day", "reason": "流程天数由起止时间计算"},
+    {"op": "propose_dependency", "link_id": "link-definition-detail", "kind": "value", "source_request_id": "req_96", "source_path": "data.id", "target_request_id": "req_98", "target_path": "query.processDefinitionId", "reason": "流程详情必须使用当前流程定义 ID", "confidence": 1.0, "evidence": {"requests": ["req_96", "req_98"]}},
+    {"op": "propose_dependency", "link_id": "link-dynamic-approvers", "kind": "response_key_map", "source_request_id": "req_98", "source_collection_path": "data.activityNodes", "source_key_path": "id", "source_label_path": "name", "target_request_id": "req_116", "target_container_path": "body.startUserSelectAssignees", "value_binding": {"kind": "caller_map_by_label", "input_field": "approvers", "option_source": {"source_request_id": "req_111", "value_path": "data.list[*].id", "label_path": "data.list[*].nickname"}}, "reason": "最新审批节点决定提交体键结构", "confidence": 1.0, "evidence": {"requests": ["req_98", "req_116"]}}
+  ]
+}
