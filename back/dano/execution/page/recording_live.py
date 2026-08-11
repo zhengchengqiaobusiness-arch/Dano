@@ -236,9 +236,34 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         raise ValueError(f"unsupported live recording op: {kind}")
     if str(edit.get("actor") or "agent") not in {"agent", "planner", "repair"}:
         raise ValueError("live recording ops must be agent-authored")
+    stored = {**deepcopy(edit), "actor": "agent"}
+    if record and any(
+        isinstance(existing, dict) and existing == stored
+        for existing in (spec.meta or {}).get("recording_agent_ops") or []
+    ):
+        return
 
     if kind == "set_goal":
-        goal = RecordedGoal.model_validate(edit.get("goal") or {})
+        raw_goal = dict(edit.get("goal") or {})
+        raw_evidence = raw_goal.get("evidence")
+        if isinstance(raw_evidence, str):
+            raw_evidence = [raw_evidence]
+        if isinstance(raw_evidence, list):
+            normalized_evidence: list[dict] = []
+            for item in raw_evidence:
+                if isinstance(item, dict):
+                    normalized_evidence.append(dict(item))
+                    continue
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                source, separator, detail = text.partition(":")
+                normalized_evidence.append({
+                    "source": source.strip() if separator and source.strip() else "agent",
+                    "ref": detail.strip() if separator and detail.strip() else text,
+                })
+            raw_goal["evidence"] = normalized_evidence
+        goal = RecordedGoal.model_validate(raw_goal)
         if not goal.intent.strip():
             raise ValueError("set_goal requires goal.intent")
         if not goal.evidence:
@@ -250,7 +275,20 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         request_id = str(edit.get("request_id") or "")
         role = str(edit.get("role") or "")
         reason = str(edit.get("reason") or "").strip()
-        evidence_refs = [str(value) for value in edit.get("evidence_refs") or [] if str(value)]
+        raw_refs = edit.get("evidence_refs")
+        if raw_refs in (None, "", []):
+            raw_refs = edit.get("evidence")
+        if isinstance(raw_refs, (str, dict)):
+            raw_refs = [raw_refs]
+        evidence_refs = [
+            (
+                str(value.get("ref") or value.get("source") or json.dumps(value, ensure_ascii=False))
+                if isinstance(value, dict)
+                else str(value)
+            )
+            for value in raw_refs or []
+            if value not in (None, "", {})
+        ]
         if not request_id or not role or not reason or not evidence_refs:
             raise ValueError("set_request_role requires request_id, role, reason and evidence_refs")
         current = (spec.request_facts.analysis or {}).get(request_id)
@@ -274,7 +312,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
 
     elif kind == "set_param_source":
         step_id = str(edit.get("step_id") or "")
-        path = str(edit.get("path") or "")
+        path = str(edit.get("path") or edit.get("wire_path") or "")
         source_kind = str(edit.get("source_kind") or "")
         reason = str(edit.get("reason") or "").strip()
         if not step_id or not path or source_kind not in _PARAM_SOURCE_KINDS or not reason:
@@ -297,7 +335,14 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
             param.reason = reason
             param.evidence = [
                 *list(param.evidence or []),
-                {"actor": "agent", "kind": "param_source", "reason": reason},
+                {
+                    "actor": "agent",
+                    "kind": "param_source",
+                    "source_kind": source_kind,
+                    "origin_request_id": str(edit.get("origin_request_id") or ""),
+                    "origin_path": str(edit.get("origin_path") or ""),
+                    "reason": reason,
+                },
             ]
         _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
 
@@ -306,8 +351,8 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         source_request_id = str(edit.get("source_request_id") or "")
         target_request_id = str(edit.get("target_request_id") or "")
         target_step_id = str(edit.get("target_step_id") or edit.get("step_id") or "")
-        source_path = str(edit.get("source_path") or "")
-        target_path = str(edit.get("target_path") or "")
+        source_path = str(edit.get("source_path") or "").removeprefix("response.")
+        target_path = str(edit.get("target_path") or "").removeprefix("request.")
         evidence = edit.get("evidence")
         if not source_request_id or not source_path or not (target_request_id or target_step_id) or not target_path:
             raise ValueError("propose_dependency requires source and target request/step paths")
@@ -319,7 +364,12 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
             signature = (source_step.step_id, source_path, target_step.step_id, target_path)
             existing = next((
                 link for link in spec.links
-                if (link.source_step_id, link.source_path, link.target_step_id, link.target_path) == signature
+                if (
+                    link.source_step_id,
+                    str(link.source_path or "").removeprefix("response."),
+                    link.target_step_id,
+                    str(link.target_path or "").removeprefix("request."),
+                ) == signature
             ), None)
             id_collision = next((link for link in spec.links if requested_link_id and link.link_id == requested_link_id), None)
             if id_collision is not None and id_collision is not existing:
@@ -487,7 +537,6 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
                 raise ValueError("mark_unverified enum target does not exist")
 
     if record:
-        stored = {**deepcopy(edit), "actor": "agent"}
         _record_agent_op(spec, stored)
 
 

@@ -400,7 +400,9 @@ class RecordingPiSession:
             "基于操作与请求的时间、事务和值证据，提交 set_request_role、set_param_source、"
             "propose_dependency、add_pitfall 等必要增量；依赖只能先提案，禁止标 verified。"
             "必须调用 submit_recording_plan，并把上述操作放入 plan.ops；实时阶段不需要读取验证报告。"
-            "参数来源只能归为 user_input/session_header/page_context/chained。"
+            "参数来源只能归为 user_input/session_header/page_context/chained：user_input 必须有目标或"
+            " fill/select 等可编辑控件证据；未被操作人修改的 pageNo/pageSize/current/limit/offset"
+            " 等分页值归 page_context；鉴权/会话头归 session_header；上游响应强值复用归 chained。"
             + ("这是 finalize 边界，必须把可落地结论写入当前 FlowSpec。" if finalizing else "一次只问一个真正无法自答的问题。"),
             timeout_s=None,
         )

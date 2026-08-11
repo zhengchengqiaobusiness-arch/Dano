@@ -4182,6 +4182,16 @@ def _param_axis_manually_edited(param: ParamField, *fields: str) -> bool:
     return any(_param_field_manually_edited(param, field) for field in fields)
 
 
+def _param_source_agent_classified(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("actor") == "agent"
+        and item.get("kind") == "param_source"
+        and item.get("source_kind") in {"user_input", "session_header", "page_context", "chained"}
+        for item in (param.evidence or [])
+    )
+
+
 def _param_has_full_lock(param: ParamField) -> bool:
     return bool(param.locked)
 
@@ -4278,7 +4288,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 param.required = False
             if not _param_axis_manually_edited(
                 param, "category", "source_kind", "source", "exposed_to_user", "editable",
-            ):
+            ) and not _param_source_agent_classified(param):
                 param.category = "user_param"
                 param.source_kind = "user_input"
                 param.source = {"kind": "pagination", "path": param.path}
@@ -5448,7 +5458,7 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 continue
             if p.locked or _param_axis_manually_edited(
                 p, "category", "source_kind", "source", "editable", "exposed_to_user",
-            ):
+            ) or (_param_source_agent_classified(p) and p.source_kind != "chained"):
                 # 依赖连线和字段来源是独立可编辑的事实。人工已选择
                 # 分类/来源后，同步层不得再用旧连线覆盖用户结果。
                 continue
@@ -20099,7 +20109,11 @@ async def apply_recording_agent_submission(
     _normalize_capability_references(current)
     current = refresh_review_items(_sync_capability_io_schemas(current))
     history: list[dict[str, Any]] = []
-    run_planner = mode == "plan" or not current.capabilities
+    # Repair ops are applied exactly once by auto_fix_flow_spec below. Running
+    # the planner first when capabilities are absent used to apply the same
+    # live ops twice (planner pass + repair pass), duplicating evidence and
+    # pitfalls even though the resulting link happened to deduplicate.
+    run_planner = mode == "plan"
 
     for round_idx in range(max_rounds):
         if run_planner:

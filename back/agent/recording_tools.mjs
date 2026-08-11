@@ -391,9 +391,68 @@ const RecordingIdentity = {
 // The SDK validates tool arguments before execute/sanitization. Keep this
 // boundary object-shaped but tolerant, then canonicalize deterministically and
 // let the backend enforce the complete semantic/fact contract.
+const GoalEvidence = Type.Object({
+  source: Type.String({ minLength: 1 }),
+  ref: Type.Optional(Type.String({ minLength: 1 })),
+  detail: Type.Optional(Type.String({ minLength: 1 })),
+}, { additionalProperties: true });
+
+const LiveRecordingOperation = Type.Union([
+  Type.Object({
+    op: Type.Literal("set_goal"),
+    goal: Type.Object({
+      intent: Type.String({ minLength: 1 }),
+      required_inputs: Type.Optional(Type.Array(Type.String())),
+      success_criteria: Type.Optional(Type.Array(Type.String())),
+      output_expectation: Type.Optional(Type.Array(Type.String())),
+      forbidden_actions: Type.Optional(Type.Array(Type.String())),
+      risk_level: Type.Optional(Type.String()),
+      capabilities: Type.Optional(Type.Array(Type.String())),
+      evidence: Type.Array(GoalEvidence, { minItems: 1 }),
+    }, { additionalProperties: false }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("set_request_role"),
+    request_id: Type.String({ minLength: 1 }),
+    role: Type.String({ minLength: 1 }),
+    reason: Type.String({ minLength: 1 }),
+    evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+    confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("set_param_source"),
+    step_id: Type.String({ minLength: 1 }),
+    path: Type.String({ minLength: 1 }),
+    source_kind: Type.Union([
+      Type.Literal("user_input"), Type.Literal("session_header"),
+      Type.Literal("page_context"), Type.Literal("chained"),
+    ]),
+    origin_request_id: Type.Optional(Type.String()),
+    origin_path: Type.Optional(Type.String()),
+    reason: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("propose_dependency"),
+    link_id: Type.Optional(Type.String({ minLength: 1 })),
+    source_request_id: Type.String({ minLength: 1 }),
+    source_path: Type.String({ minLength: 1 }),
+    target_request_id: Type.Optional(Type.String({ minLength: 1 })),
+    target_step_id: Type.Optional(Type.String({ minLength: 1 })),
+    target_path: Type.String({ minLength: 1 }),
+    reason: Type.Optional(Type.String({ minLength: 1 })),
+    confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    evidence: Type.Object({}, { additionalProperties: true, minProperties: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("add_pitfall"),
+    text: Type.String({ minLength: 1 }),
+    evidence_ref: Type.Optional(Type.String()),
+  }, { additionalProperties: false }),
+]);
+
 const RecordingPlan = Type.Object({
   semantic_plan: Type.Optional(Type.Object({}, { additionalProperties: true })),
-  ops: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+  ops: Type.Optional(Type.Array(LiveRecordingOperation)),
 }, { additionalProperties: true });
 
 const RecordingAssertion = Type.Object({
@@ -527,7 +586,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；每种 op 的必填字段以工具 schema 为准。set_goal 示例：`{\"op\":\"set_goal\",\"goal\":{\"intent\":\"...\",\"evidence\":[{\"source\":\"goal_text\",\"ref\":\"用户输入的目标\"}]}}`；set_request_role 必须有 evidence_refs。set_param_source 的 user_input 必须有 fill/select 或目标输入证据；未被操作人修改的 pageNo/pageSize/current/limit/offset 分页值用 page_context；鉴权/会话头用 session_header；上游响应强值复用用 chained。无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

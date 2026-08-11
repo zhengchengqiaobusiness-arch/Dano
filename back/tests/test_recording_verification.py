@@ -12,6 +12,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     SelectBinding,
+    apply_recording_agent_submission,
     apply_flow_edits,
 )
 from dano.execution.page.replay import evaluate_assertion, execute_write_with_verify
@@ -97,6 +98,7 @@ def _spec_with_unproposed_value_link() -> FlowSpec:
                 step_id="submit",
                 method="POST",
                 path="/items/update",
+                params=[ParamField(path="body.jobId", key="jobId", value="JOB998877")],
                 source_meta={"request_id": "req-submit"},
             ),
         ],
@@ -160,6 +162,74 @@ def test_candidate_link_id_supports_propose_then_confirm_in_one_submission():
 
     assert updated.links[0].link_id == candidate["link_id"]
     assert updated.links[0].confirmed is True
+    assert [
+        item["op"] for item in (updated.meta or {}).get("recording_agent_ops") or []
+    ] == ["propose_dependency", "confirm_dependency"]
+    assert not any(item["kind"].startswith("dependency") for item in verification_todos(updated))
+
+    replayed = apply_flow_edits(updated, [
+        {
+            "op": "propose_dependency",
+            "link_id": candidate["link_id"],
+            "source_request_id": candidate["source_request_id"],
+            "source_path": candidate["source_path"],
+            "target_request_id": candidate["target_request_id"],
+            "target_path": candidate["target_path"],
+            "evidence": {"heuristic_candidate": True},
+        },
+        {
+            "op": "confirm_dependency",
+            "link_id": candidate["link_id"],
+            "verification_id": verification_id,
+        },
+    ])
+    assert len(replayed.links) == 1
+    assert [
+        item["op"] for item in (replayed.meta or {}).get("recording_agent_ops") or []
+    ] == ["propose_dependency", "confirm_dependency"]
+
+
+@pytest.mark.asyncio
+async def test_repair_submission_persists_candidate_propose_and_confirm_ops():
+    spec = _spec_with_unproposed_value_link()
+    spec.capabilities = []
+    candidate = next(item for item in verification_todos(spec) if item["kind"] == "dependency_candidate")
+    verification_id = record_verification(
+        kind="perturb_link",
+        subject={"chain_request_ids": ["req-detail", "req-submit"]},
+        evidence={
+            "passed": True,
+            "linked_paths": [{"request_id": "req-detail", "path": "response.data.jobId"}],
+        },
+    )
+
+    updated = await apply_recording_agent_submission(
+        spec,
+        mode="repair",
+        submission={"ops": [
+            {
+                "op": "propose_dependency",
+                "link_id": candidate["link_id"],
+                "source_request_id": candidate["source_request_id"],
+                "source_path": candidate["source_path"],
+                "target_request_id": candidate["target_request_id"],
+                "target_path": candidate["target_path"],
+                "evidence": {"heuristic_candidate": True},
+            },
+            {
+                "op": "confirm_dependency",
+                "link_id": candidate["link_id"],
+                "verification_id": verification_id,
+            },
+        ]},
+    )
+
+    assert len(updated.links) == 1
+    assert updated.links[0].link_id == candidate["link_id"]
+    assert updated.links[0].confirmed is True
+    assert [
+        item["op"] for item in (updated.meta or {}).get("recording_agent_ops") or []
+    ] == ["propose_dependency", "confirm_dependency"]
     assert not any(item["kind"].startswith("dependency") for item in verification_todos(updated))
 
 

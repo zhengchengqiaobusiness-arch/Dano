@@ -6,6 +6,7 @@ import pytest
 
 from dano.execution.page.flow_spec import (
     FlowSpec,
+    FlowLink,
     FlowStep,
     ParamField,
     RequestAnalysis,
@@ -102,6 +103,82 @@ def test_live_agent_ops_write_evidenced_drafts_without_self_verifying():
     assert updated.meta["pitfalls"][0]["actor"] == "agent"
     assert {item["kind"] for item in updated.meta["agent_insights"]} >= {"goal", "role", "param_source", "link"}
     assert recording_agent_validation(updated)["report"]["agent_evidence"]["ok"] is True
+
+
+@pytest.mark.parametrize("evidence", [
+    "goal_text: 更新指定记录",
+    ["goal_text: 更新指定记录", "event:save-click"],
+])
+def test_set_goal_normalizes_model_shorthand_evidence(evidence):
+    updated = apply_flow_edits(_flow(), [{
+        "op": "set_goal",
+        "goal": {"intent": "更新指定记录", "evidence": evidence},
+    }])
+
+    assert updated.goal["evidence"]
+    assert all(isinstance(item, dict) for item in updated.goal["evidence"])
+    assert updated.goal["evidence"][0]["source"] == "goal_text"
+
+
+def test_request_role_normalizes_model_evidence_alias_and_param_wire_path():
+    updated = apply_flow_edits(_flow(), [
+        {
+            "op": "set_request_role",
+            "request_id": "req-submit",
+            "role": "submit_anchor",
+            "reason": "紧随保存操作",
+            "evidence": "request:req-submit",
+        },
+        {
+            "op": "set_param_source",
+            "step_id": "submit",
+            "wire_path": "jobId",
+            "source_kind": "chained",
+            "origin_request_id": "req-detail",
+            "origin_path": "response.data.jobId",
+            "reason": "详情响应值被提交请求复用",
+        },
+    ])
+
+    assert updated.request_facts.analysis["req-submit"].evidence["evidence_refs"] == ["request:req-submit"]
+    assert updated.steps[1].params[0].source_kind == "chained"
+
+
+def test_agent_page_context_survives_sync_and_dependency_paths_deduplicate():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(path="query.pageNo", key="pageNo", value=1)]
+    spec.links = [FlowLink(
+        link_id="existing-link",
+        source_step_id="detail",
+        source_path="data.jobId",
+        target_step_id="submit",
+        target_path="jobId",
+        evidence={"source_request_id": "req-detail", "target_request_id": "req-submit"},
+    )]
+
+    updated = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source",
+            "step_id": "detail",
+            "path": "query.pageNo",
+            "source_kind": "page_context",
+            "reason": "录制默认分页，页面未发生页码编辑",
+        },
+        {
+            "op": "propose_dependency",
+            "source_request_id": "req-detail",
+            "source_path": "response.data.jobId",
+            "target_request_id": "req-submit",
+            "target_path": "jobId",
+            "reason": "详情内部 ID 流向提交",
+            "evidence": {"candidate": "value_link"},
+        },
+    ])
+
+    assert updated.steps[0].params[0].source_kind == "page_context"
+    assert len(updated.links) == 1
+    assert updated.links[0].link_id == "existing-link"
+    assert updated.links[0].meta["actor"] == "agent"
 
 
 @pytest.mark.parametrize("operation", [

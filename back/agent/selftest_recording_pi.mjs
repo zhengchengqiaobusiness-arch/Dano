@@ -210,12 +210,27 @@ function verifyPlanToolCompatibility() {
   assert(
     planTool?.description?.includes("plan.ops")
       && planTool.description.includes("set_param_source")
-      && planTool.description.includes("propose_dependency"),
+      && planTool.description.includes("propose_dependency")
+      && planTool.description.includes('"evidence":[{"source":"goal_text"'),
     "plan tool does not expose the live semantic operation channel to Pi",
   );
   assert(
     planTool?.parameters?.properties?.plan?.properties?.ops?.type === "array",
     "plan tool schema does not declare the live semantic operation channel",
+  );
+  const liveOps = planTool?.parameters?.properties?.plan?.properties?.ops?.items?.anyOf || [];
+  const operationSchema = (name) => liveOps.find((item) => item?.properties?.op?.const === name);
+  assert(
+    operationSchema("set_request_role")?.required?.includes("evidence_refs"),
+    "set_request_role schema must expose evidence_refs",
+  );
+  assert(
+    operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 4,
+    "set_param_source schema must expose the four source categories",
+  );
+  assert(
+    operationSchema("propose_dependency")?.required?.includes("evidence"),
+    "propose_dependency schema must require evidence",
   );
   assert(
     !planTool?.parameters?.required?.includes("recording_id"),
