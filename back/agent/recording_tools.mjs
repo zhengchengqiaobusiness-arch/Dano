@@ -196,13 +196,9 @@ function proxyTool({ name, label, description, parameters }) {
 
 const SEMANTIC_PLAN_KEYS = [
   "business_understanding",
-  "request_roles",
-  "field_semantics",
   "capabilities",
-  "capability_relations",
   "unresolved_items",
 ];
-const LEGACY_DESCRIPTIVE_PLAN_KEYS = ["title", "steps", "fields", "dependencies", "enums"];
 
 function asSemanticArray(value) {
   const isRecord = (item) => (
@@ -244,27 +240,6 @@ export function canonicalizeRecordingPlan(value) {
     && !Array.isArray(value.semantic_plan)
   ) ? value.semantic_plan : {};
   const semantic = { ...rawSemantic };
-  const legacyTitle = [semantic.title, value.title].find(
-    (item) => typeof item === "string" && item.trim(),
-  );
-  if (
-    legacyTitle
-    && !(
-      (typeof semantic.business_understanding === "string" && semantic.business_understanding.trim())
-      || (
-        semantic.business_understanding
-        && typeof semantic.business_understanding === "object"
-        && !Array.isArray(semantic.business_understanding)
-        && Object.keys(semantic.business_understanding).length > 0
-      )
-    )
-  ) {
-    semantic.business_understanding = { summary: legacyTitle.trim() };
-  }
-  for (const key of LEGACY_DESCRIPTIVE_PLAN_KEYS) delete semantic[key];
-  // Descriptive axis lists carry no edits. Some models emit this after a
-  // validation hint; discard it while keeping every real unknown key strict.
-  delete semantic.field_semantic_axes;
   const submittedSemanticKeys = SEMANTIC_PLAN_KEYS.filter(
     (key) => semantic[key] !== undefined || value[key] !== undefined,
   );
@@ -274,25 +249,12 @@ export function canonicalizeRecordingPlan(value) {
     }
   }
   semantic.business_understanding = (
-    typeof semantic.business_understanding === "string"
-    || (
-      semantic.business_understanding
-      && typeof semantic.business_understanding === "object"
-      && !Array.isArray(semantic.business_understanding)
-    )
+    semantic.business_understanding
+    && typeof semantic.business_understanding === "object"
+    && !Array.isArray(semantic.business_understanding)
   ) ? semantic.business_understanding : {};
-  semantic.request_roles = asSemanticArray(semantic.request_roles);
-  semantic.field_semantics = asSemanticArray(semantic.field_semantics);
-  semantic.capabilities = [
-    ...asSemanticArray(semantic.capabilities),
-    ...asSemanticArray(semantic.item),
-    ...asSemanticArray(value.item),
-    ...asSemanticArray(value.capability),
-  ];
-  semantic.capability_relations = asSemanticArray(semantic.capability_relations);
+  semantic.capabilities = asSemanticArray(semantic.capabilities);
   semantic.unresolved_items = asSemanticArray(semantic.unresolved_items);
-  delete semantic.item;
-  delete semantic.capability;
   return normalizeConfidenceDeep({
     _submitted_semantic_keys: submittedSemanticKeys,
     semantic_plan: semantic,
@@ -362,11 +324,7 @@ export function sanitizeRecordingToolParams(name, params) {
       }
     }
     plan.semantic_plan = semantic;
-    for (const key of ["item", "capability"]) {
-      const merged = mergeObjectArrays(plan[key], params[key]);
-      if (merged.length) plan[key] = merged;
-    }
-    const operationValues = [plan.ops, params.ops]
+    const operationValues = [plan.ops]
       .flatMap((value) => Array.isArray(value) ? value : [value])
       .filter((item) => item && typeof item === "object" && !Array.isArray(item));
     const operationSignatures = new Set();
@@ -397,6 +355,21 @@ const GoalEvidence = Type.Object({
   detail: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: true });
 
+const RecordingBindingAssertion = Type.Object({
+  path: Type.Optional(Type.String()),
+  response_path: Type.Optional(Type.String()),
+  operator: Type.Optional(Type.Union([
+    Type.Literal("equals"), Type.Literal("eq"), Type.Literal("not_equals"),
+    Type.Literal("ne"), Type.Literal("contains"), Type.Literal("exists"),
+    Type.Literal("truthy"),
+  ])),
+  equals: Type.Optional(Type.Any()),
+  value: Type.Optional(Type.Any()),
+  equals_input: Type.Optional(Type.String()),
+  input_path: Type.Optional(Type.String()),
+  verify_records_min_count: Type.Optional(Type.Integer({ minimum: 0 })),
+}, { additionalProperties: false, minProperties: 1 });
+
 const LiveRecordingOperation = Type.Union([
   Type.Object({
     op: Type.Literal("set_goal"),
@@ -421,8 +394,9 @@ const LiveRecordingOperation = Type.Union([
   }, { additionalProperties: false }),
   Type.Object({
     op: Type.Literal("set_param_source"),
-    step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
-    path: Type.String({ minLength: 1 }),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
     source_kind: Type.Union([
       Type.Literal("user_input"), Type.Literal("constant"),
       Type.Literal("session_header"), Type.Literal("page_context"),
@@ -439,16 +413,18 @@ const LiveRecordingOperation = Type.Union([
   }, { additionalProperties: false }),
   Type.Object({
     op: Type.Literal("set_param_required"),
-    step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
-    path: Type.String({ minLength: 1 }),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
     required: Type.Boolean(),
     reason: Type.String({ minLength: 1 }),
     evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
   }, { additionalProperties: false }),
   Type.Object({
     op: Type.Literal("set_param_enum"),
-    step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
-    path: Type.String({ minLength: 1 }),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
     dictionary_source: Type.Optional(Type.String({ minLength: 1 })),
     options: Type.Array(Type.Object({
       label: Type.String({ minLength: 1 }),
@@ -459,8 +435,9 @@ const LiveRecordingOperation = Type.Union([
   }, { additionalProperties: false }),
   Type.Object({
     op: Type.Literal("rename_field"),
-    step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
-    path: Type.String({ minLength: 1 }),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
     label: Type.String({ minLength: 1 }),
     reason: Type.String({ minLength: 1 }),
     evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
@@ -486,27 +463,91 @@ const LiveRecordingOperation = Type.Union([
     text: Type.String({ minLength: 1 }),
     evidence_ref: Type.Optional(Type.String()),
   }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("confirm_dependency"),
+    link_id: Type.String({ minLength: 1 }),
+    verification_id: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("bind_verify_read"),
+    write_step_id: Type.String({ minLength: 1 }),
+    read_request_id: Type.String({ minLength: 1 }),
+    verification_id: Type.String({ minLength: 1 }),
+    assertion: RecordingBindingAssertion,
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("attach_enum_options"),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
+    source_request_id: Type.String({ minLength: 1 }),
+    verification_id: Type.String({ minLength: 1 }),
+    options: Type.Array(Type.Any(), { minItems: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("mark_unverified"),
+    target_kind: Type.Union([
+      Type.Literal("dependency"), Type.Literal("write_verify"), Type.Literal("enum"),
+    ]),
+    target_id: Type.String({ minLength: 1 }),
+    reason: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false }),
 ]);
 
-const RecordingPlan = Type.Object({
-  semantic_plan: Type.Optional(Type.Object({}, { additionalProperties: true })),
-  ops: Type.Optional(Type.Array(LiveRecordingOperation)),
-}, { additionalProperties: true });
+const CapabilityKind = Type.Union([
+  Type.Literal("query"), Type.Literal("query_status"), Type.Literal("list_options"),
+  Type.Literal("validate"), Type.Literal("validate_batch"), Type.Literal("preview"),
+  Type.Literal("inspect"), Type.Literal("export"), Type.Literal("create"),
+  Type.Literal("update"), Type.Literal("save_draft"), Type.Literal("submit"),
+  Type.Literal("submit_batch"), Type.Literal("approve"), Type.Literal("reject"),
+  Type.Literal("withdraw"), Type.Literal("delete"),
+]);
 
-const RecordingAssertion = Type.Object({
-  path: Type.Optional(Type.String()),
-  response_path: Type.Optional(Type.String()),
-  operator: Type.Optional(Type.Union([
-    Type.Literal("equals"), Type.Literal("eq"), Type.Literal("not_equals"),
-    Type.Literal("ne"), Type.Literal("contains"), Type.Literal("exists"),
-    Type.Literal("truthy"),
-  ])),
-  equals: Type.Optional(Type.Any()),
-  value: Type.Optional(Type.Any()),
-  equals_input: Type.Optional(Type.String()),
-  input_path: Type.Optional(Type.String()),
-  verify_records_min_count: Type.Optional(Type.Integer({ minimum: 0 })),
-}, { additionalProperties: false, minProperties: 1 });
+const SemanticPlan = Type.Object({
+  business_understanding: Type.Optional(Type.Object({
+    business_name: Type.Optional(Type.String()),
+    summary: Type.Optional(Type.String()),
+    intent: Type.Optional(Type.String()),
+    object: Type.Optional(Type.String()),
+    purpose: Type.Optional(Type.String()),
+  }, { additionalProperties: false })),
+  capabilities: Type.Optional(Type.Array(Type.Object({
+    name: Type.String({ minLength: 1 }),
+    title: Type.String({ minLength: 1 }),
+    kind: CapabilityKind,
+    anchor_step_id: Type.String({ minLength: 1 }),
+    request_refs: Type.Array(Type.Object({
+      step_id: Type.String({ minLength: 1 }),
+      usage: Type.Union([
+        Type.Literal("execute"), Type.Literal("preflight"),
+        Type.Literal("option_source"), Type.Literal("fact_check"),
+      ]),
+    }, { additionalProperties: false }), { minItems: 1 }),
+  }, { additionalProperties: false }))),
+  unresolved_items: Type.Optional(Type.Array(Type.Object({
+    type: Type.String({ minLength: 1 }),
+    title: Type.Optional(Type.String()),
+    description: Type.Optional(Type.String()),
+    reason: Type.Optional(Type.String()),
+    status: Type.Optional(Type.String()),
+    severity: Type.Optional(Type.Union([
+      Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"),
+      Type.Literal("critical"), Type.Literal("blocker"), Type.Literal("error"),
+    ])),
+    blocking: Type.Optional(Type.Boolean()),
+    request_id: Type.Optional(Type.String()),
+    step_id: Type.Optional(Type.String()),
+    wire_path: Type.Optional(Type.String()),
+    evidence_refs: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  }, { additionalProperties: false }))),
+}, { additionalProperties: false });
+
+const RecordingPlan = Type.Object({
+  semantic_plan: Type.Optional(SemanticPlan),
+  ops: Type.Optional(Type.Array(LiveRecordingOperation)),
+}, { additionalProperties: false });
+
+const RecordingAssertion = RecordingBindingAssertion;
 
 const ReplayOverrides = Type.Object({
   url_path: Type.Optional(Type.String()),
@@ -626,7 +667,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、set_param_required、set_param_enum、rename_field、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；字段操作在步骤尚未物化时可把 request_id 填入 step_id。每种 op 的必填字段以工具 schema 为准。set_goal 示例：`{\"op\":\"set_goal\",\"goal\":{\"intent\":\"...\",\"evidence\":[{\"source\":\"goal_text\",\"ref\":\"用户输入的目标\"}]}}`；set_request_role、set_param_required、set_param_enum、rename_field 必须有 evidence_refs，且至少一条要引用录制事实标识（request_id/event_id/step_id）。set_param_source 六分类：user_input=操作人真实编辑过（须有 fill/select 证据）；constant=录制值固定的业务常量（如 body 里的单据类型/流程 key，随请求原样发出）；session_header=仅限 headers.* 路径的鉴权/会话头；page_context=未被操作人修改的 pageNo/pageSize/current/limit/offset 等分页状态，编译为录制默认值且允许调用方覆盖；chained=上游响应强值复用（必须带 origin_request_id+origin_path，后端会自动建待验证依赖链）；computed=由其他调用参数推导的值（必须带 strategy=date_span_days_json+start_field+end_field，如天数=结束-开始）。分类错误会被拒绝并返回原因（例如 body 常量填 session_header 会被拒，应改 constant）。字段名称、必填性和枚举绑定必须与 field_evidence 一致；页面字典枚举用 set_param_enum 提交完整 label/value 映射，矛盾会被拒。propose_dependency 支持 kind=structure：当上游响应决定请求的键结构（如审批节点 ID 是动态键）时，target_path 填容器路径。提交后必须检查 op_results：skipped 或 rolled_back 表示没有落地，必须按 reason 修正后读取新版本重试，禁止当作成功。无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。字段契约变更必须用对应 plan.ops，不能只写 field_semantics 绕过证据闸门。未变化的标准段可省略，后端会保留事实基线。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。set_param_source 六分类为 user_input、constant、session_header、page_context、chained、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后必须检查 op_results；deferred、rejected、rolled_back 都没有完整落地，必须按 reason 和 must_retry 修正后读取新版本重试。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,
@@ -654,7 +695,7 @@ export const recordingTools = [
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        operations: Type.Array(Type.Record(Type.String(), Type.Any())),
+        operations: Type.Array(LiveRecordingOperation),
       },
       { additionalProperties: false },
     ),

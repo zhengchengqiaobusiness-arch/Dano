@@ -20348,13 +20348,121 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         report["passed"] = False
     session_audit = dict((current.meta or {}).get("recording_agent_session") or {})
     from dano.execution.page.recording_live import compact_model_payload
+    op_results = list(session_audit.get("op_results") or [])
+    must_retry = [
+        int(item.get("index") or 0)
+        for item in op_results
+        if str(item.get("status") or "") != "applied"
+    ]
+    unresolved_targets = [
+        dict(item.get("requested_target") or {})
+        for item in op_results
+        if (
+            str(item.get("status") or "") == "deferred"
+            or (
+                str(item.get("status") or "") == "rejected"
+                and not item.get("resolved_target")
+            )
+        )
+        and item.get("requested_target")
+    ]
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "report": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
         "repair_context": compact_model_payload(
             _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
         ),
-        "op_results": list(session_audit.get("op_results") or []),
+        "op_results": op_results,
+        "all_applied": not must_retry,
+        "must_retry": must_retry,
+        "unresolved_targets": unresolved_targets,
+    }
+
+
+_RECORDING_FIELD_OPS = frozenset({
+    "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+    "attach_enum_options",
+})
+
+
+def _recording_requested_target(spec: FlowSpec, operation: dict[str, Any]) -> dict[str, str]:
+    kind = str(operation.get("op") or "")
+    if kind not in _RECORDING_FIELD_OPS and kind != "propose_dependency":
+        return {}
+    identifier = str(
+        operation.get("request_id")
+        or operation.get("target_request_id")
+        or operation.get("step_id")
+        or operation.get("target_step_id")
+        or ""
+    )
+    wire_path = str(
+        operation.get("wire_path")
+        or operation.get("path")
+        or operation.get("target_path")
+        or ""
+    ).removeprefix("request.")
+    step = next((item for item in spec.steps if item.step_id == identifier), None)
+    request_id = str(((step.source_meta if step else {}) or {}).get("request_id") or identifier)
+    if step is not None and wire_path:
+        try:
+            from dano.execution.page.recording_field_identity import FieldRef, resolve_field_ref
+
+            wire_path = resolve_field_ref(
+                spec, FieldRef(step_id=step.step_id, wire_path=wire_path),
+            ).wire_path
+        except ValueError:
+            pass
+    return {
+        **({"request_id": request_id} if request_id else {}),
+        **({"wire_path": wire_path} if wire_path else {}),
+    }
+
+
+def _recording_resolved_target(spec: FlowSpec, operation: dict[str, Any]) -> dict[str, str]:
+    if str(operation.get("op") or "") not in _RECORDING_FIELD_OPS:
+        return {}
+    from dano.execution.page.recording_field_identity import FieldRef, resolve_field_ref
+
+    identifier = str(operation.get("step_id") or operation.get("request_id") or "")
+    wire_path = str(operation.get("wire_path") or operation.get("path") or "")
+    is_step_id = any(item.step_id == identifier for item in spec.steps)
+    try:
+        resolved = resolve_field_ref(spec, FieldRef(
+            step_id=identifier if is_step_id else "",
+            request_id="" if is_step_id else identifier,
+            wire_path=wire_path,
+        ))
+    except ValueError:
+        return {}
+    return {
+        "step_id": resolved.step_id,
+        "stored_path": resolved.stored_path,
+        "wire_path": resolved.wire_path,
+    }
+
+
+def _recording_operation_result(
+    spec: FlowSpec,
+    operation: dict[str, Any],
+    *,
+    index: int,
+    status: str,
+    reason: str = "",
+    flow_version_before: int,
+    flow_version_after: int = 0,
+) -> dict[str, Any]:
+    if status not in {"applied", "deferred", "rejected", "rolled_back"}:
+        status = "rejected"
+    return {
+        "index": index,
+        "op": str(operation.get("op") or ""),
+        "status": status,
+        "requested_target": _recording_requested_target(spec, operation),
+        "resolved_target": _recording_resolved_target(spec, operation),
+        "reason": str(reason or ""),
+        "flow_version_before": flow_version_before,
+        "flow_version_after": flow_version_after,
     }
 
 
@@ -20376,6 +20484,7 @@ async def apply_recording_agent_submission(
     if not isinstance(submission, dict):
         raise ValueError("recording agent submission must be an object")
     current = ensure_recorded_goal(spec.model_copy(deep=True))
+    flow_version_before = int((current.meta or {}).get("current_version") or 0)
     submitted_ops = list(submission.get("ops") or [])
     _validate_recording_agent_ops(submitted_ops)
     op_results: list[dict[str, Any]] = []
@@ -20389,11 +20498,6 @@ async def apply_recording_agent_submission(
 
         field_ops = {"set_param_source", "set_param_required", "set_param_enum", "rename_field"}
 
-        def op_target(operation: dict[str, Any]) -> str:
-            step_id = str(operation.get("step_id") or operation.get("request_id") or "")
-            path = str(operation.get("path") or operation.get("wire_path") or "")
-            return f"{step_id}:{path}".rstrip(":")
-
         for index, operation in enumerate(submitted_ops):
             kind = str(operation.get("op") or "")
             if kind in field_ops:
@@ -20404,24 +20508,63 @@ async def apply_recording_agent_submission(
                 continue
             try:
                 outcome = apply_recording_agent_edit(current, operation, record=True)
-                op_results.append({
-                    "index": index,
-                    "op": kind,
-                    "status": str(outcome.get("status") or "applied"),
-                    "target": op_target(operation),
-                    **({"reason": str(outcome["reason"])} if outcome.get("reason") else {}),
-                    **({"deferred": True} if outcome.get("deferred") else {}),
-                })
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status=str(outcome.get("status") or "applied"),
+                    reason=str(outcome.get("reason") or ""),
+                    flow_version_before=flow_version_before,
+                ))
             except (TypeError, ValueError) as exc:
-                op_results.append({
-                    "index": index,
-                    "op": kind,
-                    "status": "skipped",
-                    "target": op_target(operation),
-                    "reason": str(exc),
-                })
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status="rejected",
+                    reason=str(exc),
+                    flow_version_before=flow_version_before,
+                ))
         submission = copy.deepcopy(submission)
         submission["ops"] = [operation for _index, operation in residual_ops]
+    else:
+        from dano.execution.page.recording_live import apply_recording_agent_edit
+
+        for index, operation in enumerate(submitted_ops):
+            candidate = current.model_copy(deep=True)
+            try:
+                outcome = apply_recording_agent_edit(candidate, operation, record=True)
+                status = str(outcome.get("status") or "applied")
+                reason = str(outcome.get("reason") or "")
+                if status == "applied":
+                    candidate = refresh_review_items(_sync_capability_io_schemas(candidate))
+                    accepted, gate = _semantic_candidate_gate(current, candidate)
+                    if accepted:
+                        current = candidate
+                    else:
+                        status = "rolled_back"
+                        reason = ",".join(gate.get("reasons") or []) or "quality gate rejected operation"
+                elif status == "deferred":
+                    current = candidate
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status=status,
+                    reason=reason,
+                    flow_version_before=flow_version_before,
+                ))
+            except (TypeError, ValueError) as exc:
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status="rejected",
+                    reason=str(exc),
+                    flow_version_before=flow_version_before,
+                ))
+        submission = copy.deepcopy(submission)
+        submission["ops"] = []
     fact_hash = _semantic_fact_hash(current)
     previous_generation = dict((current.meta or {}).get("capability_generation") or {})
     initial_generation = bool(
@@ -20498,32 +20641,34 @@ async def apply_recording_agent_submission(
             kind = str(operation.get("op") or "")
             try:
                 outcome = apply_recording_agent_edit(current, operation, record=True)
-                op_results.append({
-                    "index": index,
-                    "op": kind,
-                    "status": str(outcome.get("status") or "applied"),
-                    "target": op_target(operation),
-                    **({"reason": str(outcome["reason"])} if outcome.get("reason") else {}),
-                    **({"deferred": True} if outcome.get("deferred") else {}),
-                })
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status=str(outcome.get("status") or "applied"),
+                    reason=str(outcome.get("reason") or ""),
+                    flow_version_before=flow_version_before,
+                ))
             except (TypeError, ValueError) as exc:
-                op_results.append({
-                    "index": index,
-                    "op": kind,
-                    "status": "skipped",
-                    "target": op_target(operation),
-                    "reason": str(exc),
-                })
+                op_results.append(_recording_operation_result(
+                    current,
+                    operation,
+                    index=index,
+                    status="rejected",
+                    reason=str(exc),
+                    flow_version_before=flow_version_before,
+                ))
         proposal_gate = ((current.meta or {}).get("capability_model") or {}).get("proposal_gate") or {}
         for index, operation in residual_ops:
             rolled_back = proposal_gate.get("accepted") is False
-            op_results.append({
-                "index": index,
-                "op": str(operation.get("op") or ""),
-                "status": "rolled_back" if rolled_back else "applied",
-                "target": op_target(operation),
-                **({"reason": ",".join(proposal_gate.get("reasons") or [])} if rolled_back else {}),
-            })
+            op_results.append(_recording_operation_result(
+                current,
+                operation,
+                index=index,
+                status="rolled_back" if rolled_back else "applied",
+                reason=",".join(proposal_gate.get("reasons") or []) if rolled_back else "",
+                flow_version_before=flow_version_before,
+            ))
         op_results.sort(key=lambda item: int(item["index"]))
 
     current = _auto_confirm_ready_capabilities(
@@ -20554,6 +20699,10 @@ async def apply_recording_agent_submission(
     semantic_plan = ((current.meta or {}).get("capability_model") or {}).get("semantic_plan") or {}
     generation_status = "ready" if initial_completed else "incomplete_agent_plan"
     now = datetime.now(timezone.utc).isoformat()
+    final_flow_version = int((current.meta or {}).get("current_version") or 0) + 1
+    for item in op_results:
+        item["flow_version_after"] = final_flow_version
+        item["resolved_target"] = _recording_resolved_target(current, submitted_ops[int(item["index"])])
     current.meta = {
         **(current.meta or {}),
         "capability_generation": {

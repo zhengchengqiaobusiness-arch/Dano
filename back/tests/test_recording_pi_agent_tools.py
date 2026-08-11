@@ -449,31 +449,16 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
         "recording_id": "rec-1",
         "base_flow_version": 1,
         "plan": {
-            "submission_id": "plan-1",
             "semantic_plan": {
                 "business_understanding": {"intent": "提交申请"},
-                "request_roles": [{
-                    "step_id": "submit", "role": "submit_anchor", "name": "提交申请",
-                    "title": "提交申请", "reason": "真实 POST 请求",
-                }],
-                "field_semantics": [{
-                    "step_id": "submit", "wire_path": "title", "public_name": "申请标题",
-                    "business_type": "string", "category": "user_param",
-                    "source_kind": "user_input", "confidence": 0.95,
-                    "evidence": [{
-                        "source": "screenshot", "screenshot_name": "form.png",
-                        "visible_label": "申请标题", "control_kind": "text",
-                        "editable": True,
-                    }],
-                }],
                 "capabilities": [{
                     "name": "submit_application", "title": "提交申请",
-                    "intent": "提交申请", "kind": "submit", "step_ids": ["submit"],
+                    "kind": "submit", "anchor_step_id": "submit",
+                    "request_refs": [{"step_id": "submit", "usage": "execute"}],
                 }],
-                "capability_relations": [],
                 "unresolved_items": [],
             },
-            "ops": [{"op": "rename_step", "step_id": "submit", "name": "提交申请"}],
+            "ops": [],
         },
     }))
     assert result["flow_version"] > 1
@@ -497,16 +482,13 @@ def test_pi_plan_applies_live_param_source_operation(monkeypatch):
         "plan": {
             "semantic_plan": {
                 "business_understanding": {},
-                "request_roles": [],
-                "field_semantics": [],
                 "capabilities": [],
-                "capability_relations": [],
                 "unresolved_items": [],
             },
             "ops": [{
                 "op": "set_param_source",
-                "step_id": "req-submit",
-                "path": "title",
+                "request_id": "req-submit",
+                "wire_path": "body.title",
                 "source_kind": "page_context",
                 "reason": "该值由当前页面上下文提供",
             }],
@@ -522,11 +504,25 @@ def test_pi_plan_applies_live_param_source_operation(monkeypatch):
         "index": 0,
         "op": "set_param_source",
         "status": "applied",
-        "target": "req-submit:title",
+        "requested_target": {
+            "request_id": "req-submit",
+            "wire_path": "body.title",
+        },
+        "resolved_target": {
+            "step_id": "submit",
+            "stored_path": "title",
+            "wire_path": "body.title",
+        },
+        "reason": "",
+        "flow_version_before": 1,
+        "flow_version_after": result["flow_version"],
     }]
+    assert result["all_applied"] is True
+    assert result["must_retry"] == []
+    assert result["unresolved_targets"] == []
 
 
-def test_pi_plan_reports_skipped_field_operation_instead_of_silent_success(monkeypatch):
+def test_pi_plan_reports_rejected_field_operation_instead_of_silent_success(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-op-result")
     session.spec.steps[0].source_meta = {"request_id": "req-submit"}
     session.spec.request_facts.requests = [RequestFact(
@@ -540,15 +536,15 @@ def test_pi_plan_reports_skipped_field_operation_instead_of_silent_success(monke
             "ops": [
                 {
                     "op": "set_param_source",
-                    "step_id": "req-missing",
-                    "path": "title",
+                    "request_id": "req-missing",
+                    "wire_path": "body.title",
                     "source_kind": "page_context",
                     "reason": "错误的请求标识",
                 },
                 {
                     "op": "set_param_source",
-                    "step_id": "req-submit",
-                    "path": "title",
+                    "request_id": "req-submit",
+                    "wire_path": "body.title",
                     "source_kind": "page_context",
                     "reason": "页面上下文自动提供",
                 },
@@ -556,9 +552,50 @@ def test_pi_plan_reports_skipped_field_operation_instead_of_silent_success(monke
         },
     }))
 
-    assert [item["status"] for item in result["op_results"]] == ["skipped", "applied"]
+    assert [item["status"] for item in result["op_results"]] == ["rejected", "applied"]
     assert "target not found" in result["op_results"][0]["reason"]
+    assert result["all_applied"] is False
+    assert result["must_retry"] == [0]
+    assert result["unresolved_targets"] == [{
+        "request_id": "req-missing",
+        "wire_path": "body.title",
+    }]
+    assert not any(
+        item.get("kind") == "param_source" and "req-missing" in item.get("text", "")
+        for item in (session.spec.meta or {}).get("agent_insights") or []
+    )
     assert session.spec.steps[0].params[0].source_kind == "page_context"
+
+
+def test_pi_repair_returns_the_same_complete_operation_results(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-repair-results")
+
+    result = asyncio.run(submit_recording_repair("run-repair-results", {
+        "base_flow_version": 1,
+        "operations": [{
+            "op": "add_pitfall",
+            "text": "提交前必须先读取当前流程定义",
+            "evidence_ref": "request-submit",
+        }],
+    }))
+
+    assert result["all_applied"] is True
+    assert result["must_retry"] == []
+    assert result["unresolved_targets"] == []
+    assert result["op_results"] == [{
+        "index": 0,
+        "op": "add_pitfall",
+        "status": "applied",
+        "requested_target": {},
+        "resolved_target": {},
+        "reason": "",
+        "flow_version_before": 1,
+        "flow_version_after": result["flow_version"],
+    }]
+    assert any(
+        item.get("text") == "提交前必须先读取当前流程定义"
+        for item in (session.spec.meta or {}).get("pitfalls") or []
+    )
 
 
 
@@ -578,49 +615,22 @@ def test_pi_plan_rejects_legacy_flow_spec_wrapper(monkeypatch):
     assert int((session.spec.meta or {}).get("current_version") or 0) == 1
 
 
-def test_pi_plan_normalizes_observed_model_variant_on_first_submission(monkeypatch):
+def test_pi_plan_rejects_observed_legacy_model_variant(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-model-variant")
 
-    result = asyncio.run(submit_recording_plan("run-model-variant", {
-        "recording_id": "rec-model-variant",
-        "base_flow_version": 1,
-        "plan": {
-            "semantic_plan": {
-                "business_understanding": "提交申请并返回处理结果",
-                "request_roles": ["submit_anchor"],
-                "field_semantics": [{
-                    "step_id": "submit",
-                    "wire_path": "title",
-                    "public_name": "截图中的申请标题",
-                    "business_type": "string",
-                    "category": "runtime_var",
-                    "source_kind": "previous_response",
-                    "confidence": 0.95,
-                    "evidence": "截图标签与请求字段同名",
-                }],
-                "capabilities": [{
-                    "capability_id": "cap_submit_application",
-                    "title": "发起申请",
-                    "description": "提交页面中的申请表单",
-                    "primary_step_id": "submit",
-                    "entry_step_id": "submit",
-                    "depends_on_step_ids": [],
-                }],
-                "capability_relations": [{
-                    "source_capability_id": "cap_submit_application",
-                    "target_capability_id": "cap_submit_application",
-                    "relation_type": "depends_on",
-                }],
-                "unresolved_items": [],
+    with pytest.raises(ToolError, match="禁止或未知字段"):
+        asyncio.run(submit_recording_plan("run-model-variant", {
+            "recording_id": "rec-model-variant",
+            "base_flow_version": 1,
+            "plan": {
+                "semantic_plan": {
+                    "business_understanding": {"summary": "提交申请并返回处理结果"},
+                    "field_semantics": [{"step_id": "submit", "wire_path": "body.title"}],
+                },
+                "ops": [],
             },
-            "ops": "",
-        },
-    }))
-
-    assert result["flow_version"] > 1
-    assert session.spec.capabilities
-    assert session.spec.steps[0].params[0].category == "user_param"
-    assert session.spec.steps[0].params[0].source_kind == "user_input"
+        }))
+    assert int((session.spec.meta or {}).get("current_version") or 0) == 1
 
 
 
@@ -649,10 +659,7 @@ def test_pi_plan_allows_backend_to_refresh_derived_request_usage(monkeypatch):
         "plan": {
             "semantic_plan": {
                 "business_understanding": {},
-                "request_roles": [],
-                "field_semantics": [],
                 "capabilities": [],
-                "capability_relations": [],
                 "unresolved_items": [],
             },
             "ops": [],
@@ -677,7 +684,7 @@ def test_pi_repair_rejects_stale_version_and_non_whitelisted_operation(monkeypat
             "base_flow_version": 0,
             "operations": [],
         }))
-    with pytest.raises(ToolError, match="不允许|not allowed|确定性准入"):
+    with pytest.raises(ToolError, match="不允许|not allowed|确定性准入|强类型契约"):
         asyncio.run(submit_recording_repair("run-repair", {
             "recording_id": "rec-repair",
             "base_flow_version": 1,
@@ -893,10 +900,7 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
         params["plan"] = {
             "semantic_plan": {
                 "business_understanding": {},
-                "request_roles": [],
-                "field_semantics": [],
                 "capabilities": [],
-                "capability_relations": [],
                 "unresolved_items": [],
             },
             "ops": [],
@@ -1625,102 +1629,47 @@ def test_transport_allows_incremental_semantic_keys():
     }, allow_screenshot_field_overlay=True)
 
 
-def test_screenshot_field_overlay_survives_invalid_capability_batch(monkeypatch):
+def test_screenshot_field_overlay_cannot_bypass_typed_field_operations(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-field-overlay")
     session.analysis_image_count = 1
-    result = asyncio.run(submit_recording_plan("run-field-overlay", {
-        "recording_id": "rec-field-overlay",
-        "base_flow_version": 1,
-        "plan": {
-            "_submitted_semantic_keys": [
-                "business_understanding", "request_roles", "field_semantics",
-                "capabilities", "capability_relations", "unresolved_items",
-            ],
-            "semantic_plan": {
-                "business_understanding": {"summary": "提交申请"},
-                "request_roles": [],
-                "field_semantics": [{
-                    "step_id": "submit",
-                    "wire_path": "title",
-                    "public_name": "申请标题",
-                    "business_type": "string",
-                    "category": "user_param",
-                    "source_kind": "user_input",
-                    "confidence": 0.95,
-                    "evidence": [{
-                        "source": "screenshot",
-                        "visible_label": "申请标题",
-                        "control_kind": "text",
-                        "editable": True,
+    with pytest.raises(ToolError, match="field_semantics"):
+        asyncio.run(submit_recording_plan("run-field-overlay", {
+            "recording_id": "rec-field-overlay",
+            "base_flow_version": 1,
+            "plan": {
+                "semantic_plan": {
+                    "business_understanding": {"summary": "提交申请"},
+                    "field_semantics": [{
+                        "step_id": "submit", "wire_path": "body.title",
+                        "public_name": "申请标题",
                     }],
-                }],
-                "capabilities": [{
-                    "name": "submit_application",
-                    "kind": "submit",
-                    "step_ids": ["submit"],
-                }],
-                "capability_relations": [],
-                "unresolved_items": [],
+                },
+                "ops": [],
             },
-            # Reproduces a non-field planner failure in the same tool call.
-            "ops": "invalid",
-        },
-    }))
-
-    assert result["partial_field_overlay"] is True
-    assert "已保留可验证的截图字段修正" in result["warning"]
-    assert session.spec.steps[0].params[0].label == "申请标题"
-    assert session.last_submission_kind == "plan"
+        }))
+    assert session.spec.steps[0].params[0].label != "申请标题"
 
 
-def test_recovered_long_screenshot_payload_applies_fields_with_missing_empty_keys(
+def test_recovered_legacy_screenshot_payload_is_rejected_instead_of_partially_applied(
     monkeypatch,
 ):
     session = _bind(monkeypatch, recording_id="rec-long-overlay")
     session.analysis_image_count = 1
-    result = asyncio.run(submit_recording_plan("run-long-overlay", {
-        # The active run already owns this identity.  Real multimodal model
-        # calls can omit it and must not spend another full inference retrying.
-        "base_flow_version": 1,
-        "plan": {
-            # The JS boundary recovered these real keys from the tool-call
-            # outer object; two trailing empty arrays were truncated.
-            "_submitted_semantic_keys": [
-                "business_understanding", "request_roles", "field_semantics",
-                "capabilities",
-            ],
-            "semantic_plan": {
-                "business_understanding": {"summary": "提交申请"},
-                "request_roles": [],
-                "field_semantics": [{
-                    "step_id": "submit",
-                    "wire_path": "title",
-                    "public_name": "申请标题",
-                    "business_type": "string",
-                    "category": "user_param",
-                    "source_kind": "user_input",
-                    "confidence": 0.95,
-                    "evidence": [{
-                        "source": "screenshot",
-                        "visible_label": "申请标题",
-                        "control_kind": "text",
-                        "editable": True,
+    with pytest.raises(ToolError, match="field_semantics"):
+        asyncio.run(submit_recording_plan("run-long-overlay", {
+            "base_flow_version": 1,
+            "plan": {
+                "semantic_plan": {
+                    "business_understanding": {"summary": "提交申请"},
+                    "field_semantics": [{
+                        "step_id": "submit", "wire_path": "body.title",
+                        "public_name": "申请标题",
                     }],
-                }],
-                "capabilities": [{
-                    "name": "submit_application",
-                    "kind": "submit",
-                    "step_ids": ["submit"],
-                }],
-                "capability_relations": [],
-                "unresolved_items": [],
+                },
+                "ops": [],
             },
-            "ops": [],
-        },
-    }))
-
-    assert result["flow_version"] > 1
-    assert session.spec.steps[0].params[0].label == "申请标题"
+        }))
+    assert session.spec.steps[0].params[0].label != "申请标题"
 
 
 def test_recording_tool_still_rejects_an_explicit_cross_session_identity(monkeypatch):
@@ -2856,7 +2805,7 @@ def test_screenshot_visible_value_never_overwrites_recorded_default():
 
 @pytest.mark.parametrize("existing_capabilities", [False, True])
 @pytest.mark.asyncio
-async def test_partial_screenshot_updates_initial_and_existing_capability_plans(
+async def test_partial_screenshot_semantics_require_typed_operations(
     monkeypatch, existing_capabilities,
 ):
     session = _bind(monkeypatch)
@@ -2903,18 +2852,14 @@ async def test_partial_screenshot_updates_initial_and_existing_capability_plans(
         }],
     }])
 
-    await submit_recording_plan("run-1", {
-        "recording_id": session.recording_id,
-        "base_flow_version": int(session.spec.meta["current_version"]),
-        "plan": plan,
-    })
-
-    quantity, untouched = session.spec.steps[0].params
-    assert (quantity.key, quantity.type, quantity.source_kind) == ("数量", "number", "user_input")
-    assert not quantity.enum_options
-    assert (untouched.key, untouched.value) == ("untouched", "same")
-    assert session.spec.capabilities
-    assert session.last_submission_kind == "plan"
+    before = session.spec.model_dump(mode="json")
+    with pytest.raises(ToolError, match="field_semantics"):
+        await submit_recording_plan("run-1", {
+            "recording_id": session.recording_id,
+            "base_flow_version": int(session.spec.meta["current_version"]),
+            "plan": plan,
+        })
+    assert session.spec.model_dump(mode="json") == before
 
 
 def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
@@ -2949,7 +2894,7 @@ def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
 
 
 @pytest.mark.asyncio
-async def test_unmatched_screenshot_field_does_not_block_capability_plan(monkeypatch):
+async def test_unmatched_screenshot_field_cannot_enter_semantic_plan(monkeypatch):
     session = _bind(monkeypatch)
     session.analysis_image_count = 1
     session.spec = ensure_flow_version(FlowSpec(steps=[FlowStep(
@@ -2970,17 +2915,13 @@ async def test_unmatched_screenshot_field_does_not_block_capability_plan(monkeyp
         }],
     }])
 
-    result = await submit_recording_plan("run-1", {
-        "recording_id": session.recording_id,
-        "base_flow_version": int(session.spec.meta["current_version"]),
-        "plan": plan,
-    })
-
-    assert result["flow_version"] == int(session.spec.meta["current_version"])
-    assert session.spec.capabilities
-    assert session.received_submission["semantic_plan"]["field_semantics"] == []
-    assert session.received_submission["semantic_plan"]["unresolved_items"]
-    assert session.last_submission_kind == "plan"
+    with pytest.raises(ToolError, match="field_semantics"):
+        await submit_recording_plan("run-1", {
+            "recording_id": session.recording_id,
+            "base_flow_version": int(session.spec.meta["current_version"]),
+            "plan": plan,
+        })
+    assert session.last_submission_kind == ""
 
 
 @pytest.mark.asyncio

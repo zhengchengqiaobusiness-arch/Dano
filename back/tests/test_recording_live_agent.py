@@ -616,9 +616,19 @@ async def test_field_grounding_rejection_is_returned_in_per_op_status():
     assert updated.meta["recording_agent_session"]["op_results"] == [{
         "index": 0,
         "op": "rename_field",
-        "status": "skipped",
-        "target": "submit:jobId",
+        "status": "rejected",
+        "requested_target": {
+            "request_id": "req-submit",
+            "wire_path": "body.jobId",
+        },
+        "resolved_target": {
+            "step_id": "submit",
+            "stored_path": "jobId",
+            "wire_path": "body.jobId",
+        },
         "reason": "label '页' contradicts field_evidence for jobId: observed=['任务编号']",
+        "flow_version_before": 0,
+        "flow_version_after": int(updated.meta["current_version"]),
     }]
 
 
@@ -921,6 +931,12 @@ def test_finalize_merge_materializes_deferred_request_id_field_semantics():
             "evidence_refs": ["request:req-submit", "control:jobId"],
         },
     ])
+    stored_ops = (live.meta or {})["recording_agent_ops"]
+    assert all(item["request_id"] == "req-submit" for item in stored_ops)
+    assert all(item["wire_path"] == "body.jobId" for item in stored_ops)
+    assert all(item["field_ref"] == {
+        "request_id": "req-submit", "wire_path": "body.jobId",
+    } for item in stored_ops)
 
     merged = merge_live_agent_state(live, _flow())
     param = merged.steps[1].params[0]
@@ -928,6 +944,37 @@ def test_finalize_merge_materializes_deferred_request_id_field_semantics():
     assert param.required is False
     assert param.key == "任务编号"
     assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+
+
+def test_finalize_merge_turns_still_unresolved_deferred_field_op_into_rejection():
+    live = FlowSpec(
+        flow_id="early-unresolved",
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-lost", request_index=2, method="POST", path="/lost"),
+        ]),
+    )
+    live = apply_flow_edits(live, [{
+        "op": "set_param_source",
+        "request_id": "req-lost",
+        "wire_path": "body.jobId",
+        "source_kind": "page_context",
+        "reason": "页面上下文",
+    }])
+
+    merged = merge_live_agent_state(live, _flow())
+
+    assert merged.meta["unresolved_live_agent_ops"] == [{
+        "op": "set_param_source",
+        "status": "rejected",
+        "requested_target": {
+            "request_id": "req-lost", "wire_path": "body.jobId",
+        },
+        "reason": "field target not found: req-lost:body.jobId",
+    }]
+    assert not any(
+        "req-lost" in item.get("text", "")
+        for item in (merged.meta or {}).get("agent_insights") or []
+    )
 
 
 @pytest.mark.asyncio

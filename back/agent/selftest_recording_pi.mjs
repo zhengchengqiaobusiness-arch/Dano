@@ -221,11 +221,9 @@ function verifyPlanToolCompatibility() {
   assert(
     planTool?.description?.includes("plan.ops")
       && planTool.description.includes("set_param_source")
-      && planTool.description.includes("set_param_required")
-      && planTool.description.includes("rename_field")
       && planTool.description.includes("op_results")
       && planTool.description.includes("propose_dependency")
-      && planTool.description.includes('"evidence":[{"source":"goal_text"'),
+      && planTool.description.includes("must_retry"),
     "plan tool does not expose the live semantic operation channel to Pi",
   );
   assert(
@@ -259,6 +257,12 @@ function verifyPlanToolCompatibility() {
     "propose_dependency schema must require evidence",
   );
   assert(
+    operationSchema("bind_verify_read")?.required?.includes("read_request_id")
+      && operationSchema("bind_verify_read")?.required?.includes("assertion")
+      && operationSchema("bind_verify_read")?.additionalProperties === false,
+    "bind_verify_read must be rejected before execution when its subject is incomplete",
+  );
+  assert(
     !planTool?.parameters?.required?.includes("recording_id"),
     "recording_id belongs to the active server session and must not block a model submission",
   );
@@ -268,28 +272,48 @@ function verifyPlanToolCompatibility() {
   );
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
   assert(
-    planTool?.parameters?.properties?.plan?.additionalProperties === true,
-    "plan payload must reach deterministic canonicalization before strict backend validation",
+    planTool?.parameters?.properties?.plan?.additionalProperties === false,
+    "plan payload must reject undeclared planner aliases",
+  );
+  const semanticSchema = planTool?.parameters?.properties?.plan?.properties?.semantic_plan;
+  assert(
+    semanticSchema?.additionalProperties === false
+      && JSON.stringify(Object.keys(semanticSchema?.properties || {}).sort())
+        === JSON.stringify(["business_understanding", "capabilities", "unresolved_items"]),
+    "semantic plan must expose only the strict business/capability/unresolved contract",
+  );
+  const capabilitySchema = semanticSchema?.properties?.capabilities?.items;
+  assert(
+    capabilitySchema?.required?.includes("anchor_step_id")
+      && capabilitySchema?.additionalProperties === false
+      && capabilitySchema?.properties?.request_refs?.items?.properties?.usage?.anyOf?.length === 4,
+    "capabilities must require an anchor and typed request usage",
+  );
+  const repairTool = recordingTools.find((tool) => tool.name === "submit_recording_repair");
+  assert(
+    JSON.stringify(repairTool?.parameters?.properties?.operations?.items)
+      === JSON.stringify(planTool?.parameters?.properties?.plan?.properties?.ops?.items),
+    "plan and repair must use the same typed operation union",
   );
   const plan = {
     semantic_plan: {
-      field_semantic_axes: "path,name,type,category,source,required,default_value",
+      business_understanding: { intent: "Create request" },
+      capabilities: [{
+        name: "submit_request",
+        title: "Submit request",
+        kind: "submit",
+        anchor_step_id: "submit",
+        request_refs: [{ step_id: "submit", usage: "execute" }],
+      }],
+      unresolved_items: [],
     },
-    semantic_plan: {
-      business_understanding: "Create request",
-      capabilities: [{ capability_id: "query", step_ids: ["query"] }],
-      capability_relations: [],
-      item: { capability_id: "options", step_ids: ["options"] },
-    },
-    field_semantics: [{
-      step_id: "submit",
-      wire_path: "sealId",
-      confidence: "high",
+    ops: [{
+      op: "set_param_source",
+      request_id: "req-submit",
+      wire_path: "body.title",
+      source_kind: "user_input",
+      reason: "operator entered this field",
     }],
-    request_roles: [{ step_id: "submit", role: "submit_anchor" }],
-    unresolved_items: [],
-    item: { capability_id: "submit", step_ids: ["submit"] },
-    ops: "",
   };
   const sanitized = sanitizeRecordingToolParams("submit_recording_plan", {
     recording_id: "rec-self-test",
@@ -307,132 +331,13 @@ function verifyPlanToolCompatibility() {
   );
   const semantic = sanitized.plan.semantic_plan;
   assert(
-    sanitized.plan._submitted_semantic_keys.includes("field_semantics"),
+    sanitized.plan._submitted_semantic_keys.includes("capabilities"),
     "originally submitted semantic keys were not preserved",
   );
-  assert(semantic.request_roles.length === 1, "flattened request_roles were not restored");
-  assert(semantic.field_semantics[0].confidence === 0.95, "high confidence was not normalized");
-  assert(semantic.capabilities.length === 3, "misplaced capability items were not merged");
+  assert(semantic.capabilities.length === 1, "strict capability was discarded");
   assert(Array.isArray(semantic.unresolved_items), "unresolved_items were not restored");
-  assert(!("field_semantic_axes" in semantic), "descriptive field_semantic_axes was not discarded");
-  assert(Array.isArray(sanitized.plan.ops) && sanitized.plan.ops.length === 0, "invalid ops were not normalized");
-
-  // A long tool call can spill the tail of semantic_plan beside `plan` while
-  // remaining valid JSON.  This is the exact shape emitted by the screenshot
-  // analysis path; dropping these arrays makes a successful run apply zero
-  // field changes.
-  const spilled = sanitizeRecordingToolParams("submit_recording_plan", {
-    recording_id: "rec-self-test",
-    flow_version: 3,
-    base_flow_version: 3,
-    plan: {
-      semantic_plan: {
-        business_understanding: "Create request",
-        capabilities: [{ capability_id: "submit", step_ids: ["submit"] }],
-      },
-    },
-    request_roles: [{ step_id: "submit", role: "submit_anchor" }],
-    field_semantics: [{
-      step_id: "submit",
-      wire_path: "roomCount",
-      public_name: "房间数量",
-      confidence: "high",
-    }],
-    item: { capability_id: "query", step_ids: ["query"] },
-  });
-  assert(spilled.plan.semantic_plan.request_roles.length === 1, "top-level request_roles were discarded");
-  assert(spilled.plan.semantic_plan.field_semantics.length === 1, "top-level field_semantics were discarded");
-  assert(
-    spilled.plan._submitted_semantic_keys.includes("field_semantics"),
-    "recovered top-level semantic keys were not marked as submitted",
-  );
-  assert(spilled.plan.semantic_plan.capabilities.length === 2, "top-level capability item was discarded");
-  assert(Array.isArray(spilled.plan.semantic_plan.capability_relations), "missing relations were not canonicalized");
-  assert(Array.isArray(spilled.plan.semantic_plan.unresolved_items), "missing unresolved items were not canonicalized");
-  assert(
-    !spilled.plan._submitted_semantic_keys.includes("capability_relations"),
-    "transport-filled relation key was incorrectly marked as model-submitted",
-  );
-
-  const nestedSpill = sanitizeRecordingToolParams("submit_recording_plan", {
-    recording_id: "rec-self-test",
-    flow_version: 3,
-    base_flow_version: 3,
-    plan: {
-      semantic_plan: {
-        business_understanding: {},
-        field_semantics: [],
-      },
-      ops: [],
-    },
-    semantic_plan: {
-      business_understanding: "Create request from screenshot",
-      request_roles: [{ step_id: "submit", role: "submit_anchor" }],
-      field_semantics: [{
-        step_id: "submit",
-        wire_path: "userCount",
-        public_name: "入住人数",
-        confidence: "high",
-      }],
-    },
-    ops: [{ op: "rename_field", step_id: "submit", field_path: "userCount", name: "入住人数" }],
-  });
-  assert(
-    nestedSpill.plan.semantic_plan.business_understanding === "Create request from screenshot",
-    "outer semantic_plan business understanding was hidden by an empty placeholder",
-  );
-  assert(nestedSpill.plan.semantic_plan.field_semantics.length === 1, "outer semantic_plan fields were discarded");
-  assert(nestedSpill.plan.semantic_plan.request_roles.length === 1, "outer semantic_plan roles were discarded");
-  assert(nestedSpill.plan.ops.length === 1, "outer ops were hidden by an empty plan.ops placeholder");
-
-  const compactSpill = sanitizeRecordingToolParams("submit_recording_plan", {
-    recording_id: "rec-self-test",
-    base_flow_version: 3,
-    plan: {
-      semantic_plan: {
-        business_understanding: "Compact screenshot plan",
-        request_roles: ["step_id=submit;role=submit_anchor"],
-        field_semantics: ["step_id=submit;wire_path=roomCount;public_name=房间数量;confidence=0.95"],
-        capabilities: ["capability_id=submit;step_ids=submit"],
-        capability_relations: [],
-        unresolved_items: [],
-      },
-    },
-  });
-  assert(
-    compactSpill.plan.semantic_plan.field_semantics[0].includes("wire_path=roomCount"),
-    "compact field semantics were discarded before Python normalization",
-  );
-  assert(
-    compactSpill.plan.semantic_plan.request_roles[0].includes("role=submit_anchor"),
-    "compact request roles were discarded before Python normalization",
-  );
-
-  // A 0.82.1 session can still reuse a historical model conversation whose
-  // planner vocabulary predates the semantic contract.  Those descriptive
-  // arrays must not consume every submission attempt at the strict backend
-  // boundary.  The server will rebuild grounded request/field/capability facts.
-  const legacyPlanner = sanitizeRecordingToolParams("submit_recording_plan", {
-    base_flow_version: 1,
-    plan: {
-      semantic_plan: {
-        title: "请假单查询与提交",
-        steps: [{ step_id: "invented-step", request_id: "req_76" }],
-        fields: [{ step_id: "invented-step", wire_path: "query.type" }],
-        dependencies: [{ from: "invented-step", to: "other-step" }],
-        enums: [{ field_id: "legacy-field", options: [{ label: "病假", value: "1" }] }],
-      },
-    },
-  });
-  assert(
-    legacyPlanner.plan.semantic_plan.business_understanding.summary === "请假单查询与提交",
-    "legacy title was not preserved as business understanding",
-  );
-  assert(
-    ["title", "steps", "fields", "dependencies", "enums"]
-      .every((key) => !(key in legacyPlanner.plan.semantic_plan)),
-    "legacy planner keys reached strict backend validation",
-  );
+  assert(sanitized.plan.ops.length === 1, "typed operation was discarded");
+  assert(!("field_semantics" in semantic), "field semantics bypassed plan.ops");
 }
 
 function verifyTruncatedPlanFallback() {

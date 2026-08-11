@@ -236,6 +236,59 @@ def _field_target(spec, step_or_request_id: str, path: str):  # noqa: ANN001, AN
     return resolved.step, resolved.param
 
 
+def _canonical_deferred_wire_path(spec, request_id: str, path: str) -> str:  # noqa: ANN001
+    raw = str(path or "").removeprefix("request.")
+    if raw.startswith(("body.", "query.", "headers.", "url_path[")):
+        return raw
+    fact = next(
+        (item for item in spec.request_facts.requests if item.request_id == request_id),
+        None,
+    )
+    method = str(getattr(fact, "method", "") or "").upper()
+    return f"query.{raw}" if method in {"GET", "HEAD", "OPTIONS"} else f"body.{raw}"
+
+
+def _canonical_recorded_agent_op(spec, edit: dict) -> dict:  # noqa: ANN001
+    """Persist deferred field operations as a replayable canonical FieldRef."""
+    stored = {**deepcopy(edit), "actor": "agent"}
+    if str(edit.get("op") or "") not in {
+        "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+        "attach_enum_options",
+    }:
+        return stored
+    identifier = str(edit.get("step_id") or edit.get("request_id") or "")
+    path = str(edit.get("wire_path") or edit.get("path") or "")
+    if not identifier or not path:
+        return stored
+    is_step_id = any(item.step_id == identifier for item in spec.steps)
+    try:
+        resolved = resolve_field_ref(spec, FieldRef(
+            step_id=identifier if is_step_id else "",
+            request_id="" if is_step_id else identifier,
+            wire_path=path,
+        ))
+        request_id = resolved.request_id
+        step_id = resolved.step_id
+        wire_path = resolved.wire_path
+    except FieldReferenceDeferred:
+        request_id = identifier
+        step_id = ""
+        wire_path = _canonical_deferred_wire_path(spec, request_id, path)
+    except ValueError:
+        return stored
+    stored.pop("path", None)
+    stored.pop("step_id", None)
+    stored["request_id"] = request_id
+    if step_id:
+        stored["step_id"] = step_id
+    stored["wire_path"] = wire_path
+    stored["field_ref"] = {
+        **({"step_id": step_id} if step_id else {"request_id": request_id}),
+        "wire_path": wire_path,
+    }
+    return stored
+
+
 def _evidence_refs(edit: dict) -> list[str]:
     raw = edit.get("evidence_refs") or edit.get("evidence") or []
     if isinstance(raw, (str, dict)):
@@ -682,12 +735,12 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         raise ValueError(f"unsupported live recording op: {kind}")
     if str(edit.get("actor") or "agent") not in {"agent", "planner", "repair"}:
         raise ValueError("live recording ops must be agent-authored")
-    stored = {**deepcopy(edit), "actor": "agent"}
+    stored = _canonical_recorded_agent_op(spec, edit)
     if record and any(
         isinstance(existing, dict) and existing == stored
         for existing in (spec.meta or {}).get("recording_agent_ops") or []
     ):
-        return {"status": "skipped", "reason": "duplicate operation"}
+        return {"status": "rejected", "reason": "duplicate operation"}
 
     result = {"status": "applied"}
 
@@ -766,7 +819,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         _append_insight(spec, kind="role", text=f"{request_id} 判定为 {role}：{reason}", refs=[request_id, *evidence_refs])
 
     elif kind == "set_param_source":
-        step_id = str(edit.get("step_id") or "")
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
         source_kind = str(edit.get("source_kind") or "")
         reason = str(edit.get("reason") or "").strip()
@@ -784,6 +837,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             try:
                 _compile_param_source(spec, step, param, edit, source_kind=source_kind, reason=reason)
             except _DeferredCompile as pending:
+                result["status"] = "deferred"
                 result["deferred"] = True
                 result["reason"] = str(pending)
                 if record:
@@ -802,12 +856,14 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 },
             ]
         else:
+            result["status"] = "deferred"
             result["deferred"] = True
             result["reason"] = "request is captured but its canonical step is not materialized yet"
-        _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
+        if param is not None:
+            _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
 
     elif kind == "set_param_required":
-        step_id = str(edit.get("step_id") or "")
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
         required = edit.get("required")
         reason = str(edit.get("reason") or "").strip()
@@ -838,17 +894,19 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 },
             ]
         else:
+            result["status"] = "deferred"
             result["deferred"] = True
             result["reason"] = "request is captured but its canonical step is not materialized yet"
-        _append_insight(
-            spec,
-            kind="param_required",
-            text=f"{step_id}:{path} 必填性为 {required}：{reason}",
-            refs=[step_id, path, *evidence_refs],
-        )
+        if param is not None:
+            _append_insight(
+                spec,
+                kind="param_required",
+                text=f"{step_id}:{path} 必填性为 {required}：{reason}",
+                refs=[step_id, path, *evidence_refs],
+            )
 
     elif kind == "set_param_enum":
-        step_id = str(edit.get("step_id") or "")
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
         reason = str(edit.get("reason") or "").strip()
         evidence_refs = _evidence_refs(edit)
@@ -910,17 +968,19 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 },
             ]
         else:
+            result["status"] = "deferred"
             result["deferred"] = True
             result["reason"] = "request is captured but its canonical step is not materialized yet"
-        _append_insight(
-            spec,
-            kind="enum_options",
-            text=f"{step_id}:{path} 枚举已按录制字典绑定：{reason}",
-            refs=[step_id, path, *evidence_refs],
-        )
+        if param is not None:
+            _append_insight(
+                spec,
+                kind="enum_options",
+                text=f"{step_id}:{path} 枚举已按录制字典绑定：{reason}",
+                refs=[step_id, path, *evidence_refs],
+            )
 
     elif kind == "rename_field":
-        step_id = str(edit.get("step_id") or "")
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
         label = str(edit.get("label") or edit.get("public_name") or edit.get("name") or "").strip()
         reason = str(edit.get("reason") or "").strip()
@@ -949,14 +1009,16 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 },
             ]
         else:
+            result["status"] = "deferred"
             result["deferred"] = True
             result["reason"] = "request is captured but its canonical step is not materialized yet"
-        _append_insight(
-            spec,
-            kind="field_name",
-            text=f"{step_id}:{path} 业务名称为 {label}：{reason}",
-            refs=[step_id, path, *evidence_refs],
-        )
+        if param is not None:
+            _append_insight(
+                spec,
+                kind="field_name",
+                text=f"{step_id}:{path} 业务名称为 {label}：{reason}",
+                refs=[step_id, path, *evidence_refs],
+            )
 
     elif kind == "propose_dependency":
         requested_link_id = str(edit.get("link_id") or "")
@@ -1217,11 +1279,18 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         if not isinstance(operation, dict):
             continue
         try:
-            result = apply_recording_agent_edit(merged, operation, record=True)
+            candidate = merged.model_copy(deep=True)
+            result = apply_recording_agent_edit(candidate, operation, record=True)
             if result.get("deferred"):
                 raise ValueError("field operation remained unresolved after final materialization")
+            merged = candidate
         except (TypeError, ValueError) as exc:
-            unresolved.append({"op": str(operation.get("op") or ""), "reason": str(exc)})
+            unresolved.append({
+                "op": str(operation.get("op") or ""),
+                "status": "rejected",
+                "requested_target": deepcopy(operation.get("field_ref") or {}),
+                "reason": str(exc),
+            })
     if unresolved:
         merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}
     return merged

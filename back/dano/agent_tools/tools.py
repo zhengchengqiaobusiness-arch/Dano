@@ -2614,6 +2614,141 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     return submission
 
 
+_STRICT_SEMANTIC_PLAN_KEYS = {
+    "business_understanding", "capabilities", "unresolved_items",
+}
+_STRICT_BUSINESS_UNDERSTANDING_KEYS = {
+    "business_name", "summary", "intent", "object", "purpose",
+}
+_STRICT_CAPABILITY_KEYS = {
+    "name", "title", "kind", "anchor_step_id", "request_refs",
+}
+_STRICT_REQUEST_REF_KEYS = {"step_id", "usage"}
+_STRICT_REQUEST_USAGES = {"execute", "preflight", "option_source", "fact_check"}
+_STRICT_UNRESOLVED_KEYS = {
+    "type", "title", "description", "reason", "status", "severity", "blocking",
+    "request_id", "step_id", "wire_path", "evidence_refs",
+}
+_TYPED_RECORDING_OPERATION_NAMES = {
+    "set_goal", "set_request_role", "set_param_source", "set_param_required",
+    "set_param_enum", "rename_field", "propose_dependency", "add_pitfall",
+    "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
+}
+_TYPED_RECORDING_OPERATION_KEYS = {
+    "set_goal": {"op", "goal"},
+    "set_request_role": {"op", "request_id", "role", "reason", "evidence_refs", "confidence"},
+    "set_param_source": {
+        "op", "request_id", "step_id", "wire_path", "source_kind", "origin_request_id",
+        "origin_path", "context_key", "strategy", "start_field", "end_field", "output_key",
+        "reason",
+    },
+    "set_param_required": {
+        "op", "request_id", "step_id", "wire_path", "required", "reason", "evidence_refs",
+    },
+    "set_param_enum": {
+        "op", "request_id", "step_id", "wire_path", "dictionary_source", "options",
+        "reason", "evidence_refs",
+    },
+    "rename_field": {
+        "op", "request_id", "step_id", "wire_path", "label", "reason", "evidence_refs",
+    },
+    "propose_dependency": {
+        "op", "link_id", "kind", "source_request_id", "source_path", "target_request_id",
+        "target_step_id", "target_path", "reason", "confidence", "evidence",
+    },
+    "add_pitfall": {"op", "text", "evidence_ref"},
+    "confirm_dependency": {"op", "link_id", "verification_id"},
+    "bind_verify_read": {
+        "op", "write_step_id", "read_request_id", "verification_id", "assertion",
+    },
+    "attach_enum_options": {
+        "op", "request_id", "step_id", "wire_path", "source_request_id",
+        "verification_id", "options",
+    },
+    "mark_unverified": {"op", "target_kind", "target_id", "reason"},
+}
+
+
+def _validate_typed_recording_operations(operations: object, *, label: str) -> None:
+    if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
+        raise ToolError(f"{label} 必须是对象数组")
+    for index, operation in enumerate(operations):
+        kind = str(operation.get("op") or "")
+        if kind not in _TYPED_RECORDING_OPERATION_NAMES:
+            raise ToolError(f"{label}[{index}] 操作未在强类型契约中声明: {kind or '<empty>'}")
+        unknown_keys = sorted(set(operation).difference(_TYPED_RECORDING_OPERATION_KEYS[kind]))
+        if unknown_keys:
+            raise ToolError(
+                f"{label}[{index}] 包含未知字段: " + ", ".join(unknown_keys)
+            )
+        if kind in {
+            "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+            "attach_enum_options",
+        }:
+            if not str(operation.get("request_id") or operation.get("step_id") or ""):
+                raise ToolError(f"{label}[{index}] 字段操作缺少 request_id 或 step_id")
+            if not str(operation.get("wire_path") or ""):
+                raise ToolError(f"{label}[{index}] 字段操作必须使用 wire_path")
+
+
+def _validate_strict_recording_plan(raw_plan: dict) -> None:
+    semantic = raw_plan.get("semantic_plan")
+    if semantic is None:
+        semantic = {}
+    if not isinstance(semantic, dict):
+        raise ToolError("plan.semantic_plan 必须是对象")
+    unknown = sorted(set(semantic).difference(_STRICT_SEMANTIC_PLAN_KEYS))
+    if unknown:
+        raise ToolError("plan.semantic_plan 包含禁止或未知字段：" + ", ".join(unknown))
+
+    understanding = semantic.get("business_understanding", {})
+    if not isinstance(understanding, dict):
+        raise ToolError("plan.semantic_plan.business_understanding 必须是对象")
+    unknown_understanding = sorted(
+        set(understanding).difference(_STRICT_BUSINESS_UNDERSTANDING_KEYS)
+    )
+    if unknown_understanding:
+        raise ToolError(
+            "business_understanding 包含未知字段：" + ", ".join(unknown_understanding)
+        )
+
+    capabilities = semantic.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        raise ToolError("plan.semantic_plan.capabilities 必须是数组")
+    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
+    for index, capability in enumerate(capabilities):
+        if not isinstance(capability, dict):
+            raise ToolError(f"capabilities[{index}] 必须是对象")
+        unknown_capability = sorted(set(capability).difference(_STRICT_CAPABILITY_KEYS))
+        if unknown_capability:
+            raise ToolError(
+                f"capabilities[{index}] 包含禁止或未知字段：" + ", ".join(unknown_capability)
+            )
+        for key in ("name", "title", "anchor_step_id"):
+            if not str(capability.get(key) or "").strip():
+                raise ToolError(f"capabilities[{index}].{key} 必填")
+        if str(capability.get("kind") or "") not in ALLOWED_CAPABILITY_KINDS:
+            raise ToolError(f"capabilities[{index}].kind 不是允许的能力枚举")
+        refs = capability.get("request_refs")
+        if not isinstance(refs, list) or not refs:
+            raise ToolError(f"capabilities[{index}].request_refs 必须是非空数组")
+        for ref_index, ref in enumerate(refs):
+            if not isinstance(ref, dict) or set(ref).difference(_STRICT_REQUEST_REF_KEYS):
+                raise ToolError(f"capabilities[{index}].request_refs[{ref_index}] 格式错误")
+            if not str(ref.get("step_id") or "") or str(ref.get("usage") or "") not in _STRICT_REQUEST_USAGES:
+                raise ToolError(f"capabilities[{index}].request_refs[{ref_index}] 缺少有效 step_id/usage")
+
+    unresolved = semantic.get("unresolved_items", [])
+    if not isinstance(unresolved, list):
+        raise ToolError("plan.semantic_plan.unresolved_items 必须是数组")
+    for index, item in enumerate(unresolved):
+        if not isinstance(item, dict) or set(item).difference(_STRICT_UNRESOLVED_KEYS):
+            raise ToolError(f"unresolved_items[{index}] 格式错误")
+        if not str(item.get("type") or ""):
+            raise ToolError(f"unresolved_items[{index}].type 必填")
+    _validate_typed_recording_operations(raw_plan.get("ops", []), label="plan.ops")
+
+
 def _require_complete_submitted_semantic_keys(
     raw_plan: dict,
     *,
@@ -2675,6 +2810,7 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             **deepcopy(raw_plan),
             "_analysis_screenshot_count": int(session.analysis_image_count),
         }
+    _validate_strict_recording_plan(raw_plan)
     screenshot_count = int(getattr(session, "analysis_image_count", 0) or 0)
     _require_complete_submitted_semantic_keys(
         raw_plan,
@@ -2747,8 +2883,7 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
         optional={"recording_id", "flow_version"},
     )
     operations = params.get("operations")
-    if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
-        raise ToolError("operations 必须是对象数组")
+    _validate_typed_recording_operations(operations, label="operations")
     session = _recording_session(run_id, params)
     return await _apply_recording_submission_atomic(
         session,
