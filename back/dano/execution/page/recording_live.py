@@ -7,6 +7,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from dano.execution.page.recording_field_identity import (
+    canonical_wire_path,
     FieldRef,
     FieldReferenceDeferred,
     resolve_field_ref,
@@ -268,7 +269,7 @@ def _grounded_ref_tokens(spec) -> set[str]:  # noqa: ANN001
                 tokens.add(value)
     for item in getattr(spec.request_facts, "field_evidence", []) or []:
         if isinstance(item, dict):
-            for key in ("event_id", "action_id", "field"):
+            for key in ("evidence_id", "event_id", "action_id", "field"):
                 value = str(item.get(key) or "")
                 if value:
                     tokens.add(value)
@@ -298,6 +299,7 @@ def _normalized_field_alias(value: object) -> str:
 def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
     """Return recorder controls that can be tied to this exact request field."""
     request_id = str((step.source_meta or {}).get("request_id") or "")
+    wire_path = canonical_wire_path(step, param.path)
     aliases = {
         _normalized_field_alias(param.path),
         _normalized_field_alias(param.key),
@@ -309,8 +311,22 @@ def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
     for item in getattr(spec.request_facts, "field_evidence", []) or []:
         if not isinstance(item, dict):
             continue
+        binding_status = str(item.get("binding_status") or "")
+        if binding_status:
+            if (
+                binding_status == "bound"
+                and str(item.get("request_id") or "") == request_id
+                and str(item.get("wire_path") or "") == wire_path
+            ):
+                matches.append(item)
+            continue
         evidence_request_id = str(item.get("request_id") or "")
         if evidence_request_id and request_id and evidence_request_id != request_id:
+            continue
+        evidence_path = str(item.get("wire_path") or item.get("path") or "")
+        if evidence_request_id and evidence_path:
+            if evidence_path == wire_path or evidence_path == str(param.path or ""):
+                matches.append(item)
             continue
         item_aliases = {
             _normalized_field_alias(item.get("path")),
@@ -330,9 +346,9 @@ def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
 def _require_required_grounding(spec, step, param, required: bool) -> None:  # noqa: ANN001
     candidates = _field_evidence_candidates(spec, step, param)
     observed = {
-        item.get("required")
+        item.get("required_observed", item.get("required"))
         for item in candidates
-        if isinstance(item.get("required"), bool)
+        if isinstance(item.get("required_observed", item.get("required")), bool)
     }
     if not observed:
         raise ValueError(
@@ -807,6 +823,10 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 raise ValueError(f"set_param_required target is locked: {step_id}:{path}")
             _require_required_grounding(spec, step, param, required)
             param.required = required
+            param.source = {
+                **(param.source or {}),
+                "required_state": "required" if required else "optional",
+            }
             param.evidence = [
                 *list(param.evidence or []),
                 {
@@ -1109,8 +1129,8 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
     elif kind == "attach_enum_options":
         from dano.execution.page.flow_spec import _bind_option_source
 
-        step_id = str(edit.get("step_id") or "")
-        path = str(edit.get("path") or "")
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
+        path = str(edit.get("path") or edit.get("wire_path") or "")
         source_request_id = str(edit.get("source_request_id") or "")
         verification_id = str(edit.get("verification_id") or "")
         options = edit.get("options")
@@ -1128,21 +1148,23 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         source_fact = next((item for item in spec.request_facts.requests if item.request_id == source_request_id), None)
         if source_fact is None:
             raise ValueError("attach_enum_options source request does not exist")
+        step, param = _field_target(spec, step_id, path)
+        if step is None or param is None:
+            raise ValueError("attach_enum_options target is not materialized")
+        stored_path = param.path
         _bind_option_source(
             spec,
-            target_step_id=step_id,
-            target_path=path,
+            target_step_id=step.step_id,
+            target_path=stored_path,
             source_url=source_fact.path or source_fact.url,
             source_request_id=source_request_id,
             options=options,
             actor="agent",
         )
-        step = next(item for item in spec.steps if item.step_id == step_id)
-        binding = next(item for item in step.selects if item.path == path or item.id_path == path)
+        binding = next(item for item in step.selects if item.path == stored_path or item.id_path == stored_path)
         binding.actor = "agent"
         binding.confidence = 1.0
         binding.verification_id = verification_id
-        param = next(item for item in step.params if item.path == path)
         param.evidence.append({"actor": "agent", "kind": "enum_options", "verification_id": verification_id})
 
     elif kind == "mark_unverified":
@@ -1171,8 +1193,11 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             if ":" not in target_id:
                 raise ValueError("mark_unverified enum target must be step_id:path")
             step_id, path = target_id.split(":", 1)
-            step = next((item for item in spec.steps if item.step_id == step_id), None)
-            if step is None or not any(item.path == path for item in step.params):
+            try:
+                step, param = _field_target(spec, step_id, path)
+            except ValueError as exc:
+                raise ValueError("mark_unverified enum target does not exist") from exc
+            if step is None or param is None:
                 raise ValueError("mark_unverified enum target does not exist")
 
     if record:

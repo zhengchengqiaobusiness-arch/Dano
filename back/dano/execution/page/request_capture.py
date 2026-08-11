@@ -2237,7 +2237,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         return []
     samples = samples or {}
     required_labels = required_labels or set()
-    strict_control_evidence = bool(field_evidence)
+    strict_control_evidence = any(
+        isinstance(item, dict) and bool(item.get("binding_status"))
+        for item in (field_evidence or [])
+    )
 
     def required_label_matches(label: str | None) -> bool:
         """Match page-required labels across framework punctuation/range suffixes.
@@ -2279,6 +2282,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         them sequentially manufactures wrong names. Structural control aliases
         are handled separately below; without them ambiguity stays unresolved.
         """
+        if strict_control_evidence:
+            # Once structural DOM evidence exists, recorded values remain
+            # samples only and cannot manufacture a field identity.
+            return None, False
         exact_count = _val_mult.get(sv, 0)
         if exact_count:
             if strict_control_evidence and (body_value_count != 1 or exact_count != 1):
@@ -2427,6 +2434,12 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             )
         )
         inferred_type = type_from_control(control, _infer_type(node, key))
+        if control is not None and isinstance(control.get("required_observed"), bool):
+            required_state = "required" if control["required_observed"] else "optional"
+        elif strict_control_evidence:
+            required_state = "unknown"
+        else:
+            required_state = "required" if required else "optional"
         out.append({"path": path, "key": key, "value": sv, "raw_value": node,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
@@ -2444,6 +2457,8 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "confidence": conf,                       # 字段语义置信度(P1)
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
+                    "required_state": required_state,
+                    "required_state_grounded": strict_control_evidence,
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):

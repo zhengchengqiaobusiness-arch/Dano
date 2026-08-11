@@ -276,6 +276,7 @@ def test_live_field_semantics_resolve_request_id_and_cover_source_required_and_n
     assert param.source_kind == "page_context"
     assert param.exposed_to_user is False
     assert param.required is False
+    assert param.source["required_state"] == "optional"
     assert param.key == "任务编号"
     assert param.label == "任务编号"
     assert {item.get("kind") for item in param.evidence} >= {

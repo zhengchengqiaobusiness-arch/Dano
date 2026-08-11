@@ -1869,7 +1869,11 @@ def _build_step_from_capture(
             value=str(f.get("value") or ""),
             type=ptype,
             wire_type=wire_type,
-            required=bool(f.get("required")) and caller_owned and not _looks_pagination_field(nm, path),
+            required=(
+                str(f.get("required_state") or "unknown") == "required"
+                and caller_owned
+                and not _looks_pagination_field(nm, path)
+            ),
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
@@ -1880,6 +1884,12 @@ def _build_step_from_capture(
             source_kind=source_guess["source_kind"],
             source={
                 **source_guess["source"],
+                **({
+                    "required_state": (
+                        "optional" if _looks_pagination_field(nm, path)
+                        else str(f.get("required_state") or "unknown")
+                    ),
+                } if f.get("required_state_grounded") else {}),
                 **({
                     "enum_source": select_meta.enum_source,
                     "enum_confirmed": select_meta.enum_confirmed,
@@ -2136,7 +2146,11 @@ def _params_from_get_query(
 
     # Value evidence is safe only after structural matches and pagination have
     # been removed, and only when exactly one wire field remains for a sample.
-    sample_items = [
+    has_bound_identity_protocol = any(
+        isinstance(item, dict) and bool(item.get("binding_status"))
+        for item in (field_evidence or [])
+    )
+    sample_items = [] if has_bound_identity_protocol else [
         (str(label).strip(), str(value).strip())
         for label, value in (samples or {}).items()
         if str(label or "").strip() and value not in (None, "")
@@ -2191,6 +2205,7 @@ def _params_from_get_query(
             # numeric-looking sample such as hotelName=1 is not a numeric wire
             # contract merely because this recording used digits.
             wire_type = "string"
+        required_evidence = has_required_evidence(k, label, control)
         out.append({
             "path": f"query.{k}",
             "key": k,
@@ -2200,10 +2215,17 @@ def _params_from_get_query(
             # contains only digits (for example useInfo="1231").
             "type": inferred_type,
             "wire_type": wire_type,
-            "required": has_required_evidence(k, label, control),
+            "required": required_evidence,
+            "required_state": (
+                "required" if bool(control.get("required_observed")) else "optional"
+                if isinstance(control.get("required_observed"), bool)
+                else "unknown" if has_bound_identity_protocol
+                else "required" if required_evidence else "optional"
+            ),
+            "required_state_grounded": has_bound_identity_protocol,
             "confidence": 0.9 if label != k else 0.75,
             "confidence_tier": "grounded" if label != k else "auto",
-            "name_source": "sample" if label != k else "auto",
+            "name_source": "dom" if k in control_by_key and label != k else "sample" if label != k else "auto",
             "recorded_user_input": recorded_user_input,
             "field_aliases": list(control.get("field_aliases") or []),
             "control_kind": control_kind or "unknown",
@@ -2257,6 +2279,12 @@ def _params_from_url_path(req: dict, samples: dict | None = None) -> list[dict]:
 
 def _recording_evidence_matches_request(req: dict, item: dict) -> bool:
     """Keep DOM facts on the page/frame that produced the network request."""
+    binding_status = str(item.get("binding_status") or "")
+    if binding_status:
+        if binding_status != "bound":
+            return False
+        request_id = _request_fact_key(_request_fact_entry(req, {}))
+        return bool(request_id and request_id == str(item.get("request_id") or ""))
     req_page = str(req.get("page_id") or "")
     req_frame = str(req.get("frame_id") or "")
     item_page = str(item.get("page_id") or "")
@@ -2284,10 +2312,50 @@ def _recording_evidence_matches_request(req: dict, item: dict) -> bool:
 
 
 def _field_evidence_for_request(req: dict, evidence: list[dict] | None) -> list[dict]:
-    return [
+    bound = [
         item for item in (evidence or [])
         if isinstance(item, dict) and _recording_evidence_matches_request(req, item)
     ]
+    if bound:
+        return bound
+    # Preserve the fact that evidence existed in this scope but could not be
+    # tied to one request field.  Downstream naming may then fail closed instead
+    # of reviving value-based field identity.
+    unresolved_in_scope = any(
+        isinstance(item, dict)
+        and str(item.get("binding_status") or "") in {"ambiguous", "unbound"}
+        and _recording_evidence_matches_scope(req, item)
+        for item in (evidence or [])
+    )
+    return [{"binding_status": "unresolved"}] if unresolved_in_scope else []
+
+
+def _recording_evidence_matches_scope(req: dict, item: dict) -> bool:
+    """Scope-only part of evidence matching, including unresolved evidence."""
+    req_page = str(req.get("page_id") or "")
+    req_frame = str(req.get("frame_id") or "")
+    item_page = str(item.get("page_id") or "")
+    item_frame = str(item.get("frame_id") or "")
+    if req_page and item_page and req_page != item_page:
+        return False
+    if req_frame and item_frame and req_frame != item_frame:
+        return False
+
+    def route_identity(value: dict) -> str:
+        for context in (value.get("trigger_page_context"), value.get("page_context")):
+            if not isinstance(context, dict):
+                continue
+            path = str(context.get("path") or "").strip()
+            if path:
+                return path.rstrip("/") or "/"
+            url = str(context.get("url") or "").strip()
+            if url:
+                return urlparse(url).path.rstrip("/") or "/"
+        return ""
+
+    req_route = route_identity(req)
+    item_route = route_identity(item)
+    return not (req_route and item_route and req_route != item_route)
 
 
 def _page_enum_options_for_request(req: dict, options: dict | None) -> dict:
@@ -5096,11 +5164,24 @@ def _apply_capability_field_to_param(
     )
     if not step_id or not path:
         return False
-    step = next((item for item in spec.steps if item.step_id == step_id), None)
+    from dano.execution.page.recording_field_identity import FieldRef, FieldReferenceError, resolve_field_ref
+
+    is_step_id = any(item.step_id == step_id for item in spec.steps)
+    try:
+        resolved = resolve_field_ref(spec, FieldRef(
+            step_id=step_id if is_step_id else "",
+            request_id="" if is_step_id else step_id,
+            wire_path=path,
+        ))
+        step = resolved.step
+        param = resolved.param
+        path = resolved.stored_path
+    except FieldReferenceError:
+        step = next((item for item in spec.steps if item.step_id == step_id), None)
+        param = None
     if step is None:
         return False
     if automated:
-        param = next((item for item in step.params if item.path == path), None)
         if param is None:
             grounded_path = _grounded_screenshot_query_path(step, raw)
             if grounded_path is None:
@@ -5926,6 +6007,24 @@ def to_flow_spec(
                 "evidence": request.get("evidence") or {},
             }
         request_roles.append(recorded or classify_network_request(request, captured_requests, samples))
+    # Bind DOM facts once, before any field projection.  All later naming,
+    # required and enum logic consumes this same explicit identity result.
+    observer_events_present = any(
+        isinstance(event, dict) and event.get("event_id") and event.get("kind")
+        for event in page_events
+    )
+    if observer_events_present and not all(
+        isinstance(item, dict) and bool(item.get("binding_status"))
+        for item in (field_evidence or [])
+    ):
+        binding_requests = []
+        for request, role in zip(captured_requests, request_roles):
+            binding_request = dict(request)
+            binding_request["request_id"] = _request_fact_key(_request_fact_entry(request, role))
+            binding_requests.append(binding_request)
+        from dano.execution.page.recording_field_identity import bind_field_evidence
+
+        field_evidence = bind_field_evidence(binding_requests, page_events, field_evidence)
     role_by_key = {_request_role_key(r): role for r, role in zip(captured_requests, request_roles)}
     flow_reads = _merge_flow_read_sources(reads, captured_requests, request_roles)
 
@@ -6275,6 +6374,17 @@ def to_flow_spec(
         usage.materialized_step_id = st.step_id
         usage.state = "materialized"
         request_facts.usage[request_id] = usage
+    step_id_by_request_id = {
+        str((step.source_meta or {}).get("request_id") or ""): step.step_id
+        for step in step_objs
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    for item in getattr(request_facts, "field_evidence", []) or []:
+        if not isinstance(item, dict) or item.get("binding_status") != "bound":
+            continue
+        step_id = step_id_by_request_id.get(str(item.get("request_id") or ""))
+        if step_id:
+            item["step_id"] = step_id
     for request_key, owner_request_keys in preflight_owner_request_keys.items():
         step = step_by_request_key.get(request_key)
         if step is None:
@@ -9347,6 +9457,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                         "source_kind": param.source_kind,
                         "default_value": _client_redact_sensitive(param.default_value, param.path),
                         "caller_required": _param_requires_caller_input(param),
+                        "required_state": str((param.source or {}).get("required_state") or "unknown"),
                         "exposed": bool(param.exposed_to_user),
                         "locked": bool(param.locked),
                         "evidence": _client_redact_sensitive(
@@ -19673,8 +19784,16 @@ def _autofix_ops_to_edits(
     step_by_id = {step.step_id: step for step in spec.steps}
 
     def locked_param(step_id: str, path: str) -> bool:
-        step = step_by_id.get(step_id)
-        param = next((p for p in (step.params if step else []) if p.path == path), None)
+        from dano.execution.page.recording_field_identity import FieldRef, FieldReferenceError, resolve_field_ref
+
+        try:
+            param = resolve_field_ref(spec, FieldRef(
+                step_id=step_id if step_id in step_by_id else "",
+                request_id="" if step_id in step_by_id else step_id,
+                wire_path=path,
+            )).param
+        except FieldReferenceError:
+            param = None
         # Automatic edits use the stored request path as identity.  Treat an
         # unmatched path as unavailable instead of falling back to a name/leaf.
         return param is None or bool(param.locked)

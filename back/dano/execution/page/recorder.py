@@ -1862,6 +1862,8 @@ class RecordSession:
                 self.page_events = self.page_events[-1000:]
             return
         if step.get("op") == "form_snapshot":
+            step["event_id"] = event_id
+            step["observed_at"] = observed_at
             self.form_snapshots.append(step)
             self.page_events.append({
                 "event_id": event_id,
@@ -3064,6 +3066,10 @@ class RecordSession:
                 "frame_id": str(step.get("frame_id") or ""),
                 "page_context": dict(step.get("page_context") or {}),
                 "op": str(step.get("op") or ""),
+                "event_id": str(step.get("event_id") or ""),
+                "action_id": str(step.get("action_id") or ""),
+                "transaction_id": str(step.get("transaction_id") or ""),
+                "observed_at": step.get("observed_at"),
             })
         deduped: dict[tuple, dict] = {}
         for item in evidence:

@@ -160,3 +160,14 @@ def resolve_field_ref(spec: Any, ref: FieldRef) -> ResolvedField:
         stored_path=str(getattr(param, "path", "") or ""),
         wire_path=canonical,
     )
+
+
+def bind_field_evidence(
+    requests: list[dict[str, Any]],
+    page_events: list[dict[str, Any]] | None,
+    evidence: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Bind DOM evidence through the canonical field-identity interface."""
+    from dano.execution.page.recording_field_evidence import bind_field_evidence as _bind
+
+    return _bind(requests, page_events, evidence)
