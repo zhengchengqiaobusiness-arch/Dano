@@ -118,6 +118,14 @@ def discover_value_links(all_requests: list[dict]) -> list[dict]:
         ((request, position) for position, request in enumerate(all_requests or []) if isinstance(request, dict)),
         key=lambda item: _sequence(item[0], item[1]),
     )
+    target_values: list[dict[str, list[tuple[str, object]]]] = []
+    for target, _ in ordered:
+        by_value: dict[str, list[tuple[str, object]]] = {}
+        for target_path, target_raw in _input_leaves(target):
+            if _is_strong_value(target_raw, target_path):
+                by_value.setdefault(str(target_raw).strip(), []).append((target_path, target_raw))
+        target_values.append(by_value)
+
     candidates: list[dict] = []
     for source_index, (source, _) in enumerate(ordered):
         source_id = str(source.get("request_id") or f"req_{source_index}")
@@ -132,10 +140,9 @@ def discover_value_links(all_requests: list[dict]) -> list[dict]:
         for target_index in range(source_index + 1, len(ordered)):
             target, _ = ordered[target_index]
             target_id = str(target.get("request_id") or f"req_{target_index}")
-            inputs = _input_leaves(target)
             for source_path, source_raw, value in source_values:
-                for target_path, target_raw in inputs:
-                    if _is_strong_value(target_raw, target_path) and _same_value(source_raw, target_raw) and str(target_raw).strip() == value:
+                for target_path, target_raw in target_values[target_index].get(value, []):
+                    if _same_value(source_raw, target_raw):
                         candidates.append({
                             "source_request_id": source_id,
                             "source_path": f"response.{source_path}",

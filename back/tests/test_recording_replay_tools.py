@@ -5,6 +5,7 @@ import json
 import pytest
 from aiohttp import web
 
+from dano.execution.page import value_tracing
 from dano.execution.page.replay import perturb_replay, replay_request
 from dano.execution.page.value_tracing import discover_value_links
 from dano.execution.page.verification_log import (
@@ -143,6 +144,33 @@ def test_discover_value_links_covers_inputs_and_filters_weak_or_sensitive_values
     assert "query.when" not in paths
     assert "headers.Authorization" not in paths
     assert all("TOKEN-998877" not in json.dumps(item) for item in links)
+
+
+def test_discover_value_links_scans_each_request_inputs_once(monkeypatch):
+    original = value_tracing._input_leaves
+    calls = 0
+
+    def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+    monkeypatch.setattr(value_tracing, "_input_leaves", counted)
+    requests = [
+        {
+            "request_id": f"req-{index}",
+            "sequence": index,
+            "url": "https://example.test/items",
+            "query": ({"source": f"JOB-{index - 1:03d}-998877"} if index else {}),
+            "response_json": {"jobId": f"JOB-{index:03d}-998877"},
+        }
+        for index in range(20)
+    ]
+
+    links = value_tracing.discover_value_links(requests)
+
+    assert len(links) == 19
+    assert calls <= len(requests)
 
 
 def test_verification_ids_are_executor_generated_and_defensively_copied():
