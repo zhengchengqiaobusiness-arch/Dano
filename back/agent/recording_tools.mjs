@@ -424,11 +424,17 @@ const LiveRecordingOperation = Type.Union([
     step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
     path: Type.String({ minLength: 1 }),
     source_kind: Type.Union([
-      Type.Literal("user_input"), Type.Literal("session_header"),
-      Type.Literal("page_context"), Type.Literal("chained"),
+      Type.Literal("user_input"), Type.Literal("constant"),
+      Type.Literal("session_header"), Type.Literal("page_context"),
+      Type.Literal("chained"), Type.Literal("computed"),
     ]),
-    origin_request_id: Type.Optional(Type.String()),
-    origin_path: Type.Optional(Type.String()),
+    origin_request_id: Type.Optional(Type.String({ description: "Required for chained: the upstream request that produced the value" })),
+    origin_path: Type.Optional(Type.String({ description: "Required for chained: response path of the upstream value" })),
+    context_key: Type.Optional(Type.String({ description: "Optional for page_context; defaults to the last path segment" })),
+    strategy: Type.Optional(Type.String({ description: "Required for computed; only date_span_days_json is executable" })),
+    start_field: Type.Optional(Type.String({ description: "Required for computed: user param name for the range start" })),
+    end_field: Type.Optional(Type.String({ description: "Required for computed: user param name for the range end" })),
+    output_key: Type.Optional(Type.String({ description: "Computed JSON key; when omitted it is inferred from the recorded one-key JSON sample" })),
     reason: Type.String({ minLength: 1 }),
   }, { additionalProperties: false }),
   Type.Object({
@@ -436,6 +442,18 @@ const LiveRecordingOperation = Type.Union([
     step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
     path: Type.String({ minLength: 1 }),
     required: Type.Boolean(),
+    reason: Type.String({ minLength: 1 }),
+    evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    op: Type.Literal("set_param_enum"),
+    step_id: Type.String({ minLength: 1, description: "Canonical step_id, or request_id before the request is materialized" }),
+    path: Type.String({ minLength: 1 }),
+    dictionary_source: Type.Optional(Type.String({ minLength: 1 })),
+    options: Type.Array(Type.Object({
+      label: Type.String({ minLength: 1 }),
+      value: Type.Unknown(),
+    }, { additionalProperties: false }), { minItems: 1 }),
     reason: Type.String({ minLength: 1 }),
     evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
   }, { additionalProperties: false }),
@@ -450,6 +468,10 @@ const LiveRecordingOperation = Type.Union([
   Type.Object({
     op: Type.Literal("propose_dependency"),
     link_id: Type.Optional(Type.String({ minLength: 1 })),
+    kind: Type.Optional(Type.Union([
+      Type.Literal("value"),
+      Type.Literal("structure"),
+    ], { description: "value: an upstream response value feeds a request field. structure: the upstream response decides the request's key layout (e.g. dynamic approval-node maps); target_path is the container path" })),
     source_request_id: Type.String({ minLength: 1 }),
     source_path: Type.String({ minLength: 1 }),
     target_request_id: Type.Optional(Type.String({ minLength: 1 })),
@@ -604,7 +626,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、set_param_required、rename_field、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；字段操作在步骤尚未物化时可把 request_id 填入 step_id。每种 op 的必填字段以工具 schema 为准。set_goal 示例：`{\"op\":\"set_goal\",\"goal\":{\"intent\":\"...\",\"evidence\":[{\"source\":\"goal_text\",\"ref\":\"用户输入的目标\"}]}}`；set_request_role、set_param_required、rename_field 必须有 evidence_refs。set_param_source 的 user_input 必须有 fill/select 或目标输入证据；未被操作人修改的 pageNo/pageSize/current/limit/offset 分页值用 page_context；鉴权/会话头用 session_header；上游响应强值复用用 chained。提交后必须检查 op_results：skipped 或 rolled_back 表示没有落地，必须按 reason 修正后读取新版本重试，禁止当作成功。无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、set_param_required、set_param_enum、rename_field、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；字段操作在步骤尚未物化时可把 request_id 填入 step_id。每种 op 的必填字段以工具 schema 为准。set_goal 示例：`{\"op\":\"set_goal\",\"goal\":{\"intent\":\"...\",\"evidence\":[{\"source\":\"goal_text\",\"ref\":\"用户输入的目标\"}]}}`；set_request_role、set_param_required、set_param_enum、rename_field 必须有 evidence_refs，且至少一条要引用录制事实标识（request_id/event_id/step_id）。set_param_source 六分类：user_input=操作人真实编辑过（须有 fill/select 证据）；constant=录制值固定的业务常量（如 body 里的单据类型/流程 key，随请求原样发出）；session_header=仅限 headers.* 路径的鉴权/会话头；page_context=未被操作人修改的 pageNo/pageSize/current/limit/offset 等分页状态，编译为录制默认值且允许调用方覆盖；chained=上游响应强值复用（必须带 origin_request_id+origin_path，后端会自动建待验证依赖链）；computed=由其他调用参数推导的值（必须带 strategy=date_span_days_json+start_field+end_field，如天数=结束-开始）。分类错误会被拒绝并返回原因（例如 body 常量填 session_header 会被拒，应改 constant）。字段名称、必填性和枚举绑定必须与 field_evidence 一致；页面字典枚举用 set_param_enum 提交完整 label/value 映射，矛盾会被拒。propose_dependency 支持 kind=structure：当上游响应决定请求的键结构（如审批节点 ID 是动态键）时，target_path 填容器路径。提交后必须检查 op_results：skipped 或 rolled_back 表示没有落地，必须按 reason 修正后读取新版本重试，禁止当作成功。无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。字段契约变更必须用对应 plan.ops，不能只写 field_semantics 绕过证据闸门。未变化的标准段可省略，后端会保留事实基线。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

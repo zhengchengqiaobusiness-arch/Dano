@@ -239,8 +239,8 @@ function verifyPlanToolCompatibility() {
     "set_request_role schema must expose evidence_refs",
   );
   assert(
-    operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 4,
-    "set_param_source schema must expose the four source categories",
+    operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 6,
+    "set_param_source schema must expose the six executable source categories",
   );
   assert(
     operationSchema("set_param_required")?.required?.includes("evidence_refs"),
@@ -249,6 +249,10 @@ function verifyPlanToolCompatibility() {
   assert(
     operationSchema("rename_field")?.required?.includes("evidence_refs"),
     "rename_field schema must require evidence_refs",
+  );
+  assert(
+    operationSchema("set_param_enum")?.required?.includes("evidence_refs"),
+    "set_param_enum schema must require evidence_refs",
   );
   assert(
     operationSchema("propose_dependency")?.required?.includes("evidence"),

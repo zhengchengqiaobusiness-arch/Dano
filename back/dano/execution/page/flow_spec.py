@@ -9924,10 +9924,25 @@ def _semantic_plan_to_ops(
         if target_step is not None and target_param is not None and public_name:
             from dano.execution.page.recording_live import _require_label_grounding
 
-            try:
-                _require_label_grounding(spec, target_step, target_param, public_name)
-            except ValueError:
-                public_name = str(target_param.label or target_param.key or target_param.path).strip()
+            screenshot_control = _screenshot_control_evidence(item)
+            screenshot_labels = {
+                str(screenshot_control.get(key) or "").strip()
+                for key in ("visible_label", "label", "text")
+                if screenshot_control is not None
+                and str(screenshot_control.get(key) or "").strip()
+            }
+            screenshot_name_grounded = bool(
+                screenshot_control is not None
+                and _screenshot_control_supports_axis(screenshot_control, "name")
+                and public_name in screenshot_labels
+            )
+            if not screenshot_name_grounded:
+                try:
+                    _require_label_grounding(spec, target_step, target_param, public_name)
+                except ValueError:
+                    public_name = str(
+                        target_param.label or target_param.key or target_param.path
+                    ).strip()
         if step_id in step_ids and path and public_name and confidence >= 0.8:
             owning_capability = next((
                 capability for capability in spec.capabilities or []
