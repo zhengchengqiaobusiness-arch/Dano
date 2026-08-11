@@ -548,7 +548,7 @@ _UUID_LITERAL_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-")
 def _looks_session_specific_value(value: Any) -> bool:
     """值像「一次性会话字面值 / 运行期 ID / uuid / 雪花 ID」等不能固化的字面值。
     关键:不绑定具体业务字段名,只看值本身特征 + 适当弱化兜底:
-    - 13 位纯数字:`*`可能是* 当前毫秒时间戳,也可能是用户填的请假起止时间。只在「key 也是运行期字面」
+    - 13 位纯数字:`*`可能是* 当前毫秒时间戳,也可能是用户填的申请起止时间。只在「key 也是运行期字面」
       (heuristic 上 `_looks_runtime_field`) 时才当会话值;否则当**用户输入**(user_input)。
     - uuid / session literal (BB-12345):无论 key 是什么,百分百不能固化。
     通用,不挑系统。"""
@@ -10508,7 +10508,7 @@ def _clean_page_business_candidate(value: Any) -> str:
     if not text or len(text) > 40 or _GENERIC_PAGE_TITLE_RE.fullmatch(text):
         return ""
     if re.search(r"(?:管理平台|管理系统|业务平台|办公平台)$", text) and not re.search(
-        r"申请|借阅|报销|请假|用印|印章|登记|办理", text,
+        r"申请|借阅|用印|印章|登记|办理", text,
     ):
         return ""
     if _is_technical_business_title(text):
@@ -10534,7 +10534,7 @@ def _page_context_business_name_from_contexts(contexts: list[dict[str, Any]]) ->
                 score += 5
             if 2 <= len(text) <= 12:
                 score += 4
-            if re.search(r"申请|借阅|审批|报销|请假|用印|印章|登记|查询|办理|酒店|公章", text):
+            if re.search(r"申请|借阅|审批|用印|印章|登记|查询|办理|酒店|公章", text):
                 score += 6
             if re.search(r"管理|平台|系统|首页|工作台", text):
                 score -= 7

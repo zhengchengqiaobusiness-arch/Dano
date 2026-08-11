@@ -62,7 +62,7 @@ async def parse_spec(run_id: str, params: dict) -> dict:
     sid = params["system_instance_id"]
     mat = _mat(run_id, sid)
     spec = mat.openapi or {}
-    template = oa_templates.match_template(spec)              # 仅作确定性兜底(框架名/成败规则/infra 关键词)
+    template = oa_templates.match_template(spec, tenant=mat.tenant)
     extra = template.infrastructure_patterns() if template else ()
     template_name = template.name if template else None
     success_rule = template.success_rule() if template else None
@@ -431,7 +431,7 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
     used = collect_field_refs(steps)
     user_fields = sorted(set(params.get("user_fields", [])) | used)
     required_fields = sorted(set(params.get("required_fields", [])) & set(user_fields))
-    tmpl = oa_templates.match_template(mat.openapi or {})
+    tmpl = oa_templates.match_template(mat.openapi or {}, tenant=mat.tenant)
     body = WorkflowSkillBody(
         action=params["action"], title=params.get("title", params["action"]),
         steps=steps, user_fields=user_fields, required_fields=required_fields,
@@ -564,7 +564,7 @@ async def draft_connector(run_id: str, params: dict) -> dict:
     action_name = params["action"]
     mat = _mat(run_id, sid)
     spec = mat.openapi or {}
-    template = oa_templates.match_template(spec)
+    template = oa_templates.match_template(spec, tenant=mat.tenant)
     success_rule = template.success_rule() if template else None
     action = next((a for a in doc_parser.parse_openapi(spec) if a.name == action_name), None)
     if action is None:

@@ -10,7 +10,6 @@ import pytest
 
 from dano.catalog.manifest import to_manifest
 from dano.export.agent_skills import (
-    _PROTOTYPE_SUBSYSTEMS,
     _configured_reference_dir,
     _load_reference_markdown,
     _publish_folder,
@@ -92,10 +91,12 @@ async def test_export_discovers_arbitrary_subsystems():
 
 
 @pytest.mark.asyncio
-async def test_export_falls_back_to_prototypes_when_empty_or_no_db():
-    """发现为空 / DB 不可用 → 退回原型常量兜底(不致导出整体失败,行为与旧版一致)。"""
-    assert await _tenant_subsystems(_FakeRepo([]), "acme") == _PROTOTYPE_SUBSYSTEMS
-    assert await _tenant_subsystems(_FakeRepo(raises=True), "acme") == _PROTOTYPE_SUBSYSTEMS
+async def test_export_uses_optional_pack_when_discovery_is_empty_or_unavailable():
+    """Missing tenants stay empty; configured tenants may supply a data-only fallback."""
+    assert await _tenant_subsystems(_FakeRepo([]), "acme") == []
+    assert await _tenant_subsystems(_FakeRepo(raises=True), "acme") == []
+    configured = await _tenant_subsystems(_FakeRepo([]), "a-company")
+    assert len(configured) == 3
 
 
 @pytest.mark.asyncio

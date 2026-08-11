@@ -1,7 +1,7 @@
 """LLM 识别「API 成功约定 + 框架风格」(取代 match_template 的关键词/结构硬匹配)。
 
-为什么:原来靠硬规则认 RuoYi(路径含 /workflow/、schema 有 AjaxResult)并写死
-success_rule=code==200。换一家 OA(非 RuoYi、或 code 字段叫别的)就失灵——"用代码认框架"
+为什么:原来靠硬规则认某一框架(路径含 /workflow/、schema 有固定包装)并写死
+success_rule=code==200。换一个系统(或 code 字段叫别的)就失灵——"用代码认框架"
 本就泛化不了。改让模型读**真实响应字段形状**,判这套 API 怎样表示"业务成功",产出
 safe_eval 可求值的判定表达式。
 
@@ -78,7 +78,7 @@ _PROMPT = (
     "- success_rule:" + EXPR_RULE_TEXT + "\n"
     "  例:统一返回 {code,msg,data} 的框架,业务成功常是 response.code == 200;\n"
     "      列表类接口可能无 code 字段,则放宽:response.code == null or response.code == 200。\n"
-    "- name: 这套风格的简短英文标签(如 ruoyi-ajaxresult、rest-envelope、plain-rest);拿不准填 \"generic\"。\n\n"
+    "- name: 这套风格的简短英文标签(如 rest-envelope、plain-rest);拿不准填 \"generic\"。\n\n"
     "只输出**纯 JSON 对象** {\"name\": \"...\", \"success_rule\": \"...\"},不要解释、不要代码块。\n\n"
     "响应字段:\n"
 )

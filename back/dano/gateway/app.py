@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from dano.assets.repository import AssetRepository
+from dano.business_packs import business_subsystems, default_subsystem
 from dano.catalog.manifest import build_function_tools, build_manifests, skill_id_of
 from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
@@ -46,18 +47,20 @@ from dano.resilience.circuit_breaker import InMemoryCounter
 from dano.shared.enums import SkillState
 
 log = structlog.get_logger(__name__)
-# 三件套只是**原型常量**(空租户兜底);真实系统由 _tenant_subsystems 从该租户已发布资产里发现,不写死。
-_PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
 
 
 async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
     """该租户**实际拥有**的系统实例(发现式,支持任意系统);发现为空(尚无发布)才退回原型常量兜底。"""
     try:
         subs = await repo.distinct_subsystems(tenant)
-    except Exception as e:  # noqa: BLE001 —— DB 异常时不致整体 500,退原型
+    except Exception as e:  # noqa: BLE001 —— DB 异常时仍可读取可选配置
         log.warning("tenant_subsystems.discover_failed", tenant=tenant, error=str(e))
         subs = []
-    return subs or _PROTOTYPE_SUBSYSTEMS
+    return subs or [Subsystem(value) for value in business_subsystems(tenant)]
+
+
+def _effective_subsystem(tenant: str, configured: object = "") -> str:
+    return str(configured or default_subsystem(tenant))
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
 _lifecycle_reconciler = LifecycleRegistrationReconciler(
@@ -1232,7 +1235,7 @@ async def auth_change_password(
 # ── 接入(pi 自主生成)──
 class OnboardReq(BaseModel):
     tenant: str
-    subsystem: str = "A-OA"
+    subsystem: str = ""
     openapi: dict
     deploy: dict
     credentials: dict[str, str] = {}
@@ -1245,7 +1248,8 @@ class OnboardReq(BaseModel):
 
 class PreviewReq(BaseModel):
     openapi: dict
-    subsystem: str = "A-OA"
+    tenant: str = ""
+    subsystem: str = ""
 
 
 @app.post("/onboarding/preview")
@@ -1256,7 +1260,7 @@ async def onboarding_preview(req: PreviewReq) -> dict:
     """
     from dano.capabilities import doc_parser, endpoint_classifier, oa_templates
     spec = req.openapi or {}
-    template = oa_templates.match_template(spec)
+    template = oa_templates.match_template(spec, tenant=req.tenant)
     extra = template.infrastructure_patterns() if template else ()
     categories: dict[str, int] = {}
     actions: list[dict] = []
@@ -1280,7 +1284,8 @@ async def onboarding_preview(req: PreviewReq) -> dict:
 
 class DiscoverReq(BaseModel):
     openapi: dict
-    subsystem: str = "A-OA"
+    tenant: str = ""
+    subsystem: str = ""
     include_tags: list[str] = []
 
 
@@ -1291,17 +1296,18 @@ async def onboarding_discover(req: DiscoverReq) -> dict:
     只解析 + 套模板知识,不 spawn pi、不碰凭证。前端据此勾选/微调测试输入,再发 /onboarding/start。
     """
     from dano.onboarding.discovery import discover_flows
-    return {"flows": discover_flows(req.openapi or {}, req.include_tags)}
+    return {"flows": discover_flows(req.openapi or {}, req.include_tags, tenant=req.tenant)}
 
 
 class ListTemplatesReq(BaseModel):
+    tenant: str = ""
     base_url: str
     token: str = ""
 
 
 @app.post("/onboarding/list-templates")
 async def list_templates(req: ListTemplatesReq) -> dict:
-    """查询目标 OA 真实的**流程模板清单**(业务场景:请假/报销/出差…),作为可选「业务模板」。
+    """查询目标系统真实的流程模板清单，作为可选业务模板。
 
     系统特定(查哪个端点、怎么解析)全在 dialect:网关只遍历已注册方言、试其 template_list_paths,
     用 parse_template_list 解析——**主流程零系统字面量**(换框架只改 oa_templates.py)。
@@ -1315,7 +1321,7 @@ async def list_templates(req: ListTemplatesReq) -> dict:
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     auth_fail = False
     async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
-        for dialect in oa_templates.all_templates():
+        for dialect in oa_templates.all_templates(req.tenant):
             for path in dialect.template_list_paths():
                 try:
                     r = await c.get(base + (path if path.startswith("/") else "/" + path), headers=headers)
@@ -1332,6 +1338,7 @@ async def list_templates(req: ListTemplatesReq) -> dict:
 
 
 class TemplateFormReq(BaseModel):
+    tenant: str = ""
     base_url: str
     token: str = ""
     template_id: str
@@ -1351,7 +1358,7 @@ async def template_form(req: TemplateFormReq) -> dict:
     tok = (req.token or "").strip()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
-        for dialect in oa_templates.all_templates():
+        for dialect in oa_templates.all_templates(req.tenant):
             path = dialect.form_probe_path(req.template_id)
             if not path:
                 continue
@@ -1368,6 +1375,7 @@ async def template_form(req: TemplateFormReq) -> dict:
 
 # ── v2-M1 理解流程:证据采集(静态 + 只读真探针)──
 class UnderstandReq(BaseModel):
+    tenant: str = ""
     openapi: dict
     base_url: str = ""
     token: str = ""
@@ -1384,7 +1392,7 @@ async def understand_flow(req: UnderstandReq) -> dict:
     from dano.onboarding.evidence import collect_evidence, make_http_probe
     probe = make_http_probe(req.base_url, req.token) if (req.base_url and req.token) else None
     ev = await collect_evidence(req.openapi or {}, include_tags=req.include_tags,
-                                template_id=req.template_id, probe=probe)
+                                template_id=req.template_id, probe=probe, tenant=req.tenant)
     return ev.model_dump()
 
 
@@ -1424,7 +1432,8 @@ async def fetch_swagger(req: FetchSwaggerReq) -> dict:
 @app.post("/onboarding")
 async def onboarding(req: OnboardReq) -> dict:
     from dano.onboarding import onboard
-    report = await onboard(tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
+    subsystem = _effective_subsystem(req.tenant, req.subsystem)
+    report = await onboard(tenant=req.tenant, subsystem=subsystem, openapi=req.openapi,
                            deploy=req.deploy, credentials=req.credentials,
                            policy_text=req.policy_text, include_tags=req.include_tags,
                            business_rules=req.business_rules, holidays=req.holidays,
@@ -1559,7 +1568,7 @@ async def record_ws(ws: WebSocket) -> None:
         )
         resume_key = (
             str(init.get("tenant") or ""),
-            str(init.get("subsystem") or "A-报销"),
+            _effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem")),
             recording_id,
         )
         connection_key = resume_key
@@ -1583,7 +1592,8 @@ async def record_ws(ws: WebSocket) -> None:
 
         sess = RecordSession(on_request=on_request,
                              intercept_submit=False,
-                             capture_reads=init.get("capture_reads", True))
+                             capture_reads=init.get("capture_reads", True),
+                             tenant=resume_key[0])
         start_storage = resume_state.get("storage_state") or persisted_storage or init.get("storage_state") or None
         await sess.start(init["start_url"], base_url=init.get("base_url", ""),
                          # A reconnect must prefer the state captured by the
@@ -1668,7 +1678,7 @@ async def record_ws(ws: WebSocket) -> None:
                 recording_pi = await _start_recording_pi_candidate(
                     lambda: RecordingPiSession(
                     tenant=str(init.get("tenant") or ""),
-                    subsystem=str(init.get("subsystem") or "A-报销"),
+                    subsystem=_effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem")),
                     recording_id=recording_id,
                     resume_history=not fresh,
                     on_submission_accepted=_accepted_pi_submission,
@@ -2012,7 +2022,11 @@ async def record_ws(ws: WebSocket) -> None:
                 reset_storage = await sess.storage_state()
                 _checkpoint_resume(storage_state=reset_storage)
                 from dano.execution.page.sessions import save_session
-                save_session(str(init.get("tenant") or ""), str(init.get("subsystem") or "A-报销"), reset_storage)
+                save_session(
+                    str(init.get("tenant") or ""),
+                    _effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem")),
+                    reset_storage,
+                )
                 await sender.send_json({"type": "reset_ok"})
             elif t == "finalize":
                 if await _replay_costly(msg):
@@ -2041,7 +2055,7 @@ async def record_ws(ws: WebSocket) -> None:
                 for field_key, value in sess.recorded_form_samples().items():
                     samples.setdefault(field_key, value)
                 field_evidence = sess.recorded_field_evidence()
-                sub = init.get("subsystem", "A-报销")
+                sub = _effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem"))
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
                 _checkpoint_resume(storage_state=login_state)
                 from dano.execution.page.sessions import save_session
@@ -2861,7 +2875,7 @@ async def record_ws(ws: WebSocket) -> None:
                     })
                     continue
 
-                sub = init.get("subsystem", "A-报销")
+                sub = _effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem"))
                 login_state = await sess.storage_state()
                 _checkpoint_resume(storage_state=login_state)
                 from dano.execution.page.sessions import save_session
@@ -3040,8 +3054,9 @@ async def onboarding_start(req: OnboardReq) -> dict:
 
     async def _run() -> None:
         try:
+            subsystem = _effective_subsystem(req.tenant, req.subsystem)
             rep = await onboard(
-                tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
+                tenant=req.tenant, subsystem=subsystem, openapi=req.openapi,
                 deploy=req.deploy, credentials=req.credentials,
                 include_tags=req.include_tags, business_rules=req.business_rules, holidays=req.holidays,
                 flows=req.flows, progress=_progress, lifecycle=_lifecycle,
@@ -3301,7 +3316,7 @@ async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[di
 class ToolCallReq(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
+    name: str                       # 工具名(= skill_id 的点转 __)
     capability: str | None = None   # 一个 Skill 内的业务能力键(query_status/submit_batch...)
     input: dict = Field(default_factory=dict)
     confirm: bool = False
@@ -3410,7 +3425,7 @@ async def report_failure_route(event: dict) -> dict:
 
 class SelfHealReq(BaseModel):
     tenant: str
-    subsystem: str = "A-OA"
+    subsystem: str = ""
     openapi: dict
     deploy: dict
     credentials: dict[str, str] = {}
@@ -3421,7 +3436,8 @@ class SelfHealReq(BaseModel):
 @app.post("/assurance/self-heal")
 async def self_heal_route(req: SelfHealReq) -> dict:
     from dano.assurance.service import self_heal
-    out = await self_heal(tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
+    subsystem = _effective_subsystem(req.tenant, req.subsystem)
+    out = await self_heal(tenant=req.tenant, subsystem=subsystem, openapi=req.openapi,
                           deploy=req.deploy, credentials=req.credentials, lifecycle=_lifecycle,
                           actions=req.actions, incremental=req.incremental)
     for sid in out.get("recovered", []):       # 自愈成功后清零失败计数

@@ -15,8 +15,8 @@ from typing import Any
 class MaterialContext:
     run_id: str
     tenant: str
-    system_instance_id: str          # 如 a-oa
-    subsystem: str                   # 如 A-OA
+    system_instance_id: str          # 如 workflow-main
+    subsystem: str                   # 如 workflow
     openapi: dict[str, Any] | None = None
     deploy: dict[str, Any] | None = None
     credentials: dict[str, str] = field(default_factory=dict)   # 测试账号(不进 LLM)

@@ -1,0 +1,95 @@
+tenant: a-company
+subsystems:
+  - A-OA
+  - A-工单
+  - A-报销
+default_subsystem: A-报销
+
+action_titles:
+  query_balance: 查询假期余额
+  create_leave: 创建请假
+  query_approval: 查询审批状态
+  create_ticket: 创建 IT 工单
+  query_ticket: 查询工单进度
+  create_reimburse_draft: 创建报销草稿
+  submit_leave: 提交请假申请
+
+action_meta:
+  query_balance:
+    keywords: [余额, 假期余额, 还有几天假, balance]
+  create_leave:
+    keywords: [请假, 休假, 请个假, leave]
+    fact_check_query: query_balance
+    fact_check_expr: after.balance == before.balance - fields.days and response.request_id != null
+  query_approval:
+    keywords: [审批状态, 审批进度, 批了吗, approval]
+  create_ticket:
+    keywords: [工单, 报修, IT工单, ticket]
+    fact_check_query: query_ticket
+    fact_check_expr: response.ticket_id != null
+  query_ticket:
+    keywords: [工单进度, 工单状态, ticket status]
+
+standard_fields:
+  - key: leave_type
+    label: 假期类型
+    aliases: [vacation_type, leaveCategory, type]
+    description: 年假/病假/事假等
+  - key: days
+    label: 请假天数
+    aliases: [duration, leave_days, amount_days]
+    description: 申请天数，用于与余额比对
+  - key: ticket_title
+    label: 工单标题
+    aliases: [title, subject, summary]
+    description: 工单主题
+  - key: priority
+    label: 优先级
+    aliases: [urgency, level]
+    description: 工单优先级
+  - key: amount
+    label: 金额
+    aliases: [money, total, fee, cost]
+    description: 报销金额
+  - key: category
+    label: 费用类别
+    aliases: [expense_type, item, project]
+    description: 差旅/餐饮/办公等
+  - key: has_invoice
+    label: 是否有发票
+    aliases: [invoice, with_receipt]
+    description: 制度规则判定是否需发票
+
+system_templates:
+  - template_id: oa
+    subsystem: A-OA
+    integration: api
+    actions: [query_balance, create_leave, query_approval]
+  - template_id: ticket
+    subsystem: A-工单
+    integration: api
+    actions: [create_ticket, query_ticket]
+  - template_id: reimburse
+    subsystem: A-报销
+    integration: page
+    actions: [create_reimburse_draft]
+
+dialects:
+  - name: ruoyi-flowable
+    match:
+      path_contains: [/workflow/, /flowable/]
+      schema_names: [AjaxResult]
+    success_rule: response.code == 200
+    infrastructure_patterns: [captcha, getinfo, getrouters, logout]
+    contract_tokens: [startflow, /biz/form, /biz/flow, form/info, form/save, flow/submit, listprocess, /draft, /todo, /done]
+    submit_endpoints: [/workflow/handle/startFlow, /biz/flow/submit]
+    contract_synth: true
+    form_probe_path: /biz/form/info?businessId=&templateId={template_id}
+    form_data_path: [data, formData]
+    form_schema_key: formData
+    template_ids_path: [components, schemas, StartFlowReq, properties, templateId, enum]
+    template_id_pattern: '([A-Za-z][\w-]*_template)'
+    template_list_paths:
+      - /template/template/list?pageNum=1&pageSize=500
+      - /template/template/select
+    approval_description_path: /workflow/handle/startFlow

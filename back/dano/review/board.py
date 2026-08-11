@@ -480,7 +480,7 @@ _SYSTEM_CONTEXT = (
     "请据此判断 risk_level 是否与 method 匹配。\n"
     "4. field_bindings 只覆盖平台标准字段。若该连接器是复合流程的一个步骤(入参由流程编排经 "
     "step:/const:/field: 提供),单步 field_bindings 为空属正常,不应据此判不通过。\n"
-    "5. success_rule 是业务成功判定表达式(如 response.code==200 即 RuoYi AjaxResult 的业务成功标志);"
+    "5. success_rule 是业务成功判定表达式(如 response.code==200 是某种响应包装的业务成功标志);"
     "带 success_rule 即视为已检验业务成功,不必再要求额外业务断言。\n"
     "6. sandbox_evidence 有两种验证模式,**都合规、都按设计**:① **self_check**(确定性 dry 构造验证——"
     "只构造请求、**绝不真发**,故未使用任何凭证、未触碰任何环境;这是录制/写操作的**默认安全模式**,"

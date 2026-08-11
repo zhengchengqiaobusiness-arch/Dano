@@ -23,7 +23,7 @@ log = structlog.get_logger(__name__)
 
 
 def system_key_for(subsystem: Subsystem) -> str:
-    """系统 key(与连接器 auth_ref 的 vault path 段一致)。A-OA → 'oa'。"""
+    """系统 key(与连接器 auth_ref 的 vault path 段一致)。"""
     return subsystem.value.split("-")[-1].lower()
 
 

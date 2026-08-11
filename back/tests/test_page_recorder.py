@@ -1469,7 +1469,7 @@ async def test_record_session_captures_semantic_steps(tmp_path) -> None:  # noqa
     page = tmp_path / "form.html"
     page.write_text(_HTML, encoding="utf-8")
 
-    sess = RecordSession()
+    sess = RecordSession(tenant="a-company")
     try:
         await sess.start(page.as_uri())
         # 模拟用户在录制页里操作(真实 DOM 事件 → 注入录制器捕获语义步骤)
@@ -1501,7 +1501,7 @@ async def test_dispatch_input_relays_and_captures(tmp_path) -> None:  # noqa: AN
         pytest.skip("chromium 未安装")
     page = tmp_path / "big.html"
     page.write_text(_BIG, encoding="utf-8")
-    sess = RecordSession()
+    sess = RecordSession(tenant="a-company")
     try:
         await sess.start(page.as_uri())
         await sess.dispatch_input({"kind": "click", "nx": 0.5, "ny": 0.2})    # 命中大输入框
@@ -1857,7 +1857,7 @@ async def test_follows_new_tab_and_records_on_it(tmp_path) -> None:  # noqa: ANN
     new.write_text(_NEWPAGE, encoding="utf-8")
     opener = tmp_path / "opener.html"
     opener.write_text(_OPENER.replace("NEWURL", repr(new.as_uri())), encoding="utf-8")
-    sess = RecordSession()
+    sess = RecordSession(tenant="a-company")
     try:
         await sess.start(opener.as_uri())
         first = sess.page

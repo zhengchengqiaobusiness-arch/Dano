@@ -16,6 +16,7 @@ import {
   Modal,
   Row,
   Space,
+  Switch,
   Tabs,
   Tag,
   Tooltip,
@@ -116,6 +117,7 @@ interface FlowSelectBinding {
   options?: Array<string | { label: string; value?: any }> | null; count?: number; multi?: boolean;
   option_map?: Record<string, any> | null;
   enum_source?: string | null; enum_confirmed?: boolean | null;
+  verification_id?: string | null;
   id_path?: string | null;
   field_projections?: Record<string, string>;
 }
@@ -130,6 +132,7 @@ interface FlowLinkData {
   link_id: string; source_step_id: string; source_path: string;
   target_step_id: string; target_path: string;
   confirmed?: boolean; confidence?: number; param_name?: string | null; reason?: string;
+  meta?: Record<string, any>; evidence?: Record<string, any>;
 }
 interface FlowCapabilityFieldData {
   field_id?: string; scope?: string; display_name?: string; path?: string; key?: string; type?: string;
@@ -229,6 +232,8 @@ interface FlowSpecData {
     versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
     current_version?: number;
     current_fingerprint?: string;
+    verification_log?: Array<Record<string, any>>;
+    unverified?: Array<Record<string, any>>;
   };
 }
 interface FlowCheckReport {
@@ -1407,6 +1412,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
   const [showAllAnalysisChanges, setShowAllAnalysisChanges] = useState(false);
   const [showAllPublishIssues, setShowAllPublishIssues] = useState(false);
+  const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -2430,10 +2436,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function publishRequest() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    if (!(flowSpecRef.current?.capabilities || []).length) {
-      message.warning("请先生成至少一个能力，再发布当前流程");
-      return;
-    }
     if (!action.trim() || badAction(action.trim())) return;
     runAfterFlowSync(performPublishRequest);
   }
@@ -3681,21 +3683,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           tabBarExtraContent={{
             left: (
               <Space wrap size={4} style={{ marginRight: 16 }}>
-                <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
-                  <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
+                <Tooltip title="重新运行自动语义分析，并同步刷新字段、依赖与接口闭包">
+                  <Button icon={<RobotOutlined />} loading={orchestrateBusy || autoFixBusy}
                     disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
-                    onClick={orchestrateFlow}>生成/优化能力</Button>
+                    onClick={orchestrateFlow}>重新分析</Button>
                 </Tooltip>
               </Space>
             ),
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
-                <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
-                <Tooltip title={!capabilities.length ? "请先生成至少一个能力，再验证并发布当前流程" : ""}>
-                  <span><Button type="primary" loading={phase === "publishing"}
-                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || !capabilities.length || result?.ok === true}
-                    onClick={publishRequest}>{result?.ok ? "已发布" : "重新验证并发布"}</Button></span>
-                </Tooltip>
+                <Space size={4}><Typography.Text type="secondary">维护模式</Typography.Text>
+                  <Switch size="small" checked={maintenanceMode} onChange={setMaintenanceMode} /></Space>
+                {maintenanceMode && <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>}
+                <Button type="primary" loading={phase === "publishing"}
+                  disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || result?.ok === true}
+                  onClick={publishRequest}>{result?.ok ? "已发布" : "重新验证并发布"}</Button>
               </Space>
             ),
           }}
@@ -4399,7 +4401,113 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       />
     );
   }
-  function renderCapabilityIOBusinessView(capIdx: number, inputSchema: Record<string, any>, outputSchema: Record<string, any>) {
+  function renderCapabilityObserver(cap: FlowCapabilityData, inputSchema: Record<string, any>, outputSchema: Record<string, any>) {
+    if (!flowSpec) return null;
+    const stepIds = capabilityActualStepIds(cap);
+    const steps = stepIds.map((stepId) => stepById[stepId]).filter(Boolean);
+    const scopedLinks = (flowSpec.links || []).filter((link) =>
+      stepIds.includes(link.source_step_id) && stepIds.includes(link.target_step_id));
+    const evidenceIds = new Set<string>();
+    scopedLinks.forEach((link) => {
+      const value = String(link.meta?.verification_id || "");
+      if (value) evidenceIds.add(value);
+    });
+    steps.forEach((step) => {
+      const value = String(step.fact_check?.verification_id || "");
+      if (value) evidenceIds.add(value);
+      (step.selects || []).forEach((binding) => {
+        if (binding.verification_id) evidenceIds.add(String(binding.verification_id));
+      });
+    });
+    const verificationRecords = (flowSpec.meta?.verification_log || []).filter((record) =>
+      evidenceIds.has(String(record.verification_id || "")));
+    const targetIds = new Set([String(cap.capability_id || ""), String(cap.name || ""), ...stepIds]);
+    const unverified = (flowSpec.meta?.unverified || []).filter((item) =>
+      targetIds.has(String(item.target_id || "")) || stepIds.some((stepId) => String(item.target_id || "").includes(stepId)));
+    return (
+      <Collapse size="small" defaultActiveKey={["interfaces", "io"]}>
+        <Collapse.Panel key="interfaces" header={`接口与字段 ${steps.length} 接口`}>
+          {!steps.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有公开执行接口" /> : (
+            <List
+              size="small"
+              dataSource={steps}
+              rowKey={(step) => step.step_id}
+              renderItem={(step) => (
+                <List.Item>
+                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                    <Space wrap>
+                      <Tag color={(step.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{step.method}</Tag>
+                      <Typography.Text strong>{step.name || fallbackStepName(step.method, step.path)}</Typography.Text>
+                      <PathText value={step.path || stripHost(step.url)} maxWidth={520} />
+                      {step.fact_check?.verification_id
+                        ? <Tag color="success">写后读回已验证</Tag>
+                        : (step.method || "GET").toUpperCase() !== "GET" && <Tag color="warning">写后读回未验证</Tag>}
+                    </Space>
+                    {!!step.params?.length && (
+                      <Space wrap size={4}>
+                        {step.params.map((field) => (
+                          <Tag key={field.field_id || `${step.step_id}:${field.path}`}>
+                            {field.label || field.key || field.path} · {field.type || "string"}
+                            {field.required ? " · 必填" : ""}
+                          </Tag>
+                        ))}
+                      </Space>
+                    )}
+                  </Space>
+                </List.Item>
+              )}
+            />
+          )}
+        </Collapse.Panel>
+        <Collapse.Panel key="dependencies" header={`依赖 ${scopedLinks.length}`}>
+          {!scopedLinks.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有接口依赖" /> : (
+            <List size="small" dataSource={scopedLinks} rowKey={(link) => link.link_id}
+              renderItem={(link) => (
+                <List.Item>
+                  <Space wrap>
+                    <Typography.Text>{stepById[link.source_step_id]?.name || link.source_step_id}</Typography.Text>
+                    <Typography.Text code>{link.source_path}</Typography.Text>
+                    <Typography.Text>→</Typography.Text>
+                    <Typography.Text>{stepById[link.target_step_id]?.name || link.target_step_id}</Typography.Text>
+                    <Typography.Text code>{link.target_path}</Typography.Text>
+                    {link.meta?.verification_id
+                      ? <Tag color="success">verification_id: {String(link.meta.verification_id)}</Tag>
+                      : <Tag color="warning">unverified</Tag>}
+                  </Space>
+                </List.Item>
+              )} />
+          )}
+        </Collapse.Panel>
+        <Collapse.Panel key="io" header="调用参数 / 返回结果">
+          {renderCapabilityIOBusinessView(0, inputSchema, outputSchema, false)}
+        </Collapse.Panel>
+        <Collapse.Panel key="verification" header={`验证记录 ${verificationRecords.length}`}>
+          {!verificationRecords.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无验证记录" /> : (
+            <List size="small" dataSource={verificationRecords}
+              rowKey={(record) => String(record.verification_id || JSON.stringify(record))}
+              renderItem={(record) => <List.Item><Space wrap>
+                <Tag color="success">{String(record.kind || "verified")}</Tag>
+                <Typography.Text code>{String(record.verification_id || "")}</Typography.Text>
+                {record.created_at && <Typography.Text type="secondary">{String(record.created_at)}</Typography.Text>}
+              </Space></List.Item>} />
+          )}
+          {!!unverified.length && <List size="small" header={<Tag color="warning">unverified {unverified.length}</Tag>}
+            dataSource={unverified} rowKey={(item) => `${item.target_kind}:${item.target_id}`}
+            renderItem={(item) => <List.Item><Space wrap>
+              <Tag color="warning">{String(item.target_kind || "target")}</Tag>
+              <Typography.Text code>{String(item.target_id || "")}</Typography.Text>
+              <Typography.Text type="secondary">{String(item.reason || "")}</Typography.Text>
+            </Space></List.Item>} />}
+        </Collapse.Panel>
+      </Collapse>
+    );
+  }
+  function renderCapabilityIOBusinessView(
+    capIdx: number,
+    inputSchema: Record<string, any>,
+    outputSchema: Record<string, any>,
+    editable = true,
+  ) {
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
@@ -4410,7 +4518,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             {schemaRowsView(outputSchema, "返回最后一个接口的原始响应")}
           </Card>
         </div>
-        <Collapse ghost size="small">
+        {editable && <Collapse ghost size="small">
           <Collapse.Panel key="schema" header="编辑输入/输出 Schema">
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
               <FieldControl label="输入 JSON Schema">
@@ -4429,7 +4537,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               </FieldControl>
             </div>
           </Collapse.Panel>
-        </Collapse>
+        </Collapse>}
       </Space>
     );
   }
@@ -4440,6 +4548,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const kindOptions = CAPABILITY_KIND_OPTIONS;
     return (
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
+        <Typography.Text type={maintenanceMode ? "warning" : "secondary"}>
+          {maintenanceMode
+            ? "维护模式已开启：仅在自动分析判断错误时修正，所有改动仍走既有 FlowSpec 操作。"
+            : "只读观察器：能力、接口、依赖、输入输出与验证证据由录制和验证阶段自动生成。"}
+        </Typography.Text>
         {(analysisScreenshots.length > 0 || !!flowSpec.meta?.capability_generation) && (
           <Space wrap>
             <input
@@ -4468,7 +4581,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ))}
           </Space>
         )}
-        {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
+        {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待自动分析生成能力" /> : (
           <Collapse
             size="small"
             activeKey={expandedCapabilityKeys}
@@ -4508,7 +4621,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
                     </Space>
                   }
-                  extra={
+                  extra={maintenanceMode ? (
                     <Space onClick={(e) => e.stopPropagation()}>
                       <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0}
                         onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, -1)} /></Tooltip>
@@ -4518,9 +4631,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
                         onMouseDown={(e) => e.preventDefault()} onClick={() => removeCapability(idx)} /></Tooltip>
                     </Space>
-                  }
+                  ) : <Tag color="default">只读</Tag>}
                 >
-                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  {maintenanceMode ? <Space direction="vertical" size={12} style={{ width: "100%" }}>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
                       <FieldControl label="能力名">
                         <EditableText value={cap.name || ""} width="100%" onSave={(v) => updateCapabilityField(idx, "name", v)} />
@@ -4557,7 +4670,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {renderCapabilityIOBusinessView(idx, inputSchema, derivedOutputSchema)}
                       </Collapse.Panel>
                     </Collapse>
-                  </Space>
+                  </Space> : renderCapabilityObserver(cap, inputSchema, derivedOutputSchema)}
                 </Collapse.Panel>
               );
             })}

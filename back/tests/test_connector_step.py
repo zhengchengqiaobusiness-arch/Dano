@@ -55,6 +55,6 @@ def test_standard_dictionary_still_enriches():
     a = ActionSpec(name="create_leave", method="POST", endpoint="/oa/leave",
                    params_in=["duration", "reason"], required_in=["duration"])
     binds = {b.param: b.platform_std for b in
-             build_connector_body(a, tenant="a", subsystem="A-OA").field_bindings}
+             build_connector_body(a, tenant="a-company", subsystem="A-OA").field_bindings}
     assert binds["duration"] == "days"   # duration 是 days 的别名 → 对齐
     assert binds["reason"] == "reason"

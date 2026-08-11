@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dano.agent_tools import tools
-from dano.capabilities.oa_templates import RuoYiFlowableTemplate
+from dano.capabilities.oa_templates import all_templates
 from dano.shared.std_fields import is_numeric_field
 
 
@@ -29,7 +29,7 @@ _SPEC = {
 
 
 def test_pin_tolerates_template_suffix_and_captures_required():
-    t = RuoYiFlowableTemplate()
+    t = all_templates("a-company")[0]
     for tid in ("purchase_template", "purchase"):     # 带/不带后缀都锁定本业务
         lv = tools._submit_leaf_fields(_SPEC, t, tid)
         assert lv["reason"]["description"] == "采购事由"       # 决不串成「销假说明」
@@ -39,7 +39,7 @@ def test_pin_tolerates_template_suffix_and_captures_required():
 
 def test_unpinned_never_cross_contaminates():
     # tid 空 → 冲突描述字段宁缺毋错(绝不把销假模板的「销假说明」安给采购的 reason)
-    lv = tools._submit_leaf_fields(_SPEC, RuoYiFlowableTemplate(), "")
+    lv = tools._submit_leaf_fields(_SPEC, all_templates("a-company")[0], "")
     assert (lv.get("reason") or {}).get("description") != "销假说明"
     assert "reason" not in lv                                 # 描述冲突 → 不给
 

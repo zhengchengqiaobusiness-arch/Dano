@@ -2,8 +2,8 @@
 
 Skill = Action 强约束(文档6.1节六):每个动作 Skill 有且仅有一个 action。
 运行期只消费 published 连接器(命中消费)。事实核查策略(重查哪个动作 + 比对表达式)
-**优先随连接器资产体走**(接入期 grounded 写入 fact_check_query/expr);ACTION_META 仅作
-A 公司原型 demo 的兜底增强,不再是通用连接器的唯一来源(否则只有 5 个 demo 动作有事实核查)。
+**优先随连接器资产体走**(接入期 grounded 写入 fact_check_query/expr);租户业务包仅作
+可选兜底增强,不再是通用连接器的唯一来源。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from dano.assets.store import AssetStore
+from dano.business_packs import action_meta_for
 from dano.orchestrator.types import Intent, SkillSpec
 from dano.shared.enums import AssetType, RiskLevel, Subsystem
 from dano.shared.models import Scope
@@ -24,25 +25,6 @@ class ActionMeta(BaseModel):
     fact_check_query: str | None = None
     fact_check_expr: str | None = None
     required_fields: list[str] = Field(default_factory=list)
-
-
-# 动作元数据(关键词用于意图匹配,事实核查用于重查比对)
-ACTION_META: dict[str, ActionMeta] = {
-    "query_balance": ActionMeta(keywords=["余额", "假期余额", "还有几天假", "balance"]),
-    "create_leave": ActionMeta(
-        keywords=["请假", "休假", "请个假", "leave"],
-        fact_check_query="query_balance",
-        # 重查余额按申请天数减少 + 返回单号非空
-        fact_check_expr="after.balance == before.balance - fields.days and response.request_id != null",
-    ),
-    "query_approval": ActionMeta(keywords=["审批状态", "审批进度", "批了吗", "approval"]),
-    "create_ticket": ActionMeta(
-        keywords=["工单", "报修", "IT工单", "ticket"],
-        fact_check_query="query_ticket",
-        fact_check_expr="response.ticket_id != null",
-    ),
-    "query_ticket": ActionMeta(keywords=["工单进度", "工单状态", "ticket status"]),
-}
 
 
 def _call_metadata_from_body(body: dict, env=None) -> dict:
@@ -82,6 +64,10 @@ class SkillRegistry:
         from dano.shared.asset_bodies import WorkflowSkillBody, asset_internal
 
         skills: list[SkillSpec] = []
+        configured_meta = {
+            action: ActionMeta.model_validate(value)
+            for action, value in action_meta_for(tenant).items()
+        }
         for sub in subsystems:
             scope = Scope(tenant=tenant, subsystem=sub)
             # 复合流程 Skill(阶段2):从已发布 WORKFLOW 资产派生;其步骤动作隐藏(不单独暴露)
@@ -93,6 +79,7 @@ class SkillRegistry:
                 call_meta = _call_metadata_from_body(env.body, env)
                 skills.append(
                     SkillSpec(
+                        tenant=tenant,
                         skill_id=f"{sub.value}.{body.action}",
                         subsystem=sub,
                         action=body.action,
@@ -132,8 +119,8 @@ class SkillRegistry:
                 # 步骤连接器 / internal 前置查询:永不单独露出(即便其复合流程未发布也不污染目录)
                 if action in hidden_actions or asset_internal(env.body):
                     continue
-                meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
-                # 事实核查优先取**资产体**(随资产走,接入期可 grounded 写入);ACTION_META 仅作原型 demo 兜底
+                meta = configured_meta.get(action, ActionMeta(keywords=[action]))
+                # 事实核查优先取资产体；租户业务包只提供可选兜底。
                 fc_query = env.body.get("fact_check_query") or meta.fact_check_query
                 fc_expr = env.body.get("fact_check_expr") or meta.fact_check_expr
                 bindings = env.body.get("field_bindings", [])
@@ -143,6 +130,7 @@ class SkillRegistry:
                 call_meta = _call_metadata_from_body(env.body, env)
                 skills.append(
                     SkillSpec(
+                        tenant=tenant,
                         skill_id=f"{sub.value}.{action}",
                         subsystem=sub,
                         action=action,
@@ -182,6 +170,7 @@ class SkillRegistry:
                     call_meta = _call_metadata_from_body(body, env)
                     skills.append(
                         SkillSpec(
+                            tenant=tenant,
                             skill_id=f"{sub.value}.{body_action}",
                             subsystem=sub,
                             action=body_action,

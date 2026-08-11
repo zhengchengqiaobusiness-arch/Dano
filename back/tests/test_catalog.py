@@ -63,7 +63,7 @@ async def test_connector_fact_check_from_body_not_gated_by_action_name():
         _Env({"action": "create_order", "field_bindings": [], "risk_level": "L3"}, "create_order"),
         _Env({"action": "create_leave", "field_bindings": [], "risk_level": "L3"}, "create_leave"),
     ]})
-    reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem("B-CRM")])
+    reg = await SkillRegistry.from_store(store, tenant="a-company", subsystems=[Subsystem("B-CRM")])
     by = {s.action: s for s in reg.skills}
     # 资产体声明 → 通用连接器(非 demo 动作名)也有事实核查
     assert by["create_customer"].fact_check_query == "query_customer"
@@ -86,8 +86,9 @@ async def test_registry_exposes_capability_lookup_for_published_assets():
     ]})
     reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem.OA])
 
-    assert reg.get_by_skill_id("A-OA.query_daily") is not None
-    assert reg.get_capability("A-OA.query_daily", "query_status") == {
+    skill_id = f"{Subsystem.OA.value}.query_daily"
+    assert reg.get_by_skill_id(skill_id) is not None
+    assert reg.get_capability(skill_id, "query_status") == {
         "name": "query_status",
         "kind": "query_status",
     }
@@ -951,7 +952,7 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
     assert by_cap["query_status"]["parameters"]["properties"]["month"]["type"] == "string"
     assert by_cap["query_status"]["output_schema"]["properties"]["missing_dates"]["type"] == "array"
     assert by_cap["query_status"]["call_protocol"]["invoke_path"].endswith(
-        "/v1/skills/A-OA.submit_leave/capabilities/query_status/invoke"
+        f"/v1/skills/{Subsystem.OA.value}.submit_leave/capabilities/query_status/invoke"
     )
     assert m.output_schema["properties"]["success_dates"]["type"] == "array"
     assert m.call_metadata["fields"]["请假类型"]["enum_options"] == [{"label": "事假", "value": "事假"},
@@ -967,7 +968,7 @@ def test_ruoyi_parses_approval_chain_from_prose():
             "〔金额>5000 时〕行政审批 → 〔金额>30000 时〕总经理审批 → 系统自动记账 → 结束 |\n"}}},
         "components": {"schemas": {"AjaxResult": {}}},
     }
-    meta = match_template(spec).parse_approval_chain(spec, "purchase_template")
+    meta = match_template(spec, tenant="a-company").parse_approval_chain(spec, "purchase_template")
     assert meta["flow"] == "采购申请"
     steps = [c["step"] for c in meta["approvalChain"]]
     assert "直属主管" in steps and "发起人填表" not in steps and "结束" not in steps
@@ -998,8 +999,8 @@ async def test_connector_carries_business_tag():
 # ── WS4:系统特定(模板清单/表单解析)归 dialect,网关零字面量 ──
 def test_ruoyi_dialect_parses_template_list_and_form():
     import json as _json
-    from dano.capabilities.oa_templates import RuoYiFlowableTemplate, all_templates
-    t = RuoYiFlowableTemplate()
+    from dano.capabilities.oa_templates import all_templates
+    t = all_templates("a-company")[0]
     assert t.template_list_paths()                       # RuoYi 提供模板清单端点
     rows = t.parse_template_list({"code": 200, "rows": [
         {"id": "leave_template", "name": "请假申请", "typeName": "人事", "defKey": "leave", "enableFlag": "0"}]})
@@ -1011,20 +1012,20 @@ def test_ruoyi_dialect_parses_template_list_and_form():
         {"__vModel__": "reason", "__config__": {"label": "事由", "tag": "el-input"}}]}})
     fields = t.parse_form_fields({"code": 200, "data": {"formData": designer}})
     assert {f["key"] for f in fields} == {"leaveType", "reason"}
-    assert any(d.name == "ruoyi-flowable" for d in all_templates())
+    assert any(d.name == "ruoyi-flowable" for d in all_templates("a-company"))
 
 
 def test_form_field_types_from_el_controls():
     # WS6:动态表单控件 = 字段类型的权威信源(比按名字猜更准,且能识别枚举)
     import json as _json
-    from dano.capabilities.oa_templates import RuoYiFlowableTemplate
+    from dano.capabilities.oa_templates import all_templates
     designer = _json.dumps({"list": [
         {"__vModel__": "leaveType", "__config__": {"label": "请假类型", "tag": "el-select"}},
         {"__vModel__": "leaveDays", "__config__": {"label": "天数", "tag": "el-input-number"}},
         {"__vModel__": "startDate", "__config__": {"label": "开始", "tag": "el-date-picker"}},
         {"__vModel__": "agree", "__config__": {"label": "同意", "tag": "el-switch"}},
         {"__vModel__": "reason", "__config__": {"label": "事由", "tag": "el-input"}}]})
-    fs = {f["key"]: f for f in RuoYiFlowableTemplate().parse_form_fields(
+    fs = {f["key"]: f for f in all_templates("a-company")[0].parse_form_fields(
         {"code": 200, "data": {"formData": designer}})}
     assert fs["leaveDays"]["json_type"] == "number"
     assert fs["leaveType"]["json_type"] == "string" and fs["leaveType"]["enum"] is True
@@ -1057,7 +1058,7 @@ def test_discover_flows_composites_are_dynamic_not_hardcoded():
         "components": {"schemas": {"AjaxResult": {},
             "StartFlowReq": {"properties": {"templateId": {"enum": ["purchase_template", "custom_xyz_template"]}}}}},
     }
-    flows = discover_flows(spec)
+    flows = discover_flows(spec, tenant="a-company")
     comp = {f["flow"]: f for f in flows if f["kind"] == "composite"}
     # 来自 spec 的 templateId 枚举,而非写死的请假/出差
     assert set(comp) == {"submit_purchase", "submit_custom_xyz"}
@@ -1089,10 +1090,10 @@ _GOAL_SPEC = {
 
 
 def test_build_goal_is_dynamic_and_marks_forbidden():
-    from dano.capabilities.oa_templates import RuoYiFlowableTemplate
+    from dano.capabilities.oa_templates import all_templates
     from dano.onboarding.goal import build_goal
     steps = ["post_workflow_handle_startFlow", "post_biz_flow_submit"]
-    g = build_goal(_GOAL_SPEC, RuoYiFlowableTemplate(), template_id="purchase_template",
+    g = build_goal(_GOAL_SPEC, all_templates("a-company")[0], template_id="purchase_template",
                    business="采购申请", title="采购申请提交",
                    required_inputs=["amount"], optional_inputs=["comment"], candidate_steps=steps)
     assert g.selected_template == "purchase_template"
@@ -1105,9 +1106,9 @@ def test_build_goal_is_dynamic_and_marks_forbidden():
 
 
 def test_goal_grounding_rejects_forbidden_step():
-    from dano.capabilities.oa_templates import RuoYiFlowableTemplate
+    from dano.capabilities.oa_templates import all_templates
     from dano.onboarding.goal import build_goal, goal_grounding
-    g = build_goal(_GOAL_SPEC, RuoYiFlowableTemplate(), template_id="purchase_template",
+    g = build_goal(_GOAL_SPEC, all_templates("a-company")[0], template_id="purchase_template",
                    business="采购申请", candidate_steps=["post_biz_flow_submit"])
     assert goal_grounding(g, ["post_workflow_handle_startFlow", "post_biz_flow_submit"]) == []  # 干净
     bad = goal_grounding(g, ["post_workflow_handle_reject"])                                     # 编入驳回他人

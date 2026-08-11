@@ -22,14 +22,14 @@ from urllib.parse import parse_qs, urlparse
 import structlog
 
 from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
-from dano.shared.std_fields import ALL_STD_FIELDS
+from dano.shared.std_fields import standard_fields_for
 
 log = structlog.get_logger(__name__)
 
 
-def _std_key(field: str) -> str:
+def _std_key(field: str, *, tenant: str = "") -> str:
     fl = (field or "").strip().lower()
-    for std in ALL_STD_FIELDS:
+    for std in standard_fields_for(tenant):
         if fl == std.key.lower() or fl == std.label.lower() or fl in {a.lower() for a in std.aliases}:
             return std.key
     return (field or "").strip()
@@ -37,7 +37,7 @@ def _std_key(field: str) -> str:
 
 
 
-def assign_step_field_keys(steps: list[dict]) -> dict[int, str]:
+def assign_step_field_keys(steps: list[dict], *, tenant: str = "") -> dict[int, str]:
     """为录制步骤分配稳定字段键。
 
     浏览器对同一个控件可能连续上报 click/fill/change/select 等多个事件。字段键必须按
@@ -53,7 +53,7 @@ def assign_step_field_keys(steps: list[dict]) -> dict[int, str]:
         raw_field = str(step.get("field") or "").strip()
         if not raw_field:
             continue
-        semantic = _std_key(raw_field) or raw_field
+        semantic = _std_key(raw_field, tenant=tenant) or raw_field
         semantic_id = semantic.casefold()
         locator = str(step.get("locator") or "").strip()
         page_id = str(step.get("page_id") or "").strip()
@@ -213,7 +213,7 @@ _RECORDER_JS = r"""() => {
     var lb = el.getAttribute && el.getAttribute('aria-labelledby');
     if (lb) { var t = ''; lb.split(/\s+/).forEach(function (id) { var n = document.getElementById(id); if (n) t += clean(n.innerText) + ' '; }); if (clean(t)) return clean(t); }
     // 兜底:最近表单项的标签(.el-form-item__label / .ant-form-item-label)—— 现代框架 label 常不带 for,
-    // 控件(el-select/日期/输入)靠这个才能拿到"请假类型"这类中文字段名,而不是退回 placeholder。
+    // 控件(el-select/日期/输入)靠这个才能拿到"申请类型"这类中文字段名,而不是退回 placeholder。
     try {
       var item = el.closest && el.closest('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
       var lab = item && item.querySelector('.el-form-item__label,.ant-form-item-label,label');
@@ -694,7 +694,7 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
   };
   // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
-  // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。
+  // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/申请类型绑到几百项全量字典")。
   // **通用 ARIA + 框架兜底**,不绑任何特定公司/项目:
   //   ① 隐/显 role=option / menuitem / menuitemradio / menuitemcheckbox / treeitem
   //   ② W3C aria-activedescendant / aria-selected 标识选中
@@ -1109,7 +1109,8 @@ class RecordSession:
     """一次网页内录制。start→(用户经截屏+输入回传操作)→recorded_steps→stop。"""
 
     def __init__(self, *, on_request: Callable[[dict], None] | None = None,
-                 intercept_submit: bool = True, capture_reads: bool = True) -> None:
+                 intercept_submit: bool = True, capture_reads: bool = True,
+                 tenant: str = "") -> None:
         self.steps: list[dict] = []
         # 点击提交时保存的页面语义/必填快照。它独立于操作步骤，避免弹窗关闭后
         # finalize 扫描不到表单，也避免把证据误导出成回放动作。
@@ -1145,6 +1146,7 @@ class RecordSession:
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
         self._intercept = intercept_submit
         self._capture_reads = capture_reads
+        self._tenant = tenant
         self._pw = None
         self._browser = None
         self._context = None
@@ -1503,7 +1505,7 @@ class RecordSession:
             pass
 
     def _success_envelope(self) -> str:
-        """伪造的"提交成功"响应体 —— **镜像本系统自己的成功约定**(从已抓到的成功读响应学),不写死若依 code=200。
+        """伪造的"提交成功"响应体 —— **镜像本系统自己的成功约定**(从已抓到的成功读响应学),不写死特定平台的 code=200。
 
         这样不管 SPA 前端检查 code===0 / code===200 / success===true,拦截后都能正确显示成功 → 用户能继续到
         "我的记录"页(供 fact_check 抓回查源)。学不到约定时给一个并集兜底(同时带 code/success,尽量通吃)。
@@ -2345,7 +2347,7 @@ class RecordSession:
 
     def recorded_steps(self):
         """已捕获步骤 → (普通 dict 步骤列表, sample_inputs)。"""
-        keymap = assign_step_field_keys(self.steps)
+        keymap = assign_step_field_keys(self.steps, tenant=self._tenant)
         steps: list[dict] = []
         samples: dict[str, object] = {}
         for i, s in enumerate(self.steps):
@@ -2374,7 +2376,7 @@ class RecordSession:
             )
 
         evidence = sorted([*self.steps, *self.enum_snapshots], key=evidence_order)
-        keymap = assign_step_field_keys(evidence)
+        keymap = assign_step_field_keys(evidence, tenant=self._tenant)
         out: dict[str, dict] = {}
         last_field_idx_by_scope: dict[tuple[str, str], int] = {}
         for i, s in enumerate(evidence):
@@ -3078,7 +3080,7 @@ class RecordSession:
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
-        keymap = assign_step_field_keys(self.steps)
+        keymap = assign_step_field_keys(self.steps, tenant=self._tenant)
         out = {
             key for i, key in keymap.items()
             if self.steps[i].get("required")

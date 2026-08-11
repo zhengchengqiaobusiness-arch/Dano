@@ -75,28 +75,28 @@ export default function Onboard() {
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
 
-  const [baseUrl, setBaseUrl] = useState("https://u858758-netf-d87bf18d.westd.seetacloud.com:8443/prod-api");
+  const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
-  const [subsystem, setSubsystem] = useState("A-OA");
+  const [subsystem, setSubsystem] = useState("");
 
   // 手动导入 swagger:上传 .json 文件 或 写 swagger 地址(生成时按它定位接口)
   const [importMode, setImportMode] = useState<"file" | "url">("file");
-  const [swaggerUrl, setSwaggerUrl] = useState("https://u858758-netf-d87bf18d.westd.seetacloud.com:8443/prod-api/v3/api-docs");
+  const [swaggerUrl, setSwaggerUrl] = useState("");
   const [swagger, setSwagger] = useState<unknown>(null);
   const [swaggerLabel, setSwaggerLabel] = useState("");
 
-  // 业务模板(查 OA 真实模板清单:请假/报销/…)
+  // 业务模板来自当前租户配置的目标系统方言。
   const [templates, setTemplates] = useState<BizTemplate[]>([]);
   const [selT, setSelT] = useState<Record<string, boolean>>({});
   const [valMap, setValMap] = useState<Record<string, string>>({});
   const [formFields, setFormFields] = useState<Record<string, FormField[]>>({});
 
-  // 勾选模板 → 自动查它的表单字段,并据此预填 values 骨架(请假样例不覆盖)
+  // 勾选模板 → 自动查它的表单字段,并据此预填 values 骨架。
   async function onToggleTemplate(t: BizTemplate, checked: boolean) {
     setSelT((p) => ({ ...p, [t.templateId]: checked }));
     if (!checked || formFields[t.templateId]) return;
     try {
-      const fields = await templateForm(baseUrl.trim(), token.trim(), t.templateId);
+      const fields = await templateForm(tenant, baseUrl.trim(), token.trim(), t.templateId);
       setFormFields((p) => ({ ...p, [t.templateId]: fields }));
       if (fields.length) {
         setValMap((p) => {
@@ -141,7 +141,7 @@ export default function Onboard() {
     },
   };
 
-  // step0 → 导入 swagger + 查 OA 真实业务模板
+  // step0 → 导入 swagger + 查目标系统真实业务模板
   async function doNext() {
     setBusy(true);
     try {
@@ -153,8 +153,9 @@ export default function Onboard() {
       }
       if (!sw) { message.error("请先上传 .json 文件或填 swagger 地址"); return; }
       if (!baseUrl.trim()) { message.error("请填目标系统 base_url"); return; }
-      if (!token.trim()) { message.error("请填 OA token(查业务模板要用)"); return; }
-      const tpls = await listTemplates(baseUrl.trim(), token.trim());
+      if (!subsystem.trim()) { message.error("请填子系统标识"); return; }
+      if (!token.trim()) { message.error("请填目标系统 token(查业务模板要用)"); return; }
+      const tpls = await listTemplates(tenant, baseUrl.trim(), token.trim());
       const s: Record<string, boolean> = {}, v: Record<string, string> = {};
       tpls.forEach((t) => { s[t.templateId] = false; v[t.templateId] = "{}"; });
       setTemplates(tpls); setSelT(s); setValMap(v);
@@ -242,12 +243,12 @@ export default function Onboard() {
             )}
             <Divider />
             <Form.Item label="目标系统 base_url" extra="查业务模板 + 沙箱真试跑 + 调用都打这个地址">
-              <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+              <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://system.example/api" />
             </Form.Item>
-            <Form.Item label="OA Bearer token" extra="在网页填;用来查该 OA 的业务模板 + 沙箱真跑 + 调用">
+            <Form.Item label="目标系统 Bearer token" extra="在网页填;用来查业务模板 + 沙箱真跑 + 调用">
               <Input.Password value={token} onChange={(e) => setToken(e.target.value)} />
             </Form.Item>
-            <Form.Item label="子系统"><Input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} style={{ width: 160 }} /></Form.Item>
+            <Form.Item label="子系统"><Input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="例如 crm-prod" style={{ width: 220 }} /></Form.Item>
             <Button type="primary" loading={busy} onClick={doNext}>导入并查业务模板</Button>
           </Form>
         </Card>
@@ -257,7 +258,7 @@ export default function Onboard() {
         <Card title={`选业务模板(查到 ${templates.length} 个,已选 ${chosenCount})`}>
           <Alert
             style={{ marginBottom: 12 }} type="info" showIcon
-            message="这是从你这台 OA 查到的真实流程模板(请假/报销/…)。勾选要做成 skill 的,并按该模板表单填一组测试值(沙箱会拿它真跑);请假已带样例。"
+            message="这是从目标系统查到的真实流程模板。勾选要做成 skill 的模板，并按表单填一组测试值供沙箱验证。"
           />
           {templates.length === 0 ? <Empty description="没查到模板" /> : (
             <List

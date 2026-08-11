@@ -7,23 +7,10 @@ import re
 
 from pydantic import BaseModel, Field
 
+from dano.business_packs import action_titles_for
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel
-from dano.shared.std_fields import ALL_STD_FIELDS, is_flow_internal, is_form_envelope, is_numeric_field
-
-# 动作友好标题(可扩展;缺省用 action 名)
-_ACTION_TITLES: dict[str, str] = {
-    "query_balance": "查询假期余额",
-    "create_leave": "创建请假",
-    "query_approval": "查询审批状态",
-    "create_ticket": "创建 IT 工单",
-    "query_ticket": "查询工单进度",
-    "create_reimburse_draft": "创建报销草稿",
-    "submit_leave": "提交请假申请",   # 复合流程(阶段2)
-}
-
-# 标准字段 → 人类可读描述(供前端表单/LLM 理解参数)
-_FIELD_DESC = {f.key: (f.aliases[0] if f.aliases else f.key) for f in ALL_STD_FIELDS}
+from dano.shared.std_fields import is_flow_internal, is_form_envelope, is_numeric_field, standard_fields_for
 
 # 需用户确认的风险线(L3 及以上)
 _CONFIRM_FROM = {RiskLevel.L3, RiskLevel.L4, RiskLevel.L5}
@@ -32,7 +19,7 @@ _CONFIRM_FROM = {RiskLevel.L3, RiskLevel.L4, RiskLevel.L5}
 class SkillManifest(BaseModel):
     """一个 Skill 的标准工具契约。"""
 
-    name: str                         # skill_id,如 "A-OA.create_leave"(调用入口)
+    name: str                         # skill_id,如 "workflow.create_entry"(调用入口)
     capability: str = ""              # 对外能力键;旧资产为空时等于 name,保持 skill_id 兼容
     capability_meta: dict = Field(default_factory=dict)  # 能力别名/来源/迁移信息,不进入 JSON Schema
     capabilities: list[dict] = Field(default_factory=list)  # 一个 Skill 内可调用的业务能力列表
@@ -135,7 +122,8 @@ def _manifest_title(skill: SkillSpec) -> str:
     for candidate in candidates:
         if candidate and not _TECHNICAL_TITLE_RE.search(candidate):
             return candidate
-    return current or _ACTION_TITLES.get(skill.action, skill.action)
+    configured = action_titles_for(getattr(skill, "tenant", ""))
+    return current or configured.get(skill.action, skill.action)
 
 
 def _api_selects(skill: SkillSpec) -> dict:
@@ -163,7 +151,7 @@ def _enum_label_value(opt) -> tuple[str, object] | None:
 def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, bool]:
     """选择型字段的候选事实 → (opts, has_source, is_static_enum)。
 
-    **静态页面枚举**(enum_source=dom/manual,如 请假类型=病假/事假/婚假;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
+    **静态页面枚举**(enum_source=dom/manual,如申请类型的固定选项;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
     **活接口目录**(用户/部门/审批人等网络源:会变、常被截断)→ **绝不烤静态清单**(否则前端被陈旧/错误选项硬约束,
     选的值与实际不符 → 入库失败),只暴露来源让调用方运行期 `--list-options` 现拉。通用,不挑系统/字段。
     """
@@ -228,7 +216,7 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
     """
     declared = _select_semantic_type((getattr(skill, "field_types", {}) or {}).get(field), sel)
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
-    # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
+    # 约定不写死示例值(『张三』只适合选人,不适合选值如申请类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
         opts, option_map, has_source, static = _enum_facts(sel)
         prop = {"type": "string", "format": "name-ref", "label": desc}
@@ -293,9 +281,13 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     all_fields = [f for f in dict.fromkeys([*skill.required_fields, *skill.optional_fields])
                   if not _is_reserved(f)]
     sels = _api_selects(skill)                               # 选择型字段的候选选项/来源(内置进 schema)
+    field_desc = {
+        field.key: (field.aliases[0] if field.aliases else field.key)
+        for field in standard_fields_for(getattr(skill, "tenant", ""))
+    }
     props = {}
     for f in all_fields:
-        desc = skill.field_docs.get(f) or _FIELD_DESC.get(f, f)
+        desc = skill.field_docs.get(f) or field_desc.get(f, f)
         props[f] = _schema_prop(skill, f, desc, sels.get(f))
     return {
         "type": "object",

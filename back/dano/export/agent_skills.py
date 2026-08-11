@@ -33,6 +33,7 @@ from pathlib import Path
 import structlog
 
 from dano.assets.repository import AssetRepository
+from dano.business_packs import business_subsystems
 from dano.catalog.manifest import (
     SkillManifest,
     _ask_user_question_interaction_protocol,
@@ -45,8 +46,6 @@ from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import Subsystem
 
 log = structlog.get_logger(__name__)
-# 原型常量仅作空租户 / 无 DB 兜底;真实系统由 _tenant_subsystems 从该租户已发布资产发现(任意系统,不写死)。
-_PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -165,16 +164,16 @@ def _abort_stage(stage: Path) -> None:
 
 
 async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsystem]:
-    """该租户**实际拥有**的系统(发现式,支持任意系统);发现为空 / DB 不可用才退回原型常量。
+    """发现租户实际系统；无资产时读取该租户可选业务包。
 
     与网关 `_tenant_subsystems` 一致:任意系统接入发布后自动被发现并导出,不必在代码里预先登记。
     """
     try:
         subs = await repo.distinct_subsystems(tenant)
-    except Exception as e:  # noqa: BLE001 —— DB 不可用时退原型,不致导出整体失败
+    except Exception as e:  # noqa: BLE001 —— DB 不可用时仍可读取可选配置
         log.warning("export.discover_subsystems_failed", tenant=tenant, error=str(e))
         subs = []
-    return subs or _PROTOTYPE_SUBSYSTEMS
+    return subs or [Subsystem(value) for value in business_subsystems(tenant)]
 
 
 def _upgrade_recorded_skill_for_export(skill: SkillSpec) -> SkillSpec:
@@ -311,7 +310,7 @@ def _upgrade_recorded_skill_for_export(skill: SkillSpec) -> SkillSpec:
 
 
 def _slug(skill_id: str) -> str:
-    """skill_id(如 A-OA.submit_leave)→ 文件夹名(kebab,如 dano-a-oa-submit-leave)。
+    """skill_id(如 workflow.submit_entry)→ 文件夹名(kebab,如 dano-workflow-submit-entry)。
 
     动作名含非 ASCII(中文)时 ASCII 化会塌成只剩子系统前缀、多个 skill 撞同一目录互相覆盖 →
     补 skill_id 短哈希保唯一(动作名建议用英文,中文放标题)。

@@ -22,19 +22,19 @@ export async function fetchSwaggerByUrl(url: string, token: string) {
 }
 
 export interface BizTemplate { templateId: string; name: string; type: string; defKey: string; enableFlag: string }
-export async function listTemplates(base_url: string, token: string): Promise<BizTemplate[]> {
-  const { data } = await api.post("/onboarding/list-templates", { base_url, token });
+export async function listTemplates(tenant: string, base_url: string, token: string): Promise<BizTemplate[]> {
+  const { data } = await api.post("/onboarding/list-templates", { tenant, base_url, token });
   return data.templates;
 }
 
 export interface FormField { key: string; label: string; type: string }
-export async function templateForm(base_url: string, token: string, template_id: string): Promise<FormField[]> {
-  const { data } = await api.post("/onboarding/template-form", { base_url, token, template_id });
+export async function templateForm(tenant: string, base_url: string, token: string, template_id: string): Promise<FormField[]> {
+  const { data } = await api.post("/onboarding/template-form", { tenant, base_url, token, template_id });
   return data.fields;
 }
 
-export async function preview(openapi: unknown): Promise<PreviewResp> {
-  const { data } = await api.post("/onboarding/preview", { openapi });
+export async function preview(tenant: string, openapi: unknown): Promise<PreviewResp> {
+  const { data } = await api.post("/onboarding/preview", { tenant, openapi });
   return data;
 }
 
@@ -44,8 +44,8 @@ export interface ProposedFlow {
   actions: string[]; method: string; endpoint: string; required: string[];
   suggested_test_input: Record<string, unknown>; reason: string; tags?: string[]; selected: boolean;
 }
-export async function discoverFlows(openapi: unknown, include_tags: string[], subsystem: string): Promise<ProposedFlow[]> {
-  const { data } = await api.post("/onboarding/discover-flows", { openapi, include_tags, subsystem });
+export async function discoverFlows(tenant: string, openapi: unknown, include_tags: string[], subsystem: string): Promise<ProposedFlow[]> {
+  const { data } = await api.post("/onboarding/discover-flows", { tenant, openapi, include_tags, subsystem });
   return data.flows;
 }
 

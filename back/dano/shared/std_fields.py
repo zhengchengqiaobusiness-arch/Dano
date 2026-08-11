@@ -1,12 +1,10 @@
-"""标准字段词典(平台一次建设·全公司共用)。
-
-pi coding Agent 做字段映射(流程2)时,把各家系统的真实字段对齐到这些平台标准字段。
-M0 先给请假/工单/报销三类动作的核心字段,后续按需扩充。
-"""
+"""Generic standard fields plus optional tenant-pack extensions."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel
+
+from dano.business_packs import standard_fields_for as packed_standard_fields
 
 
 class StdField(BaseModel):
@@ -28,37 +26,16 @@ COMMON_FIELDS: list[StdField] = [
              description="申请理由/备注"),
 ]
 
-# 请假(OA)
-LEAVE_FIELDS: list[StdField] = [
-    StdField(key="leave_type", label="假期类型", aliases=["vacation_type", "leaveCategory", "type"],
-             description="年假/病假/事假等"),
-    StdField(key="days", label="请假天数", aliases=["duration", "leave_days", "amount_days"],
-             description="申请天数,用于与余额比对"),
-]
-
-# 工单
-TICKET_FIELDS: list[StdField] = [
-    StdField(key="ticket_title", label="工单标题", aliases=["title", "subject", "summary"],
-             description="工单主题"),
-    StdField(key="priority", label="优先级", aliases=["urgency", "level"],
-             description="工单优先级"),
-]
-
-# 报销
-REIMBURSE_FIELDS: list[StdField] = [
-    StdField(key="amount", label="金额", aliases=["money", "total", "fee", "cost"],
-             description="报销金额"),
-    StdField(key="category", label="费用类别", aliases=["expense_type", "item", "project"],
-             description="差旅/餐饮/办公等"),
-    StdField(key="has_invoice", label="是否有发票", aliases=["invoice", "with_receipt"],
-             description="制度规则判定是否需发票"),
-]
-
-ALL_STD_FIELDS: list[StdField] = (
-    COMMON_FIELDS + LEAVE_FIELDS + TICKET_FIELDS + REIMBURSE_FIELDS
-)
+ALL_STD_FIELDS: list[StdField] = list(COMMON_FIELDS)
 
 STD_FIELD_INDEX: dict[str, StdField] = {f.key: f for f in ALL_STD_FIELDS}
+
+
+def standard_fields_for(tenant: str) -> list[StdField]:
+    """Combine universal fields with the selected tenant's optional fields."""
+    configured = [StdField.model_validate(item) for item in packed_standard_fields(tenant)]
+    merged = {field.key: field for field in [*COMMON_FIELDS, *configured]}
+    return list(merged.values())
 
 
 # ── 字段语义助手(契约/导出共用,避免各处重复猜)──────────────────────────────
@@ -68,7 +45,7 @@ FLOW_INTERNAL_FIELDS: frozenset[str] = frozenset({
     "templateid", "procinsid", "procdefid", "defid", "taskid", "bizid", "procdefkey",
 })
 
-# 整表序列化信封字段:把"整张表单"打包成一个串/对象的容器(如 RuoYi 的 formData)。
+# 整表序列化信封字段:把整张表单打包成一个串/对象的容器。
 # 它**不是**业务字段,而是一堆业务字段的序列化容器——绝不能作用户参数暴露(调用方对着黑盒无从填),
 # 应拆成提交 schema 的业务叶子(由 Dano 运行期组装回去)。
 FORM_ENVELOPE_FIELDS: frozenset[str] = frozenset({

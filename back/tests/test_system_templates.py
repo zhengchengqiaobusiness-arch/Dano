@@ -20,6 +20,6 @@ def test_register_arbitrary_system_type():
         got = get_system_template("crm")
         assert got is not None and got.subsystem.value == "B-CRM"   # 开放作用域键
         assert tpl in all_system_templates()
-        assert get_system_template("oa") is not None   # 原型种子仍在(向后兼容)
+        assert get_system_template("oa", tenant="a-company") is not None
     finally:
         SYSTEM_TEMPLATES.pop("crm", None)              # 清理全局态,不污染其它测试

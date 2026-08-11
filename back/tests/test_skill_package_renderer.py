@@ -54,6 +54,30 @@ class _BusinessApi(BaseHTTPRequestHandler):
         return
 
 
+class _AlternateBusinessApi(BaseHTTPRequestHandler):
+    records = [{"recordKey": "R1", "label": "seed"}]
+
+    def _send(self, payload):  # noqa: ANN001
+        raw = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):  # noqa: N802
+        self._send({"success": True, "items": list(self.records)})
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        self.records.insert(0, payload)
+        self._send({"success": True, "item": payload})
+
+    def log_message(self, *_args):  # noqa: ANN002
+        return
+
+
 def _recording_skill(origin: str) -> SkillSpec:
     query = FlowStep(
         step_id="query",
@@ -164,6 +188,71 @@ def _recording_skill(origin: str) -> SkillSpec:
     )
 
 
+def _alternate_recording_skill(origin: str) -> SkillSpec:
+    base = _recording_skill(origin)
+    spec = FlowSpec.model_validate(base.api_request["_release_snapshot"]["flow_spec"])
+    spec.flow_id = "alternate-records"
+    spec.title = "Alternate records"
+    query, create = spec.steps
+    query.name = "List records"
+    query.url = f"{origin}/records"
+    query.path = "/records"
+    query.success_rule = {"field": "success", "ok_values": [True]}
+    query.response_json = {"success": True, "items": [{"recordKey": "R1", "label": "seed"}]}
+    create.name = "Add record"
+    create.url = f"{origin}/records"
+    create.path = "/records"
+    create.body_source = json.dumps({"recordKey": "R1", "label": "recorded"})
+    create.body_template = {"recordKey": "R1", "label": "{{label}}"}
+    create.params = [
+        ParamField(
+            path="recordKey", key="recordKey", value="R1",
+            category="runtime_var", source_kind="previous_response",
+            source={"kind": "previous_response", "step_id": "query", "response_path": "items.0.recordKey"},
+            exposed_to_user=False,
+        ),
+        ParamField(path="label", key="label", value="recorded", category="user_param", source_kind="user_input"),
+    ]
+    create.success_rule = {"field": "success", "ok_values": [True]}
+    create.fact_check = {
+        "endpoint": "/records",
+        "assertion": {"path": "items.0.label", "equals_input": "label"},
+        "verification_id": _WRITE_VERIFICATION,
+        "verified": True,
+    }
+    spec.links[0].source_path = "items.0.recordKey"
+    spec.links[0].target_path = "recordKey"
+    query_capability, create_capability = spec.capabilities
+    query_capability.name = "list_records"
+    query_capability.title = "List records"
+    query_capability.nodes[0]["path"] = "/records"
+    create_capability.name = "add_record"
+    create_capability.title = "Add record"
+    create_capability.nodes[0]["path"] = "/records"
+    create_capability.nodes[1]["path"] = "/records"
+    create_capability.input_schema = {
+        "type": "object",
+        "properties": {"label": {"type": "string", "description": "Record label"}},
+        "required": ["label"],
+    }
+    spec.goal["intent"] = "List and add records"
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert api_request is not None and errors == []
+    api_request["_release_snapshot"] = {
+        "protocol": "dano.recording_release.v1",
+        "flow_spec": spec.model_dump(mode="json"),
+    }
+    return SkillSpec(
+        skill_id="alternate.records",
+        subsystem=Subsystem("alternate-admin"),
+        action="records",
+        risk_level=RiskLevel.L3,
+        title="Alternate records",
+        has_api=False,
+        api_request=api_request,
+    )
+
+
 def _run(script: Path, *args: str, env: dict[str, str]) -> dict:
     runner = json.loads(os.environ.get("DANO_PACKAGE_TEST_COMMAND", "[]"))
     command = [*runner, str(script), *args] if runner else [sys.executable, str(script), *args]
@@ -192,6 +281,8 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
         package = tmp_path / folder_name
         assert folder_name == package_slug(skill.skill_id)
         assert validate_skill_package(package) == {"ok": True, "issues": []}
+        contract = json.loads((package / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+        assert {item["name"] for item in contract["capabilities"]} == {"query_items", "create_item"}
         assert _LINK_VERIFICATION in (package / "reference.md").read_text(encoding="utf-8")
         all_text = "\n".join(
             path.read_text(encoding="utf-8") for path in package.rglob("*") if path.is_file()
@@ -207,6 +298,49 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
         assert _run(scripts / "create_item.py", "--name", "created", env=env)["ok"] is True
         verified = _run(scripts / "verify_create_item.py", "--name", "created", env=env)
         assert verified == {"capability": "create_item", "ok": True, "issues": [], "checks": 1}
+
+        consumer = Path(__file__).resolve().parents[2] / "consumer-poc" / "consumer.py"
+        listed = subprocess.run(
+            [sys.executable, str(consumer), "list", str(package)],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert listed.returncode == 0
+        assert json.loads(listed.stdout)["ok"] is True
+        consumed = subprocess.run(
+            [
+                sys.executable, str(consumer), "run", str(package), "create_item",
+                "--input-json", json.dumps({"name": "consumer-created"}),
+            ],
+            env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        consumed_result = json.loads(consumed.stdout)
+        assert consumed.returncode == 0
+        assert consumed_result["execution"]["ok"] is True
+        assert consumed_result["verification"]["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_unrelated_system_package_runs_without_tenant_pack_or_code_changes(tmp_path):
+    _AlternateBusinessApi.records = [{"recordKey": "R1", "label": "seed"}]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AlternateBusinessApi)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        origin = f"http://127.0.0.1:{server.server_port}"
+        skill = _alternate_recording_skill(origin)
+        package = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-two")
+        assert validate_skill_package(package) == {"ok": True, "issues": []}
+        contract = json.loads((package / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+        assert {item["name"] for item in contract["capabilities"]} == {"list_records", "add_record"}
+        scripts = package / "scripts"
+        env = {**os.environ, "DANO_AUTH_HEADERS": "{}"}
+        assert _run(scripts / "list_records.py", env=env)["ok"] is True
+        assert _run(scripts / "add_record.py", "--label", "second-system", env=env)["ok"] is True
+        verified = _run(scripts / "verify_add_record.py", "--label", "second-system", env=env)
+        assert verified == {"capability": "add_record", "ok": True, "issues": [], "checks": 1}
     finally:
         server.shutdown()
         server.server_close()

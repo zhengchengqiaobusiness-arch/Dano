@@ -175,7 +175,7 @@ class PageNode(BaseModel):
     page_id: str
     business_entity: str = Field(default="", description="业务实体,如 leave_request")
     page_role: str = Field(default="", description="create_form / list / detail / login / approval …")
-    entry_evidence: list[str] = Field(default_factory=list, description="判定『已到这页』的证据:heading=请假申请 / url 片段")
+    entry_evidence: list[str] = Field(default_factory=list, description="判定『已到这页』的证据:heading=新建申请 / url 片段")
     exit_states: list[str] = Field(default_factory=list, description="离开态:submitted / saved_draft / cancelled")
 
 
@@ -272,7 +272,7 @@ WorkflowStep.model_rebuild()
 
 
 class WorkflowSkillBody(BaseModel):
-    """复合流程 Skill:把多步连接器编排成一个面向用户的业务能力(如「提交请假」)。
+    """复合流程 Skill:把多步连接器编排成一个面向用户的业务能力(如「提交申请」)。
 
     执行层是通用解释器(DSL v2):前置不变量 → 按 steps 顺序跑(call/compute/branch/foreach/select)
     → 业务不变量;前一步输出按 step: 映射喂后一步。绝不为某家公司写 if/else。

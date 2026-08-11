@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from dano.business_packs import system_templates_for
 from dano.shared.enums import Subsystem
 
 
@@ -19,17 +20,8 @@ class SystemTemplate(BaseModel):
     actions: list[str] = Field(default_factory=list)
 
 
-# 系统类型模板目录:**开放可注册**(不是固定三类)。下列三项只是 A 公司原型**种子**;
-# 部署方 / dialect 可经 `register_system_template` 追加任意系统类型。接入并不强制从此目录选
-# (subsystem 已是开放键),真实"选业务模板"由 /onboarding/list-templates 经 dialect 动态提供。
-SYSTEM_TEMPLATES: dict[str, SystemTemplate] = {
-    "oa": SystemTemplate(template_id="oa", subsystem=Subsystem.OA, integration="api",
-                         actions=["query_balance", "create_leave", "query_approval"]),
-    "ticket": SystemTemplate(template_id="ticket", subsystem=Subsystem.TICKET, integration="api",
-                             actions=["create_ticket", "query_ticket"]),
-    "reimburse": SystemTemplate(template_id="reimburse", subsystem=Subsystem.REIMBURSE,
-                                integration="page", actions=["create_reimburse_draft"]),
-}
+# Process-local extensions; tenant-owned seeds live in business packs.
+SYSTEM_TEMPLATES: dict[str, SystemTemplate] = {}
 
 
 def register_system_template(template: SystemTemplate) -> None:
@@ -40,14 +32,17 @@ def register_system_template(template: SystemTemplate) -> None:
     SYSTEM_TEMPLATES[template.template_id] = template
 
 
-def all_system_templates() -> list[SystemTemplate]:
-    """目录里全部系统类型模板(内置种子 + 已注册)。"""
-    return list(SYSTEM_TEMPLATES.values())
+def all_system_templates(tenant: str = "") -> list[SystemTemplate]:
+    """Return registered extensions plus the selected tenant's templates."""
+    configured = [SystemTemplate.model_validate(item) for item in system_templates_for(tenant)]
+    merged = {item.template_id: item for item in configured}
+    merged.update(SYSTEM_TEMPLATES)
+    return list(merged.values())
 
 
-def get_system_template(template_id: str) -> SystemTemplate | None:
+def get_system_template(template_id: str, tenant: str = "") -> SystemTemplate | None:
     """按 id 取系统类型模板;未登记返回 None(由调用方决定回退/报错)。"""
-    return SYSTEM_TEMPLATES.get(template_id)
+    return next((item for item in all_system_templates(tenant) if item.template_id == template_id), None)
 
 
 def new_api_key() -> str:

@@ -56,16 +56,16 @@ class RiskLevel(StrEnum):
 
 class Subsystem(StrEnum):
     """系统实例标识(作用域的一部分)。**开放**:任意租户的任意系统都可作为一个 subsystem,
-    不再限于 A 公司三件套 —— OA/TICKET/REIMBURSE 只是原型常量,新系统用任意字符串即可。
+    旧符号只保留为通用兼容别名；部署值由资产或租户业务包提供。
 
     `_missing_` 让 `Subsystem("任意系统key")` 返回一个动态成员(而非抛 ValueError),从而 `Subsystem(sid)`
     在全库各处构造点都通用;pydantic v2 校验 `subsystem: Subsystem` 字段时也会经此放行未登记值(已实测)。
-    动态成员不进 `_member_map_`(`list(Subsystem)` 仍只列三件套原型),但 `.value`/相等/哈希都按字符串正常工作。
+    动态成员不进 `_member_map_`，但 `.value`/相等/哈希都按字符串正常工作。
     """
 
-    OA = "A-OA"
-    TICKET = "A-工单"
-    REIMBURSE = "A-报销"
+    OA = "legacy-workflow"
+    TICKET = "legacy-support"
+    REIMBURSE = "legacy-expense"
 
     @classmethod
     def _missing_(cls, value: object) -> "Subsystem | None":
@@ -130,7 +130,7 @@ class AuthKind(StrEnum):
     """鉴权适配器库的选项(库中选,不自造)。"""
 
     SSO = "sso"       # OA
-    TOKEN = "token"   # 工单
+    TOKEN = "token"
 
 
 class TaskState(StrEnum):

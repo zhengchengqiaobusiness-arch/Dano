@@ -145,7 +145,8 @@ def _request_example(spec: dict, op: dict | None) -> Any:
 async def collect_evidence(spec: dict, *, include_tags: list[str] | None = None,
                            template_id: str = "", probe: ProbeFn | None = None,
                            convention: dict | None = None,
-                           include_names: set[str] | None = None) -> FlowEvidence:
+                           include_names: set[str] | None = None,
+                           tenant: str = "") -> FlowEvidence:
     """采集流程证据。静态部分(swagger+模板)恒有;给了 probe 才做只读真探针。
 
     probe 为 None(或无凭证)= 纯静态,可离线/测试;给了 probe = 额外补表单字段 + 样例出参结构。
@@ -153,7 +154,7 @@ async def collect_evidence(spec: dict, *, include_tags: list[str] | None = None,
     include_names 给定则只保留这些动作名(把证据收窄到本流程相关端点,防 planner prompt 过大超时)。
     """
     tags = set(include_tags or [])
-    template = oa_templates.match_template(spec)
+    template = oa_templates.match_template(spec, tenant=tenant)
     extra = template.infrastructure_patterns() if template else ()
     actions = [a for a in doc_parser.parse_openapi(spec)
                if endpoint_classifier.classify(a, extra_infra=extra) != endpoint_classifier.INFRASTRUCTURE]

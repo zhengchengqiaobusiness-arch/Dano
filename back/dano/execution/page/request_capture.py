@@ -52,11 +52,11 @@ def extract_auth_headers(headers: dict | None) -> dict:
             continue
         out[k] = v
     return out
-# 标记"这层原本是字符串化的 JSON"(如若依/工作流把整张表单打成一段 JSON 文本塞进 formData):
+# 标记"这层原本是字符串化的 JSON"(如工作流把整张表单打成一段 JSON 文本塞进 formData):
 # 运行期 substitute 据此把填好值的内层结构 re-stringify 回字符串,目标系统照常解析。
 _JSONSTR = "__dano_jsonstr__"
-# 段拼接模板:值嵌在长串里时(如 "请假事由:回家",用户只填"回家")只参数化那一段、保留常量前后缀。
-# 形如 {__dano_seg__: ["请假事由:", {"$p": "原因"}, "后缀"]} → 运行期 substitute join 成最终字符串。
+# 段拼接模板:值嵌在长串里时(如 "申请事由:回家",用户只填"回家")只参数化那一段、保留常量前后缀。
+# 形如 {__dano_seg__: ["申请事由:", {"$p": "原因"}, "后缀"]} → 运行期 substitute join 成最终字符串。
 _SEG = "__dano_seg__"
 
 
@@ -248,7 +248,7 @@ def json_write_requests(requests: list[dict]) -> list[dict]:
     return write_requests(requests)
 
 
-# 读响应里"候选列表"的常见包装键(若依/通用):rows/records/list/data/content/items/result
+# 读响应里"候选列表"的常见包装键:rows/records/list/data/content/items/result
 _LIST_KEYS = ("rows", "records", "list", "data", "content", "items", "result", "results")
 
 
@@ -505,7 +505,7 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
                 resp = writes[j].get("response_json")
                 if resp is None:
                     continue
-                resp_unwrapped = _unwrap_json_strings(resp)   # H14 修复:stringified JSON 嵌套也要解开比对(Ruoyi 风格)
+                resp_unwrapped = _unwrap_json_strings(resp)   # H14 修复:stringified JSON 嵌套也要解开比对
                 stoks = _find_value_tokens(resp_unwrapped, tval, expected_type=_raw_type(_raw))
                 if stoks is not None:
                     matches.append((j, stoks))
@@ -790,7 +790,7 @@ def _parent_path(path: str) -> str:
 
 
 _AGG_MIN_ITEMS = 50    # 通用 type/group 等弱分类键仍须达到此规模；显式字典分类键不受此门槛限制
-# 像"分类/类目键"的字段名(若依 dictType / type / category / group …):聚合字典靠它分组,收窄时优先认它。
+# 像"分类/类目键"的字段名(dictType / type / category / group …):聚合字典靠它分组,收窄时优先认它。
 _CATEGORY_KEY_RE = _re.compile(
     r"(dicttype|type|categ|category|group|kind|class|classify|module|biztype|sort|parent)", _re.I)
 _EXPLICIT_DICT_CATEGORY_RE = _re.compile(
@@ -802,7 +802,7 @@ _EXPLICIT_DICT_CATEGORY_RE = _re.compile(
 
 
 def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> str | None:
-    """列表是不是"按类目聚合的**全量**字典"(若依 dict_data 这类:同一码在不同 dictType 下重复出现)?
+    """列表是不是"按类目聚合的**全量**字典"(同一码在不同 dictType 下重复出现)?
     是 → 返回**分类键**(供按"所选项所属类目"把全量收窄成真正属于该字段的选项);否(单字段选项源:
     城市/用户/部门,码/ID 全局唯一)→ None。**通用,不挑系统/字段名**。
 
@@ -2469,7 +2469,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
 
     selects:[{path, source_url, value_key, label_key}](Q2 选领导,path 须在 param_map 里 → 运行期名字→ID);
     identity:[{path, source}](Q1 当前用户/会话值,运行期重取覆盖,不作参数);
-    typed:{参数名 → 录制时用户填写值}。仅当某参数的填写值是其叶子的**真子串**(如叶子"请假事由:回家"、填写"回家")
+    typed:{参数名 → 录制时用户填写值}。仅当某参数的填写值是其叶子的**真子串**(如叶子"申请事由:回家"、填写"回家")
     时,改成段拼接(B2):只参数化那一段、保留常量前后缀。其余情况整值替换(不变)。
     返回 {method, path, url, content_type, body_template, params, sample_inputs, auth_headers, selects, identity}。
     """
@@ -3378,7 +3378,7 @@ def _auth_headers(storage_state: dict | None, host: str, token_key: str | None =
 
 
 # 响应体里常见的"业务成功码"字段(不信 HTTP 200,看它)。**字段名通用,但成功值不写死单一系统约定**:
-# 不同系统成功值各异(若依 code=200;阿里系 code=0/"00000";有的 success=true / status="OK")。
+# 不同系统成功值各异(code=200、code=0/"00000"、success=true 或 status="OK")。
 # 故运行期**优先用资产级 success_rule**(录制期从该系统自己的真实响应学到),无则才退下面这套兜底集。
 _OK_CODE_KEYS = ("code", "status", "errcode", "errCode", "resultCode", "rspCode", "retCode", "flag")
 # 兜底成功值集(仅在没学到资产级规则时用;尽量覆盖常见约定,但**不能假设**——这正是 success_rule 存在的原因)
@@ -3399,7 +3399,7 @@ def infer_success_rule(reads: list[dict]) -> dict | None:
 
     录制时抓到的 GET 列表响应都是真成功的 → 它们响应里出现的"成功码字段 + 该值"就是本系统的成功标志。
     多数票:同一(字段,值)在多个读响应里出现得最多者胜 → {field, ok_values}。无则 None(运行期退兜底启发式)。
-    例:若依的读响应普遍是 {"code":200,...} → 学出 {"field":"code","ok_values":["200"]};
+    例:某系统的读响应普遍是 {"code":200,...} → 学出 {"field":"code","ok_values":["200"]};
         阿里系 {"code":"0",...} → {"field":"code","ok_values":["0"]};不会把 200 强加给后者。
     """
     from collections import Counter

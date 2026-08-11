@@ -3,7 +3,7 @@
 杜绝「点了提交就算成功」:必须**重新查询、比对操作前后快照**,确认数据真的变了。
 核查判据用 shared/expr 表达,context = {before, after, response, fields}。
 
-示例(建请假):"after.balance == before.balance - fields.days and response.request_id != null"
+示例(建申请):"after.balance == before.balance - fields.days and response.request_id != null"
 """
 
 from __future__ import annotations

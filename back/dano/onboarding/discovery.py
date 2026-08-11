@@ -1,7 +1,7 @@
 """阶段一·流程发现(图二步骤2-3):导入 swagger 后,平台自动「了解功能 + 找出合适的流程」。
 
 把解析出的业务动作组织成**可直接生成**的流程提案,用户只需在前端确认/微调,不再手填:
-  - 复合流程(多步串成一个业务 skill,如 提交请假 = 发起→存表单→提交):来自匹配到的 OA 模板配方;
+  - 复合流程(多步串成一个业务 skill):来自匹配到的流程模板配方;
   - 连接器(单接口一个 skill):写接口(需测试输入,执行前先确认)/ 只读查询(自动生成)。
 
 只用 spec 客观特征 + 模板知识,不臆造流程;拿不准的留给用户在前端取舍。
@@ -14,10 +14,15 @@ from typing import Any
 
 from dano.capabilities import doc_parser, endpoint_classifier, oa_templates
 
-def discover_flows(spec: dict, include_tags: list[str] | None = None) -> list[dict[str, Any]]:
+def discover_flows(
+    spec: dict,
+    include_tags: list[str] | None = None,
+    *,
+    tenant: str = "",
+) -> list[dict[str, Any]]:
     """从 swagger 发现「合适的流程」提案(复合 + 连接器),供前端确认后生成。"""
     tags = set(include_tags or [])
-    template = oa_templates.match_template(spec)
+    template = oa_templates.match_template(spec, tenant=tenant)
     extra = template.infrastructure_patterns() if template else ()
     actions = [a for a in doc_parser.parse_openapi(spec)
                if endpoint_classifier.classify(a, extra_infra=extra) != endpoint_classifier.INFRASTRUCTURE]

@@ -1925,13 +1925,13 @@ def test_subsystem_is_open_for_any_system():
     """P0#1:系统标识开放 —— 任意租户任意系统都可作 subsystem,不再限于三件套原型。"""
     from dano.shared.enums import Subsystem
     from dano.shared.models import Scope
-    assert Subsystem.OA.value == "A-OA"                       # 原型常量仍在
+    assert Subsystem.OA.value == "legacy-workflow"
     x = Subsystem("B-合同审批")                                # 任意系统:不抛 ValueError
     assert x.value == "B-合同审批" and x == "B-合同审批"
     sc = Scope(tenant="acme", subsystem=Subsystem("C-门户"))   # pydantic 字段接受任意系统
     assert sc.subsystem.value == "C-门户"
     assert {Subsystem("新"): 1}[Subsystem("新")] == 1          # 可作字典键
-    assert [s.value for s in Subsystem] == ["A-OA", "A-工单", "A-报销"]   # 枚举仍只列原型
+    assert [s.value for s in Subsystem] == ["legacy-workflow", "legacy-support", "legacy-expense"]
 
 
 def test_pick_submit_excludes_auth_by_content_not_path():

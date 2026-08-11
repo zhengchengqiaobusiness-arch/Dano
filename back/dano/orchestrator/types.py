@@ -16,7 +16,7 @@ class Intent(BaseModel):
     """主智能体意图分析结果(LLM 产出)。"""
 
     kind: Literal["action", "ask"] = "action"
-    action_hint: str = Field(description="动作意图描述,如 '创建请假'")
+    action_hint: str = Field(description="动作意图描述,如 '创建申请'")
     fields: dict[str, Any] = Field(default_factory=dict, description="从原话抽取的字段值")
 
 
@@ -24,6 +24,7 @@ class SkillSpec(BaseModel):
     """动作 Skill(1 Skill = 1 action)。从已发布连接器或录制 V2 资产派生。"""
 
     skill_id: str
+    tenant: str = ""
     capability: str = ""                                       # 对外能力键;空则兼容退回 skill_id
     capability_meta: dict[str, Any] = Field(default_factory=dict)  # 能力分组/别名/协议草案等扩展元数据
     capabilities: list[dict[str, Any]] = Field(default_factory=list)  # 一个 Skill 内可调用的能力列表

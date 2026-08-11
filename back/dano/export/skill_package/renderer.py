@@ -757,6 +757,8 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
 
     scripts = folder / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
+    references = folder / "references"
+    references.mkdir(parents=True, exist_ok=True)
     _write_text(folder / "SKILL.md", skill_md)
     _write_text(folder / "reference.md", reference_md)
     config = {
@@ -765,6 +767,27 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         "base_url": _base_url(steps),
     }
     _write_text(scripts / "client.py", _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))))
+    contract = {
+        "protocol": "dano.skill_package.contract.v1",
+        "skill": {"id": skill.skill_id, "name": slug, "title": skill.title or skill.action},
+        "capabilities": [
+            {
+                "name": plan["name"],
+                "title": plan["title"],
+                "kind": plan["kind"],
+                "script": f"scripts/{plan['script']}.py",
+                "verify_script": f"scripts/verify_{plan['script']}.py",
+                "requires_verify": plan["requires_verify"],
+                "input_schema": plan["input_schema"],
+                "output_schema": plan["output_schema"],
+            }
+            for plan in plans
+        ],
+    }
+    _write_text(
+        references / "CONTRACT.json",
+        json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
     for plan in plans:
         plan_payload = {**plan, "fact_checks": plan["fact_checks"]}
         module = plan["script"]

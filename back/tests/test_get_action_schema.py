@@ -72,7 +72,7 @@ _SUBMIT_SPEC = {
 
 def test_submit_leaf_fields_picks_variant_and_keeps_types():
     from dano.capabilities.oa_templates import match_template
-    t = match_template(_SUBMIT_SPEC)
+    t = match_template(_SUBMIT_SPEC, tenant="a-company")
     leaves = tools._submit_leaf_fields(_SUBMIT_SPEC, t, "purchase_template")
     assert leaves["amount"]["type"] == "number" and leaves["amount"]["description"] == "采购金额(元)"
     assert leaves["quantity"]["type"] == "number"
@@ -82,7 +82,7 @@ def test_submit_leaf_fields_picks_variant_and_keeps_types():
 
 def test_field_mappings_are_traceable():
     from dano.capabilities.oa_templates import match_template
-    t = match_template(_SUBMIT_SPEC)
+    t = match_template(_SUBMIT_SPEC, tenant="a-company")
     leaves = tools._submit_leaf_fields(_SUBMIT_SPEC, t, "purchase_template")
     maps = tools._field_mappings(leaves, ["amount", "quantity", "unknown_field"],
                                  "/biz/flow/submit", "purchase_template")
