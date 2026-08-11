@@ -15779,9 +15779,33 @@ def _legacy_fact_check_is_grounded(spec: FlowSpec, step: FlowStep, fact_check: d
     return len(matches) == 1
 
 
+def _executor_fact_check_is_verified(spec: FlowSpec, fact_check: dict) -> bool:
+    """Executor-verified checks carry the verification_id minted by the write/read replay."""
+    if fact_check.get("verified") is not True:
+        return False
+    verification_id = str(fact_check.get("verification_id") or "")
+    if not verification_id:
+        return False
+    log = list((spec.meta or {}).get("verification_log") or [])
+    if not log:
+        # The op-level guard (`bind_verify_read`) already validated the record
+        # when it was applied; the log may have been dropped by projections.
+        return True
+    from dano.execution.page.verification_log import find_verification
+
+    record = find_verification(verification_id, log)
+    if record is None:
+        return False
+    return (record.get("evidence") or {}).get("passed") is not False
+
+
 def _prune_invalid_fact_checks(spec: FlowSpec) -> None:
     for step in spec.steps:
-        if step.fact_check and not _legacy_fact_check_is_grounded(spec, step, step.fact_check):
+        if not step.fact_check:
+            continue
+        if _executor_fact_check_is_verified(spec, step.fact_check):
+            continue
+        if not _legacy_fact_check_is_grounded(spec, step, step.fact_check):
             step.fact_check = None
 
 

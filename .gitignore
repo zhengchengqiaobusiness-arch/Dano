@@ -16,7 +16,7 @@ back/.dano-sessions/      # 录制保存的页面登录态(storageState,含凭�
 back/.pi-agent/
 
 # ── 生成产物(频繁变动,不入库:接入自动导出的 skill 包等)──
-export/
+/export/
 back/examples/_chunks/
 
 # ── 前端依赖 / 构建产物 ──
