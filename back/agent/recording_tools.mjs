@@ -705,7 +705,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。set_param_source 六分类为 user_input、constant、session_header、page_context、chained、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后必须检查 op_results；deferred、rejected、rolled_back 都没有完整落地，必须按 reason 和 must_retry 修正后读取新版本重试。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和已验证依赖图重新编译实际成员，模型不能强行加入无关请求。set_param_source 六分类为 user_input、constant、session_header、page_context、chained、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后必须检查 op_results；deferred、rejected、rolled_back 都没有完整落地，必须按 reason 和 must_retry 修正后读取新版本重试。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

@@ -3510,7 +3510,7 @@ def _capability_request_ref_from_step(
     )
     usage = (
         existing.usage
-        if existing and existing.origin in {"manual", "user"}
+        if existing and existing.origin in {"manual", "user", "compiler"}
         else derived_usage
     )
     role = (analysis.role if analysis else "") or (step.source_meta or {}).get("role") or step.semantic_role or ""
@@ -12548,6 +12548,27 @@ async def orchestrate_flow_capabilities(
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
+    capability_compilation_audit: dict[str, Any] = {}
+    capability_compilation_errors: list[str] = []
+    planned_capability_contracts = [
+        item for item in (proposed_semantic_plan.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    strict_anchor_contract = bool(planned_capability_contracts) and all(
+        item.get("name") and item.get("kind") and item.get("anchor_step_id")
+        for item in planned_capability_contracts
+    )
+    if strict_anchor_contract:
+        from dano.execution.page.capability_compiler import compile_capabilities
+
+        compilation = compile_capabilities(current, proposed_semantic_plan)
+        current = _ensure_external_transform_relations(
+            _sync_capability_io_schemas(sync_flow_spec_models(compilation.spec))
+        )
+        capability_compilation_audit = dict(compilation.audit)
+        capability_compilation_errors = list(compilation.errors)
+        if compilation.capabilities:
+            source = "verified_request_graph"
     proposal_accepted, proposal_gate = _semantic_candidate_gate(
         proposal_baseline,
         current,
@@ -12608,6 +12629,7 @@ async def orchestrate_flow_capabilities(
     final_errors = [
         *list(final_report.get("errors") or []),
         *list((final_report.get("capability_validation") or {}).get("errors") or []),
+        *capability_compilation_errors,
     ]
     public_boundaries_valid = bool(caps) and all(
         _planned_capability_has_public_anchor(
@@ -12632,6 +12654,7 @@ async def orchestrate_flow_capabilities(
             "semantic_coverage": semantic_coverage,
             "last_incremental_review": incremental_review,
             "proposal_gate": proposal_gate,
+            "capability_compilation": capability_compilation_audit,
         },
         "capability_orchestration_audit": {
             "mode": "initial" if initial_generation else "boundary_reanalysis",

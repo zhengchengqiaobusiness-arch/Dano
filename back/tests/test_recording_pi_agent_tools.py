@@ -1233,7 +1233,9 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
     repaired_submit = next(cap for cap in repaired.capabilities if cap.kind == "submit")
     repaired_query = next(cap for cap in repaired.capabilities if cap.kind == "query_status")
     assert repaired_query.step_ids == ["page"]
-    assert repaired_submit.step_ids == ["definition", "approval", "submit"]
+    # Model membership and a bare ``confirmed=True`` are not executor evidence.
+    # Unverified reads stay outside the callable submit chain.
+    assert repaired_submit.step_ids == ["submit"]
     repaired_seal = next(param for param in repaired.steps[3].params if param.path == "sealId")
     assert repaired_seal.source_kind == "api_option"
     option_ref = next(ref for ref in repaired_submit.request_refs if ref.step_id == "options")
