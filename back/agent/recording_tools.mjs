@@ -470,6 +470,13 @@ const RecordingAssertion = Type.Object({
   verify_records_min_count: Type.Optional(Type.Integer({ minimum: 0 })),
 }, { additionalProperties: false, minProperties: 1 });
 
+const ReplayOverrides = Type.Object({
+  url_path: Type.Optional(Type.String()),
+  query: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  body: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  headers: Type.Optional(Type.Record(Type.String(), Type.Any())),
+}, { additionalProperties: false });
+
 export const recordingTools = [
   proxyTool({
     name: "get_recording_state",
@@ -506,22 +513,17 @@ export const recordingTools = [
     parameters: Type.Object({
       ...RecordingIdentity,
       request_id: Type.String({ minLength: 1 }),
-      overrides: Type.Optional(Type.Object({
-        url_path: Type.Optional(Type.String()),
-        query: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        body: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        headers: Type.Optional(Type.Record(Type.String(), Type.Any())),
-      }, { additionalProperties: false })),
+      overrides: Type.Optional(ReplayOverrides),
     }, { additionalProperties: false }),
   }),
   proxyTool({
     name: "perturb_replay",
     label: "扰动重放请求链",
-    description: "顺序重放请求链并只扰动第一条请求，返回响应差异和执行器生成的 verification_id。",
+    description: "顺序重放请求链并只扰动第一条请求。perturb 直接填写 url_path/query/body/headers，禁止按 request_id 再包一层；返回响应差异和执行器生成的 verification_id。",
     parameters: Type.Object({
       ...RecordingIdentity,
       chain_request_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-      perturb: Type.Object({}, { additionalProperties: true }),
+      perturb: ReplayOverrides,
     }, { additionalProperties: false }),
   }),
   proxyTool({

@@ -1196,15 +1196,36 @@ async def _recording_auth_headers(session, requests: list[dict]) -> dict:  # noq
     return headers
 
 
+def _recording_replay_overrides(value: object, *, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ToolError(f"{label} 必须是对象")
+    allowed = {"url_path", "query", "body", "headers"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ToolError(
+            f"{label} 只允许 url_path/query/body/headers，禁止按 request_id 包裹: {','.join(unknown)}"
+        )
+    if "url_path" in value and not isinstance(value["url_path"], str):
+        raise ToolError(f"{label}.url_path 必须是字符串")
+    for key in ("query", "body", "headers"):
+        if key in value and not isinstance(value[key], dict):
+            raise ToolError(f"{label}.{key} 必须是对象")
+    return dict(value)
+
+
 async def replay_recording_request(run_id: str, params: dict) -> dict:
     from dano.execution.page.replay import replay_request
 
     _strict_recording_params(params, required={"request_id"}, optional={"recording_id", "flow_version", "overrides"})
     session = _recording_session(run_id, params)
     requests = _find_captured_requests(session, [str(params["request_id"])])
+    overrides = (
+        _recording_replay_overrides(params["overrides"], label="overrides")
+        if "overrides" in params else None
+    )
     result = await replay_request(
         requests[0],
-        overrides=params.get("overrides"),
+        overrides=overrides,
         auth_headers=await _recording_auth_headers(session, requests),
     )
     await session.add_verifications([result["verification_id"]])
@@ -1222,13 +1243,12 @@ async def perturb_recording_replay(run_id: str, params: dict) -> dict:
     request_ids = params["chain_request_ids"]
     if not isinstance(request_ids, list) or not request_ids or not all(isinstance(item, str) and item for item in request_ids):
         raise ToolError("chain_request_ids 必须是非空请求 ID 数组")
-    if not isinstance(params["perturb"], dict):
-        raise ToolError("perturb 必须是对象")
+    perturb = _recording_replay_overrides(params["perturb"], label="perturb")
     session = _recording_session(run_id, params)
     requests = _find_captured_requests(session, request_ids)
     result = await perturb_replay(
         requests,
-        perturb=params["perturb"],
+        perturb=perturb,
         auth_headers=await _recording_auth_headers(session, requests),
     )
     await session.add_verifications(result["verification_ids"])

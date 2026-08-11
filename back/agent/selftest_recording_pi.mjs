@@ -185,6 +185,17 @@ function verifyWriteAssertionSchema() {
     "write assertion schema must expose verify_records_min_count",
   );
 }
+
+function verifyPerturbReplaySchema() {
+  const tool = recordingTools.find((item) => item.name === "perturb_replay");
+  const perturb = tool?.parameters?.properties?.perturb;
+  assert(perturb?.additionalProperties === false, "perturb replay must reject request-id keyed overrides");
+  assert(
+    JSON.stringify(Object.keys(perturb?.properties || {}).sort())
+      === JSON.stringify(["body", "headers", "query", "url_path"]),
+    "perturb replay override fields mismatch",
+  );
+}
 function verifyDeltaPaginationSchema() {
   const tool = recordingTools.find((item) => item.name === "get_recording_delta");
   const limit = tool?.parameters?.properties?.limit;
@@ -501,8 +512,9 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
-  verifyWriteAssertionSchema();
-  verifyDeltaPaginationSchema();
+verifyWriteAssertionSchema();
+verifyPerturbReplaySchema();
+verifyDeltaPaginationSchema();
   verifyServerOwnedRecordingContext();
   verifyPlanToolCompatibility();
   verifyTruncatedPlanFallback();

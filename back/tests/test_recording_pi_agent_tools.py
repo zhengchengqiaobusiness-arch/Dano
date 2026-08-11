@@ -13,6 +13,7 @@ import dano.agent_tools.tools as agent_tools_module
 from dano.agent_tools.tools import (
     ToolError,
     ask_recording_operator,
+    perturb_recording_replay,
     get_recording_delta,
     get_recording_state,
     get_validation_report,
@@ -243,6 +244,32 @@ def test_recording_delta_tool_validates_and_forwards_page_limit(monkeypatch):
 
     with pytest.raises(ToolError, match="limit"):
         asyncio.run(get_recording_delta("run-recording", {"since_seq": 0, "limit": 51}))
+
+
+@pytest.mark.asyncio
+async def test_perturb_replay_rejects_request_id_keyed_overrides_before_execution(monkeypatch):
+    called = False
+
+    async def fake_replay(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.perturb_replay", fake_replay)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: object())
+    monkeypatch.setattr(agent_tools_module, "_find_captured_requests", lambda *_args: [{}])
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+
+    with pytest.raises(ToolError, match="url_path|query|body|headers"):
+        await perturb_recording_replay("run-recording", {
+            "chain_request_ids": ["req_97"],
+            "perturb": {"req_97": {"query": {"id": "changed"}}},
+        })
+
+    assert called is False
 
 
 def test_submit_skill_docs_returns_appended_flow_version(monkeypatch):
