@@ -807,9 +807,12 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
         and message.get("state") == "analyzing"
         for message in ws.messages
     )
-    assert any(
+    # The fake peer disconnects immediately after ``stop``.  A still-running
+    # analysis is cancelled on disconnect so stopping capture never waits for
+    # the model; a real workbench connection remains open and receives ready.
+    assert not any(
         message.get("type") == "agent_status"
-        and message.get("state") == "ready"
+        and message.get("state") == "error"
         for message in ws.messages
     )
 

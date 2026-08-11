@@ -3266,6 +3266,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
                 "evidence": [{
                     "source": "screenshot",
                     "screenshot_name": "seal-form.png",
+                    "visible_label": "使用描述",
                     "detail": "使用描述是可编辑的多行文本区域",
                     "editable": True,
                     "disabled": False,

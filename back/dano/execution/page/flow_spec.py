@@ -9924,19 +9924,19 @@ def _semantic_plan_to_ops(
         if target_step is not None and target_param is not None and public_name:
             from dano.execution.page.recording_live import _require_label_grounding
 
-            screenshot_control = _screenshot_control_evidence(item)
+            grounded_control = _grounded_control_evidence(item)
             screenshot_labels = {
-                str(screenshot_control.get(key) or "").strip()
+                str(grounded_control.get(key) or "").strip()
                 for key in ("visible_label", "label", "text")
-                if screenshot_control is not None
-                and str(screenshot_control.get(key) or "").strip()
+                if grounded_control is not None
+                and str(grounded_control.get(key) or "").strip()
             }
-            screenshot_name_grounded = bool(
-                screenshot_control is not None
-                and _screenshot_control_supports_axis(screenshot_control, "name")
+            control_name_grounded = bool(
+                grounded_control is not None
+                and _screenshot_control_supports_axis(grounded_control, "name")
                 and public_name in screenshot_labels
             )
-            if not screenshot_name_grounded:
+            if not control_name_grounded:
                 try:
                     _require_label_grounding(spec, target_step, target_param, public_name)
                 except ValueError:
@@ -10090,10 +10090,19 @@ def _semantic_plan_to_ops(
             if target_param is not None and "required" in item:
                 from dano.execution.page.recording_live import _require_required_grounding
 
+                proposed_required = bool(item.get("required"))
+                grounded_control = _grounded_control_evidence(item)
+                control_required_grounded = bool(
+                    grounded_control is not None
+                    and _screenshot_control_supports_axis(grounded_control, "required")
+                    and isinstance(grounded_control.get("required"), bool)
+                    and bool(grounded_control.get("required")) == proposed_required
+                )
                 try:
-                    _require_required_grounding(
-                        spec, target_step, target_param, bool(item.get("required")),
-                    )
+                    if not control_required_grounded:
+                        _require_required_grounding(
+                            spec, target_step, target_param, proposed_required,
+                        )
                     grounded_required = bool(item.get("required"))
                 except ValueError:
                     pass

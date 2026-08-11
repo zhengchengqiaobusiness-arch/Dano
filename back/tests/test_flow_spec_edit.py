@@ -6276,6 +6276,7 @@ def test_initial_pi_applies_all_field_semantic_axes_without_overwriting_wire_fac
             },
             "evidence": [{
                 "source": "recorder_dom",
+                "visible_label": "房间数量",
                 "control_kind": "number",
                 "editable": True,
                 "required": True,
@@ -8217,7 +8218,7 @@ def test_image_free_orchestration_never_persists_fabricated_screenshot_evidence(
     ))
 
     param = out.steps[0].params[0]
-    assert (param.key, param.label) == ("页码", "页码")
+    assert (param.key, param.label) == ("pageNo", "pageNo")
     assert not any(
         str(item.get("source") or "").lower() == "screenshot"
         for item in param.evidence
