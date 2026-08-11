@@ -797,6 +797,16 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
     await gateway.record_ws(ws)
 
     assert len(sessions) == 1
+    assert any(
+        message.get("type") == "agent_status"
+        and message.get("state") == "analyzing"
+        for message in ws.messages
+    )
+    assert any(
+        message.get("type") == "agent_status"
+        and message.get("state") == "ready"
+        for message in ws.messages
+    )
 
 
 def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:

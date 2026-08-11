@@ -1339,10 +1339,29 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         "capability_relations",
         "unresolved_items",
     }
+    normalized_raw_plan = deepcopy(raw_plan)
     if "semantic_plan" in raw_plan:
         raw_semantic = raw_plan.get("semantic_plan")
         if not isinstance(raw_semantic, dict):
             raise ToolError("plan.semantic_plan 必须是对象")
+        raw_semantic = deepcopy(raw_semantic)
+        # Historical Pi conversations may retain a generic planner vocabulary
+        # after the runtime package is upgraded.  These arrays use invented
+        # planner IDs rather than recorded FlowSpec IDs, so they are descriptive
+        # only: preserve the title and let the deterministic baseline rebuild
+        # grounded requests, fields, capabilities, and relations.
+        legacy_title = raw_semantic.get("title")
+        if (
+            isinstance(legacy_title, str)
+            and legacy_title.strip()
+            and not raw_semantic.get("business_understanding")
+        ):
+            raw_semantic["business_understanding"] = {
+                "summary": legacy_title.strip(),
+            }
+        for key in ("title", "steps", "fields", "dependencies", "enums"):
+            raw_semantic.pop(key, None)
+        normalized_raw_plan["semantic_plan"] = raw_semantic
         misplaced = sorted(semantic_keys.intersection(raw_plan))
         if misplaced:
             raise ToolError(
@@ -1355,7 +1374,10 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 "plan.semantic_plan 包含未知字段：" + ", ".join(unknown)
             )
     wrapped = any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities"))
-    submission = deepcopy(raw_plan) if wrapped else {"semantic_plan": deepcopy(raw_plan)}
+    submission = (
+        normalized_raw_plan
+        if wrapped else {"semantic_plan": deepcopy(normalized_raw_plan)}
+    )
     semantic = submission.get("semantic_plan")
     if not isinstance(semantic, dict):
         semantic = submission.get("plan") if isinstance(submission.get("plan"), dict) else {}

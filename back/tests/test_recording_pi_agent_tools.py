@@ -1103,6 +1103,38 @@ def test_recording_plan_accepts_incremental_semantic_contract():
     assert semantic["capability_relations"] == []
     assert semantic["unresolved_items"] == []
 
+
+def test_recording_plan_ignores_historical_descriptive_planner_shape():
+    legacy = {
+        "semantic_plan": {
+            "title": "请假单查询与提交",
+            "steps": [{"step_id": "invented-step", "request_id": "req_76"}],
+            "fields": [{"step_id": "invented-step", "wire_path": "query.type"}],
+            "dependencies": [{"from": "invented-step", "to": "other-step"}],
+            "enums": [{"field_id": "legacy-field", "options": [
+                {"label": "病假", "value": "1"},
+            ]}],
+        },
+    }
+
+    semantic = agent_tools_module._normalize_recording_plan_submission(
+        legacy, FlowSpec(),
+    )["semantic_plan"]
+
+    assert semantic["business_understanding"] == {"summary": "请假单查询与提交"}
+    assert semantic["request_roles"] == []
+    assert semantic["field_semantics"] == []
+    assert semantic["capabilities"] == []
+    assert semantic["capability_relations"] == []
+    assert semantic["unresolved_items"] == []
+
+
+def test_recording_plan_still_rejects_unknown_semantic_keys():
+    with pytest.raises(ToolError, match="未知字段"):
+        agent_tools_module._normalize_recording_plan_submission({
+            "semantic_plan": {"unrecognized_contract": []},
+        }, FlowSpec())
+
 def test_screenshot_normalization_replaces_stale_axes_for_all_control_types():
     controls = [
         ("title", "text", {}, "string"),

@@ -271,6 +271,7 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
         "capabilities,capability_relations,unresolved_items},ops:[]}. Never submit flow_spec or plan.flow_spec."
+        " Never use the historical title,steps,fields,dependencies,enums planner keys."
         " After reading state, call submit_recording_plan immediately with no explanatory text. "
         "The semantic_plan must be complete rather than changes-only; use empty arrays only when that section is truly empty. "
         "Keep the payload compact, but never omit a materialized request, request field, capability, or grounded relation."
@@ -1723,15 +1724,17 @@ async def record_ws(ws: WebSocket) -> None:
                 # losing its transport must not cancel that work.
                 return
 
-        def _emit_agent_insights(flow_spec) -> None:  # noqa: ANN001
+        def _emit_agent_insights(flow_spec) -> int:  # noqa: ANN001
             nonlocal emitted_agent_insights
             insights = [
-                item for item in (flow_spec.meta or {}).get("agent_insights") or []
+                item for item in (getattr(flow_spec, "meta", None) or {}).get("agent_insights") or []
                 if isinstance(item, dict)
             ]
-            for insight in insights[emitted_agent_insights:]:
+            new_insights = insights[emitted_agent_insights:]
+            for insight in new_insights:
                 sender.send_background({"type": "agent_insight", **insight})
             emitted_agent_insights = max(emitted_agent_insights, len(insights))
+            return len(new_insights)
 
         def _resolve_agent_answer(message: dict) -> bool:
             question_id = str(message.get("question_id") or "")
@@ -1771,6 +1774,18 @@ async def record_ws(ws: WebSocket) -> None:
             if live_agent_disabled:
                 return
             try:
+                insights_before = emitted_agent_insights
+                captured_all_requests = getattr(sess, "captured_all_requests", None)
+                captured_count = (
+                    len(captured_all_requests())
+                    if callable(captured_all_requests) else max(0, since_seq)
+                )
+                await _send_live_message({
+                    "type": "agent_status",
+                    "state": "analyzing",
+                    "text": f"正在分析已捕获的 {captured_count} 个请求…",
+                    "captured_count": captured_count,
+                })
                 pi_session = await _ensure_recording_pi()
                 if bind_spec is not None:
                     pi_session.bind_flow_spec(bind_spec)
@@ -1780,15 +1795,25 @@ async def record_ws(ws: WebSocket) -> None:
                 pending_flow_spec = pi_session.current_flow_spec()
                 _checkpoint_resume()
                 _emit_agent_insights(pending_flow_spec)
+                new_insight_count = max(0, emitted_agent_insights - insights_before)
+                await _send_live_message({
+                    "type": "agent_status",
+                    "state": "ready",
+                    "text": (
+                        f"已分析 {captured_count} 个请求，新增 {new_insight_count} 条业务结论"
+                        if new_insight_count
+                        else f"已分析 {captured_count} 个请求，暂无需要人工确认的问题"
+                    ),
+                    "captured_count": captured_count,
+                })
             except Exception as exc:  # noqa: BLE001 - recording remains usable without Pi
                 detail = str(exc)
                 live_agent_disabled = "no Pi model or credentials" in detail or "DANO_PI_API_KEY" in detail
                 log.warning("recording.live_agent_failed", reason=reason, error=str(exc))
                 await _send_live_message({
-                    "type": "agent_insight",
-                    "kind": "goal",
+                    "type": "agent_status",
+                    "state": "error",
                     "text": f"录制助手暂不可用，录制继续：{str(exc)[:160]}",
-                    "refs": [],
                 })
 
         def _schedule_live_analysis(reason: str) -> None:

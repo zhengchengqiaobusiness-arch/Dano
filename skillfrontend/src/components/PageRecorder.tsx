@@ -44,6 +44,7 @@ interface AgentQuestion {
   answered?: boolean; answer?: string;
 }
 interface AgentInsight { kind: "role" | "param_source" | "link" | "goal"; text: string; refs?: string[] }
+interface AgentStatus { state: "waiting" | "analyzing" | "ready" | "error"; text: string }
 interface VerifyProgress {
   stage: string; detail: string; round?: number; pending?: number;
   confirmed_links?: number; verify_coverage?: number; write_count?: number;
@@ -1352,6 +1353,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [reqs, setReqs] = useState<RecReq[]>([]);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentInsights, setAgentInsights] = useState<AgentInsight[]>([]);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>({
+    state: "waiting", text: "等待录制助手连接",
+  });
   const [verifyProgress, setVerifyProgress] = useState<VerifyProgress[]>([]);
   const [agentAnswerDrafts, setAgentAnswerDrafts] = useState<Record<string, string>>({});
   const [action, setAction] = useState(() => newRecordingActionName());
@@ -1887,7 +1891,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
-    setErr(""); setResult(null); setReqs([]); setAgentQuestions([]); setAgentInsights([]); setAgentAnswerDrafts({}); clearFrame();
+    setErr(""); setResult(null); setReqs([]); setAgentQuestions([]); setAgentInsights([]);
+    setAgentStatus({ state: "waiting", text: "正在连接录制助手" });
+    setAgentAnswerDrafts({}); clearFrame();
     resetEditorState();
     const nextAction = newRecordingActionName();
     actionRef.current = nextAction;
@@ -1983,6 +1989,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         setPhase("recording");
         setConnectionState("connected");
+        setAgentStatus({ state: "ready", text: "录制助手已连接，捕获到业务请求后会自动分析" });
         setRecordingStopped(Boolean(m.recording_paused));
         // The server draft is authoritative across a transient WebSocket
         // reconnect.  In particular, an ability plan may have completed just
@@ -2049,6 +2056,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           }].slice(-60));
         }
       }
+      else if (m.type === "agent_status") {
+        if (m.text) {
+          const state = ["waiting", "analyzing", "ready", "error"].includes(m.state)
+            ? m.state as AgentStatus["state"] : "ready";
+          setAgentStatus({ state, text: String(m.text) });
+        }
+      }
       else if (m.type === "verify_progress") {
         setVerifyProgress((items) => [...items, {
           stage: String(m.stage || "verifying"),
@@ -2071,6 +2085,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
           finalizeOperationRef.current = null;
+          setAgentStatus({ state: "ready", text: "请求抓取完成，能力草稿已生成" });
           setLastAnalysisEvidence(null);
           setLastOperationReport(null);
           setShowAllAnalysisChanges(false);
@@ -2110,6 +2125,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           };
           setShowAllAnalysisChanges(false);
           setLastAnalysisEvidence(application);
+          setAgentStatus({
+            state: application.status === "rejected" ? "error" : "ready",
+            text: application.summary || "能力分析已完成",
+          });
         }
         // A successful server mutation produces a new validation snapshot.
         // Do not keep rendering clarifications from an older failed publish;
@@ -2160,6 +2179,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
         if (retryFlowMutationAfterConflict(m)) return;
+        setAgentStatus({ state: "error", text: String(detail) });
         // Operation failures belong to the workbench, not the transport. Keep
         // the socket healthy so a rejected Pi proposal cannot poison reconnect.
         if (!m.operation) connectionErrorRef.current = detail;
@@ -2425,6 +2445,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
     setResult(null); setVerifyProgress([]); setPhase("publishing");
+    setAgentStatus({ state: "analyzing", text: "正在汇总录制请求并生成能力分析…" });
     if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim() })) {
       finalizeOperationRef.current = null;
       setPhase("recording");
@@ -4790,6 +4811,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Card size="small" title={<Space><RobotOutlined />录制助手</Space>} style={{ height: "100%" }}>
         <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          <Alert
+            showIcon
+            type={agentStatus.state === "error" ? "error" : agentStatus.state === "ready" ? "success" : "info"}
+            message={agentStatus.text}
+          />
           {!!verifyProgress.length && (() => {
             const latest = verifyProgress[verifyProgress.length - 1];
             return (
@@ -4828,9 +4854,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Space>
               </List.Item>
             )} />
-          ) : !agentQuestions.some((item) => !item.answered) && (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待实时分析" />
-          )}
+          ) : null}
         </Space>
       </Card>
     );

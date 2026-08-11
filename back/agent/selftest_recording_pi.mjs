@@ -340,6 +340,32 @@ function verifyPlanToolCompatibility() {
     compactSpill.plan.semantic_plan.request_roles[0].includes("role=submit_anchor"),
     "compact request roles were discarded before Python normalization",
   );
+
+  // A 0.82.1 session can still reuse a historical model conversation whose
+  // planner vocabulary predates the semantic contract.  Those descriptive
+  // arrays must not consume every submission attempt at the strict backend
+  // boundary.  The server will rebuild grounded request/field/capability facts.
+  const legacyPlanner = sanitizeRecordingToolParams("submit_recording_plan", {
+    base_flow_version: 1,
+    plan: {
+      semantic_plan: {
+        title: "请假单查询与提交",
+        steps: [{ step_id: "invented-step", request_id: "req_76" }],
+        fields: [{ step_id: "invented-step", wire_path: "query.type" }],
+        dependencies: [{ from: "invented-step", to: "other-step" }],
+        enums: [{ field_id: "legacy-field", options: [{ label: "病假", value: "1" }] }],
+      },
+    },
+  });
+  assert(
+    legacyPlanner.plan.semantic_plan.business_understanding.summary === "请假单查询与提交",
+    "legacy title was not preserved as business understanding",
+  );
+  assert(
+    ["title", "steps", "fields", "dependencies", "enums"]
+      .every((key) => !(key in legacyPlanner.plan.semantic_plan)),
+    "legacy planner keys reached strict backend validation",
+  );
 }
 
 function verifyTruncatedPlanFallback() {
