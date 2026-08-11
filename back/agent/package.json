@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Dano 阶段一/三 的 pi SDK Node Sidecar 桥",
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.4",
+    "@earendil-works/pi-coding-agent": "0.82.1",
     "typebox": "1.1.38"
   }
 }

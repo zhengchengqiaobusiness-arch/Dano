@@ -712,6 +712,93 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     assert first_ws.max_active_writes == 1
 
 
+@pytest.mark.asyncio
+async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(monkeypatch) -> None:  # noqa: ANN001
+    import dano.execution.page.recorder as recorder_module
+    import dano.onboarding.recording_pi as recording_pi_module
+
+    class FakeRecordSession:
+        def __init__(self, on_request, **_kwargs) -> None:  # noqa: ANN001
+            self.on_request = on_request
+            self.requests: list[dict] = []
+
+        async def start(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
+            return None
+
+        async def dispatch_input(self, _event: dict) -> dict:
+            self.requests.extend({"method": "POST", "index": index} for index in range(15))
+            await asyncio.sleep(0)
+            return {"ok": True}
+
+        def captured_all_requests(self) -> list[dict]:
+            return list(self.requests)
+
+        def recorded_field_evidence(self) -> list[dict]:
+            return []
+
+        async def flush_recording(self) -> None:
+            await asyncio.sleep(0.15)
+
+        def pause_recording(self) -> None:
+            return None
+
+        async def storage_state(self) -> dict:
+            return {}
+
+        async def stop(self) -> None:
+            return None
+
+    sessions = []
+
+    class FakePiSession:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            self.flow_spec = None
+            sessions.append(self)
+
+        async def start(self):  # noqa: ANN201
+            await asyncio.sleep(0.05)
+            return self
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        def bind_flow_spec(self, flow_spec) -> None:  # noqa: ANN001
+            self.flow_spec = flow_spec
+
+        async def notify_live_batch(self, _delta: dict) -> None:
+            return None
+
+        def current_flow_spec(self):  # noqa: ANN201
+            return self.flow_spec
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
+    monkeypatch.setattr(recording_pi_module, "RecordingPiSession", FakePiSession)
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    gateway._RECORDING_RESUME_STATES.clear()
+
+    recording_id = f"recording_{'e' * 32}"
+    ws = _FakeWebSocket([
+        {
+            "type": "start",
+            "start_url": "https://example.test",
+            "tenant": "tenant-a",
+            "pi_recording_id": recording_id,
+        },
+        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
+        {"type": "stop"},
+    ])
+
+    await gateway.record_ws(ws)
+
+    assert len(sessions) == 1
+
+
 def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     from dano.onboarding.page_onboard import run_request_onboarding
 

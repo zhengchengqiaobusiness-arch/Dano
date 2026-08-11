@@ -3,10 +3,9 @@
 import readline from "node:readline";
 import path from "node:path";
 import {
-  AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -59,21 +58,28 @@ function envInt(name, fallback, minimum = 0) {
 }
 
 const SUBMISSION_ATTEMPT_LIMIT = envInt("DANO_RECORDING_PI_MAX_SUBMISSION_ATTEMPTS", 2, 1);
+const EPHEMERAL_CREDENTIALS = {
+  read: async () => undefined,
+  list: async () => [],
+  modify: async (_provider, update) => update(undefined),
+  delete: async () => undefined,
+};
 
-function resolveModel() {
-  const authStorage = AuthStorage.inMemory();
-  const modelRegistry = ModelRegistry.create(authStorage);
+async function resolveModel() {
   const apiKey = process.env.DANO_PI_API_KEY;
   const baseUrl = process.env.DANO_PI_BASE_URL;
   const provider = process.env.DANO_PI_PROVIDER || "openai-compat";
   const modelId = process.env.DANO_PI_MODEL || "deepseek-ai/DeepSeek-V3.2";
+  const modelRuntime = await ModelRuntime.create({
+    credentials: EPHEMERAL_CREDENTIALS,
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
 
   if (baseUrl && apiKey) {
-    authStorage.setRuntimeApiKey(provider, apiKey);
-    modelRegistry.registerProvider(provider, {
+    modelRuntime.registerProvider(provider, {
       name: provider,
       baseUrl,
-      apiKey,
       api: "openai-completions",
       models: [{
         id: modelId,
@@ -85,13 +91,12 @@ function resolveModel() {
         maxTokens: envInt("DANO_PI_MAX_TOKENS", 32768, 1),
       }],
     });
-  } else if (apiKey) {
-    authStorage.setRuntimeApiKey(provider, apiKey);
   }
+  if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey, { allowNetwork: false });
 
-  const model = modelRegistry.find(provider, modelId);
+  const model = modelRuntime.getModel(provider, modelId);
   if (!model || !apiKey) throw new Error(`no Pi model or credentials: provider=${provider} model=${modelId}`);
-  return { authStorage, modelRegistry, model };
+  return { modelRuntime, model };
 }
 
 function createSettingsManager() {
@@ -185,7 +190,7 @@ async function startSession(command) {
   if (active) throw new Error("a recording Pi session is already active; close it before starting another");
   if (promptInFlight) throw new Error("cannot start a session while a prompt is running");
 
-  const { authStorage, modelRegistry, model } = resolveModel();
+  const { modelRuntime, model } = await resolveModel();
   const settingsManager = createSettingsManager();
   const sessionDir = command.session_dir ? path.resolve(command.session_dir) : undefined;
   const sessionManager = command.session_file
@@ -208,8 +213,7 @@ async function startSession(command) {
     cwd: CWD,
     agentDir: AGENT_DIR,
     model,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     settingsManager,
     resourceLoader,
     sessionManager,

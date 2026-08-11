@@ -18,9 +18,22 @@ import {
 
 const expectedTools = [
   "get_recording_state",
+  "get_recording_delta",
+  "ask_operator",
+  "replay_request",
+  "perturb_replay",
+  "execute_write_with_verify",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_fill",
+  "browser_select",
+  "list_link_candidates",
+  "get_verification",
   "submit_recording_plan",
   "get_validation_report",
   "submit_recording_repair",
+  "submit_skill_docs",
   "submit_recording_review",
 ];
 

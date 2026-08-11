@@ -1528,6 +1528,7 @@ async def record_ws(ws: WebSocket) -> None:
     _checkpoint_resume = None
     receiver_task: asyncio.Task | None = None
     live_analysis_tasks: set[asyncio.Task] = set()
+    recording_pi_lock = asyncio.Lock()
     agent_question_futures: dict[str, asyncio.Future] = {}
     schedule_live_analysis = None
     emitted_agent_insights = 0
@@ -1669,27 +1670,30 @@ async def record_ws(ws: WebSocket) -> None:
         async def _ensure_recording_pi(*, fresh: bool = False):
             """Keep the browser connected while isolating independent Pi operations."""
             nonlocal recording_pi
-            if fresh and recording_pi is not None:
-                await recording_pi.close()
-                recording_pi = None
-            if recording_pi is None:
-                from dano.onboarding.recording_pi import RecordingPiSession
+            async with recording_pi_lock:
+                if fresh and recording_pi is not None:
+                    await recording_pi.close()
+                    recording_pi = None
+                if recording_pi is None:
+                    from dano.onboarding.recording_pi import RecordingPiSession
 
-                recording_pi = await _start_recording_pi_candidate(
-                    lambda: RecordingPiSession(
-                    tenant=str(init.get("tenant") or ""),
-                    subsystem=_effective_subsystem(str(init.get("tenant") or ""), init.get("subsystem")),
-                    recording_id=recording_id,
-                    resume_history=not fresh,
-                    on_submission_accepted=_accepted_pi_submission,
+                    recording_pi = await _start_recording_pi_candidate(
+                        lambda: RecordingPiSession(
+                            tenant=str(init.get("tenant") or ""),
+                            subsystem=_effective_subsystem(
+                                str(init.get("tenant") or ""), init.get("subsystem"),
+                            ),
+                            recording_id=recording_id,
+                            resume_history=not fresh,
+                            on_submission_accepted=_accepted_pi_submission,
+                        )
                     )
-                )
-                recording_pi.bind_live_recording(
-                    sess,
-                    goal_text=goal_text,
-                    operator_asker=_ask_operator,
-                )
-            return recording_pi
+                    recording_pi.bind_live_recording(
+                        sess,
+                        goal_text=goal_text,
+                        operator_asker=_ask_operator,
+                    )
+                return recording_pi
 
         def _costly_key(message: dict) -> str:
             operation_id = str(message.get("operation_id") or "")

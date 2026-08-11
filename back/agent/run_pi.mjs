@@ -9,6 +9,12 @@ import { customTools } from "./tools.mjs";
 const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n"); // 只此一处写 stdout
 const log = (...a) => process.stderr.write("[run_pi] " + a.join(" ") + "\n");
 const BACK_DIR = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const EPHEMERAL_CREDENTIALS = {
+  read: async () => undefined,
+  list: async () => [],
+  modify: async (_provider, update) => update(undefined),
+  delete: async () => undefined,
+};
 
 function readStartRun() {
   return new Promise((resolve) => {
@@ -27,38 +33,45 @@ function readStartRun() {
 
 async function realRun(start) {
   const pi = await import("@earendil-works/pi-coding-agent");
-  const { ModelRegistry, AuthStorage, createAgentSession, SessionManager, DefaultResourceLoader } = pi;
+  const { ModelRuntime, createAgentSession, SessionManager, DefaultResourceLoader } = pi;
 
-  // 解析模型:用 pi **内置** provider(自带 API 适配器 + baseUrl),只把 key 设进 authStorage。
+  // 解析模型:用 pi **内置** provider(自带 API 适配器 + baseUrl),只设置运行时 key。
   // key 仅经 env,不落代码。DeepSeek 用内置 'deepseek' provider + 'deepseek-v4-flash'。
-  const auth = AuthStorage.inMemory();
   const apiKey = process.env.DANO_PI_API_KEY;
   const baseUrl = process.env.DANO_PI_BASE_URL;
   const provider = process.env.DANO_PI_PROVIDER || "openai-compat";
   const modelId = process.env.DANO_PI_MODEL || "deepseek-ai/DeepSeek-V3.2";
-  const registry = ModelRegistry.create(auth);
+  const agentDir = `${BACK_DIR}/.pi-agent`;
+  const modelRuntime = await ModelRuntime.create({
+    credentials: EPHEMERAL_CREDENTIALS,
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
   let model;
   if (baseUrl && apiKey && modelId) {
     // OpenAI 兼容端点(SiliconFlow / 自托管等):注册自定义 provider,用配的 baseUrl + key + model。
     // 内置 provider(如 deepseek)会忽略 baseUrl 打官方 API,与 SiliconFlow key 不匹配 → 必须走这条。
-    auth.setRuntimeApiKey(provider, apiKey);
-    registry.registerProvider(provider, {
-      name: provider, baseUrl, apiKey, api: "openai-completions",
+    modelRuntime.registerProvider(provider, {
+      name: provider, baseUrl, api: "openai-completions",
       models: [{
         id: modelId, name: modelId, reasoning: false, input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128000, maxTokens: 8192,
       }],
     });
-    model = registry.find(provider, modelId);
+    await modelRuntime.setRuntimeApiKey(provider, apiKey, { allowNetwork: false });
+    model = modelRuntime.getModel(provider, modelId);
     log("registered openai-compatible:", provider, baseUrl, modelId, "->", model ? "ok" : "NONE");
   } else {
     // 无 baseUrl → pi 内置 provider(原行为)
-    if (apiKey) auth.setRuntimeApiKey(provider, apiKey);
-    model = registry.find(provider, modelId);
-    if (!model) { log("WARN: registry.find 未命中", provider, modelId, "→ 回退 getAvailable()[0]"); model = registry.getAvailable?.()[0]; }
+    if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey, { allowNetwork: false });
+    model = modelRuntime.getModel(provider, modelId);
+    if (!model) {
+      log("WARN: modelRuntime.getModel 未命中", provider, modelId, "→ 回退 getAvailable()[0]");
+      model = (await modelRuntime.getAvailable(provider))[0];
+    }
   }
-  if (!model || (registry.hasConfiguredAuth && !registry.hasConfiguredAuth(model))) {
+  if (!model || !modelRuntime.hasConfiguredAuth(model.provider)) {
     log("ERROR: 无可用模型/凭证", "provider=" + provider, "model=" + modelId, "key_set=" + !!apiKey, "baseUrl=" + (baseUrl || "(none)"));
     return { status: "failed", error: "no_model_or_credentials" };
   }
@@ -69,15 +82,16 @@ async function realRun(start) {
   try {
     const skillsDir = new URL("./skills", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
     resourceLoader = new DefaultResourceLoader({
-      cwd: BACK_DIR, agentDir: `${BACK_DIR}/.pi-agent`,
+      cwd: BACK_DIR, agentDir,
       additionalSkillPaths: [skillsDir],
       noExtensions: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
     });
+    await resourceLoader.reload();
     skillsLoaded = true;
   } catch (e) { log("resourceLoader 构造失败(跳过 skills):", e.message); }
 
   const { session } = await createAgentSession({
-    model, authStorage: auth, modelRegistry: registry,   // ← 用我的 auth/registry(带 key)
+    model, modelRuntime,
     customTools, noTools: "builtin",
     ...(resourceLoader ? { resourceLoader } : {}),
     sessionManager: SessionManager.inMemory ? SessionManager.inMemory() : undefined,
