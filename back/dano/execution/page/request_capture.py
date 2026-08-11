@@ -15,6 +15,8 @@ import logging
 import re as _re
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlunparse
 
+from dano.execution.page.wire_format import apply_wire_formats, date_span_days
+
 _log = logging.getLogger("dano.request_capture")
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
@@ -2800,24 +2802,11 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
         kind = str(field.get("kind") or "uuid")
         if kind == "date_span_days_json":
             import json as _json
-            from datetime import datetime as _datetime
-
-            def seconds(value):
-                try:
-                    number = float(value)
-                    return number / 1000.0 if abs(number) >= 10**11 else number
-                except (TypeError, ValueError):
-                    pass
-                try:
-                    return _datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-                except (TypeError, ValueError):
-                    return None
-
-            start = seconds(out.get(str(field.get("start_field") or "")))
-            end = seconds(out.get(str(field.get("end_field") or "")))
-            if start is None or end is None:
+            start_name = str(field.get("start_field") or "")
+            end_name = str(field.get("end_field") or "")
+            if start_name not in out or end_name not in out:
                 continue
-            days = int(round(abs(end - start) / 86400.0))
+            days = date_span_days(out[start_name], out[end_name])
             out[name] = _json.dumps(
                 {str(field.get("output_key") or "days"): days},
                 ensure_ascii=False,
@@ -2839,6 +2828,57 @@ def _apply_structure_overrides(body, overrides: list[dict]) -> list[str]:  # noq
     errors: list[str] = []
     for item in overrides or []:
         target_path = item.get("target_tokens") or item.get("target_path") or ""
+        if str(item.get("mode") or "") == "response_key_map":
+            collection = item.get("source_collection")
+            key_path = str(item.get("source_key_path") or "")
+            label_path = str(item.get("source_label_path") or "")
+            binding = dict(item.get("value_binding") or {})
+            container = _path_lookup(body, target_path)
+            if not isinstance(collection, list) or not collection:
+                errors.append("动态结构来源集合为空或不是数组")
+                continue
+            if not key_path or not label_path or binding.get("kind") != "caller_map_by_label":
+                errors.append("动态结构缺少 key/label/value_binding 契约")
+                continue
+            if not isinstance(container, dict):
+                errors.append(f"动态结构输入 `{binding.get('input_field') or target_path}` 必须是按节点名称索引的对象")
+                continue
+            rows: list[tuple[str, str]] = []
+            for record in collection:
+                key = _path_lookup(record, key_path)
+                label = _path_lookup(record, label_path)
+                if key is _PATH_MISSING or key in (None, "") or label is _PATH_MISSING or label in (None, ""):
+                    errors.append("动态结构来源节点缺少 id 或 name")
+                    rows = []
+                    break
+                rows.append((str(key), str(label)))
+            if not rows:
+                continue
+            keys = [key for key, _label in rows]
+            labels = [label for _key, label in rows]
+            if len(set(keys)) != len(keys) or len(set(labels)) != len(labels):
+                errors.append("动态结构来源节点 id 或 name 重复")
+                continue
+            missing = [label for label in labels if label not in container]
+            extra = [label for label in container if label not in set(labels)]
+            if missing or extra:
+                errors.append(
+                    "动态结构审批节点与调用方输入不一致: "
+                    f"缺少={missing!r} 多余={extra!r}"
+                )
+                continue
+            shape = str(binding.get("value_shape") or "direct")
+            rebuilt = {
+                key: (
+                    value if isinstance(value, list) else [value]
+                    if shape == "single_item_list" else value
+                )
+                for key, label in rows
+                for value in [container[label]]
+            }
+            if not _set_by_path(body, target_path, rebuilt):
+                errors.append(f"动态结构目标 `{item.get('target_path') or target_path}` 写入失败")
+            continue
         keys = [value for value in (item.get("keys") or []) if value not in (None, "")]
         container = _path_lookup(body, target_path)
         if container is _PATH_MISSING:
@@ -3608,12 +3648,20 @@ def _coerce_by_type(value, ftype, sample):
 
 def _coerce_fields(fields: dict, api_request: dict) -> dict:
     """对运行期参数按 api_request.field_types 逐个归一(日期格式取自录制样例)。无 field_types → 原样不动。"""
+    wire_formats = api_request.get("wire_formats") or {}
+    converted = apply_wire_formats(fields, wire_formats)
     ftypes = api_request.get("field_types") or {}
     if not ftypes:
-        return fields
+        return converted
     samples = api_request.get("sample_inputs") or {}
-    return {k: (_coerce_by_type(v, ftypes.get(k), samples.get(k)) if k in ftypes else v)
-            for k, v in fields.items()}
+    return {
+        key: (
+            value if key in wire_formats
+            else _coerce_by_type(value, ftypes.get(key), samples.get(key))
+            if key in ftypes else value
+        )
+        for key, value in converted.items()
+    }
 
 
 async def execute_api_request(api_request: dict, fields: dict, *, base_url: str = "",
@@ -3779,13 +3827,22 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
         for lk in step.get("structure_links") or []:
             source_index = lk.get("source_step", -1)
             source = responses[source_index] if isinstance(source_index, int) and 0 <= source_index < len(responses) else None
-            structure_overrides.append({
-                **lk,
-                "keys": _get_many_by_path(
-                    source,
-                    lk.get("source_tokens") or lk.get("source_path", ""),
-                ) if source is not None else [],
-            })
+            if str(lk.get("mode") or "") == "response_key_map":
+                structure_overrides.append({
+                    **lk,
+                    "source_collection": _get_by_path(
+                        source,
+                        lk.get("source_collection_path") or lk.get("source_path", ""),
+                    ) if source is not None else None,
+                })
+            else:
+                structure_overrides.append({
+                    **lk,
+                    "keys": _get_many_by_path(
+                        source,
+                        lk.get("source_tokens") or lk.get("source_path", ""),
+                    ) if source is not None else [],
+                })
         out = await execute_api_request(step, fields, base_url=base_url, storage_state=storage_state,
                                         send=send, verify=verify, token_key=token_key, overrides=overrides,
                                         structure_overrides=structure_overrides)
@@ -3854,15 +3911,18 @@ def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dic
     params: list[str] = []
     samples: dict = {}
     field_types: dict = {}
+    wire_formats: dict = {}
     for st in steps:
         for p in st.get("params") or []:
             if p not in params:
                 params.append(p)
         samples.update(st.get("sample_inputs") or {})
         field_types.update(st.get("field_types") or {})
+        wire_formats.update(st.get("wire_formats") or {})
     out["params"] = params
     out["sample_inputs"] = samples
     out["field_types"] = field_types
+    out["wire_formats"] = wire_formats
     kind = str(cap.get("kind") or "")
     if kind not in {
         "query", "query_status", "list_options", "validate", "validate_batch",

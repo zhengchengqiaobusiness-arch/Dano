@@ -15,6 +15,7 @@ from dano.execution.page.recording_field_identity import (
     stored_container_path,
 )
 from dano.execution.page.value_tracing import discover_value_links
+from dano.execution.page.wire_format import date_span_days
 from dano.infra.token_store import mask_headers
 
 
@@ -537,17 +538,20 @@ def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict: 
 def dependency_link_signature(link) -> str:  # noqa: ANN001
     """Stable signature covered by an executor-owned dependency verification."""
     meta = dict(getattr(link, "meta", None) or {})
+    declared_kind = str(getattr(link, "kind", "") or "")
+    legacy_kind = str(meta.get("kind") or "")
+    link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
     payload = {
-        "kind": str(meta.get("kind") or "value"),
+        "kind": link_kind,
         "source_step_id": str(getattr(link, "source_step_id", "") or ""),
         "source_path": str(getattr(link, "source_path", "") or "").removeprefix("response."),
         "target_step_id": str(getattr(link, "target_step_id", "") or ""),
         "target_path": str(getattr(link, "target_path", "") or "").removeprefix("request."),
-        "source_collection_path": str(meta.get("source_collection_path") or ""),
-        "source_key_path": str(meta.get("source_key_path") or ""),
-        "source_label_path": str(meta.get("source_label_path") or ""),
-        "target_container_path": str(meta.get("target_container_path") or ""),
-        "value_binding": meta.get("value_binding") or {},
+        "source_collection_path": str(getattr(link, "source_collection_path", "") or meta.get("source_collection_path") or ""),
+        "source_key_path": str(getattr(link, "source_key_path", "") or meta.get("source_key_path") or ""),
+        "source_label_path": str(getattr(link, "source_label_path", "") or meta.get("source_label_path") or ""),
+        "target_container_path": str(getattr(link, "target_container_path", "") or meta.get("target_container_path") or ""),
+        "value_binding": getattr(link, "value_binding", None) or meta.get("value_binding") or {},
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -699,35 +703,64 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                 f"computed classification for {param.path} requires strategy=date_span_days_json "
                 "with start_field and end_field naming the user params it derives from"
             )
-        available_fields = {
-            str(value).strip()
-            for item_step in spec.steps
-            for item_param in item_step.params
-            if item_param.category == "user_param" and item_param.exposed_to_user
-            for value in (
-                item_param.key,
-                item_param.label,
-                item_param.path,
-                str(item_param.path or "").split(".")[-1],
-            )
-            if str(value or "").strip()
-        }
-        missing_fields = [
-            field for field in (start_field, end_field)
-            if field not in available_fields
-        ]
-        if missing_fields:
+        def matching_public_field(name: str):  # noqa: ANN202
+            matches = []
+            for item_step in spec.steps:
+                for item_param in item_step.params:
+                    aliases = {
+                        str(value).strip()
+                        for value in (
+                            item_param.key,
+                            item_param.label,
+                            item_param.path,
+                            str(item_param.path or "").split(".")[-1],
+                        )
+                        if str(value or "").strip()
+                    }
+                    if name in aliases:
+                        matches.append(item_param)
+            return matches
+
+        resolved_inputs = []
+        for field in (start_field, end_field):
+            matches = matching_public_field(field)
+            if len(matches) != 1:
+                raise ValueError(
+                    f"computed classification for {param.path} requires one unambiguous public input "
+                    f"for {field!r}; matched={len(matches)}"
+                )
+            caller_param = matches[0]
+            if not (
+                caller_param.category == "user_param"
+                and caller_param.exposed_to_user
+                and caller_param.source_kind == "user_input"
+                and (caller_param.source or {}).get("actor") in {"agent", "user"}
+            ):
+                raise ValueError(
+                    f"computed classification for {param.path} requires confirmed public input {field!r}"
+                )
+            resolved_inputs.append(caller_param)
+        try:
+            recorded_days = date_span_days(resolved_inputs[0].value, resolved_inputs[1].value)
+        except ValueError as exc:
             raise ValueError(
-                f"computed classification for {param.path} references unknown caller fields: "
-                f"{missing_fields!r}"
+                f"computed classification for {param.path} has invalid recorded date inputs"
+            ) from exc
+        try:
+            recorded_payload = json.loads(str(param.value or param.default_value or ""))
+        except (TypeError, ValueError):
+            recorded_payload = None
+        if not isinstance(recorded_payload, dict) or len(recorded_payload) != 1:
+            raise ValueError(
+                f"computed classification for {param.path} requires a recorded one-key JSON sample"
             )
-        if not output_key:
-            try:
-                recorded_payload = json.loads(str(param.value or param.default_value or ""))
-            except (TypeError, ValueError):
-                recorded_payload = None
-            if isinstance(recorded_payload, dict) and len(recorded_payload) == 1:
-                output_key = str(next(iter(recorded_payload)))
+        recorded_key, recorded_value = next(iter(recorded_payload.items()))
+        output_key = output_key or str(recorded_key)
+        if output_key != str(recorded_key) or recorded_value != recorded_days:
+            raise ValueError(
+                f"computed classification for {param.path} contradicts the recorded sample: "
+                f"computed={{{output_key!r}: {recorded_days!r}}} recorded={recorded_payload!r}"
+            )
         param.source_kind = "computed"
         param.source = {
             "kind": "computed",
@@ -737,6 +770,8 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             "output_key": output_key or "days",
             "reason": reason,
             "actor": "agent",
+            "sample_verified": True,
+            "sample_days": recorded_days,
         }
         param.category = "runtime_var"
         param.exposed_to_user = False
@@ -748,7 +783,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
 
 def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict:  # noqa: ANN001
     """Apply one live-only op; unresolved early endpoints remain replayable at finalize."""
-    from dano.execution.page.flow_spec import FlowLink, RecordedGoal, RequestAnalysis
+    from dano.execution.page.flow_spec import FlowLink, ParamField, RecordedGoal, RequestAnalysis
 
     kind = str(edit.get("op") or "")
     if kind not in LIVE_RECORDING_AGENT_OPS:
@@ -1049,15 +1084,29 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         target_path = str(edit.get("target_path") or "").removeprefix("request.")
         link_kind = str(edit.get("kind") or edit.get("link_kind") or "value")
         evidence = edit.get("evidence")
-        if link_kind not in {"value", "structure"}:
-            raise ValueError("propose_dependency kind must be value or structure")
+        if link_kind not in {"value", "structure", "response_key_map"}:
+            raise ValueError("propose_dependency kind must be value, structure or response_key_map")
+        source_collection_path = str(edit.get("source_collection_path") or "").removeprefix("response.")
+        source_key_path = str(edit.get("source_key_path") or "")
+        source_label_path = str(edit.get("source_label_path") or "")
+        target_container_path = str(edit.get("target_container_path") or "").removeprefix("request.")
+        value_binding = dict(edit.get("value_binding") or {})
+        if link_kind == "response_key_map":
+            source_path = source_collection_path
+            target_path = target_container_path
         if not source_request_id or not source_path or not (target_request_id or target_step_id) or not target_path:
             raise ValueError("propose_dependency requires source and target request/step paths")
         if not isinstance(evidence, dict) or not evidence:
             raise ValueError("propose_dependency requires evidence")
         source_step = _request_step(spec, source_request_id)
         target_step = next((step for step in spec.steps if step.step_id == target_step_id), None) or _request_step(spec, target_request_id)
-        if link_kind == "structure" and target_step is not None:
+        dynamic_contract: dict = {}
+        if link_kind == "response_key_map":
+            if not source_key_path or not source_label_path:
+                raise ValueError("response_key_map requires source_collection_path, source_key_path and source_label_path")
+            if value_binding.get("kind") != "caller_map_by_label" or not str(value_binding.get("input_field") or ""):
+                raise ValueError("response_key_map requires value_binding.kind=caller_map_by_label and input_field")
+        if link_kind in {"structure", "response_key_map"} and target_step is not None:
             target_path = stored_container_path(target_step, target_path)
             container = target_path.removesuffix(".*").removesuffix("[*]")
             if not any(
@@ -1068,7 +1117,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     f"structure dependency target {target_path} does not match any recorded param "
                     f"on step {target_step.step_id}"
                 )
-            if source_step is not None:
+            if source_step is not None and link_kind == "structure":
                 source_values = [
                     str(value)
                     for value in _response_values_at_path(source_step.response_json, source_path)
@@ -1084,6 +1133,99 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                         "structure dependency contradicts recorded request keys: "
                         f"response={source_values!r}, request={target_keys!r}"
                     )
+            if source_step is not None and link_kind == "response_key_map":
+                collection_values = _response_values_at_path(source_step.response_json, source_collection_path)
+                collection = collection_values[0] if len(collection_values) == 1 else None
+                if not isinstance(collection, list) or not collection:
+                    raise ValueError("response_key_map source_collection_path is absent or not a non-empty list")
+                source_keys = []
+                source_labels = []
+                for row in collection:
+                    keys = _response_values_at_path(row, source_key_path)
+                    labels = _response_values_at_path(row, source_label_path)
+                    if len(keys) != 1 or len(labels) != 1 or keys[0] in (None, "") or labels[0] in (None, ""):
+                        raise ValueError("response_key_map source rows must each contain one id and one name")
+                    source_keys.append(str(keys[0]))
+                    source_labels.append(str(labels[0]))
+                if len(set(source_keys)) != len(source_keys) or len(set(source_labels)) != len(source_labels):
+                    raise ValueError("response_key_map source ids and labels must be unique")
+                try:
+                    recorded_body = (
+                        json.loads(target_step.body_source)
+                        if isinstance(target_step.body_source, str)
+                        else deepcopy(target_step.body_source)
+                    )
+                except (TypeError, ValueError):
+                    recorded_body = None
+                containers = _response_values_at_path(recorded_body, target_path.removeprefix("body."))
+                recorded_container = containers[0] if len(containers) == 1 else None
+                if not isinstance(recorded_container, dict):
+                    raise ValueError("response_key_map target_container_path is absent from the recorded body")
+                if list(map(str, recorded_container.keys())) != source_keys:
+                    raise ValueError(
+                        "response_key_map contradicts recorded request keys: "
+                        f"response={source_keys!r}, request={list(recorded_container)!r}"
+                    )
+                recorded_values = list(recorded_container.values())
+                if all(isinstance(value, list) and len(value) == 1 for value in recorded_values):
+                    value_shape = "single_item_list"
+                    public_values = [value[0] for value in recorded_values]
+                elif all(not isinstance(value, (dict, list)) for value in recorded_values):
+                    value_shape = "direct"
+                    public_values = recorded_values
+                else:
+                    raise ValueError("response_key_map recorded target values have an unsupported mixed shape")
+                input_field = str(value_binding["input_field"])
+                option_source = value_binding.get("option_source")
+                if option_source is not None and not isinstance(option_source, dict):
+                    raise ValueError("response_key_map value_binding.option_source must be an object")
+                value_binding = {**value_binding, "value_shape": value_shape}
+                public_sample = dict(zip(source_labels, public_values, strict=True))
+                container_prefix = target_path.removeprefix("body.") + "."
+                for item_param in target_step.params:
+                    if str(item_param.path or "").removeprefix("body.").startswith(container_prefix):
+                        item_param.category = "runtime_var"
+                        item_param.source_kind = "dynamic_structure"
+                        item_param.source = {"kind": "dynamic_structure_leaf", "actor": "agent"}
+                        item_param.exposed_to_user = False
+                public_param = next((
+                    item for item in target_step.params
+                    if str(item.path or "").removeprefix("body.") == target_path.removeprefix("body.")
+                ), None)
+                if public_param is None:
+                    public_param = ParamField(path=target_path, key=input_field)
+                    target_step.params.append(public_param)
+                public_param.key = input_field
+                public_param.label = public_param.label or "审批人"
+                public_param.value = public_sample
+                public_param.type = "object"
+                public_param.wire_type = "object"
+                public_param.required = True
+                public_param.category = "user_param"
+                public_param.source_kind = "user_input"
+                public_param.source = {
+                    "kind": "dynamic_structure_input",
+                    "actor": "agent",
+                    "required_state": "required",
+                    **({"option_source": deepcopy(option_source)} if option_source else {}),
+                }
+                public_param.exposed_to_user = True
+                public_param.need_human_confirm = False
+                public_param.reason = "调用方按最新审批节点名称提供人员，运行期按最新节点 ID 组装请求"
+                public_param.evidence.append({
+                    "source": "response_key_map",
+                    "request_id": target_request_id,
+                    "wire_path": f"body.{target_path.removeprefix('body.')}",
+                    "labels": source_labels,
+                    "actor": "agent",
+                })
+                dynamic_contract = {
+                    "source_collection_path": source_collection_path,
+                    "source_key_path": source_key_path,
+                    "source_label_path": source_label_path,
+                    "target_container_path": target_path,
+                    "value_binding": value_binding,
+                }
         if source_step is not None and target_step is not None:
             signature = (source_step.step_id, source_path, target_step.step_id, target_path)
             existing = next((
@@ -1104,7 +1246,12 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 source_path=source_path,
                 target_step_id=target_step.step_id,
                 target_path=target_path,
+                kind=link_kind,
+                **dynamic_contract,
             )
+            link.kind = link_kind
+            for field, value in dynamic_contract.items():
+                setattr(link, field, deepcopy(value))
             link.confirmed = False
             link.confidence = max(float(link.confidence or 0), float(edit.get("confidence") or 0.75))
             link.reason = str(edit.get("reason") or "agent 提出的待验证依赖")
@@ -1116,8 +1263,8 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 "target_request_id": target_request_id,
             }
             link.meta = {**(link.meta or {}), "verified": False, "actor": "agent"}
-            if link_kind == "structure":
-                link.meta["kind"] = "structure"
+            if link_kind in {"structure", "response_key_map"}:
+                link.meta["kind"] = link_kind
             if existing is None:
                 spec.links.append(link)
         _append_insight(
@@ -1149,6 +1296,15 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         link.confidence = 1.0
         link.meta = {**(link.meta or {}), "verified": True, "actor": "agent", "verification_id": verification_id}
         link.evidence = {**(link.evidence or {}), "actor": "agent", "verification_id": verification_id}
+        source_step = next((item for item in spec.steps if item.step_id == link.source_step_id), None)
+        if source_step is not None:
+            for param in source_step.params:
+                if param.source_kind == "computed" and (param.source or {}).get("sample_verified") is True:
+                    param.source = {
+                        **(param.source or {}),
+                        "verified": True,
+                        "execution_verification_id": verification_id,
+                    }
 
     elif kind == "bind_verify_read":
         write_step_id = str(edit.get("write_step_id") or "")

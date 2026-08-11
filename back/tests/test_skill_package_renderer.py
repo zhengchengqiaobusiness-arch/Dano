@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ from dano.execution.page.flow_spec import (
     ParamField,
     flow_spec_to_api_request,
 )
-from dano.export.skill_package.renderer import package_slug, render_skill_package
+from dano.export.skill_package.renderer import _CLIENT_TEMPLATE, package_slug, render_skill_package
 from dano.export.skill_package.validator import validate_skill_package
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel, Subsystem
@@ -161,11 +162,13 @@ def _recording_skill(origin: str) -> SkillSpec:
                 {
                     "verification_id": _LINK_VERIFICATION,
                     "kind": "perturb_link",
+                    "status": "passed",
                     "evidence": {"passed": True},
                 },
                 {
                     "verification_id": _WRITE_VERIFICATION,
                     "kind": "write_execute",
+                    "status": "passed",
                     "evidence": {"passed": True},
                 },
             ],
@@ -294,6 +297,11 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
             "DANO_AUTH_HEADERS": json.dumps({"Authorization": "Bearer runtime-only-value"}),
         }
         scripts = package / "scripts"
+        from dano.execution.page import wire_format as wire_format_module
+
+        assert (scripts / "wire_format.py").read_text(encoding="utf-8") == Path(
+            wire_format_module.__file__
+        ).read_text(encoding="utf-8")
         assert _run(scripts / "query_items.py", env=env)["ok"] is True
         assert _run(scripts / "create_item.py", "--name", "created", env=env)["ok"] is True
         verified = _run(scripts / "verify_create_item.py", "--name", "created", env=env)
@@ -321,6 +329,88 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    from dano.execution.page import wire_format as wire_format_module
+
+    (scripts / "wire_format.py").write_text(
+        Path(wire_format_module.__file__).read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    config = json.dumps({"tenant": "tenant", "subsystem": "system", "base_url": "https://example.test"})
+    client_path = scripts / "client.py"
+    client_path.write_text(_CLIENT_TEMPLATE.replace("__CONFIG__", repr(config)), encoding="utf-8")
+    sys.path.insert(0, str(scripts))
+    try:
+        module_spec = importlib.util.spec_from_file_location("generated_stage5_client", client_path)
+        module = importlib.util.module_from_spec(module_spec)
+        assert module_spec.loader is not None
+        module_spec.loader.exec_module(module)
+        sent = []
+
+        def fake_http(method, path="", **kwargs):
+            sent.append({"method": method, "path": path, **kwargs})
+            data = (
+                {"data": {"activityNodes": [
+                    {"id": "Activity_runtime_leader", "name": "领导审批"},
+                    {"id": "Activity_runtime_hr", "name": "HR审批"},
+                ]}}
+                if path == "/approval-detail" else {"code": 0}
+            )
+            return {"ok": True, "status": 200, "data": data}
+
+        module.http_json = fake_http
+        plan = {
+            "steps": [
+                {
+                    "step_id": "detail", "method": "POST", "path": "/approval-detail",
+                    "body_template": {
+                        "startTime": "{{startTime}}", "endTime": "{{endTime}}",
+                        "processVariablesStr": "{{__days}}",
+                    },
+                    "runtime_fields": [{
+                        "name": "__days", "kind": "date_span_days_json",
+                        "start_field": "startTime", "end_field": "endTime", "output_key": "day",
+                    }],
+                    "wire_formats": {"startTime": "epoch_ms", "endTime": "epoch_ms"},
+                },
+                {
+                    "step_id": "submit", "method": "POST", "path": "/submit",
+                    "body_template": {"startUserSelectAssignees": "{{approvers}}"},
+                },
+            ],
+            "links": [{
+                "link_id": "approval-map", "kind": "response_key_map",
+                "source_step": 0, "source_collection_path": "data.activityNodes",
+                "source_key_path": "id", "source_label_path": "name",
+                "target_step": 1, "target_container_path": "startUserSelectAssignees",
+                "value_binding": {
+                    "kind": "caller_map_by_label", "input_field": "approvers",
+                    "value_shape": "single_item_list",
+                },
+            }],
+        }
+
+        result = module.execute_plan(plan, {
+            "startTime": "2026-08-06T00:00:00+08:00",
+            "endTime": "2026-08-07T00:00:00+08:00",
+            "approvers": {"领导审批": 200, "HR审批": 201},
+        })
+
+        assert result["ok"] is True
+        assert sent[0]["body"] == {
+            "startTime": 1785945600000,
+            "endTime": 1786032000000,
+            "processVariablesStr": '{"day":1}',
+        }
+        assert sent[1]["body"]["startUserSelectAssignees"] == {
+            "Activity_runtime_leader": [200],
+            "Activity_runtime_hr": [201],
+        }
+    finally:
+        sys.path.remove(str(scripts))
 
 
 def test_unrelated_system_package_runs_without_tenant_pack_or_code_changes(tmp_path):

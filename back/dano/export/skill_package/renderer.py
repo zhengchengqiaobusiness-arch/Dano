@@ -78,7 +78,7 @@ def _flow_spec(skill):  # noqa: ANN001, ANN202
             for item in ((raw.get("meta") or {}).get("verification_log") or [])
             if isinstance(item, dict)
             and item.get("kind") == "write_execute"
-            and (item.get("evidence") or {}).get("passed") is True
+            and item.get("status") == "passed"
             and item.get("verification_id")
         }
         # Legacy model normalization may prune a fact_check that was bound by
@@ -114,7 +114,7 @@ def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
                 for item in ((raw.get("meta") or {}).get("verification_log") or [])
                 if isinstance(item, dict)
                 and item.get("kind") == "write_execute"
-                and (item.get("evidence") or {}).get("passed") is True
+                and item.get("status") == "passed"
                 and item.get("verification_id")
             }
             raw_steps = {
@@ -181,6 +181,7 @@ def _safe_step(step: dict) -> dict:
     keep = {
         "step_id", "step_name", "method", "url", "url_template", "path",
         "content_type", "body_template", "query_template", "params", "success_rule",
+        "sample_inputs", "field_types", "wire_formats", "runtime_fields",
         "selects", "system_values", "fact_check",
     }
     projected = {key: step.get(key) for key in keep if step.get(key) is not None}
@@ -211,14 +212,23 @@ def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
             or positions[link.source_step_id] >= positions[link.target_step_id]
         ):
             continue
+        declared_kind = str(link.kind or "")
+        legacy_kind = str((link.meta or {}).get("kind") or "")
+        link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
         links.append({
             "link_id": link.link_id,
+            "kind": link_kind,
             "source_step": positions[link.source_step_id],
             "source_path": link.source_path,
             "target_step": positions[link.target_step_id],
             "target_path": link.target_path,
             "param_name": link.param_name or "",
             "verification_id": verification_id,
+            "source_collection_path": link.source_collection_path,
+            "source_key_path": link.source_key_path,
+            "source_label_path": link.source_label_path,
+            "target_container_path": link.target_container_path,
+            "value_binding": dict(link.value_binding or {}),
         })
     return links
 
@@ -354,6 +364,7 @@ from urllib.parse import urljoin
 from uuid import uuid4
 
 import httpx
+from wire_format import apply_wire_formats, date_span_days
 
 CONFIG = json.loads(__CONFIG__)
 BASE_URL = os.environ.get("DANO_BUSINESS_BASE_URL", CONFIG["base_url"]).rstrip("/")
@@ -533,10 +544,62 @@ def _system_values(step, body):
     return body
 
 
+def _runtime_values(step, inputs):
+    values = dict(inputs)
+    for field in step.get("runtime_fields") or []:
+        name = str(field.get("name") or "")
+        if not name or name in values:
+            continue
+        if str(field.get("kind") or "") != "date_span_days_json":
+            continue
+        start_name = str(field.get("start_field") or "")
+        end_name = str(field.get("end_field") or "")
+        if start_name not in values or end_name not in values:
+            raise RuntimeError(f"computed field {name} is missing {start_name or end_name}")
+        values[name] = json.dumps(
+            {str(field.get("output_key") or "days"): date_span_days(values[start_name], values[end_name])},
+            ensure_ascii=False, separators=(",", ":"),
+        )
+    return apply_wire_formats(values, step.get("wire_formats") or {})
+
+
+def _response_key_map(link, source, body, values):
+    collection = get_path(source, link.get("source_collection_path") or link.get("source_path"))
+    binding = link.get("value_binding") or {}
+    input_field = str(binding.get("input_field") or "")
+    caller_map = values.get(input_field)
+    if not isinstance(collection, list) or not collection:
+        raise RuntimeError(f"dynamic structure source unavailable: {link.get('link_id')}")
+    if binding.get("kind") != "caller_map_by_label" or not isinstance(caller_map, dict):
+        raise RuntimeError(f"dynamic structure input {input_field} must be an object")
+    rows = []
+    for item in collection:
+        key = get_path(item, link.get("source_key_path"))
+        label = get_path(item, link.get("source_label_path"))
+        if key in (None, "") or label in (None, ""):
+            raise RuntimeError(f"dynamic structure node lacks id/name: {link.get('link_id')}")
+        rows.append((str(key), str(label)))
+    keys = [key for key, _label in rows]
+    labels = [label for _key, label in rows]
+    if len(set(keys)) != len(keys) or len(set(labels)) != len(labels):
+        raise RuntimeError(f"dynamic structure node id/name is duplicated: {link.get('link_id')}")
+    missing = [label for label in labels if label not in caller_map]
+    extra = [label for label in caller_map if label not in set(labels)]
+    if missing or extra:
+        raise RuntimeError(f"dynamic structure labels changed: missing={missing!r}, extra={extra!r}")
+    wrap = str(binding.get("value_shape") or "direct") == "single_item_list"
+    rebuilt = {
+        key: (value if isinstance(value, list) else [value]) if wrap else value
+        for key, label in rows
+        for value in [caller_map[label]]
+    }
+    return deep_set(body or {}, link.get("target_container_path") or link.get("target_path"), rebuilt)
+
+
 def execute_plan(plan, inputs):
     outputs = []
     for index, step in enumerate(plan.get("steps") or []):
-        values = _apply_selects(step, inputs)
+        values = _apply_selects(step, _runtime_values(step, inputs))
         body = render(step.get("body_template"), values) if step.get("body_template") is not None else None
         query = render(step.get("query_template"), values) if step.get("query_template") is not None else None
         url = render(step.get("url_template") or step.get("url") or step.get("path") or "", values)
@@ -546,6 +609,9 @@ def execute_plan(plan, inputs):
             source_index = int(link.get("source_step", -1))
             if source_index < 0 or source_index >= len(outputs):
                 raise RuntimeError(f"verified dependency source unavailable: {link.get('link_id')}")
+            if str(link.get("kind") or "") == "response_key_map":
+                body = _response_key_map(link, outputs[source_index]["data"], body, values)
+                continue
             value = get_path(outputs[source_index]["data"], link.get("source_path"))
             if value is None:
                 raise RuntimeError(f"verified dependency value missing: {link.get('verification_id')}")
@@ -767,6 +833,12 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         "base_url": _base_url(steps),
     }
     _write_text(scripts / "client.py", _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))))
+    from dano.execution.page import wire_format as wire_format_module
+
+    _write_text(
+        scripts / "wire_format.py",
+        Path(wire_format_module.__file__).read_text(encoding="utf-8"),
+    )
     contract = {
         "protocol": "dano.skill_package.contract.v1",
         "skill": {"id": skill.skill_id, "name": slug, "title": skill.title or skill.action},

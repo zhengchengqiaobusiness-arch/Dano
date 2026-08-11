@@ -131,7 +131,11 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
     if not client.is_file():
         issues.append(_issue("missing_client", "scripts/client.py is required", client, warning=missing_as_warnings))
     python_scripts = sorted(scripts.glob("*.py"))
-    capabilities = [path for path in python_scripts if path.name != "client.py" and not path.name.startswith("verify_")]
+    support_scripts = {"client.py", "wire_format.py"}
+    capabilities = [
+        path for path in python_scripts
+        if path.name not in support_scripts and not path.name.startswith("verify_")
+    ]
     if not capabilities:
         issues.append(_issue("missing_capability", "at least one capability script is required", scripts, warning=missing_as_warnings))
     for capability in capabilities:
@@ -147,7 +151,7 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
             re.search(r"(?m)^from\s+client\s+import\s+.*\bemit\b", source)
             and re.search(r"(?<![\w.])emit\s*\(", source)
         )
-        if source and not (emits_json or delegates_emit):
+        if script.name not in support_scripts and source and not (emits_json or delegates_emit):
             issues.append(_issue("json_stdout", "script must emit operational JSON", script))
         try:
             completed = subprocess.run(
@@ -187,23 +191,10 @@ def flow_spec_verification_ids(spec) -> set[str]:  # noqa: ANN001
     ids = {
         str(item.get("verification_id"))
         for item in (spec.meta or {}).get("verification_log") or []
-        if isinstance(item, dict) and item.get("verification_id")
+        if isinstance(item, dict)
+        and item.get("status") == "passed"
+        and item.get("verification_id")
     }
-    ids.update(
-        str((link.meta or {}).get("verification_id"))
-        for link in spec.links
-        if (link.meta or {}).get("verified") is True
-        and (link.meta or {}).get("verification_id")
-    )
-    for step in spec.steps:
-        fact_check = step.fact_check or {}
-        if fact_check.get("verified") is True and fact_check.get("verification_id"):
-            ids.add(str(fact_check["verification_id"]))
-        ids.update(
-            str(binding.verification_id)
-            for binding in step.selects
-            if binding.enum_confirmed is True and binding.verification_id
-        )
     return ids
 
 

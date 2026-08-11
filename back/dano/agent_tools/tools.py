@@ -2681,6 +2681,8 @@ _TYPED_RECORDING_OPERATION_KEYS = {
     "propose_dependency": {
         "op", "link_id", "kind", "source_request_id", "source_path", "target_request_id",
         "target_step_id", "target_path", "reason", "confidence", "evidence",
+        "source_collection_path", "source_key_path", "source_label_path",
+        "target_container_path", "value_binding",
     },
     "add_pitfall": {"op", "text", "evidence_ref"},
     "confirm_dependency": {"op", "link_id", "verification_id"},
@@ -2715,6 +2717,19 @@ def _validate_typed_recording_operations(operations: object, *, label: str) -> N
                 raise ToolError(f"{label}[{index}] 字段操作缺少 request_id 或 step_id")
             if not str(operation.get("wire_path") or ""):
                 raise ToolError(f"{label}[{index}] 字段操作必须使用 wire_path")
+        if kind == "propose_dependency" and operation.get("kind") == "response_key_map":
+            required = {
+                "source_request_id", "source_collection_path", "source_key_path",
+                "source_label_path", "target_container_path", "value_binding", "evidence",
+            }
+            missing = sorted(key for key in required if not operation.get(key))
+            binding = operation.get("value_binding")
+            if missing:
+                raise ToolError(f"{label}[{index}] response_key_map 缺少字段: {', '.join(missing)}")
+            if not isinstance(binding, dict) or binding.get("kind") != "caller_map_by_label" or not binding.get("input_field"):
+                raise ToolError(
+                    f"{label}[{index}] response_key_map.value_binding 必须声明 caller_map_by_label/input_field"
+                )
 
 
 def _validate_strict_recording_plan(raw_plan: dict) -> None:

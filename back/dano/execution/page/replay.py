@@ -362,7 +362,9 @@ async def verify_dependency(
     if source_request is None or target_request is None:
         raise ValueError("dependency endpoints are not present in captured request facts")
 
-    link_kind = str((link.meta or {}).get("kind") or "value")
+    declared_kind = str(getattr(link, "kind", "") or "")
+    legacy_kind = str((link.meta or {}).get("kind") or "")
+    link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
     signature = dependency_link_signature(link)
     subject = {
         "link_id": link.link_id,
@@ -383,17 +385,28 @@ async def verify_dependency(
     evidence: dict = {"source": source, "target": None}
     if source.get("verification_status") == "passed":
         try:
+            replay_target_request = target_request
             if link_kind in {"structure", "response_key_map"}:
                 meta = dict(link.meta or {})
-                collection_path = str(meta.get("source_collection_path") or link.source_path or "").removeprefix("response.")
+                collection_path = str(
+                    getattr(link, "source_collection_path", "")
+                    or meta.get("source_collection_path")
+                    or link.source_path
+                    or ""
+                ).removeprefix("response.")
                 collection = _assertion_value(source.get("response"), collection_path)
                 if not isinstance(collection, list) or not collection:
                     raise ValueError("structure source collection is missing or empty")
-                key_path = str(meta.get("source_key_path") or "id")
+                key_path = str(getattr(link, "source_key_path", "") or meta.get("source_key_path") or "id")
                 keys = [_assertion_value(item, key_path) for item in collection]
                 if any(value in (None, "") for value in keys) or len(set(map(str, keys))) != len(keys):
                     raise ValueError("structure source keys are missing or duplicated")
-                container_path = str(meta.get("target_container_path") or link.target_path or "")
+                container_path = str(
+                    getattr(link, "target_container_path", "")
+                    or meta.get("target_container_path")
+                    or link.target_path
+                    or ""
+                )
                 stored_body = _request_body(target_request)
                 recorded_container = _assertion_value(
                     stored_body,
@@ -402,11 +415,57 @@ async def verify_dependency(
                 if not isinstance(recorded_container, dict) or len(recorded_container) != len(keys):
                     raise ValueError("dynamic key count does not match target value slot count")
                 slots = list(recorded_container.values())
-                injected_value = {str(key): deepcopy(slots[index]) for index, key in enumerate(keys)}
-                override = _dependency_override(target_request, container_path, injected_value)
+                if link_kind == "response_key_map":
+                    label_path = str(
+                        getattr(link, "source_label_path", "")
+                        or meta.get("source_label_path")
+                        or ""
+                    )
+                    labels = [_assertion_value(item, label_path) for item in collection]
+                    if (
+                        not label_path
+                        or any(value in (None, "") for value in labels)
+                        or len(set(map(str, labels))) != len(labels)
+                    ):
+                        raise ValueError("structure source labels are missing or duplicated")
+                    binding = dict(
+                        getattr(link, "value_binding", None)
+                        or meta.get("value_binding")
+                        or {}
+                    )
+                    if binding.get("kind") != "caller_map_by_label" or not binding.get("input_field"):
+                        raise ValueError("structure value binding is not caller_map_by_label")
+                    shape = str(binding.get("value_shape") or "direct")
+                    public_values = [
+                        value[0] if shape == "single_item_list" and isinstance(value, list) and len(value) == 1 else value
+                        for value in slots
+                    ]
+                    caller_map = {
+                        str(label): deepcopy(public_values[index])
+                        for index, label in enumerate(labels)
+                    }
+                    injected_value = {
+                        str(key): (
+                            [deepcopy(caller_map[str(labels[index])])]
+                            if shape == "single_item_list"
+                            else deepcopy(caller_map[str(labels[index])])
+                        )
+                        for index, key in enumerate(keys)
+                    }
+                else:
+                    labels = []
+                    caller_map = {}
+                    injected_value = {str(key): deepcopy(slots[index]) for index, key in enumerate(keys)}
+                body_path = container_path.removeprefix("request.").removeprefix("body.")
+                replay_body = _set_nested_value(stored_body, body_path, injected_value)
+                replay_target_request = deepcopy(target_request)
+                replay_target_request["post_data"] = json.dumps(replay_body, ensure_ascii=False)
+                override = None
                 evidence.update({
                     "source_collection_path": collection_path,
                     "source_keys": [str(value) for value in keys],
+                    "source_labels": [str(value) for value in labels],
+                    "caller_map": _redact(caller_map),
                     "target_value_slots": len(slots),
                     "injected_value": injected_value,
                 })
@@ -424,7 +483,7 @@ async def verify_dependency(
                     "injection_equal": injected_value == extracted_value,
                 })
             target = await replay_request(
-                target_request,
+                replay_target_request,
                 overrides=override,
                 auth_headers=auth_headers,
                 base_url=base_url,

@@ -465,13 +465,26 @@ def test_param_source_computed_requires_executable_strategy():
         ParamField(path="startTime", key="开始时间", value=1785945600000),
         ParamField(path="endTime", key="结束时间", value=1786032000000),
     ])
-    spec.steps[1].params.append(ParamField(path="day", key="day", value=14))
+    spec.steps[1].params.append(ParamField(
+        path="processVariablesStr", key="流程变量", value='{"day":1}',
+    ))
+
+    spec = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source", "step_id": "submit", "path": "startTime",
+            "source_kind": "user_input", "reason": "调用方提供开始时间",
+        },
+        {
+            "op": "set_param_source", "step_id": "submit", "path": "endTime",
+            "source_kind": "user_input", "reason": "调用方提供结束时间",
+        },
+    ])
 
     with pytest.raises(ValueError, match="date_span_days_json"):
         apply_flow_edits(spec, [{
             "op": "set_param_source",
             "step_id": "submit",
-            "path": "day",
+            "path": "processVariablesStr",
             "source_kind": "computed",
             "reason": "天数由起止时间推导",
         }])
@@ -479,16 +492,17 @@ def test_param_source_computed_requires_executable_strategy():
     updated = apply_flow_edits(spec, [{
         "op": "set_param_source",
         "step_id": "submit",
-        "path": "day",
+        "path": "processVariablesStr",
         "source_kind": "computed",
         "strategy": "date_span_days_json",
         "start_field": "开始时间",
         "end_field": "结束时间",
         "reason": "天数由起止时间推导",
     }])
-    param = next(item for item in updated.steps[1].params if item.path == "day")
+    param = next(item for item in updated.steps[1].params if item.path == "processVariablesStr")
     assert param.source_kind == "computed"
     assert param.source["start_field"] == "开始时间"
+    assert param.source["sample_verified"] is True
 
 
 @pytest.mark.asyncio
@@ -514,6 +528,16 @@ async def test_computed_body_field_renders_and_executes_from_caller_dates():
             ],
         )],
     )
+    spec = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source", "step_id": "detail", "path": "startTime",
+            "source_kind": "user_input", "reason": "调用方提供开始时间",
+        },
+        {
+            "op": "set_param_source", "step_id": "detail", "path": "endTime",
+            "source_kind": "user_input", "reason": "调用方提供结束时间",
+        },
+    ])
     updated = apply_flow_edits(spec, [{
         "op": "set_param_source",
         "step_id": "detail",
@@ -793,6 +817,102 @@ def test_structure_dependency_targets_container_and_stays_out_of_value_injection
         }])
 
 
+@pytest.mark.asyncio
+async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_ids():
+    from dano.execution.page.flow_spec import _capability_input_schema
+    from dano.execution.page.request_capture import execute_api_workflow
+
+    spec = _flow()
+    spec.steps[0].response_json = {
+        "data": {"activityNodes": [
+            {"id": "Activity_recorded_leader", "name": "领导审批"},
+            {"id": "Activity_recorded_hr", "name": "HR审批"},
+        ]},
+    }
+    spec.steps[1].body_source = json.dumps({
+        "jobId": "J1",
+        "startUserSelectAssignees": {
+            "Activity_recorded_leader": [160],
+            "Activity_recorded_hr": [159],
+        },
+    })
+    spec.steps[1].params.extend([
+        ParamField(
+            path="startUserSelectAssignees.Activity_recorded_leader[0]",
+            key="领导审批人", value=160,
+        ),
+        ParamField(
+            path="startUserSelectAssignees.Activity_recorded_hr[0]",
+            key="HR审批人", value=159,
+        ),
+    ])
+    updated = apply_flow_edits(spec, [{
+        "op": "propose_dependency",
+        "kind": "response_key_map",
+        "source_request_id": "req-detail",
+        "source_collection_path": "data.activityNodes",
+        "source_key_path": "id",
+        "source_label_path": "name",
+        "target_request_id": "req-submit",
+        "target_container_path": "body.startUserSelectAssignees",
+        "value_binding": {
+            "kind": "caller_map_by_label",
+            "input_field": "approvers",
+            "option_source": {
+                "capability": "list_approval_users",
+                "value_path": "id",
+                "label_path": "nickname",
+            },
+        },
+        "reason": "最新审批节点的名称决定调用方映射，节点 ID 决定请求键",
+        "evidence": {"request_ids": ["req-detail", "req-submit"]},
+    }])
+
+    link = updated.links[0]
+    assert link.kind == "response_key_map"
+    assert link.source_collection_path == "data.activityNodes"
+    assert link.target_container_path == "startUserSelectAssignees"
+    public = next(param for param in updated.steps[1].params if param.key == "approvers")
+    assert public.value == {"领导审批": 160, "HR审批": 159}
+    assert public.type == "object"
+    assert all(
+        not param.exposed_to_user
+        for param in updated.steps[1].params
+        if "Activity_recorded" in param.path
+    )
+    schema = _capability_input_schema([public])
+    assert schema["properties"]["approvers"]["x-dano-option-source"] == {
+        "capability": "list_approval_users",
+        "value_path": "id",
+        "label_path": "nickname",
+    }
+
+    api_request, errors = flow_spec_to_api_request(updated)
+    assert errors == []
+    assert api_request is not None
+    api_request["steps"][0]["response_json"] = {
+        "data": {"activityNodes": [
+            {"id": "Activity_runtime_leader", "name": "领导审批"},
+            {"id": "Activity_runtime_hr", "name": "HR审批"},
+        ]},
+    }
+    out = await execute_api_workflow(api_request, {
+        "approvers": {"领导审批": 200, "HR审批": 201},
+    }, send=False)
+    assert out["ok"] is True
+    assert out["final"]["body"]["startUserSelectAssignees"] == {
+        "Activity_runtime_leader": [200],
+        "Activity_runtime_hr": [201],
+    }
+    assert "Activity_recorded" not in json.dumps(out["final"]["body"], ensure_ascii=False)
+
+    rejected = await execute_api_workflow(api_request, {
+        "approvers": {"领导审批": 200},
+    }, send=False)
+    assert rejected["ok"] is False
+    assert any("审批节点与调用方输入不一致" in issue for issue in rejected["step_result"]["self_check"])
+
+
 def test_wire_format_is_inferred_and_survives_model_sync():
     from dano.execution.page.flow_spec import (
         _capability_input_schema,
@@ -817,6 +937,43 @@ def test_wire_format_is_inferred_and_survives_model_sync():
     assert param.wire_format == "epoch_ms"
     input_schema = _capability_input_schema([param])
     assert input_schema["properties"]["开始时间"]["x-dano-wire-format"] == "epoch_ms"
+
+
+@pytest.mark.asyncio
+async def test_wire_format_is_executed_and_invalid_input_fails_before_request(monkeypatch):
+    from dano.execution.page.request_capture import execute_api_request
+    from dano.execution.page.wire_format import WireFormatError
+
+    calls = 0
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("invalid wire input must fail before HTTP")
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: Client())
+    api_request = {
+        "method": "POST",
+        "url": "https://example.test/submit",
+        "body_template": {"startTime": "{{startTime}}"},
+        "params": ["startTime"],
+        "field_types": {"startTime": "datetime"},
+        "wire_formats": {"startTime": "epoch_ms"},
+        "sample_inputs": {"startTime": 1785945600000},
+    }
+
+    dry = await execute_api_request(api_request, {"startTime": "2026-08-06T00:00:00+08:00"}, send=False)
+    assert dry["body"]["startTime"] == 1785945600000
+    with pytest.raises(WireFormatError, match="invalid date/time input"):
+        await execute_api_request(api_request, {"startTime": "not-a-date"}, send=True)
+    assert calls == 0
 
 
 def test_semantic_plan_cannot_bypass_grounded_name_required_or_enum_ops():

@@ -200,6 +200,12 @@ class FlowLink(BaseModel):
     target_step_id: str = ""
     target_path: str = ""
     target_tokens: list[str | int] | None = None
+    kind: str = "value"
+    source_collection_path: str = ""
+    source_key_path: str = ""
+    source_label_path: str = ""
+    target_container_path: str = ""
+    value_binding: dict[str, Any] = Field(default_factory=dict)
     param_name: str | None = None
     confirmed: bool = False
     confidence: float = 0.0
@@ -6875,6 +6881,9 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
             props[key]["label"] = p.label
         if p.description or p.reason:
             props[key]["description"] = p.description or p.reason
+        option_source = (p.source or {}).get("option_source")
+        if isinstance(option_source, dict) and option_source:
+            props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
         _apply_param_schema_default(props[key], p)
         enum_input = p.type in {"enum", "list-enum"}
         dynamic_options = enum_input and p.source_kind == "api_option"
@@ -14774,6 +14783,15 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
     return out
 
 
+def _step_wire_formats(step: FlowStep) -> dict[str, str]:
+    """Map stable public input names to their explicit on-wire formats."""
+    return {
+        str(param.key): str(param.wire_format)
+        for param in step.params
+        if _param_exposed_to_caller(param) and param.key and param.wire_format
+    }
+
+
 def _runtime_param_publish_error(param: ParamField) -> str | None:
     """Source inference/configuration is advisory and never a publish error.
 
@@ -15103,6 +15121,9 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
                 "system_values": [],
                 "runtime_fields": runtime_fields,
             }
+            wire_formats = _step_wire_formats(step)
+            if wire_formats:
+                apir["wire_formats"] = wire_formats
             if step.success_rule:
                 apir["success_rule"] = step.success_rule
             if step.fact_check:
@@ -15223,6 +15244,9 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
         apir["system_values"] = list(deduped_system_values.values())
     apir["step_id"] = step.step_id
     apir["step_name"] = step.name
+    wire_formats = _step_wire_formats(step)
+    if wire_formats:
+        apir["wire_formats"] = wire_formats
     if step.success_rule:
         apir["success_rule"] = step.success_rule
     if step.fact_check:
@@ -15402,16 +15426,28 @@ def flow_spec_to_api_request(
         if not target_path or not source_path:
             errors.append(f"链接 `{lk.link_id}` 缺少 source_path 或 target_path")
             continue
-        if str((lk.meta or {}).get("kind") or "") == "structure":
-            built_steps[target_idx].setdefault("structure_links", []).append({
+        declared_kind = str(lk.kind or "")
+        legacy_kind = str((lk.meta or {}).get("kind") or "")
+        link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
+        if link_kind in {"structure", "response_key_map"}:
+            structure_link = {
                 "link_id": lk.link_id,
-                "target_path": target_path,
+                "target_path": lk.target_container_path or target_path,
                 "target_tokens": lk.target_tokens,
                 "source_step": source_idx,
-                "source_path": source_path,
+                "source_path": lk.source_collection_path or source_path,
                 "source_tokens": lk.source_tokens,
-                "mode": "response_keys",
-            })
+                "mode": "response_key_map" if link_kind == "response_key_map" else "response_keys",
+            }
+            if link_kind == "response_key_map":
+                structure_link.update({
+                    "kind": link_kind,
+                    "source_collection_path": lk.source_collection_path or source_path,
+                    "source_key_path": lk.source_key_path,
+                    "source_label_path": lk.source_label_path,
+                    "value_binding": copy.deepcopy(lk.value_binding or {}),
+                })
+            built_steps[target_idx].setdefault("structure_links", []).append(structure_link)
             continue
         built_steps[target_idx].setdefault("links", []).append({
             "target_path": target_path,
@@ -15429,10 +15465,19 @@ def flow_spec_to_api_request(
         params = flow_spec_user_params(spec)
         samples: dict[str, Any] = {}
         field_types: dict[str, str] = {}
+        wire_formats: dict[str, str] = {}
         for st in built_steps:
             samples.update(st.get("sample_inputs") or {})
             field_types.update(st.get("field_types") or {})
-        out = {"steps": built_steps, "params": params, "sample_inputs": samples, "field_types": field_types}
+            wire_formats.update(st.get("wire_formats") or {})
+        out = {
+            "steps": built_steps,
+            "params": params,
+            "sample_inputs": samples,
+            "field_types": field_types,
+        }
+        if wire_formats:
+            out["wire_formats"] = wire_formats
 
     if spec.goal:
         out["goal"] = spec.goal

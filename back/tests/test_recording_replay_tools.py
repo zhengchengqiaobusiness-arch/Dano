@@ -49,12 +49,23 @@ async def replay_server():
     async def business_failure(_request):
         return web.json_response({"code": 500, "message": "business rejected"})
 
+    async def approval_detail(_request):
+        return web.json_response({"data": {"activityNodes": [
+            {"id": "Activity_runtime_leader", "name": "领导审批"},
+            {"id": "Activity_runtime_hr", "name": "HR审批"},
+        ]}})
+
+    async def submit_approval(request):
+        return web.json_response({"code": 0, "data": await request.json()})
+
     app = web.Application()
     app.router.add_post("/state", set_state)
     app.router.add_get("/state", get_state)
     app.router.add_get("/http-failure", http_failure)
     app.router.add_post("/http-failure", http_failure)
     app.router.add_get("/business-failure", business_failure)
+    app.router.add_get("/approval-detail", approval_detail)
+    app.router.add_post("/submit-approval", submit_approval)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -320,6 +331,63 @@ async def test_verify_dependency_target_failure_never_confirms_evidence(replay_s
     record = get_verification(result["verification_id"])
     assert record["status"] == "failed"
     assert "HTTP 400" in record["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_verify_dependency_executes_response_key_map_from_recorded_slots(replay_server):
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="detail", method="GET", path="/approval-detail",
+                source_meta={"request_id": "req-detail"},
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/submit-approval",
+                source_meta={"request_id": "req-submit"},
+            ),
+        ],
+        links=[FlowLink(
+            link_id="approval-map",
+            kind="response_key_map",
+            source_step_id="detail",
+            source_path="data.activityNodes",
+            source_collection_path="data.activityNodes",
+            source_key_path="id",
+            source_label_path="name",
+            target_step_id="submit",
+            target_path="startUserSelectAssignees",
+            target_container_path="startUserSelectAssignees",
+            value_binding={
+                "kind": "caller_map_by_label",
+                "input_field": "approvers",
+                "value_shape": "single_item_list",
+            },
+            evidence={"source_request_id": "req-detail", "target_request_id": "req-submit"},
+        )],
+    )
+    captured = [
+        {"request_id": "req-detail", "method": "GET", "url": replay_server + "/approval-detail"},
+        {
+            "request_id": "req-submit", "method": "POST",
+            "url": replay_server + "/submit-approval", "content_type": "application/json",
+            "post_data": json.dumps({"startUserSelectAssignees": {
+                "Activity_recorded_leader": [160],
+                "Activity_recorded_hr": [159],
+            }}),
+        },
+    ]
+
+    result = await verify_dependency(spec, "approval-map", captured, auth_headers={})
+
+    assert result["status"] == "passed"
+    record = get_verification(result["verification_id"])
+    assert record["status"] == "passed"
+    assert record["evidence"]["source_labels"] == ["领导审批", "HR审批"]
+    assert record["evidence"]["caller_map"] == {"领导审批": 160, "HR审批": 159}
+    assert record["evidence"]["target"]["response"]["data"]["startUserSelectAssignees"] == {
+        "Activity_runtime_leader": [160],
+        "Activity_runtime_hr": [159],
+    }
 
 
 @pytest.mark.asyncio

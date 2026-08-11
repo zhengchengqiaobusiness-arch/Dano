@@ -241,7 +241,9 @@ function verifyPlanToolCompatibility() {
     "plan tool schema does not declare the live semantic operation channel",
   );
   const liveOps = planTool?.parameters?.properties?.plan?.properties?.ops?.items?.anyOf || [];
-  const operationSchema = (name) => liveOps.find((item) => item?.properties?.op?.const === name);
+  const expandedOps = liveOps.flatMap((item) => item?.anyOf || [item]);
+  const operationSchema = (name) => expandedOps.find((item) => item?.properties?.op?.const === name);
+  const operationSchemas = (name) => expandedOps.filter((item) => item?.properties?.op?.const === name);
   assert(
     operationSchema("set_request_role")?.required?.includes("evidence_refs"),
     "set_request_role schema must expose evidence_refs",
@@ -263,8 +265,20 @@ function verifyPlanToolCompatibility() {
     "set_param_enum schema must require evidence_refs",
   );
   assert(
-    operationSchema("propose_dependency")?.required?.includes("evidence"),
+    operationSchemas("propose_dependency").length === 2
+      && operationSchemas("propose_dependency").every((item) => item?.required?.includes("evidence")),
     "propose_dependency schema must require evidence",
+  );
+  const responseKeyMap = operationSchemas("propose_dependency").find(
+    (item) => item?.properties?.kind?.const === "response_key_map",
+  );
+  assert(
+    responseKeyMap?.required?.includes("source_collection_path")
+      && responseKeyMap?.required?.includes("source_key_path")
+      && responseKeyMap?.required?.includes("source_label_path")
+      && responseKeyMap?.required?.includes("target_container_path")
+      && responseKeyMap?.required?.includes("value_binding"),
+    "response_key_map schema must require the complete dynamic structure contract",
   );
   assert(
     operationSchema("bind_verify_read")?.required?.includes("read_request_id")

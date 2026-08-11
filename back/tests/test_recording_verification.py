@@ -312,7 +312,21 @@ def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
 
 
 def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
-    link_verification = _record_dependency_verification(_spec())
+    spec = _spec()
+    spec.steps[0].params.append(ParamField(
+        path="query.processVariablesStr",
+        key="processVariablesStr",
+        source_kind="computed",
+        source={
+            "kind": "computed",
+            "strategy": "date_span_days_json",
+            "start_field": "startTime",
+            "end_field": "endTime",
+            "output_key": "day",
+            "sample_verified": True,
+        },
+    ))
+    link_verification = _record_dependency_verification(spec)
     assertion = {"path": "data.kind", "equals_input": "kind"}
     write_verification = record_verification(
         kind="write_execute",
@@ -332,7 +346,7 @@ def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
         status="passed",
         evidence={"snapshot": {"elements": [{"role": "combobox", "options": options}]}},
     )
-    updated = apply_flow_edits(_spec(), [
+    updated = apply_flow_edits(spec, [
         {"op": "confirm_dependency", "link_id": "link-1", "verification_id": link_verification},
         {
             "op": "bind_verify_read",
@@ -352,6 +366,8 @@ def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
     ])
     assert updated.links[0].confirmed is True
     assert updated.links[0].meta["verification_id"] == link_verification
+    assert updated.steps[0].params[0].source["verified"] is True
+    assert updated.steps[0].params[0].source["execution_verification_id"] == link_verification
     assert updated.steps[1].fact_check["verification_id"] == write_verification
     assert updated.steps[1].selects[0].verification_id == enum_verification
     assert verification_report(updated)["all_verified"] is True
@@ -522,6 +538,10 @@ async def test_zero_operator_verification_loop_completes_with_executor_evidence(
         status="passed",
         evidence={"snapshot": {"elements": [{"options": options}]}},
     )
+    spec.meta["verification_log"] = [
+        get_verification(verification_id)
+        for verification_id in (link_id, write_id, enum_id)
+    ]
 
     class AgentSession(_UnavailableSession):
         verification_calls = 0
