@@ -391,7 +391,10 @@ const RecordingIdentity = {
 // The SDK validates tool arguments before execute/sanitization. Keep this
 // boundary object-shaped but tolerant, then canonicalize deterministically and
 // let the backend enforce the complete semantic/fact contract.
-const RecordingPlan = Type.Object({}, { additionalProperties: true });
+const RecordingPlan = Type.Object({
+  semantic_plan: Type.Optional(Type.Object({}, { additionalProperties: true })),
+  ops: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+}, { additionalProperties: true });
 
 export const recordingTools = [
   proxyTool({
@@ -508,7 +511,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的语义增量。读取状态后立即调用，不要先输出分析文字。实时分析产生的 set_goal、set_request_role、set_param_source、propose_dependency、add_pitfall 操作必须放入 plan.ops，通过本工具提交；无需读取验证报告，依赖只能先提案，禁止标 verified。plan.semantic_plan 只能使用 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items；不要使用旧式 title、steps、fields、dependencies、enums。未变化的标准段可省略，后端会保留事实基线。字段可用紧凑 `step_id=...;wire_path=...;public_name=...;business_type=...;category=...;source_kind=...;required=true;confidence=0.95;control_kind=text;editable=true;evidence=screenshot text input` 字符串，枚举等嵌套值才使用对象。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

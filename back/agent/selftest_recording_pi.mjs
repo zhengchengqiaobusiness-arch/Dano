@@ -192,6 +192,16 @@ function verifyServerOwnedRecordingContext() {
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
   assert(
+    planTool?.description?.includes("plan.ops")
+      && planTool.description.includes("set_param_source")
+      && planTool.description.includes("propose_dependency"),
+    "plan tool does not expose the live semantic operation channel to Pi",
+  );
+  assert(
+    planTool?.parameters?.properties?.plan?.properties?.ops?.type === "array",
+    "plan tool schema does not declare the live semantic operation channel",
+  );
+  assert(
     !planTool?.parameters?.required?.includes("recording_id"),
     "recording_id belongs to the active server session and must not block a model submission",
   );

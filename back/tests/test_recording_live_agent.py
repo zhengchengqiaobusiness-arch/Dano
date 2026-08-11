@@ -214,3 +214,5 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     assert result["status"] == "submitted"
     assert "get_recording_delta(since_seq=2)" in prompts[0][0]
     assert "finalize" in prompts[0][0]
+    assert "submit_recording_plan" in prompts[0][0]
+    assert "plan.ops" in prompts[0][0]

@@ -327,10 +327,41 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
     assert result["flow_version"] > 1
     assert session.received_submission["_analysis_screenshot_count"] == 2
     assert session.spec.request_facts.model_dump(mode="json") == before_facts
-
     validation = asyncio.run(get_validation_report("run-recording", {"recording_id": "rec-1"}))
     assert validation["flow_version"] == result["flow_version"]
     assert "report" in validation and "repair_context" in validation
+
+
+def test_pi_plan_applies_live_param_source_operation(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-live-op")
+
+    result = asyncio.run(submit_recording_plan("run-live-op", {
+        "recording_id": "rec-live-op",
+        "base_flow_version": 1,
+        "plan": {
+            "semantic_plan": {
+                "business_understanding": {},
+                "request_roles": [],
+                "field_semantics": [],
+                "capabilities": [],
+                "capability_relations": [],
+                "unresolved_items": [],
+            },
+            "ops": [{
+                "op": "set_param_source",
+                "step_id": "submit",
+                "path": "title",
+                "source_kind": "page_context",
+                "reason": "该值由当前页面上下文提供",
+            }],
+        },
+    }))
+
+    assert result["flow_version"] > 1
+    assert result["flow_version"] == int(session.spec.meta["current_version"])
+    param = next(item for item in session.spec.steps[0].params if item.path == "title")
+    assert param.source_kind == "page_context"
+    assert param.exposed_to_user is False
 
 
 
