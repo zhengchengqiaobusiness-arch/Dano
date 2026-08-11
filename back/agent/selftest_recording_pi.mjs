@@ -175,6 +175,16 @@ function verifyReviewToolSchema() {
     );
   }
 }
+
+function verifyWriteAssertionSchema() {
+  const tool = recordingTools.find((item) => item.name === "execute_write_with_verify");
+  const assertion = tool?.parameters?.properties?.assertion;
+  assert(assertion?.additionalProperties === false, "write assertion schema must reject unknown keys");
+  assert(
+    assertion?.properties?.verify_records_min_count?.type === "integer",
+    "write assertion schema must expose verify_records_min_count",
+  );
+}
 function verifyServerOwnedRecordingContext() {
   for (const tool of recordingTools) {
     const properties = tool?.parameters?.properties || {};
@@ -470,6 +480,7 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
+  verifyWriteAssertionSchema();
   verifyServerOwnedRecordingContext();
   verifyPlanToolCompatibility();
   verifyTruncatedPlanFallback();

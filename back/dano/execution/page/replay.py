@@ -227,12 +227,62 @@ def _assertion_value(response: object, path: str):  # noqa: ANN202
     return current
 
 
+_ASSERTION_KEYS = frozenset({
+    "path", "response_path", "operator", "equals", "value",
+    "equals_input", "input_path", "verify_records_min_count",
+})
+_RECORD_COLLECTION_KEYS = ("list", "records", "items", "rows", "content")
+
+
+def _record_count(value: object) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if not isinstance(value, dict):
+        raise ValueError("verify_records_min_count target is not a record collection")
+    for key in _RECORD_COLLECTION_KEYS:
+        collection = value.get(key)
+        if isinstance(collection, list):
+            return len(collection)
+    for wrapper in ("data", "result"):
+        nested = value.get(wrapper)
+        if isinstance(nested, (dict, list)):
+            try:
+                return _record_count(nested)
+            except ValueError:
+                pass
+    for key in ("total", "count"):
+        count = value.get(key)
+        if isinstance(count, (int, float)) and not isinstance(count, bool):
+            return max(0, int(count))
+    raise ValueError("verify_records_min_count could not find list/records/items/rows/content or total/count")
+
+
 def evaluate_assertion(response: object, assertion: dict, inputs: dict) -> dict:
     """Evaluate the small deterministic assertion contract used by write verification."""
     if not isinstance(assertion, dict) or not assertion:
         raise ValueError("assertion must be a non-empty object")
+    unknown = sorted(set(assertion) - _ASSERTION_KEYS)
+    if unknown:
+        raise ValueError(f"unsupported assertion keys: {', '.join(unknown)}")
     path = str(assertion.get("path") or assertion.get("response_path") or "")
     actual = _assertion_value(response, path) if path else response
+    if "verify_records_min_count" in assertion:
+        minimum = assertion["verify_records_min_count"]
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+            raise ValueError("verify_records_min_count must be a non-negative integer")
+        incompatible = set(assertion) & {
+            "operator", "equals", "value", "equals_input", "input_path",
+        }
+        if incompatible:
+            raise ValueError("verify_records_min_count cannot be combined with other assertion operators")
+        count = _record_count(actual)
+        return {
+            "passed": count >= minimum,
+            "path": path,
+            "operator": "records_min_count",
+            "actual": count,
+            "expected": minimum,
+        }
     expected = assertion.get("equals", assertion.get("value"))
     input_path = str(assertion.get("equals_input") or assertion.get("input_path") or "")
     if input_path:

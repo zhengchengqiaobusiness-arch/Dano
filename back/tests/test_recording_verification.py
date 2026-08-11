@@ -14,7 +14,7 @@ from dano.execution.page.flow_spec import (
     SelectBinding,
     apply_flow_edits,
 )
-from dano.execution.page.replay import execute_write_with_verify
+from dano.execution.page.replay import evaluate_assertion, execute_write_with_verify
 from dano.execution.page.verification_log import (
     _clear_verifications_for_tests,
     get_verification,
@@ -81,6 +81,37 @@ def _spec() -> FlowSpec:
             },
         ),
     )
+
+
+def test_record_count_assertion_checks_the_verify_collection():
+    empty = evaluate_assertion(
+        {"list": [], "total": 0},
+        {"verify_records_min_count": 1},
+        {},
+    )
+    populated = evaluate_assertion(
+        {"data": {"list": [{"id": "new-record"}], "total": 1}},
+        {"verify_records_min_count": 1},
+        {},
+    )
+
+    assert empty["passed"] is False
+    assert empty["actual"] == 0
+    assert populated["passed"] is True
+    assert populated["actual"] == 1
+
+
+def test_unknown_assertion_keys_are_rejected_instead_of_falling_back_to_truthy():
+    with pytest.raises(ValueError, match="unsupported assertion keys"):
+        evaluate_assertion(
+            {"list": [], "total": 0},
+            {
+                "write_response": {"code": 0},
+                "verify_response": {"code": 0},
+                "verify_records_min_count": 1,
+            },
+            {},
+        )
 
 
 def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
@@ -178,6 +209,32 @@ async def test_execute_write_with_verify_records_one_grounded_composite(monkeypa
     assert record["kind"] == "write_execute"
     assert record["subject"]["write_step_id"] == "submit"
     assert record["evidence"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_write_with_verify_does_not_verify_an_empty_readback(monkeypatch):
+    async def fake_replay(request, **_kwargs):
+        response = {"list": [], "total": 0} if request["request_id"] == "verify" else {"code": 0}
+        return {
+            "ok": True,
+            "response": response,
+            "verification_id": f"verification-{request['request_id']}",
+        }
+
+    monkeypatch.setattr("dano.execution.page.replay.replay_request", fake_replay)
+    result = await execute_write_with_verify(
+        {"request_id": "write", "method": "POST"},
+        {"request_id": "verify", "method": "GET"},
+        write_step_id="submit",
+        inputs={"type": 2},
+        assertion={"verify_records_min_count": 1},
+        auth_headers={},
+        settle_ms=0,
+    )
+
+    assert result["ok"] is False
+    assert result["assertion"]["actual"] == 0
+    assert get_verification(result["verification_id"])["evidence"]["passed"] is False
 
 
 class _UnavailableSession:

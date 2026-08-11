@@ -396,6 +396,21 @@ const RecordingPlan = Type.Object({
   ops: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
 }, { additionalProperties: true });
 
+const RecordingAssertion = Type.Object({
+  path: Type.Optional(Type.String()),
+  response_path: Type.Optional(Type.String()),
+  operator: Type.Optional(Type.Union([
+    Type.Literal("equals"), Type.Literal("eq"), Type.Literal("not_equals"),
+    Type.Literal("ne"), Type.Literal("contains"), Type.Literal("exists"),
+    Type.Literal("truthy"),
+  ])),
+  equals: Type.Optional(Type.Any()),
+  value: Type.Optional(Type.Any()),
+  equals_input: Type.Optional(Type.String()),
+  input_path: Type.Optional(Type.String()),
+  verify_records_min_count: Type.Optional(Type.Integer({ minimum: 0 })),
+}, { additionalProperties: false, minProperties: 1 });
+
 export const recordingTools = [
   proxyTool({
     name: "get_recording_state",
@@ -452,13 +467,13 @@ export const recordingTools = [
   proxyTool({
     name: "execute_write_with_verify",
     label: "执行写入并读回验证",
-    description: "真实执行指定写步骤，等待后重放 verify 读请求、执行确定性断言并可选清理；返回执行器签发的 verification_id。",
+    description: "真实执行指定写步骤，等待后重放 verify 读请求、执行确定性断言并可选清理；返回执行器签发的 verification_id。断言必须使用声明字段：可用 path/response_path 配合 operator 与 equals/equals_input，或使用 verify_records_min_count 校验读回记录数量；未知字段会被拒绝。",
     parameters: Type.Object({
       ...RecordingIdentity,
       write_step_id: Type.String({ minLength: 1 }),
       inputs: Type.Record(Type.String(), Type.Any()),
       verify_request_id: Type.String({ minLength: 1 }),
-      assertion: Type.Object({}, { additionalProperties: true }),
+      assertion: RecordingAssertion,
       cleanup_request_id: Type.Optional(Type.String({ minLength: 1 })),
     }, { additionalProperties: false }),
   }),
