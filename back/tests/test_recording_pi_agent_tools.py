@@ -12,6 +12,7 @@ import dano.agent_tools.tools as agent_tools_module
 
 from dano.agent_tools.tools import (
     ToolError,
+    ask_recording_operator,
     get_recording_state,
     get_validation_report,
     request_review,
@@ -1452,6 +1453,25 @@ def test_recording_tool_still_rejects_an_explicit_cross_session_identity(monkeyp
         asyncio.run(get_recording_state("run-owned-by-run", {
             "recording_id": "rec-from-another-run",
         }))
+
+
+def test_internal_recording_identity_question_never_reaches_operator(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-owned-by-run")
+
+    async def fail_if_operator_called(**_kwargs):
+        raise AssertionError("internal recording identity question reached the operator")
+
+    session.ask_operator = fail_if_operator_called
+    result = asyncio.run(ask_recording_operator("run-owned-by-run", {
+        "text": "请提供当前 recording_id 和 flow_version",
+        "options": ["请提供 recording_id"],
+    }))
+
+    assert result == {
+        "answered": True,
+        "answer": "recording_id 和 flow_version 由服务端管理；调用录制工具时省略这些字段。",
+        "reason": "server_owned_recording_context",
+    }
 
 
 def test_length_truncated_screenshot_plan_finishes_without_retry_loop(monkeypatch):

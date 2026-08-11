@@ -169,8 +169,8 @@ function proxyTool({ name, label, description, parameters }) {
     parameters,
     ...(SUBMISSION_TOOLS.has(name) ? { executionMode: "sequential" } : {}),
     execute: async (toolCallId, params) => {
+      const sanitizedParams = sanitizeRecordingToolParams(name, params);
       if (SUBMISSION_TOOLS.has(name)) {
-        const sanitizedParams = sanitizeRecordingToolParams(name, params);
         requireRecordingSubmissionPrerequisite(name, sanitizedParams);
         const { output } = await runRecordingSubmissionAttempt(
           name,
@@ -184,7 +184,7 @@ function proxyTool({ name, label, description, parameters }) {
           terminate: true,
         };
       }
-      const output = await callRecordingTool(name, params, toolCallId);
+      const output = await callRecordingTool(name, sanitizedParams, toolCallId);
       recordRecordingToolRead(name, output);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
@@ -282,8 +282,12 @@ export function canonicalizeRecordingPlan(value) {
 }
 
 export function sanitizeRecordingToolParams(name, params) {
-  if (name !== "submit_recording_plan" || !params || typeof params !== "object") return params;
-  const allowed = ["recording_id", "flow_version", "base_flow_version", "plan"];
+  if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+  params = Object.fromEntries(
+    Object.entries(params).filter(([key]) => !["recording_id", "flow_version"].includes(key)),
+  );
+  if (name !== "submit_recording_plan") return params;
+  const allowed = ["base_flow_version", "plan"];
   const sanitized = Object.fromEntries(
     allowed.filter((key) => key in params).map((key) => [key, params[key]]),
   );
@@ -360,11 +364,9 @@ export function sanitizeRecordingToolParams(name, params) {
 
 
 const RecordingIdentity = {
-  // The Python gateway already binds every tool call to one active run/session.
-  // Models may repeat this diagnostic identity, but correctness must not depend
-  // on them copying it through a long multimodal tool call.
-  recording_id: Type.Optional(Type.String({ minLength: 1 })),
-  flow_version: Type.Optional(Type.Integer({ minimum: 0 })),
+  // The authenticated bridge owns recording_id and flow_version. Keeping both
+  // out of model-visible schemas prevents stale session history from guessing
+  // them or asking the operator for internal runtime state.
 };
 
 // The SDK validates tool arguments before execute/sanitization. Keep this
@@ -392,7 +394,7 @@ export const recordingTools = [
   proxyTool({
     name: "ask_operator",
     label: "询问录制操作人",
-    description: "仅在录制现场确有歧义且无法由事实自答时询问一个问题；60 秒无回答会返回 answered=false，不得阻塞后续判断。",
+    description: "仅在录制现场确有业务歧义且无法由事实自答时询问一个问题；严禁询问 recording_id、flow_version、run_id 等后端内部字段；60 秒无回答会返回 answered=false，不得阻塞后续判断。",
     parameters: Type.Object({
       ...RecordingIdentity,
       text: Type.String({ minLength: 1 }),

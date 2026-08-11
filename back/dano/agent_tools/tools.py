@@ -1149,8 +1149,16 @@ async def ask_recording_operator(run_id: str, params: dict) -> dict:
     options = params.get("options") or []
     if not isinstance(options, list) or any(not isinstance(value, str) or not value.strip() for value in options):
         raise ToolError("options 必须是非空字符串数组")
-    return await _recording_session(run_id, params).ask_operator(
-        text=str(params["text"]),
+    session = _recording_session(run_id, params)
+    text = str(params["text"])
+    if re.search(r"(?i)\b(?:recording_id|flow_version|run_id)\b", text):
+        return {
+            "answered": True,
+            "answer": "recording_id 和 flow_version 由服务端管理；调用录制工具时省略这些字段。",
+            "reason": "server_owned_recording_context",
+        }
+    return await session.ask_operator(
+        text=text,
         options=options,
         context_ref=str(params.get("context_ref") or ""),
     )

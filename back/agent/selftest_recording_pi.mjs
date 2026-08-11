@@ -175,6 +175,20 @@ function verifyReviewToolSchema() {
     );
   }
 }
+function verifyServerOwnedRecordingContext() {
+  for (const tool of recordingTools) {
+    const properties = tool?.parameters?.properties || {};
+    assert(!("recording_id" in properties), `${tool.name} must not expose server-owned recording_id`);
+    assert(!("flow_version" in properties), `${tool.name} must not expose server-owned flow_version`);
+  }
+  assert(
+    JSON.stringify(sanitizeRecordingToolParams("get_recording_state", {
+      recording_id: "recording-from-old-session",
+      flow_version: 999,
+    })) === JSON.stringify({}),
+    "model-supplied recording identity reached the backend bridge",
+  );
+}
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
   assert(
@@ -221,7 +235,7 @@ function verifyPlanToolCompatibility() {
   assert(sanitized.plan !== plan, "plan payload was not canonicalized");
   assert(
     JSON.stringify(Object.keys(sanitized).sort())
-      === JSON.stringify(["base_flow_version", "flow_version", "plan", "recording_id"]),
+      === JSON.stringify(["base_flow_version", "plan"]),
     "unknown plan tool params reached the backend",
   );
   const semantic = sanitized.plan.semantic_plan;
@@ -420,6 +434,7 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
+  verifyServerOwnedRecordingContext();
   verifyPlanToolCompatibility();
   verifyTruncatedPlanFallback();
   verifyPersistentSession(tempDir);
