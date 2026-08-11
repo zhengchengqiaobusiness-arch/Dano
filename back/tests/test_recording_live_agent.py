@@ -6,6 +6,7 @@ import json
 import pytest
 
 from dano.execution.page.flow_spec import (
+    FlowCapability,
     FlowSpec,
     FlowLink,
     FlowStep,
@@ -14,6 +15,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     apply_flow_edits,
+    apply_recording_agent_submission,
     recording_agent_state,
     recording_agent_validation,
 )
@@ -171,6 +173,55 @@ def test_request_role_normalizes_model_evidence_alias_and_param_wire_path():
     assert updated.steps[1].params[0].source_kind == "chained"
 
 
+def test_live_field_semantics_resolve_request_id_and_cover_source_required_and_name():
+    updated = apply_flow_edits(_flow(), [
+        {
+            "op": "set_param_source",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "source_kind": "page_context",
+            "reason": "页面上下文自动提供",
+        },
+        {
+            "op": "set_param_required",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "required": False,
+            "reason": "页面允许不填写该筛选条件",
+            "evidence_refs": ["request:req-submit", "control:jobId"],
+        },
+        {
+            "op": "rename_field",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "label": "任务编号",
+            "reason": "页面控件标签为任务编号",
+            "evidence_refs": ["request:req-submit", "control:jobId"],
+        },
+    ])
+
+    param = updated.steps[1].params[0]
+    assert param.source_kind == "page_context"
+    assert param.exposed_to_user is False
+    assert param.required is False
+    assert param.key == "任务编号"
+    assert param.label == "任务编号"
+    assert {item.get("kind") for item in param.evidence} >= {
+        "param_source", "param_required", "field_name",
+    }
+
+
+def test_live_field_semantics_reject_unknown_target_instead_of_reporting_success():
+    with pytest.raises(ValueError, match="target.*not found"):
+        apply_flow_edits(_flow(), [{
+            "op": "set_param_source",
+            "step_id": "req-missing",
+            "path": "jobId",
+            "source_kind": "page_context",
+            "reason": "页面上下文自动提供",
+        }])
+
+
 def test_agent_page_context_survives_sync_and_dependency_paths_deduplicate():
     spec = _flow()
     spec.steps[0].params = [ParamField(path="query.pageNo", key="pageNo", value=1)]
@@ -244,6 +295,84 @@ def test_finalize_merge_replays_early_request_id_ops_on_canonical_steps():
     assert len(merged.links) == 1
     assert merged.links[0].source_step_id == "detail"
     assert merged.links[0].target_step_id == "submit"
+
+
+def test_finalize_merge_materializes_deferred_request_id_field_semantics():
+    live = FlowSpec(
+        flow_id="early-fields",
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-submit", request_index=2, method="POST", path="/items/update"),
+        ]),
+    )
+    live = apply_flow_edits(live, [
+        {
+            "op": "set_param_source",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "source_kind": "page_context",
+            "reason": "录制页面上下文自动提供",
+        },
+        {
+            "op": "set_param_required",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "required": False,
+            "reason": "页面控件没有必填标记",
+            "evidence_refs": ["request:req-submit", "control:jobId"],
+        },
+        {
+            "op": "rename_field",
+            "step_id": "req-submit",
+            "path": "jobId",
+            "label": "任务编号",
+            "reason": "页面控件标签为任务编号",
+            "evidence_refs": ["request:req-submit", "control:jobId"],
+        },
+    ])
+
+    merged = merge_live_agent_state(live, _flow())
+    param = merged.steps[1].params[0]
+    assert param.source_kind == "page_context"
+    assert param.required is False
+    assert param.key == "任务编号"
+    assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+
+
+@pytest.mark.asyncio
+async def test_live_field_op_survives_rejected_semantic_proposal_and_reports_each_result():
+    spec = _flow()
+    spec.capabilities = [FlowCapability(
+        name="submit",
+        title="提交",
+        kind="submit",
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+    )]
+
+    updated = await apply_recording_agent_submission(spec, submission={
+        "ops": [
+            {
+                "op": "set_condition",
+                "capability": "submit",
+                "node": {
+                    "id": "bad_entries_condition",
+                    "condition": "input.entries.length > 0",
+                    "then": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
+                },
+            },
+            {
+                "op": "set_param_source",
+                "step_id": "req-submit",
+                "path": "jobId",
+                "source_kind": "page_context",
+                "reason": "页面上下文自动提供",
+            },
+        ],
+    }, mode="plan")
+
+    assert updated.meta["capability_model"]["proposal_gate"]["accepted"] is False
+    assert updated.steps[1].params[0].source_kind == "page_context"
+    results = updated.meta["recording_agent_session"]["op_results"]
+    assert [item["status"] for item in results] == ["rolled_back", "applied"]
 
 
 class _Recorder:

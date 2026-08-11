@@ -4806,7 +4806,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function renderRecordingAssistant() {
     const insightColor: Record<string, string> = {
-      goal: "blue", role: "purple", param_source: "cyan", link: "gold",
+      goal: "blue", role: "purple", param_source: "cyan", param_required: "geekblue",
+      field_name: "magenta", link: "gold",
     };
     return (
       <Card size="small" title={<Space><RobotOutlined />录制助手</Space>} style={{ height: "100%" }}>

@@ -19704,7 +19704,8 @@ _RECORDING_AGENT_ALLOWED_OPS = {
     "upsert_computed_field", "upsert_output_field", "bind_dependency", "set_map",
     "set_condition", "set_output_mapping", "set_capability_relation",
     "add_request_to_capability", "remove_request_from_capability", "reject_dependency",
-    "set_goal", "set_request_role", "set_param_source", "propose_dependency", "add_pitfall",
+    "set_goal", "set_request_role", "set_param_source", "set_param_required",
+    "rename_field", "propose_dependency", "add_pitfall",
     "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
 }
 
@@ -20064,10 +20065,12 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
             *(f"agent evidence missing: {item['kind']} {item['target']}" for item in evidence_issues),
         ]
         report["passed"] = False
+    session_audit = dict((current.meta or {}).get("recording_agent_session") or {})
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "report": report,
         "repair_context": _flow_autofix_context(current, report),
+        "op_results": list(session_audit.get("op_results") or []),
     }
 
 
@@ -20089,6 +20092,52 @@ async def apply_recording_agent_submission(
     if not isinstance(submission, dict):
         raise ValueError("recording agent submission must be an object")
     current = ensure_recorded_goal(spec.model_copy(deep=True))
+    submitted_ops = list(submission.get("ops") or [])
+    _validate_recording_agent_ops(submitted_ops)
+    op_results: list[dict[str, Any]] = []
+    deferred_field_ops: list[tuple[int, dict[str, Any]]] = []
+    residual_ops: list[tuple[int, dict[str, Any]]] = []
+    if mode == "plan":
+        from dano.execution.page.recording_live import (
+            LIVE_RECORDING_AGENT_OPS,
+            apply_recording_agent_edit,
+        )
+
+        field_ops = {"set_param_source", "set_param_required", "rename_field"}
+
+        def op_target(operation: dict[str, Any]) -> str:
+            step_id = str(operation.get("step_id") or operation.get("request_id") or "")
+            path = str(operation.get("path") or operation.get("wire_path") or "")
+            return f"{step_id}:{path}".rstrip(":")
+
+        for index, operation in enumerate(submitted_ops):
+            kind = str(operation.get("op") or "")
+            if kind in field_ops:
+                deferred_field_ops.append((index, operation))
+                continue
+            if kind not in LIVE_RECORDING_AGENT_OPS:
+                residual_ops.append((index, operation))
+                continue
+            try:
+                outcome = apply_recording_agent_edit(current, operation, record=True)
+                op_results.append({
+                    "index": index,
+                    "op": kind,
+                    "status": str(outcome.get("status") or "applied"),
+                    "target": op_target(operation),
+                    **({"reason": str(outcome["reason"])} if outcome.get("reason") else {}),
+                    **({"deferred": True} if outcome.get("deferred") else {}),
+                })
+            except (TypeError, ValueError) as exc:
+                op_results.append({
+                    "index": index,
+                    "op": kind,
+                    "status": "skipped",
+                    "target": op_target(operation),
+                    "reason": str(exc),
+                })
+        submission = copy.deepcopy(submission)
+        submission["ops"] = [operation for _index, operation in residual_ops]
     fact_hash = _semantic_fact_hash(current)
     previous_generation = dict((current.meta or {}).get("capability_generation") or {})
     initial_generation = bool(
@@ -20158,6 +20207,41 @@ async def apply_recording_agent_submission(
         })
         break
 
+    if mode == "plan":
+        from dano.execution.page.recording_live import apply_recording_agent_edit
+
+        for index, operation in deferred_field_ops:
+            kind = str(operation.get("op") or "")
+            try:
+                outcome = apply_recording_agent_edit(current, operation, record=True)
+                op_results.append({
+                    "index": index,
+                    "op": kind,
+                    "status": str(outcome.get("status") or "applied"),
+                    "target": op_target(operation),
+                    **({"reason": str(outcome["reason"])} if outcome.get("reason") else {}),
+                    **({"deferred": True} if outcome.get("deferred") else {}),
+                })
+            except (TypeError, ValueError) as exc:
+                op_results.append({
+                    "index": index,
+                    "op": kind,
+                    "status": "skipped",
+                    "target": op_target(operation),
+                    "reason": str(exc),
+                })
+        proposal_gate = ((current.meta or {}).get("capability_model") or {}).get("proposal_gate") or {}
+        for index, operation in residual_ops:
+            rolled_back = proposal_gate.get("accepted") is False
+            op_results.append({
+                "index": index,
+                "op": str(operation.get("op") or ""),
+                "status": "rolled_back" if rolled_back else "applied",
+                "target": op_target(operation),
+                **({"reason": ",".join(proposal_gate.get("reasons") or [])} if rolled_back else {}),
+            })
+        op_results.sort(key=lambda item: int(item["index"]))
+
     current = _auto_confirm_ready_capabilities(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
@@ -20208,6 +20292,7 @@ async def apply_recording_agent_submission(
             "generation_mode": "initial" if initial_generation else "optimize",
             "rounds": history,
             "submission_id": str(submission.get("submission_id") or ""),
+            "op_results": op_results,
             "updated_at": now,
         },
     }

@@ -407,11 +407,14 @@ class RecordingPiSession:
             "若返回 has_more=true，必须继续用 next_seq 作为 since_seq 分页读取，直到 has_more=false。"
             f"{goal_instruction}"
             "基于操作与请求的时间、事务和值证据，提交 set_request_role、set_param_source、"
-            "propose_dependency、add_pitfall 等必要增量；依赖只能先提案，禁止标 verified。"
+            "set_param_required、rename_field、propose_dependency、add_pitfall 等必要增量；"
+            "步骤尚未物化时字段操作可把 request_id 填入 step_id；依赖只能先提案，禁止标 verified。"
             "必须调用 submit_recording_plan，并把上述操作放入 plan.ops；实时阶段不需要读取验证报告。"
             "参数来源只能归为 user_input/session_header/page_context/chained：user_input 必须有目标或"
             " fill/select 等可编辑控件证据；未被操作人修改的 pageNo/pageSize/current/limit/offset"
             " 等分页值归 page_context；鉴权/会话头归 session_header；上游响应强值复用归 chained。"
+            "逐字段用 set_param_required 提交有证据的必填性，用 rename_field 提交有证据的业务名称。"
+            "提交后检查 op_results，skipped/rolled_back 均表示未落地，必须按 reason 修正。"
             + ("这是 finalize 边界，必须把可落地结论写入当前 FlowSpec。" if finalizing else "一次只问一个真正无法自答的问题。"),
             timeout_s=None,
         )
@@ -512,6 +515,17 @@ class RecordingPiSession:
 
         async with self._state_lock:
             current = self.current_flow_spec()
+            if self._live_recorder is not None:
+                captured = getattr(self._live_recorder, "captured_all_requests", None)
+                if callable(captured):
+                    current.meta = {
+                        **(current.meta or {}),
+                        "live_request_ids": [
+                            str(item.get("request_id") or "")
+                            for item in captured()
+                            if isinstance(item, dict) and item.get("request_id")
+                        ][-500:],
+                    }
             actual_version = int((current.meta or {}).get("current_version") or 0)
             if int(base_flow_version) != actual_version:
                 raise RecordingPiError(

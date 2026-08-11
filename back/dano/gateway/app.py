@@ -271,7 +271,8 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
         "capabilities,capability_relations,unresolved_items},ops:[]}. Live set_goal, set_request_role, "
-        "set_param_source, propose_dependency, and add_pitfall operations must be submitted in plan.ops. "
+        "set_param_source, set_param_required, rename_field, propose_dependency, and add_pitfall operations must be submitted in plan.ops. "
+        "Field operations may use request_id as step_id before materialization and must inspect op_results. "
         "Never submit flow_spec or plan.flow_spec."
         " Never use the historical title,steps,fields,dependencies,enums planner keys."
         " After reading state, call submit_recording_plan immediately with no explanatory text. "

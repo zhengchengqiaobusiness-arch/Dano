@@ -486,6 +486,10 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
 
 def test_pi_plan_applies_live_param_source_operation(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-live-op")
+    session.spec.steps[0].source_meta = {"request_id": "req-submit"}
+    session.spec.request_facts.requests = [RequestFact(
+        request_id="req-submit", request_index=1, method="POST", path="/api/submit",
+    )]
 
     result = asyncio.run(submit_recording_plan("run-live-op", {
         "recording_id": "rec-live-op",
@@ -501,7 +505,7 @@ def test_pi_plan_applies_live_param_source_operation(monkeypatch):
             },
             "ops": [{
                 "op": "set_param_source",
-                "step_id": "submit",
+                "step_id": "req-submit",
                 "path": "title",
                 "source_kind": "page_context",
                 "reason": "该值由当前页面上下文提供",
@@ -514,6 +518,47 @@ def test_pi_plan_applies_live_param_source_operation(monkeypatch):
     param = next(item for item in session.spec.steps[0].params if item.path == "title")
     assert param.source_kind == "page_context"
     assert param.exposed_to_user is False
+    assert result["op_results"] == [{
+        "index": 0,
+        "op": "set_param_source",
+        "status": "applied",
+        "target": "req-submit:title",
+    }]
+
+
+def test_pi_plan_reports_skipped_field_operation_instead_of_silent_success(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-op-result")
+    session.spec.steps[0].source_meta = {"request_id": "req-submit"}
+    session.spec.request_facts.requests = [RequestFact(
+        request_id="req-submit", request_index=1, method="POST", path="/api/submit",
+    )]
+
+    result = asyncio.run(submit_recording_plan("run-op-result", {
+        "base_flow_version": 1,
+        "plan": {
+            "semantic_plan": {},
+            "ops": [
+                {
+                    "op": "set_param_source",
+                    "step_id": "req-missing",
+                    "path": "title",
+                    "source_kind": "page_context",
+                    "reason": "错误的请求标识",
+                },
+                {
+                    "op": "set_param_source",
+                    "step_id": "req-submit",
+                    "path": "title",
+                    "source_kind": "page_context",
+                    "reason": "页面上下文自动提供",
+                },
+            ],
+        },
+    }))
+
+    assert [item["status"] for item in result["op_results"]] == ["skipped", "applied"]
+    assert "target not found" in result["op_results"][0]["reason"]
+    assert session.spec.steps[0].params[0].source_kind == "page_context"
 
 
 

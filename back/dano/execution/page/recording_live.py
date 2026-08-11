@@ -14,6 +14,8 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
     "set_goal",
     "set_request_role",
     "set_param_source",
+    "set_param_required",
+    "rename_field",
     "propose_dependency",
     "add_pitfall",
     "confirm_dependency",
@@ -199,6 +201,43 @@ def _request_step(spec, request_id: str):  # noqa: ANN001, ANN202
     return next((step for step in spec.steps if step.step_id == materialized), None)
 
 
+def _known_request_id(spec, request_id: str) -> bool:  # noqa: ANN001
+    return bool(
+        request_id
+        and (
+            any(fact.request_id == request_id for fact in spec.request_facts.requests)
+            or request_id in (spec.request_facts.usage or {})
+            or request_id in set((spec.meta or {}).get("live_request_ids") or [])
+        )
+    )
+
+
+def _field_target(spec, step_or_request_id: str, path: str):  # noqa: ANN001, ANN202
+    step = next(
+        (item for item in spec.steps if item.step_id == step_or_request_id),
+        None,
+    ) or _request_step(spec, step_or_request_id)
+    if step is None:
+        if _known_request_id(spec, step_or_request_id):
+            return None, None
+        raise ValueError(f"field target not found: {step_or_request_id}:{path}")
+    param = next((item for item in step.params if item.path == path), None)
+    if param is None:
+        raise ValueError(f"field target not found: {step_or_request_id}:{path}")
+    return step, param
+
+
+def _evidence_refs(edit: dict) -> list[str]:
+    raw = edit.get("evidence_refs") or edit.get("evidence") or []
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    return [
+        str(item.get("ref") or item.get("source") or "") if isinstance(item, dict) else str(item)
+        for item in raw
+        if item not in (None, "", {})
+    ]
+
+
 def _append_insight(spec, *, kind: str, text: str, refs: list[str]) -> None:  # noqa: ANN001
     _append_meta_list(spec, "agent_insights", {"kind": kind, "text": text, "refs": refs})
 
@@ -227,7 +266,7 @@ def _step_request_id(spec, step_id: str) -> str:  # noqa: ANN001
     return str(((step.source_meta if step else {}) or {}).get("request_id") or "")
 
 
-def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None:  # noqa: ANN001
+def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict:  # noqa: ANN001
     """Apply one live-only op; unresolved early endpoints remain replayable at finalize."""
     from dano.execution.page.flow_spec import FlowLink, RecordedGoal, RequestAnalysis
 
@@ -241,7 +280,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         isinstance(existing, dict) and existing == stored
         for existing in (spec.meta or {}).get("recording_agent_ops") or []
     ):
-        return
+        return {"status": "skipped", "reason": "duplicate operation"}
+
+    result = {"status": "applied"}
 
     if kind == "set_goal":
         raw_goal = dict(edit.get("goal") or {})
@@ -317,8 +358,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
         reason = str(edit.get("reason") or "").strip()
         if not step_id or not path or source_kind not in _PARAM_SOURCE_KINDS or not reason:
             raise ValueError("set_param_source requires step_id, path, four-class source_kind and reason")
-        step = next((item for item in spec.steps if item.step_id == step_id), None)
-        param = next((item for item in (step.params if step else []) if item.path == path), None)
+        _step, param = _field_target(spec, step_id, path)
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_source target is locked: {step_id}:{path}")
@@ -344,7 +384,82 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
                     "reason": reason,
                 },
             ]
+        else:
+            result["deferred"] = True
+            result["reason"] = "request is captured but its canonical step is not materialized yet"
         _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
+
+    elif kind == "set_param_required":
+        step_id = str(edit.get("step_id") or "")
+        path = str(edit.get("path") or edit.get("wire_path") or "")
+        required = edit.get("required")
+        reason = str(edit.get("reason") or "").strip()
+        evidence_refs = _evidence_refs(edit)
+        if not step_id or not path or not isinstance(required, bool) or not reason or not evidence_refs:
+            raise ValueError(
+                "set_param_required requires step_id, path, boolean required, reason and evidence_refs"
+            )
+        _step, param = _field_target(spec, step_id, path)
+        if param is not None:
+            if param.locked:
+                raise ValueError(f"set_param_required target is locked: {step_id}:{path}")
+            param.required = required
+            param.evidence = [
+                *list(param.evidence or []),
+                {
+                    "actor": "agent",
+                    "kind": "param_required",
+                    "required": required,
+                    "reason": reason,
+                    "evidence_refs": evidence_refs,
+                },
+            ]
+        else:
+            result["deferred"] = True
+            result["reason"] = "request is captured but its canonical step is not materialized yet"
+        _append_insight(
+            spec,
+            kind="param_required",
+            text=f"{step_id}:{path} 必填性为 {required}：{reason}",
+            refs=[step_id, path, *evidence_refs],
+        )
+
+    elif kind == "rename_field":
+        step_id = str(edit.get("step_id") or "")
+        path = str(edit.get("path") or edit.get("wire_path") or "")
+        label = str(edit.get("label") or edit.get("public_name") or edit.get("name") or "").strip()
+        reason = str(edit.get("reason") or "").strip()
+        evidence_refs = _evidence_refs(edit)
+        if not step_id or not path or not label or not reason or not evidence_refs:
+            raise ValueError(
+                "rename_field requires step_id, path, label, reason and evidence_refs"
+            )
+        _step, param = _field_target(spec, step_id, path)
+        if param is not None:
+            if param.locked:
+                raise ValueError(f"rename_field target is locked: {step_id}:{path}")
+            param.key = label
+            param.label = label
+            param.name_source = "agent"
+            param.evidence = [
+                *list(param.evidence or []),
+                {
+                    "actor": "agent",
+                    "kind": "field_name",
+                    "label": label,
+                    "reason": reason,
+                    "evidence_refs": evidence_refs,
+                },
+            ]
+        else:
+            result["deferred"] = True
+            result["reason"] = "request is captured but its canonical step is not materialized yet"
+        _append_insight(
+            spec,
+            kind="field_name",
+            text=f"{step_id}:{path} 业务名称为 {label}：{reason}",
+            refs=[step_id, path, *evidence_refs],
+        )
 
     elif kind == "propose_dependency":
         requested_link_id = str(edit.get("link_id") or "")
@@ -538,6 +653,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> None
 
     if record:
         _record_agent_op(spec, stored)
+    return result
 
 
 def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
@@ -552,7 +668,9 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         if not isinstance(operation, dict):
             continue
         try:
-            apply_recording_agent_edit(merged, operation, record=True)
+            result = apply_recording_agent_edit(merged, operation, record=True)
+            if result.get("deferred"):
+                raise ValueError("field operation remained unresolved after final materialization")
         except (TypeError, ValueError) as exc:
             unresolved.append({"op": str(operation.get("op") or ""), "reason": str(exc)})
     if unresolved:

@@ -221,6 +221,9 @@ function verifyPlanToolCompatibility() {
   assert(
     planTool?.description?.includes("plan.ops")
       && planTool.description.includes("set_param_source")
+      && planTool.description.includes("set_param_required")
+      && planTool.description.includes("rename_field")
+      && planTool.description.includes("op_results")
       && planTool.description.includes("propose_dependency")
       && planTool.description.includes('"evidence":[{"source":"goal_text"'),
     "plan tool does not expose the live semantic operation channel to Pi",
@@ -238,6 +241,14 @@ function verifyPlanToolCompatibility() {
   assert(
     operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 4,
     "set_param_source schema must expose the four source categories",
+  );
+  assert(
+    operationSchema("set_param_required")?.required?.includes("evidence_refs"),
+    "set_param_required schema must require evidence_refs",
+  );
+  assert(
+    operationSchema("rename_field")?.required?.includes("evidence_refs"),
+    "rename_field schema must require evidence_refs",
   );
   assert(
     operationSchema("propose_dependency")?.required?.includes("evidence"),
