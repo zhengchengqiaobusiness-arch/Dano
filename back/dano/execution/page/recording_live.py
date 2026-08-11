@@ -6,6 +6,12 @@ import json
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from dano.execution.page.recording_field_identity import (
+    FieldRef,
+    FieldReferenceDeferred,
+    resolve_field_ref,
+    stored_container_path,
+)
 from dano.execution.page.value_tracing import discover_value_links
 from dano.infra.token_store import mask_headers
 
@@ -216,18 +222,17 @@ def _known_request_id(spec, request_id: str) -> bool:  # noqa: ANN001
 
 
 def _field_target(spec, step_or_request_id: str, path: str):  # noqa: ANN001, ANN202
-    step = next(
-        (item for item in spec.steps if item.step_id == step_or_request_id),
-        None,
-    ) or _request_step(spec, step_or_request_id)
-    if step is None:
-        if _known_request_id(spec, step_or_request_id):
-            return None, None
-        raise ValueError(f"field target not found: {step_or_request_id}:{path}")
-    param = next((item for item in step.params if item.path == path), None)
-    if param is None:
-        raise ValueError(f"field target not found: {step_or_request_id}:{path}")
-    return step, param
+    is_step_id = any(item.step_id == step_or_request_id for item in spec.steps)
+    ref = FieldRef(
+        step_id=step_or_request_id if is_step_id else "",
+        request_id="" if is_step_id else step_or_request_id,
+        wire_path=path,
+    )
+    try:
+        resolved = resolve_field_ref(spec, ref)
+    except FieldReferenceDeferred:
+        return None, None
+    return resolved.step, resolved.param
 
 
 def _evidence_refs(edit: dict) -> list[str]:
@@ -951,6 +956,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         source_step = _request_step(spec, source_request_id)
         target_step = next((step for step in spec.steps if step.step_id == target_step_id), None) or _request_step(spec, target_request_id)
         if link_kind == "structure" and target_step is not None:
+            target_path = stored_container_path(target_step, target_path)
             container = target_path.removesuffix(".*").removesuffix("[*]")
             if not any(
                 str(item.path or "").startswith(container)

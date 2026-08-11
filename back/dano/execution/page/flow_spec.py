@@ -9309,6 +9309,7 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
     from dano.execution.page.recording_live import compact_model_payload
+    from dano.execution.page.recording_field_identity import canonical_wire_path
 
     request_facts = _request_fact_items(spec)
     return {
@@ -9336,6 +9337,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "params": [
                     {
                         "path": param.path,
+                        "wire_path": canonical_wire_path(step, param.path),
                         "key": param.key,
                         "label": param.label,
                         "business_type": param.type,
