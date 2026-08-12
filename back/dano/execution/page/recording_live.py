@@ -37,6 +37,22 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
 _PARAM_SOURCE_KINDS = frozenset({
     "user_input", "constant", "session_header", "page_context", "chained", "computed",
 })
+_CANONICAL_REQUEST_ROLES = frozenset({
+    "business_get", "business_write", "submit_anchor", "read_context", "read_option",
+    "auth", "noise", "telemetry", "unsupported_upload", "unsupported_graphql",
+})
+_REQUEST_ROLE_FAMILIES = (
+    ("telemetry", frozenset({"telemetry", "metric", "metrics", "trace", "analytics", "beacon"})),
+    ("noise", frozenset({"noise", "static", "asset", "heartbeat", "ping"})),
+    ("auth", frozenset({"auth", "authentication", "authorization", "token", "login"})),
+    ("read_option", frozenset({"option", "options", "dictionary", "dict", "enum", "candidate", "candidates"})),
+    ("read_context", frozenset({"preflight", "context", "navigation", "page", "load", "entry", "fact", "check"})),
+    ("business_write", frozenset({
+        "write", "submit", "mutation", "create", "update", "delete", "save",
+        "approve", "reject", "withdraw", "commit",
+    })),
+    ("business_get", frozenset({"get", "read", "query", "search", "list", "status", "inspect", "preview"})),
+)
 _SECRET_QUERY_HINTS = ("authorization", "cookie", "token", "secret", "password", "session", "credential")
 _INLINE_SECRET_RE = re.compile(
     r"(?i)\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
@@ -224,6 +240,30 @@ def _request_step(spec, request_id: str):  # noqa: ANN001, ANN202
     usage = (spec.request_facts.usage or {}).get(request_id)
     materialized = str(usage.materialized_step_id or "") if usage is not None else ""
     return next((step for step in spec.steps if step.step_id == materialized), None)
+
+
+def _canonical_request_role(spec, request_id: str, role: str) -> str:  # noqa: ANN001
+    """Translate model vocabulary to the finite role contract used by materialization."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(role or "").strip().casefold()).strip("_")
+    if normalized in _CANONICAL_REQUEST_ROLES:
+        return normalized
+    tokens = frozenset(normalized.split("_"))
+    for canonical, family in _REQUEST_ROLE_FAMILIES:
+        if tokens & family:
+            return canonical
+    if normalized == "execute":
+        fact = next(
+            (item for item in spec.request_facts.requests if item.request_id == request_id),
+            None,
+        )
+        method = str(getattr(fact, "method", "") or "").upper()
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            return "business_write"
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            return "business_get"
+    raise ValueError(
+        f"unsupported request role {role!r}; use one of {sorted(_CANONICAL_REQUEST_ROLES)}"
+    )
 
 
 def _known_request_id(spec, request_id: str) -> bool:  # noqa: ANN001
@@ -833,6 +873,10 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         raise ValueError(f"unsupported live recording op: {kind}")
     if str(edit.get("actor") or "agent") not in {"agent", "planner", "repair"}:
         raise ValueError("live recording ops must be agent-authored")
+    edit = deepcopy(edit)
+    if kind == "set_request_role":
+        request_id = str(edit.get("request_id") or "")
+        edit["role"] = _canonical_request_role(spec, request_id, str(edit.get("role") or ""))
     stored = _canonical_recorded_agent_op(spec, edit)
     if record and any(
         isinstance(existing, dict) and existing == stored
@@ -1505,6 +1549,71 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 "requested_target": deepcopy(operation.get("field_ref") or {}),
                 "reason": str(exc),
             })
+    live_capability_model = live_meta.get("capability_model")
+    live_semantic_plan = (
+        live_capability_model.get("semantic_plan")
+        if isinstance(live_capability_model, dict) else None
+    )
+    if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
+        materialized_plan = deepcopy(live_semantic_plan)
+        step_ids = {step.step_id for step in merged.steps}
+        step_id_by_request_id = {
+            str((step.source_meta or {}).get("request_id") or ""): step.step_id
+            for step in merged.steps
+            if str((step.source_meta or {}).get("request_id") or "")
+        }
+        for request_id, usage in (merged.request_facts.usage or {}).items():
+            step_id = str(usage.materialized_step_id or "")
+            if step_id:
+                step_id_by_request_id.setdefault(str(request_id), step_id)
+
+        unresolved_anchors: list[str] = []
+        for capability in materialized_plan.get("capabilities") or []:
+            if not isinstance(capability, dict):
+                continue
+            anchor = str(capability.get("anchor_step_id") or "")
+            resolved_anchor = anchor if anchor in step_ids else step_id_by_request_id.get(anchor, "")
+            if not resolved_anchor:
+                unresolved_anchors.append(anchor or "<missing>")
+                continue
+            capability["anchor_step_id"] = resolved_anchor
+            for request_ref in capability.get("request_refs") or []:
+                if not isinstance(request_ref, dict):
+                    continue
+                identifier = str(request_ref.get("step_id") or "")
+                resolved = identifier if identifier in step_ids else step_id_by_request_id.get(identifier, "")
+                if resolved:
+                    request_ref["step_id"] = resolved
+
+        if unresolved_anchors:
+            unresolved.append({
+                "op": "compile_capabilities",
+                "status": "rejected",
+                "requested_target": {"anchor_step_ids": unresolved_anchors},
+                "reason": "live capability anchors were not materialized at finalize",
+            })
+        else:
+            from dano.execution.page.capability_compiler import compile_capabilities
+
+            candidate = merged.model_copy(deep=True)
+            candidate.meta = {
+                **(candidate.meta or {}),
+                "capability_model": {
+                    **deepcopy(live_capability_model),
+                    "semantic_plan": materialized_plan,
+                },
+            }
+            compilation = compile_capabilities(candidate, materialized_plan)
+            if compilation.errors:
+                unresolved.append({
+                    "op": "compile_capabilities",
+                    "status": "rejected",
+                    "requested_target": {},
+                    "reason": "; ".join(compilation.errors),
+                })
+            else:
+                merged = compilation.spec
+
     if unresolved:
         merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}
     return merged
@@ -1517,7 +1626,14 @@ def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
         if not isinstance(operation, dict) or operation.get("op") != "set_request_role":
             continue
         request_id = str(operation.get("request_id") or "")
-        role = str(operation.get("role") or "")
+        try:
+            role = _canonical_request_role(
+                live_spec,
+                request_id,
+                str(operation.get("role") or ""),
+            )
+        except ValueError:
+            continue
         reason = str(operation.get("reason") or "")
         if not request_id or not role or not reason:
             continue

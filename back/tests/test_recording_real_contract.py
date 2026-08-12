@@ -16,7 +16,11 @@ from dano.execution.page.flow_spec import (
     to_flow_spec,
 )
 from dano.execution.page.recording_field_identity import FieldRef, FieldReferenceError, resolve_field_ref
-from dano.execution.page.recording_live import dependency_link_signature
+from dano.execution.page.recording_live import (
+    dependency_link_signature,
+    live_request_role_overrides,
+    merge_live_agent_state,
+)
 from dano.execution.page.request_capture import execute_api_workflow
 from dano.execution.page.verification_log import find_verification, record_verification
 from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
@@ -211,6 +215,122 @@ def test_agent_role_override_is_applied_before_step_materialization():
     assert step.semantic_role == "query"
     assert spec.request_facts.analysis["req_76"].role == "business_get"
     assert spec.request_facts.analysis["req_76"].evidence["actor"] == "agent"
+
+
+def test_finalize_recompiles_live_capability_plan_from_request_ids():
+    """A completed live plan must survive the request-id to step-id boundary."""
+    live = FlowSpec(meta={
+        "recording_agent_ops": [
+            {
+                "op": "set_request_role",
+                "request_id": "req_76",
+                "role": "query_list",
+                "reason": "筛选动作触发业务列表查询",
+                "evidence_refs": ["req_76"],
+                "actor": "agent",
+            },
+            {
+                "op": "set_request_role",
+                "request_id": "req_96",
+                "role": "preflight",
+                "reason": "写请求前读取流程定义",
+                "evidence_refs": ["req_96"],
+                "actor": "agent",
+            },
+            {
+                "op": "set_request_role",
+                "request_id": "req_98",
+                "role": "preflight",
+                "reason": "写请求前读取审批结构",
+                "evidence_refs": ["req_98"],
+                "actor": "agent",
+            },
+            {
+                "op": "set_request_role",
+                "request_id": "req_116",
+                "role": "business_write",
+                "reason": "用户提交动作触发业务写请求",
+                "evidence_refs": ["req_116"],
+                "actor": "agent",
+            },
+        ],
+        "capability_model": {
+            "semantic_plan": {
+                "business_understanding": {"intent": "查询并提交业务记录"},
+                "capabilities": [
+                    {
+                        "name": "query_records",
+                        "title": "查询业务记录",
+                        "kind": "query",
+                        "anchor_step_id": "req_76",
+                        "request_refs": [{"step_id": "req_76", "usage": "execute"}],
+                    },
+                    {
+                        "name": "submit_record",
+                        "title": "提交业务记录",
+                        "kind": "submit",
+                        "anchor_step_id": "req_116",
+                        "request_refs": [{"step_id": "req_116", "usage": "execute"}],
+                    },
+                ],
+                "unresolved_items": [],
+            },
+        },
+    })
+    requests = _load("request_facts.json")["requests"]
+    finalized = to_flow_spec(
+        requests,
+        recording_mode="real_submit",
+        request_role_overrides=live_request_role_overrides(live),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    materialized = {
+        str((step.source_meta or {}).get("request_id") or "")
+        for step in merged.steps
+    }
+    assert {"req_76", "req_96", "req_98", "req_116"} <= materialized
+    assert [cap.name for cap in merged.capabilities] == [
+        "query_records", "submit_record",
+    ]
+    assert {
+        cap.name: next(
+            ref.request_id for ref in cap.request_refs if ref.usage == "execute"
+        )
+        for cap in merged.capabilities
+    } == {
+        "query_records": "req_76",
+        "submit_record": "req_116",
+    }
+
+
+def test_finalize_keeps_existing_capabilities_when_live_plan_anchor_is_unresolved():
+    finalized = _captured_spec()
+    original_names = [cap.name for cap in finalized.capabilities]
+    live = FlowSpec(meta={
+        "capability_model": {
+            "semantic_plan": {
+                "capabilities": [{
+                    "name": "missing_record",
+                    "title": "缺失请求",
+                    "kind": "query",
+                    "anchor_step_id": "req-not-captured",
+                    "request_refs": [{"step_id": "req-not-captured", "usage": "execute"}],
+                }],
+            },
+        },
+    })
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [cap.name for cap in merged.capabilities] == original_names
+    assert merged.meta["unresolved_live_agent_ops"] == [{
+        "op": "compile_capabilities",
+        "status": "rejected",
+        "requested_target": {"anchor_step_ids": ["req-not-captured"]},
+        "reason": "live capability anchors were not materialized at finalize",
+    }]
 
 
 def test_real_trace_compiles_only_verified_graph_and_releases_both_capabilities():

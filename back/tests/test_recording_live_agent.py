@@ -21,7 +21,11 @@ from dano.execution.page.flow_spec import (
     recording_agent_state,
     recording_agent_validation,
 )
-from dano.execution.page.recording_live import merge_live_agent_state, recording_delta
+from dano.execution.page.recording_live import (
+    live_request_role_overrides,
+    merge_live_agent_state,
+    recording_delta,
+)
 from dano.onboarding.recording_pi import RecordingPiSession
 
 
@@ -1078,6 +1082,55 @@ def test_finalize_merge_replays_early_request_id_ops_on_canonical_steps():
     assert len(merged.links) == 1
     assert merged.links[0].source_step_id == "detail"
     assert merged.links[0].target_step_id == "submit"
+
+
+@pytest.mark.parametrize(("submitted", "canonical"), [
+    ("query_list", "business_get"),
+    ("query", "business_get"),
+    ("business_filter_query", "business_get"),
+    ("business_read", "business_get"),
+    ("preflight", "read_context"),
+    ("option_source", "read_option"),
+    ("submit", "business_write"),
+    ("business_mutation", "business_write"),
+])
+def test_live_request_role_aliases_are_canonical_before_materialization(
+    submitted: str,
+    canonical: str,
+):
+    live = FlowSpec(
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-detail", method="GET", path="/items/detail"),
+        ]),
+    )
+
+    live = apply_flow_edits(live, [{
+        "op": "set_request_role",
+        "request_id": "req-detail",
+        "role": submitted,
+        "reason": "录制事实支持该请求用途",
+        "evidence_refs": ["req-detail"],
+    }])
+
+    assert live.request_facts.analysis["req-detail"].role == canonical
+    assert live_request_role_overrides(live)["req-detail"]["role"] == canonical
+
+
+def test_unknown_live_request_role_is_rejected_instead_of_silently_disappearing():
+    live = FlowSpec(
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-detail", method="GET", path="/items/detail"),
+        ]),
+    )
+
+    with pytest.raises(ValueError, match="unsupported request role"):
+        apply_flow_edits(live, [{
+            "op": "set_request_role",
+            "request_id": "req-detail",
+            "role": "invented_role",
+            "reason": "模型临时创造的角色",
+            "evidence_refs": ["req-detail"],
+        }])
 
 
 def test_finalize_merge_materializes_deferred_request_id_field_semantics():

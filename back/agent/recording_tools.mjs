@@ -418,7 +418,10 @@ const LiveRecordingOperation = Type.Union([
   Type.Object({
     op: Type.Literal("set_request_role"),
     request_id: Type.String({ minLength: 1 }),
-    role: Type.String({ minLength: 1 }),
+    role: Type.String({
+      minLength: 1,
+      description: "请求用途；优先使用 business_get、business_write、read_context、read_option、auth、noise 或 telemetry",
+    }),
     reason: Type.String({ minLength: 1 }),
     evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
     confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
