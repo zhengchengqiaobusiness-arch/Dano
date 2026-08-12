@@ -721,6 +721,87 @@ def test_enum_binding_requires_exact_recorded_label_value_mapping():
     assert param.type == "enum"
     assert param.source_kind == "page_enum"
     assert param.enum_value_map == {"病假": 1, "事假": 2, "婚假": 3}
+
+
+def test_enum_binding_accepts_complete_option_alias_when_control_binding_is_unbound():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.type", key="type", value="3", wire_type="string",
+    )]
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-query-type",
+        "label": "请假类型",
+        "field_aliases": [],
+        "control_kind": "select",
+        "binding_status": "unbound",
+        "page_context": {"path": "/leave"},
+    })
+    spec.request_facts.option_sources.append({
+        "kind": "page_enum_options",
+        "options": {
+            "请假类型": {
+                "field_key": "请假类型",
+                "field_aliases": ["type"],
+                "dict_type": "oa_duty_leave_type",
+                "control_kind": "select",
+                "mapping_complete": True,
+                "page_context": {"path": "/leave/create"},
+                "options": [
+                    {"label": "病假", "value": "1"},
+                    {"label": "事假", "value": "2"},
+                    {"label": "婚假", "value": "3"},
+                ],
+            },
+        },
+    })
+
+    with pytest.raises(ValueError, match="no matching select field_evidence"):
+        apply_flow_edits(spec, [{
+            "op": "set_param_enum",
+            "step_id": "detail",
+            "path": "query.type",
+            "dictionary_source": "unrelated_type",
+            "options": [
+                {"label": "病假", "value": 1},
+                {"label": "事假", "value": 2},
+                {"label": "婚假", "value": 3},
+            ],
+            "reason": "错误字典不能借用同名控件",
+            "evidence_refs": ["evt-query-type"],
+        }])
+
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_enum",
+        "step_id": "detail",
+        "path": "query.type",
+        "dictionary_source": "oa_duty_leave_type",
+        "options": [
+            {"label": "病假", "value": 1},
+            {"label": "事假", "value": 2},
+            {"label": "婚假", "value": 3},
+        ],
+        "reason": "同一字典在筛选页和创建页复用",
+        "evidence_refs": ["evt-query-type"],
+    }])
+
+    param = updated.steps[0].params[0]
+    assert param.type == "enum"
+    assert param.source["dictionary_source"] == "oa_duty_leave_type"
+    assert param.enum_value_map == {"病假": "1", "事假": "2", "婚假": "3"}
+
+    from dano.execution.page.flow_spec import validate_flow_spec
+
+    updated.capabilities = [FlowCapability(
+        name="query_records",
+        kind="query",
+        nodes=[{"id": "query", "type": "call", "step_id": "detail"}],
+        confirmed=True,
+    )]
+    report_text = json.dumps(validate_flow_spec(updated), ensure_ascii=False)
+    assert "capability_internal_field_exposed" not in report_text
+
+
+def test_field_grounding_still_rejects_unrecorded_refs():
     with pytest.raises(ValueError, match="evidence_refs must cite recorded facts"):
         apply_flow_edits(_flow(), [{
             "op": "rename_field",

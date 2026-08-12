@@ -515,12 +515,29 @@ def _require_label_grounding(spec, step, param, label: str) -> None:  # noqa: AN
         )
 
 
-def _enum_pair(option: object) -> tuple[str, str] | None:
+def _enum_wire_value(value: object, wire_type: str) -> object:
+    if wire_type == "string":
+        return str(value) if value is not None else value
+    if wire_type in {"number", "integer"} and isinstance(value, str):
+        try:
+            number = float(value)
+            return int(number) if number.is_integer() else number
+        except ValueError:
+            return value
+    return value
+
+
+def _enum_pair(option: object, wire_type: str = "") -> tuple[str, str] | None:
     if not isinstance(option, dict) or "label" not in option or "value" not in option:
         return None
     return (
         str(option.get("label") or "").strip(),
-        json.dumps(option.get("value"), ensure_ascii=False, sort_keys=True, default=str),
+        json.dumps(
+            _enum_wire_value(option.get("value"), wire_type),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ),
     )
 
 
@@ -560,11 +577,19 @@ def _structure_target_keys(step, target_path: str) -> list[str]:  # noqa: ANN001
     return keys
 
 
-def _recorded_enum_contract(spec, step, param) -> dict | None:  # noqa: ANN001
+def _recorded_enum_contract(  # noqa: ANN001
+    spec, step, param, dictionary_source: str = "",
+) -> dict | None:
     from dano.execution.page.flow_spec import _page_enum_options_from_request_facts
 
     candidates = _field_evidence_candidates(spec, step, param)
-    control_aliases = {
+    param_aliases = {
+        _normalized_field_alias(param.path),
+        _normalized_field_alias(param.key),
+        _normalized_field_alias(param.label),
+        _normalized_field_alias(str(param.path or "").split(".")[-1]),
+    }
+    control_aliases = param_aliases | {
         _normalized_field_alias(value)
         for item in candidates
         for value in (
@@ -573,13 +598,24 @@ def _recorded_enum_contract(spec, step, param) -> dict | None:  # noqa: ANN001
         )
         if _normalized_field_alias(value)
     }
-    if not candidates or not any(
+    bound_select = any(
         str(item.get("control_kind") or "").lower() in {"select", "radio", "checkbox", "cascader"}
         for item in candidates
-    ):
-        return None
+    )
+    all_evidence = [
+        item for item in (getattr(spec.request_facts, "field_evidence", []) or [])
+        if isinstance(item, dict)
+    ]
     for name, raw in _page_enum_options_from_request_facts(spec.request_facts).items():
-        if not isinstance(raw, dict):
+        if (
+            not isinstance(raw, dict)
+            or raw.get("mapping_complete") is not True
+            or not isinstance(raw.get("options"), list)
+            or not raw.get("options")
+        ):
+            continue
+        recorded_source = str(raw.get("dict_type") or raw.get("dictionary_source") or "")
+        if dictionary_source and recorded_source and dictionary_source != recorded_source:
             continue
         aliases = {
             _normalized_field_alias(name),
@@ -590,7 +626,26 @@ def _recorded_enum_contract(spec, step, param) -> dict | None:  # noqa: ANN001
             ),
         }
         aliases.discard("")
-        if aliases & control_aliases:
+        if not aliases & control_aliases:
+            continue
+        option_labels = {
+            _normalized_field_alias(name),
+            _normalized_field_alias(raw.get("field_key")),
+        }
+        label_select = any(
+            str(item.get("control_kind") or "").lower()
+            in {"select", "radio", "checkbox", "cascader"}
+            and bool(option_labels & {
+                _normalized_field_alias(item.get("label")),
+                _normalized_field_alias(item.get("field")),
+            })
+            for item in all_evidence
+        )
+        if bound_select or (
+            label_select
+            and bool(dictionary_source)
+            and dictionary_source == recorded_source
+        ):
             return raw
     return None
 
@@ -1067,7 +1122,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_enum target is locked: {step_id}:{path}")
-            recorded = _recorded_enum_contract(spec, step, param)
+            recorded = _recorded_enum_contract(
+                spec, step, param, dictionary_source=dictionary_source,
+            )
             if recorded is None:
                 raise ValueError(
                     f"enum conclusion for {param.path} has no matching select field_evidence and dictionary source"
@@ -1077,12 +1134,23 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 raise ValueError(
                     f"dictionary_source {dictionary_source!r} contradicts recorded dictionary {recorded_source!r}"
                 )
-            submitted_pairs = {_enum_pair(option) for option in options}
-            recorded_pairs = {_enum_pair(option) for option in (recorded.get("options") or [])}
+            submitted_pairs = {_enum_pair(option, param.wire_type) for option in options}
+            recorded_pairs = {
+                _enum_pair(option, param.wire_type)
+                for option in (recorded.get("options") or [])
+            }
             if None in submitted_pairs or None in recorded_pairs or submitted_pairs != recorded_pairs:
                 raise ValueError(
                     f"enum options for {param.path} contradicts recorded dictionary label/value mapping"
                 )
+            grounded_options = [
+                {
+                    **deepcopy(option),
+                    "label": str(option.get("label") or "").strip(),
+                    "value": _enum_wire_value(option.get("value"), param.wire_type),
+                }
+                for option in (recorded.get("options") or [])
+            ]
             param.type = "enum"
             param.category = "user_param"
             param.source_kind = "page_enum"
@@ -1096,11 +1164,11 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             }
             param.exposed_to_user = True
             param.editable = True
-            param.enum_options = deepcopy(options)
+            param.enum_options = grounded_options
             param.enum_value_map = {
                 pair[0]: option.get("value")
-                for option in options
-                if (pair := _enum_pair(option)) is not None
+                for option in grounded_options
+                if (pair := _enum_pair(option, param.wire_type)) is not None
             }
             param.evidence = [
                 *list(param.evidence or []),
