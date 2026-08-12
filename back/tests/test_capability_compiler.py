@@ -300,3 +300,21 @@ def test_compiler_separates_recording_business_name_from_ability_call_key() -> N
     assert compiled_param.key == "startTime"
     assert public.key == "startTime"
     assert public.display_name == "开始时间"
+
+
+def test_successful_strict_compilation_refreshes_stale_generation_state() -> None:
+    spec = _verified_graph()
+    spec.meta["capability_generation"] = {
+        "protocol": "dano.capability-generation.v2",
+        "initial_completed": False,
+        "status": "incomplete_agent_plan",
+    }
+
+    compiled = compile_capabilities(spec, {
+        "business_understanding": {"summary": "查询并提交请假"},
+        **_semantic_plan(),
+        "unresolved_items": [],
+    }).spec
+
+    assert compiled.meta["capability_generation"]["initial_completed"] is True
+    assert compiled.meta["capability_generation"]["status"] == "ready"

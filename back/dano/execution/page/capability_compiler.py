@@ -14,6 +14,8 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     READ_CAPABILITY_KINDS,
     WRITE_CAPABILITY_KINDS,
+    _semantic_plan_coverage,
+    _stable_json_hash,
     sync_capability_scoped_views,
 )
 
@@ -400,6 +402,32 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         "warnings": list(warnings),
     }
     current.meta = {**(current.meta or {}), "capability_compilation": audit}
+    generation = dict((current.meta or {}).get("capability_generation") or {})
+    if generation:
+        coverage = _semantic_plan_coverage(
+            current,
+            {"semantic_plan": plan},
+        )
+        if coverage.get("complete") and not errors:
+            current.meta = {
+                **(current.meta or {}),
+                "capability_generation": {
+                    **generation,
+                    "initial_completed": True,
+                    "semantic_plan_hash": _stable_json_hash(plan),
+                    "status": "ready",
+                },
+            }
+            model = dict((current.meta or {}).get("capability_model") or {})
+            if model:
+                current.meta["capability_model"] = {
+                    **model,
+                    "status": "ready",
+                    "source": "verified_request_graph",
+                    "semantic_plan": plan,
+                    "semantic_coverage": coverage,
+                    "capability_compilation": audit,
+                }
     return CapabilityCompilation(
         spec=current,
         capabilities=list(current.capabilities),

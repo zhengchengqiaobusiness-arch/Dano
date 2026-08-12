@@ -467,6 +467,16 @@ def test_invalid_model_docs_fall_back_to_complete_deterministic_docs(tmp_path):
     assert (folder / "scripts" / "format_list.py").is_file()
 
 
+def test_skill_package_never_expands_empty_capability_to_all_steps(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    release = skill.api_request["_release_snapshot"]["flow_spec"]
+    release["capabilities"][0]["step_ids"] = []
+    release["capabilities"][0]["nodes"] = []
+
+    with pytest.raises(ValueError, match="does not reference any compiled request step"):
+        render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+
+
 def test_valid_model_docs_cannot_replace_deterministic_operational_rules(tmp_path):
     skill = _recording_skill("https://example.invalid")
     release = skill.api_request["_release_snapshot"]["flow_spec"]

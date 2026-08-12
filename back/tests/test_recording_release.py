@@ -126,3 +126,19 @@ def test_three_true_model_verdicts_cannot_override_machine_failure():
             flow_fingerprint="ignored",
             machine_decision=machine_failure,
         )
+
+
+def test_release_rejects_explicitly_incomplete_capability_generation():
+    spec = _mixed_spec()
+    spec.capabilities = [cap for cap in spec.capabilities if cap.name == "query_items"]
+    spec.meta["capability_generation"] = {
+        "protocol": "dano.capability-generation.v2",
+        "initial_completed": False,
+        "status": "incomplete_agent_plan",
+    }
+
+    decision = evaluate_recording_release(spec)
+
+    assert decision.status == "verification_incomplete"
+    assert decision.callable_spec is None
+    assert any("能力分析尚未完整完成" in reason for reason in decision.blocking_reasons)

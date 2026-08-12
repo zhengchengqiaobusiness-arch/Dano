@@ -152,7 +152,7 @@ def _capabilities(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
         else list(api_request.get("capabilities") or skill.capabilities or [])
     )
     out = [dict(cap) for cap in raw if isinstance(cap, dict)]
-    if out:
+    if out or spec is not None:
         return out
     params = list(api_request.get("params") or [])
     field_types = dict(api_request.get("field_types") or {})
@@ -252,7 +252,9 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             ) if str(value) in by_id
         ]
         if not step_ids:
-            step_ids = list(by_id)
+            raise ValueError(
+                f"capability {name!r} does not reference any compiled request step"
+            )
         cap_steps = [_safe_step(by_id[step_id]) for step_id in step_ids]
         is_write = any(
             str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}
