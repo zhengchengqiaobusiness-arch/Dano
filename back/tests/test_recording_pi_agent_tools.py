@@ -381,6 +381,68 @@ async def test_failed_write_verification_is_not_reexecuted(monkeypatch):
     assert calls == 1
 
 
+@pytest.mark.asyncio
+async def test_invalid_assertion_does_not_consume_write_verification(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "f" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    calls = 0
+
+    async def fake_execute(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={"write_step_id": kwargs["write_step_id"]},
+            status="passed",
+            evidence={"passed": True},
+        )
+        return {
+            "ok": True,
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST"},
+            {"request_id": "req-verify", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+    params = {
+        "write_step_id": "submit",
+        "inputs": {"title": "demo"},
+        "verify_request_id": "req-verify",
+        "assertion": {
+            "collection_path": "data.list",
+            "verify_records_min_count": 1,
+        },
+    }
+
+    with pytest.raises(ToolError, match="collection assertion requires a non-empty where"):
+        await execute_recording_write_with_verify("run-recording", params)
+    assert (session.current_flow_spec().meta or {}).get("write_verification_attempts") is None
+
+    params["assertion"] = {"verify_records_min_count": 1}
+    result = await execute_recording_write_with_verify("run-recording", params)
+
+    assert result["ok"] is True
+    assert calls == 1
+
+
 def test_submit_skill_docs_returns_appended_flow_version(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-skill-docs")
     before_version = int((session.spec.meta or {}).get("current_version") or 0)

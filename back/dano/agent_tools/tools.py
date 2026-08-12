@@ -1282,7 +1282,10 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
 
 
 async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict:
-    from dano.execution.page.replay import execute_write_with_verify
+    from dano.execution.page.replay import (
+        _validate_assertion_contract,
+        execute_write_with_verify,
+    )
 
     _strict_recording_params(
         params,
@@ -1291,6 +1294,13 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
     )
     if not isinstance(params["inputs"], dict) or not isinstance(params["assertion"], dict):
         raise ToolError("inputs 和 assertion 必须是对象")
+    try:
+        # Validation must happen before claim_write_verification: malformed
+        # model arguments have not touched the business API and must not burn
+        # the step's one real-write opportunity.
+        _validate_assertion_contract(params["assertion"])
+    except ValueError as exc:
+        raise ToolError(f"assertion 契约无效：{exc}") from exc
     session = _recording_session(run_id, params)
     spec = session.current_flow_spec()
     step = next((item for item in spec.steps if item.step_id == str(params["write_step_id"])), None)

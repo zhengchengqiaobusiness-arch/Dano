@@ -272,11 +272,26 @@ export function sanitizeRecordingToolParams(name, params) {
   const sanitized = Object.fromEntries(
     allowed.filter((key) => key in params).map((key) => [key, params[key]]),
   );
-  const plan = (
+  let plan = (
     sanitized.plan
     && typeof sanitized.plan === "object"
     && !Array.isArray(sanitized.plan)
   ) ? { ...sanitized.plan } : sanitized.plan;
+  // Some OpenAI-compatible models serialize a nested object argument as one
+  // JSON string even though the tool schema says object.  Decode exactly one
+  // object layer here; the canonicalizer and Python fact/version gates remain
+  // authoritative for its contents.
+  if (typeof plan === "string" && plan.trim()) {
+    try {
+      const decoded = JSON.parse(plan);
+      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+        plan = decoded;
+      }
+    } catch {
+      // Keep the original value so the existing missing-plan path reports a
+      // deterministic rejected submission rather than accepting malformed JSON.
+    }
+  }
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
     // A completed tool-call stream can be cut at the model output limit after
     // the small version fields but before the large plan object.  Send that
@@ -583,7 +598,43 @@ const RecordingPlan = Type.Object({
   ops: Type.Optional(Type.Array(LiveRecordingOperation)),
 }, { additionalProperties: false });
 
-const RecordingAssertion = RecordingBindingAssertion;
+const RecordingPlanArgument = Type.Union([
+  RecordingPlan,
+  Type.String({ minLength: 2 }),
+]);
+
+const RecordingScalarAssertion = Type.Object({
+  path: Type.Optional(Type.String()),
+  response_path: Type.Optional(Type.String()),
+  operator: Type.Optional(Type.Union([
+    Type.Literal("equals"), Type.Literal("eq"), Type.Literal("not_equals"),
+    Type.Literal("ne"), Type.Literal("contains"), Type.Literal("exists"),
+    Type.Literal("truthy"),
+  ])),
+  equals: Type.Optional(Type.Any()),
+  value: Type.Optional(Type.Any()),
+  equals_input: Type.Optional(Type.String()),
+  input_path: Type.Optional(Type.String()),
+}, { additionalProperties: false, minProperties: 1 });
+
+const RecordingCountAssertion = Type.Object({
+  verify_records_min_count: Type.Integer({ minimum: 0 }),
+}, { additionalProperties: false });
+
+const RecordingCollectionAssertion = Type.Object({
+  collection_path: Type.String({ minLength: 1 }),
+  where: Type.Record(Type.String({ minLength: 1 }), Type.Union([
+    Type.Object({ equals_input: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+    Type.Object({ equals: Type.Any() }, { additionalProperties: false }),
+  ]), { minProperties: 1 }),
+  min_matches: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+
+const RecordingAssertion = Type.Union([
+  RecordingScalarAssertion,
+  RecordingCountAssertion,
+  RecordingCollectionAssertion,
+]);
 
 const ReplayOverrides = Type.Object({
   url_path: Type.Optional(Type.String()),
@@ -717,7 +768,7 @@ export const recordingTools = [
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: Type.Optional(RecordingPlan),
+        plan: Type.Optional(RecordingPlanArgument),
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.

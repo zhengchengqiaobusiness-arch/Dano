@@ -183,10 +183,23 @@ function verifyReviewToolSchema() {
 function verifyWriteAssertionSchema() {
   const tool = recordingTools.find((item) => item.name === "execute_write_with_verify");
   const assertion = tool?.parameters?.properties?.assertion;
-  assert(assertion?.additionalProperties === false, "write assertion schema must reject unknown keys");
+  assert(assertion?.anyOf?.length === 3, "write assertion schema must expose three executable contracts");
   assert(
-    assertion?.properties?.verify_records_min_count?.type === "integer",
+    assertion.anyOf.every((schema) => schema.additionalProperties === false),
+    "write assertion variants must reject unknown keys",
+  );
+  const countAssertion = assertion.anyOf.find((schema) => (
+    schema?.properties?.verify_records_min_count
+  ));
+  assert(
+    countAssertion?.properties?.verify_records_min_count?.type === "integer",
     "write assertion schema must expose verify_records_min_count",
+  );
+  const collectionAssertion = assertion.anyOf.find((schema) => schema?.properties?.collection_path);
+  assert(
+    JSON.stringify(collectionAssertion?.required?.sort())
+      === JSON.stringify(["collection_path", "min_matches", "where"].sort()),
+    "collection assertion must require collection_path, where and min_matches together",
   );
 }
 
@@ -231,6 +244,12 @@ function verifyServerOwnedRecordingContext() {
 }
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
+  const planArgument = planTool?.parameters?.properties?.plan;
+  const planSchema = planArgument?.anyOf?.find((schema) => schema?.type === "object");
+  assert(
+    planArgument?.anyOf?.some((schema) => schema?.type === "string") && planSchema,
+    "plan boundary must accept an object or one JSON-stringified object",
+  );
   assert(
     planTool?.description?.includes("plan.ops")
       && planTool.description.includes("set_param_source")
@@ -240,10 +259,10 @@ function verifyPlanToolCompatibility() {
     "plan tool does not expose the live semantic operation channel to Pi",
   );
   assert(
-    planTool?.parameters?.properties?.plan?.properties?.ops?.type === "array",
+    planSchema?.properties?.ops?.type === "array",
     "plan tool schema does not declare the live semantic operation channel",
   );
-  const liveOps = planTool?.parameters?.properties?.plan?.properties?.ops?.items?.anyOf || [];
+  const liveOps = planSchema?.properties?.ops?.items?.anyOf || [];
   const expandedOps = liveOps.flatMap((item) => item?.anyOf || [item]);
   const operationSchema = (name) => expandedOps.find((item) => item?.properties?.op?.const === name);
   const operationSchemas = (name) => expandedOps.filter((item) => item?.properties?.op?.const === name);
@@ -299,10 +318,10 @@ function verifyPlanToolCompatibility() {
   );
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
   assert(
-    planTool?.parameters?.properties?.plan?.additionalProperties === false,
+    planSchema?.additionalProperties === false,
     "plan payload must reject undeclared planner aliases",
   );
-  const semanticSchema = planTool?.parameters?.properties?.plan?.properties?.semantic_plan;
+  const semanticSchema = planSchema?.properties?.semantic_plan;
   assert(
     semanticSchema?.additionalProperties === false
       && JSON.stringify(Object.keys(semanticSchema?.properties || {}).sort())
@@ -319,7 +338,7 @@ function verifyPlanToolCompatibility() {
   const repairTool = recordingTools.find((tool) => tool.name === "submit_recording_repair");
   assert(
     JSON.stringify(repairTool?.parameters?.properties?.operations?.items)
-      === JSON.stringify(planTool?.parameters?.properties?.plan?.properties?.ops?.items),
+      === JSON.stringify(planSchema?.properties?.ops?.items),
     "plan and repair must use the same typed operation union",
   );
   const plan = {
@@ -365,6 +384,16 @@ function verifyPlanToolCompatibility() {
   assert(Array.isArray(semantic.unresolved_items), "unresolved_items were not restored");
   assert(sanitized.plan.ops.length === 1, "typed operation was discarded");
   assert(!("field_semantics" in semantic), "field semantics bypassed plan.ops");
+
+  const stringified = sanitizeRecordingToolParams("submit_recording_plan", {
+    base_flow_version: 3,
+    plan: JSON.stringify(plan),
+  });
+  assert(
+    stringified.plan.semantic_plan.capabilities[0].anchor_step_id === "submit"
+      && stringified.plan.ops[0].op === "set_param_source",
+    "one JSON-stringified plan object was not decoded at the tool boundary",
+  );
 }
 
 function verifyTruncatedPlanFallback() {
