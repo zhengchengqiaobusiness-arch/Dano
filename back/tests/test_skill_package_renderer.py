@@ -303,7 +303,12 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
             wire_format_module.__file__
         ).read_text(encoding="utf-8")
         assert _run(scripts / "query_items.py", env=env)["ok"] is True
-        assert _run(scripts / "create_item.py", "--name", "created", env=env)["ok"] is True
+        unconfirmed = _run(scripts / "create_item.py", "--name", "created", env=env)
+        assert unconfirmed["ok"] is False
+        assert unconfirmed["status"] == "need_confirm"
+        assert _run(
+            scripts / "create_item.py", "--name", "created", "--confirm", env=env,
+        )["ok"] is True
         verified = _run(scripts / "verify_create_item.py", "--name", "created", env=env)
         assert verified == {"capability": "create_item", "ok": True, "issues": [], "checks": 1}
 
@@ -317,7 +322,7 @@ def test_self_contained_package_executes_query_write_and_readback_without_dano(t
         consumed = subprocess.run(
             [
                 sys.executable, str(consumer), "run", str(package), "create_item",
-                "--input-json", json.dumps({"name": "consumer-created"}),
+                "--input-json", json.dumps({"name": "consumer-created"}), "--confirm",
             ],
             env=env, capture_output=True, text=True, timeout=30, check=False,
         )
@@ -428,7 +433,9 @@ def test_unrelated_system_package_runs_without_tenant_pack_or_code_changes(tmp_p
         scripts = package / "scripts"
         env = {**os.environ, "DANO_AUTH_HEADERS": "{}"}
         assert _run(scripts / "list_records.py", env=env)["ok"] is True
-        assert _run(scripts / "add_record.py", "--label", "second-system", env=env)["ok"] is True
+        assert _run(
+            scripts / "add_record.py", "--label", "second-system", "--confirm", env=env,
+        )["ok"] is True
         verified = _run(scripts / "verify_add_record.py", "--label", "second-system", env=env)
         assert verified == {"capability": "add_record", "ok": True, "issues": [], "checks": 1}
     finally:
@@ -443,7 +450,90 @@ def test_invalid_model_docs_fall_back_to_complete_deterministic_docs(tmp_path):
     release["meta"]["skill_docs"] = {"skill_md": "bad", "reference_md": "bad"}
     folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
     assert validate_skill_package(folder)["ok"] is True
-    assert "## Transport" in (folder / "SKILL.md").read_text(encoding="utf-8")
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "## Transport" in skill_md
+    assert "ask_user_question" in skill_md
+    assert "questions[]" in skill_md
+    assert "references/CONTRACT.json" in skill_md
+    assert "写能力" in skill_md and "--confirm" in skill_md
+    assert "验证" in skill_md
+    assert "## List output" in skill_md
+    assert "## Identifier fields" in skill_md
+    assert "## Fixed result presentation" in skill_md
+    assert "## Security" in skill_md
+    assert "## Limitations" in skill_md
+    assert (folder / "references" / "CAPABILITIES.md").is_file()
+    assert (folder / "references" / "OPTIONS.md").is_file()
+    assert (folder / "scripts" / "format_list.py").is_file()
+
+
+def test_valid_model_docs_cannot_replace_deterministic_operational_rules(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    release = skill.api_request["_release_snapshot"]["flow_spec"]
+    release["meta"]["skill_docs"] = {
+        "skill_md": """---
+name: minimal
+description: minimal but structurally valid
+---
+## Transport
+direct
+## Preconditions
+ready
+## Steps
+1. run
+   Done when: done
+## Branch exit
+stop
+## Pitfalls
+- none
+""",
+        "reference_md": f"""# Reference
+## API chain
+- `query_items`: GET /items; verification_id: {_LINK_VERIFICATION}
+- `create_item`: GET /items -> POST /items; verification_id: {_WRITE_VERIFICATION}
+## Business hard rules
+- keep facts
+## Fallback browser steps
+1. use visible labels
+""",
+    }
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "ask_user_question" in skill_md
+    assert "questions[]" in skill_md
+    assert "references/CONTRACT.json" in skill_md
+    assert "--confirm" in skill_md
+    assert "minimal but structurally valid" not in skill_md
+
+
+def test_self_contained_script_enforces_full_input_schema(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    release = skill.api_request["_release_snapshot"]["flow_spec"]
+    create = next(cap for cap in release["capabilities"] if cap["name"] == "create_item")
+    create["input_schema"]["properties"]["name"].update({
+        "minLength": 3,
+        "pattern": "^[A-Z]",
+    })
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(folder / "scripts" / "create_item.py"),
+            "--name", "ab", "--confirm",
+        ],
+        cwd=folder / "scripts",
+        env={**os.environ, "DANO_AUTH_HEADERS": "{}"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "too short" in completed.stderr
 
 
 def test_unverified_write_verifier_fails_closed_and_reference_marks_it(tmp_path):

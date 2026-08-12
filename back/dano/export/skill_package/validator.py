@@ -131,7 +131,7 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
     if not client.is_file():
         issues.append(_issue("missing_client", "scripts/client.py is required", client, warning=missing_as_warnings))
     python_scripts = sorted(scripts.glob("*.py"))
-    support_scripts = {"client.py", "wire_format.py"}
+    support_scripts = {"client.py", "wire_format.py", "format_list.py"}
     capabilities = [
         path for path in python_scripts
         if path.name not in support_scripts and not path.name.startswith("verify_")

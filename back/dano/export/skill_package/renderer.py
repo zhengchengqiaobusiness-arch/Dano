@@ -254,6 +254,12 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         if not step_ids:
             step_ids = list(by_id)
         cap_steps = [_safe_step(by_id[step_id]) for step_id in step_ids]
+        is_write = any(
+            str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}
+            for step in cap_steps
+        )
+        raw_risk = getattr(skill, "risk_level", "")
+        risk = str(raw_risk.value if hasattr(raw_risk, "value") else raw_risk or "").upper()
         fact_checks = []
         for step in cap_steps:
             fact_check = step.get("fact_check")
@@ -270,13 +276,17 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             "script": script,
             "input_schema": dict(cap.get("input_schema") or cap.get("parameters") or {"type": "object", "properties": {}}),
             "output_schema": dict(cap.get("output_schema") or {"type": "object"}),
+            "preconditions": list(cap.get("preconditions") or []),
+            "caller_responsibilities": list(cap.get("caller_responsibilities") or []),
+            "skill_responsibilities": list(cap.get("skill_responsibilities") or []),
             "steps": cap_steps,
             "links": _verified_links(spec, step_ids),
             "fact_checks": fact_checks,
-            "requires_verify": any(
-                str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}
-                for step in cap_steps
+            "requires_confirmation": bool(
+                is_write
+                and (cap.get("requires_human_confirm") is True or risk in {"L3", "L4", "L5"})
             ),
+            "requires_verify": is_write,
         })
     return plans
 
@@ -295,24 +305,219 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
     description = _safe_text(skill.title or skill.action or skill.skill_id)
     lines = [
         "---", f"name: {slug}", f"description: {json.dumps(description, ensure_ascii=False)}", "---", "",
-        "## Transport", "", "Direct HTTP JSON calls to the recorded business system. Runtime requires Python and `httpx`; no Dano runtime or LLM is used for business execution.", "",
-        "## Preconditions", "", "Set `DANO_AUTH_HEADERS` to a JSON object, or provide the documented local session cache / Dano raw-token fallback. Review write inputs before execution.", "",
+        f"# {description}", "",
+        "这是录制后发布的自包含 Skill。它保留既有 Skill 的能力选择、一次性收参、字段校验、写前确认、执行后验证和结果处理规则；业务请求由包内脚本直接调用目标系统。", "",
+        "## Transport", "",
+        "- 使用 `references/CONTRACT.json` 选择 capability，并调用其中声明的 `scripts/*.py`。",
+        "- 运行期需要 Python 与 `httpx`；业务执行不依赖 Dano 运行时或 LLM。",
+        "- 鉴权只从运行期 `DANO_AUTH_HEADERS`、本地会话缓存或已配置的 Dano token fallback 获取；不得把凭证写进 Skill、参数、回复或日志。", "",
+        "## Preconditions", "",
+        "- `references/CONTRACT.json` 是能力、字段名、类型、必填性、枚举和输出结构的唯一机器契约；不得按录制样例或字段外观猜值。",
+        "- 只执行契约中列出的 capability；用户目标与业务对象或动作不一致时停止，不得用相近能力代替。",
+        "- 写能力必须在执行前取得用户明确确认；查询能力只带用户明确要求的可选筛选条件。", "",
         "## Steps", "",
+        "1. 根据用户目标选择一个明确的 capability；查询和写入是不同能力，禁止默认选择写能力。",
+        "   Done when: 已选 capability 的业务对象和动作与用户目标完全一致。",
+        "2. 读取 `references/CONTRACT.json` 中该 capability 的 `input_schema`、脚本路径、`requires_confirmation` 和 `requires_verify`；需要人读说明时同时读取 `references/CAPABILITIES.md`，选择项读取 `references/OPTIONS.md`。",
+        "   Done when: 已确定全部调用方字段、必填字段、类型、枚举、默认值和内部字段，且没有使用录制样例补空值。",
+        "3. 一次性收集本次需要的调用方字段。使用一次 `ask_user_question`，顶层传 `title` 与 `questions[]`；每个 `questions[].id` 必须与 `input_schema.properties` 的字段名逐字一致。写能力收集全部必填字段；查询能力只收集必填字段和用户明确指定的可选筛选条件。",
+        "   Done when: 返回 `status=answered`，答案已按字段 id 映射，或返回 `cancelled` 并立即停止。",
+        "4. 按 schema 校验 required、type、format、enum、pattern 和边界；日期时间、数字、数组与对象按声明转换。内部字段、常量、上游响应和计算字段不得放进 `questions[]`，不得让用户猜内部 ID。",
+        "   Done when: 输入完整且逐字段满足契约；任何不确定值均未被猜测或静默替换。",
+        "5. 若 `requires_confirmation=true`，使用 `ask_user_question({confirm: true, formIds: [<answered.formId>]})` 对完整输入只确认一次；只有返回 `status=confirmed` 才能继续，并在执行脚本时带 `--confirm`。",
+        "   Done when: 写能力已有有效确认，或当前能力不需要确认。",
+        "6. 把输入作为 JSON 对象传给对应脚本：`python scripts/<capability>.py --input-json '<JSON>'`；需要确认时追加 `--confirm`。同一写请求不得并发、不得在结果不明时自动重试。",
+        "   Done when: stdout 最后一行是 JSON，且 `status=succeeded`、`ok=true`；否则按 Branch exit 停止。",
+        "7. 若 `requires_verify=true`，用完全相同的输入调用 `verify_script`；写操作只有执行和验证都 `ok=true` 才能报告成功。",
+        "   Done when: 验证脚本返回 `ok=true`，或只读能力明确不需要验证。",
+        "8. 按 `output_schema` 解读结果。数组用 Markdown 表格展示；不得把内部 ID、裸 `data` 或未声明字段擅自命名为业务编号。",
+        "   Done when: 最终回复准确区分成功、取消、待确认和失败，且未泄露凭证或内部字段。", "",
+        "## Capability summary", "",
     ]
-    for index, plan in enumerate(plans, 1):
-        lines.extend([
-            f"{index}. Run `python scripts/{plan['script']}.py --help`, then provide the capability inputs and execute `{plan['title']}`.",
-            "   Done when: stdout is one JSON line with `ok: true` and every request in the capability chain succeeded.",
-        ])
-    lines.extend(["", "## Branch exit", "", "Stop immediately when a request returns `ok: false`; for writes, run the matching `verify_*.py` script before reporting completion.", "", "## Pitfalls", ""])
+    for plan in plans:
+        schema = plan.get("input_schema") or {}
+        required = ", ".join(f"`{name}`" for name in schema.get("required") or []) or "无"
+        lines.append(
+            f"- **{_safe_text(plan['title'])}** (`{plan['name']}`): "
+            f"脚本 `scripts/{plan['script']}.py`；必填 {required}；"
+            f"写前确认 {'是' if plan['requires_confirmation'] else '否'}；"
+            f"执行后验证 {'是' if plan['requires_verify'] else '否'}。"
+        )
+    lines.extend([
+        "", "## Result contract", "",
+        "- `succeeded`: 能力执行成功；写能力还必须通过 `verify_script` 后才能向用户报告完成。",
+        "- `need_confirm`: 写能力尚未确认；取得确认后带 `--confirm` 重跑，禁止绕过。",
+        "- `failed`: 停止并报告 `reason`/失败步骤；写操作遇到超时、HTTP 5xx 或结果不明时禁止重复提交，先用只读能力核查。",
+        "- `cancelled`: 用户取消，立即停止。", "",
+        "## Branch exit", "",
+        "- capability 不匹配、字段缺失或校验失败：停止，补齐或修正后再执行。",
+        "- `ask_user_question` 返回 `cancelled`：立即停止。",
+        "- 写能力未确认或脚本返回 `need_confirm`：不得执行，取得有效确认后才可带 `--confirm`。",
+        "- 任一请求、执行脚本或验证脚本返回 `ok=false`：立即停止；不得宣称完成。",
+        "- 写结果不明：不得自动重试同一载荷，先用已发布只读能力核查；无法核实时报告不确定。", "",
+        "## Pitfalls", "",
+        "- 不得把录制样例值当作调用方默认值、固定业务值或本次用户输入。",
+        "- 不得翻译、改名或猜测参数名；`questions[].id` 和提交 JSON 的键必须与契约逐字一致。",
+        "- 不得向用户询问常量、会话头、分页上下文、上游响应、计算值或动态结构键。",
+        "- 不得跳过写前确认或写后验证，也不得因一个写请求失败而自动重试。",
+        "- 不得复用录制凭证、内部 ID 或动态流程节点标识。",
+        "", "## List output", "",
+        "- 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --capability <能力名> --json '<output JSON>'`。",
+        "- 最终回复只展示脚本生成的 Markdown 表格；无数据时明确显示“无数据”，不要重复粘贴原始 JSON。",
+        "- Markdown 表头、分隔行和数据行之间不得插入空行；单元格内换行统一使用 `<br>`。",
+        "", "## Field validation", "",
+        "- 优先遵守 schema 的 `type`、`format`、`enum`、`pattern` 和边界，再结合 `title`、`description` 的明确业务语义。",
+        "- 日期时间必须符合声明格式，枚举值必须来自候选；标识、编码、电话号码等字符串不得擅自转成数字或去掉前导零。",
+        "- schema 没有依据时不得臆造长度、精度、范围或业务规则；任何明确冲突都必须在确认和执行前要求修正。",
+        "", "## Identifier fields", "",
+        "- 标识语义只认 `output_schema` 的 `x-dano-identifier-role`；未声明时保留原字段名，禁止按名称或值形状猜成申请编号、流程编号或单据编号。",
+        "- 后续能力只可使用同名字段或契约明确声明的映射；需要内部标识时先用已发布查询能力定位同一记录，不得让用户猜。",
+        "- 面向用户隐藏、排序和标题均以 `output_schema` 展示元数据为准；脚本原始输出保留给后续准确取值。",
+        "", "## Fixed result presentation", "",
+        "- 成功写操作用 capability 标题给出业务化完成结论；不得逐项展示裸 `code`、`data`、`msg`、`true` 或内部 ID。",
+        "- 未类型化结果只能称“接口返回值”；没有契约声明时不得给返回字段发明业务名称。",
+        "- 非成功状态不得显示成功结论；只展示脚本返回的原因和允许的下一步。",
+        "", "## Security", "",
+        "- 不在回复、日志、表单或调用参数中输出完整 token、cookie、密码或其他凭证。",
+        "- 不规避写前确认或写后验证；用户要求绕过时拒绝。",
+        "- 调用者身份由运行期登录凭证决定，不伪造身份、字段值或执行结果。",
+        "", "## Limitations", "",
+        "只支持 Capability summary 中列出的能力；未列出的业务动作必须明确说明不支持，不得选择相近能力代替。",
+    ])
     pitfalls = list(((spec.meta or {}).get("pitfalls") or [])) if spec is not None else []
     if pitfalls:
         for item in pitfalls[:20]:
             text = item.get("text") if isinstance(item, dict) else item
             lines.append(f"- {_safe_text(text)}")
-    else:
-        lines.extend(["- Never reuse recorded credentials or identifiers.", "- Do not report a write as complete until its read-back verifier returns `ok: true`."])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
+    lines = [f"# {_safe_text(skill.title or skill.skill_id)} capabilities", ""]
+    for plan in plans:
+        schema = plan.get("input_schema") or {}
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        lines.extend([
+            f"## {_safe_text(plan['title'])} (`{plan['name']}`)", "",
+            f"- Script: `scripts/{plan['script']}.py`",
+            f"- Verify script: `scripts/verify_{plan['script']}.py`",
+            f"- Requires confirmation: `{str(plan['requires_confirmation']).lower()}`",
+            f"- Requires verify: `{str(plan['requires_verify']).lower()}`", "",
+            "| Field | Type | Required | Description |", "|---|---|---|---|",
+        ])
+        if not properties:
+            lines.append("| (none) | object | no | No caller input |")
+        for name, raw in properties.items():
+            field = raw if isinstance(raw, dict) else {}
+            description = _safe_text(field.get("description") or field.get("title") or name).replace("|", "\\|")
+            lines.append(
+                f"| `{name}` | `{field.get('type') or 'string'}` | "
+                f"{'yes' if name in required else 'no'} | {description} |"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _options_md(plans: list[dict]) -> str:
+    lines = ["# Capability options", ""]
+    found = False
+    for plan in plans:
+        for name, raw in ((plan.get("input_schema") or {}).get("properties") or {}).items():
+            field = raw if isinstance(raw, dict) else {}
+            values = list(field.get("enum") or [])
+            labels = dict(field.get("x-enum-value-map") or {})
+            if not values and not labels:
+                continue
+            found = True
+            lines.extend([f"## `{plan['name']}.{name}`", "", "| Label | Value |", "|---|---|"])
+            if labels:
+                lines.extend(f"| {_safe_text(label)} | `{value}` |" for label, value in labels.items())
+            else:
+                lines.extend(f"| `{value}` | `{value}` |" for value in values)
+            lines.append("")
+    if not found:
+        lines.append("No static enum options are declared. Do not invent candidates.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_list_py(plans: list[dict]) -> str:
+    schemas = {
+        str(plan["name"]): dict(plan.get("output_schema") or {})
+        for plan in plans
+    }
+    return f'''from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+SCHEMAS = json.loads({json.dumps(json.dumps(schemas, ensure_ascii=False), ensure_ascii=False)})
+
+
+def list_rows(value):
+    if isinstance(value, dict) and "output" in value:
+        return list_rows(value["output"])
+    if isinstance(value, dict):
+        for key in ("records", "rows", "items", "list"):
+            if isinstance(value.get(key), list):
+                return value[key]
+        if isinstance(value.get("data"), (dict, list)):
+            return list_rows(value["data"])
+        return [value]
+    return value if isinstance(value, list) else [value]
+
+
+def row_schema(schema):
+    properties = (schema or {{}}).get("properties") or {{}}
+    for field in properties.values():
+        if isinstance(field, dict) and field.get("type") == "array":
+            return field.get("items") or {{}}
+    return schema or {{}}
+
+
+def cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value).replace("|", r"\\|").replace("\\r", " ").replace("\\n", "<br>")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="format capability output as Markdown table")
+    parser.add_argument("--json")
+    parser.add_argument("--capability", required=True, choices=sorted(SCHEMAS))
+    args = parser.parse_args()
+    raw = args.json if args.json is not None else sys.stdin.read()
+    value = json.loads(raw)
+    rows = list_rows(value)
+    if not rows:
+        print("无数据")
+        return
+    rows = [row if isinstance(row, dict) else {{"值": row}} for row in rows]
+    properties = (row_schema(SCHEMAS[args.capability]).get("properties") or {{}})
+    columns = []
+    for row in rows:
+        for key in row:
+            field = properties.get(key) or {{}}
+            if field.get("x-dano-display") is False or field.get("x-dano-internal") is True:
+                continue
+            if key not in columns:
+                columns.append(key)
+    if not columns:
+        print("无数据")
+        return
+    labels = [str((properties.get(key) or {{}}).get("title") or key) for key in columns]
+    print("| " + " | ".join(cell(label) for label in labels) + " |")
+    print("| " + " | ".join("---" for _ in columns) + " |")
+    for row in rows:
+        print("| " + " | ".join(cell(row.get(key)) for key in columns) + " |")
+
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 def _fallback_reference_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
@@ -687,7 +892,9 @@ if __name__ == "__main__":
 _CAPABILITY_TEMPLATE = r'''from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import re
 import sys
 
 from client import emit, execute_plan
@@ -711,9 +918,88 @@ def _coerce(value, schema):
     return value
 
 
+def _validate(value, schema, path="input"):
+    schema = schema or {}
+    if "const" in schema and value != schema.get("const"):
+        raise ValueError(f"{path} must equal {schema.get('const')!r}")
+    alternatives = schema.get("oneOf") or schema.get("anyOf")
+    if alternatives:
+        matched = 0
+        for alternative in alternatives:
+            try:
+                _validate(value, alternative, path)
+                matched += 1
+            except (TypeError, ValueError):
+                pass
+        if not matched or (schema.get("oneOf") and matched != 1):
+            raise ValueError(f"{path} does not match its alternative schemas")
+        return
+    allowed = schema.get("enum")
+    if allowed and value not in allowed:
+        raise ValueError(f"{path} must be one of: {', '.join(map(str, allowed))}")
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        properties = schema.get("properties") or {}
+        missing = [
+            name for name in schema.get("required") or []
+            if name not in value or value[name] in (None, "")
+        ]
+        if missing:
+            raise ValueError(f"{path} missing required: {', '.join(missing)}")
+        if schema.get("additionalProperties") is False:
+            extra = sorted(name for name in value if name not in properties)
+            if extra:
+                raise ValueError(f"{path} has undeclared fields: {', '.join(extra)}")
+        for name, child in properties.items():
+            if name in value and value[name] is not None:
+                _validate(value[name], child, f"{path}.{name}")
+    elif expected == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array")
+        if schema.get("minItems") is not None and len(value) < int(schema["minItems"]):
+            raise ValueError(f"{path} has too few items")
+        if schema.get("maxItems") is not None and len(value) > int(schema["maxItems"]):
+            raise ValueError(f"{path} has too many items")
+        if schema.get("uniqueItems") and len({json.dumps(item, sort_keys=True) for item in value}) != len(value):
+            raise ValueError(f"{path} must not contain duplicate items")
+        for index, item in enumerate(value):
+            _validate(item, schema.get("items") or {}, f"{path}[{index}]")
+    elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+        raise ValueError(f"{path} must be an integer")
+    elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+        raise ValueError(f"{path} must be a number")
+    elif expected == "boolean" and not isinstance(value, bool):
+        raise ValueError(f"{path} must be a boolean")
+    elif expected == "string" and not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    if isinstance(value, str):
+        if schema.get("minLength") is not None and len(value) < int(schema["minLength"]):
+            raise ValueError(f"{path} is too short")
+        if schema.get("maxLength") is not None and len(value) > int(schema["maxLength"]):
+            raise ValueError(f"{path} is too long")
+        if schema.get("pattern") and re.search(str(schema["pattern"]), value) is None:
+            raise ValueError(f"{path} does not match its pattern")
+        if schema.get("format") == "date":
+            datetime.date.fromisoformat(value)
+        elif schema.get("format") == "date-time":
+            datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if schema.get("minimum") is not None and value < schema["minimum"]:
+            raise ValueError(f"{path} is below minimum")
+        if schema.get("maximum") is not None and value > schema["maximum"]:
+            raise ValueError(f"{path} is above maximum")
+        if schema.get("exclusiveMinimum") is not None and value <= schema["exclusiveMinimum"]:
+            raise ValueError(f"{path} must be greater than exclusiveMinimum")
+        if schema.get("exclusiveMaximum") is not None and value >= schema["exclusiveMaximum"]:
+            raise ValueError(f"{path} must be less than exclusiveMaximum")
+
+
 def parser():
     command = argparse.ArgumentParser(description=PLAN.get("title") or PLAN["name"])
     command.add_argument("--input-json", default="{}", help="JSON object merged before named arguments")
+    command.add_argument("--confirm", action="store_true", help="confirm an explicitly reviewed write")
     for name, schema in (PLAN.get("input_schema", {}).get("properties") or {}).items():
         command.add_argument(f"--{name}", dest=name, help=str(schema.get("description") or schema.get("title") or name))
     return command
@@ -732,6 +1018,7 @@ def inputs_from_args(args, command):
         missing = [name for name in PLAN.get("input_schema", {}).get("required") or [] if name not in values]
         if missing:
             command.error("missing required inputs: " + ", ".join(missing))
+        _validate(values, PLAN.get("input_schema") or {"type": "object"})
         return values
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         command.error(str(exc))
@@ -739,9 +1026,20 @@ def inputs_from_args(args, command):
 
 def main():
     command = parser()
-    inputs = inputs_from_args(command.parse_args(), command)
+    args = command.parse_args()
+    inputs = inputs_from_args(args, command)
+    if PLAN.get("requires_confirmation") and not args.confirm:
+        emit({
+            "capability": PLAN["name"], "ok": False, "status": "need_confirm",
+            "reason": "write capability requires explicit confirmation",
+        })
+        return 0
     result = execute_plan(PLAN, inputs)
-    emit({"capability": PLAN["name"], **result})
+    emit({
+        "capability": PLAN["name"],
+        "status": "succeeded" if result.get("ok") else "failed",
+        **result,
+    })
     return 0 if result.get("ok") else 1
 
 
@@ -809,17 +1107,22 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         raise ValueError(f"{skill.skill_id} has no capability")
     slug = package_slug(skill.skill_id)
     docs = dict(((spec.meta or {}).get("skill_docs") or {})) if spec is not None else {}
-    skill_md = str(docs.get("skill_md") or "")
+    model_skill_md = str(docs.get("skill_md") or "")
     reference_md = str(docs.get("reference_md") or "")
     docs_valid = validate_skill_documents(
-        skill_md,
+        model_skill_md,
         reference_md,
         allowed_verification_ids=flow_spec_verification_ids(spec),
         required_chain_names={str(plan["name"]) for plan in plans},
         required_unverified_chains=flow_spec_unverified_capability_names(spec),
     )["ok"]
+    # The model may enrich business facts in reference.md, but it must never
+    # replace the deterministic operational contract inherited from the
+    # original Skill exporter (collection, validation, confirmation, verify,
+    # and result handling). A structurally valid but minimal model document was
+    # previously accepted here and silently discarded all of those rules.
+    skill_md = _fallback_skill_md(skill, slug, plans, spec)
     if not docs_valid:
-        skill_md = _fallback_skill_md(skill, slug, plans, spec)
         reference_md = _fallback_reference_md(skill, plans, spec)
 
     scripts = folder / "scripts"
@@ -828,6 +1131,8 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     references.mkdir(parents=True, exist_ok=True)
     _write_text(folder / "SKILL.md", skill_md)
     _write_text(folder / "reference.md", reference_md)
+    _write_text(references / "CAPABILITIES.md", _capabilities_md(skill, plans))
+    _write_text(references / "OPTIONS.md", _options_md(plans))
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
@@ -840,6 +1145,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         scripts / "wire_format.py",
         Path(wire_format_module.__file__).read_text(encoding="utf-8"),
     )
+    _write_text(scripts / "format_list.py", _format_list_py(plans))
     contract = {
         "protocol": "dano.skill_package.contract.v1",
         "skill": {"id": skill.skill_id, "name": slug, "title": skill.title or skill.action},
@@ -850,11 +1156,19 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 "kind": plan["kind"],
                 "script": f"scripts/{plan['script']}.py",
                 "verify_script": f"scripts/verify_{plan['script']}.py",
+                "requires_confirmation": plan["requires_confirmation"],
                 "requires_verify": plan["requires_verify"],
                 "input_schema": plan["input_schema"],
                 "output_schema": plan["output_schema"],
+                "preconditions": plan["preconditions"],
+                "caller_responsibilities": plan["caller_responsibilities"],
+                "skill_responsibilities": plan["skill_responsibilities"],
             }
             for plan in plans
+        ],
+        "capability_relations": [
+            relation.model_dump(mode="json", exclude_none=True)
+            for relation in (spec.capability_relations if spec is not None else [])
         ],
     }
     _write_text(

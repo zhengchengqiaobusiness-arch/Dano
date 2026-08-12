@@ -32,10 +32,13 @@ def _script(package: Path, relative: str) -> Path:
     return path
 
 
-def _invoke(package: Path, relative: str, inputs: dict) -> dict:
+def _invoke(package: Path, relative: str, inputs: dict, *, confirm: bool = False) -> dict:
     path = _script(package, relative)
+    command = [sys.executable, str(path), "--input-json", json.dumps(inputs, ensure_ascii=False)]
+    if confirm:
+        command.append("--confirm")
     completed = subprocess.run(
-        [sys.executable, str(path), "--input-json", json.dumps(inputs, ensure_ascii=False)],
+        command,
         cwd=path.parent,
         env=os.environ.copy(),
         capture_output=True,
@@ -65,6 +68,7 @@ def main() -> int:
     run_command.add_argument("package")
     run_command.add_argument("capability")
     run_command.add_argument("--input-json", default="{}")
+    run_command.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -82,7 +86,21 @@ def main() -> int:
         )
         if capability is None:
             raise ValueError(f"unknown capability: {args.capability}")
-        execution = _invoke(package, str(capability["script"]), inputs)
+        requires_confirmation = capability.get("requires_confirmation") is True
+        if requires_confirmation and not args.confirm:
+            _emit({
+                "ok": False,
+                "capability": args.capability,
+                "status": "need_confirm",
+                "error": "write capability requires explicit --confirm",
+            })
+            return 1
+        execution = _invoke(
+            package,
+            str(capability["script"]),
+            inputs,
+            confirm=requires_confirmation and args.confirm,
+        )
         verification = None
         if execution["ok"] and capability.get("requires_verify"):
             verification = _invoke(package, str(capability["verify_script"]), inputs)
