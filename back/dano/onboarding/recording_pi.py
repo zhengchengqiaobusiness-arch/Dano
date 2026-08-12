@@ -9,6 +9,7 @@ state remains authoritative in Python rather than in Pi conversation history.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -163,6 +164,7 @@ class RecordingPiSession:
         self._analysis_images: list[dict[str, str]] = []
         self._active_analysis_image_count = 0
         self._live_recorder: Any = None
+        self._live_evidence_marker: tuple[Any, ...] | None = None
         self._recording_delta_cursor = 0
         self._live_goal_text = ""
         self._operator_asker: Callable[..., Any] | None = None
@@ -318,6 +320,7 @@ class RecordingPiSession:
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
         self.flow_spec = spec.model_copy(deep=True)
+        self._live_evidence_marker = None
         self._analysis_images = []
         self.last_submission_kind = ""
         self.last_submission_warning = ""
@@ -349,6 +352,7 @@ class RecordingPiSession:
     ) -> None:
         """Bind the live recorder and websocket-backed operator question channel."""
         self._live_recorder = recorder
+        self._live_evidence_marker = None
         self._live_goal_text = str(goal_text or "")
         self._operator_asker = operator_asker
 
@@ -357,11 +361,20 @@ class RecordingPiSession:
 
         if self._live_recorder is None:
             raise RecordingPiError("实时录制事实源尚未绑定")
+        captured = list(self._live_recorder.captured_all_requests() or [])
+        page_events = list(self._live_recorder.recorded_page_events() or [])
         delta = recording_delta(
             self._live_recorder,
             since_seq=since_seq,
             limit=limit,
             goal_text=self._live_goal_text,
+            captured_requests=captured,
+            page_events=page_events,
+        )
+        # Keep edit grounding aligned with the exact batch just returned.
+        await self.refresh_live_evidence(
+            captured_requests=captured,
+            page_events=page_events,
         )
         self._recording_delta_cursor = max(
             self._recording_delta_cursor,
@@ -372,6 +385,90 @@ class RecordingPiSession:
     def recording_delta_cursor(self) -> int:
         """Highest request cursor actually returned to this Pi session."""
         return self._recording_delta_cursor
+
+    async def refresh_live_evidence(
+        self,
+        *,
+        captured_requests: list[dict] | None = None,
+        page_events: list[dict] | None = None,
+    ) -> None:
+        """Publish the recorder's latest DOM facts into the bound FlowSpec.
+
+        The request delta and field-operation gates must read one evidence
+        snapshot. Previously only request ids were copied into FlowSpec, so Pi
+        could cite a real event returned by ``get_recording_delta`` while the
+        edit gate still considered that event unknown.
+        """
+        recorder = self._live_recorder
+        if recorder is None or self.flow_spec is None:
+            return
+        capture = getattr(recorder, "captured_all_requests", None)
+        read_events = getattr(recorder, "recorded_page_events", None)
+        read_fields = getattr(recorder, "recorded_field_evidence", None)
+        read_enums = getattr(recorder, "recorded_page_enum_options", None)
+        captured = (
+            list(captured_requests)
+            if captured_requests is not None
+            else list(capture() or []) if callable(capture) else []
+        )
+        page_events = (
+            list(page_events)
+            if page_events is not None
+            else list(read_events() or []) if callable(read_events) else []
+        )
+        raw_fields = list(read_fields() or []) if callable(read_fields) else []
+        page_enums = dict(read_enums() or {}) if callable(read_enums) else {}
+        last_request = captured[-1] if captured else {}
+        last_event = page_events[-1] if page_events else {}
+        semantic_digest = hashlib.sha256(json.dumps(
+            {"fields": raw_fields, "enums": page_enums},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")).hexdigest()
+        marker = (
+            len(captured),
+            str(last_request.get("request_id") or ""),
+            last_request.get("sequence", last_request.get("index")),
+            len(page_events),
+            str(last_event.get("event_id") or last_event.get("action_id") or ""),
+            semantic_digest,
+        )
+        if marker == self._live_evidence_marker:
+            return
+
+        from dano.execution.page.flow_spec import _option_sources_from_page_enum_options
+        from dano.execution.page.recording_field_identity import bind_field_evidence
+
+        bound_fields = bind_field_evidence(captured, page_events, raw_fields)
+        async with self._state_lock:
+            if marker == self._live_evidence_marker:
+                return
+            current = self.current_flow_spec()
+            current.meta = {
+                **(current.meta or {}),
+                "live_request_ids": [
+                    str(item.get("request_id") or "")
+                    for item in captured
+                    if isinstance(item, dict) and item.get("request_id")
+                ][-500:],
+            }
+            current.request_facts.page_events = deepcopy(page_events)
+            current.request_facts.field_evidence = deepcopy(bound_fields)
+            retained_sources = [
+                deepcopy(source)
+                for source in (current.request_facts.option_sources or [])
+                if not (
+                    isinstance(source, dict)
+                    and source.get("kind") == "page_enum_options"
+                )
+            ]
+            retained_sources.extend(
+                _option_sources_from_page_enum_options(page_enums, captured)
+            )
+            current.request_facts.option_sources = retained_sources
+            self.flow_spec = current
+            self._live_evidence_marker = marker
 
     async def ask_operator(
         self,
@@ -461,6 +558,7 @@ class RecordingPiSession:
     async def get_recording_state(self) -> dict[str, Any]:
         from dano.execution.page.flow_spec import recording_agent_state
 
+        await self.refresh_live_evidence()
         async with self._state_lock:
             current = self.current_flow_spec()
             return await asyncio.to_thread(recording_agent_state, current)
@@ -468,6 +566,7 @@ class RecordingPiSession:
     async def get_validation_report(self) -> dict[str, Any]:
         from dano.execution.page.flow_spec import recording_agent_validation
 
+        await self.refresh_live_evidence()
         async with self._state_lock:
             current = self.current_flow_spec()
             return await asyncio.to_thread(recording_agent_validation, current)

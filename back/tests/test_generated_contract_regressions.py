@@ -84,7 +84,7 @@ def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_
     assert properties["pageSize"]["default"] == 10
     assert properties["酒店名称"]["type"] == "string"
     assert properties["酒店名称"]["x-dano-wire-type"] == "string"
-    assert properties["酒店名称"]["default"] == "1"
+    assert "default" not in properties["酒店名称"]
 
     item_properties = capability.output_schema["properties"]["records"]["items"]["properties"]
     assert item_properties["id"]["type"] == "string"
@@ -292,7 +292,7 @@ def test_schema_defaults_are_type_safe_and_never_guess_enum_labels():
         path="query.status", key="状态", type="enum", value="1",
         enum_options=[{"label": "审批中", "value": 1}],
         enum_value_map={"审批中": 1},
-    )) == "审批中"
+    )) is _NO_SCHEMA_DEFAULT
     assert _schema_default_for_param(ParamField(
         path="query.status", key="状态", type="enum", value="9",
         enum_options=[{"label": "审批中", "value": 1}],
@@ -303,7 +303,7 @@ def test_schema_defaults_are_type_safe_and_never_guess_enum_labels():
     )) is _NO_SCHEMA_DEFAULT
     assert _schema_default_for_param(ParamField(
         path="startAt", key="开始时间", type="datetime", value="2026-07-15 09:30:00",
-    )) == "2026-07-15 09:30:00"
+    )) is _NO_SCHEMA_DEFAULT
 
 
 def test_withdraw_id_remains_explicit_user_input_and_is_never_silently_defaulted():
@@ -882,6 +882,6 @@ def test_export_rebuilds_lossy_persisted_capabilities_from_frozen_recording_evid
     assert capability["input_schema"]["required"] == []
     assert properties["pageNo"]["default"] == 1
     assert properties["pageSize"]["default"] == 10
-    assert properties["酒店名称"]["default"] == "1"
+    assert "default" not in properties["酒店名称"]
     assert properties["酒店名称"]["x-dano-wire-type"] == "string"
     assert record_properties["id"]["type"] == "string"

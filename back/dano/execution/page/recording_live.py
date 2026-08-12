@@ -157,9 +157,15 @@ def recording_delta(
     since_seq: int = 0,
     limit: int = _DEFAULT_DELTA_LIMIT,
     goal_text: str = "",
+    captured_requests: list[dict] | None = None,
+    page_events: list[dict] | None = None,
 ) -> dict:  # noqa: ANN001
     """Project a bounded, redacted append-only request delta for the model."""
-    requests = recorder.captured_all_requests()
+    requests = (
+        captured_requests
+        if captured_requests is not None
+        else recorder.captured_all_requests()
+    )
     start = max(0, min(int(since_seq or 0), len(requests)))
     page_size = max(1, min(int(limit or _DEFAULT_DELTA_LIMIT), _MAX_DELTA_LIMIT))
     fresh = requests[start:start + page_size]
@@ -173,7 +179,9 @@ def recording_delta(
         item for item in discover_response_key_maps(requests)
         if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
     ]
-    page_events = recorder.recorded_page_events()
+    page_events = (
+        page_events if page_events is not None else recorder.recorded_page_events()
+    )
     return {
         "since_seq": start,
         "next_seq": next_seq,
@@ -646,6 +654,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         }
         param.category = "runtime_var"
         param.exposed_to_user = False
+        param.default_value = None
 
     elif source_kind == "page_context":
         context_key = str(edit.get("context_key") or "") or param.path.split(".")[-1].split("[")[0]

@@ -188,9 +188,9 @@ def test_recording_pipeline_cleanup_baseline_is_stable():
     }
     assert baseline == {
         "request_facts": "7e3aae17cac77555",
-        "client_projection": "beb7d237a1e11ab5",
-        "release_payload": "c63c6bc3d7b16554",
-        "compiled_api_request": "9400e4d0c495ee55",
+        "client_projection": "bd093cc241ff42f7",
+        "release_payload": "3ceee24eed49dd94",
+        "compiled_api_request": "96f5202309808099",
         "runtime_result": "5424aae2ef90d33f",
         "shape": {
             "request_ids": ["req-save-contact"],

@@ -1912,7 +1912,18 @@ def _build_step_from_capture(
             },
             editable=bool(source_guess["editable"]),
             exposed_to_user=bool(source_guess["exposed_to_user"]),
-            default_value=f.get("raw_value", f.get("value")),
+            # A submitted request value is a replay sample, not a reusable
+            # caller default. Defaults require explicit page/control evidence.
+            default_value=(
+                f.get("visible_default")
+                if f.get("visible_default") is not None
+                else f.get("raw_value", f.get("value"))
+                if (
+                    _looks_pagination_field(nm, path)
+                    or source_guess["source_kind"] == "constant"
+                )
+                else None
+            ),
             reason=_append_reason_detail(source_guess["reason"], enum_description),
             description=enum_description,
             need_human_confirm=bool(
@@ -3669,7 +3680,11 @@ def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
         return fields
     props = (cap.output_schema or {}).get("properties") or {}
     required = set((cap.output_schema or {}).get("required") or [])
-    for name, schema in props.items():
+    # ``properties`` is a JSON object, so insertion order is not part of the
+    # contract. Derive the mirrored output list in a canonical order; an
+    # equivalent JSON/database round-trip must not change the release hash.
+    for name in sorted(props):
+        schema = props[name]
         schema = schema if isinstance(schema, dict) else {}
         fields.append(CapabilityField(
             field_id=f"output:{cap.name or cap.capability_id}:{name}",
@@ -5847,6 +5862,8 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             }
             p.editable = True
             p.exposed_to_user = caller_editable
+            if not caller_editable:
+                p.default_value = None
             if caller_editable:
                 p.reason = (
                     f"编辑场景默认来自上一步 `{source.name or source.path}` 的响应 `{lk.source_path}`；"
@@ -5889,6 +5906,8 @@ def _apply_user_link_source(steps: list[FlowStep], link: FlowLink) -> None:
         "link_id": link.link_id,
     }
     param.editable = True
+    if not param.exposed_to_user:
+        param.default_value = None
     param.need_human_confirm = not bool(link.confirmed)
     param.reason = (
         f"该字段由用户绑定到 `{source_step.name or source_step.path or source_step.step_id}` "
@@ -7048,8 +7067,10 @@ def _schema_default_for_param(param: ParamField) -> Any:
     are wire values, so expose the matching human label when the evidence map
     proves one instead of leaking an internal code as the default.
     """
+    # ``value`` is the sample captured in this particular recording. It proves
+    # transport shape for replay, but it is not evidence of a page default.
     value = param.default_value
-    if value is None:
+    if value is None and _looks_pagination_field(param.key, param.path):
         value = param.value
     if value in (None, ""):
         return _NO_SCHEMA_DEFAULT
@@ -17096,7 +17117,9 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
             exposed_to_user=bool(source_guess["exposed_to_user"]),
             editable=bool(source_guess["editable"]),
             need_human_confirm=bool(source_guess["need_human_confirm"]),
-            default_value=value,
+            default_value=(
+                value if _looks_pagination_field(key, path) else None
+            ),
             reason=source_guess["reason"],
         ))
         if value not in (None, ""):

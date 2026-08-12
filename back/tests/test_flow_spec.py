@@ -2173,7 +2173,7 @@ def test_timesheet_field_ownership_and_selected_project_projections():
         "user_param", "user_input", "date",
     )
     assert params["reportedHours"].source_kind == "user_input"
-    assert params["reportedHours"].default_value == 8
+    assert params["reportedHours"].default_value is None
     for path in ("remainingHours", "teamId", "workTypeId", "approverId"):
         assert params[path].category == "runtime_var"
         assert params[path].source_kind == "selected_option_field"
@@ -2381,13 +2381,13 @@ def test_empty_query_filters_keep_page_control_contract_and_empty_multi_select()
         assert (
             fields[path].key, fields[path].default_value, fields[path].type,
             fields[path].category, fields[path].source_kind, fields[path].required,
-        ) == (label, "", "date", "user_param", "user_input", False)
+        ) == (label, None, "date", "user_param", "user_input", False)
     for path, label in (("projectName", "项目名称"), ("spr", "审批人")):
         assert (
             fields[path].key, fields[path].default_value, fields[path].type,
             fields[path].category, fields[path].source_kind,
             fields[path].exposed_to_user, fields[path].required,
-        ) == (label, "", "string", "user_param", "user_input", True, False)
+        ) == (label, None, "string", "user_param", "user_input", True, False)
     for path, default in (("pageNo", 1), ("pageSize", 10)):
         assert (
             fields[path].key, fields[path].default_value, fields[path].type,
@@ -2397,7 +2397,7 @@ def test_empty_query_filters_keep_page_control_contract_and_empty_multi_select()
     assert (status.key, status.type, status.category, status.source_kind) == (
         "审批状态", "list-enum", "user_param", "page_enum",
     )
-    assert status.default_value == []
+    assert status.default_value is None
     assert status.required is False
     assert status.enum_options == [
         {"label": "未通过", "value": "未通过"},
@@ -2617,7 +2617,7 @@ def test_field_contract_axes_generalize_to_nested_unrelated_system():
     assert (params["amount"].key, params["amount"].type, params["amount"].category, params["amount"].source_kind) == (
         "申报数量", "number", "user_param", "user_input",
     )
-    assert params["amount"].default_value == 5
+    assert params["amount"].default_value is None
     expected = {
         "quotaLeft": ("剩余额度", "number", "quota.left"),
         "groupKey": ("业务组", "string", "group.key"),

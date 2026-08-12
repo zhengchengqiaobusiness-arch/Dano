@@ -484,26 +484,26 @@ def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
         ("/oa/seal-apply/page", "query.pageNo", "pageNo", "1", "number", "number", "user_param", "user_input", False),
         ("/oa/seal-apply/page", "query.pageSize", "pageSize", "10", "number", "number", "user_param", "user_input", False),
         (
-            "/oa/seal-apply/page", "query.processStatus", "流程状态", "2",
+            "/oa/seal-apply/page", "query.processStatus", "流程状态", None,
             "enum", "string", "user_param", "page_enum", False,
         ),
         ("/process-definition/get", "query.key", "key", "oa_seal_apply", "string", "string", "system_const", "constant", False),
-        ("/get-approval-detail", "query.processDefinitionId", "processDefinitionId", "oa_seal_apply:1:def", "string", "string", "runtime_var", "previous_response", False),
+        ("/get-approval-detail", "query.processDefinitionId", "processDefinitionId", None, "string", "string", "runtime_var", "previous_response", False),
         ("/get-approval-detail", "query.activityId", "activityId", "StartUserNode", "string", "string", "system_const", "constant", False),
-        ("/seal-apply/submit-process", "sealId", "公章", "seal-a", "enum", "string", "user_param", "api_option", True),
-        ("/seal-apply/submit-process", "applyTitle", "申请标题", "项目用章", "string", "string", "user_param", "user_input", True),
+        ("/seal-apply/submit-process", "sealId", "公章", None, "enum", "string", "user_param", "api_option", True),
+        ("/seal-apply/submit-process", "applyTitle", "申请标题", None, "string", "string", "user_param", "user_input", True),
         (
-            "/seal-apply/submit-process", "useTime", "使用日期", 1784476800000,
+            "/seal-apply/submit-process", "useTime", "使用日期", None,
             "datetime", "number", "user_param", "user_input", True,
         ),
         (
-            "/seal-apply/submit-process", "backTime", "归还日期", 1784563200000,
+            "/seal-apply/submit-process", "backTime", "归还日期", None,
             "datetime", "number", "user_param", "user_input", True,
         ),
-        ("/seal-apply/submit-process", "useInfo", "使用描述", "项目材料", "string", "string", "user_param", "user_input", True),
+        ("/seal-apply/submit-process", "useInfo", "使用描述", None, "string", "string", "user_param", "user_input", True),
         ("/seal-apply/submit-process", "billType", "billType", "oa_seal_apply", "string", "string", "system_const", "constant", False),
         ("/seal-apply/submit-process", "processDefKey", "processDefKey", "oa_seal_apply", "string", "string", "system_const", "constant", False),
-        ("/seal-apply/submit-process", "remark", "备注", "当天归还", "string", "string", "user_param", "user_input", False),
+        ("/seal-apply/submit-process", "remark", "备注", None, "string", "string", "user_param", "user_input", False),
     ],
 )
 def test_r0_seal_truth_resolves_each_field_axis_independently(
@@ -1282,10 +1282,10 @@ def test_schema_defaults_are_type_safe_and_only_pagination_is_silently_applicabl
 
     assert props["pageNo"]["default"] == 1
     assert props["pageNo"]["x-dano-apply-default"] is True
-    assert props["id"]["default"] == "H-100"
+    assert "default" not in props["id"]
     assert "x-dano-apply-default" not in props["id"]
-    assert props["confirmed"]["default"] is False
-    assert props["roomType"]["default"] == "大床房"
+    assert "default" not in props["confirmed"]
+    assert "default" not in props["roomType"]
     assert "default" not in props["unknownCode"]
 
 

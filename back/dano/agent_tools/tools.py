@@ -2845,6 +2845,9 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
         optional={"recording_id", "flow_version", "plan", "submission_error"},
     )
     session = _recording_session(run_id, params)
+    refresh_live_evidence = getattr(session, "refresh_live_evidence", None)
+    if callable(refresh_live_evidence):
+        await refresh_live_evidence()
     raw_plan = params.get("plan")
     if not isinstance(raw_plan, dict):
         if params.get("submission_error") == "model_output_truncated_missing_plan":
@@ -2936,6 +2939,9 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
     operations = params.get("operations")
     _validate_typed_recording_operations(operations, label="operations")
     session = _recording_session(run_id, params)
+    refresh_live_evidence = getattr(session, "refresh_live_evidence", None)
+    if callable(refresh_live_evidence):
+        await refresh_live_evidence()
     return await _apply_recording_submission_atomic(
         session,
         {"ops": operations, "submission_id": str(uuid4())},

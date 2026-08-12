@@ -27,6 +27,7 @@ from dano.agent_tools.tools import (
 from dano.shared.enums import AssetType
 from dano.execution.page import flow_spec as flow_module
 from dano.execution.page.flow_spec import (
+    FlowCapability,
     FlowSpec,
     FlowStep,
     ParamField,
@@ -107,6 +108,29 @@ def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None
     assert flow_spec_fingerprint(spec) == flow_spec_fingerprint(frozen)
 
 
+def test_flow_fingerprint_ignores_output_schema_property_insertion_order() -> None:
+    """JSON object order must not change a frozen release contract."""
+
+    def with_property_order(names: list[str]) -> FlowSpec:
+        spec = _spec()
+        spec.capabilities = [FlowCapability(
+            capability_id="submit-capability",
+            name="submit",
+            title="提交申请",
+            nodes=_call_nodes(["submit"]),
+            output_schema={
+                "type": "object",
+                "properties": {name: {"type": "string"} for name in names},
+            },
+        )]
+        return spec
+
+    first = with_property_order(["code", "data", "msg"])
+    second = with_property_order(["msg", "code", "data"])
+
+    assert flow_spec_fingerprint(first) == flow_spec_fingerprint(second)
+
+
 def test_manual_edit_then_release_reviews_the_exact_persisted_snapshot() -> None:
     spec = _spec()
     spec.capabilities = [flow_module.FlowCapability(
@@ -165,6 +189,155 @@ def test_release_fingerprint_treats_missing_and_explicit_none_evidence_as_equal(
         flow_module.flow_spec_release_payload(prepared)
     )
     assert flow_spec_fingerprint(reconstructed) == release["flow_fingerprint"]
+
+
+class _LiveEvidenceRecorder:
+    def __init__(self):
+        self.calls = {
+            "requests": 0,
+            "events": 0,
+            "fields": 0,
+            "enums": 0,
+        }
+
+    def captured_all_requests(self):
+        self.calls["requests"] += 1
+        return [{
+            "request_id": "req-submit",
+            "sequence": 1,
+            "timestamp": 200,
+            "method": "POST",
+            "url": "https://example.test/leave/submit",
+            "post_data": {"reason": "recorded"},
+            "page_id": "page-1",
+            "frame_id": "main",
+            "trigger_action_id": "action-submit",
+            "page_context": {"path": "/leave"},
+        }]
+
+    def recorded_page_events(self):
+        self.calls["events"] += 1
+        return [{
+            "event_id": "event-reason",
+            "action_id": "action-submit",
+            "kind": "fill",
+        }]
+
+    def recorded_field_evidence(self):
+        self.calls["fields"] += 1
+        return [{
+            "evidence_id": "field-reason",
+            "event_id": "event-reason",
+            "action_id": "action-submit",
+            "label": "请假原因",
+            "field_aliases": ["reason"],
+            "control_kind": "textarea",
+            "required": True,
+            "required_observed": True,
+            "page_id": "page-1",
+            "frame_id": "main",
+            "page_context": {"path": "/leave"},
+        }]
+
+    def recorded_page_enum_options(self):
+        self.calls["enums"] += 1
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_live_page_evidence_is_available_before_field_ops_are_submitted() -> None:
+    from dano.execution.page.recording_live import (
+        apply_recording_agent_edit,
+        merge_live_agent_state,
+    )
+
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "a" * 32,
+    )
+    session.bind_flow_spec(ensure_flow_version(FlowSpec(), "recorded", reason="test"))
+    recorder = _LiveEvidenceRecorder()
+    session.bind_live_recording(recorder)
+
+    await session.refresh_live_evidence()
+    current = session.current_flow_spec()
+    [field] = current.request_facts.field_evidence
+
+    assert current.request_facts.page_events[0]["event_id"] == "event-reason"
+    assert field["binding_status"] == "bound"
+    assert (field["request_id"], field["wire_path"]) == ("req-submit", "body.reason")
+
+    result = apply_recording_agent_edit(current, {
+        "op": "rename_field",
+        "step_id": "req-submit",
+        "path": "body.reason",
+        "label": "请假原因",
+        "reason": "页面字段标签",
+        "evidence_refs": ["event-reason"],
+    })
+
+    assert result["status"] == "deferred"
+    assert current.meta["recording_agent_ops"][0]["wire_path"] == "body.reason"
+
+    required_result = apply_recording_agent_edit(current, {
+        "op": "set_param_required",
+        "step_id": "req-submit",
+        "path": "body.reason",
+        "required": True,
+        "reason": "页面必填标记",
+        "evidence_refs": ["event-reason"],
+    })
+    assert required_result["status"] == "deferred"
+
+    finalized = current.model_copy(deep=True)
+    finalized.meta = {
+        key: value for key, value in (finalized.meta or {}).items()
+        if key != "recording_agent_ops"
+    }
+    finalized.steps = [FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/leave/submit",
+        source_meta={"request_id": "req-submit"},
+        params=[ParamField(
+            path="reason",
+            key="reason",
+            value="recorded",
+            required=False,
+        )],
+    )]
+
+    merged = merge_live_agent_state(current, finalized)
+    field = merged.steps[0].params[0]
+    assert (field.key, field.label) == ("请假原因", "请假原因")
+    assert field.required is True
+    assert field.source["required_state"] == "required"
+
+    await session.refresh_live_evidence()
+    assert recorder.calls == {
+        "requests": 2,
+        "events": 2,
+        "fields": 2,
+        "enums": 2,
+    }
+
+
+def test_recorded_request_sample_is_not_published_as_a_caller_default() -> None:
+    param = ParamField(
+        path="reason",
+        key="请假原因",
+        value="本次录制临时填写的内容",
+        default_value=None,
+        category="user_param",
+        source_kind="user_input",
+        exposed_to_user=True,
+    )
+
+    assert flow_module._schema_default_for_param(param) is flow_module._NO_SCHEMA_DEFAULT
+
+    param.default_value = "页面真实初始值"
+    assert flow_module._schema_default_for_param(param) == "页面真实初始值"
 
 
 class _Session:
