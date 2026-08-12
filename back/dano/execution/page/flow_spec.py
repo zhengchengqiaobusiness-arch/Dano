@@ -2124,6 +2124,17 @@ def _params_from_get_query(
     for item in field_evidence or []:
         if not isinstance(item, dict):
             continue
+        bound_path = str(item.get("wire_path") or "").removeprefix("request.")
+        if str(item.get("binding_status") or "") == "bound" and bound_path.startswith("query."):
+            bound_key = bound_path.removeprefix("query.")
+            if bound_key in raw_keys:
+                key = bound_key
+                label = str(item.get("label") or item.get("field") or "").strip()
+                if label:
+                    labels[key] = label
+                grounded.add(key)
+                control_by_key[key] = item
+                continue
         aliases = [
             str(value).strip() for value in (item.get("field_aliases") or [])
             if str(value or "").strip()
@@ -4777,7 +4788,11 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 _refresh_param_enum_description(param)
         elif param.category == "user_param" and param.source_kind == "user_input":
             semantic_type = _semantic_recorded_type(param)
-            if semantic_type in {"date", "datetime"} and not _param_field_manually_edited(param, "type"):
+            if (
+                semantic_type in {"date", "datetime"}
+                and not _param_field_manually_edited(param, "type")
+                and not _param_has_grounded_type(param)
+            ):
                 param.type = semantic_type
 
 
@@ -6393,7 +6408,10 @@ def to_flow_spec(
             binding_requests.append(binding_request)
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
-        field_evidence = bind_field_evidence(binding_requests, page_events, field_evidence)
+        field_evidence = bind_field_evidence(
+            binding_requests, page_events, field_evidence,
+            page_enum_options=page_enum_options,
+        )
     role_by_key = {_request_role_key(r): role for r, role in zip(captured_requests, request_roles)}
     flow_reads = _merge_flow_read_sources(reads, captured_requests, request_roles)
 

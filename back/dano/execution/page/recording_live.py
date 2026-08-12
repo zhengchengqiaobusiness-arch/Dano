@@ -692,7 +692,25 @@ def _append_insight(spec, *, kind: str, text: str, refs: list[str]) -> None:  # 
 
 
 def _record_agent_op(spec, edit: dict) -> None:  # noqa: ANN001
-    _append_meta_list(spec, "recording_agent_ops", edit)
+    spec.meta = dict(spec.meta or {})
+    values = [
+        dict(value) for value in spec.meta.get("recording_agent_ops") or []
+        if isinstance(value, dict)
+    ]
+
+    def identity(value: dict) -> dict:
+        return {key: item for key, item in value.items() if key != "_deferred"}
+
+    signature = identity(edit)
+    for index, existing in enumerate(values):
+        if identity(existing) != signature:
+            continue
+        if existing.get("_deferred") and not edit.get("_deferred"):
+            values[index] = deepcopy(edit)
+        spec.meta["recording_agent_ops"] = values[-500:]
+        return
+    values.append(deepcopy(edit))
+    spec.meta["recording_agent_ops"] = values[-500:]
 
 
 def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict:  # noqa: ANN001
@@ -971,7 +989,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         edit["role"] = _canonical_request_role(spec, request_id, str(edit.get("role") or ""))
     stored = _canonical_recorded_agent_op(spec, edit)
     if record and any(
-        isinstance(existing, dict) and existing == stored
+        isinstance(existing, dict)
+        and not existing.get("_deferred")
+        and {key: value for key, value in existing.items() if key != "_deferred"} == stored
         for existing in (spec.meta or {}).get("recording_agent_ops") or []
     ):
         return {"status": "rejected", "reason": "duplicate operation"}
@@ -1626,8 +1646,74 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 raise ValueError("mark_unverified enum target does not exist")
 
     if record:
-        _record_agent_op(spec, stored)
+        recorded = deepcopy(stored)
+        recorded.pop("_deferred", None)
+        if result.get("status") == "deferred":
+            recorded["_deferred"] = True
+        _record_agent_op(spec, recorded)
     return result
+
+
+def _retarget_unique_equivalent_field_operation(spec, operation: dict) -> dict:  # noqa: ANN001
+    """Map a transient request instance to one equivalent materialized step.
+
+    Repeated requests on the same endpoint get different request ids.  A live
+    field conclusion may target the pre-materialization instance while the
+    canonical step is built from the later one.  Retarget only when method,
+    canonical path, page/frame scope and exact wire path identify one step.
+    """
+    if str(operation.get("op") or "") not in {
+        "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+        "attach_enum_options",
+    }:
+        return operation
+    request_id = str(operation.get("request_id") or "")
+    wire_path = str(operation.get("wire_path") or operation.get("path") or "")
+    if not request_id or not wire_path or _request_step(spec, request_id) is not None:
+        return operation
+    source_fact = next(
+        (item for item in spec.request_facts.requests if item.request_id == request_id),
+        None,
+    )
+    if source_fact is None:
+        return operation
+    source_method = str(source_fact.method or "GET").upper()
+    source_path = str(source_fact.path or source_fact.url or "").split("?", 1)[0]
+    candidates: list = []
+    for step in spec.steps:
+        if str(step.method or "GET").upper() != source_method:
+            continue
+        step_path = str(step.path or step.url or "").split("?", 1)[0]
+        if step_path != source_path:
+            continue
+        candidate_request_id = str((step.source_meta or {}).get("request_id") or "")
+        candidate_fact = next(
+            (item for item in spec.request_facts.requests if item.request_id == candidate_request_id),
+            None,
+        )
+        if candidate_fact is not None and any(
+            left and right and left != right
+            for left, right in (
+                (str(source_fact.page_id or ""), str(candidate_fact.page_id or "")),
+                (str(source_fact.frame_id or ""), str(candidate_fact.frame_id or "")),
+            )
+        ):
+            continue
+        try:
+            resolve_field_ref(spec, FieldRef(step_id=step.step_id, wire_path=wire_path))
+        except ValueError:
+            continue
+        candidates.append(step)
+    if len(candidates) != 1:
+        return operation
+    step = candidates[0]
+    candidate_request_id = str((step.source_meta or {}).get("request_id") or "")
+    updated = deepcopy(operation)
+    updated["request_id"] = candidate_request_id
+    updated["step_id"] = step.step_id
+    updated["field_ref"] = {"step_id": step.step_id, "wire_path": wire_path}
+    updated.pop("_deferred", None)
+    return updated
 
 
 def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
@@ -1649,6 +1735,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         if not isinstance(operation, dict):
             continue
         try:
+            operation = _retarget_unique_equivalent_field_operation(merged, operation)
             candidate = merged.model_copy(deep=True)
             result = apply_recording_agent_edit(candidate, operation, record=True)
             if result.get("deferred"):

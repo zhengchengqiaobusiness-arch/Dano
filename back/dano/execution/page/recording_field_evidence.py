@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -76,6 +77,113 @@ def _request_fields(request: dict[str, Any]) -> list[str]:
     fields = [f"query.{key}" for key in query]
     fields.extend(f"body.{path}" for path in _leaves(_parse_body(request)))
     return fields
+
+
+def _value_leaves(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    if isinstance(value, dict):
+        return [
+            item
+            for key, child in value.items()
+            for item in _value_leaves(child, f"{prefix}.{key}" if prefix else str(key))
+        ]
+    if isinstance(value, list):
+        return [
+            item
+            for index, child in enumerate(value)
+            for item in _value_leaves(child, f"{prefix}[{index}]")
+        ]
+    return [(prefix, value)] if prefix else []
+
+
+def _request_field_values(request: dict[str, Any]) -> list[tuple[str, Any]]:
+    parsed = urlparse(str(request.get("url") or request.get("path") or ""))
+    query = request.get("query")
+    if not isinstance(query, dict):
+        query = parse_qs(parsed.query, keep_blank_values=True)
+    values: list[tuple[str, Any]] = []
+    for key, value in query.items():
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, list):
+            values.extend((f"query.{key}[{index}]", item) for index, item in enumerate(value))
+        else:
+            values.append((f"query.{key}", value))
+    values.extend((f"body.{path}", value) for path, value in _value_leaves(_parse_body(request)))
+    return values
+
+
+def _same_recorded_value(left: Any, right: Any) -> bool:
+    if left is None or right is None or isinstance(left, (dict, list, bool)) or isinstance(right, (dict, list, bool)):
+        return False
+    left_text = str(left).strip()
+    right_text = str(right).strip()
+    if not left_text or not right_text:
+        return False
+    if left_text == right_text:
+        return True
+
+    def date_keys(value: str) -> set[str]:
+        matches = {
+            f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+            for year, month, day in re.findall(
+                r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", value,
+            )
+        }
+        if matches or not value.isdigit() or len(value) not in {10, 13}:
+            return matches
+        seconds = int(value) / (1000 if len(value) == 13 else 1)
+        try:
+            # Browser controls expose local calendar dates while JSON bodies
+            # often serialize an epoch.  Keep both UTC and UTC+8 dates; the
+            # exact action/scope/uniqueness guards still decide identity.
+            return {
+                datetime.fromtimestamp(seconds + offset * 3600, tz=timezone.utc).strftime("%Y-%m-%d")
+                for offset in (0, 8)
+            }
+        except (OverflowError, OSError, ValueError):
+            return set()
+
+    left_dates = date_keys(left_text)
+    right_dates = date_keys(right_text)
+    return bool(left_dates and right_dates and left_dates & right_dates)
+
+
+def _enrich_enum_aliases(
+    evidence: dict[str, Any], page_enum_options: dict[str, Any] | None,
+) -> None:
+    """Merge an exact same-control enum identity into DOM evidence."""
+    label = _normalize_identifier(evidence.get("label") or evidence.get("field"))
+    if not label or _evidence_aliases(evidence):
+        return
+    matches: list[dict[str, Any]] = []
+    for name, raw in (page_enum_options or {}).items():
+        if not isinstance(raw, dict) or not _same_scope(raw, evidence):
+            continue
+        enum_labels = {
+            _normalize_identifier(name),
+            _normalize_identifier(raw.get("field_key")),
+            _normalize_identifier(raw.get("label")),
+        }
+        if label not in enum_labels:
+            continue
+        evidence_kind = str(evidence.get("control_kind") or "").casefold()
+        enum_kind = str(raw.get("control_kind") or "").casefold()
+        if evidence_kind and enum_kind and evidence_kind != enum_kind:
+            continue
+        matches.append(raw)
+    if len(matches) != 1:
+        return
+    aliases = [
+        str(value) for value in [
+            *(matches[0].get("field_aliases") or []),
+            matches[0].get("path"), matches[0].get("key"),
+        ] if str(value or "").strip()
+    ]
+    if aliases:
+        evidence["field_aliases"] = list(dict.fromkeys(aliases))
+        evidence["identity_sources"] = [
+            *list(evidence.get("identity_sources") or []), "page_enum_options",
+        ]
 
 
 def _normalize_identifier(value: Any) -> str:
@@ -158,6 +266,7 @@ def bind_field_evidence(
     captured_requests: list[dict[str, Any]],
     page_events: list[dict[str, Any]] | None,
     field_evidence: list[dict[str, Any]] | None,
+    page_enum_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return evidence annotated with an explicit bound/ambiguous/unbound result.
 
@@ -181,6 +290,7 @@ def bind_field_evidence(
         if not isinstance(raw, dict):
             continue
         evidence = deepcopy(raw)
+        _enrich_enum_aliases(evidence, page_enum_options)
         evidence["evidence_id"] = _evidence_id(evidence, index)
         related_event = events_by_id.get(str(evidence.get("event_id") or ""))
         if related_event is None and evidence.get("action_id"):
@@ -224,6 +334,27 @@ def bind_field_evidence(
                                 request.get("trigger_action_id") or request.get("trigger_transaction_id")
                             ),
                         })
+        elif evidence.get("value") not in (None, ""):
+            value_candidates: list[dict[str, Any]] = []
+            for request in requests:
+                if not _same_scope(request, evidence) or not _causal_match(request, evidence):
+                    continue
+                request_id = str(request.get("request_id") or request.get("id") or request.get("index") or "")
+                if not request_id:
+                    continue
+                for wire_path, value in _request_field_values(request):
+                    if _same_recorded_value(evidence.get("value"), value):
+                        value_candidates.append({
+                            "request_id": request_id,
+                            "wire_path": wire_path,
+                            "match_score": 0,
+                            "causal_match": True,
+                            "temporal_match": True,
+                            "time_delta": 0,
+                            "has_request_causality": True,
+                        })
+            if len({(item["request_id"], item["wire_path"]) for item in value_candidates}) == 1:
+                candidates = value_candidates
         if candidates:
             best_score = max(int(item["match_score"]) for item in candidates)
             candidates = [item for item in candidates if int(item["match_score"]) == best_score]
@@ -236,7 +367,10 @@ def bind_field_evidence(
         ]
         if exact_causal:
             selected = exact_causal
-            binding_method = "exact_alias_same_transaction"
+            binding_method = (
+                "exact_alias_same_transaction" if aliases
+                else "unique_value_same_transaction"
+            )
         elif ordered_causal:
             nearest = min(float(item["time_delta"]) for item in ordered_causal)
             selected = [item for item in ordered_causal if float(item["time_delta"]) == nearest]
@@ -278,7 +412,11 @@ def bind_field_evidence(
                 "request_id": request_id,
                 "wire_path": wire_path,
                 "binding_method": binding_method,
-                "binding_reason": "exact control alias, page/frame scope and request causality",
+                "binding_reason": (
+                    "exact control alias, page/frame scope and request causality"
+                    if aliases else
+                    "unique recorded value in the exact action transaction and page/frame scope"
+                ),
             })
         else:
             evidence.pop("request_id", None)

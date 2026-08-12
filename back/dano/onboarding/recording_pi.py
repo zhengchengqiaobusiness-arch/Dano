@@ -440,7 +440,10 @@ class RecordingPiSession:
         from dano.execution.page.flow_spec import _option_sources_from_page_enum_options
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
-        bound_fields = bind_field_evidence(captured, page_events, raw_fields)
+        bound_fields = bind_field_evidence(
+            captured, page_events, raw_fields,
+            page_enum_options=page_enums,
+        )
         async with self._state_lock:
             if marker == self._live_evidence_marker:
                 return

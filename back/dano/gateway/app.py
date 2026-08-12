@@ -2148,7 +2148,10 @@ async def record_ws(ws: WebSocket) -> None:
                 page_events = sess.recorded_page_events()
                 from dano.execution.page.recording_field_identity import bind_field_evidence
 
-                field_evidence = bind_field_evidence(all_caps, page_events, field_evidence)
+                field_evidence = bind_field_evidence(
+                    all_caps, page_events, field_evidence,
+                    page_enum_options=page_enum_options,
+                )
                 log.info("record.finalize", captured=len(all_caps), steps=len(steps),
                          captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140])
                                         for c in all_caps][:25])

@@ -2348,10 +2348,19 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         if not isinstance(item, dict):
             continue
         aliases = evidence_aliases(item)
-        if not aliases:
-            continue
         candidates: list[int] = []
+        bound_path = str(item.get("wire_path") or "").removeprefix("request.")
+        if bound_path.startswith("body."):
+            relative_bound_path = bound_path.removeprefix("body.")
+            candidates = [
+                index for index, (path, _key, _node, _sv, _tl, _internal) in enumerate(leaves)
+                if path == relative_bound_path
+            ]
+        if not candidates and not aliases:
+            continue
         for index, (path, key, _node, _sv, _tl, _internal) in enumerate(leaves):
+            if candidates:
+                break
             if any(
                 _identifier_matches_field(alias, path)
                 or _identifier_matches_field(alias, key)

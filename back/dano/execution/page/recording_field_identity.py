@@ -166,8 +166,9 @@ def bind_field_evidence(
     requests: list[dict[str, Any]],
     page_events: list[dict[str, Any]] | None,
     evidence: list[dict[str, Any]] | None,
+    page_enum_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Bind DOM evidence through the canonical field-identity interface."""
     from dano.execution.page.recording_field_evidence import bind_field_evidence as _bind
 
-    return _bind(requests, page_events, evidence)
+    return _bind(requests, page_events, evidence, page_enum_options=page_enum_options)

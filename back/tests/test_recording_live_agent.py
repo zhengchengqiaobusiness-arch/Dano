@@ -22,6 +22,7 @@ from dano.execution.page.flow_spec import (
     recording_agent_validation,
 )
 from dano.execution.page.recording_live import (
+    apply_recording_agent_edit,
     live_request_role_overrides,
     merge_live_agent_state,
     recording_delta,
@@ -1387,6 +1388,69 @@ def test_finalize_merge_materializes_deferred_request_id_field_semantics():
     assert param.required is False
     assert param.key == "任务编号"
     assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+
+
+def test_finalize_merge_retargets_deferred_field_op_to_unique_equivalent_request():
+    live = FlowSpec(
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-observed", request_index=7, method="GET",
+                path="/records/page", query={"status": ["1"]},
+                query_paths=["query.status"],
+            ),
+        ]),
+    )
+    live = apply_flow_edits(live, [{
+        "op": "set_param_source",
+        "request_id": "req-observed",
+        "wire_path": "query.status",
+        "source_kind": "user_input",
+        "reason": "查询筛选控件由操作人提供",
+    }])
+    finalized = FlowSpec(
+        steps=[FlowStep(
+            step_id="query-records", method="GET", path="/records/page",
+            source_meta={"request_id": "req-materialized", "request_index": 8},
+            params=[ParamField(path="query.status", key="status", value="1")],
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-observed", request_index=7, method="GET",
+                path="/records/page", query={"status": ["1"]},
+                query_paths=["query.status"],
+            ),
+            RequestFact(
+                request_id="req-materialized", request_index=8, method="GET",
+                path="/records/page", query={"status": ["1"]},
+                query_paths=["query.status"],
+            ),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert merged.steps[0].params[0].source_kind == "user_input"
+    assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+
+
+def test_retrying_identical_deferred_field_op_remains_retryable_not_duplicate():
+    live = FlowSpec(request_facts=RequestFacts(requests=[
+        RequestFact(request_id="req-submit", method="POST", path="/records/submit"),
+    ]))
+    edit = {
+        "op": "set_param_source",
+        "request_id": "req-submit",
+        "wire_path": "body.reason",
+        "source_kind": "user_input",
+        "reason": "输入控件由操作人填写",
+    }
+
+    first = apply_flow_edits(live, [edit])
+    retried = apply_recording_agent_edit(first, edit)
+
+    assert retried["status"] == "deferred"
+    assert retried["reason"] != "duplicate operation"
+    assert len(first.meta["recording_agent_ops"]) == 1
 
 
 def test_finalize_merge_turns_still_unresolved_deferred_field_op_into_rejection():
