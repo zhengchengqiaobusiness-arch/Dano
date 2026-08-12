@@ -168,6 +168,51 @@ def test_real_trace_agent_ops_are_all_applied_and_body_field_identity_is_canonic
     assert submit_params["endTime"].wire_format == "epoch_ms"
 
 
+def test_machine_structure_evidence_materializes_dynamic_preflight_chain():
+    requests = _load("request_facts.json")["requests"]
+    for request in requests:
+        if request["request_id"] in {"req_96", "req_98"}:
+            request["role"] = "noise"
+            request["keep"] = False
+    spec = to_flow_spec(
+        requests,
+        recording_mode="real_submit",
+    )
+
+    materialized = {
+        str((step.source_meta or {}).get("request_id") or "")
+        for step in spec.steps
+    }
+    assert {"req_96", "req_98", "req_116"} <= materialized
+
+
+def test_agent_role_override_is_applied_before_step_materialization():
+    requests = _load("request_facts.json")["requests"]
+    query = next(request for request in requests if request["request_id"] == "req_76")
+    query["role"] = "noise"
+    query["keep"] = False
+
+    spec = to_flow_spec(
+        requests,
+        recording_mode="real_submit",
+        request_role_overrides={
+            "req_76": {
+                "role": "business_get",
+                "keep": True,
+                "reason": "Pi 依据筛选操作与请求参数判定为业务查询",
+                "confidence": 0.99,
+                "actor": "agent",
+                "evidence": {"actor": "agent", "evidence_refs": ["req_76"]},
+            },
+        },
+    )
+
+    step = next(item for item in spec.steps if (item.source_meta or {}).get("request_id") == "req_76")
+    assert step.semantic_role == "query"
+    assert spec.request_facts.analysis["req_76"].role == "business_get"
+    assert spec.request_facts.analysis["req_76"].evidence["actor"] == "agent"
+
+
 def test_real_trace_compiles_only_verified_graph_and_releases_both_capabilities():
     spec, submission = _apply_real_agent_submission()
     spec = _attach_executor_evidence(spec)

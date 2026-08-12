@@ -53,6 +53,7 @@ from dano.execution.page.request_capture import (
     _multipart_contains_file,
     _pick_label_key,
 )
+from dano.execution.page.value_tracing import discover_response_key_maps, discover_workflow_value_links
 
 
 _REQUEST_OBSERVER_KEYS = (
@@ -6096,6 +6097,7 @@ def to_flow_spec(
     page_events: list[dict] | None = None,
     tenant: str = "",
     subsystem: str = "",
+    request_role_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> FlowSpec:
     """收敛：把 record_ws 现有产物 → FlowSpec（包含 GET 业务请求）。"""
     reads = reads or []
@@ -6106,6 +6108,7 @@ def to_flow_spec(
     diagnostics = diagnostics or []
     page_events = page_events or []
     recording_mode = recording_mode or "unknown"
+    request_role_overrides = request_role_overrides or {}
 
     request_roles = []
     for request in captured_requests:
@@ -6126,7 +6129,11 @@ def to_flow_spec(
                 "confidence": request.get("confidence") or 0.0,
                 "evidence": request.get("evidence") or {},
             }
-        request_roles.append(recorded or classify_network_request(request, captured_requests, samples))
+        request_id = str(request.get("request_id") or "")
+        override = request_role_overrides.get(request_id)
+        request_roles.append(dict(override) if isinstance(override, dict) else (
+            recorded or classify_network_request(request, captured_requests, samples)
+        ))
     # Bind DOM facts once, before any field projection.  All later naming,
     # required and enum logic consumes this same explicit identity result.
     observer_events_present = any(
@@ -6154,6 +6161,26 @@ def to_flow_spec(
         if (role_by_key.get(_request_role_key(c), {}).get("keep")
             and role_by_key.get(_request_role_key(c), {}).get("role") in {"submit_anchor", "business_write"})
     ]
+    selected_write_request_ids = {
+        str(request.get("request_id") or "") for request in write_cands if request.get("request_id")
+    }
+    machine_preflight_request_ids: set[str] = set()
+    for candidate in discover_response_key_maps(captured_requests):
+        if str(candidate.get("target_request_id") or "") in selected_write_request_ids:
+            machine_preflight_request_ids.add(str(candidate.get("source_request_id") or ""))
+    # Complete the control chain upstream: a strong response value can feed the
+    # request that later produces the dynamic request-key collection.
+    strong_value_candidates = discover_workflow_value_links(captured_requests)
+    changed = True
+    while changed:
+        changed = False
+        for candidate in strong_value_candidates:
+            if str(candidate.get("target_request_id") or "") not in machine_preflight_request_ids:
+                continue
+            source_request_id = str(candidate.get("source_request_id") or "")
+            if source_request_id and source_request_id not in machine_preflight_request_ids:
+                machine_preflight_request_ids.add(source_request_id)
+                changed = True
     # 2) 前置读候选：business_get 直接进入候选；存在写锚点时，把 read_context
     # 也交给后续数据/控制依赖闭包判断。这里不再用 keep 先删掉事实，否则审批详情
     # 这类“响应不直接进入 POST”的控制前置永远没有机会被识别。
@@ -6165,6 +6192,7 @@ def to_flow_spec(
                 bool(write_cands)
                 and role_by_key.get(_request_role_key(r), {}).get("role") == "read_context"
             )
+            or str(r.get("request_id") or "") in machine_preflight_request_ids
         )
     ]
     preread_before_dedupe = len(preread_cands)
@@ -6315,6 +6343,25 @@ def to_flow_spec(
                 and _request_precedes(request, write_request)
             ):
                 owners_by_position.setdefault(idx, set()).add(write_position)
+    position_by_request_id = {
+        str(request.get("request_id") or ""): index
+        for index, request in enumerate(potential_steps)
+        if request.get("request_id")
+    }
+    # Exact response-row keys matching a later request object is machine
+    # evidence that the read controls the write's request shape. Keep that
+    # source in the preflight closure so Pi can propose and verify the richer
+    # response_key_map contract instead of freezing recorded dynamic keys.
+    for candidate in discover_response_key_maps(captured_requests):
+        source_pos = position_by_request_id.get(str(candidate.get("source_request_id") or ""))
+        target_pos = position_by_request_id.get(str(candidate.get("target_request_id") or ""))
+        if (
+            source_pos is not None
+            and target_pos in write_positions
+            and _request_role_key(potential_steps[source_pos]) in preread_keys
+            and _request_precedes(potential_steps[source_pos], potential_steps[target_pos])
+        ):
+            owners_by_position.setdefault(source_pos, set()).add(target_pos)
     try:
         potential_links = discover_step_links(potential_steps)
     except Exception:

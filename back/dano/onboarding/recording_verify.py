@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any, Awaitable, Callable
 
-from dano.execution.page.value_tracing import discover_value_links
+from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -35,44 +35,71 @@ def _request_step_id(spec, request_id: str) -> str:  # noqa: ANN001
 
 def _candidate_link_id(candidate: dict[str, Any]) -> str:
     signature = "\n".join(str(candidate.get(key) or "") for key in (
-        "source_request_id", "source_path", "target_request_id", "target_path",
+        "source_request_id", "source_path", "source_collection_path", "source_key_path",
+        "source_label_path", "target_request_id", "target_path", "target_container_path",
     ))
     return f"candidate-{hashlib.sha256(signature.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dict[str, Any]]:  # noqa: ANN001
     """Promote strong captured value links when no agent-authored link exists yet."""
-    if spec.links:
-        return []
     rows = [fact.model_dump(mode="json") for fact in spec.request_facts.requests]
     todos: list[dict[str, Any]] = []
-    for candidate in discover_value_links(rows):
+    candidates = [
+        *discover_value_links(rows),
+        *discover_response_key_maps(rows),
+    ]
+    for candidate in candidates:
         source_request_id = str(candidate.get("source_request_id") or "")
         target_request_id = str(candidate.get("target_request_id") or "")
         source_step_id = _request_step_id(spec, source_request_id)
         target_step_id = _request_step_id(spec, target_request_id)
         if not source_step_id or not target_step_id:
             continue
+        reported_source_path = str(candidate.get("source_path") or candidate.get("source_collection_path") or "")
+        reported_target_path = str(candidate.get("target_path") or candidate.get("target_container_path") or "")
+        source_path = reported_source_path.removeprefix("response.")
+        target_path = reported_target_path.removeprefix("request.")
+        dependency_kind = str(candidate.get("kind") or "value")
+        if any(
+            link.source_step_id == source_step_id
+            and str(link.source_path or "").removeprefix("response.") == source_path
+            and link.target_step_id == target_step_id
+            and str(link.target_path or "").removeprefix("request.") == target_path
+            and str(link.kind or "value") == dependency_kind
+            for link in spec.links
+        ):
+            continue
         link_id = _candidate_link_id(candidate)
         if ("dependency_candidate", link_id) in skipped:
             continue
-        todos.append({
+        todo = {
             "kind": "dependency_candidate",
+            "dependency_kind": dependency_kind,
             "target_id": link_id,
             "link_id": link_id,
             "source_step_id": source_step_id,
             "source_request_id": source_request_id,
-            "source_path": str(candidate.get("source_path") or ""),
+            "source_path": reported_source_path,
             "target_step_id": target_step_id,
             "target_request_id": target_request_id,
-            "target_path": str(candidate.get("target_path") or ""),
+            "target_path": reported_target_path,
             "chain_request_ids": [source_request_id, target_request_id],
             "value_sample": str(candidate.get("value_sample") or "")[:128],
             "occurrences": int(candidate.get("occurrences") or 1),
             "confidence": 0.9,
             "suggested_tool": "submit_recording_repair",
             "completion_ops": ["propose_dependency", "verify_dependency", "confirm_dependency"],
-        })
+        }
+        if dependency_kind == "response_key_map":
+            todo.update({
+                "source_collection_path": str(candidate.get("source_collection_path") or ""),
+                "source_key_path": str(candidate.get("source_key_path") or ""),
+                "source_label_path": str(candidate.get("source_label_path") or ""),
+                "target_container_path": str(candidate.get("target_container_path") or ""),
+                "recorded_key_count": int(candidate.get("recorded_key_count") or 0),
+            })
+        todos.append(todo)
     return todos
 
 
@@ -397,7 +424,9 @@ async def run_recording_verification(
             " submit_recording_repair 提交 confirm_dependency、bind_verify_read、attach_enum_options。"
             "dependency_candidate 是后端从真实请求值链发现的高置信候选：先单独提交"
             " propose_dependency；读取刷新后的验证报告后调用 verify_dependency(link_id)，"
-            "再用它返回的 verification_id 提交 confirm_dependency。"
+            "再用它返回的 verification_id 提交 confirm_dependency。dependency_kind=response_key_map 时必须按"
+            "待办给出的 collection/key/label/container 路径提交 response_key_map，并使用"
+            " value_binding.kind=caller_map_by_label，不能退化成固定动态键。"
             "本轮不要提交 mark_unverified；重试耗尽由后端统一处理。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )

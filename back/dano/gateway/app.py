@@ -1789,7 +1789,7 @@ async def record_ws(ws: WebSocket) -> None:
                 agent_question_futures.pop(question_id, None)
 
         async def _run_live_analysis(reason: str, since_seq: int, *, bind_spec=None) -> None:  # noqa: ANN001
-            nonlocal pending_flow_spec, live_agent_disabled
+            nonlocal pending_flow_spec, live_agent_disabled, last_live_scheduled_count
             if live_agent_disabled:
                 return
             try:
@@ -1811,6 +1811,9 @@ async def record_ws(ws: WebSocket) -> None:
                 elif pi_session.flow_spec is None and pending_flow_spec is not None:
                     pi_session.bind_flow_spec(pending_flow_spec)
                 await pi_session.notify_live_batch({"reason": reason, "since_seq": since_seq})
+                cursor_reader = getattr(pi_session, "recording_delta_cursor", None)
+                consumed_cursor = int(cursor_reader() or 0) if callable(cursor_reader) else captured_count
+                last_live_scheduled_count = max(last_live_scheduled_count, consumed_cursor)
                 pending_flow_spec = pi_session.current_flow_spec()
                 _checkpoint_resume()
                 _emit_agent_insights(pending_flow_spec)
@@ -1845,7 +1848,6 @@ async def record_ws(ws: WebSocket) -> None:
                     return
                 current_count = len(captured_all_requests())
                 since_seq = last_live_scheduled_count
-                last_live_scheduled_count = current_count
                 await _run_live_analysis(reason, since_seq)
                 # Pi 一次只能处理一轮。分析期间到达的事实必须合并成尾批，
                 # 不能因为当时已有任务就静默丢弃。
@@ -1853,6 +1855,7 @@ async def record_ws(ws: WebSocket) -> None:
                     not live_agent_disabled
                     and len(captured_all_requests()) > last_live_scheduled_count
                     and pending_live_analysis_reason is None
+                    and last_live_scheduled_count > since_seq
                 ):
                     pending_live_analysis_reason = "request_batch"
 
@@ -2163,6 +2166,11 @@ async def record_ws(ws: WebSocket) -> None:
                         to_flow_spec,
                         validate_flow_spec,
                     )
+                    live_role_overrides = {}
+                    if recording_pi is not None and recording_pi.flow_spec is not None:
+                        from dano.execution.page.recording_live import live_request_role_overrides
+
+                        live_role_overrides = live_request_role_overrides(recording_pi.current_flow_spec())
                     pending_flow_spec = to_flow_spec(
                         captured_requests=all_caps,
                         reads=reads,
@@ -2177,6 +2185,7 @@ async def record_ws(ws: WebSocket) -> None:
                         page_events=page_events,
                         tenant=init.get("tenant", ""),
                         subsystem=init.get("subsystem", ""),
+                        request_role_overrides=live_role_overrides,
                     )
                     if recording_pi is not None and recording_pi.flow_spec is not None:
                         from dano.execution.page.recording_live import merge_live_agent_state
@@ -2186,7 +2195,6 @@ async def record_ws(ws: WebSocket) -> None:
                             pending_flow_spec,
                         )
                     finalize_since_seq = last_live_scheduled_count
-                    last_live_scheduled_count = len(all_caps)
                     if not live_agent_disabled:
                         await _responsive_prompt(_run_live_analysis(
                             "finalize",

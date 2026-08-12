@@ -1,4 +1,4 @@
-"""Strong response-to-later-request value-link candidates."""
+"""Strong response-to-later-request value and structure candidates."""
 from __future__ import annotations
 
 import json
@@ -44,6 +44,20 @@ def _is_strong_value(raw: object, path: str) -> bool:
         and _OPAQUE_RE.fullmatch(value)
         and any(ch.isalpha() for ch in value)
         and any(ch.isdigit() for ch in value)
+    )
+
+
+def _is_workflow_route_value(raw: object, source_path: str, target_path: str) -> bool:
+    """Allow short stable workflow IDs only when both path names say ID/key."""
+    if raw is None or isinstance(raw, bool):
+        return False
+    value = str(raw).strip()
+    if len(value) < 4 or value.casefold() in _BORING_LINK_VALUES:
+        return False
+    source_leaf = re.sub(r"[^a-z0-9]+", "", source_path.casefold().split(".")[-1])
+    target_leaf = re.sub(r"[^a-z0-9]+", "", target_path.casefold().split(".")[-1])
+    return source_leaf in {"id", "key", "code"} and (
+        target_leaf.endswith("id") or target_leaf.endswith("key") or target_leaf.endswith("code")
     )
 
 
@@ -112,6 +126,132 @@ def _same_value(left: object, right: object) -> bool:
     return False
 
 
+def _nested_nodes(node: object, path: str = "") -> list[tuple[str, object]]:
+    """Return nested containers with stable dotted paths (excluding the root)."""
+    out: list[tuple[str, object]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = f"{path}.{key}" if path else str(key)
+            if isinstance(value, (dict, list)):
+                out.append((child, value))
+                out.extend(_nested_nodes(value, child))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            child = f"{path}[{index}]" if path else f"[{index}]"
+            if isinstance(value, (dict, list)):
+                out.append((child, value))
+                out.extend(_nested_nodes(value, child))
+    return out
+
+
+def _list_collections(node: object, path: str = "") -> list[tuple[str, list]]:
+    """Collect response row arrays without expanding every row into the index."""
+    out: list[tuple[str, list]] = []
+    if not isinstance(node, dict):
+        return out
+    for key, value in node.items():
+        child = f"{path}.{key}" if path else str(key)
+        if isinstance(value, list):
+            if value and all(isinstance(row, dict) for row in value):
+                out.append((child, value))
+            continue
+        if isinstance(value, dict):
+            out.extend(_list_collections(value, child))
+    return out
+
+
+def _field_rank(field: str, *, label: bool) -> tuple[int, str]:
+    normalized = re.sub(r"[^a-z0-9]+", "", field.casefold())
+    hints = (
+        ("name", "label", "title", "caption", "text", "description")
+        if label else
+        ("id", "key", "code", "value")
+    )
+    try:
+        return hints.index(normalized), normalized
+    except ValueError:
+        return len(hints), normalized
+
+
+def discover_response_key_maps(all_requests: list[dict]) -> list[dict]:
+    """Find exact ``response rows -> later request object keys`` contracts.
+
+    The match is deliberately structural: every recorded target key must equal
+    one unique key from one upstream response collection, in the same order.
+    It is therefore a candidate for model/executor verification, never an
+    automatically confirmed dependency.
+    """
+    ordered = sorted(
+        ((request, position) for position, request in enumerate(all_requests or []) if isinstance(request, dict)),
+        key=lambda item: _sequence(item[0], item[1]),
+    )
+    candidates: list[dict] = []
+    for source_index, (source, _) in enumerate(ordered):
+        response = source.get("response_json")
+        if response is None:
+            continue
+        collections = _list_collections(response)
+        if not collections:
+            continue
+        source_id = str(source.get("request_id") or f"req_{source_index}")
+        for collection_path, rows in collections:
+            common_fields = set(rows[0])
+            for row in rows[1:]:
+                common_fields.intersection_update(row)
+            scalar_fields = [
+                field for field in common_fields
+                if not _is_sensitive(field)
+                and all(row.get(field) not in (None, "") and not isinstance(row.get(field), (dict, list, bool)) for row in rows)
+            ]
+            key_fields = sorted(scalar_fields, key=lambda field: _field_rank(field, label=False))
+            label_fields = sorted(
+                [
+                    field for field in scalar_fields
+                    if all(isinstance(row.get(field), str) and str(row.get(field)).strip() for row in rows)
+                ],
+                key=lambda field: _field_rank(field, label=True),
+            )
+            for target_index in range(source_index + 1, len(ordered)):
+                target, _ = ordered[target_index]
+                target_id = str(target.get("request_id") or f"req_{target_index}")
+                body = _body(target)
+                for container_path, container in _nested_nodes(body):
+                    if not isinstance(container, dict) or not container:
+                        continue
+                    target_keys = [str(key) for key in container]
+                    for key_field in key_fields:
+                        source_keys = [str(row[key_field]) for row in rows]
+                        if len(set(source_keys)) != len(source_keys) or source_keys != target_keys:
+                            continue
+                        label_field = next((
+                            field for field in label_fields
+                            if field != key_field
+                            and len({str(row[field]) for row in rows}) == len(rows)
+                        ), "")
+                        if not label_field:
+                            continue
+                        candidates.append({
+                            "kind": "response_key_map",
+                            "source_request_id": source_id,
+                            "source_collection_path": collection_path,
+                            "source_key_path": key_field,
+                            "source_label_path": label_field,
+                            "target_request_id": target_id,
+                            "target_container_path": f"body.{container_path}",
+                            "recorded_key_count": len(target_keys),
+                            "confidence": 0.99,
+                        })
+                        break
+    unique: dict[tuple[str, ...], dict] = {}
+    for item in candidates:
+        signature = tuple(str(item.get(key) or "") for key in (
+            "source_request_id", "source_collection_path", "source_key_path",
+            "source_label_path", "target_request_id", "target_container_path",
+        ))
+        unique.setdefault(signature, item)
+    return list(unique.values())
+
+
 def discover_value_links(all_requests: list[dict]) -> list[dict]:
     """Return strong response-value links into any later request input."""
     ordered = sorted(
@@ -158,4 +298,43 @@ def discover_value_links(all_requests: list[dict]) -> list[dict]:
     for item in candidates:
         key = (item["source_request_id"], item["source_path"], item["target_request_id"], item["target_path"])
         unique.setdefault(key, {**item, "occurrences": counts[key]})
+    return list(unique.values())
+
+
+def discover_workflow_value_links(all_requests: list[dict]) -> list[dict]:
+    """Find strong links plus short ID/key workflow routing links."""
+    candidates = list(discover_value_links(all_requests))
+    ordered = sorted(
+        ((request, position) for position, request in enumerate(all_requests or []) if isinstance(request, dict)),
+        key=lambda item: _sequence(item[0], item[1]),
+    )
+    input_leaves = [_input_leaves(request) for request, _ in ordered]
+    for source_index, (source, _) in enumerate(ordered):
+        response = source.get("response_json")
+        if response is None:
+            continue
+        source_id = str(source.get("request_id") or f"req_{source_index}")
+        for source_path, source_raw in _leaves(response):
+            for target_index in range(source_index + 1, len(ordered)):
+                target, _ = ordered[target_index]
+                target_id = str(target.get("request_id") or f"req_{target_index}")
+                for target_path, target_raw in input_leaves[target_index]:
+                    if (
+                        _same_value(source_raw, target_raw)
+                        and _is_workflow_route_value(source_raw, source_path, target_path)
+                    ):
+                        candidates.append({
+                            "source_request_id": source_id,
+                            "source_path": f"response.{source_path}",
+                            "target_request_id": target_id,
+                            "target_path": target_path,
+                            "value_sample": str(source_raw)[:128],
+                            "occurrences": 1,
+                        })
+    unique: dict[tuple[str, str, str, str], dict] = {}
+    for item in candidates:
+        signature = tuple(str(item.get(key) or "") for key in (
+            "source_request_id", "source_path", "target_request_id", "target_path",
+        ))
+        unique.setdefault(signature, item)
     return list(unique.values())

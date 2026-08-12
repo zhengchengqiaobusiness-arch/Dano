@@ -163,6 +163,7 @@ class RecordingPiSession:
         self._analysis_images: list[dict[str, str]] = []
         self._active_analysis_image_count = 0
         self._live_recorder: Any = None
+        self._recording_delta_cursor = 0
         self._live_goal_text = ""
         self._operator_asker: Callable[..., Any] | None = None
         self.last_submission_kind = ""
@@ -356,12 +357,21 @@ class RecordingPiSession:
 
         if self._live_recorder is None:
             raise RecordingPiError("实时录制事实源尚未绑定")
-        return recording_delta(
+        delta = recording_delta(
             self._live_recorder,
             since_seq=since_seq,
             limit=limit,
             goal_text=self._live_goal_text,
         )
+        self._recording_delta_cursor = max(
+            self._recording_delta_cursor,
+            int(delta.get("next_seq") or 0),
+        )
+        return delta
+
+    def recording_delta_cursor(self) -> int:
+        """Highest request cursor actually returned to this Pi session."""
+        return self._recording_delta_cursor
 
     async def ask_operator(
         self,
@@ -427,7 +437,9 @@ class RecordingPiSession:
             "（必须带 origin_request_id 和 origin_path）；由用户参数推导的值（如天数=结束-开始）归 computed"
             "（必须带 strategy=date_span_days_json、start_field、end_field）。分类会做可执行编译校验，"
             "被拒绝时按返回原因改类重提。上游响应决定请求键结构时（如动态审批节点 ID 作为键），"
-            "用 propose_dependency kind=structure，target_path 填容器路径。"
+            "优先使用 heuristic_candidates.response_key_maps 给出的精确候选，提交 propose_dependency "
+            "kind=response_key_map，并原样填写 source_collection_path/source_key_path/source_label_path/"
+            "target_container_path；value_binding 用 caller_map_by_label，input_field 使用稳定业务名。"
             "逐字段用 set_param_required 提交有证据的必填性，用 rename_field 提交有证据的业务名称，"
             "页面字典枚举用 set_param_enum 提交完整 label/value 映射；三者都会回查 field_evidence/字典，"
             "禁止只写 field_semantics 绕过证据闸门，evidence_refs 至少要有一条引用真实 request_id/event_id/step_id。"

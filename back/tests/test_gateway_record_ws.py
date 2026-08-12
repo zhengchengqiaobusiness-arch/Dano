@@ -867,6 +867,7 @@ async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
             self.flow_spec = None
             self.notify_calls: list[dict] = []
+            self.cursor = 0
             sessions.append(self)
 
         async def start(self):  # noqa: ANN201
@@ -882,6 +883,13 @@ async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy
             self.notify_calls.append(dict(delta))
             analysis_started.set()
             await asyncio.sleep(0.05)
+            # The Pi tool paged through ten requests while this prompt was
+            # running. The next server turn must continue from that consumed
+            # cursor, not from the zero-request snapshot at scheduling time.
+            self.cursor = 10 if len(self.notify_calls) == 1 else 15
+
+        def recording_delta_cursor(self) -> int:
+            return self.cursor
 
         def current_flow_spec(self):  # noqa: ANN201
             return self.flow_spec
@@ -916,7 +924,7 @@ async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy
     assert len(sessions) == 1
     assert sessions[0].notify_calls == [
         {"reason": "recording_started", "since_seq": 0},
-        {"reason": "request_batch", "since_seq": 0},
+        {"reason": "request_batch", "since_seq": 10},
     ]
     assert any(
         message.get("type") == "agent_status"

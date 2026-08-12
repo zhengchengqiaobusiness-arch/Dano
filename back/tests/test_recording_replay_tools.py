@@ -7,7 +7,7 @@ from aiohttp import web
 
 from dano.execution.page import value_tracing
 from dano.execution.page.replay import perturb_replay, replay_request, verify_dependency
-from dano.execution.page.value_tracing import discover_value_links
+from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
 from dano.execution.page.verification_log import (
     _clear_verifications_for_tests,
     find_verification,
@@ -194,6 +194,43 @@ def test_discover_value_links_scans_each_request_inputs_once(monkeypatch):
 
     assert len(links) == 19
     assert calls <= len(requests)
+
+
+def test_discover_response_key_maps_requires_exact_unique_response_keys():
+    requests = [
+        {
+            "request_id": "req-detail",
+            "sequence": 1,
+            "response_json": {"data": {"activityNodes": [
+                {"id": "Activity_leader", "name": "领导审批"},
+                {"id": "Activity_hr", "name": "人力审批"},
+            ]}},
+        },
+        {
+            "request_id": "req-submit",
+            "sequence": 2,
+            "post_data": {"startUserSelectAssignees": {
+                "Activity_leader": [501],
+                "Activity_hr": [502],
+            }},
+        },
+    ]
+
+    assert discover_response_key_maps(requests) == [{
+        "kind": "response_key_map",
+        "source_request_id": "req-detail",
+        "source_collection_path": "data.activityNodes",
+        "source_key_path": "id",
+        "source_label_path": "name",
+        "target_request_id": "req-submit",
+        "target_container_path": "body.startUserSelectAssignees",
+        "recorded_key_count": 2,
+        "confidence": 0.99,
+    }]
+
+    changed = json.loads(json.dumps(requests))
+    changed[1]["post_data"]["startUserSelectAssignees"] = {"Activity_stale": [501]}
+    assert discover_response_key_maps(changed) == []
 
 
 def test_verification_ids_are_executor_generated_and_defensively_copied():

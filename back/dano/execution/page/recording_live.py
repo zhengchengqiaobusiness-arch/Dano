@@ -14,7 +14,7 @@ from dano.execution.page.recording_field_identity import (
     resolve_field_ref,
     stored_container_path,
 )
-from dano.execution.page.value_tracing import discover_value_links
+from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
 from dano.execution.page.wire_format import date_span_days
 from dano.infra.token_store import mask_headers
 
@@ -169,6 +169,10 @@ def recording_delta(
         item for item in discover_value_links(requests)
         if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
     ]
+    structure_candidates = [
+        item for item in discover_response_key_maps(requests)
+        if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
+    ]
     page_events = recorder.recorded_page_events()
     return {
         "since_seq": start,
@@ -190,6 +194,7 @@ def recording_delta(
                 for request in fresh
             ],
             "value_links": candidates,
+            "response_key_maps": structure_candidates,
         },
     }
 
@@ -1464,6 +1469,32 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     if unresolved:
         merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}
     return merged
+
+
+def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
+    """Project accepted agent role ops for use before canonical materialization."""
+    overrides: dict[str, dict] = {}
+    for operation in (live_spec.meta or {}).get("recording_agent_ops") or []:
+        if not isinstance(operation, dict) or operation.get("op") != "set_request_role":
+            continue
+        request_id = str(operation.get("request_id") or "")
+        role = str(operation.get("role") or "")
+        reason = str(operation.get("reason") or "")
+        if not request_id or not role or not reason:
+            continue
+        overrides[request_id] = {
+            "role": role,
+            "keep": role not in {"noise", "auth", "telemetry"},
+            "reason": reason,
+            "confidence": max(0.8, float(operation.get("confidence") or 0)),
+            "actor": "agent",
+            "evidence": {
+                "actor": "agent",
+                "reason": reason,
+                "evidence_refs": _evidence_refs(operation),
+            },
+        }
+    return overrides
 
 
 def recording_agent_evidence_issues(spec) -> list[dict]:  # noqa: ANN001

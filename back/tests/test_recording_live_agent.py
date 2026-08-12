@@ -1212,6 +1212,31 @@ def test_recording_delta_is_incremental_and_fully_redacted():
     assert recording_delta(_Recorder(), since_seq=1)["requests"][0]["request_id"] == "req-1"
 
 
+def test_recording_delta_projects_dynamic_request_key_candidates():
+    class Recorder:
+        def captured_all_requests(self):
+            return [
+                {
+                    "request_id": "req-detail", "sequence": 1,
+                    "response_json": {"data": {"nodes": [
+                        {"id": "Node_leader", "name": "领导"},
+                        {"id": "Node_hr", "name": "人事"},
+                    ]}},
+                },
+                {
+                    "request_id": "req-submit", "sequence": 2, "method": "POST",
+                    "post_data": {"assignees": {"Node_leader": [1], "Node_hr": [2]}},
+                },
+            ]
+
+        def recorded_page_events(self):
+            return []
+
+    candidate = recording_delta(Recorder(), since_seq=0)["heuristic_candidates"]["response_key_maps"][0]
+    assert candidate["source_request_id"] == "req-detail"
+    assert candidate["target_container_path"] == "body.assignees"
+
+
 class _LargeRecorder:
     def captured_all_requests(self):
         return [
@@ -1334,6 +1359,9 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     delta = await session.get_recording_delta(0, limit=1)
     assert delta["has_more"] is True
     assert delta["requests"][0]["request_id"] == "req-0"
+    assert session.recording_delta_cursor() == 1
+    await session.get_recording_delta(1, limit=10)
+    assert session.recording_delta_cursor() == 2
     answer = await session.ask_operator(text="选择？", options=["选项A"])
     assert answer == {"answered": True, "answer": "选项A"}
     assert questions[0]["text"] == "选择？"
