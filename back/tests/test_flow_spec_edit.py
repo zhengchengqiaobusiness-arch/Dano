@@ -738,6 +738,74 @@ def test_confirmed_capability_contract_change_is_advice_not_publish_policy():
     assert not any("确认后合同已变化" in item for item in report["suggestions"])
 
 
+def test_verification_refreshes_planner_confirmation_hash():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/records",
+            body_source='{"description":"sample"}',
+            params=[ParamField(
+                path="description", key="业务说明", value="sample",
+                category="user_param", source_kind="user_input", exposed_to_user=True,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            capability_id="submit-cap", name="submit", kind="submit",
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            confirmed=True, requires_human_confirm=False, updated_by="planner",
+        )],
+    )
+    cap = spec.capabilities[0]
+    cap.confirmation_hash = flow_spec_module._capability_confirmation_hash(spec, cap)
+    spec.steps[0].fact_check = {
+        "verified": True,
+        "verification_id": "verify-write-1",
+        "endpoint": "/api/records",
+        "assertion": {"path": "data.total", "gte": 1},
+    }
+    spec.meta["verification_run"] = {"complete": True}
+
+    refreshed = flow_spec_module._auto_confirm_ready_capabilities(spec)
+
+    assert refreshed.capabilities[0].confirmation_hash == flow_spec_module._capability_confirmation_hash(
+        refreshed, refreshed.capabilities[0]
+    )
+    assert not any("确认后合同已变化" in error for error in validate_flow_spec(refreshed)["errors"])
+
+
+def test_dependency_verification_receipt_does_not_hide_dependency_contract_changes():
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="source", method="GET", path="/api/options"),
+            FlowStep(
+                step_id="target", method="POST", path="/api/records",
+                params=[ParamField(path="optionId", key="选项", value="1")],
+            ),
+        ],
+        links=[FlowLink(
+            link_id="option-link", source_step_id="source", source_path="data.id",
+            target_step_id="target", target_path="optionId",
+        )],
+        capabilities=[FlowCapability(
+            capability_id="record-cap", name="create_record", kind="create",
+            nodes=[
+                {"id": "call_source", "type": "call", "step_id": "source"},
+                {"id": "call_target", "type": "call", "step_id": "target"},
+            ],
+        )],
+    )
+    cap = spec.capabilities[0]
+    original = flow_spec_module._capability_confirmation_hash(spec, cap)
+
+    spec.links[0].confirmed = True
+    spec.links[0].confidence = 1.0
+    spec.links[0].meta = {"verified": True, "verification_id": "verify-link-1"}
+    spec.links[0].evidence = {"verification_id": "verify-link-1"}
+    assert flow_spec_module._capability_confirmation_hash(spec, cap) == original
+
+    spec.links[0].target_path = "otherOptionId"
+    assert flow_spec_module._capability_confirmation_hash(spec, cap) != original
+
+
 def test_generated_placeholder_output_name_is_normalized_to_stable_result():
     spec = FlowSpec(
         steps=[FlowStep(
@@ -2879,6 +2947,110 @@ def test_saved_page_enum_repairs_internal_type_category_and_source_on_sync():
     assert param.source_kind == "page_enum"
     assert param.enum_value_map == {"普通": 1, "豪华": 3}
     assert fixed.steps[0].selects[0].enum_confirmed is True
+
+
+def test_complete_dictionary_reuses_only_with_scoped_control_and_value_label_evidence():
+    option_source = {
+        "kind": "page_enum_options",
+        "options": {
+            "记录状态": {
+                "field_key": "记录状态",
+                "field_aliases": ["status"],
+                "control_kind": "select",
+                "enum_source": "script_dictionary",
+                "source_url": "/admin-api/system/dict-data/simple-list",
+                "dict_type": "record_status",
+                "mapping_complete": True,
+                "page_id": "page-1",
+                "frame_id": "main",
+                "page_context": {"path": "/records/create"},
+                "options": [
+                    {"label": "待处理", "value": "1"},
+                    {"label": "已完成", "value": "2"},
+                ],
+                "request_value_observations": [
+                    {"request_id": "req-submit", "wire_path": "status", "value": "1"},
+                ],
+            },
+        },
+    }
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="query", method="GET", path="/api/records",
+                source_meta={
+                    "request_id": "req-query", "page_id": "page-1", "frame_id": "main",
+                    "trigger_page_context": {"path": "/records"},
+                },
+                params=[ParamField(
+                    path="query.status", key="status", value="1", type="string",
+                    category="user_param", source_kind="user_input", exposed_to_user=True,
+                )],
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/api/records",
+                source_meta={
+                    "request_id": "req-submit", "page_id": "page-1", "frame_id": "main",
+                    "trigger_page_context": {"path": "/records/create"},
+                },
+                params=[ParamField(
+                    path="status", key="status", value="1", type="string",
+                    category="user_param", source_kind="user_input", exposed_to_user=True,
+                )],
+            ),
+            FlowStep(
+                step_id="unrelated", method="GET", path="/api/other-records",
+                source_meta={
+                    "request_id": "req-unrelated", "page_id": "page-1", "frame_id": "main",
+                    "trigger_page_context": {"path": "/other-records"},
+                },
+                params=[ParamField(
+                    path="query.status", key="status", value="9", type="string",
+                    category="user_param", source_kind="user_input", exposed_to_user=True,
+                )],
+            ),
+        ],
+        request_facts=RequestFacts(
+            option_sources=[option_source],
+            field_evidence=[
+                {
+                    "field": "记录状态", "label": "记录状态",
+                    "control_kind": "select", "binding_status": "unbound",
+                    "page_id": "page-1", "frame_id": "main",
+                    "page_context": {"path": "/records"},
+                },
+                {
+                    "kind": "table_column", "label": "记录状态",
+                    "control_kind": "table_column", "sample_values": ["待处理", "已完成"],
+                    "page_id": "page-1", "frame_id": "main",
+                    "page_context": {"path": "/records"},
+                },
+                {
+                    "field": "记录状态", "label": "记录状态",
+                    "control_kind": "select", "binding_status": "unbound",
+                    "page_id": "page-1", "frame_id": "main",
+                    "page_context": {"path": "/other-records"},
+                },
+                {
+                    "kind": "table_column", "label": "记录状态",
+                    "control_kind": "table_column", "sample_values": ["已暂停"],
+                    "page_id": "page-1", "frame_id": "main",
+                    "page_context": {"path": "/other-records"},
+                },
+            ],
+        ),
+    )
+
+    synced = sync_flow_spec_models(spec)
+    by_step = {step.step_id: step.params[0] for step in synced.steps}
+
+    for step_id in ("query", "submit"):
+        param = by_step[step_id]
+        assert param.key == "记录状态"
+        assert param.type == "enum"
+        assert param.enum_value_map == {"待处理": "1", "已完成": "2"}
+    assert by_step["unrelated"].key == "status"
+    assert by_step["unrelated"].type == "string"
 
 
 def test_sync_capability_scoped_views_prunes_noisy_submit_steps():

@@ -728,6 +728,30 @@ def test_enum_binding_requires_exact_recorded_label_value_mapping():
         }])
 
 
+def test_live_field_operation_rejects_response_path_and_reports_request_paths():
+    spec = FlowSpec(request_facts=RequestFacts(requests=[RequestFact(
+        request_id="req-query",
+        method="GET",
+        path="/records",
+        query={"status": ["1"]},
+        query_paths=["query.status"],
+    )]))
+
+    with pytest.raises(ValueError, match=r"response path.*query\.status"):
+        apply_flow_edits(spec, [{
+            "op": "set_param_enum",
+            "request_id": "req-query",
+            "wire_path": "response.data.list[].status",
+            "dictionary_source": "record_status",
+            "options": [
+                {"label": "待处理", "value": 1},
+                {"label": "已完成", "value": 2},
+            ],
+            "reason": "错误地把响应字段当请求字段",
+            "evidence_refs": ["req-query"],
+        }])
+
+
 def test_set_goal_merges_axes_instead_of_wiping_them():
     spec = _flow()
     spec.goal = {

@@ -255,6 +255,34 @@ def _canonical_deferred_wire_path(spec, request_id: str, path: str) -> str:  # n
     return f"query.{raw}" if method in {"GET", "HEAD", "OPTIONS"} else f"body.{raw}"
 
 
+def _reject_response_field_target(spec, identifier: str, path: str) -> None:  # noqa: ANN001
+    raw = str(path or "").removeprefix("request.")
+    if not raw.startswith(("response.", "response[")):
+        return
+    step = next((item for item in spec.steps if item.step_id == identifier), None)
+    request_id = str((step.source_meta or {}).get("request_id") or "") if step else identifier
+    fact = next(
+        (item for item in spec.request_facts.requests if item.request_id == request_id),
+        None,
+    )
+    available = {
+        str(value)
+        for value in [
+            *(getattr(fact, "query_paths", None) or []),
+            *(getattr(fact, "body_paths", None) or []),
+            *(getattr(fact, "header_paths", None) or []),
+            *(param.path for param in (step.params if step else []) if param.path),
+        ]
+        if str(value or "")
+    }
+    if fact is not None and isinstance(getattr(fact, "query", None), dict):
+        available.update(f"query.{key}" for key in fact.query)
+    suffix = f"; available request paths: {', '.join(sorted(available))}" if available else ""
+    raise ValueError(
+        f"response path {raw!r} cannot target a request field{suffix}"
+    )
+
+
 def _canonical_recorded_agent_op(spec, edit: dict) -> dict:  # noqa: ANN001
     """Persist deferred field operations as a replayable canonical FieldRef."""
     stored = {**deepcopy(edit), "actor": "agent"}
@@ -267,6 +295,7 @@ def _canonical_recorded_agent_op(spec, edit: dict) -> dict:  # noqa: ANN001
     path = str(edit.get("wire_path") or edit.get("path") or "")
     if not identifier or not path:
         return stored
+    _reject_response_field_target(spec, identifier, path)
     is_step_id = any(item.step_id == identifier for item in spec.steps)
     try:
         resolved = resolve_field_ref(spec, FieldRef(

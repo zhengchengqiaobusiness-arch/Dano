@@ -3236,6 +3236,8 @@ def _option_sources_from_page_enum_options(
             ]
         observations: list[dict[str, Any]] = []
         for request in captured_requests or []:
+            if not _recording_evidence_matches_request(request, raw_entry):
+                continue
             fact = facts_by_request_id.get(str(request.get("request_id") or ""))
             if fact is None and request.get("index") is not None:
                 fact = facts_by_request_index.get(request.get("index"))
@@ -4170,6 +4172,94 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
     def norm(value: Any) -> str:
         return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
 
+    def wire_identity(value: Any) -> str:
+        path = str(value or "").strip().removeprefix("request.")
+        return path.removeprefix("body.").removeprefix("query.")
+
+    def grounded_targets(raw: dict) -> list[dict[str, str]]:
+        """Resolve dictionary evidence through request, control, and scope identity."""
+        aliases = {
+            norm(value) for value in (raw.get("field_aliases") or [])
+            if norm(value)
+        }
+        if not aliases:
+            return []
+        field_name = norm(raw.get("field_key"))
+        observations = [
+            item for item in (raw.get("request_value_observations") or [])
+            if isinstance(item, dict)
+        ]
+        option_pairs = [
+            pair for option in (raw.get("options") or raw.get("values") or [])
+            if (pair := _enum_label_value(option)) is not None
+        ]
+        direct: list[dict[str, str]] = []
+        scoped: dict[str, list[dict[str, str]]] = {}
+        for step in spec.steps:
+            request_id = str((step.source_meta or {}).get("request_id") or "")
+            scoped_evidence = [
+                item for item in (getattr(spec.request_facts, "field_evidence", []) or [])
+                if isinstance(item, dict)
+                and field_name in {
+                    norm(item.get("field")), norm(item.get("label")),
+                }
+                and _recording_evidence_matches_scope(step.source_meta or {}, item)
+            ]
+            matching_controls = [
+                item for item in scoped_evidence
+                if str(item.get("control_kind") or "").lower() == "select"
+            ]
+            for param in step.params or []:
+                param_names = {
+                    norm(param.key), norm(param.label), norm(param.path),
+                    norm(wire_identity(param.path).split(".")[-1]),
+                }
+                if not aliases.intersection(param_names):
+                    continue
+                target = {"request_id": request_id, "wire_path": param.path}
+                if any(
+                    request_id == str(item.get("request_id") or "")
+                    and wire_identity(param.path) == wire_identity(item.get("wire_path"))
+                    for item in observations
+                ):
+                    direct.append(target)
+                    continue
+                mapped_labels = {
+                    str(label) for label, wire_value in option_pairs
+                    if str(wire_value) == str(param.value)
+                }
+                visible_labels = {
+                    str(value)
+                    for item in scoped_evidence
+                    for value in [
+                        item.get("value"), item.get("selected"), item.get("selected_label"),
+                        *(item.get("sample_values") or []),
+                    ]
+                    if value not in (None, "")
+                }
+                if matching_controls and mapped_labels.intersection(visible_labels):
+                    scoped.setdefault(step.step_id, []).append(target)
+
+        # An exact request observation owns its field directly. A route-scoped
+        # control may reuse the same complete dictionary only when it identifies
+        # exactly one matching request field on that step; ambiguity fails closed.
+        targets = list(direct)
+        targets.extend(items[0] for items in scoped.values() if len(items) == 1)
+        return list({(item["request_id"], item["wire_path"]): item for item in targets}.values())
+
+    expanded_page_options: dict[str, Any] = {}
+    for raw_key, raw in page_options.items():
+        targets = grounded_targets(raw) if isinstance(raw, dict) else []
+        if not targets:
+            expanded_page_options[str(raw_key)] = raw
+            continue
+        for index, target in enumerate(targets):
+            expanded_page_options[f"{raw_key}@target:{index}"] = {
+                **raw,
+                "_grounded_target": target,
+            }
+    page_options = expanded_page_options
+
     seen: set[str] = set()
     for raw_key, raw in page_options.items():
         if isinstance(raw, dict):
@@ -4194,6 +4284,7 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             ]
             selected = str(raw.get("selected_label") or raw.get("selected") or "").strip()
             explicit_map = dict(raw.get("option_map") or raw.get("value_map") or {})
+            grounded_target = raw.get("_grounded_target")
             strict_control_identity = True
         else:
             continue
@@ -4207,7 +4298,13 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         ):
             continue
         signature = json.dumps(
-            {"field": field_key, "aliases": field_aliases, "selected": selected, "options": options},
+            {
+                "field": field_key,
+                "aliases": field_aliases,
+                "selected": selected,
+                "options": options,
+                "grounded_target": grounded_target,
+            },
             ensure_ascii=False, sort_keys=True, default=str,
         )
         if signature in seen:
@@ -4218,6 +4315,13 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         field_norm = norm(field_key)
         for step in spec.steps:
             for param in step.params or []:
+                if isinstance(grounded_target, dict):
+                    step_request_id = str((step.source_meta or {}).get("request_id") or "")
+                    if not (
+                        step_request_id == str(grounded_target.get("request_id") or "")
+                        and wire_identity(param.path) == wire_identity(grounded_target.get("wire_path"))
+                    ):
+                        continue
                 names = [
                     param.key, param.label, param.path,
                     _strip_body_prefix(param.path or ""),
@@ -5607,9 +5711,7 @@ def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
     # Hash the same canonical contract shape used by validation/publish. Raw
     # editor state may still have derived fields or schemas pending sync;
     # hashing it directly made an immediate validation look stale.
-    canonical = _sync_capability_io_schemas(
-        sync_flow_spec_models(spec.model_copy(deep=True))
-    )
+    canonical = prepare_flow_spec_for_publish(spec)
     canonical_cap = next(
         (
             item for item in canonical.capabilities
@@ -5618,18 +5720,33 @@ def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
         cap,
     )
     by_id = {step.step_id: step for step in canonical.steps}
+    def link_contract(link: FlowLink) -> dict[str, Any]:
+        # Verification state proves a dependency; it is not part of the
+        # dependency's executable identity. Keep endpoints and transform shape
+        # fingerprinted while allowing trusted verification to add its receipt.
+        return link.model_dump(exclude={
+            "confirmed", "confidence", "reason", "evidence", "meta",
+        })
+
+    capability_contract = canonical_cap.model_dump(exclude={
+        "confirmed", "confirmation_hash", "status", "requires_human_confirm",
+        "confidence", "updated_by",
+    })
+    capability_contract["dependencies"] = [
+        dependency.model_dump(exclude={
+            "confirmed", "confidence", "reason", "evidence", "locked",
+        })
+        for dependency in canonical_cap.dependencies
+    ]
     payload = {
-        "capability": canonical_cap.model_dump(exclude={
-            "confirmed", "confirmation_hash", "status", "requires_human_confirm",
-            "confidence", "updated_by",
-        }),
+        "capability": capability_contract,
         "steps": [
             by_id[sid].model_dump()
             for sid in _capability_node_step_ids(canonical_cap)
             if sid in by_id
         ],
         "links": [
-            link.model_dump()
+            link_contract(link)
             for link in canonical.links
             if link.source_step_id in set(_capability_node_step_ids(canonical_cap))
             and link.target_step_id in set(_capability_node_step_ids(canonical_cap))
@@ -20561,6 +20678,12 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
     verification_complete = bool(((spec.meta or {}).get("verification_run") or {}).get("complete"))
     for cap in spec.capabilities or []:
         if cap.confirmed:
+            # Planner confirmation is automatic. Verification may append a
+            # verified readback/fact_check to the same executable contract, so
+            # refresh that machine-owned fingerprint after verification. User
+            # confirmations remain immutable and still detect later changes.
+            if verification_complete and cap.updated_by == "planner":
+                cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
             continue
         if not verification_complete and float(cap.confidence or 0) <= 0.7:
             continue
