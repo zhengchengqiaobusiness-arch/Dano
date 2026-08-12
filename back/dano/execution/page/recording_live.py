@@ -133,18 +133,34 @@ def _redact(node):  # noqa: ANN001, ANN202
 
 
 def _request_projection(request: dict) -> dict:
+    detailed = bool(
+        not str(request.get("role") or "")
+        or request.get("keep") is True
+        or str(request.get("role") or "") in {
+            "business_get", "business_write", "submit_anchor", "read_option",
+        }
+        or str(request.get("trigger_op") or "").lower() in {
+            "click", "submit", "select", "pick", "fill",
+        }
+    )
+    detail_keys = {
+        "query", "post_data", "response_json", "headers", "content_type",
+    }
     projected = {
         key: deepcopy(request.get(key))
         for key in (
             "request_id", "index", "request_index", "sequence", "timestamp", "method",
             "path", "query", "post_data", "response_status", "status", "response_json",
             "content_type", "role", "keep", "reason", "confidence", "trigger_action_id",
-            "trigger_transaction_id", "action_delta_ms", "causality_confidence",
+            "trigger_transaction_id", "trigger_op", "trigger_locator", "trigger_page_context",
+            "action_delta_ms", "causality_confidence",
         )
         if request.get(key) is not None
+        and (detailed or key not in detail_keys)
     }
     projected["url"] = _redact_url(str(request.get("url") or ""))
-    projected["headers"] = mask_headers(request.get("headers"))
+    if detailed:
+        projected["headers"] = mask_headers(request.get("headers"))
     raw_body = projected.get("post_data")
     if isinstance(raw_body, str):
         try:
@@ -187,17 +203,38 @@ def recording_delta(
     fresh = requests[start:start + page_size]
     next_seq = start + len(fresh)
     fresh_ids = {str(request.get("request_id") or "") for request in fresh}
+    graph_requests = [
+        request for request in requests[:next_seq]
+        if not str(request.get("role") or "")
+        or request.get("keep") is True
+        or str(request.get("role") or "") in {"business_get", "business_write", "submit_anchor"}
+    ]
     candidates = [
-        item for item in discover_value_links(requests)
+        item for item in discover_value_links(graph_requests)
         if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
     ]
     structure_candidates = [
-        item for item in discover_response_key_maps(requests)
+        item for item in discover_response_key_maps(graph_requests)
         if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
     ]
     page_events = (
         page_events if page_events is not None else recorder.recorded_page_events()
     )
+    action_ids = {
+        str(request.get("trigger_action_id") or "") for request in fresh
+        if request.get("trigger_action_id")
+    }
+    transaction_ids = {
+        str(request.get("trigger_transaction_id") or "") for request in fresh
+        if request.get("trigger_transaction_id")
+    }
+    related_events = [
+        event for event in page_events
+        if isinstance(event, dict) and (
+            str(event.get("action_id") or "") in action_ids
+            or str(event.get("transaction_id") or "") in transaction_ids
+        )
+    ] if fresh else []
     return {
         "since_seq": start,
         "next_seq": next_seq,
@@ -206,7 +243,7 @@ def recording_delta(
         "has_more": next_seq < len(requests),
         "goal_text": str(goal_text or ""),
         "requests": [_request_projection(request) for request in fresh],
-        "page_events": compact_model_payload(_redact(page_events[-50:]), max_depth=5, max_items=50),
+        "page_events": compact_model_payload(_redact(related_events[-50:]), max_depth=5, max_items=50),
         "heuristic_candidates": {
             "request_roles": [
                 {

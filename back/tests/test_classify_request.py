@@ -174,6 +174,132 @@ def test_generic_message_rows_are_not_business_capability_by_field_names_alone()
     assert cls["keep"] is False
 
 
+def test_object_post_body_is_classified_without_parser_failure():
+    """浏览器适配器可直接提供已解析对象；分类器不能假定请求体一定是字符串。"""
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://x/api/opaque-command",
+        "post_data": {"subject": "季度申请", "amount": 3},
+        "trigger_op": "submit",
+        "trigger_action_id": "action-submit",
+        "trigger_transaction_id": "txn-submit",
+        "causality_confidence": "high",
+    })
+
+    assert cls["role"] in {"submit_anchor", "business_write"}
+    assert cls["keep"] is True
+
+
+def test_unanchored_unknown_post_is_not_a_business_write():
+    """带 JSON 的后台 SDK/设备上报没有操作或业务语义，不能凭 POST+body 生成能力。"""
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://collector.invalid/v3/common",
+        "post_data": {"device": "browser", "events": [{"at": 1786543210000}]},
+        "response_json": {"ok": True},
+    })
+
+    assert cls["role"] == "read_context"
+    assert cls["keep"] is False
+
+
+def test_telemetry_event_envelope_is_noise_even_near_a_click():
+    """后台埋点会继承最近点击事务；结构化事件包仍不能冒充该点击的业务请求。"""
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://x/v1/opaque",
+        "query": {"app": "123", "platform": "web"},
+        "post_data": [{
+            "events": [{"event": "page_view", "local_time_ms": 1786543210000}],
+            "user": {"anonymous_id": "visitor-1"},
+            "header": {"sdk_version": "5.3.9", "browser": "Chrome"},
+        }],
+        "trigger_op": "click",
+        "trigger_action_id": "action-search",
+        "trigger_transaction_id": "txn-search",
+    })
+
+    assert cls["role"] == "telemetry"
+    assert cls["keep"] is False
+
+
+def test_multiple_transport_query_values_without_action_are_not_business_filters():
+    cls = classify_network_request({
+        "method": "GET",
+        "url": "https://x/settings?bid=browser&store=1&timestamp=1786543210000",
+        "query": {"bid": "browser", "store": 1, "timestamp": 1786543210000},
+        "response_json": {"data": {"sampleRate": 0.1}},
+    })
+
+    assert cls["role"] == "read_context"
+    assert cls["keep"] is False
+
+
+def test_fill_triggered_typeahead_with_transport_query_is_not_public_query():
+    """签名参数和输入联想不等于用户提交了一次可调用查询。"""
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://x/api/opaque?signature=abc123&timestamp=1786543210000",
+        "query": {"signature": "abc123", "timestamp": "1786543210000"},
+        "post_data": {"keyword": "测试"},
+        "response_json": {"items": [{"text": "测试词"}]},
+        "trigger_op": "fill",
+        "trigger_action_id": "action-fill",
+        "trigger_transaction_id": "txn-fill",
+        "causality_confidence": "high",
+    })
+
+    assert cls["role"] != "business_get"
+    assert cls["keep"] is False
+
+
+def test_fill_triggered_typeahead_is_not_public_query_even_on_search_route():
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://x/api/search/suggest",
+        "post_data": {"keyword": "测试"},
+        "response_json": {"items": [{"text": "测试词"}]},
+        "trigger_op": "fill",
+        "trigger_action_id": "action-fill",
+        "trigger_transaction_id": "txn-fill",
+        "causality_confidence": "high",
+    })
+
+    assert cls["role"] != "business_get"
+    assert cls["keep"] is False
+
+
+def test_unanchored_suggestion_endpoint_is_context_not_public_query():
+    cls = classify_network_request({
+        "method": "POST",
+        "url": "https://x/api/search/getSuggestions",
+        "post_data": {"keyword": "测"},
+        "response_json": {"items": [{"text": "测试"}]},
+    })
+
+    assert cls["role"] == "read_context"
+    assert cls["keep"] is False
+
+
+def test_unanchored_infrastructure_consumer_does_not_promote_source_read():
+    """一个值被后续后台上报复用，不能把两条基建请求升级成业务依赖链。"""
+    source = {
+        "method": "GET",
+        "url": "https://collector.invalid/settings",
+        "response_json": {"data": {"deviceId": "device-ABC123"}},
+    }
+    trace = [source, {
+        "method": "POST",
+        "url": "https://collector.invalid/v3/common",
+        "post_data": {"deviceId": "device-ABC123", "events": []},
+    }]
+
+    cls = classify_network_request(source, trace)
+
+    assert cls["role"] == "read_context"
+    assert cls["keep"] is False
+
+
 # ── 2. all_requests 自动分类 ──
 def _new_sess():
     return RecordSession()

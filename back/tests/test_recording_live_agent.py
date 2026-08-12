@@ -855,6 +855,80 @@ def test_finalize_replays_deferred_enum_from_complete_unbound_snapshot():
     assert "unresolved_live_agent_ops" not in merged.meta
 
 
+def test_recording_delta_preserves_action_kind_and_does_not_repeat_unrelated_events():
+    request = {
+        "request_id": "req-search",
+        "sequence": 1,
+        "method": "POST",
+        "url": "https://x/api/search",
+        "post_data": {"keyword": "合同"},
+        "role": "business_get",
+        "keep": True,
+        "trigger_action_id": "action-search",
+        "trigger_transaction_id": "txn-search",
+        "trigger_op": "click",
+        "trigger_locator": "button[name=查询]",
+    }
+    events = [{"event_id": "unrelated", "action_id": "other", "op": "fill"}]
+
+    first = recording_delta(
+        None,
+        since_seq=0,
+        captured_requests=[request],
+        page_events=events,
+    )
+    exhausted = recording_delta(
+        None,
+        since_seq=1,
+        captured_requests=[request],
+        page_events=events,
+    )
+
+    assert first["requests"][0]["trigger_op"] == "click"
+    assert first["requests"][0]["trigger_locator"] == "button[name=查询]"
+    assert exhausted["page_events"] == []
+
+
+def test_recording_agent_state_keeps_late_business_request_visible():
+    spec = _flow()
+    spec.steps = []
+    spec.capabilities = []
+    spec.request_facts = RequestFacts(
+        requests=[
+            RequestFact(
+                request_id=f"req-{index}",
+                request_index=index,
+                sequence=index,
+                method="POST" if index == 149 else "GET",
+                path="/api/final-command" if index == 149 else f"/assets/context/{index}",
+            )
+            for index in range(150)
+        ],
+        analysis={
+            **{
+                f"req-{index}": RequestAnalysis(
+                    request_id=f"req-{index}", role="read_context", keep=False,
+                    reason="background context", confidence=0.5,
+                )
+                for index in range(149)
+            },
+            "req-149": RequestAnalysis(
+                request_id="req-149", role="business_write", keep=True,
+                reason="final command", confidence=0.95,
+            ),
+        },
+    )
+
+    state = recording_agent_state(spec)
+    visible = {
+        item.get("request_id")
+        for item in state["facts"]["captured_requests"]
+        if isinstance(item, dict)
+    }
+
+    assert "req-149" in visible
+
+
 def test_field_grounding_still_rejects_unrecorded_refs():
     with pytest.raises(ValueError, match="evidence_refs must cite recorded facts"):
         apply_flow_edits(_flow(), [{
@@ -1492,6 +1566,27 @@ def test_recording_delta_pages_without_losing_requests_and_compacts_responses():
         if not page["has_more"]:
             break
     assert seen == [f"req-{index}" for index in range(61)]
+
+
+def test_recording_delta_summarizes_unanchored_background_payloads():
+    requests = [{
+        "request_id": "req-background",
+        "sequence": 0,
+        "method": "POST",
+        "url": "https://collector.invalid/common",
+        "role": "read_context",
+        "keep": False,
+        "post_data": {"events": [{"payload": "x" * 20_000}]},
+        "response_json": {"settings": {f"field-{index}": "y" * 100 for index in range(100)}},
+    }]
+
+    projected = recording_delta(
+        None, since_seq=0, captured_requests=requests, page_events=[],
+    )["requests"][0]
+
+    assert projected["request_id"] == "req-background"
+    assert "post_data" not in projected
+    assert "response_json" not in projected
 
 
 def test_recording_state_compacts_large_response_schemas_without_mutating_facts():

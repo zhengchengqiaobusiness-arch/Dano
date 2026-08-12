@@ -123,8 +123,12 @@ def _parse_multipart_text_fields(post_data: str) -> dict[str, object] | None:
     return fields or None
 
 
-def _parse_body(post_data: str | None):
+def _parse_body(post_data):  # noqa: ANN001, ANN202
+    if isinstance(post_data, (dict, list)):
+        return _unwrap_json_strings(copy.deepcopy(post_data))
     if not post_data:
+        return None
+    if not isinstance(post_data, str):
         return None
     multipart = _parse_multipart_text_fields(post_data)
     if multipart is not None:

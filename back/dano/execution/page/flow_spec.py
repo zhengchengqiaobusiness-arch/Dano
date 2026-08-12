@@ -2545,7 +2545,7 @@ _NOISE_SEGS = {
 _OPTION_SEGS = {"list", "options", "option", "dict", "select", "candidates", "tree", "users", "roles"}
 _WRITE_HINT_SEGS = {
     "submit", "save", "create", "update", "send", "apply", "start", "commit",
-    "confirm", "approve", "complete", "finish",
+    "confirm", "approve", "complete", "finish", "chat",
 }
 _BORING_LINK_VALUES = {"", "0", "1", "true", "false", "200", "ok", "success", "none", "null"}
 
@@ -2560,6 +2560,17 @@ def _request_path(req: dict) -> str:
 
 def _request_segments(req: dict) -> set[str]:
     return {s.lower() for s in re.split(r"[^a-zA-Z0-9]+", _request_path(req)) if s}
+
+
+def _request_has_write_hint(req: dict) -> bool:
+    if _request_segments(req) & _WRITE_HINT_SEGS:
+        return True
+    leaf = _request_path(req).rstrip("/").rsplit("/", 1)[-1]
+    normalized = re.sub(r"[^a-z0-9]+", "", leaf.casefold())
+    return bool(re.match(
+        r"^(?:submit|save|create|update|send|apply|start|commit|confirm|approve|complete|finish)",
+        normalized,
+    ))
 
 
 def _request_values(req: dict) -> list[tuple[str, str]]:
@@ -2610,6 +2621,23 @@ def _useful_link_value(value: str) -> bool:
     return bool(v and v not in _BORING_LINK_VALUES and len(v) >= 3)
 
 
+def _dependency_consumer_candidate(request: dict) -> bool:
+    """Return whether a later request can ground a business dependency.
+
+    A value copied between two background SDK calls is not a workflow edge.
+    Keep command-anchored requests, explicit command paths and parameterized
+    reads; these are protocol evidence rather than host/path allowlists.
+    """
+    method = str(request.get("method") or "GET").upper()
+    if _is_noise_request(request) or looks_like_auth_write(
+        str(request.get("url") or ""), request.get("post_data"),
+    ):
+        return False
+    if _request_has_command_anchor(request) or _request_has_write_hint(request):
+        return True
+    return bool(method in {"GET", "HEAD"} and _business_filter_count(request) > 0)
+
+
 def _response_referenced_later(req: dict, trace: list[dict]) -> dict | None:
     pos = _trace_pos(req, trace)
     if pos < 0:
@@ -2622,6 +2650,8 @@ def _response_referenced_later(req: dict, trace: list[dict]) -> dict | None:
     # 所以 path 在命中时再从 response_values 里取。
     pool_values: dict[str, dict] = {}      # value → {target_url, target_method}
     for later in trace[pos + 1:]:
+        if not _dependency_consumer_candidate(later):
+            continue
         for _p, v in _request_values(later):
             if _useful_link_value(v) and v not in pool_values:
                 pool_values[v] = {
@@ -2646,6 +2676,30 @@ def _is_noise_request(req: dict) -> bool:
     if path.endswith(_NOISE_EXTS):
         return True
     return bool(_request_segments(req) & _NOISE_SEGS)
+
+
+def _looks_telemetry_request(req: dict) -> bool:
+    """Detect generic SDK event envelopes without naming vendors or hosts."""
+    body = _parse_body(req.get("post_data"))
+    envelopes = body if isinstance(body, list) else [body]
+    for envelope in envelopes:
+        if not isinstance(envelope, dict):
+            continue
+        events = envelope.get("events")
+        if not isinstance(events, list) or not events:
+            continue
+        event_rows = [item for item in events if isinstance(item, dict)]
+        if not event_rows:
+            continue
+        event_shape = sum(
+            1 for item in event_rows
+            if item.get("event") not in (None, "")
+            and any(key in item for key in ("local_time_ms", "timestamp", "event_time"))
+        )
+        envelope_shape = any(key in envelope for key in ("header", "user", "sdk", "context"))
+        if event_shape == len(event_rows) and envelope_shape:
+            return True
+    return False
 
 
 def _looks_graphql_request(req: dict) -> bool:
@@ -2765,6 +2819,10 @@ _BUSINESS_QUERY_PATH_RE = re.compile(
     r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)",
     re.I,
 )
+_TYPEAHEAD_PATH_RE = re.compile(
+    r"(?:sug(?:gest(?:ion)?s?|data)|autocomplete|typeahead|search[_-]?hint|complete[_-]?word)",
+    re.I,
+)
 
 
 def _has_query_action_evidence(trigger_op: Any, trigger_locator: Any) -> bool:
@@ -2783,16 +2841,25 @@ def _request_has_business_query_evidence(req: dict) -> bool:
     ) or _has_query_action_evidence(
         trigger_op, trigger_locator,
     )
+    action_grounded = bool(
+        _request_transaction_id(req)
+        and (business_filters > 0 or submitted_query)
+        and trigger_op in {"click", "submit"}
+    )
+    route_grounded = bool(
+        business_filters > 0
+        and trigger_op not in {"fill", "select", "pick"}
+        and _BUSINESS_QUERY_PATH_RE.search(_request_path(req))
+        and not _TYPEAHEAD_PATH_RE.search(_request_path(req))
+        and not (
+            _list_payload_has_reference_contract(req.get("response_json"))
+            and _request_has_option_endpoint_hint(req)
+        )
+    )
     return bool(
         not _choice_control_triggered(req)
-        and (
-            business_filters >= 2
-            or (
-                _request_transaction_id(req)
-                and (business_filters > 0 or submitted_query)
-                and trigger_op in {"click", "submit"}
-            )
-        )
+        and not _looks_telemetry_request(req)
+        and (action_grounded or route_grounded)
     )
 
 
@@ -2811,6 +2878,11 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
     if _is_noise_request(req):
         return _role_row(req, role="noise", keep=False,
                          reason="静态资源、心跳或埋点请求，不进入业务流程",
+                         confidence=0.98, semantic=semantic)
+
+    if _looks_telemetry_request(req):
+        return _role_row(req, role="telemetry", keep=False,
+                         reason="SDK 事件上报包只记录页面行为，不进入业务流程",
                          confidence=0.98, semantic=semantic)
 
     ct = (req.get("content_type") or (req.get("headers") or {}).get("content-type") or "").lower()
@@ -2938,19 +3010,19 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
 
     sample_hits = _sample_hit_count(req, samples)
     body = _parse_body(req.get("post_data"))
-    if sample_hits > 0 or segs & _WRITE_HINT_SEGS:
+    if sample_hits > 0 or _request_has_write_hint(req) or _request_has_command_anchor(req):
         role = "submit_anchor" if sample_hits > 0 else "business_write"
         reason = ("请求体包含用户录制输入值，判定为提交锚点"
-                  if sample_hits > 0 else "写请求路径命中业务提交/保存/发送语义，保留为业务步骤")
+                  if sample_hits > 0 else "写请求具有明确提交动作或业务命令语义，保留为业务步骤")
         evidence = {"sample_hits": sample_hits} if sample_hits > 0 else None
         return _role_row(req, role=role, keep=True, reason=reason,
                          confidence=0.93 if sample_hits > 0 else 0.86,
                          semantic=semantic, evidence=evidence)
 
     if body is not None or semantic.get("sideEffect") == "write":
-        return _role_row(req, role="business_write", keep=True,
-                         reason="非查询写请求，保守保留为业务步骤",
-                         confidence=0.78, semantic=semantic)
+        return _role_row(req, role="read_context", keep=False,
+                         reason="写请求缺少用户操作、录制输入或业务命令证据，保留为背景事实",
+                         confidence=0.7, semantic=semantic)
 
     return _role_row(req, role="read_context", keep=False,
                      reason="缺少可解析请求体且未发现业务依赖，默认过滤",
@@ -3040,6 +3112,23 @@ def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...]]:
     return ((req.get("method") or "GET").upper(), _request_path(req), context)
 
 
+_TRANSPORT_FILTER_KEYS = frozenset({
+    "signature", "sign", "nonce", "timestamp", "ts", "callback", "jsonp",
+    "token", "session", "sessionid", "trace", "traceid", "spanid", "requestid",
+    "sdk", "sdkversion", "version", "cache", "cachebuster", "webid", "deviceid",
+    "mstoken", "abogus",
+})
+
+
+def _caller_filter_key(key: str, path: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(key or "").casefold())
+    return bool(
+        normalized
+        and normalized not in _TRANSPORT_FILTER_KEYS
+        and not _looks_pagination_field(str(key), path)
+    )
+
+
 def _business_filter_count(req: dict) -> int:
     """Count caller-meaningful filters without treating pagination as business input."""
     query = req.get("query")
@@ -3048,11 +3137,18 @@ def _business_filter_count(req: dict) -> int:
             query = parse_qs(urlparse(str(req.get("url") or "")).query, keep_blank_values=True)
         except Exception:  # noqa: BLE001
             query = {}
-    return sum(
+    count = sum(
         1 for key, value in (query or {}).items()
-        if not _looks_pagination_field(str(key), f"query.{key}")
+        if _caller_filter_key(str(key), f"query.{key}")
         and any(str(item).strip() for item in (value if isinstance(value, list) else [value]))
     )
+    body = _parse_body(req.get("post_data"))
+    if isinstance(body, (dict, list)):
+        for path, _tokens, value, _raw in _leaf_paths(body):
+            key = str(path).rsplit(".", 1)[-1].split("[", 1)[0]
+            if _caller_filter_key(key, f"body.{path}") and str(value).strip():
+                count += 1
+    return count
 
 
 def _preread_candidate_score(req: dict) -> tuple[int, int, int, float]:
@@ -9744,6 +9840,35 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 
 
 
+def _model_visible_request_facts(
+    request_facts: list[dict[str, Any]], *, max_items: int = 40,
+) -> list[dict[str, Any]]:
+    """Keep late/candidate requests visible without expanding model context.
+
+    Raw request facts remain complete in FlowSpec and the append-only delta.
+    This state projection prioritizes business/causal/materialized facts, then
+    fills remaining slots from the newest observations.
+    """
+    priority_roles = {"business_get", "business_write", "submit_anchor", "read_option"}
+    priority = [
+        item for item in request_facts
+        if item.get("keep") is True
+        or str(item.get("role") or "") in priority_roles
+        or item.get("materialized_step_id")
+        or str(item.get("trigger_op") or "").lower() in {"click", "submit", "select", "pick"}
+    ]
+    selected: dict[str, dict[str, Any]] = {}
+    for item in [*reversed(priority), *reversed(request_facts)]:
+        request_id = str(item.get("request_id") or item.get("request_index") or id(item))
+        selected.setdefault(request_id, item)
+        if len(selected) >= max_items:
+            break
+    return sorted(
+        selected.values(),
+        key=lambda item: _request_order_value(item) if _request_order_value(item) is not None else -1,
+    )
+
+
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
     from dano.execution.page.recording_live import compact_model_payload
@@ -9844,7 +9969,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                     max_string=500,
                 ),
             }
-            for request in request_facts[:120]
+            for request in _model_visible_request_facts(request_facts)
         ],
         "captured_request_count": len(request_facts),
         "field_evidence_count": len(getattr(spec.request_facts, "field_evidence", []) or []),
