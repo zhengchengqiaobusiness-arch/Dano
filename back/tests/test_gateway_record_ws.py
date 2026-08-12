@@ -817,6 +817,114 @@ async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(mon
     )
 
 
+@pytest.mark.asyncio
+async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy(monkeypatch) -> None:  # noqa: ANN001
+    import dano.execution.page.recorder as recorder_module
+    import dano.onboarding.recording_pi as recording_pi_module
+
+    analysis_started = asyncio.Event()
+
+    class FakeRecordSession:
+        def __init__(self, on_capture_count=None, **_kwargs) -> None:  # noqa: ANN001
+            self.on_capture_count = on_capture_count
+            self.requests: list[dict] = []
+
+        async def start(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
+            return None
+
+        async def dispatch_input(self, _event: dict) -> dict:
+            await analysis_started.wait()
+            for index in range(15):
+                self.requests.append({"method": "POST", "index": index})
+                if self.on_capture_count is not None:
+                    self.on_capture_count(len(self.requests))
+            return {"ok": True}
+
+        def captured_all_requests(self) -> list[dict]:
+            return list(self.requests)
+
+        def recorded_field_evidence(self) -> list[dict]:
+            return []
+
+        async def flush_recording(self) -> None:
+            return None
+
+        def pause_recording(self) -> None:
+            return None
+
+        async def storage_state(self) -> dict:
+            return {}
+
+        async def stop(self) -> None:
+            return None
+
+    sessions = []
+
+    class FakePiSession:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            self.flow_spec = None
+            self.notify_calls: list[dict] = []
+            sessions.append(self)
+
+        async def start(self):  # noqa: ANN201
+            return self
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        def bind_flow_spec(self, flow_spec) -> None:  # noqa: ANN001
+            self.flow_spec = flow_spec
+
+        async def notify_live_batch(self, delta: dict) -> None:
+            self.notify_calls.append(dict(delta))
+            analysis_started.set()
+            await asyncio.sleep(0.05)
+
+        def current_flow_spec(self):  # noqa: ANN201
+            return self.flow_spec
+
+        async def close(self) -> None:
+            return None
+
+    class DelayedDisconnectWebSocket(_FakeWebSocket):
+        async def receive_json(self) -> dict:
+            if not self.incoming:
+                await asyncio.sleep(0.2)
+            return await super().receive_json()
+
+    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
+    monkeypatch.setattr(recording_pi_module, "RecordingPiSession", FakePiSession)
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    gateway._RECORDING_RESUME_STATES.clear()
+
+    ws = DelayedDisconnectWebSocket([
+        {
+            "type": "start",
+            "start_url": "https://example.test",
+            "tenant": "tenant-a",
+            "pi_recording_id": f"recording_{'f' * 32}",
+        },
+        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
+        {"type": "stop"},
+    ])
+
+    await gateway.record_ws(ws)
+
+    assert len(sessions) == 1
+    assert sessions[0].notify_calls == [
+        {"reason": "recording_started", "since_seq": 0},
+        {"reason": "request_batch", "since_seq": 0},
+    ]
+    assert any(
+        message.get("type") == "agent_status"
+        and message.get("captured_count") == 15
+        for message in ws.messages
+    )
+
+
 def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     from dano.onboarding.page_onboard import run_request_onboarding
 

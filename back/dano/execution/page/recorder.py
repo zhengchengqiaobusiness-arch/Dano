@@ -1115,6 +1115,7 @@ class RecordSession:
     """一次网页内录制。start→(用户经截屏+输入回传操作)→recorded_steps→stop。"""
 
     def __init__(self, *, on_request: Callable[[dict], None] | None = None,
+                 on_capture_count: Callable[[int], None] | None = None,
                  intercept_submit: bool = True, capture_reads: bool = True,
                  tenant: str = "") -> None:
         self.steps: list[dict] = []
@@ -1149,6 +1150,7 @@ class RecordSession:
         self._page_ids: dict[int, str] = {}
         self._frame_ids: dict[int, str] = {}
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
+        self._on_capture_count_cb = on_capture_count
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
         self._intercept = intercept_submit
         self._capture_reads = capture_reads
@@ -1411,6 +1413,11 @@ class RecordSession:
                 })
         self.all_requests.append(entry)
         self._classify_entry(entry)
+        if self._on_capture_count_cb is not None:
+            try:
+                self._on_capture_count_cb(len(self.all_requests))
+            except Exception:  # noqa: BLE001 - 捕获进度不能中断权威请求 ledger
+                pass
         return idx
 
     def _attach_response(self, *, url: str, method: str, response_json, status, content_type: str,

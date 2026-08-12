@@ -1538,6 +1538,9 @@ async def record_ws(ws: WebSocket) -> None:
     emitted_agent_insights = 0
     live_agent_disabled = False
     last_live_scheduled_count = 0
+    last_live_progress_count = 0
+    pending_live_analysis_reason: str | None = None
+    note_live_capture = None
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
@@ -1595,7 +1598,20 @@ async def record_ws(ws: WebSocket) -> None:
                 if classify_request_role(r).get("semanticRole") == "workflow_submit":
                     schedule_live_analysis("submit_candidate")
 
-        sess = RecordSession(on_request=on_request,
+        def on_capture_count(captured_count: int) -> None:
+            nonlocal last_live_progress_count
+            if captured_count == 1 or captured_count - last_live_progress_count >= 5:
+                last_live_progress_count = captured_count
+                sender.send_background({
+                    "type": "agent_status",
+                    "state": "analyzing",
+                    "text": f"正在捕获并分析 {captured_count} 个请求…",
+                    "captured_count": captured_count,
+                })
+            if note_live_capture is not None:
+                note_live_capture()
+
+        sess = RecordSession(on_request=on_request, on_capture_count=on_capture_count,
                              intercept_submit=False,
                              capture_reads=init.get("capture_reads", True),
                              tenant=resume_key[0])
@@ -1819,19 +1835,42 @@ async def record_ws(ws: WebSocket) -> None:
                     "text": f"录制助手暂不可用，录制继续：{str(exc)[:160]}",
                 })
 
+        async def _drain_live_analysis() -> None:
+            nonlocal last_live_scheduled_count, pending_live_analysis_reason
+            captured_all_requests = getattr(sess, "captured_all_requests", None)
+            while not live_agent_disabled and callable(captured_all_requests):
+                reason = pending_live_analysis_reason
+                pending_live_analysis_reason = None
+                if not reason:
+                    return
+                current_count = len(captured_all_requests())
+                since_seq = last_live_scheduled_count
+                last_live_scheduled_count = current_count
+                await _run_live_analysis(reason, since_seq)
+                # Pi 一次只能处理一轮。分析期间到达的事实必须合并成尾批，
+                # 不能因为当时已有任务就静默丢弃。
+                if (
+                    not live_agent_disabled
+                    and len(captured_all_requests()) > last_live_scheduled_count
+                    and pending_live_analysis_reason is None
+                ):
+                    pending_live_analysis_reason = "request_batch"
+
         def _schedule_live_analysis(reason: str) -> None:
-            nonlocal last_live_scheduled_count
+            nonlocal pending_live_analysis_reason
             captured_all_requests = getattr(sess, "captured_all_requests", None)
             if live_agent_disabled or not callable(captured_all_requests):
                 return
+            # Preserve an already queued reason until the drain consumes it.
+            # Otherwise a burst arriving before the task gets CPU can replace
+            # ``recording_started`` and move the cursor past unanalysed facts.
+            if pending_live_analysis_reason is None:
+                pending_live_analysis_reason = reason
             if any(not task.done() for task in live_analysis_tasks):
                 return
-            current_count = len(captured_all_requests())
-            since_seq = last_live_scheduled_count
-            last_live_scheduled_count = current_count
             task = asyncio.create_task(
-                _run_live_analysis(reason, since_seq),
-                name=f"recording-live-agent-{reason}",
+                _drain_live_analysis(),
+                name="recording-live-agent-drain",
             )
             live_analysis_tasks.add(task)
             task.add_done_callback(live_analysis_tasks.discard)
@@ -1861,6 +1900,8 @@ async def record_ws(ws: WebSocket) -> None:
             )
             if ambiguous:
                 _schedule_live_analysis("ambiguous_field")
+
+        note_live_capture = _maybe_schedule_live_analysis
 
         async def _dispatch_recording_input(event: dict) -> None:
             try:
