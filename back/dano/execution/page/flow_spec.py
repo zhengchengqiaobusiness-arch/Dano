@@ -4665,6 +4665,16 @@ def _semantic_recorded_type(param: ParamField) -> str:
     return param.type or param.wire_type or _infer_type_from_value(value)
 
 
+def _param_has_interacted_temporal_control(param: ParamField) -> bool:
+    """Preserve an explicitly operated date/time control over wire inference."""
+    return any(
+        isinstance(item, dict)
+        and item.get("interacted") is True
+        and str(item.get("control_kind") or "").lower() in {"date", "datetime", "time"}
+        for item in (param.evidence or [])
+    )
+
+
 def _audit_step_param_contracts(step: FlowStep) -> None:
     """Conservatively repair only contradictory generated field contracts."""
     display_paths = {
@@ -4800,7 +4810,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             if (
                 semantic_type in {"date", "datetime"}
                 and not _param_field_manually_edited(param, "type")
-                and not _param_has_grounded_type(param)
+                and not _param_has_interacted_temporal_control(param)
             ):
                 param.type = semantic_type
 
@@ -13033,7 +13043,7 @@ async def orchestrate_flow_capabilities(
             submission["semantic_plan"] = proposed_semantic_plan
         else:
             submission["plan"] = proposed_semantic_plan
-    complete_semantic_submission = bool(
+    strict_semantic_submission = bool(
         isinstance(proposed_semantic_plan.get("capabilities"), list)
         and proposed_semantic_plan.get("capabilities")
         and all(
@@ -13046,6 +13056,25 @@ async def orchestrate_flow_capabilities(
             for item in proposed_semantic_plan.get("capabilities") or []
         )
     )
+    # Recordings created before the strict anchor/request_refs contract persist
+    # the same complete boundary decision as ``step_ids``.  Treat that stored
+    # representation as a full replacement during optimize so an obsolete
+    # planner-owned aggregate cannot survive beside its replacement abilities.
+    legacy_semantic_submission = bool(
+        isinstance(proposed_semantic_plan.get("request_roles"), list)
+        and isinstance(proposed_semantic_plan.get("field_semantics"), list)
+        and isinstance(proposed_semantic_plan.get("capabilities"), list)
+        and proposed_semantic_plan.get("capabilities")
+        and all(
+            isinstance(item, dict)
+            and item.get("name")
+            and item.get("kind")
+            and isinstance(item.get("step_ids"), list)
+            and item.get("step_ids")
+            for item in proposed_semantic_plan.get("capabilities") or []
+        )
+    )
+    complete_semantic_submission = strict_semantic_submission or legacy_semantic_submission
     if complete_semantic_submission and not initial_generation:
         baseline_ids.update(
             capability.capability_id
