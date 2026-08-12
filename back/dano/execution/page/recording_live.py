@@ -942,6 +942,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     "origin_request_id": str(edit.get("origin_request_id") or ""),
                     "origin_path": str(edit.get("origin_path") or ""),
                     "reason": reason,
+                    "evidence_refs": _evidence_refs(edit),
                 },
             ]
         else:

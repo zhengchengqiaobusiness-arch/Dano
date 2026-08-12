@@ -183,9 +183,9 @@ function verifyReviewToolSchema() {
 function verifyWriteAssertionSchema() {
   const tool = recordingTools.find((item) => item.name === "execute_write_with_verify");
   const assertion = tool?.parameters?.properties?.assertion;
-  assert(assertion?.anyOf?.length === 3, "write assertion schema must expose three executable contracts");
+  assert(assertion?.anyOf?.length === 4, "write assertion schema must expose three executable contracts and string compatibility");
   assert(
-    assertion.anyOf.every((schema) => schema.additionalProperties === false),
+    assertion.anyOf.slice(0, 3).every((schema) => schema.additionalProperties === false),
     "write assertion variants must reject unknown keys",
   );
   const countAssertion = assertion.anyOf.find((schema) => (
@@ -200,6 +200,19 @@ function verifyWriteAssertionSchema() {
     JSON.stringify(collectionAssertion?.required?.sort())
       === JSON.stringify(["collection_path", "min_matches", "where"].sort()),
     "collection assertion must require collection_path, where and min_matches together",
+  );
+}
+
+function verifyStringifiedWriteAssertionCompatibility() {
+  const sanitized = sanitizeRecordingToolParams("execute_write_with_verify", {
+    write_step_id: "submit",
+    inputs: { title: "recorded" },
+    verify_request_id: "req-read",
+    assertion: JSON.stringify({ verify_records_min_count: 1 }),
+  });
+  assert(
+    sanitized.assertion?.verify_records_min_count === 1,
+    "one JSON-stringified write assertion was not decoded at the tool boundary",
   );
 }
 
@@ -273,6 +286,10 @@ function verifyPlanToolCompatibility() {
   assert(
     operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 6,
     "set_param_source schema must expose the six executable source categories",
+  );
+  assert(
+    operationSchema("set_param_source")?.properties?.evidence_refs?.type === "array",
+    "set_param_source schema must accept grounded evidence_refs",
   );
   assert(
     operationSchema("set_param_required")?.required?.includes("evidence_refs"),
@@ -489,6 +506,7 @@ try {
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
 verifyWriteAssertionSchema();
+  verifyStringifiedWriteAssertionCompatibility();
 verifyPerturbReplaySchema();
 verifyDependencySchema();
 verifyDeltaPaginationSchema();

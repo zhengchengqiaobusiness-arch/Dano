@@ -4216,7 +4216,11 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
                 }
                 if not aliases.intersection(param_names):
                     continue
-                target = {"request_id": request_id, "wire_path": param.path}
+                target = {
+                    "step_id": step.step_id,
+                    "request_id": request_id,
+                    "wire_path": param.path,
+                }
                 if any(
                     request_id == str(item.get("request_id") or "")
                     and wire_identity(param.path) == wire_identity(item.get("wire_path"))
@@ -4245,7 +4249,7 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         # exactly one matching request field on that step; ambiguity fails closed.
         targets = list(direct)
         targets.extend(items[0] for items in scoped.values() if len(items) == 1)
-        return list({(item["request_id"], item["wire_path"]): item for item in targets}.values())
+        return list({(item["step_id"], item["wire_path"]): item for item in targets}.values())
 
     expanded_page_options: dict[str, Any] = {}
     for raw_key, raw in page_options.items():
@@ -4318,7 +4322,8 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
                 if isinstance(grounded_target, dict):
                     step_request_id = str((step.source_meta or {}).get("request_id") or "")
                     if not (
-                        step_request_id == str(grounded_target.get("request_id") or "")
+                        step.step_id == str(grounded_target.get("step_id") or "")
+                        and step_request_id == str(grounded_target.get("request_id") or "")
                         and wire_identity(param.path) == wire_identity(grounded_target.get("wire_path"))
                     ):
                         continue
@@ -5707,11 +5712,16 @@ def _apply_capability_field_to_param(
             })
     return True
 
-def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
+def _capability_confirmation_hash(
+    spec: FlowSpec,
+    cap: FlowCapability,
+    *,
+    prepared: bool = False,
+) -> str:
     # Hash the same canonical contract shape used by validation/publish. Raw
     # editor state may still have derived fields or schemas pending sync;
     # hashing it directly made an immediate validation look stale.
-    canonical = prepare_flow_spec_for_publish(spec)
+    canonical = spec if prepared else prepare_flow_spec_for_publish(spec)
     canonical_cap = next(
         (
             item for item in canonical.capabilities
@@ -13324,7 +13334,7 @@ def _capability_param_enum_warning(param: ParamField) -> str:
     return ""
 
 
-def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
+def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> dict[str, Any]:
     spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     _normalize_capability_references(spec)
     errors: list[str] = []
@@ -13544,7 +13554,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             cap_warnings.append(f"Capability `{label}` 尚未确认，需要确认或移除后再发布")
         elif not cap.confirmation_hash:
             cap_warnings.append(f"Capability `{label}` 来自旧版确认记录；下次合同编辑后将启用版本指纹校验")
-        elif cap.confirmation_hash != _capability_confirmation_hash(spec, cap):
+        elif cap.confirmation_hash != _capability_confirmation_hash(spec, cap, prepared=prepared):
             cap_errors.append(f"Capability `{label}` 确认后合同已变化，请复核并重新确认")
 
         cap_steps = [step_by_id[sid] for sid in node_step_ids if sid in step_by_id]
@@ -14604,7 +14614,7 @@ def _dedupe_step_params(step: FlowStep) -> None:
     step.params = [by_key[key] for key in order if key in by_key]
 
 
-def refresh_review_items(spec: FlowSpec) -> FlowSpec:
+def refresh_review_items(spec: FlowSpec, *, prepared: bool = False) -> FlowSpec:
     """重建 review_items，并保留同 id 项的已解决状态。
 
     ID 是稳定 hash(target)，所以同一字段/同一依赖在重建前后 ID 不变，
@@ -14630,7 +14640,7 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
                 str(item.target.get("path") or ""),
             )
             legacy_source_resolved.setdefault(target_key, item.resolved)
-    spec.review_items = _generated_review_items(spec)
+    spec.review_items = _generated_review_items(spec, prepared=prepared)
     for item in spec.review_items:
         if item.id in old_resolved:
             item.resolved = old_resolved[item.id]
@@ -15683,6 +15693,7 @@ def flow_spec_to_api_request(
     capability: str | FlowCapability | None = None,
     capability_id: str | None = None,
     capability_name: str | None = None,
+    _prepared: bool = False,
 ) -> tuple[dict | None, list[str]]:
     """把编辑后的 FlowSpec 转成 run_request_onboarding 可消费的 api_request。
 
@@ -15697,7 +15708,8 @@ def flow_spec_to_api_request(
         )
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
-    spec = prepare_flow_spec_for_publish(spec)
+    if not _prepared:
+        spec = prepare_flow_spec_for_publish(spec)
     active_step_ids = _active_capability_step_ids(spec)
 
     built_steps: list[dict] = []
@@ -15930,9 +15942,14 @@ def _fact_check_report(api_request: dict | None) -> dict:
     }
 
 
-def dry_run_flow_spec(spec: FlowSpec, fields: dict[str, Any] | None = None) -> dict:
+def dry_run_flow_spec(
+    spec: FlowSpec,
+    fields: dict[str, Any] | None = None,
+    *,
+    _prepared: bool = False,
+) -> dict:
     """静态 dry-run：不触网，只验证 FlowSpec 能否构造为可执行请求计划。"""
-    api_request, build_errors = flow_spec_to_api_request(spec)
+    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=_prepared)
     if build_errors or api_request is None:
         return {
             "ok": False,
@@ -16354,7 +16371,11 @@ def _compiled_contract_issue_groups(
     return groups
 
 
-def _compiled_contract_review_items(spec: FlowSpec) -> list[ReviewItem]:
+def _compiled_contract_review_items(
+    spec: FlowSpec,
+    *,
+    prepared: bool = False,
+) -> list[ReviewItem]:
     """Materialize unresolved compiled-contract advice as stable ReviewItems.
 
     Publish validation operates on a compiled ``api_request`` while ignore state
@@ -16363,7 +16384,7 @@ def _compiled_contract_review_items(spec: FlowSpec) -> list[ReviewItem]:
     """
     if not spec.capabilities:
         return []
-    api_request, build_errors = flow_spec_to_api_request(spec)
+    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=prepared)
     if api_request is None or build_errors:
         return []
     from dano.execution.page.repair_ops import collect_repair_findings
@@ -16392,9 +16413,12 @@ def _compiled_contract_review_items(spec: FlowSpec) -> list[ReviewItem]:
     return items
 
 
-def _generated_review_items(spec: FlowSpec) -> list[ReviewItem]:
+def _generated_review_items(spec: FlowSpec, *, prepared: bool = False) -> list[ReviewItem]:
     """Build every generated review item with one stable-ID dedupe pass."""
-    generated = [*build_review_items(spec), *_compiled_contract_review_items(spec)]
+    generated = [
+        *build_review_items(spec),
+        *_compiled_contract_review_items(spec, prepared=prepared),
+    ]
     deduped: dict[str, ReviewItem] = {}
     for item in generated:
         existing = deduped.get(item.id)
@@ -16568,7 +16592,9 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
         step for step in spec.steps
         if active_step_ids is None or step.step_id in active_step_ids
     ]
-    review_items = refresh_review_items(spec.model_copy(deep=True)).review_items
+    review_items = refresh_review_items(
+        spec.model_copy(deep=True), prepared=True,
+    ).review_items
     blocking_reviews = [
         item for item in review_items
         if item.severity == "high" and not item.resolved and item.type in _PUBLISH_BLOCKING_REVIEW_TYPES
@@ -16580,7 +16606,7 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     suggestions.extend([f"生成建议: {item.title}" for item in blocking_reviews])
     diag_errors, diag_warnings = _diagnostic_publish_findings(spec)
     suggestions.extend([*diag_errors, *diag_warnings])
-    capability_validation = _capability_validation_report(spec)
+    capability_validation = _capability_validation_report(spec, prepared=True)
     capability_errors = list(capability_validation.get("errors") or [])
     capability_warnings = list(capability_validation.get("warnings") or [])
     # Capability validation describes the executable public contract.  A
@@ -16613,7 +16639,7 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
             cap_steps = [by_step_id[sid] for sid in _capability_node_step_ids(capability) if sid in by_step_id]
             if cap_steps and not any(_is_business_query_step(step) for step in cap_steps):
                 suggestions.append(f"Capability `{cap_label}` 没有返回业务记录/状态的查询接口，仅包含配置或前置接口")
-    api_request, build_errors = flow_spec_to_api_request(spec)
+    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=True)
     errors.extend(build_errors)
     if not flow_spec_user_params(spec):
         suggestions.append("FlowSpec 没有 user_param，发布后的 Skill 不会要求用户输入参数")
@@ -16709,7 +16735,7 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 continue
             session_errors.append(detail)
         suggestions.extend(session_errors)
-    dry_run = dry_run_flow_spec(spec)
+    dry_run = dry_run_flow_spec(spec, _prepared=True)
     errors = list(dict.fromkeys(str(item) for item in errors if item))
     warnings = list(dict.fromkeys(str(item) for item in warnings if item))
     suggestions = list(dict.fromkeys(str(item) for item in suggestions if item))

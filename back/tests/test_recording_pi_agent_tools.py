@@ -554,6 +554,7 @@ def test_pi_plan_applies_live_param_source_operation(monkeypatch):
                 "wire_path": "body.title",
                 "source_kind": "page_context",
                 "reason": "该值由当前页面上下文提供",
+                "evidence_refs": ["req-submit"],
             }],
         },
     }))

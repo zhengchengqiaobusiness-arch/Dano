@@ -8121,6 +8121,103 @@ def test_structural_option_binding_repairs_get_query_enum_from_recorded_facts():
     }
 
 
+def test_saved_page_enum_targets_duplicate_request_steps_by_step_identity():
+    def query_step(step_id: str) -> FlowStep:
+        return FlowStep(
+            step_id=step_id,
+            method="GET",
+            path="/api/leave/page?pageNo=1&pageSize=10&type=2",
+            source_meta={
+                "request_id": "req_78",
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": {"path": "/leave"},
+            },
+            params=[ParamField(
+                path="query.type", key="type", label="type", value="2",
+                type="string", wire_type="string", source_kind="user_input",
+            )],
+        )
+
+    first = query_step("query-active")
+    duplicate = query_step("query-duplicate")
+    facts = RequestFacts(
+        field_evidence=[
+            {
+                "field": "请假类型", "label": "请假类型", "control_kind": "select",
+                "page_id": "page_1", "frame_id": "frame_1",
+                "page_context": {"path": "/leave"},
+            },
+            {
+                "kind": "table_column", "label": "请假类型",
+                "sample_values": ["病假", "事假"],
+                "page_id": "page_1", "frame_id": "frame_1",
+                "page_context": {"path": "/leave"},
+            },
+        ],
+        option_sources=[{"kind": "page_enum_options", "options": {
+            "请假类型": {
+                "field_key": "请假类型", "field_aliases": ["type"],
+                "control_kind": "select", "mapping_complete": True,
+                "enum_source": "script_dictionary",
+                "source_url": "/api/dict/simple-list",
+                "dict_type": "leave_type",
+                "page_id": "page_1", "frame_id": "frame_1",
+                "page_context": {"path": "/leave/create"},
+                "options": [
+                    {"label": "病假", "value": "1"},
+                    {"label": "事假", "value": "2"},
+                    {"label": "婚假", "value": "3"},
+                ],
+            },
+        }}],
+    )
+    spec = FlowSpec(
+        flow_id="duplicate-request-enum",
+        steps=[first, duplicate],
+        request_facts=facts,
+        capabilities=[FlowCapability(
+            capability_id="query-leave", name="query_leave", kind="query",
+            nodes=_call_nodes([first.step_id]),
+        )],
+    )
+
+    prepared = sync_flow_spec_models(spec)
+
+    for step in prepared.steps:
+        assert step.params[0].type == "enum"
+        assert step.params[0].enum_value_map == {"病假": "1", "事假": "2", "婚假": "3"}
+
+
+def test_validation_prepares_contract_only_once(monkeypatch):
+    step = FlowStep(
+        step_id="query", method="GET", path="/api/items?pageNo=1",
+        params=[ParamField(path="query.pageNo", key="pageNo", value="1")],
+    )
+    spec = FlowSpec(
+        flow_id="single-validation-prepare",
+        steps=[step],
+        capabilities=[FlowCapability(
+            capability_id="query-items", name="query_items", kind="query",
+            nodes=_call_nodes([step.step_id]), confirmed=True,
+            confirmation_hash="stale-on-purpose",
+        )],
+    )
+    original = flow_spec_module.prepare_flow_spec_for_publish
+    calls = 0
+
+    def counted(current):
+        nonlocal calls
+        calls += 1
+        return original(current)
+
+    monkeypatch.setattr(flow_spec_module, "prepare_flow_spec_for_publish", counted)
+
+    validate_flow_spec(spec)
+
+    assert calls == 1
+
+
 def test_sync_migrates_legacy_api_option_business_type_without_changing_wire_type():
     param = ParamField(
         path="type", key="请假类型", value=2,

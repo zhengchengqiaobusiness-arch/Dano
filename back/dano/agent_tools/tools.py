@@ -2676,7 +2676,7 @@ _TYPED_RECORDING_OPERATION_KEYS = {
     "set_param_source": {
         "op", "request_id", "step_id", "wire_path", "source_kind", "origin_request_id",
         "origin_path", "context_key", "strategy", "start_field", "end_field", "output_key",
-        "reason",
+        "reason", "evidence_refs",
     },
     "set_param_required": {
         "op", "request_id", "step_id", "wire_path", "required", "reason", "evidence_refs",

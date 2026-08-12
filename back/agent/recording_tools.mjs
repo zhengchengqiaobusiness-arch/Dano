@@ -267,6 +267,16 @@ export function sanitizeRecordingToolParams(name, params) {
   params = Object.fromEntries(
     Object.entries(params).filter(([key]) => !["recording_id", "flow_version"].includes(key)),
   );
+  if (name === "execute_write_with_verify" && typeof params.assertion === "string") {
+    try {
+      const decoded = JSON.parse(params.assertion);
+      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+        params.assertion = decoded;
+      }
+    } catch {
+      // Preserve malformed text for the existing deterministic validator.
+    }
+  }
   if (name !== "submit_recording_plan") return params;
   const allowed = ["base_flow_version", "plan"];
   const sanitized = Object.fromEntries(
@@ -431,6 +441,7 @@ const LiveRecordingOperation = Type.Union([
     end_field: Type.Optional(Type.String({ description: "Required for computed: user param name for the range end" })),
     output_key: Type.Optional(Type.String({ description: "Computed JSON key; when omitted it is inferred from the recorded one-key JSON sample" })),
     reason: Type.String({ minLength: 1 }),
+    evidence_refs: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
   }, { additionalProperties: false }),
   Type.Object({
     op: Type.Literal("set_param_required"),
@@ -634,6 +645,7 @@ const RecordingAssertion = Type.Union([
   RecordingScalarAssertion,
   RecordingCountAssertion,
   RecordingCollectionAssertion,
+  Type.String({ minLength: 2 }),
 ]);
 
 const ReplayOverrides = Type.Object({
