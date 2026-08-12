@@ -801,6 +801,60 @@ def test_enum_binding_accepts_complete_option_alias_when_control_binding_is_unbo
     assert "capability_internal_field_exposed" not in report_text
 
 
+def test_finalize_replays_deferred_enum_from_complete_unbound_snapshot():
+    finalized = _flow()
+    finalized.steps[0].params = [ParamField(
+        path="query.type", key="type", value="3", wire_type="string",
+    )]
+    finalized.request_facts.field_evidence.append({
+        "event_id": "evt-query-type",
+        "label": "请假类型",
+        "field_aliases": [],
+        "control_kind": "select",
+        "binding_status": "unbound",
+    })
+    finalized.request_facts.option_sources.append({
+        "kind": "page_enum_options",
+        "options": {
+            "请假类型": {
+                "field_key": "请假类型",
+                "field_aliases": ["type"],
+                "dict_type": "leave_type",
+                "mapping_complete": True,
+                "options": [
+                    {"label": "年假", "value": "1"},
+                    {"label": "事假", "value": "2"},
+                    {"label": "病假", "value": "3"},
+                ],
+            },
+        },
+    })
+    live = FlowSpec(
+        request_facts=finalized.request_facts.model_copy(deep=True),
+        meta={"live_request_ids": ["req-detail"]},
+    )
+    live = apply_flow_edits(live, [{
+        "op": "set_param_enum",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "dictionary_source": "leave_type",
+        "options": [
+            {"label": "年假", "value": 1},
+            {"label": "事假", "value": 2},
+            {"label": "病假", "value": 3},
+        ],
+        "reason": "录制中的完整字典快照",
+        "evidence_refs": ["evt-query-type"],
+    }])
+
+    merged = merge_live_agent_state(live, finalized)
+
+    param = merged.steps[0].params[0]
+    assert param.type == "enum"
+    assert param.enum_value_map == {"年假": "1", "事假": "2", "病假": "3"}
+    assert "unresolved_live_agent_ops" not in merged.meta
+
+
 def test_field_grounding_still_rejects_unrecorded_refs():
     with pytest.raises(ValueError, match="evidence_refs must cite recorded facts"):
         apply_flow_edits(_flow(), [{
