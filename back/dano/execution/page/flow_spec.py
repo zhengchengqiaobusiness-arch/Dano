@@ -4519,7 +4519,13 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         if binding is None:
             binding = SelectBinding(path=param.path)
             step.selects.append(binding)
-        binding.param = field_key
+        compiled_call_key = any(
+            isinstance(item, dict)
+            and item.get("source") == "capability_compiler"
+            and item.get("field") == "key"
+            for item in (param.evidence or [])
+        )
+        binding.param = param.key if compiled_call_key else field_key
         binding.path = param.path
         binding.options = options
         binding.option_map = option_map or None
@@ -4551,7 +4557,10 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         # DOM label is stronger public naming evidence than an internal wire
         # identifier, but never overwrite an explicit/manual business label.
         path_leaf = _strip_body_prefix(param.path or "").split(".")[-1]
-        if param.key in {"", param.path, path_leaf} or looks_internal_param_name(param.key):
+        if (
+            not compiled_call_key
+            and (param.key in {"", param.path, path_leaf} or looks_internal_param_name(param.key))
+        ):
             if not any(other is not param and other.key == field_key for other in step.params):
                 old_key = param.key
                 param.key = field_key
@@ -11002,88 +11011,21 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
             "covered_steps": 0,
             "covered_fields": 0,
         }
-    def confidence_of(item: dict[str, Any]) -> float:
-        try:
-            return float(item.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+    if any(key in plan for key in ("request_roles", "field_semantics", "capability_relations")):
+        return _legacy_semantic_plan_coverage(spec, plan)
+    step_by_id = {step.step_id: step for step in spec.steps}
+    allowed_usages = {"execute", "preflight", "option_source", "fact_check"}
 
-    field_axes = (
-        "path", "name", "default_value", "type", "category", "source", "required",
-    )
-    resolved_statuses = {"grounded", "image_matched", "preserved_fact", "locked"}
-
-    def axis_statuses(item: dict[str, Any]) -> dict[str, str]:
-        raw_statuses = item.get("axis_status")
-        if not isinstance(raw_statuses, dict):
-            return {}
-        statuses: dict[str, str] = {}
-        for axis, raw_status in raw_statuses.items():
-            value = raw_status.get("status") if isinstance(raw_status, dict) else raw_status
-            statuses[str(axis)] = str(value or "")
-        return statuses
-
-    def evidenced_axes(item: dict[str, Any]) -> set[str]:
-        raw_axis_evidence = item.get("axis_evidence")
-        axes = {
-            str(axis) for axis, evidence in raw_axis_evidence.items() if evidence
-        } if isinstance(raw_axis_evidence, dict) else set()
-        for evidence in item.get("evidence") or []:
-            if not isinstance(evidence, dict):
-                continue
-            declared = evidence.get("axes") or evidence.get("axis") or []
-            if isinstance(declared, str):
-                declared = [declared]
-            axes.update(str(axis) for axis in declared if str(axis))
-        return axes
-
-    def field_axis_contract_complete(item: dict[str, Any]) -> bool:
-        values_present = {
-            "path": bool(str(item.get("wire_path") or item.get("path") or "")),
-            "name": bool(str(item.get("public_name") or item.get("business_name") or item.get("label") or "")),
-            "default_value": any(key in item for key in ("visible_default", "default_value", "default")),
-            "type": bool(str(item.get("business_type") or item.get("type") or "")),
-            "category": str(item.get("category") or "").strip().lower() not in {"", "unknown"},
-            "source": str(item.get("source_kind") or "").strip().lower() not in {"", "unknown"},
-            "required": isinstance(item.get("required"), bool),
-        }
-        statuses = axis_statuses(item)
-        evidence = evidenced_axes(item)
-        return bool(
-            confidence_of(item) > 0
-            and all(values_present.values())
-            and all(statuses.get(axis) in resolved_statuses for axis in field_axes)
-            and set(field_axes).issubset(evidence)
-        )
-    role_items = [
-        item for item in (plan.get("request_roles") or []) if isinstance(item, dict)
-    ]
-    covered_steps = {
-        str(item.get("step_id") or "")
-        for item in role_items if str(item.get("step_id") or "")
-    }
-    field_items = [
-        item for item in (plan.get("field_semantics") or []) if isinstance(item, dict)
-    ]
-    covered_fields = {
-        (str(item.get("step_id") or ""), str(item.get("path") or item.get("wire_path") or ""))
-        for item in field_items
-    }
-    required_steps = {step.step_id for step in spec.steps}
-    required_fields = {
-        (step.step_id, param.path)
-        for step in spec.steps
-        for param in step.params
-    }
-    planned_memberships: dict[str, int] = {}
-    for capability in plan.get("capabilities") or []:
-        if not isinstance(capability, dict):
-            continue
-        for step_id in capability.get("step_ids") or []:
-            step_id = str(step_id or "")
-            if step_id:
-                planned_memberships[step_id] = planned_memberships.get(step_id, 0) + 1
+    # Public ability count is the number of distinct recorded business anchors,
+    # not the number of preflights, option endpoints, or fact-check reads.
     required_business_steps: dict[str, bool] = {}
+    for step in spec.steps:
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+        method = str(step.method or "GET").upper()
+        if role in {"business_write", "submit_anchor"} and method in _WRITE_METHODS:
+            required_business_steps[step.step_id] = True
+        elif role == "business_get" and method in {"GET", "HEAD", "POST"}:
+            required_business_steps[step.step_id] = False
     for item in _request_fact_items(spec):
         is_write = _eligible_business_write_fact(item)
         if not (is_write or _eligible_business_get_fact(item)):
@@ -11091,6 +11033,73 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         step_id = _materialized_step_id_for_request(spec, item)
         if step_id:
             required_business_steps[step_id] = is_write
+
+    required_fields = [
+        (step.step_id, param)
+        for step in spec.steps
+        for param in step.params
+    ]
+
+    def field_contract_complete(param: ParamField) -> bool:
+        return bool(
+            str(param.path or "").strip()
+            and str(param.label or param.key or "").strip()
+            and str(param.type or "").strip().lower() not in {"", "unknown"}
+            and str(param.category or "").strip().lower() not in {"", "unknown"}
+            and str(param.source_kind or "").strip().lower() not in {"", "unknown"}
+            and _field_source_configuration_advice(param) is None
+            and isinstance(param.required, bool)
+        )
+
+    covered_fields = {
+        (step_id, param.path)
+        for step_id, param in required_fields
+        if field_contract_complete(param)
+    }
+    capability_items = [
+        item for item in (plan.get("capabilities") or []) if isinstance(item, dict)
+    ]
+    covered_steps: set[str] = set()
+    names: set[str] = set()
+    anchors: set[str] = set()
+    capability_contract_invalid = False
+    for capability in capability_items:
+        name = str(capability.get("name") or "").strip()
+        title = str(capability.get("title") or "").strip()
+        kind = str(capability.get("kind") or "").strip()
+        anchor_step_id = str(capability.get("anchor_step_id") or "").strip()
+        refs = capability.get("request_refs")
+        valid_refs = bool(
+            isinstance(refs, list)
+            and refs
+            and all(
+                isinstance(ref, dict)
+                and str(ref.get("step_id") or "") in step_by_id
+                and str(ref.get("usage") or "") in allowed_usages
+                for ref in refs
+            )
+        )
+        anchor_ref = bool(
+            valid_refs
+            and any(
+                str(ref.get("step_id") or "") == anchor_step_id
+                and str(ref.get("usage") or "") == "execute"
+                for ref in refs
+            )
+        )
+        valid = bool(
+            name and title and kind in ALLOWED_CAPABILITY_KINDS
+            and anchor_step_id in step_by_id
+            and valid_refs and anchor_ref
+            and name not in names and anchor_step_id not in anchors
+            and _planned_capability_has_public_anchor(spec, kind, [anchor_step_id])
+        )
+        if not valid:
+            capability_contract_invalid = True
+            continue
+        names.add(name)
+        anchors.add(anchor_step_id)
+        covered_steps.add(anchor_step_id)
     missing: list[str] = []
     if any(
         _eligible_business_write_fact(item)
@@ -11098,14 +11107,118 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         for item in _request_fact_items(spec)
     ):
         missing.append("request_materialization")
+    if len(covered_fields) != len(required_fields):
+        missing.append("field_axis_contract")
+    if not capability_items:
+        missing.append("capabilities")
+    elif capability_contract_invalid:
+        missing.append("capability_contracts")
+    if set(required_business_steps) != covered_steps:
+        missing.append("capability_membership")
+    understanding = plan.get("business_understanding")
+    if not isinstance(understanding, dict) or not any(
+        str(understanding.get(key) or "").strip()
+        for key in ("business_name", "summary", "intent", "object", "purpose")
+    ):
+        missing.append("business_understanding")
+    unresolved_items = plan.get("unresolved_items", [])
+    if not isinstance(unresolved_items, list) or any(
+        not isinstance(item, dict)
+        or item.get("blocking") is True
+        or str(item.get("severity") or "").strip().lower()
+        in {"high", "critical", "blocker", "error"}
+        for item in (unresolved_items if isinstance(unresolved_items, list) else [])
+    ):
+        missing.append("unresolved_blockers")
+    return {
+        "complete": not missing,
+        "missing": missing,
+        "covered_steps": len(covered_steps & set(required_business_steps)),
+        "total_steps": len(required_business_steps),
+        "covered_fields": len(covered_fields),
+        "total_fields": len(required_fields),
+    }
+
+
+def _legacy_semantic_plan_coverage(
+    spec: FlowSpec,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Read already-saved pre-strict plans without changing the live contract."""
+    role_items = [
+        item for item in (plan.get("request_roles") or []) if isinstance(item, dict)
+    ]
+    field_items = [
+        item for item in (plan.get("field_semantics") or []) if isinstance(item, dict)
+    ]
+    required_steps = {step.step_id for step in spec.steps}
+    required_fields = {
+        (step.step_id, param.path) for step in spec.steps for param in step.params
+    }
+    covered_steps = {
+        str(item.get("step_id") or "") for item in role_items
+        if str(item.get("step_id") or "")
+    }
+    covered_fields = {
+        (
+            str(item.get("step_id") or ""),
+            str(item.get("path") or item.get("wire_path") or ""),
+        )
+        for item in field_items
+    }
+
+    def field_complete(item: dict[str, Any]) -> bool:
+        statuses = item.get("axis_status") if isinstance(item.get("axis_status"), dict) else {}
+        resolved = {"grounded", "image_matched", "preserved_fact", "locked"}
+        axes = {"path", "name", "default_value", "type", "category", "source", "required"}
+        evidence_axes: set[str] = set()
+        for evidence in item.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            declared = evidence.get("axes") or evidence.get("axis") or []
+            if isinstance(declared, str):
+                declared = [declared]
+            evidence_axes.update(str(axis) for axis in declared if str(axis))
+        return bool(
+            str(item.get("wire_path") or item.get("path") or "")
+            and str(item.get("public_name") or item.get("business_name") or item.get("label") or "")
+            and any(key in item for key in ("visible_default", "default_value", "default"))
+            and str(item.get("business_type") or item.get("type") or "")
+            and str(item.get("category") or "").lower() not in {"", "unknown"}
+            and str(item.get("source_kind") or "").lower() not in {"", "unknown"}
+            and isinstance(item.get("required"), bool)
+            and all(
+                str(
+                    (
+                        statuses.get(axis, {}).get("status")
+                        if isinstance(statuses.get(axis), dict)
+                        else statuses.get(axis)
+                    )
+                    or ""
+                ) in resolved
+                for axis in axes
+            )
+            and axes.issubset(evidence_axes)
+        )
+
+    capabilities = [
+        item for item in (plan.get("capabilities") or []) if isinstance(item, dict)
+    ]
+    planned_memberships: dict[str, int] = {}
+    for capability in capabilities:
+        for step_id in capability.get("step_ids") or []:
+            value = str(step_id or "")
+            if value:
+                planned_memberships[value] = planned_memberships.get(value, 0) + 1
+    missing: list[str] = []
     if not required_steps.issubset(covered_steps):
         missing.append("request_roles")
     if any(
         str(item.get("step_id") or "") in required_steps
         and not (
-            str(item.get("role") or "").strip()
-            and str(item.get("name") or item.get("title") or "").strip()
-            and str(item.get("reason") or "").strip()
+            str(item.get("role") or "")
+            and str(item.get("name") or item.get("title") or "")
+            and str(item.get("reason") or "")
         )
         for item in role_items
     ):
@@ -11114,45 +11227,36 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         missing.append("field_semantics")
     if any(
         (str(item.get("step_id") or ""), str(item.get("path") or item.get("wire_path") or ""))
-        in required_fields
-        and not field_axis_contract_complete(item)
+        in required_fields and not field_complete(item)
         for item in field_items
     ):
         missing.append("field_axis_contract")
-    if not isinstance(plan.get("capabilities"), list) or not plan.get("capabilities"):
+    if not capabilities:
         missing.append("capabilities")
     elif any(
         not (
-            str(item.get("name") or "").strip()
-            and str(item.get("title") or "").strip()
-            and str(item.get("kind") or "").strip()
-            and str(item.get("intent") or item.get("description") or "").strip()
+            str(item.get("name") or "")
+            and str(item.get("title") or "")
+            and str(item.get("kind") or "")
+            and str(item.get("intent") or item.get("description") or "")
             and isinstance(item.get("step_ids"), list)
-            and bool(item.get("step_ids"))
-            and set(str(step_id) for step_id in item.get("step_ids") or []).issubset(required_steps)
+            and item.get("step_ids")
+            and set(str(value) for value in item.get("step_ids") or []).issubset(required_steps)
         )
-        for item in plan.get("capabilities") or [] if isinstance(item, dict)
+        for item in capabilities
     ):
         missing.append("capability_contracts")
-    if any(planned_memberships.get(step_id, 0) == 0 for step_id in required_business_steps):
-        missing.append("capability_membership")
-    if any(
-        is_write and planned_memberships.get(step_id, 0) > 1
-        for step_id, is_write in required_business_steps.items()
-    ):
-        missing.append("capability_membership")
     if not isinstance(plan.get("business_understanding"), dict) or not plan.get("business_understanding"):
         missing.append("business_understanding")
     if not isinstance(plan.get("capability_relations"), list):
         missing.append("capability_relations")
-    if not isinstance(plan.get("unresolved_items"), list):
-        missing.append("unresolved_items")
-    elif any(
+    unresolved = plan.get("unresolved_items")
+    if not isinstance(unresolved, list) or any(
         not isinstance(item, dict)
         or item.get("blocking") is True
-        or str(item.get("severity") or "").strip().lower()
+        or str(item.get("severity") or "").lower()
         in {"high", "critical", "blocker", "error"}
-        for item in plan.get("unresolved_items") or []
+        for item in (unresolved if isinstance(unresolved, list) else [])
     ):
         missing.append("unresolved_blockers")
     return {
@@ -11726,15 +11830,14 @@ def _complete_semantic_plan_from_spec(
     spec: FlowSpec,
     proposed: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Complete a first-pass semantic plan from grounded FlowSpec facts.
-
-    The model remains responsible for semantic choices. This function only
-    fills omitted coverage records with already accepted names, types, roles
-    and capability boundaries, so structural omissions never trigger another
-    full-context model call.
-    """
-    plan = copy.deepcopy(proposed) if isinstance(proposed, dict) else {}
-    understanding = plan.get("business_understanding")
+    """Persist the same strict semantic contract exposed by the Pi tool."""
+    proposed_plan = copy.deepcopy(proposed) if isinstance(proposed, dict) else {}
+    legacy_plan = any(
+        key in proposed_plan
+        for key in ("request_roles", "field_semantics", "capability_relations")
+    )
+    plan: dict[str, Any] = {}
+    understanding = proposed_plan.get("business_understanding")
     if not isinstance(understanding, dict):
         understanding = {}
     business_name = str(
@@ -11750,46 +11853,99 @@ def _complete_semantic_plan_from_spec(
         understanding.setdefault("business_name", business_name)
     plan["business_understanding"] = understanding
 
-    role_by_step = {
-        str(item.get("step_id") or ""): item
-        for item in (plan.get("request_roles") or [])
-        if isinstance(item, dict) and str(item.get("step_id") or "")
-    }
-    for step in spec.steps:
-        item = role_by_step.setdefault(step.step_id, {"step_id": step.step_id})
-        role = str((step.source_meta or {}).get("role") or step.semantic_role or "business_request")
-        item.setdefault("role", role)
-        item.setdefault("name", step.name or f"{step.method} {step.path or step.url}")
-        item.setdefault("reason", str((step.source_meta or {}).get("keep_reason") or "来自录制请求事实"))
-    plan["request_roles"] = list(role_by_step.values())
+    def strict_refs(raw_refs: Any) -> list[dict[str, str]]:
+        refs: list[dict[str, str]] = []
+        for raw in raw_refs if isinstance(raw_refs, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            step_id = str(raw.get("step_id") or "")
+            usage = str(raw.get("usage") or "")
+            if (
+                step_id
+                and any(step.step_id == step_id for step in spec.steps)
+                and usage in {"execute", "preflight", "option_source", "fact_check"}
+                and {"step_id": step_id, "usage": usage} not in refs
+            ):
+                refs.append({"step_id": step_id, "usage": usage})
+        return refs
 
-    # Field omissions remain omissions.  Reusing current ParamField values here
-    # made stale heuristic names/types look model-confirmed and hid unresolved
-    # internal/runtime fields from the coverage gate.
-    plan["field_semantics"] = [
-        item for item in (plan.get("field_semantics") or [])
+    capability_by_name: dict[str, dict[str, Any]] = {}
+    for raw in proposed_plan.get("capabilities") or []:
+        if not isinstance(raw, dict) or not str(raw.get("name") or ""):
+            continue
+        item = {
+            "name": str(raw.get("name") or ""),
+            "title": str(raw.get("title") or raw.get("name") or ""),
+            "kind": str(raw.get("kind") or ""),
+            "anchor_step_id": str(raw.get("anchor_step_id") or ""),
+            "request_refs": strict_refs(raw.get("request_refs")),
+        }
+        capability_by_name[item["name"]] = item
+    for capability in spec.capabilities or []:
+        if capability.name in capability_by_name:
+            continue
+        refs = strict_refs([
+            ref.model_dump(exclude_none=True) for ref in (capability.request_refs or [])
+        ])
+        candidate_ids = [
+            ref["step_id"] for ref in refs if ref["usage"] == "execute"
+        ] or list(_capability_node_step_ids(capability))
+        anchor_step_id = next((
+            step_id for step_id in reversed(candidate_ids)
+            if _planned_capability_has_public_anchor(spec, capability.kind, [step_id])
+        ), "")
+        if not anchor_step_id:
+            continue
+        if not any(
+            ref["step_id"] == anchor_step_id and ref["usage"] == "execute"
+            for ref in refs
+        ):
+            refs.append({"step_id": anchor_step_id, "usage": "execute"})
+        capability_by_name[capability.name] = {
+            "name": capability.name,
+            "title": capability.title or capability.name,
+            "kind": capability.kind,
+            "anchor_step_id": anchor_step_id,
+            "request_refs": refs,
+        }
+    plan["capabilities"] = list(capability_by_name.values())
+    plan["unresolved_items"] = [
+        copy.deepcopy(item)
+        for item in (proposed_plan.get("unresolved_items") or [])
         if isinstance(item, dict)
     ]
-
-    capability_by_name = {
-        str(item.get("name") or ""): item
-        for item in (plan.get("capabilities") or [])
-        if isinstance(item, dict) and str(item.get("name") or "")
-    }
-    for capability in spec.capabilities or []:
-        item = capability_by_name.setdefault(capability.name, {"name": capability.name})
-        item.setdefault("title", capability.title or capability.name)
-        item.setdefault("kind", capability.kind)
-        item.setdefault("intent", capability.intent or capability.title or capability.name)
-        item.setdefault("step_ids", list(_capability_node_step_ids(capability)))
-    plan["capabilities"] = list(capability_by_name.values())
-    plan["capability_relations"] = [
-        relation.model_dump(exclude_none=True)
-        for relation in (spec.capability_relations or [])
-        if relation.from_output and relation.to_input
-    ]
-    if not isinstance(plan.get("unresolved_items"), list):
-        plan["unresolved_items"] = []
+    if legacy_plan:
+        role_by_step = {
+            str(item.get("step_id") or ""): copy.deepcopy(item)
+            for item in (proposed_plan.get("request_roles") or [])
+            if isinstance(item, dict) and str(item.get("step_id") or "")
+        }
+        for step in spec.steps:
+            item = role_by_step.setdefault(step.step_id, {"step_id": step.step_id})
+            item.setdefault(
+                "role",
+                str((step.source_meta or {}).get("role") or step.semantic_role or "business_request"),
+            )
+            item.setdefault("name", step.name or f"{step.method} {step.path or step.url}")
+            item.setdefault("reason", str((step.source_meta or {}).get("keep_reason") or "来自录制请求事实"))
+        plan["request_roles"] = list(role_by_step.values())
+        plan["field_semantics"] = [
+            copy.deepcopy(item)
+            for item in (proposed_plan.get("field_semantics") or [])
+            if isinstance(item, dict)
+        ]
+        # Legacy plans retain their old capability representation for display
+        # and migration; new Pi submissions never enter this branch.
+        plan["capabilities"] = [
+            copy.deepcopy(item)
+            for item in (proposed_plan.get("capabilities") or [])
+            if isinstance(item, dict)
+        ] or plan["capabilities"]
+        plan["capability_relations"] = [
+            copy.deepcopy(item)
+            for item in (proposed_plan.get("capability_relations") or [])
+            if isinstance(item, dict)
+        ]
     return plan
 
 
@@ -12878,9 +13034,17 @@ async def orchestrate_flow_capabilities(
         else:
             submission["plan"] = proposed_semantic_plan
     complete_semantic_submission = bool(
-        proposed_semantic_plan.get("capabilities")
-        and isinstance(proposed_semantic_plan.get("request_roles"), list)
-        and isinstance(proposed_semantic_plan.get("field_semantics"), list)
+        isinstance(proposed_semantic_plan.get("capabilities"), list)
+        and proposed_semantic_plan.get("capabilities")
+        and all(
+            isinstance(item, dict)
+            and item.get("name")
+            and item.get("kind")
+            and item.get("anchor_step_id")
+            and isinstance(item.get("request_refs"), list)
+            and item.get("request_refs")
+            for item in proposed_semantic_plan.get("capabilities") or []
+        )
     )
     if complete_semantic_submission and not initial_generation:
         baseline_ids.update(

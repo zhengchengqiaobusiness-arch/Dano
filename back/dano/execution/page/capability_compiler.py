@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,6 +19,7 @@ from dano.execution.page.flow_spec import (
 
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_SIMPLE_CALL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,70 @@ def _compiled_nodes(step_ids: list[str], anchor_step_id: str) -> list[dict[str, 
     return nodes
 
 
+def _normalize_compiled_call_keys(
+    spec: FlowSpec,
+    capabilities: list[FlowCapability],
+) -> None:
+    """Keep display semantics while compiling stable caller keys.
+
+    Recording-owned ParamFields intentionally use localized business names as
+    ``key``.  The generated ability is a separate copy: for a simple request
+    leaf that was named automatically from the page, its invocation key must
+    stay equal to the wire leaf.  Explicit agent/operator renames and derived
+    structures remain untouched.
+    """
+    compiled_step_ids = {
+        step_id
+        for capability in capabilities
+        for step_id in capability.step_ids
+    }
+    for step in spec.steps:
+        if step.step_id not in compiled_step_ids:
+            continue
+        candidates: list[tuple[Any, str]] = []
+        for param in step.params:
+            if not (param.exposed_to_user and param.category == "user_param"):
+                continue
+            if param.locked or param.name_source in {"agent", "manual"}:
+                continue
+            source_contract_kind = str((param.source or {}).get("kind") or "")
+            if (
+                param.source_kind in {"dynamic_structure", "dynamic_structure_input"}
+                or source_contract_kind in {"dynamic_structure", "dynamic_structure_input"}
+            ):
+                continue
+            relative = str(param.path or "")
+            for prefix in ("body.", "query.", "path."):
+                if relative.startswith(prefix):
+                    relative = relative[len(prefix):]
+                    break
+            if not _SIMPLE_CALL_KEY.fullmatch(relative):
+                continue
+            candidates.append((param, relative))
+        existing = {str(param.key or "") for param in step.params}
+        for param, call_key in candidates:
+            if call_key != param.key and call_key in existing:
+                continue
+            old_key = str(param.key or "")
+            existing.discard(str(param.key or ""))
+            existing.add(call_key)
+            param.key = call_key
+            param.evidence = [*list(param.evidence or []), {
+                "source": "capability_compiler",
+                "field": "key",
+                "previous": old_key,
+                "value": call_key,
+                "reason": "能力调用键与请求 wire 叶子保持稳定，显示名继续使用页面业务名称",
+            }]
+            if old_key in step.sample_inputs:
+                step.sample_inputs[call_key] = step.sample_inputs.pop(old_key)
+            elif param.value not in (None, ""):
+                step.sample_inputs.setdefault(call_key, param.value)
+            for binding in step.selects:
+                if binding.path == param.path or binding.param == old_key:
+                    binding.param = call_key
+
+
 def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> CapabilityCompilation:
     """Return a copy whose generated abilities use only verified graph membership.
 
@@ -288,7 +354,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         compiled.append(FlowCapability(
             name=name,
             title=title,
-            intent=str(item.get("intent") or ""),
+            intent=str(item.get("intent") or title or name),
             kind=kind,
             capability_id=_stable_capability_id(name, kind, anchor_step_id),
             request_refs=refs,
@@ -315,6 +381,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         or any(ref.origin in {"manual", "user"} for ref in capability.request_refs or [])
     ]
     current.capabilities = [*preserved, *compiled]
+    _normalize_compiled_call_keys(current, compiled)
     valid_refs = {
         ref for capability in current.capabilities
         for ref in (capability.name, capability.capability_id) if ref

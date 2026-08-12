@@ -13,6 +13,7 @@ from dano.execution.page.flow_spec import (
     SelectBinding,
     orchestrate_flow_capabilities,
 )
+from dano.execution.page import flow_spec as flow_spec_module
 
 
 def _verified_graph() -> FlowSpec:
@@ -229,3 +230,73 @@ def test_strict_pi_plan_is_recompiled_before_orchestration_is_persisted():
     assert result.meta["capability_model"]["capability_compilation"]["errors"] == []
     submit = next(cap for cap in result.capabilities if cap.name == "submit_leave")
     assert submit.step_ids == ["definition", "approval", "submit"]
+
+
+def test_strict_pi_plan_coverage_uses_the_declared_anchor_contract() -> None:
+    coverage = flow_spec_module._semantic_plan_coverage(
+        _verified_graph(),
+        {
+            "semantic_plan": {
+                "business_understanding": {"summary": "查询并提交请假"},
+                **_semantic_plan(),
+                "unresolved_items": [],
+            },
+        },
+    )
+
+    assert coverage["complete"] is True
+    assert coverage["missing"] == []
+    assert coverage["covered_steps"] == 2
+
+
+def test_semantic_completion_preserves_only_the_strict_pi_contract() -> None:
+    compiled = compile_capabilities(_verified_graph(), _semantic_plan()).spec
+    completed = flow_spec_module._complete_semantic_plan_from_spec(
+        compiled,
+        {
+            "business_understanding": {"summary": "查询并提交请假"},
+            **_semantic_plan(),
+            "unresolved_items": [],
+        },
+    )
+
+    assert set(completed) == {
+        "business_understanding", "capabilities", "unresolved_items",
+    }
+    assert len(completed["capabilities"]) == 2
+    for capability in completed["capabilities"]:
+        assert set(capability) == {
+            "name", "title", "kind", "anchor_step_id", "request_refs",
+        }
+        assert capability["anchor_step_id"]
+        assert capability["request_refs"]
+
+
+def test_compiler_separates_recording_business_name_from_ability_call_key() -> None:
+    spec = _verified_graph()
+    submit = next(step for step in spec.steps if step.step_id == "submit")
+    submit.params.append(ParamField(
+        path="body.startTime",
+        key="开始时间",
+        label="开始时间",
+        name_source="dom",
+        value=1785945600000,
+        type="datetime",
+        wire_type="number",
+        wire_format="epoch_ms",
+        category="user_param",
+        source_kind="user_input",
+        exposed_to_user=True,
+        required=True,
+    ))
+
+    compiled = compile_capabilities(spec, _semantic_plan()).spec
+    compiled_submit = next(step for step in compiled.steps if step.step_id == "submit")
+    compiled_param = next(param for param in compiled_submit.params if param.path == "body.startTime")
+    capability = next(cap for cap in compiled.capabilities if cap.name == "submit_leave")
+    public = next(field for field in capability.inputs if field.path == "body.startTime")
+
+    assert submit.params[-1].key == "开始时间"
+    assert compiled_param.key == "startTime"
+    assert public.key == "startTime"
+    assert public.display_name == "开始时间"
