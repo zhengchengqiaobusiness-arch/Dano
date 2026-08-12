@@ -15011,7 +15011,10 @@ def append_flow_version(
     sync_flow_spec_models(spec)
     meta = dict(spec.meta or {})
     versions = list(meta.get("versions") or [])
-    current = max([int(v.get("version") or 0) for v in versions] or [0])
+    current = max(
+        [int(meta.get("current_version") or 0)]
+        + [int(v.get("version") or 0) for v in versions]
+    )
     entry = {
         "version": current + 1,
         "action": action,

@@ -305,6 +305,74 @@ def test_finalize_recompiles_live_capability_plan_from_request_ids():
     }
 
 
+def test_accepted_pre_materialization_plan_survives_finalize_with_monotonic_version():
+    requests = _load("request_facts.json")["requests"]
+    captured = to_flow_spec(requests, recording_mode="real_submit")
+    live = FlowSpec(
+        request_facts=captured.request_facts.model_copy(deep=True),
+        meta={
+            "live_request_ids": [item.request_id for item in captured.request_facts.requests],
+            "versions": [{"version": 1}],
+            "current_version": 1,
+        },
+    )
+    live = asyncio.run(apply_recording_agent_submission(
+        live,
+        submission={
+            "semantic_plan": {
+                "business_understanding": {"intent": "查询并提交业务记录"},
+                "capabilities": [
+                    {
+                        "name": "query_records",
+                        "title": "查询业务记录",
+                        "kind": "query",
+                        "anchor_step_id": "req_76",
+                        "request_refs": [{"step_id": "req_76", "usage": "execute"}],
+                    },
+                    {
+                        "name": "submit_record",
+                        "title": "提交业务记录",
+                        "kind": "submit",
+                        "anchor_step_id": "req_116",
+                        "request_refs": [{"step_id": "req_116", "usage": "execute"}],
+                    },
+                ],
+                "unresolved_items": [],
+            },
+            "ops": [
+                {
+                    "op": "set_request_role",
+                    "request_id": "req_76",
+                    "role": "query_list",
+                    "reason": "筛选动作触发业务列表查询",
+                    "evidence_refs": ["req_76"],
+                },
+                {
+                    "op": "set_request_role",
+                    "request_id": "req_116",
+                    "role": "business_write",
+                    "reason": "用户提交动作触发业务写请求",
+                    "evidence_refs": ["req_116"],
+                },
+            ],
+        },
+        mode="plan",
+    ))
+    accepted_version = int(live.meta["current_version"])
+    finalized = to_flow_spec(
+        requests,
+        recording_mode="real_submit",
+        request_role_overrides=live_request_role_overrides(live),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [cap.name for cap in merged.capabilities] == [
+        "query_records", "submit_record",
+    ]
+    assert int(merged.meta["current_version"]) > accepted_version
+
+
 def test_finalize_keeps_existing_capabilities_when_live_plan_anchor_is_unresolved():
     finalized = _captured_spec()
     original_names = [cap.name for cap in finalized.capabilities]

@@ -1529,6 +1529,13 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     """Replay accepted live agent ops onto the canonical finalized FlowSpec."""
     merged = finalized_spec.model_copy(deep=True)
     live_meta = live_spec.meta or {}
+    finalized_meta = merged.meta or {}
+    live_version = int(live_meta.get("current_version") or 0)
+    finalized_version = int(finalized_meta.get("current_version") or 0)
+    if live_version >= finalized_version:
+        merged.meta = {**finalized_meta, "current_version": live_version}
+        if live_meta.get("versions"):
+            merged.meta["versions"] = deepcopy(live_meta["versions"])
     for key in ("verification_log", "agent_answers"):
         if live_meta.get(key):
             merged.meta = {**(merged.meta or {}), key: deepcopy(live_meta[key])}
@@ -1616,7 +1623,13 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
 
     if unresolved:
         merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}
-    return merged
+    from dano.execution.page.flow_spec import append_flow_version
+
+    return append_flow_version(
+        merged,
+        "recording_finalize",
+        reason="将实时录制结论绑定到最终请求步骤",
+    )
 
 
 def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
