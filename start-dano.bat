@@ -12,6 +12,8 @@ set "FRONTEND_PORT=%DANO_FRONTEND_PORT%"
 echo Stopping previous Dano process trees ...
 call :stop_known_dano_processes
 
+call "%ROOT%clean-python-cache.bat" nopause
+
 call :clear_port %BACKEND_PORT% Backend
 if errorlevel 1 goto :cleanup_failed
 call :clear_port %FRONTEND_PORT% Frontend
