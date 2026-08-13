@@ -5013,13 +5013,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               autoComplete="off" aria-label="录制画面键盘输入" tabIndex={-1}
               style={{ position: "absolute", left: 0, top: 0, width: 2, height: 2, opacity: 0.01, border: 0, padding: 0, pointerEvents: "none" }} />
           </div>
-          {hasFrame && (frameMeta.frameWidth || frameMeta.viewportWidth) && (
-            <Typography.Text type="secondary" style={{ display: "block", marginTop: 4, fontSize: 12 }}>
-              画面 {frameMeta.frameWidth || "?"}×{frameMeta.frameHeight || "?"}
-              {frameMeta.viewportWidth ? ` · 浏览器 ${frameMeta.viewportWidth}×${frameMeta.viewportHeight || "?"}` : ""}
-              {frameMeta.deviceScaleFactor ? ` · DPR ${frameMeta.deviceScaleFactor}` : ""}
-            </Typography.Text>
-          )}
           </div>
         </div>
       )}
