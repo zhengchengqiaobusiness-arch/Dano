@@ -6619,9 +6619,7 @@ def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> No
 
 
 def _flow_link_kind(link: FlowLink) -> str:
-    declared = str(link.kind or "")
-    legacy = str((link.meta or {}).get("kind") or "")
-    return legacy if legacy and declared in {"", "value"} else declared or legacy or "value"
+    return str(link.kind or "value")
 
 
 def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
@@ -16599,9 +16597,7 @@ def flow_spec_to_api_request(
         if not target_path or not source_path:
             errors.append(f"链接 `{lk.link_id}` 缺少 source_path 或 target_path")
             continue
-        declared_kind = str(lk.kind or "")
-        legacy_kind = str((lk.meta or {}).get("kind") or "")
-        link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
+        link_kind = str(lk.kind or "value")
         if link_kind in {"structure", "response_key_map"}:
             structure_link = {
                 "link_id": lk.link_id,

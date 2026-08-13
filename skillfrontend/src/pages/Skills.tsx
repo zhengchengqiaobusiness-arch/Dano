@@ -54,7 +54,7 @@ export default function Skills() {
   const [invoke, setInvoke] = useState<SkillManifest | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportDir, setExportDir] = useState(localStorage.getItem(EXPORT_DIR_LS) || DEFAULT_EXPORT_DIR);
-  const [exportMode, setExportMode] = useState<SkillExportMode>("both");
+  const [exportMode, setExportMode] = useState<SkillExportMode>("package");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);   // 打开运行期 token 弹窗的子系统
   const tenant = localStorage.getItem(TENANT_NAME) || "";
@@ -222,7 +222,7 @@ export default function Skills() {
           onChange={setExportMode}
           style={{ width: "100%" }}
           options={[
-            { value: "both", label: "代理包 + 自包含包（默认）" },
+            { value: "both", label: "代理包 + 自包含包" },
             { value: "package", label: "仅自包含包（直连业务 API）" },
             { value: "proxy", label: "仅代理包（调用 Dano）" },
           ]}

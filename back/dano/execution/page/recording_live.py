@@ -834,9 +834,7 @@ def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict: 
 def dependency_link_signature(link) -> str:  # noqa: ANN001
     """Stable signature covered by an executor-owned dependency verification."""
     meta = dict(getattr(link, "meta", None) or {})
-    declared_kind = str(getattr(link, "kind", "") or "")
-    legacy_kind = str(meta.get("kind") or "")
-    link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
+    link_kind = str(getattr(link, "kind", "") or "value")
     payload = {
         "kind": link_kind,
         "source_step_id": str(getattr(link, "source_step_id", "") or ""),
@@ -1642,7 +1640,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             }
             link.meta = {**(link.meta or {}), "actor": "agent"}
             if link_kind in {"structure", "response_key_map"}:
-                link.meta["kind"] = link_kind
+                link.meta.pop("kind", None)
             if existing is None:
                 spec.links.append(link)
         _append_insight(

@@ -3327,7 +3327,7 @@ async def write_exports(
     tenant: str,
     out_dir: str,
     *,
-    mode: str = "both",
+    mode: str = "package",
     exclude_skill_ids: set[str] | None = None,
 ) -> list[str]:
     """Write proxy packages, self-contained packages, or both without collisions."""
@@ -3353,7 +3353,7 @@ async def write_exports(
     return written
 
 
-async def export(tenant: str, out_dir: str, *, mode: str = "both") -> list[str]:
+async def export(tenant: str, out_dir: str, *, mode: str = "package") -> list[str]:
     """命令行入口:自管连接池(init→write→close);返回写出的文件夹名列表。"""
     from dano.infra.db import close_pool, init_pool
     await init_pool()
@@ -3367,7 +3367,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="导出已上架 Skill 为官方 skill-creator 格式 skill(.agents/skills/)")
     ap.add_argument("--tenant", required=True, help="租户名,如 demo-oa")
     ap.add_argument("--out", required=True, help="输出目录,通常是 <pi仓库>/.agents/skills")
-    ap.add_argument("--mode", choices=("proxy", "package", "both"), default="both", help="导出代理包、自包含包或两者")
+    ap.add_argument("--mode", choices=("proxy", "package", "both"), default="package", help="导出代理包、自包含包或两者")
     args = ap.parse_args()
     written = asyncio.run(export(args.tenant, args.out, mode=args.mode))
     print(f"已导出 {len(written)} 个 skill 到 {args.out}:")

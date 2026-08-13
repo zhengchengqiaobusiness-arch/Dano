@@ -1252,7 +1252,8 @@ def test_structure_dependency_targets_container_and_stays_out_of_value_injection
         "evidence": {"observed_keys": ["Activity_09dlq0g", "Activity_0ag2wyz"]},
     }])
     link = updated.links[0]
-    assert link.meta["kind"] == "structure"
+    assert link.kind == "structure"
+    assert "kind" not in link.meta
     assert link.confirmed is False
 
     updated.steps[1].body_source = json.dumps({

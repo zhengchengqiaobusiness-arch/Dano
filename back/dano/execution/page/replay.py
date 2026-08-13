@@ -362,9 +362,7 @@ async def verify_dependency(
     if source_request is None or target_request is None:
         raise ValueError("dependency endpoints are not present in captured request facts")
 
-    declared_kind = str(getattr(link, "kind", "") or "")
-    legacy_kind = str((link.meta or {}).get("kind") or "")
-    link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
+    link_kind = str(getattr(link, "kind", "") or "value")
     signature = dependency_link_signature(link)
     subject = {
         "link_id": link.link_id,

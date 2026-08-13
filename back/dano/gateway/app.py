@@ -3120,7 +3120,7 @@ async def record_ws(ws: WebSocket) -> None:
             _release_recording_connection(connection_key, connection_lease)
 
 
-async def _auto_export(tenant: str, *, mode: Literal["proxy", "package", "both"] = "both") -> None:
+async def _auto_export(tenant: str, *, mode: Literal["proxy", "package", "both"] = "package") -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
     目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
@@ -3459,7 +3459,7 @@ async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(de
 
 class ExportSkillsReq(BaseModel):
     out_dir: str                    # 目标目录(通常是 pi 仓库的 .agents/skills),后端本地写入
-    mode: Literal["proxy", "package", "both"] = "both"
+    mode: Literal["proxy", "package", "both"] = "package"
 
 
 @app.post("/export/agent-skills")

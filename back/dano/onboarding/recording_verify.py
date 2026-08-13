@@ -112,7 +112,7 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
             continue
         todos.append({
             "kind": "dependency",
-            "dependency_kind": str((link.meta or {}).get("kind") or "value"),
+            "dependency_kind": str(link.kind or "value"),
             "target_id": link.link_id,
             "source_step_id": link.source_step_id,
             "source_request_id": str((link.evidence or {}).get("source_request_id") or ""),

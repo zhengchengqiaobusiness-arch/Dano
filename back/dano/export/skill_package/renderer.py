@@ -146,9 +146,7 @@ def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
             or positions[link.source_step_id] >= positions[link.target_step_id]
         ):
             continue
-        declared_kind = str(link.kind or "")
-        legacy_kind = str((link.meta or {}).get("kind") or "")
-        link_kind = legacy_kind if legacy_kind and declared_kind in {"", "value"} else declared_kind or legacy_kind or "value"
+        link_kind = str(link.kind or "value")
         links.append({
             "link_id": link.link_id,
             "kind": link_kind,

@@ -603,6 +603,28 @@ async def test_export_mode_dispatches_exact_requested_shapes(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_export_mode_defaults_to_self_contained_package(monkeypatch, tmp_path):
+    import dano.export.agent_skills as exports
+    import dano.export.skill_package.renderer as packages
+
+    calls = []
+
+    async def proxy(*_args, **_kwargs):
+        calls.append("proxy")
+        return ["proxy-folder"]
+
+    async def package(*_args, **_kwargs):
+        calls.append("package")
+        return ["package-folder"]
+
+    monkeypatch.setattr(exports, "write_skills", proxy)
+    monkeypatch.setattr(packages, "write_skill_packages", package)
+
+    assert await exports.write_exports("tenant-a", str(tmp_path)) == ["package-folder"]
+    assert calls == ["package"]
+
+
+@pytest.mark.asyncio
 async def test_export_mode_rejects_unknown_value(tmp_path):
     from dano.export.agent_skills import write_exports
 
