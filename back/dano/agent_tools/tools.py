@@ -1198,12 +1198,16 @@ def _find_captured_requests(session, request_ids: list[str]) -> list[dict]:  # n
 
 async def _recording_auth_headers(session, requests: list[dict]) -> dict:  # noqa: ANN001
     from dano.execution.page.request_capture import extract_auth_headers
-    from dano.infra.token_store import get_token_headers
+    from dano.infra.token_store import get_token_headers, normalize_headers
 
-    headers: dict = {}
+    # Persisted runtime credentials are only a fallback during recording.  The
+    # headers captured from the active browser request are newer and must win.
+    headers = normalize_headers(await get_token_headers(session.tenant, session.subsystem))
     for request in requests:
-        headers.update(extract_auth_headers(request.get("headers")))
-    headers.update(await get_token_headers(session.tenant, session.subsystem))
+        headers = normalize_headers({
+            **headers,
+            **extract_auth_headers(request.get("headers")),
+        })
     return headers
 
 

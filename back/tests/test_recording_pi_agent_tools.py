@@ -1532,6 +1532,8 @@ def test_transport_allows_incremental_semantic_keys():
         ),
     ],
 )
+
+
 def test_real_pi_schema_drift_is_rejected_without_mutating_flow(
     monkeypatch,
     plan: dict,
@@ -1548,6 +1550,34 @@ def test_real_pi_schema_drift_is_rejected_without_mutating_flow(
         }))
 
     assert session.spec.model_dump(mode="json") == before
+
+
+@pytest.mark.asyncio
+async def test_recording_replay_auth_prefers_fresh_captured_headers(monkeypatch):
+    async def stale_runtime_headers(_tenant, _subsystem):
+        return {
+            "Authorization": "Bearer stale-runtime-token",
+            "Tenant-Id": "stale-tenant",
+        }
+
+    monkeypatch.setattr(
+        "dano.infra.token_store.get_token_headers",
+        stale_runtime_headers,
+    )
+    session = SimpleNamespace(tenant="tenant-a", subsystem="system-a")
+
+    headers = await agent_tools_module._recording_auth_headers(session, [{
+        "headers": {
+            "authorization": "Bearer fresh-captured-token",
+            "tenant-id": "fresh-tenant",
+        },
+    }])
+
+    assert headers == {
+        "Authorization": "Bearer fresh-captured-token",
+        "Tenant-Id": "fresh-tenant",
+    }
+    assert len({name.casefold() for name in headers}) == len(headers)
 
 
 def test_screenshot_field_overlay_cannot_bypass_typed_field_operations(monkeypatch):

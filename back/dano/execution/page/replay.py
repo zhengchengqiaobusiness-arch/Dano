@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from dano.execution.page.flow_spec import _client_redact_sensitive
 from dano.execution.page.request_capture import execute_api_request, extract_auth_headers
 from dano.execution.page.verification_log import record_verification
+from dano.infra.token_store import normalize_headers
 
 
 _INLINE_SECRET_RE = re.compile(
@@ -46,22 +47,6 @@ def _deep_merge(original, patch):  # noqa: ANN001, ANN202
             merged[key] = _deep_merge(merged.get(key), value)
         return merged
     return deepcopy(patch)
-
-
-def _merge_headers_case_insensitively(*groups: dict | None) -> dict[str, object]:
-    """Merge HTTP headers with last-writer-wins semantics independent of casing."""
-    merged: dict[str, object] = {}
-    names: dict[str, str] = {}
-    for group in groups:
-        for raw_name, value in (group or {}).items():
-            name = str(raw_name)
-            folded = name.casefold()
-            previous = names.get(folded)
-            if previous is not None and previous != name:
-                merged.pop(previous, None)
-            merged[name] = value
-            names[folded] = name
-    return merged
 
 
 def _request_body(request: dict):  # noqa: ANN202
@@ -165,11 +150,11 @@ async def replay_request(
         or next((value for key, value in (request.get("headers") or {}).items() if str(key).casefold() == "content-type"), "")
         or "application/json"
     )
-    headers = _merge_headers_case_insensitively(
-        extract_auth_headers(request.get("headers")),
-        auth_headers,
-        overrides.get("headers"),
-    )
+    headers = normalize_headers({
+        **extract_auth_headers(request.get("headers")),
+        **auth_headers,
+        **(overrides.get("headers") or {}),
+    })
     api_request = {
         "method": str(request.get("method") or "GET").upper(),
         "url": url,
