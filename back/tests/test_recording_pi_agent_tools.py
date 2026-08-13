@@ -831,6 +831,7 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
 
 def test_pi_plan_applies_live_param_source_operation(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-live-op")
+    session.analysis_image_count = 1
     session.spec.steps[0].source_meta = {"request_id": "req-submit"}
     session.spec.request_facts.requests = [RequestFact(
         request_id="req-submit", request_index=1, method="POST", path="/api/submit",

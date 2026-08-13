@@ -68,12 +68,11 @@ def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
     assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
     assert "strong references, not an admission gate" in gateway._analysis_screenshot_guidance(screenshots)
     protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
-    assert "field_semantics" in protocol and "step_id" in protocol and "wire_path" in protocol
-    assert "control_kind" in protocol
-    assert "user_param/user_input" in protocol
-    assert "capability_relations" in protocol
-    assert "from_output" in protocol and "to_input" in protocol
-    assert "non-blocking unresolved item" in protocol
+    assert "set_param_type" in protocol
+    assert "step_id" in protocol and "wire_path" in protocol
+    assert "field_semantics" in protocol and "must not contain" in protocol
+    assert "capability_relations" in protocol and "must not contain" in protocol
+    assert "matching recorded field evidence" in protocol
     assert "Never submit flow_spec" in protocol
 
 
@@ -102,15 +101,11 @@ def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert gateway._analysis_screenshot_guidance([]) == ""
     protocol = gateway._recording_plan_protocol_guidance(has_screenshots=False)
     assert "screenshot-derived" not in protocol
-    for axis in ("path", "name", "default_value", "type", "category", "source", "required"):
+    for axis in ("path", "name", "default", "type", "category", "source", "required"):
         assert axis in protocol
-    assert "every materialized request field" in protocol
-    assert "actively apply" in protocol
-    assert "materialized_step_id" in protocol
-    assert "blocking unresolved" in protocol
-    assert "do not claim the plan is complete" in protocol
-    assert "must not emit or cite screenshot evidence" in protocol
-    assert "wire key or path leaf is not by itself a grounded public name" in protocol
+    assert "typed plan.ops" in protocol
+    assert "Do not cite screenshot" in protocol
+    assert "recorded default stay immutable" in protocol
 
 
 def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
@@ -130,7 +125,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"operation_id": operation_id' in branch
     assert '"status": "rejected"' in branch
     assert "原配置保持不变" in branch
-    assert "orchestrate_flow_capabilities" in branch
+    assert "pi_session.prompt" in branch
     assert "if not before_operation.capabilities:" not in branch
     assert "submission={\"ops\": []}" not in branch
     assert "needs_pi =" not in branch
@@ -286,22 +281,19 @@ def test_analysis_application_report_is_persistable_and_explicit(
         steps=[SimpleNamespace(
             step_id="submit",
             params=[
-                SimpleNamespace(path="reason", label="原因", key="reason", locked=False),
-                SimpleNamespace(path="remark", label="备注", key="remark", locked=False),
+                SimpleNamespace(
+                    path="reason", label="原因", key="reason", locked=False,
+                    evidence=[{"actor": "agent", "kind": "param_type"}],
+                ),
+                SimpleNamespace(
+                    path="remark", label="备注", key="remark", locked=False,
+                    evidence=[{"actor": "agent", "kind": "field_name"}],
+                ),
             ],
         )],
         meta={
             "capability_model": {
-                "semantic_plan": {
-                    "field_semantics": [{
-                        "step_id": "submit", "wire_path": "reason",
-                        "evidence": [{"source": "screenshot"}],
-                    }, {
-                        "step_id": "submit", "wire_path": "remark",
-                        "evidence": [{"source": "screenshot"}],
-                    }],
-                    "unresolved_items": [],
-                },
+                "semantic_plan": {"unresolved_items": []},
                 "semantic_coverage": {"complete": True},
             },
             "capability_generation": {"last_mode": "optimize"},
@@ -1247,12 +1239,6 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
         "capability_model": {
             "semantic_coverage": {"complete": False},
             "semantic_plan": {
-                "field_semantics": [{
-                    "step_id": "submit",
-                    "wire_path": "reason",
-                    "axis_status": {"name": "locked"},
-                    "evidence": [{"source": "screenshot", "axis": "name"}],
-                }],
                 "unresolved_items": [{
                     "kind": "field_axis",
                     "step_id": "submit",
@@ -1290,8 +1276,8 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
     assert report["unmatched_field_count"] == 0
     assert report["unresolved_items"][0]["axis"] == "required"
     assert report["unresolved_field_count"] == len(report["unresolved_items"])
-    assert report["locked_field_count"] == 2
-    assert len(report["locked_items"]) == 2
+    assert report["locked_field_count"] == 1
+    assert len(report["locked_items"]) == 1
     assert report["rejected_field_count"] == 1
     assert len(report["rejected_items"]) == 1
     assert "field" in report["issue_groups"]

@@ -23,6 +23,7 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
     "set_goal",
     "set_request_role",
     "set_param_source",
+    "set_param_type",
     "set_param_required",
     "set_param_enum",
     "rename_field",
@@ -36,6 +37,10 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
 
 _PARAM_SOURCE_KINDS = frozenset({
     "user_input", "constant", "session_header", "page_context", "chained", "computed",
+})
+_PARAM_BUSINESS_TYPES = frozenset({
+    "string", "email", "url", "number", "integer", "boolean", "date",
+    "datetime", "time", "array", "object", "enum", "list-enum",
 })
 _CANONICAL_REQUEST_ROLES = frozenset({
     "business_get", "business_write", "submit_anchor", "read_context", "read_option",
@@ -376,7 +381,7 @@ def _canonical_recorded_agent_op(spec, edit: dict) -> dict:  # noqa: ANN001
     """Persist deferred field operations as a replayable canonical FieldRef."""
     stored = {**deepcopy(edit), "actor": "agent"}
     if str(edit.get("op") or "") not in {
-        "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+        "set_param_source", "set_param_type", "set_param_required", "set_param_enum", "rename_field",
         "attach_enum_options",
     }:
         return stored
@@ -587,6 +592,47 @@ def _require_label_grounding(
         raise ValueError(
             f"label {label!r} contradicts field_evidence for {param.path}: "
             f"observed={sorted(labels)!r}"
+        )
+
+
+def _require_type_grounding(
+    spec, step, param, business_type: str, *, evidence_refs: list[str],
+) -> None:  # noqa: ANN001
+    candidates = [
+        item for item in _field_evidence_candidates(
+            spec, step, param, evidence_refs=evidence_refs,
+        )
+        if _evidence_matches_refs(item, evidence_refs)
+    ]
+    observed: set[str] = set()
+    for item in candidates:
+        kind = str(item.get("control_kind") or item.get("input_type") or "").strip().lower()
+        multiple = bool(item.get("multiple"))
+        has_options = bool(item.get("options"))
+        if kind in {"input", "text", "textarea", "rich_text", "password", "hidden"}:
+            observed.add("string")
+        elif kind in {"email", "url"}:
+            observed.update({"string", kind})
+        elif kind in {"number", "range", "slider"}:
+            observed.update({"number", "integer"})
+        elif kind in {"date", "datetime", "datetime-local", "time"}:
+            observed.add("datetime" if kind == "datetime-local" else kind)
+        elif kind in {"select", "combobox", "cascader", "picker", "radio", "tree_select"}:
+            observed.add("list-enum" if multiple else "enum")
+        elif kind == "checkbox":
+            observed.add("list-enum" if multiple or has_options else "boolean")
+        elif kind == "switch":
+            observed.add("boolean")
+        elif kind in {"upload", "file"}:
+            observed.add("array" if multiple else "string")
+    if not observed:
+        raise ValueError(
+            f"type conclusion for {param.path} has no matching field_evidence control kind"
+        )
+    if business_type not in observed:
+        raise ValueError(
+            f"type={business_type!r} contradicts field_evidence for {param.path}: "
+            f"observed={sorted(observed)!r}"
         )
 
 
@@ -1247,6 +1293,50 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             _append_insight(spec, kind="param_source", text=f"{step_id}:{path} 来源为 {source_kind}：{reason}", refs=[step_id, path])
 
+    elif kind == "set_param_type":
+        step_id = str(edit.get("step_id") or edit.get("request_id") or "")
+        path = str(edit.get("path") or edit.get("wire_path") or "")
+        business_type = str(edit.get("business_type") or "").strip().lower()
+        reason = str(edit.get("reason") or "").strip()
+        evidence_refs = _evidence_refs(edit)
+        if (
+            not step_id or not path or business_type not in _PARAM_BUSINESS_TYPES
+            or not reason or not evidence_refs
+        ):
+            raise ValueError(
+                "set_param_type requires step_id, path, supported business_type, reason and evidence_refs"
+            )
+        _require_grounded_refs(spec, "set_param_type", evidence_refs)
+        step, param = _field_target(spec, step_id, path)
+        if param is not None:
+            if param.locked:
+                raise ValueError(f"set_param_type target is locked: {step_id}:{path}")
+            _require_type_grounding(
+                spec, step, param, business_type, evidence_refs=evidence_refs,
+            )
+            param.type = business_type
+            param.evidence = [
+                *list(param.evidence or []),
+                {
+                    "actor": "agent",
+                    "kind": "param_type",
+                    "business_type": business_type,
+                    "reason": reason,
+                    "evidence_refs": evidence_refs,
+                },
+            ]
+        else:
+            result["status"] = "deferred"
+            result["deferred"] = True
+            result["reason"] = "request is captured but its canonical step is not materialized yet"
+        if param is not None:
+            _append_insight(
+                spec,
+                kind="param_type",
+                text=f"{step_id}:{path} 业务类型为 {business_type}：{reason}",
+                refs=[step_id, path, *evidence_refs],
+            )
+
     elif kind == "set_param_required":
         step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
@@ -1828,7 +1918,7 @@ def _retarget_unique_equivalent_field_operation(spec, operation: dict) -> dict: 
     canonical path, page/frame scope and exact wire path identify one step.
     """
     if str(operation.get("op") or "") not in {
-        "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+        "set_param_source", "set_param_type", "set_param_required", "set_param_enum", "rename_field",
         "attach_enum_options",
     }:
         return operation

@@ -435,6 +435,21 @@ const LiveRecordingOperation = Type.Union([
     evidence_refs: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
   }, { additionalProperties: false }),
   Type.Object({
+    op: Type.Literal("set_param_type"),
+    step_id: Type.Optional(Type.String({ minLength: 1 })),
+    request_id: Type.Optional(Type.String({ minLength: 1 })),
+    wire_path: Type.String({ minLength: 1 }),
+    business_type: Type.Union([
+      Type.Literal("string"), Type.Literal("email"), Type.Literal("url"),
+      Type.Literal("number"), Type.Literal("integer"), Type.Literal("boolean"),
+      Type.Literal("date"), Type.Literal("datetime"), Type.Literal("time"),
+      Type.Literal("array"), Type.Literal("object"), Type.Literal("enum"),
+      Type.Literal("list-enum"),
+    ]),
+    reason: Type.String({ minLength: 1 }),
+    evidence_refs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  }, { additionalProperties: false }),
+  Type.Object({
     op: Type.Literal("set_param_required"),
     step_id: Type.Optional(Type.String({ minLength: 1 })),
     request_id: Type.Optional(Type.String({ minLength: 1 })),

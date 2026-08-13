@@ -1498,7 +1498,7 @@ _STRICT_RECORDING_PLAN_KEYS = {
     "_analysis_screenshot_count",
 }
 _TYPED_RECORDING_OPERATION_NAMES = {
-    "set_goal", "set_request_role", "set_param_source", "set_param_required",
+    "set_goal", "set_request_role", "set_param_source", "set_param_type", "set_param_required",
     "set_param_enum", "rename_field", "propose_dependency", "add_pitfall",
     "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
 }
@@ -1509,6 +1509,10 @@ _TYPED_RECORDING_OPERATION_KEYS = {
         "op", "request_id", "step_id", "wire_path", "source_kind", "origin_request_id",
         "origin_path", "context_key", "strategy", "start_field", "end_field", "output_key",
         "reason", "evidence_refs",
+    },
+    "set_param_type": {
+        "op", "request_id", "step_id", "wire_path", "business_type", "reason",
+        "evidence_refs",
     },
     "set_param_required": {
         "op", "request_id", "step_id", "wire_path", "required", "reason", "evidence_refs",
@@ -1552,7 +1556,7 @@ def _validate_typed_recording_operations(operations: object, *, label: str) -> N
                 f"{label}[{index}] 包含未知字段: " + ", ".join(unknown_keys)
             )
         if kind in {
-            "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+            "set_param_source", "set_param_type", "set_param_required", "set_param_enum", "rename_field",
             "attach_enum_options",
         }:
             if not str(operation.get("request_id") or operation.get("step_id") or ""):
@@ -1687,12 +1691,14 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
     if screenshot_count:
         semantic = raw_plan.get("semantic_plan")
         has_grounded_proposal = bool(
-            isinstance(semantic, dict)
-            and (
-                semantic.get("field_semantics")
-                or semantic.get("capabilities")
-                or semantic.get("capability_relations")
-                or semantic.get("unresolved_items")
+            raw_plan.get("ops")
+            or (
+                isinstance(semantic, dict)
+                and (
+                    semantic.get("business_understanding")
+                    or semantic.get("capabilities")
+                    or semantic.get("unresolved_items")
+                )
             )
         )
         if not has_grounded_proposal:

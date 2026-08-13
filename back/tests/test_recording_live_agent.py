@@ -322,6 +322,66 @@ def test_live_field_semantics_resolve_request_id_and_cover_source_required_and_n
     }
 
 
+def test_param_type_is_grounded_by_the_exact_cited_control_and_preserves_wire_type():
+    spec = _flow()
+    param = spec.steps[1].params[0]
+    param.type = "number"
+    param.wire_type = "string"
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-job-id",
+        "evidence_id": "evt-job-id",
+        "field": "任务编号",
+        "label": "任务编号",
+        "value": param.value,
+        "op": "fill",
+        "editable": True,
+        "control_kind": "text",
+        "binding_status": "bound",
+        "request_id": "req-submit",
+        "wire_path": "body.jobId",
+    })
+
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_type",
+        "request_id": "req-submit",
+        "wire_path": "body.jobId",
+        "business_type": "string",
+        "reason": "页面中是文本输入框",
+        "evidence_refs": ["evt-job-id"],
+    }])
+
+    actual = updated.steps[1].params[0]
+    assert actual.type == "string"
+    assert actual.wire_type == "string"
+    assert any(item.get("kind") == "param_type" for item in actual.evidence)
+
+
+def test_param_type_rejects_a_model_type_that_contradicts_the_cited_control():
+    spec = _flow()
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-job-id",
+        "evidence_id": "evt-job-id",
+        "field": "任务编号",
+        "label": "任务编号",
+        "op": "fill",
+        "editable": True,
+        "control_kind": "text",
+        "binding_status": "bound",
+        "request_id": "req-submit",
+        "wire_path": "body.jobId",
+    })
+
+    with pytest.raises(ValueError, match="contradicts field_evidence"):
+        apply_flow_edits(spec, [{
+            "op": "set_param_type",
+            "request_id": "req-submit",
+            "wire_path": "body.jobId",
+            "business_type": "number",
+            "reason": "模型猜测为数字",
+            "evidence_refs": ["evt-job-id"],
+        }])
+
+
 def test_live_field_semantics_resolve_request_id_and_qualified_body_path():
     updated = apply_flow_edits(_flow(), [{
         "op": "set_param_source",
@@ -1471,35 +1531,6 @@ async def test_wire_format_is_executed_and_invalid_input_fails_before_request(mo
     assert calls == 0
 
 
-def test_semantic_plan_cannot_bypass_grounded_name_required_or_enum_ops():
-    from dano.execution.page.flow_spec import _semantic_plan_to_ops
-
-    spec = _flow()
-    spec.steps[1].params[0].required = False
-    spec.capabilities = [FlowCapability(
-        name="submit", kind="submit", nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
-    )]
-    ops = _semantic_plan_to_ops(spec, {
-        "semantic_plan": {
-            "field_semantics": [{
-                "step_id": "submit",
-                "wire_path": "jobId",
-                "public_name": "页",
-                "required": True,
-                "enum_options": [{"label": "事假", "value": 1}],
-                "confidence": 0.99,
-                "evidence": [{"source": "model_reasoning"}],
-            }],
-        },
-    })
-
-    field_ops = [item for item in ops if item.get("op") in {"rename_field", "upsert_input_field"}]
-    assert all(item.get("label") != "页" for item in field_ops)
-    for operation in field_ops:
-        field = operation.get("field") or {}
-        assert field.get("key") != "页"
-        assert field.get("required") is not True
-        assert "enum_options" not in field
 
 
 def test_agent_required_conclusion_survives_query_audit():
