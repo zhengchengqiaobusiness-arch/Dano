@@ -12462,6 +12462,26 @@ async def orchestrate_flow_capabilities(
         if strict_semantic_submission
         else previous_semantic_plan if previous_strict_plan else {}
     )
+    fact_request_ids = {
+        str(item.get("request_id") or "")
+        for item in _request_fact_items(current)
+        if str(item.get("request_id") or "")
+    }
+    pre_materialization_strict_plan = bool(
+        strict_semantic_submission
+        and not current.steps
+        and fact_request_ids
+        and all(
+            str(item.get("anchor_step_id") or "") in fact_request_ids
+            and all(
+                isinstance(ref, dict)
+                and str(ref.get("step_id") or "") in fact_request_ids
+                for ref in (item.get("request_refs") or [])
+            )
+            for item in (effective_semantic_plan.get("capabilities") or [])
+            if isinstance(item, dict)
+        )
+    )
     complete_semantic_submission = strict_semantic_submission
     preserved_human_relations: list[CapabilityRelation] = []
     if complete_semantic_submission:
@@ -12524,7 +12544,7 @@ async def orchestrate_flow_capabilities(
         item.get("name") and item.get("kind") and item.get("anchor_step_id")
         for item in planned_capability_contracts
     )
-    if strict_anchor_contract:
+    if strict_anchor_contract and not pre_materialization_strict_plan:
         from dano.execution.page.capability_compiler import compile_capabilities
 
         compilation = compile_capabilities(current, effective_semantic_plan)
@@ -12544,7 +12564,20 @@ async def orchestrate_flow_capabilities(
             )
         if compilation.capabilities:
             source = "verified_request_graph"
-    if strict_anchor_contract and not capability_compilation_errors:
+    if pre_materialization_strict_plan:
+        # Live analysis runs before request facts are materialized into stable
+        # FlowStep IDs. Accept and retain a fully fact-addressable strict plan,
+        # but do not manufacture provisional capabilities. Finalize retargets
+        # request IDs to canonical step IDs and invokes the same compiler once.
+        proposal_accepted = True
+        proposal_gate = {
+            "accepted": True,
+            "reasons": [],
+            "producer": "verified_request_graph",
+            "pending": "request_materialization",
+        }
+        source = "strict_plan_awaiting_materialization"
+    elif strict_anchor_contract and not capability_compilation_errors:
         proposal_accepted = True
         proposal_gate = {
             "accepted": True,
@@ -12593,7 +12626,9 @@ async def orchestrate_flow_capabilities(
                     current, relation.model_dump(exclude_none=True),
                 )
     current = _apply_semantic_business_understanding(current, semantic_plan)
-    if strict_anchor_contract and not capability_compilation_errors:
+    if pre_materialization_strict_plan:
+        semantic_plan = copy.deepcopy(effective_semantic_plan)
+    elif strict_anchor_contract and not capability_compilation_errors:
         semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
     else:
         # Never synthesize a strict plan from an old/default capability.  Doing
@@ -12641,7 +12676,11 @@ async def orchestrate_flow_capabilities(
     current.meta = {
         **(current.meta or {}),
         "capability_model": {
-            "status": "ready" if generation_ready else "needs_review",
+            "status": (
+                "awaiting_materialization"
+                if pre_materialization_strict_plan
+                else "ready" if generation_ready else "needs_review"
+            ),
             "source": source,
             "generated_count": len(caps),
             "reason": reason,

@@ -16,6 +16,56 @@ from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 
 
+def _strict_plan(*capabilities: tuple[str, str, str, str, list[tuple[str, str]]]) -> dict:
+    return {
+        "semantic_plan": {
+            "business_understanding": {"summary": "录制事实定义的业务能力"},
+            "capabilities": [
+                {
+                    "name": name,
+                    "title": title,
+                    "kind": kind,
+                    "anchor_step_id": anchor,
+                    "request_refs": [
+                        {"step_id": step_id, "usage": usage}
+                        for step_id, usage in refs
+                    ],
+                }
+                for name, title, kind, anchor, refs in capabilities
+            ],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+
+def _ground_unknown_test_sources(spec, *, derived: dict[tuple[str, str], dict] | None = None) -> None:
+    """Supply the field-source decisions that strict Pi plans require.
+
+    These recorder tests exercise capability boundaries rather than source
+    inference.  Production obtains the same decisions from grounded live ops;
+    an old empty-plan test used to hide this required precondition behind the
+    retired heuristic capability builder.
+    """
+    derived = derived or {}
+    for step in spec.steps:
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        for param in step.params:
+            if param.source_kind != "unknown":
+                continue
+            source = derived.get((request_id, param.path))
+            if source:
+                param.category = "runtime_var"
+                param.source_kind = "previous_response"
+                param.source = dict(source)
+                param.exposed_to_user = False
+            else:
+                param.category = "user_param"
+                param.source_kind = "user_input"
+                param.source = {"kind": "recorded_user_input", "path": param.path}
+                param.exposed_to_user = True
+
+
 def test_pause_recording_keeps_session_but_stops_fact_collection_until_reset() -> None:
     sess = RecordSession()
     event = json.dumps({"op": "click", "locator": "button#submit"})
@@ -461,7 +511,16 @@ def test_actual_recording_keeps_same_rpc_requests_from_distinct_actions() -> Non
         "action_save", "action_submit",
     }
 
-    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    planned = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_plan(*[
+            (
+                f"rpc_action_{index}", f"RPC 业务动作 {index}", "submit", step.step_id,
+                [(step.step_id, "execute")],
+            )
+            for index, step in enumerate(spec.steps, start=1)
+        ]),
+    ))
     assert {frozenset(cap.step_ids) for cap in planned.capabilities} == {
         frozenset({spec.steps[0].step_id}), frozenset({spec.steps[1].step_id}),
     }
@@ -610,19 +669,47 @@ def test_real_business_writes_are_materialized_before_pi_boundary_analysis() -> 
     step_by_request = {
         step.source_meta.get("request_id"): step for step in spec.steps
     }
+    _ground_unknown_test_sources(spec, derived={
+        ("req_submit", "definitionId"): {
+            "step_id": step_by_request["req_definition"].step_id,
+            "response_path": "data.id",
+        },
+    })
     assert {param.path for param in step_by_request["req_withdraw"].params} == {"id", "reason"}
     assert {param.path for param in step_by_request["req_delete"].params} == {"query.id"}
 
-    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    planned = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_plan(
+            (
+                "query_hotel", "查询酒店申请", "query_status", step_by_request["req_query"].step_id,
+                [(step_by_request["req_query"].step_id, "execute")],
+            ),
+            (
+                "submit_hotel", "提交酒店申请", "submit", step_by_request["req_submit"].step_id,
+                [
+                    (step_by_request["req_definition"].step_id, "preflight"),
+                    (step_by_request["req_approval"].step_id, "preflight"),
+                    (step_by_request["req_submit"].step_id, "execute"),
+                ],
+            ),
+            (
+                "withdraw_hotel", "撤回酒店申请", "withdraw", step_by_request["req_withdraw"].step_id,
+                [(step_by_request["req_withdraw"].step_id, "execute")],
+            ),
+            (
+                "delete_hotel", "删除酒店申请", "delete", step_by_request["req_delete"].step_id,
+                [(step_by_request["req_delete"].step_id, "execute")],
+            ),
+        ),
+    ))
     assert len(planned.capabilities) == 4
     capability_steps = [set(capability.step_ids) for capability in planned.capabilities]
     assert {frozenset(step_ids) for step_ids in capability_steps} == {
         frozenset({step_by_request["req_query"].step_id}),
-        frozenset({
-            step_by_request["req_definition"].step_id,
-            step_by_request["req_approval"].step_id,
-            step_by_request["req_submit"].step_id,
-        }),
+        # Model-supplied preflight membership is only a hypothesis.  With no
+        # verified dependency edge, the compiler keeps the write anchor alone.
+        frozenset({step_by_request["req_submit"].step_id}),
         frozenset({step_by_request["req_withdraw"].step_id}),
         frozenset({step_by_request["req_delete"].step_id}),
     }
@@ -755,9 +842,27 @@ def test_seven_observed_operations_in_one_business_domain_stay_independent(
             request["post_data"] = body
         requests.append(request)
 
+    spec = to_flow_spec(captured_requests=requests)
+    step_by_request = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in spec.steps
+    }
+    _ground_unknown_test_sources(spec)
     spec = asyncio.run(orchestrate_flow_capabilities(
-        to_flow_spec(captured_requests=requests),
-        submission={"ops": []},
+        spec,
+        submission=_strict_plan(*[
+            (
+                f"{name}_records", label, (
+                    "query_status" if name == "query"
+                    else "inspect" if name == "detail"
+                    else name if name in {"create", "approve", "reject", "delete"}
+                    else "update"
+                ),
+                step_by_request[f"req_{name}"].step_id,
+                [(step_by_request[f"req_{name}"].step_id, "execute")],
+            )
+            for name, _method, _url, _body, label, _role in operations
+        ]),
     ))
 
     assert len(spec.steps) == 7
@@ -874,9 +979,27 @@ def test_auth_refresh_is_excluded_and_repeated_write_observations_share_one_capa
     assert "req_auth_1" not in spec.request_facts.analysis
     assert "req_auth_2" not in spec.request_facts.analysis
 
+    executable_submit_step_id = next(
+        step.step_id
+        for step in spec.steps
+        if step.method == "POST"
+        and not (step.source_meta or {}).get("duplicate_observation_of")
+    )
+    delete_step_id = next(
+        step.step_id for step in spec.steps if step.method == "DELETE"
+    )
     planned = asyncio.run(orchestrate_flow_capabilities(
         spec,
-        submission={"ops": []},
+        submission=_strict_plan(
+            (
+                "submit_hotel", "提交酒店申请", "submit", executable_submit_step_id,
+                [(executable_submit_step_id, "execute")],
+            ),
+            (
+                "delete_hotel", "删除酒店申请", "delete", delete_step_id,
+                [(delete_step_id, "execute")],
+            ),
+        ),
     ))
     executable_submit_step_id = next(
         step.step_id

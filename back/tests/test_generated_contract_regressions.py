@@ -42,6 +42,29 @@ def _get(index: int, url: str, response_json: dict) -> dict:
     }
 
 
+def _strict_plan(*capabilities: tuple[str, str, str, str, list[tuple[str, str]]]) -> dict:
+    return {
+        "semantic_plan": {
+            "business_understanding": {"summary": "录制事实定义的业务能力"},
+            "capabilities": [
+                {
+                    "name": name,
+                    "title": title,
+                    "kind": kind,
+                    "anchor_step_id": anchor,
+                    "request_refs": [
+                        {"step_id": step_id, "usage": usage}
+                        for step_id, usage in refs
+                    ],
+                }
+                for name, title, kind, anchor, refs in capabilities
+            ],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+
 def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_records():
     requests = [
         _get(
@@ -73,7 +96,14 @@ def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_
         samples={"酒店名称": "1"},
         field_evidence=evidence,
     )
-    spec = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    query_step_id = spec.steps[0].step_id
+    spec = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_plan((
+            "query_hotel_apply", "查询酒店申请记录", "query_status", query_step_id,
+            [(query_step_id, "execute")],
+        )),
+    ))
     capability = next(cap for cap in spec.capabilities if cap.kind == "query_status")
     properties = capability.input_schema["properties"]
 
@@ -81,9 +111,12 @@ def test_hotel_query_contract_uses_optional_filters_overridable_paging_and_rich_
     assert properties["pageNo"]["default"] == 1
     assert properties["pageNo"]["x-dano-apply-default"] is True
     assert properties["pageSize"]["default"] == 10
-    assert properties["酒店名称"]["type"] == "string"
-    assert properties["酒店名称"]["x-dano-wire-type"] == "string"
-    assert "default" not in properties["酒店名称"]
+    # Public JSON uses the executable wire key.  The localized business label
+    # is presentation metadata and must never replace the request field name.
+    assert properties["hotelName"]["type"] == "string"
+    assert properties["hotelName"]["x-dano-wire-type"] == "string"
+    assert properties["hotelName"]["label"] == "酒店名称"
+    assert "default" not in properties["hotelName"]
 
     item_properties = capability.output_schema["properties"]["records"]["items"]["properties"]
     assert item_properties["id"]["type"] == "string"
@@ -323,11 +356,18 @@ def test_withdraw_id_remains_explicit_user_input_and_is_never_silently_defaulted
         response_json={"code": 0, "message": "success"},
     )
 
-    spec = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[withdraw]), submission={"ops": []}))
+    spec = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[withdraw]),
+        submission=_strict_plan((
+            "withdraw_hotel_apply", "撤回酒店申请", "withdraw", "withdraw",
+            [("withdraw", "execute")],
+        )),
+    ))
     capability = next(cap for cap in spec.capabilities if cap.kind == "withdraw")
     properties = capability.input_schema["properties"]
 
-    assert set(capability.input_schema["required"]) == {"id", "撤回原因"}
+    assert set(capability.input_schema["required"]) == {"id", "reason"}
+    assert properties["reason"]["label"] == "撤回原因"
     assert properties["id"]["default"] == "process-1"
     assert "x-dano-apply-default" not in properties["id"]
     assert spec.capability_relations == []
@@ -833,7 +873,14 @@ def test_export_preserves_published_contract_without_recompiling_release_snapsho
             "control_kind": "text",
         }],
     )
-    spec = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    query_step_id = spec.steps[0].step_id
+    spec = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_plan((
+            "query_hotel_apply", "查询酒店申请记录", "query_status", query_step_id,
+            [(query_step_id, "execute")],
+        )),
+    ))
     query = next(capability for capability in spec.capabilities if capability.kind == "query_status")
     query.name = "query_hotel_apply"
     # Reproduce the legacy persisted bug: a populated URL was mistaken for

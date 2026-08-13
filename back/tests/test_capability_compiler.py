@@ -387,6 +387,34 @@ def test_compiler_separates_recording_business_name_from_ability_call_key() -> N
     assert public.display_name == "开始时间"
 
 
+def test_compiler_preserves_legacy_key_as_display_name_when_label_is_empty() -> None:
+    spec = _verified_graph()
+    submit = next(step for step in spec.steps if step.step_id == "submit")
+    submit.params.append(ParamField(
+        path="body.reason",
+        key="申请原因",
+        label="",
+        value="出差",
+        type="string",
+        wire_type="string",
+        category="user_param",
+        source_kind="user_input",
+        exposed_to_user=True,
+        required=True,
+    ))
+
+    compiled = compile_capabilities(spec, _semantic_plan()).spec
+    compiled_submit = next(step for step in compiled.steps if step.step_id == "submit")
+    compiled_param = next(param for param in compiled_submit.params if param.path == "body.reason")
+    capability = next(cap for cap in compiled.capabilities if cap.name == "submit_leave")
+    public = next(field for field in capability.inputs if field.path == "body.reason")
+
+    assert compiled_param.key == "reason"
+    assert compiled_param.label == "申请原因"
+    assert public.key == "reason"
+    assert public.display_name == "申请原因"
+
+
 def test_successful_strict_compilation_refreshes_stale_generation_state() -> None:
     spec = _verified_graph()
     spec.meta["capability_generation"] = {

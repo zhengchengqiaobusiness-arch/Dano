@@ -260,6 +260,11 @@ def _normalize_compiled_call_keys(
             if call_key != param.key and call_key in existing:
                 continue
             old_key = str(param.key or "")
+            # Older captures stored the page-facing business name in ``key``
+            # and left ``label`` empty.  Normalizing the callable key must not
+            # erase that independent name axis.
+            if old_key and old_key != call_key and not str(param.label or "").strip():
+                param.label = old_key
             existing.discard(str(param.key or ""))
             existing.add(call_key)
             param.key = call_key

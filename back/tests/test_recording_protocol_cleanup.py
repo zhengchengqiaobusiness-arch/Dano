@@ -65,7 +65,9 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
 def test_frontend_relays_backward_delete_without_relying_only_on_keydown() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    assert 'inputType === "deleteContentBackward"' in source
+    assert 'inputEvent.inputType !== "deleteContentBackward"' in source
+    assert 'kind: "key", key: "Backspace"' in source
+    assert "lastBackspaceKeydownAtRef" in source
     assert "onBeforeInput={onKbBeforeInput}" in source
 
 
