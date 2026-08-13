@@ -8,7 +8,7 @@ export default function Recording() {
   const storageState = "";
 
   return (
-    <div style={{ maxWidth: 1480, margin: "0 auto" }}>
+    <div style={{ width: "100%", height: "100%" }}>
       <PageRecorder tenant={tenant} subsystem={subsystem} baseUrl={baseUrl} storageState={storageState} />
     </div>
   );

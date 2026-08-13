@@ -2132,7 +2132,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setReconnectedSessionNeedsCapture(false);
           message.success("录制连接及编辑内容已自动恢复");
         }
-        if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
+        if (m.operation === "finalize") {
           finalizeOperationRef.current = null;
           setAgentStatus({ state: "ready", text: "请求抓取完成，能力草稿已生成" });
           setLastAnalysisEvidence(null);
@@ -4921,7 +4921,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   return (
     <ConfigProvider getPopupContainer={popupContainer}>
-    <Card size="small" title="网页录制">
+    <Card size="small">
       <Steps
         current={workspaceStage}
         responsive={false}
@@ -4973,7 +4973,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             marginBottom: 8,
             boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
           }}>
-            <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", gap: 12, overflowX: "auto", paddingBottom: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", gap: 8, overflow: "hidden" }}>
               <Tag color={connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
                 {connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
               </Tag>
@@ -4981,11 +4981,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Button size="small" onClick={stopAll} disabled={phase === "publishing" || recordingStopped}>结束录制</Button>
               <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
                 <Tooltip title="每个录制会话自动生成唯一 UUID 动作名，避免与历史资产重复">
-                  <Input value={action} readOnly style={{ width: 340, fontFamily: "monospace" }} />
+                  <Input value={action} readOnly style={{ width: 280, fontFamily: "monospace" }} />
                 </Tooltip>
               </Form.Item>
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
+                <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 150 }} />
               </Form.Item>
               <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
                 {flowSpec ? "重新抓取并分析请求" : "停止并分析请求"}
@@ -4996,12 +4996,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </div>
           </div>
           <div>
-          <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "auto", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
+          <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
             <canvas ref={frameCanvasRef} draggable={false} role="img" aria-label="录制画面"
               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
               onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
               style={{
-                width: frameMeta.frameWidth || "auto", maxWidth: "100%", height: "auto",
+                width: "auto", maxWidth: "100%", height: "auto", maxHeight: "calc(100vh - 230px)",
                 display: hasFrame ? "block" : "none", margin: "0 auto", cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
                 touchAction: "none", userSelect: "none",
               }} />

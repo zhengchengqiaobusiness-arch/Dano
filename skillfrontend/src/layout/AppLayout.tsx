@@ -33,17 +33,19 @@ export default function AppLayout() {
           ]}
         />
       </Sider>
-      <Layout>
-        <Header style={{ background: "#fff", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px" }}>
-          <Typography.Text type="secondary">阶段一 接入生成 · 阶段三 运维(P0:目录 + 测试调用)</Typography.Text>
-          <Space>
-            <Tag color="blue">租户 {tenant}</Tag>
-            <Button size="small" icon={<LogoutOutlined />} onClick={() => { clearTenant(); nav("/tenant"); }}>
-              切换租户
-            </Button>
-          </Space>
-        </Header>
-        <Content style={{ padding: 20 }}>
+      <Layout style={{ minWidth: 0 }}>
+        {selected === "skills" && (
+          <Header style={{ background: "#fff", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px" }}>
+            <Typography.Text type="secondary">阶段一 接入生成 · 阶段三 运维(P0:目录 + 测试调用)</Typography.Text>
+            <Space style={{ marginLeft: "auto" }}>
+              <Tag color="blue">租户 {tenant}</Tag>
+              <Button size="small" icon={<LogoutOutlined />} onClick={() => { clearTenant(); nav("/tenant"); }}>
+                切换租户
+              </Button>
+            </Space>
+          </Header>
+        )}
+        <Content style={selected === "recording" ? { padding: 16, height: "100vh", overflow: "auto" } : { padding: 20 }}>
           <Outlet />
         </Content>
       </Layout>
