@@ -45,6 +45,27 @@ def test_publish_failure_report_exposes_machine_gate_reasons() -> None:
     )
 
 
+def test_partial_publish_report_names_released_and_draft_only_capabilities() -> None:
+    decision = ReleaseDecision(
+        status="partial",
+        callable_spec=FlowSpec(capabilities=[FlowCapability(name="query_items")]),
+        capabilities=(
+            SimpleNamespace(name="query_items", passed=True),
+            SimpleNamespace(name="submit_item", passed=False),
+        ),
+        blocking_reasons=("submit_item: 缺少写后回读验证",),
+    )
+
+    report = gateway._recording_partial_release_report(decision)
+
+    assert report == {
+        "status": "partial",
+        "released_capabilities": ["query_items"],
+        "draft_only_capabilities": ["submit_item"],
+        "blocking_reasons": ["submit_item: 缺少写后回读验证"],
+    }
+
+
 def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
     raw = b"\x89PNG\r\n\x1a\n" + b"screenshot-content"
     screenshots = gateway._normalize_analysis_screenshots([{

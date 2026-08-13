@@ -601,6 +601,23 @@ def _recording_release_failure_report(release_decision) -> dict[str, object]:  #
     }
 
 
+def _recording_partial_release_report(release_decision) -> dict[str, object]:  # noqa: ANN001
+    """Describe the exact callable subset frozen by a partial release."""
+    return {
+        "status": str(release_decision.status or ""),
+        "released_capabilities": [
+            str(item.name) for item in release_decision.capabilities if item.passed
+        ],
+        "draft_only_capabilities": [
+            str(item.name) for item in release_decision.capabilities if not item.passed
+        ],
+        "blocking_reasons": [
+            str(reason) for reason in (release_decision.blocking_reasons or ())
+            if str(reason).strip()
+        ],
+    }
+
+
 def _checkpoint_accepted_recording_pi_submission(
     resume_state: dict,
     flow_spec,
@@ -2994,12 +3011,15 @@ async def record_ws(ws: WebSocket) -> None:
                             "report": {**rep, "check_report": check_report,
                                        "release": release_candidate,
                                        "recording_mode": recording_mode,
-                                       "verification": verification_result},
+                                        "verification": verification_result},
                             **_recording_flow_projection(pending_flow_spec),
                             "parsed_steps": len(last_params), "via": "flow_spec",
                             "recording_mode": recording_mode,
                             "workflow_steps": len(apir.get("steps") or []) or None,
                             "pi_session": pi_session.descriptor}
+                response["report"]["capability_release"] = _recording_partial_release_report(
+                    release_decision
+                )
                 _remember_costly(msg, response)
                 await sender.send_json(response)
                 log.info(

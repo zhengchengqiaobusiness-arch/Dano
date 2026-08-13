@@ -282,6 +282,12 @@ interface RecResult {
   asset_version?: number; lifecycle_pending?: boolean; lifecycle_message?: string; lifecycle_error?: string;
   api?: { method?: string; path?: string; params?: string[] };
   check_report?: FlowCheckReport;
+  capability_release?: {
+    status?: "ready" | "partial" | string;
+    released_capabilities?: string[];
+    draft_only_capabilities?: string[];
+    blocking_reasons?: string[];
+  };
 }
 type RecorderConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -3697,6 +3703,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       (group) => group.items.some((item) => item.auto_fixable === true),
     );
     const publishFailed = result?.ok === false;
+    const partialRelease = result?.ok === true && result.capability_release?.status === "partial";
     const publishPending = phase === "publishing" && !!publishOperationRef.current;
     const validationRefreshing = !checkReport;
     const analysisPending = orchestrateBusy || autoFixBusy;
@@ -3706,7 +3713,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
           <Alert
             key="flow-status-panel"
-            type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
+            type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : partialRelease || (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
             showIcon
             style={{ marginBottom: 12, minHeight: 96, height: 150, overflow: "hidden" }}
             message={publishPending
@@ -3716,7 +3723,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               : publishFailed
               ? "发布未完成"
               : result?.ok
-              ? "发布完成"
+              ? (partialRelease ? "部分能力已发布" : "发布完成")
               : analysisRejected
               ? "分析提出的修改未通过准入"
               : analysisNeedsReview
@@ -3741,8 +3748,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {result && !publishPending && (
                   <Space direction="vertical" size={2}>
                     <Typography.Text type={result.ok ? "success" : "danger"}>
-                      {result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}
+                      {result.ok
+                        ? partialRelease
+                          ? `已发布 ${result.capability_release?.released_capabilities?.length || 0} 个能力，${result.capability_release?.draft_only_capabilities?.length || 0} 个仍在草稿`
+                          : `已发布：${result.action}`
+                        : `未发布：${result.reason || "需要调整"}`}
                     </Typography.Text>
+                    {partialRelease && (
+                      <Space direction="vertical" size={1}>
+                        <Typography.Text style={{ fontSize: 12 }}>
+                          已发布：{(result.capability_release?.released_capabilities || []).join("、") || "无"}
+                        </Typography.Text>
+                        <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                          待验证：{(result.capability_release?.draft_only_capabilities || []).join("、") || "无"}
+                        </Typography.Text>
+                        {(result.capability_release?.blocking_reasons || []).slice(0, 3).map((reason, index) => (
+                          <Typography.Text key={index} type="warning" style={{ fontSize: 12 }}>{reason}</Typography.Text>
+                        ))}
+                      </Space>
+                    )}
                     {result.ok && result.lifecycle_pending && (
                       <Typography.Text type="warning" style={{ fontSize: 12 }}>
                         {result.lifecycle_message || "资产已发布，生命周期登记待补偿"}
@@ -3811,8 +3835,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Switch size="small" checked={maintenanceMode} onChange={setMaintenanceMode} /></Space>
                 {maintenanceMode && <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>}
                 <Button type="primary" loading={phase === "publishing"}
-                  disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || result?.ok === true}
-                  onClick={publishRequest}>{result?.ok ? "已发布" : "重新验证并发布"}</Button>
+                  disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (result?.ok === true && !partialRelease)}
+                  onClick={publishRequest}>{result?.ok && !partialRelease ? "已发布" : "重新验证并发布"}</Button>
               </Space>
             ),
           }}
