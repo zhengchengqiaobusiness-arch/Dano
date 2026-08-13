@@ -1383,11 +1383,19 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 recorded_container = containers[0] if len(containers) == 1 else None
                 if not isinstance(recorded_container, dict):
                     raise ValueError("response_key_map target_container_path is absent from the recorded body")
-                if list(map(str, recorded_container.keys())) != source_keys:
+                recorded_keys = list(map(str, recorded_container.keys()))
+                matched_positions = [
+                    source_keys.index(key) for key in recorded_keys if key in source_keys
+                ]
+                if (
+                    len(matched_positions) != len(recorded_keys)
+                    or matched_positions != sorted(matched_positions)
+                ):
                     raise ValueError(
                         "response_key_map contradicts recorded request keys: "
-                        f"response={source_keys!r}, request={list(recorded_container)!r}"
+                        f"response={source_keys!r}, request={recorded_keys!r}"
                     )
+                matched_labels = [source_labels[index] for index in matched_positions]
                 recorded_values = list(recorded_container.values())
                 if all(isinstance(value, list) and len(value) == 1 for value in recorded_values):
                     value_shape = "single_item_list"
@@ -1401,8 +1409,15 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 option_source = value_binding.get("option_source")
                 if option_source is not None and not isinstance(option_source, dict):
                     raise ValueError("response_key_map value_binding.option_source must be an object")
-                value_binding = {**value_binding, "value_shape": value_shape}
-                public_sample = dict(zip(source_labels, public_values, strict=True))
+                value_binding = {
+                    **value_binding,
+                    "value_shape": value_shape,
+                    "required_labels": matched_labels,
+                    "ignored_labels": [
+                        label for label in source_labels if label not in set(matched_labels)
+                    ],
+                }
+                public_sample = dict(zip(matched_labels, public_values, strict=True))
                 container_prefix = target_path.removeprefix("body.") + "."
                 dynamic_leaf_paths: set[str] = set()
                 for item_param in target_step.params:

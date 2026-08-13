@@ -791,14 +791,25 @@ def _response_key_map(link, source, body, values):
     labels = [label for _key, label in rows]
     if len(set(keys)) != len(keys) or len(set(labels)) != len(labels):
         raise RuntimeError(f"dynamic structure node id/name is duplicated: {link.get('link_id')}")
-    missing = [label for label in labels if label not in caller_map]
-    extra = [label for label in caller_map if label not in set(labels)]
-    if missing or extra:
-        raise RuntimeError(f"dynamic structure labels changed: missing={missing!r}, extra={extra!r}")
+    required_labels = [str(label) for label in (binding.get("required_labels") or labels)]
+    ignored_labels = {str(label) for label in (binding.get("ignored_labels") or [])}
+    row_by_label = {label: key for key, label in rows}
+    missing_source = [label for label in required_labels if label not in row_by_label]
+    unexpected_source = [
+        label for label in labels if label not in set(required_labels) | ignored_labels
+    ]
+    missing = [label for label in required_labels if label not in caller_map]
+    extra = [label for label in caller_map if label not in set(required_labels)]
+    if missing_source or unexpected_source or missing or extra:
+        raise RuntimeError(
+            f"dynamic structure labels changed: source_missing={missing_source!r}, "
+            f"source_unexpected={unexpected_source!r}, missing={missing!r}, extra={extra!r}"
+        )
     wrap = str(binding.get("value_shape") or "direct") == "single_item_list"
     rebuilt = {
         key: (value if isinstance(value, list) else [value]) if wrap else value
-        for key, label in rows
+        for label in required_labels
+        for key in [row_by_label[label]]
         for value in [caller_map[label]]
     }
     return deep_set(body or {}, link.get("target_container_path") or link.get("target_path"), rebuilt)

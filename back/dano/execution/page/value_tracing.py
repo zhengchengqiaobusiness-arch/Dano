@@ -221,7 +221,15 @@ def discover_response_key_maps(all_requests: list[dict]) -> list[dict]:
                     target_keys = [str(key) for key in container]
                     for key_field in key_fields:
                         source_keys = [str(row[key_field]) for row in rows]
-                        if len(set(source_keys)) != len(source_keys) or source_keys != target_keys:
+                        if len(set(source_keys)) != len(source_keys):
+                            continue
+                        matched_positions = [
+                            source_keys.index(key) for key in target_keys if key in source_keys
+                        ]
+                        if (
+                            len(matched_positions) != len(target_keys)
+                            or matched_positions != sorted(matched_positions)
+                        ):
                             continue
                         label_field = next((
                             field for field in label_fields

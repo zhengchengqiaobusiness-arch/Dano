@@ -412,7 +412,7 @@ async def verify_dependency(
                     stored_body,
                     container_path.removeprefix("request.").removeprefix("body."),
                 )
-                if not isinstance(recorded_container, dict) or len(recorded_container) != len(keys):
+                if not isinstance(recorded_container, dict) or not recorded_container:
                     raise ValueError("dynamic key count does not match target value slot count")
                 slots = list(recorded_container.values())
                 if link_kind == "response_key_map":
@@ -435,22 +435,43 @@ async def verify_dependency(
                     )
                     if binding.get("kind") != "caller_map_by_label" or not binding.get("input_field"):
                         raise ValueError("structure value binding is not caller_map_by_label")
+                    configured_labels = binding.get("required_labels") or []
+                    if configured_labels:
+                        required_labels = [str(label) for label in configured_labels]
+                        ignored_labels = {
+                            str(label) for label in (binding.get("ignored_labels") or [])
+                        }
+                        unexpected_labels = [
+                            str(label) for label in labels
+                            if str(label) not in set(required_labels) | ignored_labels
+                        ]
+                        if unexpected_labels:
+                            raise ValueError("unexpected dynamic source labels were introduced")
+                    else:
+                        if len(labels) != len(slots):
+                            raise ValueError("dynamic key count does not match target value slot count")
+                        required_labels = [str(label) for label in labels]
+                    label_positions = {
+                        str(label): index for index, label in enumerate(labels)
+                    }
+                    if any(label not in label_positions for label in required_labels):
+                        raise ValueError("required dynamic source labels are missing")
                     shape = str(binding.get("value_shape") or "direct")
                     public_values = [
                         value[0] if shape == "single_item_list" and isinstance(value, list) and len(value) == 1 else value
                         for value in slots
                     ]
                     caller_map = {
-                        str(label): deepcopy(public_values[index])
-                        for index, label in enumerate(labels)
+                        label: deepcopy(public_values[index])
+                        for index, label in enumerate(required_labels)
                     }
                     injected_value = {
-                        str(key): (
-                            [deepcopy(caller_map[str(labels[index])])]
+                        str(keys[label_positions[label]]): (
+                            [deepcopy(caller_map[label])]
                             if shape == "single_item_list"
-                            else deepcopy(caller_map[str(labels[index])])
+                            else deepcopy(caller_map[label])
                         )
-                        for index, key in enumerate(keys)
+                        for label in required_labels
                     }
                 else:
                     labels = []

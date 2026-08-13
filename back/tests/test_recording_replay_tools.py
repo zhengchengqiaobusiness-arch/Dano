@@ -233,6 +233,35 @@ def test_discover_response_key_maps_requires_exact_unique_response_keys():
     assert discover_response_key_maps(changed) == []
 
 
+def test_discover_response_key_maps_accepts_the_ordered_used_subset_of_response_rows():
+    requests = [
+        {
+            "request_id": "req-detail",
+            "sequence": 1,
+            "response_json": {"data": {"activityNodes": [
+                {"id": "Event_start", "name": "发起人"},
+                {"id": "Activity_leader", "name": "领导审批"},
+                {"id": "Activity_hr", "name": "人力审批"},
+                {"id": "Event_end", "name": "结束"},
+            ]}},
+        },
+        {
+            "request_id": "req-submit",
+            "sequence": 2,
+            "post_data": {"assignees": {
+                "Activity_leader": [501],
+                "Activity_hr": [502],
+            }},
+        },
+    ]
+
+    [candidate] = discover_response_key_maps(requests)
+
+    assert candidate["source_request_id"] == "req-detail"
+    assert candidate["target_container_path"] == "body.assignees"
+    assert candidate["recorded_key_count"] == 2
+
+
 def test_verification_ids_are_executor_generated_and_defensively_copied():
     verification_id = record_verification(
         kind="enum_snapshot",

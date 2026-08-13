@@ -1080,8 +1080,10 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     spec = _flow()
     spec.steps[0].response_json = {
         "data": {"activityNodes": [
+            {"id": "Event_start", "name": "发起人"},
             {"id": "Activity_recorded_leader", "name": "领导审批"},
             {"id": "Activity_recorded_hr", "name": "HR审批"},
+            {"id": "Event_end", "name": "结束"},
         ]},
     }
     spec.steps[1].body_source = json.dumps({
@@ -1127,6 +1129,8 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     assert link.kind == "response_key_map"
     assert link.source_collection_path == "data.activityNodes"
     assert link.target_container_path == "startUserSelectAssignees"
+    assert link.value_binding["required_labels"] == ["领导审批", "HR审批"]
+    assert link.value_binding["ignored_labels"] == ["发起人", "结束"]
     public = next(param for param in updated.steps[1].params if param.key == "approvers")
     assert public.value == {"领导审批": 160, "HR审批": 159}
     assert public.type == "object"
@@ -1147,8 +1151,10 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     assert api_request is not None
     api_request["steps"][0]["response_json"] = {
         "data": {"activityNodes": [
+            {"id": "Event_runtime_start", "name": "发起人"},
             {"id": "Activity_runtime_leader", "name": "领导审批"},
             {"id": "Activity_runtime_hr", "name": "HR审批"},
+            {"id": "Event_runtime_end", "name": "结束"},
         ]},
     }
     out = await execute_api_workflow(api_request, {
