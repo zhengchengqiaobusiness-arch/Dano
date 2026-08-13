@@ -8218,6 +8218,98 @@ def test_saved_page_enum_targets_duplicate_request_steps_by_step_identity():
         assert step.params[0].enum_value_map == {"病假": "1", "事假": "2", "婚假": "3"}
 
 
+def test_sync_collapses_duplicate_materialized_request_identity_without_losing_richer_contract():
+    rich = FlowStep(
+        step_id="query-rich", method="GET", path="/api/leave/page?processStatus=1",
+        source_meta={"request_id": "req_49", "request_index": 49, "role": "business_get"},
+        params=[ParamField(
+            path="query.processStatus", key="审批结果", label="审批结果", value="1",
+            type="enum", wire_type="number", source_kind="api_option",
+            enum_options=[{"label": "审批中", "value": 1}, {"label": "审批通过", "value": 2}],
+            enum_value_map={"审批中": 1, "审批通过": 2},
+            evidence=[{"source": "recorded_dictionary"}],
+        )],
+    )
+    stale = FlowStep(
+        step_id="query-stale", method="GET", path="/api/leave/page?processStatus=1",
+        source_meta={"request_id": "req_49", "request_index": 49, "role": "business_get"},
+        params=[ParamField(
+            path="query.processStatus", key="审批结果", label="审批结果", value="1",
+            type="enum", wire_type="number", source_kind="form_option",
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="duplicate-materialized-request",
+        steps=[rich, stale],
+        request_facts=RequestFacts.model_validate({
+            "requests": [{"request_id": "req_49", "request_index": 49, "method": "GET", "path": "/api/leave/page"}],
+            "usage": {"req_49": {"request_id": "req_49", "materialized_step_id": "query-stale"}},
+        }),
+        capabilities=[
+            FlowCapability(
+                capability_id="query-a", name="query_leave_a", title="查询请假记录", kind="query",
+                nodes=_call_nodes(["query-rich"]), updated_by="planner",
+            ),
+            FlowCapability(
+                capability_id="query-b", name="query_leave_b", title="查询请假记录", kind="query",
+                nodes=_call_nodes(["query-stale"]), updated_by="planner",
+            ),
+        ],
+    )
+
+    synced = sync_flow_spec_models(spec)
+
+    assert [step.step_id for step in synced.steps] == ["query-rich"]
+    assert len(synced.capabilities) == 1
+    assert synced.capabilities[0].step_ids == ["query-rich"]
+    assert synced.request_facts.usage["req_49"].materialized_step_id == "query-rich"
+    status = synced.steps[0].params[0]
+    assert status.source_kind == "api_option"
+    assert status.enum_value_map == {"审批中": 1, "审批通过": 2}
+
+
+def test_query_fact_upgrade_cannot_create_a_second_step_for_the_same_request():
+    initial = FlowStep(
+        step_id="initial-list", method="GET", path="/api/leave/page?pageNo=1&pageSize=10",
+        source_meta={"request_id": "req_10", "request_index": 10, "role": "read_context"},
+        params=[
+            ParamField(path="query.pageNo", key="pageNo", value="1", type="number"),
+            ParamField(path="query.pageSize", key="pageSize", value="10", type="number"),
+        ],
+    )
+    searched = FlowStep(
+        step_id="searched-list", method="GET",
+        path="/api/leave/page?pageNo=1&pageSize=10&processStatus=1",
+        source_meta={"request_id": "req_49", "request_index": 49, "role": "business_get"},
+        params=[
+            ParamField(path="query.pageNo", key="pageNo", value="1", type="number"),
+            ParamField(path="query.pageSize", key="pageSize", value="10", type="number"),
+            ParamField(path="query.processStatus", key="审批结果", value="1", type="enum"),
+        ],
+    )
+    spec = FlowSpec(
+        flow_id="query-upgrade-identity",
+        steps=[initial, searched],
+        request_facts=RequestFacts.model_validate({
+            "requests": [
+                {"request_id": "req_10", "request_index": 10, "method": "GET", "path": initial.path,
+                 "query": {"pageNo": ["1"], "pageSize": ["10"]}},
+                {"request_id": "req_49", "request_index": 49, "method": "GET", "path": searched.path,
+                 "query": {"pageNo": ["1"], "pageSize": ["10"], "processStatus": ["1"]}},
+            ],
+            "analysis": {
+                "req_10": {"request_id": "req_10", "role": "read_context", "keep": True},
+                "req_49": {"request_id": "req_49", "role": "business_get", "keep": True, "confidence": 0.99},
+            },
+        }),
+    )
+
+    synced = sync_flow_spec_models(spec)
+
+    assert len(synced.steps) == 1
+    assert (synced.steps[0].source_meta or {}).get("request_id") == "req_49"
+
+
 def test_validation_prepares_contract_only_once(monkeypatch):
     step = FlowStep(
         step_id="query", method="GET", path="/api/items?pageNo=1",

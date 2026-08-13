@@ -4255,8 +4255,240 @@ def _infer_wire_format(value: Any) -> str:
     return ""
 
 
+def _param_contract_richness(param: ParamField) -> tuple[int, int, int, int, float]:
+    options = list(param.enum_options or [])
+    executable_options = sum(
+        1 for option in options
+        if isinstance(option, dict)
+        and option.get("label") not in (None, "")
+        and option.get("value") not in (None, "")
+    )
+    source_rank = {
+        "api_option": 5,
+        "page_enum": 4,
+        "static_enum": 4,
+        "manual_enum": 4,
+        "form_option": 2,
+        "user_input": 1,
+        "constant": 1,
+    }.get(str(param.source_kind or ""), 0)
+    return (
+        executable_options,
+        len(param.enum_value_map or {}),
+        source_rank,
+        len(param.evidence or []),
+        float(param.confidence or 0.0),
+    )
+
+
+def _step_contract_richness(step: FlowStep) -> tuple[int, int, int, int]:
+    param_scores = [_param_contract_richness(param) for param in (step.params or [])]
+    return (
+        sum(score[0] + score[1] for score in param_scores),
+        sum(score[2] + score[3] for score in param_scores),
+        _response_shape_evidence_score(step.response_json),
+        len(step.selects or []),
+    )
+
+
+def _merge_duplicate_step_contract(target: FlowStep, source: FlowStep) -> None:
+    by_path = {str(param.path or ""): param for param in target.params if param.path}
+    for source_param in source.params or []:
+        path = str(source_param.path or "")
+        target_param = by_path.get(path)
+        if target_param is None:
+            copied = source_param.model_copy(deep=True)
+            target.params.append(copied)
+            if path:
+                by_path[path] = copied
+            continue
+        if _param_contract_richness(source_param) > _param_contract_richness(target_param):
+            index = target.params.index(target_param)
+            copied = source_param.model_copy(deep=True)
+            _merge_enum_values(copied, target_param)
+            target.params[index] = copied
+            by_path[path] = copied
+        else:
+            _merge_enum_values(target_param, source_param)
+
+    existing_selects = {
+        json.dumps(binding.model_dump(exclude_none=True), ensure_ascii=False, sort_keys=True, default=str)
+        for binding in (target.selects or [])
+    }
+    for binding in source.selects or []:
+        marker = json.dumps(
+            binding.model_dump(exclude_none=True), ensure_ascii=False, sort_keys=True, default=str,
+        )
+        if marker not in existing_selects:
+            target.selects.append(binding.model_copy(deep=True))
+            existing_selects.add(marker)
+
+    if _response_shape_evidence_score(source.response_json) > _response_shape_evidence_score(target.response_json):
+        target.response_json = copy.deepcopy(source.response_json)
+    if not target.body_template and source.body_template:
+        target.body_template = copy.deepcopy(source.body_template)
+    if not target.body_source and source.body_source:
+        target.body_source = source.body_source
+    if not target.headers and source.headers:
+        target.headers = dict(source.headers)
+    target.sample_inputs = {**dict(source.sample_inputs or {}), **dict(target.sample_inputs or {})}
+
+
+def _retarget_step_references(spec: FlowSpec, replacements: dict[str, str]) -> None:
+    if not replacements:
+        return
+
+    def replace(value: Any) -> Any:
+        return replacements.get(str(value or ""), value)
+
+    def retarget_nodes(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            for key in ("step_id", "from", "source"):
+                if key in node:
+                    node[key] = replace(node.get(key))
+            for child_key in ("children", "steps", "then", "else", "otherwise"):
+                if isinstance(node.get(child_key), list):
+                    retarget_nodes(node[child_key])
+
+    for link in spec.links or []:
+        link.source_step_id = replace(link.source_step_id)
+        link.target_step_id = replace(link.target_step_id)
+    for item in spec.review_items or []:
+        item.target = {
+            key: replace(value) if key in {"step_id", "source_step_id", "target_step_id"} else value
+            for key, value in (item.target or {}).items()
+        }
+    for capability in spec.capabilities or []:
+        retarget_nodes(capability.nodes or [])
+        capability.step_ids = list(dict.fromkeys(replace(step_id) for step_id in capability.step_ids or []))
+        for ref in capability.request_refs or []:
+            ref.step_id = replace(ref.step_id)
+        for field_name in (
+            "inputs", "request_fields", "internal_fields", "computed_fields", "outputs",
+        ):
+            for field in getattr(capability, field_name) or []:
+                field.step_id = replace(field.step_id)
+        for dependency in capability.dependencies or []:
+            if "step_id" in (dependency.source or {}):
+                dependency.source["step_id"] = replace(dependency.source.get("step_id"))
+            if "step_id" in (dependency.target or {}):
+                dependency.target["step_id"] = replace(dependency.target.get("step_id"))
+        for mapping in capability.output_mapping or []:
+            if isinstance(mapping, dict):
+                for key in ("step_id", "from", "source"):
+                    if key in mapping:
+                        mapping[key] = replace(mapping.get(key))
+        for evidence in capability.evidence or []:
+            if isinstance(evidence, dict) and "anchor_step_id" in evidence:
+                evidence["anchor_step_id"] = replace(evidence.get("anchor_step_id"))
+    for usage in (spec.request_facts.usage or {}).values():
+        usage.materialized_step_id = replace(usage.materialized_step_id)
+        for membership in usage.capability_memberships or []:
+            if isinstance(membership, dict) and "step_id" in membership:
+                membership["step_id"] = replace(membership.get("step_id"))
+    for evidence in getattr(spec.request_facts, "field_evidence", []) or []:
+        if isinstance(evidence, dict) and "step_id" in evidence:
+            evidence["step_id"] = replace(evidence.get("step_id"))
+
+    capability_model = (spec.meta or {}).get("capability_model") or {}
+    semantic_plan = capability_model.get("semantic_plan") if isinstance(capability_model, dict) else None
+    if isinstance(semantic_plan, dict):
+        for capability in semantic_plan.get("capabilities") or []:
+            if not isinstance(capability, dict):
+                continue
+            if "anchor_step_id" in capability:
+                capability["anchor_step_id"] = replace(capability.get("anchor_step_id"))
+            for ref in capability.get("request_refs") or []:
+                if isinstance(ref, dict) and "step_id" in ref:
+                    ref["step_id"] = replace(ref.get("step_id"))
+
+
+def _generated_capability_is_protected(capability: FlowCapability) -> bool:
+    return bool(
+        capability.locked
+        or capability.updated_by == "user"
+        or any(ref.origin in {"manual", "user"} for ref in capability.request_refs or [])
+    )
+
+
+def _collapse_duplicate_generated_capabilities(spec: FlowSpec) -> None:
+    kept: list[FlowCapability] = []
+    signature_index: dict[tuple[str, tuple[str, ...]], int] = {}
+    for capability in spec.capabilities or []:
+        signature = (
+            _capability_kind_family(capability.kind),
+            tuple(_capability_node_step_ids(capability)),
+        )
+        if not signature[1]:
+            kept.append(capability)
+            continue
+        existing_index = signature_index.get(signature)
+        if existing_index is None:
+            signature_index[signature] = len(kept)
+            kept.append(capability)
+            continue
+        existing = kept[existing_index]
+        existing_protected = _generated_capability_is_protected(existing)
+        incoming_protected = _generated_capability_is_protected(capability)
+        if existing_protected and incoming_protected:
+            kept.append(capability)
+            continue
+        if incoming_protected:
+            kept[existing_index] = capability
+            continue
+        if existing_protected:
+            continue
+        if float(capability.confidence or 0.0) > float(existing.confidence or 0.0):
+            kept[existing_index] = capability
+    spec.capabilities = kept
+
+
+def _canonicalize_materialized_request_identities(spec: FlowSpec) -> None:
+    """One captured request identity may own only one materialized FlowStep."""
+    grouped: dict[str, list[FlowStep]] = {}
+    for step in spec.steps:
+        meta = step.source_meta or {}
+        request_id = str(meta.get("request_id") or "").strip()
+        request_index = meta.get("request_index")
+        identity = f"id:{request_id}" if request_id else (
+            f"idx:{request_index}" if request_index is not None else ""
+        )
+        if identity:
+            grouped.setdefault(identity, []).append(step)
+
+    replacements: dict[str, str] = {}
+    removed_ids: set[str] = set()
+    for duplicates in grouped.values():
+        if len(duplicates) < 2:
+            continue
+        canonical = max(duplicates, key=_step_contract_richness)
+        for duplicate in duplicates:
+            if duplicate is canonical:
+                continue
+            _merge_duplicate_step_contract(canonical, duplicate)
+            replacements[duplicate.step_id] = canonical.step_id
+            removed_ids.add(duplicate.step_id)
+    if not removed_ids:
+        return
+    spec.steps = [step for step in spec.steps if step.step_id not in removed_ids]
+    _retarget_step_references(spec, replacements)
+    _collapse_duplicate_generated_capabilities(spec)
+    spec.meta = {
+        **(spec.meta or {}),
+        "deduped_request_identity_count": (
+            int((spec.meta or {}).get("deduped_request_identity_count") or 0) + len(removed_ids)
+        ),
+    }
+
+
 def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
+    _canonicalize_materialized_request_identities(spec)
     _upgrade_materialized_query_facts(spec)
+    # Upgrading an initial list request to the richer searched fact can make it
+    # converge with a step that already owns that durable request identity.
+    _canonicalize_materialized_request_identities(spec)
     _enrich_materialized_response_shapes(spec)
     _rebind_saved_field_evidence(spec)
     _ground_saved_page_enums(spec)
