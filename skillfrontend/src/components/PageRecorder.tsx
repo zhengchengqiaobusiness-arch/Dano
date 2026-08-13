@@ -1336,6 +1336,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const renderedFrameSeqRef = useRef(0);
   const pointerMoveTimerRef = useRef<number | null>(null);
   const pendingPointerMoveRef = useRef<Record<string, unknown> | null>(null);
+  const wheelTimerRef = useRef<number | null>(null);
+  const pendingWheelRef = useRef<{ dx: number; dy: number; nx?: number; ny?: number } | null>(null);
   const pointerGestureRef = useRef<{
     pointerId: number; nx: number; ny: number; clientX: number; clientY: number;
     button: string; buttons: number; pointerType: string; dragging: boolean; clickCount: number;
@@ -1344,6 +1346,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     at: number; clientX: number; clientY: number; button: string; clickCount: number;
   } | null>(null);
   const lastInputErrorNoticeRef = useRef(0);
+  const lastBackspaceKeydownAtRef = useRef(0);
   const componentMountedRef = useRef(false);
   const intentionalCloseRef = useRef(false);
   const sessionStartedRef = useRef(false);
@@ -1360,6 +1363,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   const [phase, setPhase] = useState<"idle" | "recording" | "publishing" | "done">("idle");
   const [workspaceStage, setWorkspaceStage] = useState(0);
+  const workspaceStageRef = useRef(workspaceStage);
+  useEffect(() => {
+    workspaceStageRef.current = workspaceStage;
+    if (workspaceStage === 1) scheduleLatestFrameDecode();
+  }, [workspaceStage]);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -1388,12 +1396,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({
     state: "waiting", text: "等待录制助手连接",
   });
+  const agentStatusRef = useRef<AgentStatus>({
+    state: "waiting", text: "等待录制助手连接",
+  });
   const [verifyProgress, setVerifyProgress] = useState<VerifyProgress[]>([]);
+  const verifyProgressRef = useRef<VerifyProgress[]>([]);
   const [agentAnswerDrafts, setAgentAnswerDrafts] = useState<Record<string, string>>({});
   const [action, setAction] = useState(() => newRecordingActionName());
   const actionRef = useRef(action);
   useEffect(() => { actionRef.current = action; }, [action]);
   const [title, setTitle] = useState("");
+  const titleRef = useRef("");
   const [result, setResult] = useState<RecResult | null>(null);
   const [err, setErr] = useState("");
 
@@ -1529,7 +1542,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setLastAnalysisEvidence(fs.meta.last_analysis_application);
     }
     const nextTitle = preferredSkillTitle(fs);
-    if (nextTitle && !title.trim()) setTitle(nextTitle);
+    if (nextTitle && !titleRef.current.trim()) {
+      titleRef.current = nextTitle;
+      setTitle(nextTitle);
+    }
+  }
+
+  function updateAgentStatus(next: AgentStatus) {
+    agentStatusRef.current = next;
+    if (assistantOpenRef.current) setAgentStatus(next);
+  }
+
+  function appendVerifyProgress(next: VerifyProgress) {
+    verifyProgressRef.current = [...verifyProgressRef.current, next].slice(-30);
+    if (assistantOpenRef.current) setVerifyProgress(verifyProgressRef.current);
   }
   function newCostlyOperationId(prefix: string) {
     const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -1633,6 +1659,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         wsRef.current?.close();
       }
       if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
+      if (wheelTimerRef.current != null) window.clearTimeout(wheelTimerRef.current);
       if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
       frameDecodeGenerationRef.current += 1;
     };
@@ -1815,67 +1842,75 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       window.cancelAnimationFrame(frameRafRef.current);
       frameRafRef.current = null;
     }
+    pendingWheelRef.current = null;
+    if (wheelTimerRef.current != null) {
+      window.clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = null;
+    }
     const canvas = frameCanvasRef.current;
     const context = canvas?.getContext("2d");
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
     setHasFrame(false);
   }
 
+  function scheduleLatestFrameDecode() {
+    if (workspaceStageRef.current !== 1 || frameDecodeBusyRef.current || frameRafRef.current != null) return;
+    frameRafRef.current = window.requestAnimationFrame(() => {
+      frameRafRef.current = null;
+      const frame = latestFrameRef.current;
+      if (!frame || frame.seq <= renderedFrameSeqRef.current || workspaceStageRef.current !== 1) return;
+
+      frameDecodeBusyRef.current = true;
+      const generation = frameDecodeGenerationRef.current;
+      const decoder = new Image();
+      decoder.decoding = "async";
+      decoder.src = frame.src;
+      const decoded = typeof decoder.decode === "function"
+        ? decoder.decode()
+        : new Promise<void>((resolve, reject) => {
+            decoder.onload = () => resolve();
+            decoder.onerror = () => reject(new Error("recording frame decode failed"));
+          });
+
+      decoded.then(() => {
+        if (
+          generation !== frameDecodeGenerationRef.current
+          || frame.seq <= renderedFrameSeqRef.current
+          || workspaceStageRef.current !== 1
+        ) return;
+        // Only expose a fully decoded, monotonically newer JPEG. Canvas keeps
+        // the previous pixels until this synchronous draw, so the recording
+        // surface never blanks while another JPEG is still decoding.
+        const canvas = frameCanvasRef.current;
+        const context = canvas?.getContext("2d", { alpha: false });
+        if (!canvas || !context) return;
+        const frameWidth = Math.max(1, Math.round(frame.meta.frameWidth || decoder.naturalWidth || 1));
+        const frameHeight = Math.max(1, Math.round(frame.meta.frameHeight || decoder.naturalHeight || 1));
+        if (canvas.width !== frameWidth) canvas.width = frameWidth;
+        if (canvas.height !== frameHeight) canvas.height = frameHeight;
+        context.drawImage(decoder, 0, 0, frameWidth, frameHeight);
+        renderedFrameSeqRef.current = frame.seq;
+        if (!hasFrameRef.current) setHasFrame(true);
+      }).catch(() => {
+        // A corrupt/superseded JPEG is simply skipped; the next latest frame
+        // will be decoded without blanking the currently visible image.
+        if (generation === frameDecodeGenerationRef.current) {
+          renderedFrameSeqRef.current = Math.max(renderedFrameSeqRef.current, frame.seq);
+        }
+      }).finally(() => {
+        if (generation !== frameDecodeGenerationRef.current) return;
+        frameDecodeBusyRef.current = false;
+        const latest = latestFrameRef.current;
+        if (latest && latest.seq > renderedFrameSeqRef.current) scheduleLatestFrameDecode();
+      });
+    });
+  }
+
   function queueFrame(seq: number, data: string, meta: RecorderFrameMeta = {}) {
     if (!data) return;
     const normalizedSeq = Number(seq || 0) > 0 ? Number(seq) : renderedFrameSeqRef.current + 1;
     latestFrameRef.current = { seq: normalizedSeq, src: `data:image/jpeg;base64,${data}`, meta };
-
-    const scheduleDecode = () => {
-      if (frameDecodeBusyRef.current || frameRafRef.current != null) return;
-      frameRafRef.current = window.requestAnimationFrame(() => {
-        frameRafRef.current = null;
-        const frame = latestFrameRef.current;
-        if (!frame || frame.seq <= renderedFrameSeqRef.current) return;
-
-        frameDecodeBusyRef.current = true;
-        const generation = frameDecodeGenerationRef.current;
-        const decoder = new Image();
-        decoder.decoding = "async";
-        decoder.src = frame.src;
-        const decoded = typeof decoder.decode === "function"
-          ? decoder.decode()
-          : new Promise<void>((resolve, reject) => {
-              decoder.onload = () => resolve();
-              decoder.onerror = () => reject(new Error("recording frame decode failed"));
-            });
-
-        decoded.then(() => {
-          if (generation !== frameDecodeGenerationRef.current || frame.seq <= renderedFrameSeqRef.current) return;
-          // Only expose a fully decoded, monotonically newer JPEG. Canvas keeps
-          // the previous pixels until this synchronous draw, so the recording
-          // surface never blanks while another JPEG is still decoding.
-          const canvas = frameCanvasRef.current;
-          const context = canvas?.getContext("2d", { alpha: false });
-          if (!canvas || !context) return;
-          const frameWidth = Math.max(1, Math.round(frame.meta.frameWidth || decoder.naturalWidth || 1));
-          const frameHeight = Math.max(1, Math.round(frame.meta.frameHeight || decoder.naturalHeight || 1));
-          if (canvas.width !== frameWidth) canvas.width = frameWidth;
-          if (canvas.height !== frameHeight) canvas.height = frameHeight;
-          context.drawImage(decoder, 0, 0, frameWidth, frameHeight);
-          renderedFrameSeqRef.current = frame.seq;
-          if (!hasFrameRef.current) setHasFrame(true);
-        }).catch(() => {
-          // A corrupt/superseded JPEG is simply skipped; the next latest frame
-          // will be decoded without blanking the currently visible image.
-          if (generation === frameDecodeGenerationRef.current) {
-            renderedFrameSeqRef.current = Math.max(renderedFrameSeqRef.current, frame.seq);
-          }
-        }).finally(() => {
-          if (generation !== frameDecodeGenerationRef.current) return;
-          frameDecodeBusyRef.current = false;
-          const latest = latestFrameRef.current;
-          if (latest && latest.seq > renderedFrameSeqRef.current) scheduleDecode();
-        });
-      });
-    };
-
-    scheduleDecode();
+    scheduleLatestFrameDecode();
   }
 
   function resetEditorState() {
@@ -1911,8 +1946,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
     agentInsightsRef.current = [];
+    agentStatusRef.current = { state: "waiting", text: "正在连接录制助手" };
+    verifyProgressRef.current = [];
     setErr(""); setResult(null); hasRequestsRef.current = false; setHasRequests(false); setAgentQuestions([]); setAgentInsights([]);
-    setAgentStatus({ state: "waiting", text: "正在连接录制助手" });
+    setAgentStatus(agentStatusRef.current);
+    setVerifyProgress([]);
     setAgentAnswerDrafts({}); clearFrame();
     resetEditorState();
     const nextAction = newRecordingActionName();
@@ -2014,7 +2052,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         setPhase("recording");
         setConnectionState("connected");
-        setAgentStatus({ state: "ready", text: "录制助手已连接，捕获到业务请求后会自动分析" });
+        updateAgentStatus({ state: "ready", text: "录制助手已连接，捕获到业务请求后会自动分析" });
         setRecordingStopped(Boolean(m.recording_paused));
         // The server draft is authoritative across a transient WebSocket
         // reconnect.  In particular, an ability plan may have completed just
@@ -2090,11 +2128,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (m.text) {
           const state = ["waiting", "analyzing", "ready", "error"].includes(m.state)
             ? m.state as AgentStatus["state"] : "ready";
-          setAgentStatus({ state, text: String(m.text) });
+          updateAgentStatus({ state, text: String(m.text) });
         }
       }
       else if (m.type === "verify_progress") {
-        setVerifyProgress((items) => [...items, {
+        appendVerifyProgress({
           stage: String(m.stage || "verifying"),
           detail: String(m.detail || "正在验证"),
           round: Number(m.round || 0),
@@ -2102,7 +2140,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           confirmed_links: Number(m.confirmed_links || 0),
           verify_coverage: Number(m.verify_coverage || 0),
           write_count: Number(m.write_count || 0),
-        }].slice(-30));
+        });
         setPhase("publishing");
       }
       else if (m.type === "flow_spec") {
@@ -2115,7 +2153,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.operation === "finalize") {
           finalizeOperationRef.current = null;
-          setAgentStatus({ state: "ready", text: "请求抓取完成，能力草稿已生成" });
+          updateAgentStatus({ state: "ready", text: "请求抓取完成，能力草稿已生成" });
           setLastAnalysisEvidence(null);
           setLastOperationReport(null);
           setShowAllAnalysisChanges(false);
@@ -2156,7 +2194,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           };
           setShowAllAnalysisChanges(false);
           setLastAnalysisEvidence(application);
-          setAgentStatus({
+          updateAgentStatus({
             state: application.status === "rejected" ? "error" : "ready",
             text: application.summary || "能力分析已完成",
           });
@@ -2210,7 +2248,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
         if (retryFlowMutationAfterConflict(m)) return;
-        setAgentStatus({ state: "error", text: String(detail) });
+        updateAgentStatus({ state: "error", text: String(detail) });
         // Operation failures belong to the workbench, not the transport. Keep
         // the socket healthy so a rejected Pi proposal cannot poison reconnect.
         if (!m.operation) connectionErrorRef.current = detail;
@@ -2311,6 +2349,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // Coalesce display-rate pointer events while keeping remote hover and drag
     // responsive. The backend and frame sender both drop superseded work.
     pointerMoveTimerRef.current = window.setTimeout(sendPendingPointerMove, POINTER_MOVE_INTERVAL_MS);
+  }
+  function sendPendingWheel() {
+    wheelTimerRef.current = null;
+    const event = pendingWheelRef.current;
+    pendingWheelRef.current = null;
+    if (event) send({ type: "input", event: { kind: "scroll", ...event } });
   }
   function onImgPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (connectionState !== "connected" || e.button < 0) return;
@@ -2415,7 +2459,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (connectionState !== "connected") return;
     const point = normalizedPoint(e.clientX, e.clientY);
     e.preventDefault();
-    send({ type: "input", event: { kind: "scroll", dy: e.deltaY, dx: e.deltaX, ...(point || {}) } });
+    const previous = pendingWheelRef.current;
+    pendingWheelRef.current = {
+      dx: (previous?.dx || 0) + e.deltaX,
+      dy: (previous?.dy || 0) + e.deltaY,
+      ...(point || {}),
+    };
+    if (wheelTimerRef.current == null) {
+      wheelTimerRef.current = window.setTimeout(sendPendingWheel, POINTER_MOVE_INTERVAL_MS);
+    }
   }
   function relayKb(el: HTMLInputElement) {
     const v = el.value;
@@ -2444,14 +2496,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     const key = recorderKeyName(e);
     if (key) {
+      if (key === "Backspace") lastBackspaceKeydownAtRef.current = performance.now();
       send({ type: "input", event: { kind: "key", key } });
       e.preventDefault();
     }
   }
   function onKbBeforeInput(e: React.FormEvent<HTMLInputElement>) {
-    // Key commands are relayed by keydown. Keeping Backspace in both handlers
-    // made browser-dependent beforeinput ordering either duplicate or swallow it.
-    if ((e.nativeEvent as InputEvent).inputType === "deleteContentBackward") e.preventDefault();
+    const inputEvent = e.nativeEvent as InputEvent;
+    if (inputEvent.inputType !== "deleteContentBackward") return;
+    // Chromium normally emits keydown first. Mobile/IME paths can emit only
+    // beforeinput; relay that case without duplicating a normal Backspace.
+    if (performance.now() - lastBackspaceKeydownAtRef.current > 80) {
+      send({ type: "input", event: { kind: "key", key: "Backspace" } });
+    }
+    e.preventDefault();
   }
   function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
@@ -2479,8 +2537,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     showRecordingAssistant();
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
+    verifyProgressRef.current = [];
     setResult(null); setVerifyProgress([]); setPhase("publishing");
-    setAgentStatus({ state: "analyzing", text: "正在汇总录制请求并生成能力分析…" });
+    updateAgentStatus({ state: "analyzing", text: "正在汇总录制请求并生成能力分析…" });
     if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim() })) {
       finalizeOperationRef.current = null;
       setPhase("recording");
@@ -4840,7 +4899,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
 
   function showRecordingAssistant() {
+    assistantOpenRef.current = true;
     setAgentInsights(agentInsightsRef.current);
+    setAgentStatus(agentStatusRef.current);
+    setVerifyProgress(verifyProgressRef.current);
     setAssistantOpen(true);
   }
 
@@ -4967,7 +5029,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Tooltip>
               </Form.Item>
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 150 }} />
+                <Input value={title} onChange={(e) => {
+                  titleRef.current = e.target.value;
+                  setTitle(e.target.value);
+                }} style={{ width: 150 }} />
               </Form.Item>
               <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
                 {flowSpec ? "重新抓取并分析请求" : "停止并分析请求"}
@@ -4983,8 +5048,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
               onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
               style={{
-                width: "auto", maxWidth: "100%", height: "auto", maxHeight: "calc(100vh - 170px)",
-                display: hasFrame ? "block" : "none", margin: "0 auto", cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
+                width: "100%", height: "auto",
+                display: hasFrame ? "block" : "none", margin: 0, cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
                 touchAction: "none", userSelect: "none",
               }} />
             {!hasFrame && <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
@@ -4999,7 +5064,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
       {workspaceStage === 2 && (flowSpec ? renderFlowWorkbench() : <Empty description="完成请求分析后将在这里生成能力" />)}
 
-      <Drawer title="录制助手" open={assistantOpen} onClose={() => setAssistantOpen(false)} width={420}
+      <Drawer title="录制助手" open={assistantOpen} onClose={() => {
+        assistantOpenRef.current = false;
+        setAssistantOpen(false);
+      }} width={420}
         styles={{ body: { padding: 12 } }}>
         {assistantOpen && renderRecordingAssistant()}
       </Drawer>
