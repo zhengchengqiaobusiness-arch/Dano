@@ -42,7 +42,6 @@ from dano.catalog.manifest import (
 )
 from dano.config import get_settings
 from dano.orchestrator.skills import SkillRegistry
-from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import Subsystem
 
 log = structlog.get_logger(__name__)
@@ -1095,16 +1094,6 @@ def _multi_capability_sop(m: SkillManifest) -> str:
     return "\n".join(lines)
 
 
-def _multi_capability_quality_section(m: SkillManifest) -> str:
-    lines = ["## 质量标准(怎样算做好)", ""]
-    for name, contract in _capability_contracts(m).items():
-        required = "、".join(f"`{field}`" for field in (contract.get("required") or [])) or "无"
-        verdict = "事实核查通过后才可报告成功" if contract.get("verify_required") else "返回值必须符合该能力 output_schema"
-        lines.append(f"- `{name}`:只校验本能力必填输入 {required}；{verdict}。")
-    lines.append("- 能力未明确、输入缺失或需要确认但未确认时不得执行；验证不通过时不得报告成功。")
-    return "\n".join(lines)
-
-
 # ─────────────────────────── 语义抽取(供丰富 SKILL.md)───────────────────────────
 def _numeric_fields(props: dict) -> list[str]:
     """数值字段:manifest 的 type 优先(已按信源/语义判定),再退按名字/描述。与契约层同一判据。
@@ -1144,17 +1133,6 @@ def _is_name_ref(p: dict) -> bool:
 def _select_fields(props: dict) -> list[str]:
     """名字→ID 的选择型字段(选领导/字典下拉/参会人多选):agent 传名字,Dano 运行期查内部 ID。"""
     return [k for k, v in (props or {}).items() if _is_name_ref(v)]
-
-
-def _opts_hint(prop: dict, cap: int = 12) -> str:
-    """枚举字段在参数表/SOP 里的"可选值"提示:静态枚举列前 cap 个候选(超出指向 OPTIONS.md);
-    **活接口目录**(选人/部门/审批人:有来源、无内置清单)→ 提示运行期实时拉,**不列陈旧快照**。"""
-    opts = _option_labels(prop)
-    if not opts:
-        return "选项来自实时接口:先 `--list-options` 拉当前可选项再传名字" if (prop or {}).get("x-options-source") else ""
-    shown = " / ".join(str(o) for o in opts[:cap])
-    more = f" …(共 {len(opts)} 项,见 references/OPTIONS.md)" if len(opts) > cap else ""
-    return f"可选:{shown}{more}"
 
 
 def _option_labels(prop: dict) -> list[str]:
@@ -1769,107 +1747,6 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         "不要重复粘贴原始 JSON。写操作超时或结果不明时不得自动重试。",
     ]
     return "\n".join(L)
-
-
-def _quality_section(m: SkillManifest) -> str:
-    """质量标准(怎样算做好):**纯函数、grounded、零业务/框架字面量**。
-
-    输入合格 ← preconditions/computes/parameters;落点正确 ← business_meta;
-    结果合格 ← flow.verify / judged_by_code;达成目标 ← goal.success_criteria;红线 ← goal.forbidden_steps。
-    源空即省略该项;只读类给轻量"如实反映"。任意业务/框架自适配。
-    """
-    keys, required, props = _fields(m)
-    numset = set(_numeric_fields(props))
-    f = m.flow or {}
-    g = m.goal or {}
-    bm = m.business_meta or {}
-    write = m.requires_confirmation
-    # 只读查询(非写、无前置、无成功标准)→ 轻量验收
-    if not write and not (f.get("preconditions") or g.get("success_criteria")):
-        return ("## 质量标准(怎样算做好)\n\n"
-                "- 结果应**如实反映系统数据**;查不到 / 为空就如实告知,**不要编造**记录或字段。")
-    L = ["## 质量标准(怎样算做好)", "", "逐条自检;不全过就**不算做好**,不要对用户报成功。", ""]
-
-    # ① 输入合格
-    L.append("**① 输入合格(提交前)**")
-    reqs = [k for k in keys if k in required]
-    L.append(f"- 必填字段齐全:{'、'.join('`' + k + '`' for k in reqs)}。" if reqs
-             else "- 用户给定的字段已逐项确认,无臆造。")
-    num = [k for k in keys if k in numset]
-    if num:
-        L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})为数字。")
-    sel = _select_fields(props)
-    if sel:
-        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传名字/选项文字,**非内部 ID**。")
-    for c in (f.get("computes") or []):
-        L.append(f"- `{c['out']}` 与 `{c['expr']}` 的计算结果一致(给了不一致先与用户确认)。")
-    for p in (f.get("preconditions") or []):
-        msg = (p.get("message") or "").strip() or p.get("check")
-        L.append(f"- 满足前置:{msg}。")
-
-    # ② 落点正确
-    L += ["", "**② 落点正确**",
-          "- 返回 `succeeded` 且带**业务标识**(单号/实例号)= 已真正进入业务流程。"]
-    chain = bm.get("approvalChain") or bm.get("approval_chain") or []
-    if chain:
-        steps = " → ".join((c.get("step", "") if isinstance(c, dict) else str(c)) for c in chain if c)
-        L.append(f"- 已进入正确审批链:{steps}。")
-    if bm.get("thresholds"):
-        L.append("- 达到阈值时按规则自动加签(见上方「审批路径」)。")
-
-    # ③ 结果合格
-    L += ["", "**③ 结果合格(真生效)**"]
-    if f.get("verify"):
-        L.append("- `status=succeeded` **且事实核查通过**(Dano 回查确认)才算成功;"
-                 "回查未过 / 接口 200 但空操作 → **不算成功**,原样返回给用户,**勿谎报**。")
-    elif f.get("judged_by_code"):
-        L.append("- 以**业务返回码**判成功(非 HTTP 字面);失败码即不算成功,**勿谎报**。")
-    else:
-        L.append("- `status=succeeded` 才算成功;`failed` 据 `reason` 处置,**勿把失败说成成功**。")
-    for sc in (g.get("success_criteria") or []):
-        L.append(f"- 达成:{sc}。")
-
-    # 红线
-    L += ["", "**红线(命中即不合格)**"]
-    L.append("- 不重复提交(超时/结果不明 → 先核对,别重跑);不绕过 `--confirm` / 不伪造身份或结果。"
-             if write else "- 不伪造数据或结果;不绕过平台闸门。")
-    forb = g.get("forbidden_steps") or []
-    if forb:
-        L.append(f"- 不执行越权/破坏动作:{'、'.join('`' + s + '`' for s in forb[:8])}。")
-    return "\n".join(L)
-
-
-def _interaction_section(m: SkillManifest) -> str:
-    """Render only the non-negotiable ask_user_question rules used by the SOP."""
-    contracts = _capability_contracts(m)
-    lines = [
-        "### 表单工具硬约束",
-        "",
-        "- 填表或补字段时原生调用 `ask_user_question`；每次回复最多调用一次，多个字段必须使用顶层 `title`，"
-        "并放入同一 `questions` 数组（`questions[]`）一次提交，不要逐字段拆成多轮。",
-        "- 查询能力不得为可选筛选字段主动提问、自动使用录制推荐值或补造条件；没有用户筛选条件时直接使用空 input。",
-        "- 多个表单、分区或连续步骤先一次性汇总；不得按表单、分区、步骤或字段分别提问。只收集一个非确认字段时才使用顶层 `question`。",
-        "- `questions[].id` 必须与能力参数名逐字一致，禁止翻译、改名或改成 snake_case；多题按 questions 的 `id` 映射答案。",
-        "- SOP 第3步的字段配置表是唯一表单来源；`id`、`question`、`inputType`、`required`、"
-        "`default`、`options`/`dataSource` 必须逐项照抄，任一不一致都必须在展示前修正。",
-        "- 用户值优先；否则把能力参考小节“推荐默认值”列的主值逐字复制为表单 `default`；"
-        "括号内录制值只用于溯源。普通问题提供非空 `default`，"
-        "禁止使用“请填写…”“例如…”“待确认”等占位内容。",
-        "- `options`/`dataSource` 必须逐字取自字段配置或 `--list-options` 结果；"
-        "必须保留每个候选的稳定 `id` 与 `label`，禁止丢弃 id、按 label 合并不同记录，"
-        "禁止自行生成、替换、增删候选项。枚举默认值必须引用候选 id，禁止回落为候选第一项。",
-        "- 推荐默认值只用于 `ask_user_question` 展示；仅 `x-dano-apply-default: true` 可静默应用，其余必须等用户回答。",
-        "- 只有业务上确实必填的字段设置 `required: true`。日期使用 `inputType: \"date\"` 与 `dateFormat`；动态选项先 `--list-options`，只有来源映射完整时才使用 `dataSource`。",
-        "- 用户取消时立即停止；工具返回校验错误时修正参数后静默重试原生工具调用，不在普通文本中模拟提问。",
-    ]
-    if len(contracts) > 1:
-        lines.append("- 先根据用户目标选择一个明确 capability；不同能力的必填字段不能混用。")
-    if any(contract.get("requires_confirmation") for contract in contracts.values()):
-        lines.append(
-            "- 写能力必须在同一 Assistant Turn 内，用首次表单返回的 `formId` 发起只含 "
-            "`formIds[]` 与 `confirm: true` 的确认；仅 `status=confirmed` 后带 `--confirm` 执行。"
-        )
-    return "\n".join(lines)
 
 
 def _errors_md(has_fact_verification: bool) -> str:
@@ -3258,12 +3135,12 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
         raise
 
 
-async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
+async def write_skills(tenant: str, out_dir: str, *,
                        exclude_skill_ids: set[str] | None = None) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
     带 business 标签的操作**按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
-    rich 参数保留兼容旧调用;当前导出只做确定性渲染。每业务独立 try/except,一个失败不连累其它。
+    每业务独立 try/except,一个失败不连累其它。
     """
     from collections import defaultdict
     repo = AssetRepository()

@@ -288,9 +288,6 @@ type RecorderConnectionState = "idle" | "connecting" | "connected" | "reconnecti
 interface RecorderFrameMeta {
   frameWidth?: number;
   frameHeight?: number;
-  viewportWidth?: number;
-  viewportHeight?: number;
-  deviceScaleFactor?: number;
 }
 
 const KEYMAP: Record<string, string> = {
@@ -558,13 +555,9 @@ function positiveNumber(...values: unknown[]) {
 
 function frameMetaFromMessage(message: any): RecorderFrameMeta {
   const frame = message?.frame || message?.frame_meta || message?.metadata || message?.meta || {};
-  const viewport = message?.viewport || frame?.viewport || {};
   return {
     frameWidth: positiveNumber(message?.frame_width, message?.width, frame?.frame_width, frame?.width),
     frameHeight: positiveNumber(message?.frame_height, message?.height, frame?.frame_height, frame?.height),
-    viewportWidth: positiveNumber(message?.viewport_width, viewport?.width, frame?.viewport_width),
-    viewportHeight: positiveNumber(message?.viewport_height, viewport?.height, frame?.viewport_height),
-    deviceScaleFactor: positiveNumber(message?.device_scale_factor, message?.dpr, viewport?.deviceScaleFactor, frame?.device_scale_factor),
   };
 }
 
@@ -1383,7 +1376,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [recordingStopped, setRecordingStopped] = useState(false);
   const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
   const [hasFrame, setHasFrame] = useState(false);
-  const [frameMeta, setFrameMeta] = useState<RecorderFrameMeta>({});
   const hasFrameRef = useRef(false);
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
   const [hasRequests, setHasRequests] = useState(false);
@@ -1827,7 +1819,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const context = canvas?.getContext("2d");
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
     setHasFrame(false);
-    setFrameMeta({});
   }
 
   function queueFrame(seq: number, data: string, meta: RecorderFrameMeta = {}) {
@@ -1868,17 +1859,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           if (canvas.height !== frameHeight) canvas.height = frameHeight;
           context.drawImage(decoder, 0, 0, frameWidth, frameHeight);
           renderedFrameSeqRef.current = frame.seq;
-          setFrameMeta((current) => {
-            const updates = {
-              ...Object.fromEntries(Object.entries(frame.meta).filter(([, value]) => value != null)),
-              frameWidth,
-              frameHeight,
-            };
-            if (Object.entries(updates).every(([key, value]) => current[key as keyof RecorderFrameMeta] === value)) {
-              return current;
-            }
-            return { ...current, ...updates };
-          });
           if (!hasFrameRef.current) setHasFrame(true);
         }).catch(() => {
           // A corrupt/superseded JPEG is simply skipped; the next latest frame

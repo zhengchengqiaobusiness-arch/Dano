@@ -221,13 +221,6 @@ def _structural_evidence_aliases(evidence: dict[str, Any]) -> set[str]:
     return {normalized for value in raw if (normalized := _normalize_identifier(value))}
 
 
-def _field_aliases(wire_path: str) -> set[str]:
-    relative = wire_path.split(".", 1)[1] if "." in wire_path else wire_path
-    normalized = _normalize_identifier(relative)
-    leaf = normalized.rsplit(".", 1)[-1]
-    return {value for value in (normalized, leaf) if value}
-
-
 def _field_match_score(aliases: set[str], wire_path: str) -> int:
     relative = wire_path.split(".", 1)[1] if "." in wire_path else wire_path
     full = _normalize_identifier(relative)

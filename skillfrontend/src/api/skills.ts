@@ -79,11 +79,6 @@ export interface FunctionTool {
   function: { name: string; description: string; parameters: JSONSchema };
 }
 
-export async function createTenant(tenant: string): Promise<{ tenant: string; api_key: string }> {
-  const { data } = await api.post("/tenants", { tenant });
-  return data;
-}
-
 export async function createTenantWithPassword(
   tenant: string,
   username: string,
