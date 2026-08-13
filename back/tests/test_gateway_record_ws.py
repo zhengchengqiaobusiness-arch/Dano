@@ -17,12 +17,33 @@ from dano.execution.page.flow_spec import (
     ParamField,
 )
 from dano.gateway import app as gateway
+from dano.onboarding.recording_release import ReleaseDecision
 
 
 def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
 
     assert gateway._default_export_dir() == "/opt/dano/runtime-data/.agents/skills"
+
+
+def test_publish_failure_report_exposes_machine_gate_reasons() -> None:
+    decision = ReleaseDecision(
+        status="verification_incomplete",
+        callable_spec=None,
+        capabilities=(),
+        blocking_reasons=(
+            "查询订单: dry run 未通过",
+            "提交订单: 缺少写后回读验证",
+        ),
+    )
+
+    report = gateway._recording_release_failure_report(decision)
+
+    assert report["reason"] == "查询订单: dry run 未通过"
+    assert report["clarifications"] == list(decision.blocking_reasons)
+    assert report["release_policy"]["blocking_reasons"] == list(
+        decision.blocking_reasons
+    )
 
 
 def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:

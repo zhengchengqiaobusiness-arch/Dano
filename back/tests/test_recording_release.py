@@ -128,7 +128,7 @@ def test_three_true_model_verdicts_cannot_override_machine_failure():
         )
 
 
-def test_release_rejects_explicitly_incomplete_capability_generation():
+def test_release_evaluates_abilities_independently_from_global_generation_marker():
     spec = _mixed_spec()
     spec.capabilities = [cap for cap in spec.capabilities if cap.name == "query_items"]
     spec.meta["capability_generation"] = {
@@ -139,6 +139,6 @@ def test_release_rejects_explicitly_incomplete_capability_generation():
 
     decision = evaluate_recording_release(spec)
 
-    assert decision.status == "verification_incomplete"
-    assert decision.callable_spec is None
-    assert any("能力分析尚未完整完成" in reason for reason in decision.blocking_reasons)
+    assert decision.status == "ready"
+    assert decision.callable_spec is not None
+    assert [cap.name for cap in decision.callable_spec.capabilities] == ["query_items"]

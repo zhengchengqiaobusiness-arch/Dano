@@ -11026,6 +11026,20 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     step_by_id = {step.step_id: step for step in spec.steps}
     allowed_usages = {"execute", "preflight", "option_source", "fact_check"}
 
+    capability_items = [
+        item for item in (plan.get("capabilities") or []) if isinstance(item, dict)
+    ]
+    referenced_step_ids = {
+        str(ref.get("step_id") or "")
+        for capability in capability_items
+        for ref in (
+            capability.get("request_refs")
+            if isinstance(capability.get("request_refs"), list)
+            else []
+        )
+        if isinstance(ref, dict) and str(ref.get("step_id") or "")
+    }
+
     # Public ability count is the number of distinct recorded business anchors,
     # not the number of preflights, option endpoints, or fact-check reads.
     required_business_steps: dict[str, bool] = {}
@@ -11034,19 +11048,26 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         method = str(step.method or "GET").upper()
         if role in {"business_write", "submit_anchor"} and method in _WRITE_METHODS:
             required_business_steps[step.step_id] = True
-        elif role == "business_get" and method in {"GET", "HEAD", "POST"}:
+        elif (
+            role == "business_get"
+            and method in {"GET", "HEAD", "POST"}
+            and _is_business_query_step(step)
+        ):
             required_business_steps[step.step_id] = False
     for item in _request_fact_items(spec):
         is_write = _eligible_business_write_fact(item)
-        if not (is_write or _eligible_business_get_fact(item)):
+        is_read = _eligible_business_get_fact(item)
+        if not (is_write or is_read):
             continue
         step_id = _materialized_step_id_for_request(spec, item)
-        if step_id:
+        step = step_by_id.get(step_id)
+        if step_id and (is_write or (step is not None and _is_business_query_step(step))):
             required_business_steps[step_id] = is_write
 
     required_fields = [
         (step.step_id, param)
         for step in spec.steps
+        if step.step_id in referenced_step_ids
         for param in step.params
     ]
 
@@ -11066,9 +11087,6 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         for step_id, param in required_fields
         if field_contract_complete(param)
     }
-    capability_items = [
-        item for item in (plan.get("capabilities") or []) if isinstance(item, dict)
-    ]
     covered_steps: set[str] = set()
     names: set[str] = set()
     anchors: set[str] = set()

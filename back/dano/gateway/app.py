@@ -633,6 +633,22 @@ def _recording_publish_review_failure(error: Exception) -> dict[str, object]:
     }
 
 
+def _recording_release_failure_report(release_decision) -> dict[str, object]:  # noqa: ANN001
+    """Keep the machine gate's concrete ability reasons visible to the UI."""
+    policy = release_decision.to_dict()
+    reasons = [
+        str(reason) for reason in (release_decision.blocking_reasons or ())
+        if str(reason).strip()
+    ]
+    return {
+        "ok": False,
+        "stage": "verification_incomplete",
+        "reason": reasons[0] if reasons else "没有通过机器发布闸门的可调用能力",
+        "clarifications": reasons,
+        "release_policy": policy,
+    }
+
+
 def _checkpoint_accepted_recording_pi_submission(
     resume_state: dict,
     flow_spec,
@@ -2860,18 +2876,14 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.onboarding.recording_release import evaluate_recording_release
 
                     release_decision = evaluate_recording_release(pending_flow_spec)
-                    verification_gate = release_decision.to_dict()
                     if release_decision.callable_spec is None:
                         await sender.send_json({
                             "type": "result",
                             "operation": "publish",
                             "operation_id": msg.get("operation_id"),
-                            "report": {
-                                "ok": False,
-                                "stage": "verification_incomplete",
-                                "reason": "没有能力通过机器发布闸门；完整录制草稿已保留",
-                                "release_policy": verification_gate,
-                            },
+                            "report": _recording_release_failure_report(
+                                release_decision
+                            ),
                             **_recording_flow_projection(pending_flow_spec),
                         })
                         continue

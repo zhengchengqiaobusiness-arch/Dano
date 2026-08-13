@@ -318,3 +318,54 @@ def test_successful_strict_compilation_refreshes_stale_generation_state() -> Non
 
     assert compiled.meta["capability_generation"]["initial_completed"] is True
     assert compiled.meta["capability_generation"]["status"] == "ready"
+
+
+def test_semantic_coverage_ignores_internal_requests_outside_ability_scope() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="query",
+                method="GET",
+                path="/orders/page",
+                source_meta={
+                    "role": "business_get",
+                    "trigger_op": "click",
+                    "trigger_locator": "button:has-text('查询')",
+                },
+                response_json={"data": {"list": [], "total": 0}},
+            ),
+            FlowStep(
+                step_id="refresh-token",
+                method="POST",
+                path="/auth/refresh-token",
+                source_meta={"role": "auth"},
+                params=[ParamField(
+                    path="body.refreshToken",
+                    key="refreshToken",
+                    value="captured-secret",
+                    type="unknown",
+                    category="unknown",
+                    source_kind="unknown",
+                )],
+            ),
+        ],
+    )
+    semantic_plan = {
+        "business_understanding": {"summary": "查询订单"},
+        "capabilities": [{
+            "name": "query_orders",
+            "title": "查询订单",
+            "kind": "query_status",
+            "anchor_step_id": "query",
+            "request_refs": [{"step_id": "query", "usage": "execute"}],
+        }],
+        "unresolved_items": [],
+    }
+
+    coverage = flow_spec_module._semantic_plan_coverage(  # noqa: SLF001
+        spec, {"semantic_plan": semantic_plan},
+    )
+
+    assert coverage["complete"] is True
+    assert coverage["total_steps"] == 1
+    assert coverage["total_fields"] == 0

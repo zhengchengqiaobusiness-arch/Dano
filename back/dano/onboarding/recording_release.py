@@ -358,17 +358,6 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
 def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
     """Evaluate and derive the callable subset without mutating the draft."""
     source = spec.model_copy(deep=True)
-    generation = dict((source.meta or {}).get("capability_generation") or {})
-    if generation and (
-        generation.get("initial_completed") is not True
-        or str(generation.get("status") or "") != "ready"
-    ):
-        return ReleaseDecision(
-            status="verification_incomplete",
-            callable_spec=None,
-            capabilities=(),
-            blocking_reasons=("能力分析尚未完整完成，不能冻结或产出 Skill",),
-        )
     decisions = tuple(_evaluate_capability(source, cap) for cap in source.capabilities)
     passed_ids = {item.capability_id for item in decisions if item.passed}
     if not passed_ids:
