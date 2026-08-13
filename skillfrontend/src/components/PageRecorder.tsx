@@ -2093,6 +2093,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ...items.filter((item) => item.question_id !== question.question_id),
             question,
           ].slice(-20));
+          showRecordingAssistant();
         }
       }
       else if (m.type === "agent_insight") {
@@ -2495,6 +2496,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     if (!action.trim() || badAction(action.trim())) return;
     if (!hasFrame && !hasRequests) { message.error("还没有可分析的页面画面或请求"); return; }
+    showRecordingAssistant();
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
     setResult(null); setVerifyProgress([]); setPhase("publishing");
@@ -4941,19 +4943,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               placeholder="https://oa.example.com/reimburse/new" onPressEnter={start} />
           </Form.Item>
           <Form.Item label="录制目标" required tooltip="建议填写；允许留空，录制助手会在必要时询问" style={{ marginBottom: 12 }}>
-            <Input.TextArea rows={3} value={goalText} disabled={phase !== "idle"} onChange={(event) => setGoalText(event.target.value)}
-              placeholder="例如：创建一条申请，并确认列表中能查询到刚创建的记录" />
+            <div style={{ position: "relative" }}>
+              <Input.TextArea rows={3} value={goalText} disabled={phase !== "idle"} onChange={(event) => setGoalText(event.target.value)}
+                placeholder="例如：创建一条申请，并确认列表中能查询到刚创建的记录"
+                style={{ paddingRight: 130, paddingBottom: 44 }} />
+              {phase === "idle" ? (
+                <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}
+                  style={{ position: "absolute", right: 8, bottom: 8 }}>开始录制</Button>
+              ) : (
+                <Button type="primary" onClick={() => setWorkspaceStage(1)}
+                  style={{ position: "absolute", right: 8, bottom: 8 }}>返回页面录制</Button>
+              )}
+            </div>
           </Form.Item>
-          <Space align="center" wrap>
-            {phase === "idle" ? (
-              <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
-            ) : (
-              <Button type="primary" onClick={() => setWorkspaceStage(1)}>返回页面录制</Button>
-            )}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              页面操作始终按原逻辑真实执行，录制不会拦截请求。
-            </Typography.Text>
-          </Space>
           {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={err} />}
         </>
       )}
