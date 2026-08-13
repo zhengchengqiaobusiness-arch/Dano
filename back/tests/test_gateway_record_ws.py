@@ -954,6 +954,13 @@ async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy
     )
 
 
+def test_recording_gateway_skips_queued_live_batch_after_cursor_catches_up() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert 'reason == "request_batch"' in source
+    assert "len(captured_all_requests()) <= since_seq" in source
+
+
 def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     from dano.onboarding.page_onboard import run_request_onboarding
 

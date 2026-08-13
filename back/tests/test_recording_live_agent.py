@@ -1766,7 +1766,10 @@ def test_recording_delta_pages_without_losing_requests_and_compacts_responses():
     assert first["has_more"] is True
     assert len(first["requests"]) == 10
     assert "__truncated_items__" in json.dumps(first["requests"][0]["response_json"])
-    assert len(json.dumps(first, ensure_ascii=False)) < 200_000
+    # A single live batch shares one model turn with state and the previous
+    # submission receipt.  Per-branch truncation is not enough: the whole
+    # delta must stay small enough to avoid timing out the Pi request.
+    assert len(json.dumps(first, ensure_ascii=False)) < 80_000
 
     seen = []
     cursor = 0

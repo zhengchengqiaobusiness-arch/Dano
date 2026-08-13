@@ -1863,6 +1863,15 @@ async def record_ws(ws: WebSocket) -> None:
                 if not reason:
                     return
                 since_seq = last_live_scheduled_count
+                if (
+                    reason == "request_batch"
+                    and len(captured_all_requests()) <= since_seq
+                ):
+                    # A batch may have been queued while the preceding Pi turn
+                    # was still paging.  If that turn consumed the whole tail,
+                    # do not start another full-state model prompt for an empty
+                    # delta.
+                    continue
                 await _run_live_analysis(reason, since_seq)
                 # Pi 一次只能处理一轮。分析期间到达的事实必须合并成尾批，
                 # 不能因为当时已有任务就静默丢弃。

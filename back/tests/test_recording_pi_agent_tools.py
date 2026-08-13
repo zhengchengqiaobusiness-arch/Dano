@@ -817,6 +817,8 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
         },
     }))
     assert result["flow_version"] > 1
+    assert "report" not in result
+    assert "repair_context" not in result
     assert session.received_submission["_analysis_screenshot_count"] == 2
     assert session.spec.request_facts.model_dump(mode="json") == before_facts
     validation = asyncio.run(get_validation_report("run-recording", {"recording_id": "rec-1"}))

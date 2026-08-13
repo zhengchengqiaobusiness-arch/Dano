@@ -1109,7 +1109,18 @@ async def _apply_recording_submission_atomic(
                 "录制计划不得修改原始 request facts"
                 if mode == "plan" else "录制修复不得修改原始 request facts"
             )
-        return result
+        # Submission tools only need an acknowledgement and per-operation
+        # outcomes.  The full validation report has its own read tool; feeding
+        # it back here duplicates tens of thousands of characters into every
+        # live Pi turn and caused later requests to time out.
+        return {
+            key: deepcopy(result[key])
+            for key in (
+                "flow_version", "op_results", "all_applied", "must_retry",
+                "unresolved_targets", "accepted", "unchanged", "warning",
+            )
+            if key in result
+        }
     except Exception as exc:  # noqa: BLE001 - rollback all partial session mutations
         try:
             _restore_recording_session(

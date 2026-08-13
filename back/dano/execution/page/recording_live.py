@@ -171,7 +171,11 @@ def _request_projection(request: dict) -> dict:
     for key, settings in {
         "query": (4, 30, 500),
         "post_data": (5, 30, 800),
-        "response_json": (5, 20, 800),
+        # Live deltas share a model turn with the current contract.  The old
+        # 20 x 800 response projection made one 10-request page exceed 170 KB
+        # and repeatedly exhausted the Pi prompt timeout.  Paths and sample
+        # values remain visible; repeated response rows are bounded here.
+        "response_json": (3, 8, 160),
     }.items():
         if key in projected:
             projected[key] = compact_model_payload(
