@@ -32,6 +32,31 @@ def _call_nodes(step_ids: list[str]) -> list[dict]:
     ]
 
 
+def _strict_submission(
+    *abilities: tuple[str, str, str, str, list[tuple[str, str]]],
+) -> dict:
+    return {
+        "semantic_plan": {
+            "business_understanding": {"summary": "录制业务能力"},
+            "capabilities": [
+                {
+                    "name": name,
+                    "title": title,
+                    "kind": kind,
+                    "anchor_step_id": anchor,
+                    "request_refs": [
+                        {"step_id": step_id, "usage": usage}
+                        for step_id, usage in refs
+                    ],
+                }
+                for name, title, kind, anchor, refs in abilities
+            ],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+
 def _post(url, body, method="POST", resp=None, headers=None):
     return {
         "method": method, "url": url,
@@ -496,7 +521,7 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(by_path["applyTitle"].source_kind, "user_input")
         self.assertEqual(by_path["useInfo"].source_kind, "user_input")
         self.assertNotEqual(by_path["applyTitle"].source_kind, "api_option")
-        self.assertFalse(any(l.target_path in {"applyTitle", "useInfo", "remark", "backTime"} for l in spec.links))
+        self.assertFalse(any(link.target_path in {"applyTitle", "useInfo", "remark", "backTime"} for link in spec.links))
 
     def test_get_pagination_fields_are_not_enum_options(self):
         captured = [
@@ -682,8 +707,6 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(s["schema_version"], 1)
         self.assertEqual(s["capabilities"], [])
 
-        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
-        self.assertIn("submit", {c.kind for c in orchestrated.capabilities})
         st_sum = s["steps"][0]
         self.assertIn("step_id", st_sum)
         self.assertNotIn("params", st_sum)  # 轻量摘要不含 params
@@ -835,7 +858,6 @@ class GetBusinessStepTest(unittest.TestCase):
         get_role = next(r for r in roles if "/getappid" in r["path"])
         self.assertTrue(get_role["keep"])
         self.assertIn("后续业务请求引用", get_role["reason"])
-        by_step = {s.path: s for s in spec.steps}
         send_step = next(s for s in spec.steps if "/sjws_chat" in s.path)
         send_params = {p.path: p for p in send_step.params}
         self.assertEqual(send_params["conversation_id"].category, "runtime_var")
@@ -880,8 +902,8 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(get_api_step["query_template"]["appName"], "auto")
         self.assertEqual(get_api_step["response_json"]["data"], "app-code")
         send_api_step = next(s for s in apir["steps"] if "/sjws_chat" in s["path"])
-        self.assertTrue(any(l["target_path"] == "conversation_id" for l in send_api_step["links"]))
-        self.assertTrue(any(l["target_path"] == "appCode" for l in send_api_step["links"]))
+        self.assertTrue(any(link["target_path"] == "conversation_id" for link in send_api_step["links"]))
+        self.assertTrue(any(link["target_path"] == "appCode" for link in send_api_step["links"]))
 
         dry = dry_run_flow_spec(spec)
         self.assertTrue(dry["ok"])
@@ -955,7 +977,7 @@ class GetBusinessStepTest(unittest.TestCase):
         detail_step = next(s for s in apir["steps"] if s["path"] == "/api/detail")
         self.assertEqual(detail_step["query_template"]["token"], "T-OLD")
         self.assertNotIn("token", detail_step.get("params") or [])
-        self.assertTrue(any(l["target_path"] == "query.token" for l in detail_step["links"]))
+        self.assertTrue(any(link["target_path"] == "query.token" for link in detail_step["links"]))
 
     def test_unconsumed_list_response_stays_context_only(self):
         """无控件因果、无下游消费的 list 不得自动成为下拉源。"""
@@ -1042,22 +1064,6 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertTrue(any("/system/user/page" in fact.path for fact in candidates))
 
         self.assertEqual(spec.capabilities, [])
-        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
-        cap_kinds = {c.kind for c in orchestrated.capabilities}
-        self.assertEqual(cap_kinds, {"submit"})
-        submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit")
-        # 审批详情是提交能力的控制前置，不重复拆成独立状态查询能力。
-        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
-        self.assertTrue(any("/submit-process" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
-
-        client = flow_spec_to_client(orchestrated)
-        self.assertIn("capabilities", client)
-        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"submit"})
-        apir, errors = flow_spec_to_api_request(orchestrated)
-        self.assertEqual(errors, [])
-        self.assertIn("capabilities", apir)
-        self.assertTrue(all(s.get("step_id") for s in apir["steps"]))
-        self.assertIn("submit", {c["kind"] for c in apir["capabilities"]})
 
     def test_capability_validate_gate_sanitizes_stale_missing_step(self):
         spec = FlowSpec(
@@ -1184,7 +1190,7 @@ class GetBusinessStepTest(unittest.TestCase):
                 "ywsxList[0].yyxtmc", "yyxtmc", "所属系统", sys1,
             )],
         )
-        step = spec.steps[0]
+        step = next(item for item in spec.steps if item.method == "POST")
 
         self.assertEqual(len(step.selects), 1)
         sel = step.selects[0]
@@ -1324,8 +1330,8 @@ class GetBusinessStepTest(unittest.TestCase):
         submit = spec.steps[1]
         by_path = {p.path: p for p in submit.params}
         self.assertEqual(by_path["type"].source_kind, "page_enum")
-        self.assertFalse(any(l.target_path == "type" for l in spec.links))
-        self.assertTrue(any(l.target_path == "taskId" for l in spec.links))
+        self.assertFalse(any(link.target_path == "type" for link in spec.links))
+        self.assertTrue(any(link.target_path == "taskId" for link in spec.links))
 
     def test_flow_spec_does_not_mark_enum_without_real_options(self):
         spec = to_flow_spec(
@@ -1477,7 +1483,6 @@ class PageEnumOnInternalFieldTest(unittest.TestCase):
     而不是退化成 user_param/unknown。通用,不挑系统/公司。"""
 
     def test_dom_options_match_internal_field_via_label_to_value(self):
-        from dano.execution.page.request_capture import _enum_records_from_page_options
         # body 用内部码 leaveType=2,但 DOM 抓到的 options 是 display label
         body = {"formData": {"leaveType": 2, "name": "张三"}}
         # page_enum_options 用新形态:{字段key: {options:[...], field_key:...}}
@@ -1489,7 +1494,7 @@ class PageEnumOnInternalFieldTest(unittest.TestCase):
                 {"label": "婚假", "value": 3},
             ],
         )
-        from dano.execution.page.request_capture import apply_page_enum_options, page_enum_selects
+        from dano.execution.page.request_capture import page_enum_selects
         out = page_enum_selects(json.dumps(body, ensure_ascii=False), page_enum_options, set(), fields=[
             _select_evidence("formData.leaveType", "leaveType", "请假类型", "事假"),
             {"path": "formData.name", "key": "name", "value": "张三", "suggest_name": "姓名"},
@@ -2255,101 +2260,6 @@ def test_editable_select_is_not_reclassified_as_selected_option_projection():
     assert params["teamId"].exposed_to_user is True
 
 
-def test_cross_system_timesheet_keeps_post_query_and_single_form_submit_separate():
-    """POST is not automatically a write and a one-row array is not automatically batch."""
-    search = FlowStep(
-        step_id="search", method="POST", path="/rpc/work-hours/search",
-        params=[
-            ParamField(path="projectName", key="项目名称", type="string", required=False),
-            ParamField(path="approver", key="审批人", type="string", required=False),
-        ],
-        response_json={"data": {"records": [{"id": "row-1"}], "total": 1}},
-        source_meta={
-            "role": "business_get", "page_id": "list-page",
-            "trigger_action_id": "query-click", "trigger_op": "click",
-            "trigger_locator": "text=查询", "causality_confidence": "high",
-        },
-    )
-    project_options = FlowStep(
-        step_id="project-options", method="GET", path="/rpc/projects/options",
-        params=[
-            ParamField(path="query.isManager", key="isManager", type="boolean"),
-            ParamField(path="query.workType", key="workType", type="string"),
-        ],
-        response_json={"data": [{"id": "project-1", "name": "项目一"}]},
-        source_meta={"role": "read_option", "page_id": "form-page"},
-    )
-    remaining = FlowStep(
-        step_id="remaining", method="GET", path="/rpc/work-hours/remaining",
-        params=[
-            ParamField(path="query.projectId", key="项目名称", type="enum", required=True),
-            ParamField(path="query.date", key="申报日期", type="date", required=True),
-        ],
-        response_json={"data": 8},
-        source_meta={
-            "role": "business_get", "page_id": "form-page",
-            "control_preflight_for_write": True,
-            "trigger_action_id": "date-change", "trigger_op": "pick",
-            "trigger_locator": "label=申报日期", "causality_confidence": "high",
-        },
-    )
-    submit = FlowStep(
-        step_id="submit", method="POST", path="/rpc/work-hours/insertPCList",
-        body_source='[{"projectId":"project-1","date":"2026-07-22","hours":8,"content":"开发"}]',
-        params=[
-            ParamField(path="[0].projectId", key="项目名称", type="enum", required=True),
-            ParamField(path="[0].date", key="申报日期", type="date", required=True),
-            ParamField(path="[0].hours", key="申报工时", type="number", required=True),
-            ParamField(path="[0].content", key="工作内容", type="string", required=True),
-        ],
-        response_json={"code": 0},
-        source_meta={
-            "role": "business_write", "page_id": "form-page",
-            "trigger_action_id": "submit-click", "trigger_op": "click",
-            "trigger_locator": "text=提交", "causality_confidence": "high",
-        },
-    )
-    spec = FlowSpec(steps=[search, project_options, remaining, submit])
-
-    capabilities = flow_spec_module._build_initial_flow_capabilities(spec)
-
-    assert [cap.kind for cap in capabilities] == ["query_status", "submit"]
-    assert capabilities[0].step_ids == ["search"]
-    assert capabilities[1].step_ids == ["remaining", "submit"]
-    assert "project-options" not in {
-        step_id for capability in capabilities for step_id in capability.step_ids
-    }
-
-
-def test_initial_capability_recovers_post_query_from_click_evidence():
-    """A POST search triggered by 查询 is a callable query, not an empty/write-only plan."""
-    search = FlowStep(
-        step_id="search", method="POST",
-        path="/gsgl/gsApply/getWorkTimeDetailByZhId",
-        params=[
-            ParamField(path="projectName", key="项目名称", type="string", required=False),
-            ParamField(path="spr", key="审批人", type="string", required=False),
-        ],
-        response_json={"data": {"records": [{"id": "row-1"}], "total": 1}},
-        semantic_role="business_write",
-        source_meta={
-            "role": "business_write",
-            "trigger_action_id": "action-query",
-            "trigger_op": "click",
-            "trigger_locator": "text=查询",
-            "trigger_page_context": {
-                "path": "/app-vue/workingHourManage/searchWorkingHours/search",
-            },
-            "causality_confidence": "high",
-        },
-    )
-
-    capabilities = flow_spec_module._build_initial_flow_capabilities(FlowSpec(steps=[search]))
-
-    assert [cap.kind for cap in capabilities] == ["query_status"]
-    assert capabilities[0].step_ids == ["search"]
-
-
 def test_post_query_click_is_kept_when_response_rows_are_empty():
     request = _post(
         "https://work.test/gsgl/gsApply/getWorkTimeDetailByZhId",
@@ -2560,18 +2470,34 @@ def test_cross_system_timesheet_end_to_end_preserves_interface_and_field_contrac
         samples={"项目名称": "项目一", "审批人": "审批甲", "申报日期": "2026-07-22", "申报工时": "8", "工作内容": "开发"},
         field_evidence=evidence,
     )
-    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}, generation_mode="initial"))
+    search_step_id = next(step.step_id for step in spec.steps if step.path == "/rpc/work-hours/search")
+    submit_step_id = next(step.step_id for step in spec.steps if step.path == "/rpc/work-hours/insertPCList")
+    strict = _strict_submission(
+        (
+            "query_work_hours", "查询工时记录", "query_status", search_step_id,
+            [(search_step_id, "execute")],
+        ),
+        (
+            "submit_work_hours", "提交工时申报", "submit", submit_step_id,
+            [(submit_step_id, "execute")],
+        ),
+    )
+    planned = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=strict,
+        generation_mode="initial",
+    ))
 
     assert [cap.kind for cap in planned.capabilities] == ["query_status", "submit"]
     assert planned.capability_relations == []
     query_capability = next(cap for cap in planned.capabilities if cap.kind == "query_status")
     submit_capability = next(cap for cap in planned.capabilities if cap.kind == "submit")
     assert query_capability.step_ids == [next(step.step_id for step in planned.steps if step.path == "/rpc/work-hours/search")]
-    assert all(step.path != "/rpc/projects/options" for step in planned.steps)
+    assert all(not step.path.startswith("/rpc/projects/options") for step in planned.steps)
     search_step = next(step for step in planned.steps if step.path == "/rpc/work-hours/search")
     search_fields = {param.path: param for param in search_step.params}
-    assert (search_fields["projectName"].key, search_fields["projectName"].required) == ("项目名称", False)
-    assert (search_fields["approver"].key, search_fields["approver"].required) == ("审批人", False)
+    assert (search_fields["projectName"].key, search_fields["projectName"].label, search_fields["projectName"].required) == ("projectName", "项目名称", False)
+    assert (search_fields["approver"].key, search_fields["approver"].label, search_fields["approver"].required) == ("approver", "审批人", False)
     submit_step = next(step for step in planned.steps if step.path == "/rpc/work-hours/insertPCList")
     submit_fields = {param.path: param for param in submit_step.params}
     assert (submit_fields["[0].xmId"].key, submit_fields["[0].xmId"].type, submit_fields["[0].xmId"].source_kind) == (

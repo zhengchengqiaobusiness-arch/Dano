@@ -4864,6 +4864,16 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             item for item in (step.selects or [])
             if _strip_body_prefix(item.path or item.id_path or "") == _strip_body_prefix(param.path)
         ), None)
+        if (
+            existing_binding is not None
+            and str(existing_binding.enum_source or "") == "api"
+            and existing_binding.enum_confirmed is True
+            and source_kind == "dom"
+        ):
+            # A recorded API label/value contract contains the actual wire
+            # values. A later incomplete DOM snapshot is display evidence, not
+            # authority to erase that stronger renewable source contract.
+            continue
         option_map = dict(explicit_map)
         for option in options:
             # A bare string proves only a visible label, not that the backend
@@ -6848,8 +6858,8 @@ def to_flow_spec(
                 machine_preflight_request_ids.add(source_request_id)
                 changed = True
     # 2) 前置读候选：business_get 直接进入候选；存在写锚点时，把 read_context
-    # 也交给后续数据/控制依赖闭包判断。这里不再用 keep 先删掉事实，否则审批详情
-    # 这类“响应不直接进入 POST”的控制前置永远没有机会被识别。
+    # 也交给后续数据/控制依赖闭包判断。候选源仍完整保存在 request_facts，只有
+    # 进入执行闭包的读取才物化为 FlowStep。
     preread_cands = [
         r for r in captured_requests
         if (
@@ -7113,7 +7123,14 @@ def to_flow_spec(
             stable_role["role"] = "business_write"
         if request_key in preflight_owner_request_keys:
             stable_role.update({
-                "role": "read_context",
+                # Option identity is orthogonal to preflight ownership.  A
+                # candidate endpoint can belong to the same command while it
+                # still remains an option source rather than a context read.
+                "role": (
+                    "read_option"
+                    if stable_role.get("role") == "read_option"
+                    else "read_context"
+                ),
                 "keep": True,
                 "filter_reason": "",
                 "confidence": max(float(stable_role.get("confidence") or 0.0), 0.9),
@@ -10490,16 +10507,16 @@ def _planned_capability_has_public_anchor(
             continue
         # `/list` is common to both business searches and option endpoints.
         # Strong recorded business-query evidence wins over the URL heuristic.
-        if step_id in option_ids:
+        if step_id in option_ids and kind in READ_CAPABILITY_KINDS:
             recorded_role = str(
                 (step.source_meta or {}).get("role") or step.semantic_role or ""
             )
             if recorded_role != "business_get":
                 continue
-        method = (step.method or "GET").upper()
-        if kind in WRITE_CAPABILITY_KINDS and method in _WRITE_METHODS:
+        grounded_kind = _capability_operation_kind(step)
+        if kind in WRITE_CAPABILITY_KINDS and grounded_kind in WRITE_CAPABILITY_KINDS:
             return True
-        if kind in READ_CAPABILITY_KINDS and _is_business_query_step(step):
+        if kind in READ_CAPABILITY_KINDS and grounded_kind in READ_CAPABILITY_KINDS and _is_business_query_step(step):
             return True
     return False
 

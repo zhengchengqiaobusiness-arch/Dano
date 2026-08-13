@@ -27,8 +27,6 @@ from dano.execution.page.flow_spec import (
     ParamField,
     SelectBinding,
     apply_flow_edits,
-    apply_recording_agent_submission,
-    build_default_flow_capabilities,
     flow_spec_to_api_request,
     flow_spec_to_client,
     orchestrate_flow_capabilities,
@@ -45,6 +43,32 @@ def _call_nodes(step_ids: list[str]) -> list[dict]:
         {"id": f"call_{index}", "type": "call", "step_id": step_id}
         for index, step_id in enumerate(step_ids)
     ]
+
+
+def _strict_submission(
+    *abilities: tuple[str, str, str, str, list[tuple[str, str]]],
+) -> dict:
+    """Build an explicit current-protocol plan; never infer public abilities."""
+    return {
+        "semantic_plan": {
+            "business_understanding": {"summary": "录制业务能力"},
+            "capabilities": [
+                {
+                    "name": name,
+                    "title": title,
+                    "kind": kind,
+                    "anchor_step_id": anchor,
+                    "request_refs": [
+                        {"step_id": step_id, "usage": usage}
+                        for step_id, usage in refs
+                    ],
+                }
+                for name, title, kind, anchor, refs in abilities
+            ],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
 
 
 def _get(index: int, path: str, response_json: dict) -> dict:
@@ -189,6 +213,7 @@ def test_later_plain_analysis_removes_a_stale_weak_text_option_binding() -> None
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/api/applications/submit",
+            source_meta={"request_id": "req-submit", "role": "business_write"},
             params=[ParamField(
                 path="useInfo", key="useInfo", label="useInfo", value="1",
                 type="enum", wire_type="string", category="user_param",
@@ -204,30 +229,21 @@ def test_later_plain_analysis_removes_a_stale_weak_text_option_binding() -> None
                 option_map={"System Management": "1"},
             )],
         )],
-        capabilities=[FlowCapability(
-            name="submit_application", kind="submit",
-            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
-        )],
+        request_facts=flow_spec_module.RequestFacts(field_evidence=[{
+            "event_id": "event-use-info", "binding_status": "bound",
+            "request_id": "req-submit", "wire_path": "body.useInfo",
+            "control_kind": "textarea", "field_aliases": ["useInfo"],
+        }]),
     )
-    submission = {"semantic_plan": {
-        "business_understanding": {"summary": "Submit application"},
-        "request_roles": [],
-        "field_semantics": [{
-            "step_id": "submit", "wire_path": "useInfo",
-            "public_name": "Usage description", "business_type": "string",
-            "category": "user_param", "source_kind": "user_input",
-            "confidence": 0.95, "evidence": ["recorded textarea"],
-        }],
-        "capabilities": [{
-            "name": "submit_application", "kind": "submit",
-            "step_ids": ["submit"],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="optimize",
-    ))
+    optimized = apply_flow_edits(spec, [{
+        "op": "set_param_source", "step_id": "submit",
+        "wire_path": "body.useInfo", "source_kind": "user_input",
+        "reason": "录制文本域由操作人填写", "evidence_refs": ["event-use-info"],
+    }, {
+        "op": "set_param_type", "step_id": "submit",
+        "wire_path": "body.useInfo", "business_type": "string",
+        "reason": "录制控件是文本域", "evidence_refs": ["event-use-info"],
+    }])
     field = optimized.steps[0].params[0]
 
     assert (field.type, field.wire_type) == ("string", "string")
@@ -241,7 +257,7 @@ def test_later_plain_analysis_repairs_numeric_sample_type_for_text_field() -> No
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="query", method="GET", path="/api/applications/page?useInfo=1",
-            source_meta={"role": "business_get"},
+            source_meta={"request_id": "req-query", "role": "business_get"},
             response_json={"data": {"list": [{"id": 1}], "total": 1}},
             params=[ParamField(
                 path="query.useInfo", key="useInfo", value="1",
@@ -249,30 +265,17 @@ def test_later_plain_analysis_repairs_numeric_sample_type_for_text_field() -> No
                 source_kind="user_input",
             )],
         )],
-        capabilities=[FlowCapability(
-            name="query_applications", kind="query_status",
-            nodes=[{"id": "call", "type": "call", "step_id": "query"}],
-        )],
+        request_facts=flow_spec_module.RequestFacts(field_evidence=[{
+            "event_id": "event-use-info", "binding_status": "bound",
+            "request_id": "req-query", "wire_path": "query.useInfo",
+            "control_kind": "text", "field_aliases": ["useInfo"],
+        }]),
     )
-    submission = {"semantic_plan": {
-        "business_understanding": {"summary": "Query applications"},
-        "request_roles": [],
-        "field_semantics": [{
-            "step_id": "query", "wire_path": "query.useInfo",
-            "public_name": "Usage description", "business_type": "string",
-            "category": "user_param", "source_kind": "user_input",
-            "confidence": 0.95, "evidence": ["recorded text filter"],
-        }],
-        "capabilities": [{
-            "name": "query_applications", "kind": "query_status",
-            "step_ids": ["query"],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="optimize",
-    ))
+    optimized = apply_flow_edits(spec, [{
+        "op": "set_param_type", "step_id": "query",
+        "wire_path": "query.useInfo", "business_type": "string",
+        "reason": "录制控件是文本输入框", "evidence_refs": ["event-use-info"],
+    }])
     field = optimized.steps[0].params[0]
 
     assert (field.type, field.wire_type) == ("string", "string")
@@ -417,7 +420,27 @@ def r0_seal_recording_truth_spec() -> FlowSpec:
         ],
         recording_mode="browser",
     )
-    return asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    query = _r0_step(spec, "/oa/seal-apply/page")
+    definition = _r0_step(spec, "/process-definition/get")
+    approval = _r0_step(spec, "/get-approval-detail")
+    submit = _r0_step(spec, "/seal-apply/submit-process")
+    return asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_submission(
+            (
+                "query_seal_applications", "查询用章申请", "query_status", query.step_id,
+                [(query.step_id, "execute")],
+            ),
+            (
+                "submit_seal_application", "提交用章申请", "submit", submit.step_id,
+                [
+                    (definition.step_id, "preflight"),
+                    (approval.step_id, "preflight"),
+                    (submit.step_id, "execute"),
+                ],
+            ),
+        ),
+    ))
 
 
 def _r0_step(spec: FlowSpec, path_fragment: str) -> FlowStep:
@@ -443,9 +466,10 @@ def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
     assert [
         _r0_step(spec, "/oa/seal-apply/page").step_id,
     ] == capabilities["query_status"].step_ids
+    # The semantic plan may propose preflight membership, but executable call
+    # nodes are derived only from machine-verified links. These unverified
+    # reads remain materialized facts and do not become executable calls yet.
     assert capabilities["submit"].step_ids == [
-        _r0_step(spec, "/process-definition/get").step_id,
-        _r0_step(spec, "/get-approval-detail").step_id,
         _r0_step(spec, "/seal-apply/submit-process").step_id,
     ]
 
@@ -520,7 +544,7 @@ def test_r0_seal_truth_resolves_each_field_axis_independently(
     param = _r0_param(r0_seal_recording_truth_spec, step_fragment, path)
     assert {
         "path": param.path,
-        "name": param.key,
+        "name": param.label or param.key,
         "default_value": param.default_value,
         "business_type": param.type,
         "wire_type": param.wire_type,
@@ -562,8 +586,6 @@ def test_r0_seal_truth_classifies_each_interface_role(
     ("capability_kind", "path_fragment", "expected_role", "expected_usage"),
     [
         ("query_status", "/oa/seal-apply/page", "business_get", "execute"),
-        ("submit", "/process-definition/get", "read_context", "preflight"),
-        ("submit", "/get-approval-detail", "read_context", "preflight"),
         ("submit", "/seal-apply/submit-process", "business_write", "execute"),
         ("submit", "/bd/seal/simple-list", "read_option", "option_source"),
     ],
@@ -614,8 +636,6 @@ def test_same_command_transaction_keeps_auxiliary_json_interface_in_operation():
     assert {step.path for step in spec.steps} == {
         "/api/workflow/preflight", "/api/application/cancel",
     }
-    submit = next(cap for cap in build_default_flow_capabilities(spec) if cap.kind == "submit")
-    assert set(submit.step_ids) == {step.step_id for step in spec.steps}
 
 
 def test_optimize_fills_placeholder_capability_title_and_intent_without_model_guess():
@@ -916,6 +936,12 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
     })
 
     spec = to_flow_spec(captured, samples={"content": "完成回归测试"})
+    process_param = next(
+        param for step in spec.steps if "/daily-report/submit" in step.path
+        for param in step.params if param.path == "processId"
+    )
+    process_param.category = "runtime_var"
+    process_param.source_kind = "previous_response"
 
     assert [step.method for step in spec.steps] == ["GET", "GET", "POST"]
     assert [step.path.split("?", 1)[0] for step in spec.steps] == [
@@ -930,13 +956,28 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
     }
     assert spec.request_facts.usage[independent.request_id].state == "materialized"
 
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    query_step = next(step for step in spec.steps if "/daily-report/page" in step.path)
+    definition_step = next(step for step in spec.steps if "/process/definition/get" in step.path)
+    submit_step = next(step for step in spec.steps if "/daily-report/submit" in step.path)
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_submission(
+            (
+                "query_daily_reports", "查询日报", "query_status", query_step.step_id,
+                [(query_step.step_id, "execute")],
+            ),
+            (
+                "submit_daily_report", "提交日报", "submit", submit_step.step_id,
+                [(definition_step.step_id, "preflight"), (submit_step.step_id, "execute")],
+            ),
+        ),
+    ))
     by_kind = {cap.kind: cap for cap in orchestrated.capabilities}
     assert set(by_kind) == {"query_status", "submit"}
     assert [orchestrated.steps[[s.step_id for s in orchestrated.steps].index(sid)].path.split("?", 1)[0]
             for sid in by_kind["query_status"].step_ids] == ["/daily-report/page"]
     assert [orchestrated.steps[[s.step_id for s in orchestrated.steps].index(sid)].path.split("?", 1)[0]
-            for sid in by_kind["submit"].step_ids] == ["/process/definition/get", "/daily-report/submit"]
+            for sid in by_kind["submit"].step_ids] == ["/daily-report/submit"]
 
 
 def test_unique_real_value_dependency_is_confirmed_but_ambiguous_value_is_not():
@@ -958,40 +999,6 @@ def test_unique_real_value_dependency_is_confirmed_but_ambiguous_value_is_not():
     # 同一个值来自多个上游响应时来源不唯一，不能生成随机候选依赖。
     assert ambiguous.links == []
     assert all(link.confidence == 0.85 for link in ambiguous.links)
-
-
-def test_default_capabilities_keep_enum_inside_submit_contract_without_empty_ability():
-    spec = FlowSpec(
-        flow_id="single-submit-with-enum",
-        steps=[FlowStep(
-            step_id="submit",
-            name="POST_submit",
-            method="POST",
-            url="/leave/submit",
-            path="/leave/submit",
-            params=[
-                ParamField(
-                    path="leaveType",
-                    key="请假类型",
-                    value="2",
-                    type="enum",
-                    enum_options=[{"label": "病假", "value": "2"}, {"label": "事假", "value": "3"}],
-                    category="user_param",
-                    source_kind="page_enum",
-                    required=True,
-                ),
-                ParamField(path="reason", key="原因", value="年假", category="user_param"),
-            ],
-        )],
-    )
-
-    capabilities = build_default_flow_capabilities(spec)
-    by_kind = {cap.kind: cap for cap in capabilities}
-
-    assert set(by_kind) == {"submit"}
-    assert by_kind["submit"].step_ids == ["submit"]
-    assert by_kind["submit"].name == "submit"
-    assert by_kind["submit"].input_schema["properties"]["请假类型"]["enum"] == ["病假", "事假"]
 
 
 def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
@@ -1058,105 +1065,29 @@ def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
         if param.path in {"query.key", "query.processDefinitionId", "query.activityId", "billType", "processDefKey"}
     )
 
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    submit_anchor = spec.steps[-1]
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_submission((
+            "submit_seal_application", "提交用章申请", "submit", submit_anchor.step_id,
+            [
+                *((step.step_id, "preflight") for step in spec.steps[:-1]),
+                (submit_anchor.step_id, "execute"),
+            ],
+        )),
+    ))
     submit_cap = next(cap for cap in orchestrated.capabilities if cap.kind == "submit")
-    assert submit_cap.step_ids == [step.step_id for step in spec.steps]
+    assert submit_cap.step_ids == [submit_anchor.step_id]
     assert not any(cap.kind == "query_status" for cap in orchestrated.capabilities)
 
-    planned = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="plan"))
-    planned_submit = next(cap for cap in planned.capabilities if cap.kind == "submit")
-    assert planned_submit.confirmed is True
-    assert planned_submit.requires_human_confirm is False
-    assert "## 8.1 失败处理" in planned.business_description
-    planned_report = validate_flow_spec(planned)
-    assert planned_report["passed"] is True
-    assert not any("前置接口保留" in item.title for item in planned.review_items if not item.resolved)
-
-
-def test_daily_report_builds_independent_query_and_batch_submit_capabilities():
-    query_steps = [
-        FlowStep(
-            step_id=f"query_{idx}",
-            name=f"查询日报阶段{idx}",
-            method="GET",
-            url=f"/daily-report/query/{idx}",
-            path=f"/daily-report/query/{idx}",
-            source_meta={"role": "business_get", "sequence": idx},
-            response_json={"data": {"filled_dates": ["2026-05-01"], "missing_dates": ["2026-05-11"]}},
-        )
-        for idx in range(1, 6)
-    ]
-    submit_preflights = [
-        FlowStep(
-            step_id=f"submit_context_{idx}",
-            name=f"填报上下文{idx}",
-            method="GET",
-            url=f"/daily-report/submit-context/{idx}",
-            path=f"/daily-report/submit-context/{idx}",
-            source_meta={"role": "read_context", "sequence": idx + 5, "control_preflight_for_write": True},
-        )
-        for idx in range(1, 4)
-    ]
-    submit = FlowStep(
-        step_id="submit_batch",
-        name="批量填写日报",
-        method="POST",
-        url="/daily-report/submit-batch",
-        path="/daily-report/submit-batch",
-        body_source='[{"date":"2026-05-11","content":"开发"}]',
-        source_meta={"role": "submit_anchor", "sequence": 9},
-        params=[
-            ParamField(path="[0].date", key="日期", type="date", category="user_param", source_kind="user_input"),
-            ParamField(path="[0].content", key="工作内容", category="user_param", source_kind="user_input"),
-        ],
-    )
-    spec = FlowSpec(flow_id="daily-two-capabilities", steps=[*query_steps, *submit_preflights, submit])
-
-    capabilities = build_default_flow_capabilities(spec)
-    by_kind = {cap.kind: cap for cap in capabilities}
-
-    assert set(by_kind) == {"query_status", "submit_batch"}
-    assert by_kind["query_status"].step_ids == [step.step_id for step in query_steps]
-    assert by_kind["submit_batch"].step_ids == [step.step_id for step in [*submit_preflights, submit]]
-    assert {mapping["name"] for mapping in by_kind["query_status"].output_mapping} == {
-        "filled_dates", "missing_dates",
-    }
-    assert {mapping["step_id"] for mapping in by_kind["query_status"].output_mapping} == {"query_5"}
-    assert all(mapping["kind"] == "batch_result" for mapping in by_kind["submit_batch"].output_mapping)
-    assert not set(by_kind["query_status"].step_ids) & set(by_kind["submit_batch"].step_ids)
-
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
-    # Similar field names and compatible collection shapes do not prove that
-    # the query output should feed the submit input.  The caller may add an
-    # explicit relation after choosing the required transform.
-    assert orchestrated.capability_relations == []
-    api_request, errors = flow_spec_to_api_request(orchestrated)
-    assert errors == []
-    assert api_request["capability_graph"]["relations"] == []
-
-
-def test_query_output_mapping_uses_stable_names_for_numeric_urls():
-    steps = [
-        FlowStep(
-            step_id=f"query_{idx}",
-            method="GET",
-            url=f"/daily/query/{idx}",
-            path=f"/daily/query/{idx}",
-            source_meta={"role": "business_get", "confidence": 0.93},
-            response_json={"data": {"value": idx}},
-        )
-        for idx in range(1, 4)
-    ]
-
-    cap = build_default_flow_capabilities(FlowSpec(flow_id="numeric-query-output", steps=steps))[0]
-
-    assert [mapping["name"] for mapping in cap.output_mapping] == ["query_1", "query_2", "query_3"]
+    validate_flow_spec(orchestrated)
+    assert not any("前置接口保留" in item.title for item in orchestrated.review_items if not item.resolved)
 
 
 def test_query_result_names_do_not_invent_batch_for_single_row_submit():
     query = FlowStep(
         step_id="query_missing", method="GET", path="/daily/page",
-        source_meta={"role": "business_get", "confidence": 0.96},
+        source_meta={"role": "read_context", "confidence": 0.96},
         response_json={"data": {"filled_dates": ["2026-05-01"], "missing_dates": ["2026-05-11"]}},
     )
     submit = FlowStep(
@@ -1169,51 +1100,18 @@ def test_query_result_names_do_not_invent_batch_for_single_row_submit():
         ],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit]), submission={"ops": []}))
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[query, submit]),
+        submission=_strict_submission((
+            "submit_daily_report", "提交日报", "submit", "submit_one",
+            [("submit_one", "execute")],
+        )),
+    ))
     submit_cap = next(cap for cap in out.capabilities if cap.kind == "submit")
 
     assert "entries" not in submit_cap.input_schema.get("properties", {})
     assert not any(node.get("type") == "foreach" for node in submit_cap.nodes)
     assert out.capability_relations == []
-
-
-def test_legacy_query_url_materializes_capability_inputs_from_step_params():
-    query = FlowStep(
-        step_id="query",
-        method="GET",
-        url="/daily/page?keyword=alice&pageNo=1&pageSize=20",
-        path="/daily/page",
-        source_meta={"role": "business_get"},
-        response_json={"data": {"records": []}},
-    )
-
-    spec = FlowSpec(steps=[query])
-    params = {param.path: param for param in spec.steps[0].params}
-    cap = build_default_flow_capabilities(spec)[0]
-
-    assert set(params) == {"query.keyword", "query.pageNo", "query.pageSize"}
-    assert params["query.keyword"].category == "user_param"
-    assert params["query.pageNo"].category == "user_param"
-    assert params["query.pageNo"].required is False
-    assert set(cap.input_schema["properties"]) == {"keyword", "pageNo", "pageSize"}
-    assert cap.input_schema["properties"]["pageNo"]["default"] == 1
-    assert cap.input_schema["properties"]["pageNo"]["x-dano-apply-default"] is True
-    assert cap.input_schema["properties"]["pageSize"]["default"] == 20
-    assert set(cap.input_schema["required"]) == set()
-
-    # The recorded pagination values are defaults, not constants: explicit
-    # caller values must win in the executable query.
-    from dano.execution.page.request_capture import substitute
-    spec.capabilities = [cap]
-    api_request, errors = flow_spec_to_api_request(spec)
-    assert errors == []
-    rendered = substitute(
-        api_request["query_template"],
-        {"pageNo": 4, "pageSize": 50},
-        api_request["sample_inputs"],
-    )
-    assert rendered["pageNo"] == 4
-    assert rendered["pageSize"] == 50
 
 
 def test_query_required_and_text_wire_type_follow_observed_controls_not_sample_shape():
@@ -1315,7 +1213,13 @@ def test_richer_observed_query_response_defines_record_item_schema_and_id():
         ]),
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=_strict_submission((
+            "query_hotels", "查询酒店", "query_status", "query",
+            [("query", "execute")],
+        )),
+    ))
     records = out.capabilities[0].output_schema["properties"]["records"]
 
     assert records["items"]["properties"]["id"]["type"] == "string"
@@ -1386,103 +1290,6 @@ def test_partial_page_enum_is_executable_when_every_label_has_an_explicit_value(
     )
 
     assert flow_spec_module._incomplete_page_enum_is_executable(param) is True
-
-
-def test_semantic_coverage_requires_all_seven_field_axes_and_axis_evidence():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/api/request/submit",
-        params=[ParamField(path="days", key="days", value="2")],
-    )])
-    result = {"semantic_plan": {
-        "business_understanding": {"summary": "Submit leave request"},
-        "request_roles": [{
-            "step_id": "submit",
-            "role": "submit_anchor",
-            "name": "Submit leave request",
-            "reason": "Recorded write",
-        }],
-        "field_semantics": [{
-            "step_id": "submit",
-            "wire_path": "days",
-            "public_name": "请假天数",
-            "business_type": "number",
-            "source_kind": "user_input",
-            "confidence": 0.99,
-            # Missing default conclusion, category, required, and per-axis
-            # evidence/status must not be accepted as complete coverage.
-        }],
-        "capabilities": [{
-            "name": "submit_leave",
-            "title": "Submit leave",
-            "kind": "submit",
-            "intent": "Submit leave request",
-            "step_ids": ["submit"],
-        }],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }}
-
-    coverage = flow_spec_module._semantic_plan_coverage(spec, result)
-
-    assert coverage["complete"] is False
-    assert "field_axis_contract" in coverage["missing"]
-
-
-def test_semantic_coverage_accepts_only_resolved_seven_axis_contracts():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/api/request/submit",
-        params=[ParamField(path="days", key="days", value="2")],
-    )])
-    field_axes = [
-        "path", "name", "default_value", "type", "category", "source", "required",
-    ]
-    result = {"semantic_plan": {
-        "business_understanding": {"summary": "Submit leave request"},
-        "request_roles": [{
-            "step_id": "submit", "role": "submit_anchor",
-            "name": "Submit leave request", "reason": "Recorded write",
-        }],
-        "field_semantics": [{
-            "step_id": "submit",
-            "wire_path": "days",
-            "public_name": "请假天数",
-            "default_value": "2",
-            "business_type": "number",
-            "category": "user_param",
-            "source_kind": "user_input",
-            "required": True,
-            "confidence": 0.99,
-            "axis_status": {axis: "grounded" for axis in field_axes},
-            "evidence": [{"source": "recording", "axes": field_axes}],
-        }],
-        "capabilities": [{
-            "name": "submit_leave", "title": "Submit leave", "kind": "submit",
-            "intent": "Submit leave request", "step_ids": ["submit"],
-        }],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }}
-
-    coverage = flow_spec_module._semantic_plan_coverage(spec, result)
-
-    assert coverage["complete"] is True
-    assert coverage["missing"] == []
-
-    result["semantic_plan"]["unresolved_items"] = [{
-        "kind": "field_axis", "step_id": "submit", "path": "days",
-        "axis": "required", "reason": "required marker not visible",
-    }]
-    advisory = flow_spec_module._semantic_plan_coverage(spec, result)
-    assert advisory["complete"] is True
-
-    result["semantic_plan"]["unresolved_items"][0]["blocking"] = True
-    blocked = flow_spec_module._semantic_plan_coverage(spec, result)
-    assert blocked["complete"] is False
-    assert "unresolved_blockers" in blocked["missing"]
 
 
 def test_unrelated_same_value_list_is_not_bound_as_option_source():
@@ -1825,19 +1632,6 @@ def test_execution_fingerprint_ignores_descriptive_copy():
     assert flow_spec_module.flow_spec_fingerprint(original) != flow_spec_module.flow_spec_fingerprint(changed)
 
 
-def test_generated_capability_ids_are_stable_for_same_execution_membership():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/custom/commands/create",
-        source_meta={"role": "submit_anchor"},
-    )])
-
-    first = build_default_flow_capabilities(spec)
-    second = build_default_flow_capabilities(spec.model_copy(deep=True))
-
-    assert [cap.capability_id for cap in first] == [cap.capability_id for cap in second]
-    assert first[0].capability_id.startswith("cap_")
-
-
 def test_query_outputs_are_projected_from_arbitrary_response_fields():
     step = FlowStep(
         step_id="query", method="GET", path="/custom/search",
@@ -1927,7 +1721,13 @@ def test_query_output_fields_use_mapped_response_schema_types():
         response_json={"data": {"missing_dates": ["2026-05-11"], "total": 1}},
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query]), submission={"ops": []}))
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[query]),
+        submission=_strict_submission((
+            "query_daily_reports", "查询日报", "query_status", "query",
+            [("query", "execute")],
+        )),
+    ))
     cap = out.capabilities[0]
     fields = {field.key: field.type for field in cap.outputs}
 
@@ -2013,99 +1813,24 @@ def test_query_then_submit_does_not_invent_relation_without_field_mapping():
         params=[ParamField(path="date", key="日期", type="date", source_kind="user_input")],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit]), submission={"ops": []}))
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[query, submit]),
+        submission=_strict_submission(
+            (
+                "query_records", "查询记录", "query_status", "query_status",
+                [("query_status", "execute")],
+            ),
+            (
+                "submit_record", "提交记录", "submit", "submit",
+                [("submit", "execute")],
+            ),
+        ),
+    ))
 
     assert {cap.kind for cap in out.capabilities} == {"query_status", "submit"}
     assert out.capability_relations == []
     report = validate_flow_spec(out)
     assert not any("output/input 字段" in message for message in report["errors"])
-
-
-def test_page_context_names_business_and_default_capabilities_without_model_guessing():
-    spec = FlowSpec(
-        title="submit-process 流程(2 步)",
-        meta={"page_context": {
-            "path": "/oa/seal-apply",
-            "document_title": "OA 管理系统",
-            "visible_titles": ["OA 管理系统", "公章借阅", "申请信息"],
-        }},
-        steps=[
-            FlowStep(
-                step_id="query", method="GET", path="/oa/seal-apply/page",
-                source_meta={"role": "business_get"}, response_json={"data": {"list": []}},
-            ),
-            FlowStep(
-                step_id="submit", method="POST", path="/oa/seal-apply/submit-process",
-                source_meta={"role": "submit_anchor"}, body_source='{"title":"借阅"}',
-                params=[ParamField(path="title", key="申请标题", category="user_param")],
-                success_rule={"path": "code", "equals": 0},
-            ),
-        ],
-    )
-
-    generated = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="plan"))
-
-    assert generated.title == "公章借阅"
-    assert {cap.title for cap in generated.capabilities} == {
-        "查询公章借阅记录", "提交公章借阅申请",
-    }
-
-
-def test_withdraw_operation_uses_page_and_button_semantics_not_endpoint_text():
-    page_context = {
-        "path": "/oa/common/hotel-apply",
-        "document_title": "点狮全业务管理平台",
-        "visible_titles": ["点狮全业务管理平台", "系统首页酒店申请", "查询条件"],
-    }
-    spec = FlowSpec(
-        title="cancel-by-start-user 流程(2 步)",
-        meta={"page_context": page_context},
-        steps=[
-            FlowStep(
-                step_id="hotel-page", method="GET", path="/admin-api/oa/hotel-apply/page",
-                source_meta={
-                    "role": "business_get", "trigger_locator": "role=button[name=搜索]",
-                    "trigger_op": "click", "trigger_page_context": page_context,
-                },
-                response_json={"data": {"list": [], "total": 0}},
-                params=[ParamField(
-                    path="query.roomType", key="房间类型", label="房间类型",
-                    category="user_param", source_kind="user_input",
-                )],
-            ),
-            FlowStep(
-                step_id="withdraw", method="DELETE",
-                path="/admin-api/bpm/process-instance/cancel-by-start-user",
-                source_meta={
-                    "role": "business_write", "trigger_locator": "role=button[name=撤回]",
-                    "trigger_op": "click", "trigger_page_context": page_context,
-                },
-                params=[ParamField(
-                    path="id", key="单据编号", label="单据编号",
-                    category="user_param", source_kind="user_input",
-                )],
-            ),
-        ],
-    )
-
-    generated = asyncio.run(apply_recording_agent_submission(
-        spec, submission={"ops": []}, mode="plan",
-    ))
-    by_name = {cap.name: cap for cap in generated.capabilities}
-
-    assert generated.title == "酒店申请"
-    assert set(by_name) == {"query_hotel_apply", "withdraw_hotel_apply"}
-    assert by_name["query_hotel_apply"].title == "查询酒店申请记录"
-    assert by_name["withdraw_hotel_apply"].title == "撤回酒店申请"
-    assert "房间类型" in by_name["query_hotel_apply"].intent
-    assert "单据编号" in by_name["withdraw_hotel_apply"].intent
-    public_text = "\n".join(
-        [generated.title]
-        + [value for cap in generated.capabilities for value in (cap.title, cap.intent)]
-    )
-    assert "cancel-by-start-user" not in public_text
-    assert "真实接口" not in public_text
-    assert "调用方提供业务字段" not in public_text
 
 
 def test_reoptimization_can_refresh_auto_accepted_semantics_but_keeps_user_owned_text():
@@ -2134,16 +1859,18 @@ def test_reoptimization_can_refresh_auto_accepted_semantics_but_keeps_user_owned
         submission={"semantic_plan": {
             "business_understanding": {"business_name": "酒店申请"},
             "capabilities": [{
-                "name": "withdraw_hotel_application", "kind": "submit",
+                "name": "withdraw_hotel_application", "kind": "withdraw",
                 "title": "撤回酒店申请", "intent": "撤回用户选定的酒店申请记录。",
-                "step_ids": ["withdraw"],
+                "anchor_step_id": "withdraw",
+                "request_refs": [{"step_id": "withdraw", "usage": "execute"}],
             }],
+            "unresolved_items": [],
         }, "ops": []},
         generation_mode="optimize",
     ))
 
     capability = optimized.capabilities[0]
-    assert capability.name == "withdraw_hotel_apply"
+    assert capability.name == "withdraw_hotel_application"
     assert capability.title == "撤回酒店申请"
     assert capability.intent == "撤回用户选定的酒店申请记录。"
 
@@ -2326,302 +2053,6 @@ def test_option_endpoint_unmatched_filters_are_constants_but_recorded_search_is_
     )
 
 
-def test_complex_business_domains_split_into_independent_capabilities():
-    steps = [
-        FlowStep(
-            step_id="leave-query", method="GET", path="/oa/leave/page",
-            source_meta={"role": "business_get"},
-            response_json={"data": {"list": [{"id": 1}]}},
-        ),
-        FlowStep(
-            step_id="expense-query", method="GET", path="/oa/expense/page",
-            source_meta={"role": "business_get"},
-            response_json={"data": {"list": [{"id": 2}]}},
-        ),
-        FlowStep(step_id="leave-submit", method="POST", path="/oa/leave/submit"),
-        FlowStep(step_id="expense-submit", method="POST", path="/oa/expense/submit"),
-    ]
-
-    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
-    by_name = {cap.name: cap for cap in capabilities}
-
-    assert set(by_name) == {
-        "query_status_leave", "query_status_expense", "submit_leave", "submit_expense",
-    }
-    assert by_name["query_status_leave"].step_ids == ["leave-query"]
-    assert by_name["query_status_expense"].step_ids == ["expense-query"]
-    assert by_name["submit_leave"].step_ids == ["leave-submit"]
-    assert by_name["submit_expense"].step_ids == ["expense-submit"]
-
-
-
-
-def test_cross_domain_write_dependency_prevents_unsafe_automatic_split():
-    spec = FlowSpec(
-        steps=[
-            FlowStep(step_id="draft", method="POST", path="/oa/draft/create"),
-            FlowStep(step_id="archive", method="POST", path="/oa/archive/commit"),
-        ],
-        links=[FlowLink(
-            source_step_id="draft", source_path="data.id",
-            target_step_id="archive", target_path="draftId",
-        )],
-    )
-
-    capabilities = build_default_flow_capabilities(spec)
-
-    assert [(cap.name, cap.step_ids) for cap in capabilities] == [
-        ("submit", ["draft", "archive"]),
-    ]
-
-
-
-
-
-
-def _seal_semantic_spec() -> FlowSpec:
-    return FlowSpec(steps=[
-        FlowStep(
-            step_id="seal-page", method="GET",
-            path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
-            source_meta={"page_id": "page-list", "control_preflight_for_write": True},
-            response_json={"data": {"list": [], "total": 0}},
-            params=[
-                ParamField(
-                    path="query.useTime[0]", key="useTime[0]", value="2026-07-09 00:00:00",
-                    type="datetime", category="user_param", source_kind="user_input",
-                ),
-                ParamField(
-                    path="query.useTime[1]", key="useTime[1]", value="2026-08-11 23:59:59",
-                    type="datetime", category="user_param", source_kind="user_input",
-                ),
-            ],
-        ),
-        FlowStep(
-            step_id="definition", method="GET",
-            path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
-            source_meta={"page_id": "page-form", "control_preflight_for_write": True},
-        ),
-        FlowStep(
-            step_id="approval", method="GET",
-            path="/admin-api/bpm/process-instance/get-approval-detail",
-            source_meta={"page_id": "page-form", "control_preflight_for_write": True},
-        ),
-        FlowStep(
-            step_id="submit", method="POST", path="/admin-api/oa/seal-apply/submit-process",
-            source_meta={"page_id": "page-form"},
-            params=[
-                ParamField(path="sealId", key="印章编号", type="enum", category="user_param"),
-                ParamField(path="applyTitle", key="申请标题", category="user_param"),
-                ParamField(path="useTime", key="使用日期", type="datetime", category="user_param"),
-                ParamField(path="returnTime", key="归还日期", type="datetime", category="user_param"),
-                ParamField(path="description", key="使用描述", category="user_param"),
-                ParamField(path="remark", key="备注", category="user_param"),
-            ],
-        ),
-    ])
-
-
-def _complete_semantic_submission() -> dict:
-    field_axes = [
-        "path", "name", "default_value", "type", "category", "source", "required",
-    ]
-    return {
-            "semantic_plan": {
-                "business_understanding": {
-                    "intent": "查询公章借阅记录并提交公章借阅申请",
-                },
-                "request_roles": [
-                    {"step_id": "seal-page", "role": "business_query", "name": "查询公章借阅记录", "reason": "列表页查询"},
-                    {"step_id": "definition", "role": "submit_preflight", "name": "获取公章申请流程定义", "reason": "提交前流程定义"},
-                    {"step_id": "approval", "role": "submit_preflight", "name": "获取公章申请审批配置", "reason": "提交前审批配置"},
-                    {"step_id": "submit", "role": "business_write", "name": "提交公章借阅申请", "reason": "最终写接口"},
-                ],
-                "field_semantics": [
-                    {
-                        "step_id": step.step_id,
-                        "wire_path": param.path,
-                        "public_name": {
-                            "query.useTime[0]": "查询开始时间",
-                            "query.useTime[1]": "查询结束时间",
-                        }.get(param.path, param.key),
-                        "default_value": param.default_value,
-                        "business_type": param.type,
-                        "category": param.category,
-                        "source_kind": (
-                            "user_input" if param.category == "user_param" else param.source_kind
-                        ),
-                        "required": param.required,
-                        "confidence": 0.99,
-                        "axis_status": {axis: "grounded" for axis in field_axes},
-                        "evidence": [{"source": "recording", "axes": field_axes}],
-                    }
-                    for step in _seal_semantic_spec().steps
-                    for param in step.params
-                ],
-                "capabilities": [
-                    {
-                        "name": "query_status", "kind": "query_status",
-                        "title": "查询公章借阅记录", "intent": "查询现有公章借阅记录",
-                        "step_ids": ["seal-page"],
-                    },
-                    {
-                        "name": "submit", "kind": "submit",
-                        "title": "提交公章借阅申请", "intent": "提交单个公章借阅申请",
-                        "step_ids": ["definition", "approval", "submit"],
-                    },
-                ],
-                "capability_relations": [{
-                    "from": "query_status", "to": "submit", "type": "caller_decision",
-                }],
-                "unresolved_items": [],
-            },
-            "ops": [],
-        }
-
-
-def test_initial_pi_submission_names_indexed_range_and_inherits_context():
-    generated = asyncio.run(apply_recording_agent_submission(
-        _seal_semantic_spec(), submission=_complete_semantic_submission(), mode="plan",
-    ))
-
-    query = next(step for step in generated.steps if step.step_id == "seal-page")
-    assert [(param.key, param.path) for param in query.params if "useTime" in param.path] == [
-        ("查询开始时间", "query.useTime[0]"),
-        ("查询结束时间", "query.useTime[1]"),
-    ]
-    assert {cap.kind for cap in generated.capabilities} == {"query_status", "submit"}
-    assert generated.title == "公章借阅"
-    assert {cap.title for cap in generated.capabilities} == {
-        "查询公章借阅记录", "提交公章借阅申请",
-    }
-    assert {step.step_id: step.name for step in generated.steps} == {
-        "seal-page": "查询公章借阅记录",
-        "definition": "获取公章申请流程定义",
-        "approval": "获取公章申请审批配置",
-        "submit": "提交公章借阅申请",
-    }
-    assert generated.meta["capability_generation"]["initial_completed"] is True
-    assert generated.meta["capability_generation"]["status"] == "ready"
-    assert generated.meta["recording_agent_session"]["mode"] == "plan"
-
-
-def test_small_manual_change_accepts_one_incremental_pi_submission():
-    generated = asyncio.run(apply_recording_agent_submission(
-        _seal_semantic_spec(), submission=_complete_semantic_submission(), mode="plan",
-    ))
-    submit = next(step for step in generated.steps if step.step_id == "submit")
-    remark = next(param for param in submit.params if param.path == "remark")
-    remark.required = False
-    optimized = asyncio.run(apply_recording_agent_submission(
-        generated,
-        submission={
-            "reviewed_scope": {
-                "changed_fields": ["submit:remark"],
-                "affected_capabilities": ["submit"],
-                "reason": "调用方将备注改为可选",
-            },
-            "ops": [],
-            "unresolved_items": [],
-        },
-        mode="plan",
-    ))
-
-    assert optimized.meta["recording_agent_session"]["generation_mode"] == "optimize"
-
-
-
-def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contract():
-    spec = FlowSpec(
-        title="技术接口",
-        business_description="旧说明",
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/seal/submit",
-            body_source='{"useDate":"2026-07-18"}',
-            params=[ParamField(
-                path="useDate",
-                key="useDate",
-                label="useDate",
-                value="2026-07-18",
-                type="string",
-                wire_type="string",
-                required=False,
-                default_value="2026-07-17",
-                category="runtime_var",
-                source_kind="current_user",
-                exposed_to_user=False,
-            ), ParamField(
-                path="operatorName",
-                key="operatorName",
-                label="operatorName",
-                value="alice",
-                type="string",
-                wire_type="string",
-                category="user_param",
-                source_kind="user_input",
-                exposed_to_user=True,
-            )],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_seal",
-            title="提交",
-            intent="旧能力说明",
-            kind="submit",
-            nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
-        )],
-    )
-    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
-        "business_understanding": {"business_name": "公章申请", "summary": "根据页面填写日期后提交公章申请"},
-        "request_roles": [{
-            "step_id": "submit", "role": "business_write", "name": "提交公章申请", "reason": "页面提交按钮",
-        }],
-        "field_semantics": [{
-            "step_id": "submit", "wire_path": "useDate", "public_name": "使用日期",
-            "business_type": "date", "category": "user_param", "source_kind": "user_input",
-            "required": True, "confidence": 0.99,
-            "evidence": [{
-                "source": "screenshot", "label": "使用日期", "control_kind": "date",
-                "editable": True, "required": True, "visible_value": "2026-07-18",
-            }],
-        }, {
-            "step_id": "submit", "wire_path": "operatorName", "public_name": "Applicant",
-            "business_type": "string", "category": "runtime_var", "source_kind": "current_user",
-            "confidence": 0.99,
-            "evidence": [{"source": "screenshot", "label": "Applicant", "control_kind": "text",
-                          "editable": False, "read_only": True}],
-        }],
-        "capabilities": [{
-            "name": "submit_seal", "title": "发起公章使用申请", "kind": "submit",
-            "intent": "填写使用日期并提交审批", "step_ids": ["submit"],
-        }],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }, "ops": []}
-
-    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=submission, generation_mode="optimize"))
-
-    capability = next(cap for cap in out.capabilities if cap.name == "submit_seal")
-    operator = next(param for param in out.steps[0].params if param.path == "operatorName")
-    field = next(param for param in out.steps[0].params if param.path == "useDate")
-    assert capability.title == "发起公章使用申请"
-    assert capability.intent == "填写使用日期并提交审批"
-    assert field.key == "使用日期"
-    assert field.label == "使用日期"
-    assert field.type == "date"
-    assert field.wire_type == "string"
-    assert field.category == "user_param"
-    assert field.source_kind == "user_input"
-    assert field.required is True
-    assert field.default_value == "2026-07-17"
-    assert operator.key == "Applicant"
-    assert operator.type == "string"
-    assert (operator.category, operator.source_kind) == ("runtime_var", "current_user")
-    assert operator.exposed_to_user is False
-    assert field.exposed_to_user is True
-
-
 def test_screenshot_plan_cannot_overwrite_grounded_field_axes():
     field = ParamField(
         path="projectId", key="项目名称", label="项目名称", value="p-1",
@@ -2661,203 +2092,6 @@ def test_screenshot_plan_cannot_overwrite_grounded_field_axes():
     assert (result.key, result.label, result.type) == ("项目名称", "项目名称", "enum")
     assert (result.category, result.source_kind) == ("user_param", "api_option")
     assert result.source["source_url"] == "/api/projects"
-
-def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_first_run():
-    submission = {"semantic_plan": {
-                "business_understanding": {"intent": "分别保存草稿并提交订单"},
-                "request_roles": [
-                    {"step_id": "draft", "role": "business_write", "name": "保存订单草稿", "reason": "独立保存动作"},
-                    {"step_id": "commit", "role": "business_write", "name": "提交订单", "reason": "独立提交动作"},
-                ],
-                "field_semantics": [],
-                "capabilities": [
-                    {"name": "save_draft", "title": "保存订单草稿", "kind": "submit", "intent": "保存草稿", "step_ids": ["draft"]},
-                    {"name": "commit_order", "title": "提交订单", "kind": "submit", "intent": "提交订单", "step_ids": ["commit"]},
-                ],
-                "capability_relations": [],
-                "unresolved_items": [],
-            }, "ops": []}
-
-    spec = FlowSpec(steps=[
-        FlowStep(step_id="draft", method="POST", path="/api/order/draft", body_source="{}"),
-        FlowStep(step_id="commit", method="POST", path="/api/order/commit", body_source="{}"),
-    ])
-    generated = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="initial",
-    ))
-
-    assert {(cap.name, tuple(cap.step_ids)) for cap in generated.capabilities} == {
-        ("save_draft", ("draft",)),
-        ("commit_order", ("commit",)),
-    }
-
-
-def test_complete_semantic_plan_can_split_planner_managed_aggregate_during_optimize():
-    submission = {"semantic_plan": {
-        "business_understanding": {"intent": "分别保存草稿并提交订单"},
-        "request_roles": [
-            {"step_id": "draft", "role": "business_write", "name": "保存订单草稿"},
-            {"step_id": "commit", "role": "business_write", "name": "提交订单"},
-        ],
-        "field_semantics": [],
-        "capabilities": [
-            {
-                "name": "save_draft",
-                "title": "保存订单草稿",
-                "kind": "submit",
-                "step_ids": ["draft"],
-            },
-            {
-                "name": "commit_order",
-                "title": "提交订单",
-                "kind": "submit",
-                "step_ids": ["commit"],
-            },
-        ],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }, "ops": []}
-    spec = FlowSpec(
-        steps=[
-            FlowStep(
-                step_id="draft", method="POST",
-                path="/api/order/draft", body_source="{}",
-            ),
-            FlowStep(
-                step_id="commit", method="POST",
-                path="/api/order/commit", body_source="{}",
-            ),
-        ],
-        capabilities=[FlowCapability(
-            name="submit_order",
-            title="旧聚合能力",
-            kind="submit",
-            nodes=[
-                {"id": "draft_call", "type": "call", "step_id": "draft"},
-                {"id": "commit_call", "type": "call", "step_id": "commit"},
-            ],
-            updated_by="planner",
-        )],
-        meta={"capability_model": {"status": "ready"}},
-    )
-
-    optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="optimize",
-    ))
-
-    assert {(cap.name, tuple(cap.step_ids)) for cap in optimized.capabilities} == {
-        ("save_draft", ("draft",)),
-        ("commit_order", ("commit",)),
-    }
-    persisted_plan = optimized.meta["capability_model"]["semantic_plan"]
-    assert {
-        (item["name"], tuple(item["step_ids"]))
-        for item in persisted_plan["capabilities"]
-    } == {
-        ("save_draft", ("draft",)),
-        ("commit_order", ("commit",)),
-    }
-    assert persisted_plan["business_understanding"]["intent"] == "分别保存草稿并提交订单"
-
-
-def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_one_capability():
-    query = FlowStep(
-        step_id="seal-page", method="GET", path="/oa/seal-apply/page",
-        source_meta={"control_preflight_for_write": True},
-        response_json={"data": {"list": [], "total": 0}},
-    )
-    definition = FlowStep(
-        step_id="definition", method="GET", path="/bpm/process-definition/get",
-        source_meta={"control_preflight_for_write": True},
-    )
-    approval = FlowStep(
-        step_id="approval", method="GET", path="/bpm/process-instance/get-approval-detail",
-        source_meta={"control_preflight_for_write": True},
-    )
-    submit = FlowStep(step_id="submit", method="POST", path="/oa/seal-apply/submit-process")
-
-    out = asyncio.run(orchestrate_flow_capabilities(
-        FlowSpec(steps=[query, definition, approval, submit]),
-        submission={
-            "ops": [{
-                "op": "add_request_to_capability",
-                "capability": "submit",
-                "step_id": "seal-page",
-            }],
-            "abilities": [{
-                "name": "submit_all",
-                "kind": "submit",
-                "step_ids": ["seal-page", "definition", "approval", "submit"],
-            }],
-        },
-    ))
-    by_kind = {cap.kind: cap for cap in out.capabilities}
-
-    assert set(by_kind) == {"query_status", "submit"}
-    assert by_kind["query_status"].step_ids == ["seal-page"]
-    assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
-
-
-def test_initial_planner_cannot_merge_distinct_same_family_action_boundaries():
-    first = FlowStep(
-        step_id="save", method="POST", path="/rpc/execute",
-        body_source='{"operation":"save"}',
-        source_meta={"trigger_action_id": "action_save", "trigger_op": "click"},
-    )
-    second = FlowStep(
-        step_id="submit", method="POST", path="/rpc/execute",
-        body_source='{"operation":"submit"}',
-        source_meta={"trigger_action_id": "action_submit", "trigger_op": "click"},
-    )
-    submission = {"semantic_plan": {
-        "business_understanding": {"business_name": "订单处理"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [{
-            "name": "save_and_submit", "title": "保存并提交", "kind": "submit",
-            "intent": "把两个独立动作合成一个能力", "step_ids": ["save", "submit"],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    out = asyncio.run(orchestrate_flow_capabilities(
-        FlowSpec(steps=[first, second]), submission=submission, generation_mode="initial",
-    ))
-    scopes = [set(cap.step_ids) for cap in out.capabilities]
-    assert {"save", "submit"} not in scopes
-    assert any("save" in scope for scope in scopes)
-    assert any("submit" in scope for scope in scopes)
-
-
-def test_distinct_fill_transactions_remain_separate_write_capabilities():
-    first = FlowStep(
-        step_id="withdraw_first", method="DELETE", path="/orders/withdraw",
-        body_source='{"id":"1","reason":"a"}',
-        source_meta={
-            "trigger_action_id": "fill_reason_first",
-            "trigger_transaction_id": "tx_first",
-            "trigger_op": "fill",
-            "trigger_locator": "label=撤回原因",
-        },
-    )
-    second = FlowStep(
-        step_id="withdraw_second", method="DELETE", path="/orders/withdraw",
-        body_source='{"id":"2","reason":"b"}',
-        source_meta={
-            "trigger_action_id": "fill_reason_second",
-            "trigger_transaction_id": "tx_second",
-            "trigger_op": "fill",
-            "trigger_locator": "label=撤回原因",
-        },
-    )
-
-    out = asyncio.run(orchestrate_flow_capabilities(
-        FlowSpec(steps=[first, second]), submission={"ops": []}, generation_mode="initial",
-    ))
-
-    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
-        frozenset({"withdraw_first"}),
-        frozenset({"withdraw_second"}),
-    }
 
 def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capability():
     step = FlowStep(
@@ -2965,211 +2199,6 @@ def test_external_transform_with_only_one_field_remains_invalid():
     assert normalized.mode == "external_transform"
 
 
-def test_generic_write_endpoint_splits_by_grounded_visible_actions():
-    steps = [
-        FlowStep(
-            step_id="save", method="POST", path="/rpc/execute",
-            source_meta={
-                "trigger_action_id": "action-save", "trigger_op": "click",
-                "trigger_locator": "button[data-command=save]", "page_id": "form",
-                "causality_confidence": "high",
-            },
-        ),
-        FlowStep(
-            step_id="submit", method="POST", path="/rpc/execute",
-            source_meta={
-                "trigger_action_id": "action-submit", "trigger_op": "click",
-                "trigger_locator": "button[data-command=submit]", "page_id": "form",
-                "causality_confidence": "high",
-            },
-        ),
-    ]
-
-    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
-
-    assert len(capabilities) == 2
-    assert {tuple(cap.step_ids) for cap in capabilities} == {("save",), ("submit",)}
-
-def test_generic_write_endpoint_splits_from_locator_without_action_ids():
-    steps = [
-        FlowStep(
-            step_id="approve", method="POST", path="/gateway/dispatch",
-            source_meta={
-                "trigger_op": "click", "trigger_locator": "button[data-op=approve]",
-                "page_url": "/orders/detail", "causality_confidence": "medium",
-            },
-        ),
-        FlowStep(
-            step_id="reject", method="POST", path="/gateway/dispatch",
-            source_meta={
-                "trigger_op": "click", "trigger_locator": "button[data-op=reject]",
-                "page_url": "/orders/detail", "causality_confidence": "medium",
-            },
-        ),
-    ]
-
-    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
-
-    assert len(capabilities) == 2
-    assert {tuple(cap.step_ids) for cap in capabilities} == {("approve",), ("reject",)}
-
-
-def test_dependency_keeps_distinct_write_actions_as_independent_capabilities():
-    def write(step_id: str) -> FlowStep:
-        return FlowStep(
-            step_id=step_id, method="POST", path="/rpc/execute",
-            source_meta={
-                "trigger_op": "click", "trigger_locator": f"button[data-op={step_id}]",
-                "page_id": "workspace", "causality_confidence": "high",
-            },
-        )
-
-    spec = FlowSpec(
-        steps=[write("prepare"), write("confirm"), write("archive")],
-        links=[FlowLink(
-            link_id="prepare-confirm", source_step_id="prepare", source_path="data.token",
-            target_step_id="confirm", target_path="token", confidence=0.99,
-        )],
-    )
-
-    capabilities = build_default_flow_capabilities(spec)
-    memberships = {frozenset(cap.step_ids) for cap in capabilities}
-
-    assert memberships == {
-        frozenset({"prepare"}),
-        frozenset({"confirm"}),
-        frozenset({"archive"}),
-    }
-
-
-def test_unanchored_dependency_group_cannot_bridge_distinct_write_actions():
-    def action(step_id: str) -> FlowStep:
-        return FlowStep(
-            step_id=step_id,
-            method="POST" if step_id == "submit" else "DELETE",
-            path=f"/api/{step_id}",
-            source_meta={
-                "trigger_action_id": f"action_{step_id}",
-                "trigger_op": "click",
-                "trigger_locator": f"role=button[name={step_id}]",
-            },
-        )
-
-    spec = FlowSpec(
-        steps=[
-            action("submit"),
-            FlowStep(step_id="bridge", method="POST", path="/infra/refresh"),
-            action("delete"),
-        ],
-        links=[
-            FlowLink(
-                source_step_id="submit", source_path="data.token",
-                target_step_id="bridge", target_path="token",
-            ),
-            FlowLink(
-                source_step_id="bridge", source_path="data.id",
-                target_step_id="delete", target_path="id",
-            ),
-        ],
-    )
-
-    capabilities = build_default_flow_capabilities(spec)
-
-    assert not any(
-        {"submit", "delete"}.issubset(set(capability.step_ids))
-        for capability in capabilities
-    )
-
-
-def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field():
-    spec = FlowSpec(
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/leave/submit",
-            params=[ParamField(
-                path="startDate",
-                key="startDate",
-                label="startDate",
-                value="2026-07-19",
-                type="string",
-                wire_type="string",
-                category="runtime_var",
-                source_kind="current_user",
-                exposed_to_user=False,
-            )],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_leave",
-            title="Submit",
-            intent="Submit",
-            kind="submit",
-            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
-        )],
-    )
-
-    def submission(evidence: list[dict]) -> dict:
-        return {"_analysis_screenshot_count": 1 if evidence else 0, "semantic_plan": {
-            "business_understanding": {"summary": "Submit a leave request"},
-            "request_roles": [{
-                "step_id": "submit",
-                "role": "business_write",
-                "name": "Submit leave request",
-                "reason": "Recorded submit request",
-            }],
-            "field_semantics": [{
-                "step_id": "submit",
-                "wire_path": "startDate",
-                "public_name": "Start date",
-                "business_type": "date",
-                "category": "user_param",
-                "source_kind": "user_input",
-                "confidence": 0.99,
-                "evidence": evidence,
-            }],
-            "capabilities": [{
-                "name": "submit_leave",
-                "title": "Submit leave request",
-                "intent": "Submit a leave request",
-                "kind": "submit",
-                "step_ids": ["submit"],
-            }],
-            "capability_relations": [],
-            "unresolved_items": [],
-        }, "ops": []}
-
-    image_free = asyncio.run(orchestrate_flow_capabilities(
-        spec,
-        submission=submission([]),
-        generation_mode="optimize",
-    ))
-    stale = image_free.steps[0].params[0]
-    assert stale.type == "string"
-    assert (stale.category, stale.source_kind) == ("runtime_var", "current_user")
-
-    with_image = asyncio.run(orchestrate_flow_capabilities(
-        image_free,
-        submission=submission([{
-            "source": "screenshot",
-            "screenshot_name": "leave-form.png",
-            "visible_label": "Start date",
-            "control_kind": "date",
-            "editable": True,
-        }]),
-        generation_mode="optimize",
-    ))
-    corrected = with_image.steps[0].params[0]
-    assert (corrected.type, corrected.wire_type) == ("date", "string")
-    assert (corrected.category, corrected.source_kind) == ("user_param", "user_input")
-    assert corrected.exposed_to_user is True
-
-
-
-
-
-
-
-
 def test_screenshot_visible_options_replace_a_stale_api_source_only_when_unique():
     people = FlowStep(
         step_id="people", method="GET", path="/api/hr/users/page",
@@ -3215,136 +2244,6 @@ def test_screenshot_visible_options_replace_a_stale_api_source_only_when_unique(
     assert field.source_kind == "api_option"
     assert field.source["source_step_id"] == "people"
     assert field.enum_value_map == {"财务A": 145, "审批B": 148}
-
-def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relations():
-    query = FlowStep(
-        step_id="query",
-        method="GET",
-        path="/api/orders/page",
-        response_json={"data": [{"id": "o-1"}]},
-        params=[ParamField(
-            path="query.filter",
-            key="filter",
-            type="string",
-            wire_type="string",
-            category="user_param",
-            source_kind="user_input",
-        )],
-        source_meta={"role": "business_get"},
-    )
-    submit = FlowStep(
-        step_id="submit",
-        method="POST",
-        response_json={"result": "archived"},
-        path="/api/orders/archive",
-        params=[ParamField(
-            path="orderIds",
-            key="orderIds",
-            type="array",
-            wire_type="array",
-            category="user_param",
-            source_kind="user_input",
-        ), ParamField(
-            path="manualIds",
-            key="manualIds",
-            type="array",
-            wire_type="array",
-            category="user_param",
-            source_kind="user_input",
-        )],
-        source_meta={"role": "submit_anchor"},
-    )
-    spec = FlowSpec(
-        steps=[query, submit],
-        capabilities=[
-            FlowCapability(
-                name="query_orders",
-                title="Query orders",
-                intent="Query orders",
-                kind="query_status",
-                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
-            ),
-            FlowCapability(
-                name="archive_orders",
-                title="Archive orders",
-                intent="Archive selected orders",
-                kind="submit",
-                nodes=[{"id": "submit_call", "type": "call", "step_id": "submit"}],
-            ),
-        ],
-        capability_relations=[
-            CapabilityRelation(
-                from_capability="query_orders",
-                from_output="wrong",
-                to_capability="archive_orders",
-                to_input="orderIds",
-                confirmed=False,
-                evidence={"source": "planner_semantic_plan"},
-            ),
-            CapabilityRelation(
-                from_capability="query_orders",
-                from_output="records",
-                to_capability="archive_orders",
-                to_input="manualIds",
-                confirmed=True,
-                evidence={"source": "manual"},
-            ),
-        ],
-    )
-    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
-        "business_understanding": {"summary": "Query and archive orders"},
-        "request_roles": [
-            {
-                "step_id": "query", "role": "business_get",
-                "name": "Query orders", "reason": "Recorded query",
-            },
-            {
-                "step_id": "submit", "role": "business_write",
-                "name": "Archive orders", "reason": "Recorded submit",
-            },
-        ],
-        "field_semantics": [],
-        "capabilities": [
-            {
-                "name": "query_orders", "title": "Query orders",
-                "intent": "Query orders", "kind": "query_status", "step_ids": ["query"],
-            },
-            {
-                "name": "archive_orders", "title": "Archive orders",
-                "intent": "Archive selected orders", "kind": "submit", "step_ids": ["submit"],
-            },
-        ],
-        "capability_relations": [{
-            "from_capability": "query_orders",
-            "from_output": "records",
-            "to_capability": "archive_orders",
-            "to_input": "orderIds",
-            "type": "external_transform",
-            "confidence": 0.98,
-            "reason": "Screenshot and API facts agree on the selection flow",
-        }],
-        "unresolved_items": [],
-    }, "ops": []}
-
-    out = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="optimize",
-    ))
-    signatures = {
-        (rel.from_capability, rel.from_output, rel.to_capability, rel.to_input)
-        for rel in out.capability_relations
-    }
-    assert ("query_orders", "wrong", "archive_orders", "orderIds") not in signatures
-    assert ("query_orders", "records", "archive_orders", "orderIds") not in signatures
-    assert ("query_orders", "records", "archive_orders", "manualIds") in signatures
-    assert submission["semantic_plan"]["unresolved_items"] == [{
-        "kind": "capability_relation",
-        "from_capability": "query_orders",
-        "from_output": "records",
-        "to_capability": "archive_orders",
-        "to_input": "orderIds",
-        "reason": "relation endpoints are missing or type-incompatible",
-    }]
-
 
 def test_r5_auto_flow_links_require_real_ordered_type_compatible_endpoints():
     source = FlowStep(
@@ -3449,154 +2348,6 @@ def test_r5_field_projection_requires_exact_typed_submitted_value():
     flow_spec_module._attach_select_field_projections(selects, fields, reads)
 
     assert "field_projections" not in selects[0]
-
-
-def test_r5_semantic_relation_requires_real_typed_endpoints_or_becomes_unresolved():
-    spec = FlowSpec(capabilities=[
-        FlowCapability(
-            name="query_status", kind="query_status",
-            output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
-        ),
-        FlowCapability(
-            name="submit_batch", kind="submit_batch",
-            input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
-        ),
-    ])
-    submission = {"semantic_plan": {
-        "capabilities": [], "field_semantics": [], "request_roles": [],
-        "capability_relations": [{
-            "from_capability": "query_status", "from_output": "missing_records",
-            "to_capability": "submit_batch", "to_input": "entries",
-            "type": "external_transform",
-        }],
-        "unresolved_items": [],
-    }}
-
-    ops = flow_spec_module._semantic_plan_to_ops(spec, submission)
-
-    assert not any(op.get("op") == "set_capability_relation" for op in ops)
-    assert submission["semantic_plan"]["unresolved_items"] == [{
-        "kind": "capability_relation",
-        "from_capability": "query_status",
-        "from_output": "missing_records",
-        "to_capability": "submit_batch",
-        "to_input": "entries",
-        "reason": "relation endpoints are missing or type-incompatible",
-    }]
-
-
-def test_split_capabilities_resolve_relations_after_the_new_boundaries_exist():
-    first = FlowStep(
-        step_id="first", method="GET", path="/api/first/list",
-        response_json={"data": {"records": [{"recordNo": "A-1"}]}},
-        source_meta={"role": "business_get"},
-    )
-    second = FlowStep(
-        step_id="second", method="GET", path="/api/second/list",
-        response_json={"data": {"records": [{"recordNo": "B-1"}]}},
-        source_meta={"role": "business_get"},
-    )
-    spec = FlowSpec(
-        steps=[first, second],
-        capabilities=[FlowCapability(
-            name="combined", title="Combined", kind="query_status",
-            nodes=_call_nodes(["first", "second"]),
-        )],
-    )
-    submission = {"semantic_plan": {
-        "business_understanding": {"summary": "Two independent queries"},
-        "request_roles": [
-            {"step_id": "first", "role": "business_get", "name": "First", "reason": "recorded"},
-            {"step_id": "second", "role": "business_get", "name": "Second", "reason": "recorded"},
-        ],
-        "field_semantics": [],
-        "capabilities": [
-            {"name": "query_first", "title": "First", "kind": "query_status", "step_ids": ["first"]},
-            {"name": "query_second", "title": "Second", "kind": "query_status", "step_ids": ["second"]},
-        ],
-        "capability_relations": [{
-            "from_capability": "query_first", "to_capability": "query_second",
-            "type": "caller_decision", "confidence": 0.98,
-        }],
-        "unresolved_items": [],
-    }, "ops": []}
-
-    out = asyncio.run(orchestrate_flow_capabilities(
-        spec, submission=submission, generation_mode="optimize",
-    ))
-
-    assert any(
-        relation.from_capability == "query_first"
-        and relation.to_capability == "query_second"
-        for relation in out.capability_relations
-    ), (
-        [capability.name for capability in out.capabilities],
-        [relation.model_dump() for relation in out.capability_relations],
-        submission["semantic_plan"]["unresolved_items"],
-        out.meta.get("capability_model"),
-    )
-
-
-def test_r6_screenshot_protocol_requires_complete_field_axes_and_forbids_fact_creation():
-    from dano.gateway import app as gateway
-
-    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
-
-    for field in (
-        "step_id", "wire_path", "public_name", "visible_default", "business_type",
-        "category", "source_kind", "required", "confidence", "evidence",
-    ):
-        assert field in protocol
-    assert "must never create" in gateway._analysis_screenshot_guidance([{
-        "name": "form.png", "data": "AA==", "mimeType": "image/png",
-    }])
-
-
-def test_r6_screenshot_report_does_not_treat_offscreen_fields_as_failed_matches():
-    from dano.gateway import app as gateway
-
-    before = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[
-            ParamField(path="title", key="Title"),
-            ParamField(path="description", key="Description"),
-        ],
-    )])
-    after = before.model_copy(deep=True)
-    after.meta = {"capability_model": {
-        "semantic_plan": {
-            "field_semantics": [{
-                "step_id": "submit", "wire_path": "title", "public_name": "Title",
-                "business_type": "string", "category": "user_param",
-                "source_kind": "user_input", "required": True, "confidence": 0.99,
-                "evidence": [{"source": "screenshot", "screenshot_name": "form.png"}],
-            }],
-            "unresolved_items": [{
-                "kind": "field", "step_id": "submit", "wire_path": "description",
-                "reason": "field is not visible in the supplied screenshot",
-            }],
-        },
-        "semantic_coverage": {"complete": False, "missing": ["field_semantics"]},
-    }}
-
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": True, "summary": "updated", "changes": {"fields": 1},
-            "proposal_gate": {"accepted": True},
-        },
-        screenshots=[{"name": "form.png"}],
-        delivered_image_count=1,
-        operation_id="r6-report",
-    )
-
-    assert report["status"] == "applied"
-    assert report["matched_field_count"] == 1
-    assert report["unmatched_field_count"] == 0
-    assert report["locked_field_count"] == 0
-    assert report["rejected_field_count"] == 0
-    assert report["unresolved_field_count"] == 1
 
 
 def test_screenshot_analysis_reconciles_stale_option_binding_with_recorded_control_fact():

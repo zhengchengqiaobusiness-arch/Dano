@@ -1315,6 +1315,16 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 spec, step, param, business_type, evidence_refs=evidence_refs,
             )
             param.type = business_type
+            if business_type not in {"enum", "list-enum"}:
+                param.enum_options = None
+                param.enum_value_map = None
+                if step is not None:
+                    step.selects = [
+                        binding
+                        for binding in (step.selects or [])
+                        if str(binding.path or binding.param or "")
+                        not in {str(param.path or ""), canonical_wire_path(step, param.path)}
+                    ]
             param.evidence = [
                 *list(param.evidence or []),
                 {

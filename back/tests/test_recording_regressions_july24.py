@@ -1,80 +1,13 @@
 import json
 
-import pytest
-
 import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     FlowLink,
-    FlowSpec,
+    FlowCapability,
     FlowStep,
     ParamField,
-    build_default_flow_capabilities,
     to_flow_spec,
 )
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "locator", "expected_kind"),
-    [
-        ("GET", "/api/applications/page?pageNo=1", "button=查询", "query_status"),
-        ("GET", "/api/applications/export-excel?pageNo=1", "button=导出", "export"),
-        ("POST", "/api/applications/create", "button=保存草稿", "save_draft"),
-        ("POST", "/api/applications/submit-process", "button=提交", "submit"),
-        ("DELETE", "/api/process/cancel", "button=撤回", "withdraw"),
-        ("DELETE", "/api/applications/delete?id=1", "button=删除", "delete"),
-    ],
-)
-def test_recorded_operation_keeps_its_business_capability_kind(
-    method: str,
-    path: str,
-    locator: str,
-    expected_kind: str,
-) -> None:
-    step = FlowStep(
-        step_id=expected_kind,
-        method=method,
-        path=path,
-        source_meta={
-            "role": "business_get" if method == "GET" else "business_write",
-            "trigger_op": "click",
-            "trigger_locator": locator,
-            "trigger_action_id": f"action-{expected_kind}",
-            "causality_confidence": "high",
-        },
-    )
-    capabilities = build_default_flow_capabilities(FlowSpec(steps=[step]))
-    assert len(capabilities) == 1
-    assert capabilities[0].kind == expected_kind
-
-
-def test_six_recorded_operations_remain_six_capabilities() -> None:
-    operations = [
-        ("query_status", "GET", "/api/applications/page", "button=查询"),
-        ("save_draft", "POST", "/api/applications/create", "button=保存草稿"),
-        ("submit", "POST", "/api/applications/submit-process", "button=提交"),
-        ("withdraw", "DELETE", "/api/process/cancel", "button=撤回"),
-        ("export", "GET", "/api/applications/export-excel", "button=导出"),
-        ("delete", "DELETE", "/api/applications/delete?id=1", "button=删除"),
-    ]
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id=kind,
-            method=method,
-            path=path,
-            source_meta={
-                "role": "business_get" if method == "GET" else "business_write",
-                "trigger_op": "click",
-                "trigger_locator": locator,
-                "trigger_action_id": f"action-{kind}",
-                "causality_confidence": "high",
-            },
-        )
-        for kind, method, path, locator in operations
-    ])
-    capabilities = build_default_flow_capabilities(spec)
-    assert {cap.kind: tuple(cap.step_ids) for cap in capabilities} == {
-        kind: (kind,) for kind, *_ in operations
-    }
 
 
 def test_unexpanded_select_keeps_choice_semantics() -> None:
@@ -158,9 +91,6 @@ def test_edit_preflight_is_kept_but_post_write_refresh_is_not_executed() -> None
         ),
     ]
     spec = to_flow_spec(captured_requests=requests)
-    capabilities = build_default_flow_capabilities(spec)
-    assert len(capabilities) == 1
-    assert capabilities[0].kind == "submit"
     step_by_request_id = {
         str((step.source_meta or {}).get("request_id")): step
         for step in spec.steps
@@ -169,7 +99,19 @@ def test_edit_preflight_is_kept_but_post_write_refresh_is_not_executed() -> None
     detail = step_by_request_id["detail"]
     submit = step_by_request_id["submit"]
     assert detail.source_meta["control_preflight_for_write_ids"] == [submit.step_id]
-    assert set(capabilities[0].step_ids) == {detail.step_id, submit.step_id}
+    capability = FlowCapability(
+        name="submit_application",
+        title="提交申请",
+        kind="submit",
+        nodes=[
+            {"id": "call_detail", "type": "call", "step_id": detail.step_id},
+            {"id": "call_submit", "type": "call", "step_id": submit.step_id},
+        ],
+    )
+    capability = flow_spec_module.sync_flow_spec_models(
+        flow_spec_module.FlowSpec(steps=[detail, submit], capabilities=[capability])
+    ).capabilities[0]
+    assert set(capability.step_ids) == {detail.step_id, submit.step_id}
 
 
 def test_editable_field_uses_upstream_value_as_overrideable_default() -> None:

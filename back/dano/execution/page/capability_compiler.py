@@ -312,14 +312,13 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         if anchor_step_id in seen_anchors:
             errors.append(f"{prefix}: public anchor is already owned by another capability")
             continue
-        method = str(anchor.method or "GET").upper()
-        is_write = method in _WRITE_METHODS
+        grounded_kind = _capability_operation_kind(anchor)
+        is_write = grounded_kind in WRITE_CAPABILITY_KINDS
         if (is_write and kind not in WRITE_CAPABILITY_KINDS) or (
             not is_write and kind not in READ_CAPABILITY_KINDS
         ):
-            errors.append(f"{prefix}: capability kind does not match the anchor request method")
+            errors.append(f"{prefix}: capability kind does not match the grounded business operation")
             continue
-        grounded_kind = _capability_operation_kind(anchor)
         grounded_batch = bool(is_write and _write_contract_is_batch(current, [anchor]))
         if kind != grounded_kind and not (kind == "submit_batch" and grounded_batch):
             warnings.append(

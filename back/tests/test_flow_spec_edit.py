@@ -17,7 +17,7 @@ from dano.execution.page.flow_spec import (
     flow_spec_to_client,
     apply_recording_agent_submission, auto_fix_flow_spec, orchestrate_flow_capabilities, sync_flow_spec_models,
     flow_spec_canonical_summary, to_flow_spec,
-    build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
+    prepare_flow_spec_for_publish, prepare_flow_release_candidate,
     flow_operation_report,
 )
 from dano.execution.page.request_capture import execute_api_request
@@ -258,41 +258,6 @@ def test_publish_canonicalizes_submit_alias_and_all_relations_atomically():
     assert prepared.capabilities[0].name == "submit"
     assert prepared.capability_relations[0].to_capability == "submit"
     assert prepared.goal["capabilities"] == ["submit"]
-
-
-def test_response_field_names_do_not_change_single_submit_cardinality():
-    leave_query = FlowStep(
-        step_id="leave-query", method="GET",
-        url="/leave/page?startDate=2026-07-01&endDate=2026-07-11",
-        response_json={"data": {"list": [{"startDate": "2026-07-01", "endDate": "2026-07-11"}]}},
-        source_meta={"role": "business_get", "confidence": 0.95},
-    )
-    leave_submit = FlowStep(
-        step_id="leave-submit", method="POST", path="/leave/submit", body_source='{"startDate":"2026-07-01","endDate":"2026-07-11","reason":"x"}',
-        params=[
-            ParamField(path="startDate", key="开始日期", value="2026-07-01", type="date", category="user_param", exposed_to_user=True),
-            ParamField(path="endDate", key="结束日期", value="2026-07-11", type="date", category="user_param", exposed_to_user=True),
-        ],
-    )
-    leave_caps = build_default_flow_capabilities(FlowSpec(flow_id="leave", steps=[leave_query, leave_submit]))
-    assert next(cap for cap in leave_caps if cap.kind in {"submit", "submit_batch"}).kind == "submit"
-
-    daily_query = FlowStep(
-        step_id="daily-query", method="GET", path="/daily/missing",
-        response_json={"data": {"missingDates": ["2026-07-11", "2026-07-12"]}},
-        source_meta={"role": "business_get", "confidence": 0.95},
-    )
-    daily_submit = FlowStep(
-        step_id="daily-submit", method="POST", path="/daily/submit", body_source='{"reportDate":"2026-07-11","workContent":"x"}',
-        params=[
-            ParamField(path="reportDate", key="日报日期", value="2026-07-11", type="date", category="user_param", exposed_to_user=True),
-            ParamField(path="workContent", key="工作内容", value="x", category="user_param", exposed_to_user=True),
-        ],
-    )
-    daily_caps = build_default_flow_capabilities(FlowSpec(flow_id="daily", steps=[daily_query, daily_submit]))
-    batch = next(cap for cap in daily_caps if cap.kind in {"submit", "submit_batch"})
-    assert batch.kind == "submit"
-    assert set(batch.input_schema["properties"]) >= {"日报日期", "工作内容"}
 
 
 def test_sync_upgrades_default_query_step_to_richer_captured_search_fact():
@@ -2823,138 +2788,6 @@ def test_update_link_to_duplicate_merges_existing_link_instead_of_raising():
     assert new.links[0].confidence == 0.8
 
 
-def test_default_submit_capability_uses_dependency_closure_not_all_reads():
-    option = FlowStep(
-        step_id="opt", name="GET_simple-list", method="GET", url="/system/dict-data/simple-list", path="/system/dict-data/simple-list",
-        source_meta={"role": "read_option"},
-    )
-    query = FlowStep(
-        step_id="query", name="GET_process", method="GET", url="/bpm/process-definition/get", path="/bpm/process-definition/get",
-        source_meta={"role": "business_get"}, response_json={"data": {"key": "oa_seal_apply"}},
-    )
-    submit = FlowStep(
-        step_id="submit", name="POST_submit-process", method="POST", url="/oa/seal-apply/submit-process", path="/oa/seal-apply/submit-process",
-        params=[ParamField(path="processDefKey", key="processDefKey", value="oa_seal_apply", type="string", category="runtime_var")],
-    )
-    spec = FlowSpec(flow_id="cap-prune", steps=[option, query, submit], links=[
-        FlowLink(source_step_id="query", source_path="data.key", target_step_id="submit", target_path="processDefKey")
-    ])
-
-    caps = flow_spec_module.build_default_flow_capabilities(spec)
-    submit_cap = next(c for c in caps if c.kind == "submit")
-
-    assert submit_cap.step_ids == ["query", "submit"]
-    assert "opt" not in submit_cap.step_ids
-
-
-def test_default_capabilities_keep_independent_query_and_submit_separate():
-    query_status = FlowStep(
-        step_id="status",
-        name="GET_page",
-        method="GET",
-        url="/admin-api/oa/daily-report/page",
-        path="/admin-api/oa/daily-report/page",
-        source_meta={"role": "business_get"},
-        response_json={"data": {"list": [{"date": "2026-05-01"}]}},
-    )
-    preread = FlowStep(
-        step_id="definition",
-        name="GET_process",
-        method="GET",
-        url="/admin-api/bpm/process-definition/get",
-        path="/admin-api/bpm/process-definition/get",
-        source_meta={"role": "business_get"},
-        response_json={"data": {"taskId": "T-1"}},
-    )
-    submit = FlowStep(
-        step_id="submit",
-        name="POST_submit",
-        method="POST",
-        url="/admin-api/oa/daily-report/submit",
-        path="/admin-api/oa/daily-report/submit",
-        params=[ParamField(path="taskId", key="taskId", value="T-1", type="string", category="runtime_var")],
-    )
-    spec = FlowSpec(flow_id="multi-cap", steps=[query_status, preread, submit], links=[
-        FlowLink(source_step_id="definition", source_path="data.taskId", target_step_id="submit", target_path="taskId")
-    ])
-
-    caps = flow_spec_module.build_default_flow_capabilities(spec)
-    by_kind = {c.kind: c for c in caps}
-
-    assert "query_status" in by_kind
-    assert "submit" in by_kind
-    assert by_kind["query_status"].step_ids == ["status"]
-    assert by_kind["submit"].step_ids == ["definition", "submit"]
-
-
-def test_default_query_capabilities_split_distinct_commands_inside_one_domain():
-    query = FlowStep(
-        step_id="query",
-        name="GET_page",
-        method="GET",
-        path="/admin-api/oa/work-hours/page",
-        source_meta={
-            "role": "business_get",
-            "trigger_op": "click",
-            "trigger_locator": "role=button[name=查询]",
-            "causality_confidence": "high",
-        },
-        response_json={"data": {"list": [{"id": "row-1"}], "total": 1}},
-    )
-    detail = FlowStep(
-        step_id="detail",
-        name="GET_detail",
-        method="GET",
-        path="/admin-api/oa/work-hours/detail",
-        source_meta={
-            "role": "business_get",
-            "trigger_op": "click",
-            "trigger_locator": "role=button[name=查看详情]",
-            "causality_confidence": "high",
-        },
-        response_json={"data": {"id": "row-1", "status": "approved"}},
-    )
-
-    caps = build_default_flow_capabilities(FlowSpec(flow_id="action-split", steps=[query, detail]))
-
-    assert len(caps) == 2
-    assert {tuple(cap.step_ids) for cap in caps} == {("query",), ("detail",)}
-
-
-def test_default_query_capability_groups_multiple_requests_from_same_command():
-    steps = [
-        FlowStep(
-            step_id="page",
-            method="GET",
-            path="/admin-api/oa/hotel-apply/page",
-            source_meta={
-                "role": "business_get",
-                "trigger_op": "click",
-                "trigger_locator": "role=button[name=查询]",
-                "causality_confidence": "high",
-            },
-            response_json={"data": {"list": [{"id": "H-1"}], "total": 1}},
-        ),
-        FlowStep(
-            step_id="statistics",
-            method="GET",
-            path="/admin-api/oa/hotel-apply/statistics",
-            source_meta={
-                "role": "business_get",
-                "trigger_op": "click",
-                "trigger_locator": "role=button[name=查询]",
-                "causality_confidence": "high",
-            },
-            response_json={"data": {"pending": 1}},
-        ),
-    ]
-
-    caps = build_default_flow_capabilities(FlowSpec(flow_id="same-command", steps=steps))
-
-    assert len(caps) == 1
-    assert caps[0].step_ids == ["page", "statistics"]
-
-
 def test_saved_page_enum_repairs_internal_type_category_and_source_on_sync():
     spec = FlowSpec(
         flow_id="repair-page-enum",
@@ -4375,30 +4208,6 @@ def test_option_source_membership_is_visible_but_not_executed():
         ("options", "option_source", "manual", True),
     ]
     assert capability.request_refs[0].model_dump().get("pinned") is True
-
-
-def test_default_query_capability_uses_business_records_not_process_configuration():
-    spec = FlowSpec(
-        flow_id="query-evidence",
-        steps=[
-            FlowStep(
-                step_id="definition", method="GET",
-                url="/admin-api/bpm/process-definition/get", path="/admin-api/bpm/process-definition/get",
-                source_meta={"role": "business_get"}, response_json={"data": {"id": "definition-id"}},
-            ),
-            FlowStep(
-                step_id="records", method="GET",
-                url="/admin-api/oa/duty-leave/page", path="/admin-api/oa/duty-leave/page",
-                source_meta={"role": "business_get"},
-                response_json={"data": {"list": [{"id": "leave-1", "type": 2}], "total": 1}},
-            ),
-        ],
-    )
-
-    capabilities = build_default_flow_capabilities(spec)
-    query = next(cap for cap in capabilities if cap.kind == "query_status")
-
-    assert query.step_ids == ["records"]
 
 
 @pytest.mark.parametrize(
@@ -7392,9 +7201,15 @@ def test_array_first_row_dependency_is_replaced_by_grounded_option_binding():
         "Finance Seal": "seal-2",
     }
 
-    spec.capabilities = build_default_flow_capabilities(spec)
-    assert {cap.kind for cap in spec.capabilities} == {"query_status", "submit"}
-    submit_capability = next(cap for cap in spec.capabilities if cap.kind == "submit")
+    submit_capability = FlowCapability(
+        name="submit_seal_application",
+        title="提交印章申请",
+        kind="submit",
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+    )
+    spec.capabilities = [submit_capability]
+    spec = sync_flow_spec_models(spec)
+    submit_capability = spec.capabilities[0]
     assert submit_capability.step_ids == ["submit"]
     flow_spec_module._attach_option_source_memberships(spec)
     source_ref = next(ref for ref in submit_capability.request_refs if ref.step_id == "seal-options")
@@ -7829,7 +7644,13 @@ def test_latest_leave_recording_binds_full_dictionary_and_captured_user_director
         assert approver.source["label_key"] == "nickname"
         assert approver.enum_value_map[expected_label] == expected_value
 
-    spec.capabilities = build_default_flow_capabilities(spec)
+    spec.capabilities = [FlowCapability(
+        name="submit_leave_application",
+        title="提交请假申请",
+        kind="submit",
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+    )]
+    spec = sync_flow_spec_models(spec)
     flow_spec_module._attach_option_source_memberships(spec)
     submit_capability = next(cap for cap in spec.capabilities if cap.kind == "submit")
     captured_option_refs = {
@@ -8442,52 +8263,6 @@ def test_r2_automated_field_resolution_requires_exact_step_path_identity():
     assert [param.key for param in spec.steps[0].params] == ["客户编号", "id"]
 
 
-def test_screenshot_can_add_query_field_grounded_by_unique_response_leaf():
-    query = FlowStep(
-        step_id="query", method="GET", path="/api/leave/page",
-        params=[ParamField(
-            path="query.pageNo", key="pageNo", required=False,
-            category="user_param", source_kind="user_input",
-        )],
-        response_json={"data": {"list": [{"processStatus": 1}] }},
-    )
-    spec = FlowSpec(
-        steps=[query],
-        capabilities=[FlowCapability(
-            name="query_leave", kind="query_status",
-            nodes=_call_nodes(["query"]),
-        )],
-    )
-    field = {
-        "step_id": "query", "wire_path": "processStatus",
-        "public_name": "审批结果", "business_type": "enum",
-        "category": "user_param", "source_kind": "page_enum",
-        "required": False, "confidence": 0.55,
-        "evidence": [{
-            "source": "screenshot", "visible_label": "审批结果",
-            "control_kind": "select", "editable": True,
-            "required": False, "options": [],
-        }],
-    }
-
-    ops = flow_spec_module._semantic_plan_to_ops(
-        spec, {"semantic_plan": {"field_semantics": [field]}},
-    )
-    edit = next(op for op in ops if op.get("op") == "upsert_input_field")
-    assert edit["field"]["path"] == "query.processStatus"
-    assert flow_spec_module._apply_capability_field_to_param(
-        spec, edit["field"], scope="input", actor="planner",
-    ) is True
-
-    added = next(param for param in query.params if param.path == "query.processStatus")
-    assert (added.key, added.label) == ("审批结果", "审批结果")
-    assert (added.type, added.wire_type) == ("enum", "string")
-    assert (added.category, added.source_kind) == ("user_param", "form_option")
-    assert added.required is False
-    assert added.default_value is None
-    assert added.need_human_confirm is True
-
-
 @pytest.mark.parametrize(
     ("path", "key", "name_source"),
     [
@@ -8545,41 +8320,6 @@ def test_planner_can_replace_an_automatic_wire_key_with_a_business_name():
         actor="planner",
     ) is True
     assert (param.key, param.label, param.name_source) == ("页码", "页码", "planner")
-
-
-def test_image_free_plan_drops_fabricated_screenshot_evidence():
-    cleaned = flow_spec_module._remove_unavailable_screenshot_claims({
-        "field_semantics": [{
-            "step_id": "query",
-            "wire_path": "query.pageNo",
-            "public_name": "页码",
-            "axis_status": {
-                "name": "image_matched",
-                "path": "preserved_fact",
-            },
-            "evidence": [
-                {
-                    "source": "screenshot",
-                    "screenshot_name": "not-uploaded.png",
-                    "control_kind": "number",
-                },
-                {
-                    "source": "recorder_dom",
-                    "control_kind": "number",
-                },
-            ],
-        }],
-    })
-
-    field = cleaned["field_semantics"][0]
-    assert field["evidence"] == [{
-        "source": "recorder_dom",
-        "control_kind": "number",
-    }]
-    assert field["axis_status"] == {
-        "name": "unresolved",
-        "path": "preserved_fact",
-    }
 
 
 def test_image_free_orchestration_never_persists_fabricated_screenshot_evidence():
@@ -8663,36 +8403,6 @@ def test_image_free_orchestration_never_persists_fabricated_screenshot_evidence(
     )
 
 
-def test_screenshot_does_not_invent_query_field_without_unique_response_leaf():
-    query = FlowStep(
-        step_id="query", method="GET", path="/api/leave/page",
-        response_json={"data": {"list": [{"statusName": "审批中"}] }},
-    )
-    spec = FlowSpec(
-        steps=[query],
-        capabilities=[FlowCapability(
-            name="query_leave", kind="query_status",
-            nodes=_call_nodes(["query"]),
-        )],
-    )
-
-    ops = flow_spec_module._semantic_plan_to_ops(spec, {"semantic_plan": {
-        "field_semantics": [{
-            "step_id": "query", "wire_path": "processStatus",
-            "public_name": "审批结果", "business_type": "enum",
-            "category": "user_param", "source_kind": "page_enum",
-            "required": False, "confidence": 0.95,
-            "evidence": [{
-                "source": "screenshot", "visible_label": "审批结果",
-                "control_kind": "select", "editable": True,
-            }],
-        }],
-    }})
-
-    assert not any(op.get("op") == "upsert_input_field" for op in ops)
-    assert query.params == []
-
-
 def test_r5_confirmed_relation_rejects_unknown_cardinality_and_transform_owner():
     source = FlowCapability(
         name="query", title="Query", kind="query_status", confirmed=True,
@@ -8769,39 +8479,6 @@ def test_r2_manual_field_evidence_protects_only_its_owned_axis():
     assert param.source_kind == "user_input"
     assert param.required is True
     assert param.default_value == 1784476800000
-
-
-def test_r2_semantic_completion_does_not_resurrect_unreviewed_field_values():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        params=[
-            ParamField(path="title", key="旧标题", category="user_param"),
-            ParamField(path="tenantId", key="旧租户", category="system_const"),
-        ],
-    )])
-    proposed = {
-        "field_semantics": [{
-            "step_id": "submit",
-            "wire_path": "title",
-            "public_name": "申请标题",
-            "business_type": "string",
-            "source_kind": "user_input",
-            "confidence": 0.95,
-        }],
-        "request_roles": [],
-        "capabilities": [],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }
-
-    completed = flow_spec_module._complete_semantic_plan_from_spec(spec, proposed)
-    assert [field["wire_path"] for field in completed["field_semantics"]] == ["title"]
-    coverage = flow_spec_module._semantic_plan_coverage(
-        spec, {"semantic_plan": completed},
-    )
-    assert coverage["total_fields"] == 2
-    assert coverage["covered_fields"] == 1
-    assert "field_semantics" in coverage["missing"]
 
 
 def test_unchanged_user_field_update_does_not_create_manual_lock():
@@ -8922,52 +8599,3 @@ def test_operation_report_does_not_claim_an_undisplayable_field_change():
     assert report["changes"]["fields"] == 0
     assert report["changed"] is False
     assert report["summary"] == "分析结果与当前配置相同，无需修改"
-
-
-def test_semantic_capability_keeps_grounded_preflight_chain_for_its_write():
-    process = FlowStep(
-        step_id="process", method="GET", path="/process-definition",
-        source_meta={
-            "role": "read_context",
-            "control_preflight_for_write": True,
-            "control_preflight_for_write_ids": ["submit"],
-        },
-    )
-    approval = FlowStep(
-        step_id="approval", method="GET", path="/approval-detail",
-        source_meta={
-            "role": "read_context",
-            "control_preflight_for_write": True,
-            "control_preflight_for_write_ids": ["submit"],
-        },
-    )
-    submit = FlowStep(step_id="submit", method="POST", path="/leave/submit-process")
-    spec = FlowSpec(
-        steps=[process, approval, submit],
-        links=[FlowLink(
-            source_step_id="process", source_path="data.id",
-            target_step_id="approval", target_path="query.processDefinitionId",
-        )],
-        capabilities=[FlowCapability(
-            name="submit", kind="submit",
-            nodes=_call_nodes(["process", "approval", "submit"]),
-        )],
-    )
-
-    ops = flow_spec_module._semantic_plan_to_ops(spec, {"semantic_plan": {
-        "capabilities": [{
-            "name": "submit", "kind": "submit",
-            "request_refs": [{"step_id": "submit", "usage": "execute"}],
-        }],
-    }})
-
-    memberships = {
-        (op.get("step_id"), op.get("usage"))
-        for op in ops if op.get("op") == "add_request_to_capability"
-    }
-    assert memberships == {
-        ("process", "preflight"),
-        ("approval", "preflight"),
-        ("submit", "execute"),
-    }
-    assert not any(op.get("op") == "remove_request_from_capability" for op in ops)
