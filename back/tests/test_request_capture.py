@@ -2814,30 +2814,31 @@ def test_classify_request_role_aggregates_multistep_write_instead_of_defaulting_
     assert role == {"semanticRole": "workflow_submit", "sideEffect": "write", "risk_level": "L3"}
 
 
-def test_flatten_required_defaults_all_when_no_star():
-    """表单没抓到任何 * 必填标记(required_labels 空)→ 参数字段**默认全部必填**(写操作宁多勿漏,免手动勾选)。"""
+def test_flatten_required_remains_unknown_when_no_star_is_captured():
+    """未捕获必填证据时不得把调用参数猜成必填。"""
     body = '{"reason":"回家","street":"中山路","type":"周末"}'
     samples = {"原因": "回家", "所在街道": "中山路", "加班类型": "周末"}
     fields = {f["key"]: f for f in flatten_body(body, samples)}     # 不传 required_labels
-    assert fields["reason"]["required"] is True
-    assert fields["street"]["required"] is True
-    assert fields["type"]["required"] is True
+    assert fields["reason"]["required"] is False
+    assert fields["street"]["required"] is False
+    assert fields["type"]["required"] is False
 
 
-def test_flatten_required_unconfident_defaults_required():
-    """表单区分了必填(有 * ),但某字段值有歧义(同值多字段)映射不确信 → 不敢判可选,默认必填。"""
+def test_flatten_required_ambiguous_value_does_not_confirm_other_field():
+    """同值字段只能确认有明确标签证据的必填轴。"""
     body = '{"a":"1","b":"1"}'                 # 两字段同值 1 → 映射不确信
     samples = {"甲": "1", "乙": "1"}
     req_labels = {"甲"}                          # 表单确实区分了必填(甲有 *)
     fields = {f["key"]: f for f in flatten_body(body, samples, req_labels)}
-    assert fields["a"]["required"] is True and fields["b"]["required"] is True
+    assert fields["a"]["required"] is True
+    assert fields["b"]["required"] is False
 
 
 def test_flatten_required_nonparam_is_optional():
     """常量/内部 id 不是用户要填的项 → required=False(它本就原样提交,不进必填清单)。"""
     body = '{"reason":"回家","procDefKey":"oa_duty_leave"}'
     fields = {f["key"]: f for f in flatten_body(body, {"原因": "回家"})}
-    assert fields["reason"]["required"] is True
+    assert fields["reason"]["required"] is False
     assert fields["procDefKey"]["suggest_param"] is False and fields["procDefKey"]["required"] is False
 
 

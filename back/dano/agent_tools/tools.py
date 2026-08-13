@@ -1289,10 +1289,11 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
 
     _strict_recording_params(
         params,
-        required={"write_step_id", "inputs", "verify_request_id", "assertion"},
-        optional={"recording_id", "flow_version", "cleanup_request_id"},
+        required={"write_step_id", "verify_request_id", "assertion"},
+        optional={"recording_id", "flow_version", "cleanup_request_id", "inputs"},
     )
-    if not isinstance(params["inputs"], dict) or not isinstance(params["assertion"], dict):
+    inputs = params.get("inputs") or {}
+    if not isinstance(inputs, dict) or not isinstance(params["assertion"], dict):
         raise ToolError("inputs 和 assertion 必须是对象")
     try:
         # Validation must happen before claim_write_verification: malformed
@@ -1355,7 +1356,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
                 requests[0],
                 requests[1],
                 write_step_id=step.step_id,
-                inputs=params["inputs"],
+                inputs=inputs,
                 assertion=params["assertion"],
                 auth_headers=await _recording_auth_headers(session, requests),
                 cleanup_request=requests[2] if cleanup_request_id else None,

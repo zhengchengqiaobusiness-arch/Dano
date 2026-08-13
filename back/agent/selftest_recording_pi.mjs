@@ -182,6 +182,10 @@ function verifyReviewToolSchema() {
 
 function verifyWriteAssertionSchema() {
   const tool = recordingTools.find((item) => item.name === "execute_write_with_verify");
+  assert(
+    !(tool?.parameters?.required || []).includes("inputs"),
+    "write verification must allow replaying the captured body without redundant inputs",
+  );
   const assertion = tool?.parameters?.properties?.assertion;
   assert(assertion?.anyOf?.length === 4, "write assertion schema must expose three executable contracts and string compatibility");
   assert(

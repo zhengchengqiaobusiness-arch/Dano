@@ -6517,7 +6517,11 @@ def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top
             required=True,
             category="user_param",
             source_kind="user_input",
-            evidence=[{"kind": "page_required", "required": True}],
+            evidence=[{
+                "kind": "page_required",
+                "required": True,
+                "binding_status": "bound",
+            }],
         )],
         source_meta={"role": "read_context", "control_preflight_for_write": True},
     )

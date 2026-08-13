@@ -169,6 +169,29 @@ def test_discover_value_links_covers_inputs_and_filters_weak_or_sensitive_values
     assert all("TOKEN-998877" not in json.dumps(item) for item in links)
 
 
+def test_discover_value_links_handles_canonical_query_lists_and_colon_ids():
+    process_definition_id = "oa_leave:15:80988d17-962a-11f1-937a-0a4095592b97"
+    links = discover_value_links([
+        {
+            "request_id": "definition",
+            "sequence": 1,
+            "response_json": {"data": {"id": process_definition_id}},
+        },
+        {
+            "request_id": "approval",
+            "sequence": 2,
+            "url": "https://example.test/approval-detail",
+            "query": {"processDefinitionId": [process_definition_id]},
+        },
+    ])
+
+    assert any(
+        item["source_path"] == "response.data.id"
+        and item["target_path"] == "query.processDefinitionId"
+        for item in links
+    )
+
+
 def test_discover_value_links_scans_each_request_inputs_once(monkeypatch):
     original = value_tracing._input_leaves
     calls = 0

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dano.execution.page.recording_field_identity import bind_field_evidence
-from dano.execution.page.flow_spec import to_flow_spec
+from dano.execution.page.flow_spec import prepare_flow_spec_for_publish, to_flow_spec
 
 
 def _requests() -> list[dict]:
@@ -214,6 +214,46 @@ def test_flow_spec_persists_binding_results_and_does_not_name_by_equal_values() 
     assert fields["reason"].source["required_state"] == "unknown"
 
 
+def test_bound_required_dom_evidence_projects_to_write_param_contract() -> None:
+    requests = _requests()
+    requests[0].update({
+        "role": "business_get", "keep": True, "confidence": 0.99,
+        "response_json": {"list": [], "total": 0},
+    })
+    requests[1].update({
+        "role": "business_write", "keep": True, "confidence": 0.99,
+        "response_json": {"code": 0},
+    })
+
+    spec = to_flow_spec(
+        captured_requests=requests,
+        field_evidence=[{
+            "label": "原因",
+            "field_aliases": ["reason"],
+            "required": True,
+            "action_id": "action-submit",
+            "page_id": "page-1",
+            "frame_id": "main",
+            "page_context": {"path": "/leave"},
+        }],
+        page_events=[{"event_id": "event-submit", "kind": "action"}],
+    )
+
+    submit = next(
+        step for step in spec.steps
+        if (step.source_meta or {}).get("request_id") == "req-submit"
+    )
+    reason = next(param for param in submit.params if param.path == "reason")
+
+    assert reason.required is True
+    assert reason.source["required_state"] == "required"
+    assert any(
+        item.get("kind") == "page_required"
+        and item.get("binding_status") == "bound"
+        for item in reason.evidence
+    )
+
+
 def test_bound_aliasless_control_projects_all_grounded_axes_to_flow_spec() -> None:
     requests = [{
         "request_id": "req-submit",
@@ -337,3 +377,87 @@ def test_unique_value_binds_a_control_filled_before_the_later_submit_action() ->
     assert bound["binding_status"] == "bound"
     assert (bound["request_id"], bound["wire_path"]) == ("req-submit", "body.reason")
     assert bound["binding_method"] == "unique_value_same_scope_causal_order"
+
+
+def test_aliasless_value_uses_nearest_later_request_before_global_uniqueness() -> None:
+    requests = [
+        {
+            "request_id": "req-earlier",
+            "method": "GET",
+            "url": "https://example.test/leave/page?pageNo=1",
+            "query": {"pageNo": "1"},
+            "page_id": "page-1",
+            "frame_id": "main",
+            "trigger_action_id": "action-page",
+            "timestamp": 350,
+            "role": "read_option",
+            "page_context": {"path": "/leave/create"},
+        },
+        {
+            "request_id": "req-submit",
+            "method": "POST",
+            "url": "https://example.test/leave/submit",
+            "post_data": '{"reason":"1","type":2}',
+            "page_id": "page-1",
+            "frame_id": "main",
+            "trigger_action_id": "action-submit",
+            "timestamp": 400,
+            "role": "business_write",
+            "page_context": {"path": "/leave/create"},
+        },
+    ]
+
+    [bound] = bind_field_evidence(requests, [], [{
+        "event_id": "event-reason",
+        "action_id": "action-fill-reason",
+        "label": "Reason",
+        "field_aliases": [],
+        "control_kind": "textarea",
+        "required": True,
+        "value": "1",
+        "observed_at": 300,
+        "page_id": "page-1",
+        "frame_id": "main",
+        "page_context": {"path": "/leave/create"},
+    }])
+
+    assert bound["binding_status"] == "bound"
+    assert (bound["request_id"], bound["wire_path"]) == ("req-submit", "body.reason")
+    assert bound["required_observed"] is True
+
+
+def test_publish_rebinds_persisted_unresolved_dom_evidence_to_existing_step() -> None:
+    requests = _requests()
+    requests[0].update({
+        "role": "business_get", "keep": True, "confidence": 0.99,
+        "response_json": {"list": [], "total": 0},
+    })
+    requests[1].update({
+        "role": "business_write", "keep": True, "confidence": 0.99,
+        "post_data": '{"reason":"1","type":2}',
+        "response_json": {"code": 0},
+    })
+    spec = to_flow_spec(captured_requests=requests)
+    spec.request_facts.field_evidence = [{
+        "event_id": "event-reason",
+        "action_id": "action-fill-reason",
+        "label": "Reason",
+        "field_aliases": [],
+        "control_kind": "textarea",
+        "required": True,
+        "required_observed": True,
+        "value": "1",
+        "observed_at": 300,
+        "page_id": "page-1",
+        "frame_id": "main",
+        "page_context": {"path": "/leave"},
+        "binding_status": "unbound",
+    }]
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    submit = next(step for step in prepared.steps if step.method == "POST")
+    reason = next(param for param in submit.params if param.path == "reason")
+
+    assert reason.label == "Reason"
+    assert reason.required is True
+    assert reason.source["required_state"] == "required"

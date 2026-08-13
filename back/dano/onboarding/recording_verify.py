@@ -293,7 +293,7 @@ def finalize_verification_state(
         apply_flow_edits,
     )
 
-    current = spec.model_copy(deep=True)
+    current = _consume_dependency_executor_evidence(spec)
     report = verification_report(current)
     if report["todos"]:
         current = apply_flow_edits(current, [
@@ -322,6 +322,71 @@ def finalize_verification_state(
         },
     }
     return _auto_confirm_ready_capabilities(current), final_report
+
+
+def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
+    """Apply the latest current-signature dependency execution result."""
+    from dano.execution.page.flow_spec import apply_flow_edits
+
+    current = spec.model_copy(deep=True)
+    # Executor evidence is authoritative even when the Pi turn times out after
+    # the tool returns but before it can submit the follow-up operation. Keep
+    # only the latest record for the current link signature: a pass confirms
+    # the hypothesis; a deterministic failure rejects an unlocked model
+    # proposal instead of retrying and publishing the known-bad dependency.
+    from dano.execution.page.recording_live import dependency_link_signature
+
+    latest_by_link: dict[str, dict[str, Any]] = {}
+    links_by_id = {link.link_id: link for link in current.links}
+    for record in list((current.meta or {}).get("verification_log") or []):
+        if not isinstance(record, dict) or record.get("kind") != "dependency_execute":
+            continue
+        subject = record.get("subject") or {}
+        link_id = str(subject.get("link_id") or "")
+        link = links_by_id.get(link_id)
+        if link is None or str(subject.get("signature") or "") != dependency_link_signature(link):
+            continue
+        latest_by_link[link_id] = record
+    for link_id, record in latest_by_link.items():
+        verification_id = str(record.get("verification_id") or "")
+        if record.get("status") == "failed":
+            link = next((item for item in current.links if item.link_id == link_id), None)
+            actor = str(((link.meta if link else {}) or {}).get("actor") or ((link.evidence if link else {}) or {}).get("actor") or "")
+            if link is not None and actor == "agent" and not link.locked and not link.confirmed:
+                current = apply_flow_edits(current, [{"op": "reject_dependency", "link_id": link_id}])
+                current.meta = {
+                    **(current.meta or {}),
+                    "unverified": [
+                        item for item in (current.meta or {}).get("unverified") or []
+                        if not (
+                            isinstance(item, dict)
+                            and str(item.get("target_id") or "") == link_id
+                            and str(item.get("target_kind") or "").startswith("dependency")
+                        )
+                    ],
+                }
+            continue
+        if record.get("status") != "passed" or not verification_id:
+            continue
+        link = next((item for item in current.links if item.link_id == link_id), None)
+        if (
+            link is not None
+            and link.confirmed
+            and (link.meta or {}).get("verified") is True
+            and str((link.meta or {}).get("verification_id") or "") == verification_id
+        ):
+            continue
+        try:
+            current = apply_flow_edits(current, [{
+                "op": "confirm_dependency",
+                "link_id": link_id,
+                "verification_id": verification_id,
+            }])
+        except ValueError:
+            # The guarded op rejects stale evidence whose link signature no
+            # longer matches the current draft; such a link must stay pending.
+            continue
+    return current
 
 
 async def generate_skill_documents(
@@ -437,7 +502,10 @@ async def run_recording_verification(
     rounds = 0
     deadline = asyncio.get_running_loop().time() + max(0.01, float(timeout_s))
     for round_number in range(1, max(1, min(int(max_rounds), 5)) + 1):
-        current = session.current_flow_spec()
+        before_settle = session.current_flow_spec()
+        current = _consume_dependency_executor_evidence(before_settle)
+        if current.model_dump(mode="json") != before_settle.model_dump(mode="json"):
+            session.bind_flow_spec(current)
         report = verification_report(current)
         if report["complete"]:
             break
@@ -480,7 +548,11 @@ async def run_recording_verification(
                 or "超时" in str(exc)
             ):
                 break
-        updated = verification_report(session.current_flow_spec())
+        before_settle = session.current_flow_spec()
+        settled = _consume_dependency_executor_evidence(before_settle)
+        if settled.model_dump(mode="json") != before_settle.model_dump(mode="json"):
+            session.bind_flow_spec(settled)
+        updated = verification_report(settled)
         await _emit(progress, _progress(
             "validating",
             f"第 {round_number} 轮完成，复查验证证据",

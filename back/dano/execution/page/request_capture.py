@@ -2435,21 +2435,25 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         is_param = bool(label is not None or (not const and sv != ""))
         conf = _field_confidence(label, confident, key, is_param)
         control = structural.get(i)
-        # 只保留一个实际的 required 结论，不再维护两套会互相矛盾的必填状态。
+        required_grounded = bool(
+            control is not None
+            and isinstance(control.get("required_observed"), bool)
+            and str(control.get("binding_status") or "") == "bound"
+        )
+        # Required is a field-identity axis.  Once structural evidence exists,
+        # an unbound control (or merely seeing a submitted value) cannot make a
+        # request field mandatory.
         required = bool(
             is_param and (
-                bool(control.get("required"))
-                if control is not None and "required" in control
-                else (
-                    not required_labels
-                    or label is None
-                    or not confident
-                    or required_label_matches(label)
-                )
+                bool(control.get("required_observed"))
+                if required_grounded
+                else required_label_matches(label)
+                if not strict_control_evidence
+                else False
             )
         )
         inferred_type = type_from_control(control, _infer_type(node, key))
-        if control is not None and isinstance(control.get("required_observed"), bool):
+        if required_grounded:
             required_state = "required" if control["required_observed"] else "optional"
         elif strict_control_evidence:
             required_state = "unknown"
@@ -2473,7 +2477,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
                     "required_state": required_state,
-                    "required_state_grounded": strict_control_evidence,
+                    "required_state_grounded": required_grounded,
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):

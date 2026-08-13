@@ -1849,7 +1849,7 @@ def _build_step_from_capture(
                 "request_path": path,
                 **dict(f.get("constraints") or {}),
             })
-        if f.get("required"):
+        if f.get("required") and f.get("required_state_grounded"):
             # Persist the page marker as evidence instead of only persisting the
             # resulting boolean. This lets later re-analysis distinguish an
             # actually-required search control from a filter that merely had a
@@ -1858,6 +1858,7 @@ def _build_step_from_capture(
                 "kind": "page_required",
                 "source": "recorder_dom",
                 "request_path": path,
+                "binding_status": "bound",
             })
         if enum_description and source_guess["source_kind"] in _OPTION_SOURCE_KINDS:
             evidence.append({
@@ -1904,7 +1905,11 @@ def _build_step_from_capture(
                         "optional" if _looks_pagination_field(nm, path)
                         else str(f.get("required_state") or "unknown")
                     ),
-                } if f.get("required_state_grounded") else {}),
+                } if f.get("required_state_grounded") or (
+                    f.get("control_evidence_available")
+                    and source_guess["category"] == "user_param"
+                    and source_guess["exposed_to_user"]
+                ) else {}),
                 **({
                     "enum_source": select_meta.enum_source,
                     "enum_confirmed": select_meta.enum_confirmed,
@@ -2917,8 +2922,6 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
 
     response_ref = _response_referenced_later(req, trace)
     list_items = as_list_payload(req.get("response_json"))
-    segs = _request_segments(req)
-
     if list_items is not None and _read_is_entity_enrichment_lookup(req):
         return _role_row(
             req,
@@ -3915,13 +3918,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     materialized_by_request: dict[str, str] = {}
     memberships_by_request: dict[str, list[dict[str, Any]]] = {}
     for cap in spec.capabilities:
-        previous_refs = {ref.step_id: ref for ref in (cap.request_refs or []) if ref.step_id}
         previous_step_ids = _capability_scoped_step_ids(cap)
-        auxiliary_refs = [
-            ref for ref in (cap.request_refs or [])
-            if ref.usage in {"fact_check", "preflight", "option_source"}
-            and (not ref.step_id or ref.step_id not in previous_step_ids)
-        ]
         cap_step_ids = [
             sid for sid in previous_step_ids
             if sid in by_step and _capability_step_allowed(spec, cap, by_step[sid])
@@ -3935,10 +3932,10 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         _sync_capability_order(spec, cap)
         cap_step_ids = list(cap.step_ids)
         step_objs = [by_step[sid] for sid in cap_step_ids]
-        cap.request_refs = [
-            _capability_request_ref_from_step(spec, st, previous_refs.get(st.step_id))
-            for st in step_objs
-        ] + auxiliary_refs
+        # ``_sync_capability_order`` has already rebuilt these memberships and
+        # resolved the capability-local public anchor. Rebuilding once more
+        # from the stale pre-sync refs would downgrade a shared query anchor
+        # back to the step-global ``control_preflight_for_write`` usage.
         cap_name = cap.name or cap.capability_id
         for ref in cap.request_refs:
             if ref.request_id and cap_name:
@@ -4261,6 +4258,7 @@ def _infer_wire_format(value: Any) -> str:
 def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _upgrade_materialized_query_facts(spec)
     _enrich_materialized_response_shapes(spec)
+    _rebind_saved_field_evidence(spec)
     _ground_saved_page_enums(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
@@ -4294,6 +4292,124 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
         usage.materialized_step_id = step.step_id
         spec.request_facts.usage[request_id] = usage
     return sync_capability_scoped_views(spec)
+
+
+def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
+    """Re-evaluate unresolved DOM facts against the authoritative saved body.
+
+    The client projection deliberately redacts request bodies, but the server
+    draft still owns them on FlowStep. Re-analysis therefore must bind from
+    server steps instead of freezing an old ``unbound`` result forever.
+    """
+    evidence = list(getattr(spec.request_facts, "field_evidence", []) or [])
+    unresolved_indexes = [
+        index
+        for index, item in enumerate(evidence)
+        if isinstance(item, dict)
+        and str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+    ]
+    if not unresolved_indexes:
+        return
+    from dano.execution.page.recording_field_identity import (
+        bind_field_evidence,
+        canonical_wire_path,
+    )
+
+    requests: list[dict[str, Any]] = []
+    facts_by_id = {
+        str(fact.request_id or ""): fact.model_dump(exclude_none=True)
+        for fact in spec.request_facts.requests
+        if str(fact.request_id or "")
+    }
+    for step in spec.steps:
+        meta = dict(step.source_meta or {})
+        request_id = str(meta.get("request_id") or "")
+        if not request_id:
+            continue
+        analysis = spec.request_facts.analysis.get(request_id)
+        fact = facts_by_id.get(request_id, {})
+        method = str(step.method or fact.get("method") or "GET").upper()
+        query = meta.get("query") or fact.get("query") or {}
+        body = step.body_source
+        # A client projection intentionally redacts request bodies.  Rebinding
+        # against that empty projection would destroy previously captured
+        # evidence, so only authoritative server-side request values may
+        # participate in this repair pass.
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            if not query:
+                continue
+        elif body in (None, "", {}, []):
+            continue
+        requests.append({
+            **fact,
+            **meta,
+            "request_id": request_id,
+            "method": method,
+            "url": step.url or step.path,
+            "post_data": body,
+            "query": query,
+            "role": analysis.role if analysis is not None else meta.get("role") or "",
+        })
+    if not requests:
+        return
+    unresolved = [evidence[index] for index in unresolved_indexes]
+    rebound_unresolved = bind_field_evidence(
+        requests,
+        list(spec.request_facts.page_events or []),
+        unresolved,
+        page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
+    )
+    rebound = list(evidence)
+    for index, item in zip(unresolved_indexes, rebound_unresolved, strict=True):
+        rebound[index] = item
+    spec.request_facts.field_evidence = rebound
+    for step in spec.steps:
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        controls = [
+            item for item in rebound
+            if isinstance(item, dict)
+            and item.get("binding_status") == "bound"
+            and str(item.get("request_id") or "") == request_id
+        ]
+        for param in step.params:
+            wire_path = canonical_wire_path(step, param.path)
+            matches = [item for item in controls if str(item.get("wire_path") or "") == wire_path]
+            if len(matches) != 1:
+                continue
+            control = matches[0]
+            label = str(control.get("label") or control.get("field") or "").strip()
+            if (
+                label
+                and not _param_field_manually_edited(param, "key")
+                and not _param_field_manually_edited(param, "label")
+                and not any(
+                    isinstance(item, dict) and item.get("actor") == "agent" and item.get("kind") == "field_name"
+                    for item in (param.evidence or [])
+                )
+            ):
+                param.label = label
+            if isinstance(control.get("required_observed"), bool):
+                param.evidence = [
+                    item for item in (param.evidence or [])
+                    if not (isinstance(item, dict) and item.get("kind") == "page_required")
+                ]
+                if control["required_observed"]:
+                    param.evidence.append({
+                        "kind": "page_required",
+                        "source": "recorder_dom",
+                        "request_path": param.path,
+                        "binding_status": "bound",
+                        "evidence_id": control.get("evidence_id") or "",
+                    })
+                if (
+                    not _param_field_manually_edited(param, "required")
+                    and not _param_required_agent_classified(param)
+                ):
+                    param.required = bool(control["required_observed"])
+                    param.source = {
+                        **(param.source or {}),
+                        "required_state": "required" if param.required else "optional",
+                    }
 
 
 def _ground_saved_page_enums(spec: FlowSpec) -> None:
@@ -4645,10 +4761,14 @@ def _param_has_page_required_evidence(param: ParamField) -> bool:
     return any(
         isinstance(item, dict)
         and (
-            item.get("kind") == "page_required"
+            (
+                item.get("kind") == "page_required"
+                and str(item.get("binding_status") or "") == "bound"
+            )
             or (
                 item.get("source") in {"recorder_dom", "page", "page_snapshot"}
                 and item.get("required") is True
+                and str(item.get("binding_status") or "") == "bound"
             )
         )
         for item in (param.evidence or [])
@@ -4723,6 +4843,19 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             param.enum_options = None
             param.enum_value_map = None
             continue
+        required_state = str((param.source or {}).get("required_state") or "")
+        if (
+            not _param_field_manually_edited(param, "required")
+            and not _param_required_agent_classified(param)
+            and required_state not in {"required", "optional"}
+            and _param_has_page_required_evidence(param)
+            and _param_exposed_to_caller(param)
+        ):
+            # A bound DOM required marker is already machine-grounded evidence.
+            # Do not leave the persisted write contract at ``unknown`` merely
+            # because the Pi turn did not repeat that captured fact.
+            param.required = True
+            param.source = {**(param.source or {}), "required_state": "required"}
         if (
             (step.method or "GET").upper() in {"GET", "HEAD"}
             and str(param.path or "").startswith("query.")
@@ -12195,10 +12328,23 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
 
     for cap in spec.capabilities or []:
         cap.nodes = clean_nodes(cap.nodes or [], [])
-        for ref in cap.request_refs or []:
+        legacy_refs = list(cap.request_refs or [])
+        for ref in legacy_refs:
             if ref.usage == "preflight" and valid_step_id(ref.step_id):
                 _add_step_id_to_capability(spec, cap, ref.step_id)
         _sync_capability_order(spec, cap)
+        if not cap.locked:
+            membership_by_step = {ref.step_id: ref for ref in cap.request_refs if ref.step_id}
+            for legacy_ref in legacy_refs:
+                current = membership_by_step.get(legacy_ref.step_id)
+                if (
+                    current is not None
+                    and legacy_ref.usage == "preflight"
+                    and legacy_ref.origin in {"manual", "user"}
+                ):
+                    current.usage = "preflight"
+                    current.origin = legacy_ref.origin
+                    current.confirmed = legacy_ref.confirmed
     return spec
 
 
@@ -12271,6 +12417,7 @@ def _remove_capability_step_nodes(nodes: list[dict[str, Any]], step_id: str) -> 
 def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
     """Refresh derived membership views from the executable node plan."""
     by_id = {step.step_id: step for step in spec.steps}
+    legacy_refs = list(cap.request_refs or [])
     cap.step_ids = [
         step_id for step_id in _capability_call_step_ids_from_nodes(cap.nodes or [])
         if step_id in by_id
@@ -12279,15 +12426,57 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
         ref.step_id: ref for ref in (cap.request_refs or [])
         if ref.usage in {"execute", "preflight"} and ref.step_id
     }
+    call_step_ids = set(cap.step_ids)
     auxiliary_refs = [
         ref for ref in (cap.request_refs or [])
-        if ref.usage not in {"execute", "preflight"} or not ref.step_id
+        if (
+            ref.usage not in {"execute", "preflight"}
+            or not ref.step_id
+            # Explicit planner/manual preflight facts need not be executable
+            # call nodes. Preserve those references while normalizing the one
+            # public execute anchor among actual call nodes.
+            or (ref.usage == "preflight" and ref.step_id not in call_step_ids)
+        )
     ]
+    existing_execute_ids = [
+        ref.step_id for ref in legacy_refs
+        if ref.usage == "execute" and ref.step_id in call_step_ids
+    ]
+    evidence_anchor_ids = [
+        str(item.get("anchor_step_id") or "")
+        for item in (cap.evidence or [])
+        if isinstance(item, dict)
+        and str(item.get("anchor_step_id") or "") in call_step_ids
+    ]
+    return_anchor_ids = [
+        str(node.get("from") or node.get("source") or "")
+        for node in _iter_capability_nodes(cap.nodes or [])
+        if isinstance(node, dict)
+        and node.get("type") == "return"
+        and str(node.get("from") or node.get("source") or "") in call_step_ids
+    ]
+    anchor_candidates = list(dict.fromkeys(
+        existing_execute_ids or evidence_anchor_ids or return_anchor_ids
+    ))
+    if not anchor_candidates and len(cap.step_ids) == 1:
+        anchor_candidates = list(cap.step_ids)
+    anchor_step_id = anchor_candidates[0] if len(anchor_candidates) == 1 else ""
     execute_refs: list[CapabilityRequestRef] = []
     for step_id in cap.step_ids:
         ref = _capability_request_ref_from_step(
             spec, by_id[step_id], existing_memberships.get(step_id),
         )
+        if anchor_step_id and not cap.locked:
+            ref.usage = "execute" if step_id == anchor_step_id else "preflight"
+        legacy_ref = next((item for item in legacy_refs if item.step_id == step_id), None)
+        if (
+            legacy_ref is not None
+            and legacy_ref.usage == "preflight"
+            and legacy_ref.origin in {"manual", "user"}
+        ):
+            ref.usage = "preflight"
+            ref.origin = legacy_ref.origin
+            ref.confirmed = legacy_ref.confirmed
         execute_refs.append(ref)
     cap.request_refs = execute_refs + auxiliary_refs
 

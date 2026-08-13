@@ -724,7 +724,7 @@ export const recordingTools = [
     parameters: Type.Object({
       ...RecordingIdentity,
       write_step_id: Type.String({ minLength: 1 }),
-      inputs: Type.Record(Type.String(), Type.Any()),
+      inputs: Type.Optional(Type.Record(Type.String(), Type.Any())),
       verify_request_id: Type.String({ minLength: 1 }),
       assertion: RecordingAssertion,
       cleanup_request_id: Type.Optional(Type.String({ minLength: 1 })),

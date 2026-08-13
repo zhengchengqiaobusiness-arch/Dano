@@ -1543,8 +1543,22 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             raise ValueError("dependency verification signature does not match current link")
         link.confirmed = True
         link.confidence = 1.0
-        link.meta = {**(link.meta or {}), "verified": True, "actor": "agent", "verification_id": verification_id}
+        link_meta = dict(link.meta or {})
+        link_meta.pop("unverified_reason", None)
+        link.meta = {**link_meta, "verified": True, "actor": "agent", "verification_id": verification_id}
         link.evidence = {**(link.evidence or {}), "actor": "agent", "verification_id": verification_id}
+        spec.meta = {
+            **(spec.meta or {}),
+            "unverified": [
+                item for item in (spec.meta or {}).get("unverified") or []
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("target_id") or "") == link_id
+                    and str(item.get("target_kind") or "")
+                    in {"dependency", "dependency_candidate"}
+                )
+            ],
+        }
         source_step = next((item for item in spec.steps if item.step_id == link.source_step_id), None)
         if source_step is not None:
             for param in source_step.params:

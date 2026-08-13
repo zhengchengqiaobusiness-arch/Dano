@@ -39,12 +39,24 @@ def _is_strong_value(raw: object, path: str) -> bool:
         return len(value) >= 6
     if _UUID_RE.fullmatch(value):
         return True
-    return bool(
+    # Workflow engines commonly use colon-delimited compound IDs such as
+    # ``processKey:version:uuid``. Each segment must still be opaque; allowing
+    # arbitrary punctuation would revive free-text value collisions.
+    opaque_parts = value.split(":")
+    ordinary_opaque = bool(len(opaque_parts) == 1 and _OPAQUE_RE.fullmatch(value))
+    compound_opaque = bool(
+        len(opaque_parts) >= 3
+        and all(re.fullmatch(r"[A-Za-z0-9_-]+", part or "") for part in opaque_parts)
+        and any(ch.isalpha() for ch in opaque_parts[0])
+        and any(_UUID_RE.fullmatch(part) or _OPAQUE_RE.fullmatch(part) for part in opaque_parts[1:])
+    )
+    opaque_shape = bool(
         len(value) >= 8
-        and _OPAQUE_RE.fullmatch(value)
+        and (ordinary_opaque or compound_opaque)
         and any(ch.isalpha() for ch in value)
         and any(ch.isdigit() for ch in value)
     )
+    return opaque_shape
 
 
 def _is_workflow_route_value(raw: object, source_path: str, target_path: str) -> bool:
@@ -98,7 +110,14 @@ def _input_leaves(request: dict) -> list[tuple[str, object]]:
     query = request.get("query")
     if not isinstance(query, dict):
         query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    out.extend((f"query.{path}", value) for path, value in _leaves(query))
+    # ``RequestFact.query`` stores every wire key as a value list. A one-item
+    # list is transport bookkeeping, not an array-valued field; keep the
+    # canonical target identity ``query.key`` instead of inventing ``[0]``.
+    for key, value in query.items():
+        if isinstance(value, list) and len(value) == 1:
+            out.append((f"query.{key}", value[0]))
+        else:
+            out.extend((f"query.{path}", item) for path, item in _leaves({key: value}))
     out.extend((f"body.{path}", value) for path, value in _leaves(_body(request)))
     out.extend((f"headers.{path}", value) for path, value in _leaves(request.get("headers") or {}))
     return out

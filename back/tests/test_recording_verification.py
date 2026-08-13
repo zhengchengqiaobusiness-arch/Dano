@@ -203,6 +203,62 @@ def test_finalize_marks_unresolved_dependency_candidates_without_crashing():
     assert finalized.meta["verification_run"]["complete"] is True
 
 
+def test_finalize_consumes_persisted_passed_dependency_verification():
+    spec = _spec()
+    verification_id = _record_dependency_verification(spec)
+    spec.meta = {
+        **(spec.meta or {}),
+        "verification_log": [get_verification(verification_id)],
+    }
+    _clear_verifications_for_tests()
+
+    finalized, _report = finalize_verification_state(
+        spec,
+        rounds=3,
+        max_rounds=3,
+        errors=["agent turn ended after executor returned"],
+    )
+
+    link = finalized.links[0]
+    assert link.confirmed is True
+    assert link.meta["verified"] is True
+    assert link.meta["verification_id"] == verification_id
+    assert not any(
+        item.get("target_id") == link.link_id
+        and str(item.get("target_kind") or "").startswith("dependency")
+        for item in (finalized.meta or {}).get("unverified") or []
+    )
+
+
+def test_finalize_rejects_agent_dependency_with_latest_matching_failed_evidence():
+    spec = _spec()
+    verification_id = _record_dependency_verification(spec, status="failed")
+    spec.meta = {
+        **(spec.meta or {}),
+        "verification_log": [get_verification(verification_id)],
+        "unverified": [{
+            "target_kind": "dependency",
+            "target_id": "link-1",
+            "reason": "stale pending marker",
+        }],
+    }
+    _clear_verifications_for_tests()
+
+    finalized, _report = finalize_verification_state(
+        spec,
+        rounds=3,
+        max_rounds=3,
+        errors=["agent turn ended after executor rejected the hypothesis"],
+    )
+
+    assert finalized.links == []
+    assert finalized.meta["rejected_dependencies"][0]["source_step_id"] == "detail"
+    assert not any(
+        item.get("target_id") == "link-1"
+        for item in finalized.meta.get("unverified") or []
+    )
+
+
 def test_candidate_link_id_supports_propose_verify_then_confirm():
     spec = _spec_with_unproposed_value_link()
     candidate = next(item for item in verification_todos(spec) if item["kind"] == "dependency_candidate")

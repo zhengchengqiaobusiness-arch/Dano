@@ -114,14 +114,16 @@ def test_legacy_manual_preflight_reference_is_promoted_when_loaded() -> None:
     spec = _spec(FlowCapability(
         name="submit",
         nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
-        request_refs=[CapabilityRequestRef(
+    ))
+    # Simulate a persisted legacy payload. FlowSpec validation now immediately
+    # canonicalizes derived memberships, so inject the old ref after loading.
+    spec.capabilities[0].request_refs = [CapabilityRequestRef(
             request_id="req-query",
             step_id="query",
             usage="preflight",
             origin="manual",
             confirmed=True,
-        )],
-    ))
+        )]
 
     _normalize_capability_references(spec)
 

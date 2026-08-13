@@ -5,7 +5,16 @@ from types import SimpleNamespace
 import pytest
 
 from dano.execution.page.capability_compiler import compile_capabilities
-from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField, RequestFact, RequestFacts
+from dano.execution.page.flow_spec import (
+    CapabilityRequestRef,
+    FlowCapability,
+    FlowSpec,
+    FlowStep,
+    ParamField,
+    RequestFact,
+    RequestFacts,
+    prepare_flow_spec_for_publish,
+)
 from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
 from dano.onboarding.recording_release import evaluate_recording_release
 
@@ -56,6 +65,73 @@ def _mixed_spec() -> FlowSpec:
         {"name": "submit_item", "title": "提交项目", "kind": "submit", "anchor_step_id": "submit"},
     ]}
     return compile_capabilities(source, plan).spec
+
+
+def test_publish_sync_keeps_capability_anchor_execute_when_step_is_shared_preflight():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            path="/items",
+            source_meta={
+                "request_id": "req-query",
+                "role": "business_get",
+                "control_preflight_for_write": True,
+            },
+            response_json={"data": {"list": [], "total": 0}},
+        )],
+        capabilities=[FlowCapability(
+            name="query_items",
+            kind="query_status",
+            nodes=[
+                {"id": "call_1", "type": "call", "step_id": "query"},
+                {"id": "return_1", "type": "return", "from": "query", "path": "response"},
+            ],
+            request_refs=[CapabilityRequestRef(
+                request_id="req-query",
+                step_id="query",
+                usage="preflight",
+                origin="planner",
+            )],
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/items"),
+        ]),
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+
+    assert [(ref.step_id, ref.usage) for ref in prepared.capabilities[0].request_refs] == [
+        ("query", "execute"),
+    ]
+
+
+def test_publish_sync_projects_bound_page_required_evidence_to_write_contract():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/items/create",
+        params=[ParamField(
+            path="body.reason",
+            key="reason",
+            required=False,
+            category="user_param",
+            source_kind="user_input",
+            source={"required_state": "unknown"},
+            evidence=[{
+                "kind": "page_required",
+                "source": "recorder_dom",
+                "request_path": "body.reason",
+                "binding_status": "bound",
+            }],
+        )],
+    )])
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    reason = prepared.steps[0].params[0]
+
+    assert reason.required is True
+    assert reason.source["required_state"] == "required"
 
 
 def test_release_keeps_verified_query_callable_and_write_in_draft_only():

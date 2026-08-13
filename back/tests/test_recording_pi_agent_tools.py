@@ -509,6 +509,58 @@ async def test_write_verification_executes_each_step_only_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_write_verification_defaults_to_captured_request_body(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "b" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    observed_inputs = None
+
+    async def fake_execute(*_args, **kwargs):
+        nonlocal observed_inputs
+        observed_inputs = kwargs["inputs"]
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={"write_step_id": kwargs["write_step_id"]},
+            status="passed",
+            evidence={"passed": True},
+        )
+        return {
+            "ok": True,
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST", "post_data": '{"title":"recorded"}'},
+            {"request_id": "req-verify", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+
+    result = await execute_recording_write_with_verify("run-recording", {
+        "write_step_id": "submit",
+        "verify_request_id": "req-verify",
+        "assertion": {"path": "data.id", "operator": "exists"},
+    })
+
+    assert result["ok"] is True
+    assert observed_inputs == {}
+
+
+@pytest.mark.asyncio
 async def test_failed_write_verification_is_not_reexecuted(monkeypatch):
     session = RecordingPiSession(
         tenant="tenant",

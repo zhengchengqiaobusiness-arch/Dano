@@ -249,6 +249,18 @@ def _causal_match(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
     )
 
 
+def _request_binding_priority(request: dict[str, Any]) -> int:
+    """Prefer the business request caused by a form action over background reads."""
+    role = str(request.get("role") or request.get("request_role") or "")
+    if role in {"business_write", "submit_anchor"}:
+        return 3
+    if role == "business_get":
+        return 2
+    if role in {"read_context", "read_option"}:
+        return 1
+    return 2 if str(request.get("method") or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"} else 1
+
+
 def _timestamp(value: Any) -> float | None:
     try:
         number = float(value)
@@ -389,9 +401,26 @@ def bind_field_evidence(
                             "has_request_causality": bool(
                                 request.get("trigger_action_id") or request.get("trigger_transaction_id")
                             ),
+                            "request_priority": _request_binding_priority(request),
                         })
-            if len({(item["request_id"], item["wire_path"]) for item in value_candidates}) == 1:
-                candidates = value_candidates
+            # A short value such as ``1`` often appears in earlier paging or
+            # option requests. First select the causally aligned business
+            # request, then require uniqueness inside that request. Global
+            # value uniqueness discarded valid form evidence.
+            exact_value_candidates = [item for item in value_candidates if item["causal_match"]]
+            aligned = exact_value_candidates
+            if not aligned:
+                aligned = [
+                    item for item in value_candidates
+                    if item["temporal_match"] and item["has_request_causality"]
+                ]
+                if aligned:
+                    priority = max(int(item["request_priority"]) for item in aligned)
+                    aligned = [item for item in aligned if int(item["request_priority"]) == priority]
+                    nearest = min(float(item["time_delta"]) for item in aligned)
+                    aligned = [item for item in aligned if float(item["time_delta"]) == nearest]
+            if len({(item["request_id"], item["wire_path"]) for item in aligned}) == 1:
+                candidates = aligned
         if candidates:
             best_score = max(int(item["match_score"]) for item in candidates)
             candidates = [item for item in candidates if int(item["match_score"]) == best_score]
