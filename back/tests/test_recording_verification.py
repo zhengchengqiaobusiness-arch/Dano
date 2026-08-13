@@ -176,7 +176,7 @@ def test_enum_param_without_select_binding_is_still_a_verification_todo():
     assert todo["target_id"] == "query:query.type"
     assert todo["step_id"] == "query"
     assert todo["path"] == "query.type"
-    assert todo["completion_op"] == "attach_enum_options"
+    assert todo["completion_op"] == "set_param_enum"
 
 
 def test_finalize_marks_unresolved_dependency_candidates_without_crashing():

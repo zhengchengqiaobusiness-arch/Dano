@@ -12849,6 +12849,7 @@ def _semantic_candidate_gate(
     candidate: FlowSpec,
     *,
     allow_screenshot_query_additions: bool = False,
+    allow_grounded_wire_change: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Admit an automatic proposal only when executable quality is monotonic."""
     before_report = validate_flow_spec(before)
@@ -12888,6 +12889,7 @@ def _semantic_candidate_gate(
     after_warning_list = generation_findings(after_report, "warnings")
     if (
         _semantic_wire_hash(before) != _semantic_wire_hash(candidate)
+        and not allow_grounded_wire_change
         and not (
             allow_screenshot_query_additions
             and _only_grounded_screenshot_query_params_added(before, candidate)
@@ -21378,7 +21380,16 @@ async def apply_recording_agent_submission(
                         refresh_review_items(_sync_capability_io_schemas(candidate)),
                         refresh_machine_owned=True,
                     )
-                    accepted, gate = _semantic_candidate_gate(current, candidate)
+                    expected_grounded_wire_change = bool(
+                        str(operation.get("op") or "") == "propose_dependency"
+                        and str(operation.get("kind") or operation.get("link_kind") or "")
+                        in {"structure", "response_key_map"}
+                    )
+                    accepted, gate = _semantic_candidate_gate(
+                        current,
+                        candidate,
+                        allow_grounded_wire_change=expected_grounded_wire_change,
+                    )
                     if accepted:
                         current = candidate
                     else:

@@ -885,7 +885,7 @@ async def test_verified_enum_repair_refreshes_machine_owned_capability_contract(
     })
 
     op_result = updated.meta["recording_agent_session"]["op_results"][0]
-    assert op_result["status"] == "applied", op_result
+    assert op_result["status"] == "applied", json.dumps(op_result, ensure_ascii=False)
     assert updated.steps[0].params[0].enum_value_map == {"病假": 1, "事假": 2}
     assert updated.capabilities[0].confirmation_hash != old_confirmation_hash
     after_validation = validate_flow_spec(updated)
@@ -1179,7 +1179,7 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
             key="HR审批人", value=159,
         ),
     ])
-    updated = apply_flow_edits(spec, [{
+    dependency_op = {
         "op": "propose_dependency",
         "kind": "response_key_map",
         "source_request_id": "req-detail",
@@ -1199,7 +1199,28 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
         },
         "reason": "最新审批节点的名称决定调用方映射，节点 ID 决定请求键",
         "evidence": {"request_ids": ["req-detail", "req-submit"]},
-    }])
+    }
+    spec.capabilities = [FlowCapability(
+        name="submit_item",
+        kind="submit",
+        nodes=[
+            {"id": "read_detail", "type": "call", "step_id": "detail"},
+            {"id": "write_item", "type": "call", "step_id": "submit"},
+        ],
+        confidence=0.95,
+    )]
+    spec.meta = {**(spec.meta or {}), "verification_run": {"complete": True}}
+    spec = _auto_confirm_ready_capabilities(spec)
+    spec.meta["verification_run"] = {"complete": False}
+
+    updated = await apply_recording_agent_submission(
+        spec,
+        mode="repair",
+        submission={"ops": [dependency_op]},
+    )
+
+    op_result = updated.meta["recording_agent_session"]["op_results"][0]
+    assert op_result["status"] == "applied", json.dumps(op_result, ensure_ascii=False)
 
     link = updated.links[0]
     assert link.kind == "response_key_map"

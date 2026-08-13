@@ -3082,7 +3082,10 @@ def _check_step_links(workflow: dict) -> list[str]:
             source_values = _get_many_by_path(steps[source_step].get("response_json"), source_path)
             if not source_values:
                 out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的来源路径 `{source_path}` 在上游响应样例里找不到")
-            elif len(source_values) != len(container):
+            elif (
+                lk.get("mode") != "response_key_map"
+                and len(source_values) != len(container)
+            ):
                 out.append(
                     f"步骤{i + 1}:结构依赖 `{disp}` 的上游键数 {len(source_values)} "
                     f"与录制值槽数 {len(container)} 不一致"

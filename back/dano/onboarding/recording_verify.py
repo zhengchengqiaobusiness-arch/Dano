@@ -182,6 +182,7 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
                 and (binding_incomplete or param_incomplete)
                 and ("enum", target_id) not in skipped
             ):
+                completion_op = "attach_enum_options" if binding is not None else "set_param_enum"
                 todos.append({
                     "kind": "enum",
                     "target_id": target_id,
@@ -190,8 +191,12 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
                     "source_request_id": str(binding.source_request_id or "") if binding is not None else "",
                     "known_count": len(binding.options or []) if binding is not None else len(param.enum_options or []),
                     "expected_count": binding.count if binding is not None else 0,
-                    "suggested_tools": ["browser_snapshot", "browser_click", "replay_request"],
-                    "completion_op": "attach_enum_options",
+                    "suggested_tools": (
+                        ["browser_snapshot", "browser_click", "replay_request"]
+                        if binding is not None else
+                        ["get_recording_state", "submit_recording_repair"]
+                    ),
+                    "completion_op": completion_op,
                 })
     return todos
 
@@ -446,8 +451,9 @@ async def run_recording_verification(
         prompt = (
             "进入录后自主验证。先调用 get_recording_state 和 get_validation_report，逐项处理下面的"
             " verification_todos。已提议的依赖只用 verify_dependency(link_id) 验证，写步骤用 execute_write_with_verify，"
-            "枚举/分支缺口用 browser_* 补采。只能使用工具返回的 verification_id，最后调用"
-            " submit_recording_repair 提交 confirm_dependency、bind_verify_read、attach_enum_options。"
+            "枚举待办按 completion_op 处理：attach_enum_options 先用 browser_* 补采并使用工具返回的"
+            " verification_id；set_param_enum 必须使用录制状态中已有的 field_evidence 和完整字典 label/value。"
+            "最后调用 submit_recording_repair 提交对应操作以及 confirm_dependency、bind_verify_read。"
             "dependency_candidate 是后端从真实请求值链发现的高置信候选：先单独提交"
             " propose_dependency；读取刷新后的验证报告后调用 verify_dependency(link_id)，"
             "再用它返回的 verification_id 提交 confirm_dependency。dependency_kind=response_key_map 时必须按"
