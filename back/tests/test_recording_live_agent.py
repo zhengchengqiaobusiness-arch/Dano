@@ -233,7 +233,11 @@ def test_live_agent_ops_write_evidenced_drafts_without_self_verifying():
     assert param.source["origin_request_id"] == "req-detail"
     assert any(item.get("source_kind") == "chained" for item in param.evidence)
     assert len(updated.links) == 1
-    assert updated.links[0].meta == {"verified": False, "actor": "agent"}
+    assert updated.links[0].meta == {
+        "verified": False,
+        "actor": "agent",
+        "unverified_reason": "依赖提案已更新，需要重新执行 dependency_execute 验证",
+    }
     assert updated.links[0].confirmed is False
     assert updated.meta["pitfalls"][0]["actor"] == "agent"
     assert {item["kind"] for item in updated.meta["agent_insights"]} >= {"goal", "role", "param_source", "link"}
@@ -328,6 +332,111 @@ def test_live_field_semantics_resolve_request_id_and_qualified_body_path():
     }])
 
     assert updated.steps[1].params[0].source_kind == "page_context"
+
+
+def test_cited_unbound_page_control_grounds_all_field_axes_and_public_short_code():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.referenceCode",
+        key="referenceCode",
+        value="1",
+    )]
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-reference-code",
+        "evidence_id": "evt-reference-code",
+        "field": "业务单号",
+        "label": "业务单号",
+        "value": "1",
+        "op": "fill",
+        "required_observed": False,
+        "editable": True,
+        "disabled": False,
+        "read_only": False,
+        "control_kind": "text",
+        "binding_status": "unbound",
+        "binding_reason": "the page control has no transport alias",
+    })
+
+    updated = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source",
+            "request_id": "req-detail",
+            "wire_path": "query.referenceCode",
+            "source_kind": "user_input",
+            "reason": "操作人填写了业务单号",
+            "evidence_refs": ["evt-reference-code"],
+        },
+        {
+            "op": "rename_field",
+            "request_id": "req-detail",
+            "wire_path": "query.referenceCode",
+            "label": "业务单号",
+            "reason": "页面标签明确显示业务单号",
+            "evidence_refs": ["evt-reference-code"],
+        },
+        {
+            "op": "set_param_required",
+            "request_id": "req-detail",
+            "wire_path": "query.referenceCode",
+            "required": False,
+            "reason": "页面控件没有必填标记",
+            "evidence_refs": ["evt-reference-code"],
+        },
+    ])
+
+    param = updated.steps[0].params[0]
+    assert param.label == "业务单号"
+    assert param.source["required_state"] == "optional"
+    assert any(
+        item.get("kind") == "page_control"
+        and item.get("evidence_id") == "evt-reference-code"
+        and item.get("editable") is True
+        for item in param.evidence
+    )
+
+    updated.capabilities = [FlowCapability(
+        name="query_records",
+        kind="query",
+        nodes=[{"id": "query", "type": "call", "step_id": "detail"}],
+        confirmed=True,
+    )]
+    from dano.execution.page.flow_spec import sync_capability_scoped_views, validate_flow_spec
+
+    updated = sync_capability_scoped_views(updated)
+    report_text = json.dumps(validate_flow_spec(updated), ensure_ascii=False)
+    assert "capability_internal_field_exposed" not in report_text
+
+
+def test_cited_control_with_a_different_value_does_not_ground_public_source():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.referenceCode", key="referenceCode", value="A-1",
+    )]
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-other-field",
+        "evidence_id": "evt-other-field",
+        "field": "其他字段",
+        "label": "其他字段",
+        "value": "B-2",
+        "op": "fill",
+        "editable": True,
+        "control_kind": "text",
+        "binding_status": "unbound",
+    })
+
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_source",
+        "request_id": "req-detail",
+        "wire_path": "query.referenceCode",
+        "source_kind": "user_input",
+        "reason": "错误地引用了另一个页面控件",
+        "evidence_refs": ["evt-other-field"],
+    }])
+
+    assert not any(
+        item.get("kind") == "page_control"
+        for item in updated.steps[0].params[0].evidence
+    )
 
 
 def test_source_reclassification_preserves_the_independent_required_axis():

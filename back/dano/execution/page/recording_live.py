@@ -474,7 +474,23 @@ def _normalized_field_alias(value: object) -> str:
     return text.casefold()
 
 
-def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
+def _evidence_matches_refs(item: dict, evidence_refs: list[str]) -> bool:
+    identifiers = {
+        str(item.get(key) or "")
+        for key in ("evidence_id", "event_id", "action_id", "transaction_id")
+    }
+    identifiers.update(str(value or "") for value in (item.get("event_refs") or []))
+    identifiers.discard("")
+    return any(
+        ref == identifier or ref.endswith(f":{identifier}")
+        for ref in evidence_refs
+        for identifier in identifiers
+    )
+
+
+def _field_evidence_candidates(
+    spec, step, param, *, evidence_refs: list[str] | None = None,
+) -> list[dict]:  # noqa: ANN001
     """Return recorder controls that can be tied to this exact request field."""
     request_id = str((step.source_meta or {}).get("request_id") or "")
     wire_path = canonical_wire_path(step, param.path)
@@ -496,6 +512,16 @@ def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
                 and str(item.get("request_id") or "") == request_id
                 and str(item.get("wire_path") or "") == wire_path
             ):
+                matches.append(item)
+            elif (
+                binding_status == "unbound"
+                and evidence_refs
+                and _evidence_matches_refs(item, evidence_refs)
+            ):
+                # An unbound control is not useless evidence.  A later semantic
+                # operation may identify it by its immutable event/evidence id.
+                # Bound evidence remains authoritative and can never be
+                # retargeted this way.
                 matches.append(item)
             continue
         evidence_request_id = str(item.get("request_id") or "")
@@ -521,8 +547,12 @@ def _field_evidence_candidates(spec, step, param) -> list[dict]:  # noqa: ANN001
     return matches
 
 
-def _require_required_grounding(spec, step, param, required: bool) -> None:  # noqa: ANN001
-    candidates = _field_evidence_candidates(spec, step, param)
+def _require_required_grounding(
+    spec, step, param, required: bool, *, evidence_refs: list[str] | None = None,
+) -> None:  # noqa: ANN001
+    candidates = _field_evidence_candidates(
+        spec, step, param, evidence_refs=evidence_refs,
+    )
     observed = {
         item.get("required_observed", item.get("required"))
         for item in candidates
@@ -539,8 +569,12 @@ def _require_required_grounding(spec, step, param, required: bool) -> None:  # n
         )
 
 
-def _require_label_grounding(spec, step, param, label: str) -> None:  # noqa: ANN001
-    candidates = _field_evidence_candidates(spec, step, param)
+def _require_label_grounding(
+    spec, step, param, label: str, *, evidence_refs: list[str] | None = None,
+) -> None:  # noqa: ANN001
+    candidates = _field_evidence_candidates(
+        spec, step, param, evidence_refs=evidence_refs,
+    )
     labels = {
         str(item.get(key) or "").strip()
         for item in candidates
@@ -616,6 +650,72 @@ def _structure_target_keys(step, target_path: str) -> list[str]:  # noqa: ANN001
         if key and key not in keys:
             keys.append(key)
     return keys
+
+
+def _ground_param_in_cited_page_controls(
+    spec, step, param, evidence_refs: list[str], *, source_kind: str,
+) -> None:  # noqa: ANN001
+    """Persist the raw page facts that prove an accepted source conclusion."""
+    if source_kind != "user_input" or not evidence_refs:
+        return
+    _require_grounded_refs(spec, "set_param_source", evidence_refs)
+    candidates = _field_evidence_candidates(
+        spec, step, param, evidence_refs=evidence_refs,
+    )
+    controls = []
+    for item in candidates:
+        if not _evidence_matches_refs(item, evidence_refs):
+            continue
+        observed_value = item.get("value")
+        recorded_value = param.value if param.value not in (None, "") else param.default_value
+        if (
+            observed_value not in (None, "")
+            and recorded_value not in (None, "")
+            and str(observed_value) != str(recorded_value)
+        ):
+            continue
+        interacted = bool(
+            item.get("recorded_user_input")
+            or str(item.get("op") or "").lower() in {
+                "fill", "input", "change", "select", "check", "click",
+            }
+        )
+        editable = bool(
+            item.get("editable") is True
+            or (
+                item.get("disabled") is not True
+                and item.get("read_only") is not True
+                and item.get("control_disabled") is not True
+                and item.get("control_read_only") is not True
+            )
+        )
+        if not interacted or not editable:
+            continue
+        controls.append({
+            "kind": "page_control",
+            "source": "recorder_dom",
+            "evidence_id": str(item.get("evidence_id") or item.get("event_id") or ""),
+            "event_id": str(item.get("event_id") or ""),
+            "field_aliases": list(item.get("field_aliases") or []),
+            "label": str(item.get("label") or item.get("visible_label") or item.get("field") or ""),
+            "control_kind": str(item.get("control_kind") or "unknown"),
+            "interacted": True,
+            "disabled": bool(item.get("disabled", item.get("control_disabled", False))),
+            "read_only": bool(item.get("read_only", item.get("control_read_only", False))),
+            "editable": True,
+            "required_observed": item.get("required_observed", item.get("required")),
+            "request_path": canonical_wire_path(step, param.path),
+            "binding_status": "agent_grounded",
+        })
+    existing_ids = {
+        str(item.get("evidence_id") or item.get("event_id") or "")
+        for item in (param.evidence or [])
+        if isinstance(item, dict) and item.get("kind") == "page_control"
+    }
+    param.evidence = [
+        *list(param.evidence or []),
+        *(item for item in controls if item["evidence_id"] not in existing_ids),
+    ]
 
 
 def _recorded_enum_contract(  # noqa: ANN001
@@ -1122,6 +1222,14 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     _record_agent_op(spec, stored)
                 return result
             param.reason = reason
+            evidence_refs = _evidence_refs(edit)
+            _ground_param_in_cited_page_controls(
+                spec,
+                step,
+                param,
+                evidence_refs,
+                source_kind=source_kind,
+            )
             param.evidence = [
                 *list(param.evidence or []),
                 {
@@ -1131,7 +1239,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     "origin_request_id": str(edit.get("origin_request_id") or ""),
                     "origin_path": str(edit.get("origin_path") or ""),
                     "reason": reason,
-                    "evidence_refs": _evidence_refs(edit),
+                    "evidence_refs": evidence_refs,
                 },
             ]
         else:
@@ -1156,7 +1264,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_required target is locked: {step_id}:{path}")
-            _require_required_grounding(spec, step, param, required)
+            _require_required_grounding(
+                spec, step, param, required, evidence_refs=evidence_refs,
+            )
             param.required = required
             param.source = {
                 **(param.source or {}),
@@ -1288,7 +1398,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"rename_field target is locked: {step_id}:{path}")
-            _require_label_grounding(spec, step, param, label)
+            _require_label_grounding(
+                spec, step, param, label, evidence_refs=evidence_refs,
+            )
             param.key = label
             param.label = label
             param.name_source = "agent"
