@@ -3,7 +3,6 @@ import json
 import pytest
 
 import dano.execution.page.flow_spec as flow_spec_module
-from dano.agent_tools.tools import _normalize_recording_plan_submission
 from dano.execution.page.flow_spec import (
     FlowLink,
     FlowSpec,
@@ -108,31 +107,6 @@ def test_unexpanded_select_keeps_choice_semantics() -> None:
     assert source["exposed_to_user"] is True
 
 
-def test_incremental_pi_plan_may_omit_unchanged_sections() -> None:
-    normalized = _normalize_recording_plan_submission(
-        {
-            "semantic_plan": {
-                "capabilities": [{
-                    "name": "query_records",
-                    "kind": "query",
-                    "step_ids": ["query"],
-                }],
-            },
-            "ops": [],
-        },
-        FlowSpec(steps=[FlowStep(
-            step_id="query",
-            method="GET",
-            path="/api/page",
-            source_meta={"role": "business_get"},
-        )]),
-    )
-    semantic = normalized["semantic_plan"]
-    assert semantic["capabilities"][0]["name"] == "query_records"
-    assert semantic["request_roles"][0]["step_id"] == "query"
-    assert semantic["field_semantics"] == []
-    assert semantic["capability_relations"] == []
-    assert semantic["unresolved_items"] == []
 
 
 def _captured(

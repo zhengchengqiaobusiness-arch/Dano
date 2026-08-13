@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -1451,523 +1452,24 @@ def test_page_onboard_required_recording_session_loss_never_falls_back(monkeypat
     assert calls == ["save"]
 
 
-def test_observed_five_interface_plan_keeps_only_business_anchors():
-    page = FlowStep(
-        step_id="page",
-        method="GET",
-        path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
-        source_meta={"role": "business_get"},
-        params=[ParamField(
-            path="query.pageNo", key="pageNo", value="1",
-            category="user_param", source_kind="user_input", exposed_to_user=True,
-        )],
-        response_json={"data": {"list": [{"sealId": "seal-1"}], "total": 1}},
-    )
-    definition = FlowStep(
-        step_id="definition",
-        method="GET",
-        path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
-        source_meta={"role": "business_get", "control_preflight_for_write": True},
-        response_json={"data": {"id": "process-1"}},
-    )
-    approval = FlowStep(
-        step_id="approval",
-        method="GET",
-        path="/admin-api/bpm/process-instance/get-approval-detail",
-        source_meta={"role": "business_get", "control_preflight_for_write": True},
-        params=[ParamField(
-            path="query.processDefinitionId", key="processDefinitionId",
-            value="process-1", category="runtime_var",
-            source_kind="previous_response", exposed_to_user=False,
-        )],
-        response_json={"data": {"nodes": []}},
-    )
-    seal = ParamField(
-        path="sealId",
-        key="sealId",
-        value="seal-1",
-        category="runtime_var",
-        source_kind="previous_response",
-        source={
-            "step_id": "page",
-            "response_path": "data.list[0].sealId",
-            "link_id": "bad-seal-link",
-        },
-        exposed_to_user=False,
-    )
-    submit = FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/admin-api/oa/seal-apply/submit-process",
-        source_meta={"role": "submit_anchor"},
-        params=[seal],
-        response_json={"code": 0},
-    )
-    options = FlowStep(
-        step_id="options",
-        method="GET",
-        path="/admin-api/bd/seal/simple-list?status=0",
-        source_meta={"role": "business_get"},
-        response_json={
-            "data": [
-                {"id": "seal-1", "name": "Company Seal"},
-                {"id": "seal-2", "name": "Finance Seal"},
-            ],
-        },
-    )
-    spec = FlowSpec(
-        flow_id="observed-five-interface",
-        steps=[page, definition, approval, submit, options],
-        links=[
-            flow_module.FlowLink(
-                source_step_id="definition",
-                source_path="data.id",
-                target_step_id="approval",
-                target_path="query.processDefinitionId",
-                confirmed=True,
-                confidence=0.97,
-            ),
-            flow_module.FlowLink(
-                link_id="bad-seal-link",
-                source_step_id="page",
-                source_path="data.list[0].sealId",
-                target_step_id="submit",
-                target_path="sealId",
-                reason="值匹配自动关联",
-                evidence={"kind": "value_match"},
-                confidence=0.85,
-            ),
-        ],
-    )
-    raw_plan = {
-        "semantic_plan": {
-            "business_understanding": "Submit a seal application",
-            "request_roles": [{"role_id": "submit_anchor"}],
-            "field_semantics": [{
-                "step_id": "submit",
-                "wire_path": "sealId",
-                "public_name": "Seal",
-                "business_type": "string",
-                "category": "runtime_var",
-                "source_kind": "previous_response",
-                "confidence": "high",
-                "evidence": "The model guessed data.list[0].sealId",
-            }],
-            "capabilities": [
-                {"capability_id": "cap_submit", "title": "Submit Application", "anchor_step_id": "submit"},
-                {"capability_id": "cap_page", "title": "Query Applications", "anchor_step_id": "page"},
-                {"capability_id": "cap_definition", "title": "Get Process Definition", "anchor_step_id": "definition"},
-                {"capability_id": "cap_approval", "title": "Get Approval Detail", "anchor_step_id": "approval"},
-                {"capability_id": "cap_options", "title": "List Seals", "anchor_step_id": "options"},
-            ],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": "",
-    }
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    capabilities = normalized["semantic_plan"]["capabilities"]
-
-    assert {item["name"] for item in capabilities} == {"cap_submit", "cap_page"}
-    submit_capability = next(item for item in capabilities if item["name"] == "cap_submit")
-    assert submit_capability["kind"] == "submit"
-    assert submit_capability["step_ids"] == ["definition", "approval", "submit"]
-    query_capability = next(item for item in capabilities if item["name"] == "cap_page")
-    assert query_capability["step_ids"] == ["page"]
-    field = normalized["semantic_plan"]["field_semantics"][0]
-    assert field["category"] == "runtime_var"
-    assert field["source_kind"] == "previous_response"
-    assert field["confidence"] == 0.95
-
-    spec.capabilities = [flow_module.FlowCapability(
-        name="submit_create",
-        title="Old Incorrect Combined Capability",
-        kind="submit",
-        nodes=[
-            {"id": "call_1", "type": "call", "step_id": step_id}
-            for step_id in ("page", "definition", "approval", "submit")
-        ],
-        updated_by="planner",
-    )]
-    spec.meta = {"capability_model": {"source": "pi_agent_patch", "status": "ready"}}
-
-    repaired = asyncio.run(flow_module.orchestrate_flow_capabilities(
-        spec,
-        submission=normalized,
-        generation_mode="optimize",
-    ))
-
-    # The compatibility normalizer is not a second production ability
-    # producer. Its legacy plan has no strict request_refs contract and is
-    # therefore rejected instead of silently rebuilding public abilities.
-    assert repaired.capabilities == []
-    assert repaired.meta["capability_model"]["source"] == "strict_plan_rejected"
-
-def test_recording_plan_normalizes_labeled_step_ids_from_real_agent_output():
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id="0f576fe00bfe",
-            method="POST",
-            path="/admin-api/oa/seal-apply/submit-process",
-            source_meta={"role": "submit_anchor"},
-        ),
-        FlowStep(
-            step_id="10caab0f4afe",
-            method="GET",
-            path="/admin-api/oa/seal-apply/page",
-            source_meta={"role": "business_get"},
-        ),
-    ])
-    raw_plan = {
-        "semantic_plan": {
-            "business_understanding": {
-                "summary": "Submit and query seal applications",
-            },
-            "request_roles": [],
-            "field_semantics": [],
-            "capabilities": [
-                {
-                    "capability_id": "submit_seal_application",
-                    "title": "Submit seal application",
-                    "steps": ["step_id>0f576fe00bfe"],
-                },
-                {
-                    "capability_id": "query_seal_applications",
-                    "title": "Query seal applications",
-                    "steps": ["step_id=10caab0f4afe"],
-                },
-                {
-                    "capability_id": "invented_capability",
-                    "title": "Invented capability",
-                    "steps": ["step_id=not-recorded"],
-                },
-            ],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": [],
-    }
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )
-    capabilities = {
-        item["name"]: item
-        for item in normalized["semantic_plan"]["capabilities"]
-    }
-
-    assert set(capabilities) == {
-        "submit_seal_application", "query_seal_applications",
-    }
-    assert capabilities["submit_seal_application"]["kind"] == "submit"
-    assert capabilities["submit_seal_application"]["step_ids"] == ["0f576fe00bfe"]
-    assert capabilities["query_seal_applications"]["kind"] == "query_status"
-    assert capabilities["query_seal_applications"]["step_ids"] == ["10caab0f4afe"]
 
 
-def test_internal_only_capability_is_ignored_without_rejecting_the_plan():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="options", method="GET", path="/api/users/options",
-        source_meta={"role": "read_option"},
-        response_json={"data": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]},
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "User options"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [{
-            "capability_id": "list_users", "title": "List users",
-            "anchor_step_id": "options",
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-
-    assert normalized["semantic_plan"]["capabilities"] == []
-    assert normalized["semantic_plan"]["unresolved_items"][0]["type"] == "internal_or_unmatched_capability"
 
 
-def test_recording_plan_rejects_semantic_fields_outside_semantic_plan():
-    malformed = {
-        "semantic_plan": {"business_understanding": "发起请假申请单"},
-        "field_semantics": [],
-        "capabilities": [],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }
-
-    with pytest.raises(ToolError, match="必须位于 plan.semantic_plan 内"):
-        agent_tools_module._normalize_recording_plan_submission(malformed, FlowSpec())
 
 
-def test_recording_plan_accepts_incremental_semantic_contract():
-    incomplete = {
-        "semantic_plan": {
-            "business_understanding": "发起请假申请单",
-            "request_roles": [],
-        },
-    }
-
-    semantic = agent_tools_module._normalize_recording_plan_submission(
-        incomplete, FlowSpec(),
-    )["semantic_plan"]
-    assert semantic["request_roles"] == []
-    assert semantic["field_semantics"] == []
-    assert semantic["capabilities"] == []
-    assert semantic["capability_relations"] == []
-    assert semantic["unresolved_items"] == []
 
 
-def test_recording_plan_ignores_historical_descriptive_planner_shape():
-    legacy = {
-        "semantic_plan": {
-            "title": "请假单查询与提交",
-            "steps": [{"step_id": "invented-step", "request_id": "req_76"}],
-            "fields": [{"step_id": "invented-step", "wire_path": "query.type"}],
-            "dependencies": [{"from": "invented-step", "to": "other-step"}],
-            "enums": [{"field_id": "legacy-field", "options": [
-                {"label": "病假", "value": "1"},
-            ]}],
-        },
-    }
-
-    semantic = agent_tools_module._normalize_recording_plan_submission(
-        legacy, FlowSpec(),
-    )["semantic_plan"]
-
-    assert semantic["business_understanding"] == {"summary": "请假单查询与提交"}
-    assert semantic["request_roles"] == []
-    assert semantic["field_semantics"] == []
-    assert semantic["capabilities"] == []
-    assert semantic["capability_relations"] == []
-    assert semantic["unresolved_items"] == []
 
 
-def test_recording_plan_still_rejects_unknown_semantic_keys():
-    with pytest.raises(ToolError, match="未知字段"):
-        agent_tools_module._normalize_recording_plan_submission({
-            "semantic_plan": {"unrecognized_contract": []},
-        }, FlowSpec())
-
-def test_screenshot_normalization_replaces_stale_axes_for_all_control_types():
-    controls = [
-        ("title", "text", {}, "string"),
-        ("amount", "number", {}, "number"),
-        ("useDate", "date", {}, "date"),
-        ("approved", "switch", {}, "boolean"),
-        ("status", "select", {"options": [
-            {"label": "Open", "value": "open"},
-            {"label": "Closed", "value": "closed"},
-        ]}, "enum"),
-        ("tags", "checkbox", {"options": [
-            {"label": "A", "value": "a"},
-            {"label": "B", "value": "b"},
-        ]}, "list-enum"),
-        ("files", "upload", {"multiple": True}, "array"),
-    ]
-    params = [
-        ParamField(
-            path=path,
-            key=path,
-            label=path,
-            value="stale",
-            type="string",
-            wire_type="string",
-            category="runtime_var",
-            source_kind="current_user",
-            exposed_to_user=False,
-        )
-        for path, _kind, _extra, _expected in controls
-    ]
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/generic/submit",
-            params=params,
-        ),
-    ])
-    raw_plan = {
-        "_analysis_screenshot_count": 1,
-        "semantic_plan": {
-            "business_understanding": {"summary": "Generic form submission"},
-            "request_roles": [{
-                "step_id": "submit",
-                "role": "business_write",
-                "name": "Submit form",
-                "reason": "Recorded submit request",
-            }],
-            "field_semantics": [
-                {
-                    "step_id": "submit",
-                    "wire_path": path,
-                    "public_name": f"Visible {path}",
-                    "business_type": "string",
-                    "category": "user_param",
-                    "source_kind": "user_input",
-                    "confidence": 0.99,
-                    "evidence": [{
-                        "source": "screenshot",
-                        "screenshot_name": "form.png",
-                        "control_kind": kind,
-                        "editable": True,
-                        **extra,
-                    }],
-                }
-                for path, kind, extra, _expected in controls
-            ],
-            "capabilities": [{
-                "name": "submit_generic",
-                "title": "Submit form",
-                "intent": "Submit visible form fields",
-                "kind": "submit",
-                "step_ids": ["submit"],
-            }],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": [],
-    }
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    by_path = {
-        item["wire_path"]: item
-        for item in normalized["semantic_plan"]["field_semantics"]
-    }
-
-    for path, _kind, _extra, expected_type in controls:
-        assert by_path[path]["business_type"] == expected_type
-        assert by_path[path]["category"] == "user_param"
-        assert by_path[path]["source_kind"] == (
-            "current_user" if expected_type in {"enum", "list-enum"} else "user_input"
-        )
-        assert by_path[path]["evidence"][0]["source"] == "screenshot"
 
 
-def test_image_free_normalization_does_not_relabel_a_model_axis_as_grounded():
-    param = ParamField(
-        path="ownerId", key="ownerId", type="string", wire_type="string",
-        category="runtime_var", source_kind="current_user",
-    )
-    spec = FlowSpec(steps=[
-        FlowStep(step_id="submit", method="POST", path="/api/task", params=[param]),
-    ])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "Task"},
-        "request_roles": [],
-        "field_semantics": [{
-            "step_id": "submit", "wire_path": "ownerId", "public_name": "Owner",
-            "business_type": "enum", "category": "user_param", "source_kind": "user_input",
-            "confidence": 0.99, "evidence": "Model-only guess",
-        }],
-        "capabilities": [],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }, "ops": []}
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-    assert (field["category"], field["source_kind"]) == ("user_param", "user_input")
-    assert field["evidence"] == [{"source": "pi_analysis", "detail": "Model-only guess"}]
 
 
-def test_screenshot_normalization_preserves_unresolved_axes_and_canonicalizes_evidence():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/task",
-        params=[ParamField(
-            path="ownerId", key="审批人", label="审批人", type="enum",
-            default_value=148, required=True, category="user_param", source_kind="api_option",
-        )],
-    )])
-    raw_plan = {"_analysis_screenshot_count": 1, "semantic_plan": {
-        "business_understanding": {"summary": "提交审批"},
-        "request_roles": [{
-            "step_id": "submit", "role": "business_write",
-            "name": "提交审批", "reason": "录制的提交请求",
-        }],
-        "field_semantics": [{
-            "step_id": "submit", "wire_path": "ownerId", "public_name": "审批人",
-            "business_type": "enum", "category": "user_param", "source_kind": "user_input",
-            "default_value": 148, "required": True, "confidence": 0.95,
-            "axis_status": {
-                "path": "grounded", "name": "image_matched", "default_value": "grounded",
-                "type": "image_matched", "category": "grounded", "source": "unresolved",
-                "required": "image_matched",
-            },
-            "evidence": [{
-                "source": "screenshot", "screenshot_name": "form.png",
-                "visible_label": "审批人", "control_kind": "select", "editable": True,
-                "supported_axis": ["name", "type", "required"],
-            }, {
-                "source": "recorder_facts",
-                "support_axis": ["path", "default_value", "category", "source"],
-            }],
-        }],
-        "capabilities": [{
-            "name": "submit_task", "title": "提交审批", "intent": "提交审批",
-            "kind": "submit", "step_ids": ["submit"],
-        }],
-        "capability_relations": [],
-        "unresolved_items": [{"kind": "options_not_visible", "severity": "low", "blocking": False}],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )
-    field = normalized["semantic_plan"]["field_semantics"][0]
-
-    assert field["evidence"][0]["axes"] == ["name", "type", "required"]
-    assert field["source_kind"] == "api_option"
-    assert field["axis_status"]["source"] == "preserved_fact"
-    preserved = next(
-        item for item in field["evidence"]
-        if item.get("source") == "recorded_flow_spec"
-        and item.get("kind") == "preserved_fact"
-    )
-    assert {"path", "default_value", "category", "source"}.issubset(
-        preserved["axes"]
-    )
-    assert sum(
-        item.get("canonical_screenshot_control") is True
-        for item in field["evidence"]
-    ) == 1
-    assert flow_module._semantic_plan_coverage(spec, normalized)["complete"] is True
 
 
-def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        params=[
-            ParamField(path="id", key="根编号"),
-            ParamField(path="body.id", key="请求体编号"),
-        ],
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {},
-        "request_roles": [],
-        "field_semantics": [{
-            "step_id": "submit",
-            "wire_path": "id",
-            "public_name": "编号",
-            "business_type": "string",
-            "source_kind": "user_input",
-            "confidence": 0.9,
-        }],
-        "capabilities": [],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }, "ops": []}
 
-    semantic = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )["semantic_plan"]
-    assert semantic["field_semantics"] == []
-    assert semantic["unresolved_items"][0]["kind"] == "unmatched_field"
-    assert semantic["unresolved_items"][0]["step_id"] == "submit"
-    assert semantic["unresolved_items"][0]["wire_path"] == "id"
-    assert semantic["unresolved_items"][0]["reason"] == "字段引用不存在或不唯一"
+
 
 
 def test_transport_allows_incremental_semantic_keys():
@@ -1993,6 +1495,58 @@ def test_transport_allows_incremental_semantic_keys():
             "step_id": "submit", "wire_path": "title",
         }]},
     }, allow_screenshot_field_overlay=True)
+
+
+@pytest.mark.parametrize(
+    ("plan", "message"),
+    [
+        (
+            {
+                "semantic_plan": {
+                    "business_understanding": {
+                        "summary": "提交申请",
+                        "risk_level": "low",
+                    },
+                    "capabilities": [],
+                    "unresolved_items": [],
+                },
+                "ops": [],
+            },
+            "business_understanding 包含未知字段：risk_level",
+        ),
+        (
+            {
+                "semantic_plan": {
+                    "business_understanding": {"summary": "提交申请"},
+                    "capabilities": [],
+                    "unresolved_items": [],
+                },
+                "ops": [{
+                    "op": "set_goal",
+                    "goal": "提交申请",
+                    "evidence": ["req-1"],
+                }],
+            },
+            "plan.ops[0] 包含未知字段: evidence",
+        ),
+    ],
+)
+def test_real_pi_schema_drift_is_rejected_without_mutating_flow(
+    monkeypatch,
+    plan: dict,
+    message: str,
+):
+    session = _bind(monkeypatch, recording_id="rec-schema-drift")
+    before = session.spec.model_dump(mode="json")
+
+    with pytest.raises(ToolError, match=re.escape(message)):
+        asyncio.run(submit_recording_plan("run-schema-drift", {
+            "recording_id": session.recording_id,
+            "base_flow_version": int(session.spec.meta["current_version"]),
+            "plan": plan,
+        }))
+
+    assert session.spec.model_dump(mode="json") == before
 
 
 def test_screenshot_field_overlay_cannot_bypass_typed_field_operations(monkeypatch):
@@ -2081,209 +1635,16 @@ def test_length_truncated_screenshot_plan_finishes_without_retry_loop(monkeypatc
     assert "结构化计划在模型输出上限前未完成" in result["warning"]
 
 
-def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        params=[ParamField(path="title", key="旧标题", type="string")],
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {},
-        "request_roles": [],
-        "field_semantics": [{"step_id": "submit", "wire_path": "title"}],
-        "capabilities": [],
-        "capability_relations": [],
-        "unresolved_items": [],
-    }, "ops": []}
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-    assert "public_name" not in field
-    assert "business_type" not in field
-    assert field["confidence"] == 0.0
 
 
-def test_screenshot_plan_keeps_grounded_field_when_image_has_no_field_evidence():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/api/task",
-        source_meta={"role": "business_write"},
-        params=[ParamField(path="title", key="标题")],
-    )])
-    raw_plan = {
-        "_analysis_screenshot_count": 1,
-        "semantic_plan": {
-            "business_understanding": {"summary": "Submit task"},
-            "request_roles": [{
-                "step_id": "submit", "role": "business_write",
-                "name": "Submit task", "reason": "recorded request",
-            }],
-            "field_semantics": [{
-                "step_id": "submit", "wire_path": "title",
-                "public_name": "标题", "business_type": "string",
-                "category": "user_param", "source_kind": "user_input",
-                "confidence": 0.99, "evidence": [{"source": "pi_analysis"}],
-            }],
-            "capabilities": [{
-                "name": "submit_task", "title": "Submit task",
-                "intent": "Submit task", "kind": "submit", "step_ids": ["submit"],
-            }],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": [],
-    }
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "title")
-    assert field["evidence"][0] == {"source": "pi_analysis"}
-    assert field["evidence"][-1]["source"] == "recorded_flow_spec"
 
 
-def test_no_screenshot_plan_keeps_existing_compatibility_for_empty_semantic_lists():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/task",
-        source_meta={"role": "business_write"},
-        params=[ParamField(path="title", key="标题")],
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "Submit task"},
-        "request_roles": [], "field_semantics": [], "capabilities": [],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-
-    assert normalized["semantic_plan"]["request_roles"][0]["step_id"] == "submit"
 
 
-def test_legacy_primary_step_plan_keeps_grounded_query_and_submit_boundaries():
-    query = FlowStep(
-        step_id="query", method="GET", path="/api/applications/page?pageNo=1&pageSize=10",
-        source_meta={"role": "read_context", "control_preflight_for_write": True},
-        response_json={"data": {"list": [{"id": "one", "status": 1}], "total": 1}},
-    )
-    submit = FlowStep(
-        step_id="submit", method="POST", path="/api/applications/submit",
-        source_meta={"role": "business_write"},
-    )
-    raw_plan = {
-        "semantic_plan": {
-            "business_understanding": "Submit and query applications",
-            "request_roles": [],
-            "field_semantics": [],
-            "capabilities": [
-                {
-                    "capability_id": "submit_application",
-                    "category": "business_write",
-                    "primary_step": "submit",
-                    "precondition_steps": [],
-                    "post_steps": ["query"],
-                },
-                {
-                    "capability_id": "query_applications",
-                    "category": "business_query",
-                    "primary_step": "query",
-                },
-            ],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": [],
-    }
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(
-        raw_plan, FlowSpec(steps=[query, submit]),
-    )
-    by_name = {
-        item["name"]: item
-        for item in normalized["semantic_plan"]["capabilities"]
-    }
-
-    assert set(by_name) == {"query_applications", "submit_application"}
-    assert by_name["query_applications"]["kind"] == "query_status"
-    assert by_name["query_applications"]["step_ids"] == ["query"]
-    assert by_name["submit_application"]["kind"] == "submit"
-    assert by_name["submit_application"]["step_ids"] == ["submit"]
 
 
-def test_capability_request_step_ids_are_normalized_to_grounded_boundaries():
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id="query", method="GET", path="/api/applications/page?status=1",
-            source_meta={"role": "business_get"},
-        ),
-        FlowStep(
-            step_id="submit", method="POST", path="/api/applications/submit",
-            source_meta={"role": "business_write"},
-        ),
-    ])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "Query and submit applications"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [
-            {
-                "capability_id": "query_applications",
-                "capability_type": "business_get",
-                "request_step_ids": ["query"],
-            },
-            {
-                "capability_id": "submit_application",
-                "capability_type": "business_write",
-                "request_step_ids": ["submit"],
-            },
-        ],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    by_name = {
-        item["name"]: item
-        for item in normalized["semantic_plan"]["capabilities"]
-    }
-
-    assert by_name["query_applications"]["step_ids"] == ["query"]
-    assert by_name["submit_application"]["step_ids"] == ["submit"]
 
 
-def test_semicolon_record_field_semantics_are_normalized_instead_of_dropped():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/applications/submit",
-        source_meta={"role": "business_write"},
-        params=[ParamField(
-            path="useInfo", key="useInfo", value="1", type="string",
-            category="user_param", source_kind="user_input",
-        )],
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": "Submit an application",
-        "request_roles": [
-            "step_id=submit;role=business_write;name=Submit application",
-        ],
-        "field_semantics": [
-            "step_id=submit;wire_path=useInfo;public_name=Usage description;"
-            "business_type=string;category=user_param;source_kind=user_input;"
-            "confidence=0.95;evidence=recorded textarea",
-        ],
-        "capabilities": [{
-            "name": "submit_application", "title": "Submit application",
-            "kind": "submit", "primary_step": "submit",
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    field = normalized["semantic_plan"]["field_semantics"][0]
-
-    assert field["step_id"] == "submit"
-    assert field["wire_path"] == "useInfo"
-    assert field["public_name"] == "Usage description"
-    assert field["business_type"] == "string"
-    assert field["confidence"] == 0.95
 
 
 def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
@@ -2307,718 +1668,46 @@ def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
     }
 
 
-def test_screenshot_field_without_model_wire_identity_matches_unique_recorded_label():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(path="title", key="申请标题", label="申请标题"),
-            ParamField(path="remark", key="备注", label="备注"),
-        ],
-    )])
-    plan = _screenshot_match_plan([{
-        "public_name": "备注", "business_type": "string",
-        "category": "user_param", "source_kind": "user_input",
-        "required": False, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "备注", "control_kind": "textarea", "editable": True,
-        }],
-    }])
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(plan, spec)
-    field = normalized["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "remark")
-    assert field["match"]["status"] == "confirmed"
-    assert "label_exact" in field["match"]["reasons"]
-
-
-def test_screenshot_field_does_not_guess_between_duplicate_recorded_labels():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(path="applicant.remark", key="备注", label="备注"),
-            ParamField(path="review.remark", key="备注", label="备注"),
-        ],
-    )])
-    plan = _screenshot_match_plan([{
-        "public_name": "备注", "business_type": "string",
-        "category": "user_param", "source_kind": "user_input",
-        "required": False, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "备注", "control_kind": "textarea", "editable": True,
-        }],
-    }])
-
-    semantic = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]
-
-    assert semantic["field_semantics"] == []
-    assert semantic["unresolved_items"][0]["kind"] == "unmatched_field"
-
-
-def test_exact_recorded_reference_survives_same_label_on_another_step() -> None:
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id="query", method="GET", path="/api/records",
-            params=[ParamField(path="query.status", key="流程状态", label="流程状态")],
-        ),
-        FlowStep(
-            step_id="submit", method="POST", path="/api/request",
-            params=[ParamField(path="status", key="流程状态", label="流程状态")],
-        ),
-    ])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "status", "public_name": "流程状态",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.99,
-        "evidence": [{
-            "source": "screenshot", "visible_label": "流程状态",
-            "control_kind": "text", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "status")
-    assert field["match"]["reasons"] == ["exact_recorded_reference"]
-
-
-def test_screenshot_field_can_match_unique_recorded_value_and_control_type():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(
-                path="quantity", key="unknownQuantity", value=7,
-                type="enum", wire_type="number", source_kind="api_option",
-            ),
-            ParamField(path="title", key="unknownTitle", value="demo", wire_type="string"),
-        ],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "wrong.path", "public_name": "数量",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "数量", "visible_value": 7,
-            "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "quantity")
-    assert {"recorded_value", "control_type"}.issubset(field["match"]["reasons"])
-
-
-def test_screenshot_strong_evidence_corrects_an_existing_but_wrong_wire_hint():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(path="wrongCount", key="错误数量", value=0, wire_type="number"),
-            ParamField(path="roomCount", key="roomCount", value=7, wire_type="number"),
-        ],
-    )], meta={"field_evidence": [{
-        "field_aliases": ["roomCount"], "label": "房间数量", "control_kind": "number",
-    }]})
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "wrongCount", "public_name": "房间数量",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.61,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "房间数量", "visible_value": 7,
-            "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "roomCount")
-    assert field["confidence"] >= 0.8
-    assert {"label_exact", "recorded_value", "control_type"}.issubset(field["match"]["reasons"])
-
-
-def test_unique_recorded_values_can_correct_swapped_stale_field_names() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[
-            ParamField(path="x1", key="Beta", label="Beta", value=10, wire_type="number"),
-            ParamField(path="x2", key="Alpha", label="Alpha", value=20, wire_type="number"),
-        ],
-    )])
-    plan = _screenshot_match_plan([
-        {
-            "public_name": label, "business_type": "number",
-            "category": "user_param", "source_kind": "user_input", "confidence": 0.99,
-            "evidence": [{
-                "source": "screenshot", "visible_label": label,
-                "visible_value": value, "control_kind": "number", "editable": True,
-            }],
-        }
-        for label, value in (("Alpha", 10), ("Beta", 20))
-    ])
-
-    fields = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"]
-
-    assert [(field["wire_path"], field["public_name"]) for field in fields] == [
-        ("x1", "Alpha"), ("x2", "Beta"),
-    ]
-    assert all("unique_recorded_value" in field["match"]["reasons"] for field in fields)
-
-
-def test_screenshot_ambiguous_value_does_not_discard_an_exact_recorded_reference():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[
-            ParamField(path="roomCount", key="roomCount", value=1, wire_type="number"),
-            ParamField(path="userCount", key="userCount", value=1, wire_type="number"),
-        ],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "roomCount", "public_name": "入住人数",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.99,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "入住人数", "visible_value": 1,
-            "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    semantic = agent_tools_module._normalize_recording_plan_submission(plan, spec)["semantic_plan"]
-
-    assert semantic["field_semantics"][0]["wire_path"] == "roomCount"
-    assert semantic["field_semantics"][0]["match"]["reasons"] == ["exact_recorded_reference"]
-
-
-def test_screenshot_field_does_not_guess_from_duplicate_values():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[
-            ParamField(path="firstCount", key="firstCount", value=1, wire_type="number"),
-            ParamField(path="secondCount", key="secondCount", value=1, wire_type="number"),
-        ],
-    )])
-    plan = _screenshot_match_plan([{
-        "public_name": "数量", "business_type": "number", "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "数量", "visible_value": 1,
-            "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    semantic = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]
-
-    assert semantic["field_semantics"] == []
-    assert semantic["unresolved_items"][0]["kind"] == "unmatched_field"
-
-
-def test_screenshot_choice_without_wire_mapping_does_not_create_empty_page_enum():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="status", key="流程状态", type="string",
-            category="user_param", source_kind="unknown",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "status", "public_name": "流程状态",
-        "business_type": "enum", "category": "user_param",
-        "source_kind": "page_enum", "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "流程状态", "control_kind": "select", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["business_type"] == "enum"
-    assert field["source_kind"] == "unknown"
-    assert field["axis_status"]["type"] == "image_matched"
-    assert field["axis_status"]["source"] == "preserved_fact"
-    assert any(
-        item.get("kind") == "enum_mapping" and item.get("blocking") is False
-        for item in agent_tools_module._normalize_recording_plan_submission(
-            plan, spec,
-        )["semantic_plan"]["unresolved_items"]
-    )
-
-
-@pytest.mark.parametrize(("multiple", "expected"), [(False, "enum"), (True, "list-enum")])
-def test_screenshot_picker_proves_choice_type_but_not_screenshot_wire_values(
-    multiple: bool, expected: str,
-):
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="ownerId", key="负责人", value="u1", type="string",
-            category="user_param", source_kind="user_input",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "ownerId", "public_name": "负责人",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "page_enum", "confidence": 0.99,
-        "evidence": [{
-            "source": "screenshot", "visible_label": "负责人",
-            "control_kind": "picker", "editable": True, "multiple": multiple,
-            "options": [
-                {"label": "甲", "value": "u1"},
-                {"label": "乙", "value": "u2"},
-            ],
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["business_type"] == expected
-    assert field["source_kind"] == "user_input"
-    assert "enum_options" not in field
-    assert any(
-        item.get("kind") == "enum_mapping"
-        for item in agent_tools_module._normalize_recording_plan_submission(
-            plan, spec,
-        )["semantic_plan"]["unresolved_items"]
-    )
-
-
-@pytest.mark.parametrize(
-    ("axes", "expected_category", "expected_source"),
-    [
-        (["source"], "runtime_var", "user_input"),
-        (["category"], "user_param", "current_user"),
-    ],
-)
-def test_screenshot_category_and_source_axes_are_independent(
-    axes: list[str], expected_category: str, expected_source: str,
-):
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="remark", key="备注", type="string",
-            category="runtime_var", source_kind="current_user",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "remark", "public_name": "备注",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.99,
-        "evidence": [{
-            "source": "screenshot", "visible_label": "备注",
-            "control_kind": "textarea", "editable": True, "axes": axes,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["category"] == expected_category
-    assert field["source_kind"] == expected_source
-
-
-def test_screenshot_current_value_change_does_not_invalidate_exact_recorded_field():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(path="title", key="标题", value="旧标题", type="string")],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "title", "public_name": "标题",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.99,
-        "evidence": [{
-            "source": "screenshot", "control_kind": "text", "editable": True,
-            "visible_value": "本次新标题", "axes": ["type", "source"],
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["wire_path"] == "title"
-    assert field["default_value"] is None
-
-
-def test_screenshot_placeholder_names_fall_back_to_unique_recorded_paths():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[
-            ParamField(path="participants[0].userId", key="userId", label="userId"),
-            ParamField(path="reviewers[0].userId", key="userId", label="userId"),
-        ],
-    )])
-    plan = _screenshot_match_plan([
-        {
-            "step_id": "submit", "wire_path": path, "public_name": "-",
-            "business_type": "string", "category": "user_param",
-            "source_kind": "user_input", "confidence": 0.99,
-            "evidence": [{
-                "source": "screenshot", "control_kind": "text", "editable": True,
-                "axes": ["type", "source"],
-            }],
-        }
-        for path in ("participants[0].userId", "reviewers[0].userId")
-    ])
-
-    fields = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"]
-
-    assert [field["public_name"] for field in fields] == [
-        "participants[0].userId", "reviewers[0].userId",
-    ]
-
-
-def test_multiple_screenshot_controls_merge_independently_of_upload_order():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="status", key="流程状态", value="pending", type="enum",
-            category="user_param", source_kind="page_enum",
-            enum_options=[
-                {"label": "待处理", "value": "pending"},
-                {"label": "已完成", "value": "done"},
-            ],
-            enum_value_map={"待处理": "pending", "已完成": "done"},
-        )],
-    )])
-    readonly = {
-        "source": "screenshot", "screenshot_name": "list.png",
-        "visible_label": "流程状态", "control_kind": "text", "read_only": True,
-        "axes": ["name"],
-    }
-    editable = {
-        "source": "screenshot", "screenshot_name": "form.png",
-        "visible_label": "流程状态", "control_kind": "select", "editable": True,
-        "required": True, "axes": ["type", "source", "required"],
-        "options": [
-            {"label": "待处理", "value": "pending"},
-            {"label": "已完成", "value": "done"},
-        ],
-    }
-
-    outputs = []
-    for evidence in ([readonly, editable], [editable, readonly]):
-        plan = _screenshot_match_plan([{
-            "step_id": "submit", "wire_path": "status", "public_name": "流程状态",
-            "business_type": "enum", "category": "user_param",
-            "source_kind": "page_enum", "confidence": 0.99,
-            "evidence": evidence,
-        }])
-        field = agent_tools_module._normalize_recording_plan_submission(
-            plan, spec,
-        )["semantic_plan"]["field_semantics"][0]
-        outputs.append((
-            field["business_type"], field["source_kind"], field["required"],
-            field.get("enum_options"), field["axis_status"],
-        ))
-
-    assert outputs[0] == outputs[1]
-    assert outputs[0][:3] == ("enum", "page_enum", True)
-
-
-def test_implicit_all_axes_is_not_narrowed_by_another_screenshot() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="amount", key="amount", value=1, type="string",
-            category="runtime_var", source_kind="current_user",
-        )],
-    )])
-    all_axes = {
-        "source": "screenshot", "visible_label": "金额",
-        "control_kind": "number", "editable": True,
-    }
-    name_only = {
-        "source": "screenshot", "visible_label": "金额",
-        "control_kind": "number", "editable": True, "axes": ["name"],
-    }
-
-    outputs = []
-    for evidence in ([all_axes, name_only], [name_only, all_axes]):
-        plan = _screenshot_match_plan([{
-            "step_id": "submit", "wire_path": "amount", "public_name": "金额",
-            "business_type": "number", "category": "user_param",
-            "source_kind": "user_input", "confidence": 0.99, "evidence": evidence,
-        }])
-        field = agent_tools_module._normalize_recording_plan_submission(
-            plan, spec,
-        )["semantic_plan"]["field_semantics"][0]
-        outputs.append((field["business_type"], field["category"], field["source_kind"]))
-
-    assert outputs == [("number", "user_param", "user_input")] * 2
-
-
-def test_name_only_screenshot_cannot_change_other_field_axes() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="amount", key="amount", label="amount", value="1",
-            type="string", wire_type="string", required=False,
-            category="runtime_var", source_kind="current_user",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "amount", "public_name": "金额",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.99,
-        "axis_status": {
-            "path": "image_matched", "name": "image_matched",
-            "default_value": "image_matched", "type": "image_matched",
-            "category": "image_matched", "source": "image_matched",
-            "required": "image_matched",
-        },
-        "evidence": [{
-            "source": "screenshot", "visible_label": "金额",
-            "control_kind": "number", "editable": True, "axes": ["name"],
-        }],
-    }])
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(plan, spec)
-    field = normalized["semantic_plan"]["field_semantics"][0]
-    assert (
-        field["public_name"], field["business_type"], field["category"],
-        field["source_kind"], field["required"],
-    ) == ("金额", "string", "runtime_var", "current_user", False)
-
-    optimized = asyncio.run(flow_module.orchestrate_flow_capabilities(
-        spec, submission=normalized, generation_mode="optimize",
-    ))
-    final = optimized.steps[0].params[0]
-    # Legacy semantic field paragraphs are display-only and cannot bypass the
-    # typed rename/source/required operations used by the live recording path.
-    assert (
-        final.label, final.type, final.category, final.source_kind, final.required,
-    ) == ("amount", "string", "runtime_var", "current_user", False)
-
-
-def test_screenshot_run_cannot_change_field_without_screenshot_evidence() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="amount", key="原名称", label="原名称", value="1",
-            type="string", required=False, category="runtime_var",
-            source_kind="current_user",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "amount", "public_name": "伪造名称",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.99,
-        "axis_status": {
-            axis: "image_matched"
-            for axis in (
-                "path", "name", "default_value", "type",
-                "category", "source", "required",
-            )
-        },
-        "evidence": [{"source": "pi_analysis", "detail": "model claim only"}],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (
-        field["public_name"], field["business_type"], field["category"],
-        field["source_kind"], field["required"],
-    ) == ("原名称", "string", "runtime_var", "current_user", False)
-
-
-@pytest.mark.parametrize(
-    ("sequence", "expected_type", "expected_control"),
-    [
-        (("text", "select"), "enum", "select"),
-        (("select", "text"), "string", "text"),
-    ],
-)
-def test_later_screenshot_replaces_derived_evidence_from_prior_analysis(
-    sequence: tuple[str, str],
-    expected_type: str,
-    expected_control: str,
-) -> None:
-    current = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="value", key="值", label="值", value="a",
-            type="string", wire_type="string", category="user_param",
-            source_kind="user_input",
-        )],
-    )])
-
-    prior_screenshot_evidence: list[dict] = []
-    for control_kind in sequence:
-        business_type = "enum" if control_kind == "select" else "string"
-        raw_control = {
-            "source": "screenshot", "visible_label": "值",
-            "control_kind": control_kind, "editable": True, "axes": ["type"],
-        }
-        plan = _screenshot_match_plan([{
-            "step_id": "submit", "wire_path": "value", "public_name": "值",
-            "business_type": business_type, "category": "user_param",
-            "source_kind": "user_input", "confidence": 0.99,
-            "evidence": [*prior_screenshot_evidence, raw_control],
-        }])
-        normalized = agent_tools_module._normalize_recording_plan_submission(plan, current)
-        current = asyncio.run(flow_module.orchestrate_flow_capabilities(
-            current, submission=normalized, generation_mode="optimize",
-        ))
-        prior_screenshot_evidence = [
-            dict(item) for item in current.steps[0].params[0].evidence
-            if str(item.get("source") or "").lower() == "screenshot"
-        ]
-
-    field = current.steps[0].params[0]
-    canonicals = [
-        item for item in field.evidence
-        if item.get("canonical_screenshot_control") is True
-    ]
-    # The retired semantic-plan screenshot overlay is no longer a mutation
-    # channel. New recording submissions must use the typed field operations.
-    assert field.type == "string"
-    assert canonicals == []
-
-
-def test_equal_strength_conflicting_control_types_preserve_recorded_type() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(path="value", key="值", value="1", type="string")],
-    )])
-    controls = [
-        {"source": "screenshot", "visible_label": "值", "control_kind": "text", "editable": True},
-        {"source": "screenshot", "visible_label": "值", "control_kind": "number", "editable": True},
-    ]
-    final_contracts = []
-    for evidence in (controls, list(reversed(controls))):
-        plan = _screenshot_match_plan([{
-            "step_id": "submit", "wire_path": "value", "public_name": "值",
-            "business_type": "number", "category": "user_param",
-            "source_kind": "user_input", "confidence": 0.99,
-            "evidence": evidence,
-        }])
-        normalized = agent_tools_module._normalize_recording_plan_submission(plan, spec)
-        semantic = normalized["semantic_plan"]
-        field = semantic["field_semantics"][0]
-        assert field["business_type"] == "string"
-        assert field["axis_status"]["type"] == "preserved_fact"
-        assert any(
-            item.get("kind") == "control_type_conflict"
-            for item in semantic["unresolved_items"]
-        )
-        optimized = asyncio.run(flow_module.orchestrate_flow_capabilities(
-            spec, submission=normalized, generation_mode="optimize",
-        ))
-        final = optimized.steps[0].params[0]
-        final_contracts.append((final.type, final.source_kind))
-
-    assert final_contracts == [("string", "unknown")] * 2
-
-
-def test_explicit_business_role_wins_over_option_source_membership_heuristic():
-    query = FlowStep(
-        step_id="query", method="GET", path="/api/users/page",
-        response_json={"data": {"list": [{"id": 1, "name": "甲"}]}},
-        source_meta={"role": "business_get"},
-    )
-    submit = FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="ownerId", key="负责人", value=1, source_kind="api_option",
-            source={"source_step_id": "query", "source_url": "/api/users/page"},
-        )],
-        source_meta={"role": "business_write"},
-    )
-    spec = FlowSpec(steps=[query, submit])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "查询并提交"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [{
-            "name": "query_users", "title": "查询用户", "intent": "查询用户",
-            "kind": "query_status", "step_ids": ["query"],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    capability = normalized["semantic_plan"]["capabilities"][0]
-
-    assert capability["request_refs"][0]["usage"] == "execute"
-    assert flow_module._planned_capability_has_public_anchor(
-        spec, "query_status", ["query"],
-    ) is True
-
-
-def test_business_get_can_be_execute_and_grounded_option_source_per_capability():
-    query = FlowStep(
-        step_id="query", method="GET", path="/api/users/page",
-        response_json={"data": {"list": [{"id": 1, "name": "甲"}]}},
-        source_meta={"role": "business_get"},
-    )
-    submit = FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="ownerId", key="负责人", value=1, source_kind="api_option",
-            source={"source_step_id": "query", "source_url": "/api/users/page"},
-        )],
-        source_meta={"role": "business_write"},
-    )
-    spec = FlowSpec(steps=[query, submit])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "查询并提交"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [{
-            "name": "query_users", "title": "查询用户", "intent": "查询用户",
-            "kind": "query_status",
-            "request_refs": [{"step_id": "query", "usage": "execute"}],
-        }, {
-            "name": "submit_request", "title": "提交申请", "intent": "提交申请",
-            "kind": "submit",
-            "request_refs": [
-                {"step_id": "query", "usage": "option_source"},
-                {"step_id": "submit", "usage": "execute"},
-            ],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    capabilities = {
-        item["name"]: {
-            (ref["step_id"], ref["usage"])
-            for ref in item["request_refs"]
-        }
-        for item in normalized["semantic_plan"]["capabilities"]
-    }
-
-    assert capabilities["query_users"] == {("query", "execute")}
-    assert capabilities["submit_request"] == {
-        ("query", "option_source"), ("submit", "execute"),
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_explicit_read_option_cannot_become_public_query_capability():
@@ -3033,143 +1722,14 @@ def test_explicit_read_option_cannot_become_public_query_capability():
     ) is False
 
 
-@pytest.mark.parametrize(
-    ("required_evidence", "expected", "status"),
-    [
-        ({"required": False}, True, "preserved_fact"),
-        ({
-            "required": False,
-            "required_convention_confirmed": True,
-            "label_region_complete": True,
-        }, False, "image_matched"),
-    ],
-)
-def test_screenshot_optional_requires_complete_required_convention(
-    required_evidence, expected, status,
-):
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(path="remark", key="备注", required=True)],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "remark", "public_name": "备注",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "required": False, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "备注", "control_kind": "text", "editable": True,
-            **required_evidence,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["required"] is expected
-    assert field["axis_status"]["required"] == status
 
 
-def test_explicit_screenshot_required_marker_overrides_model_false() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(path="title", key="标题", required=False)],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "title", "public_name": "标题",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "required": False, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "visible_label": "标题",
-            "control_kind": "text", "editable": True, "required": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["required"] is True
-    assert field["axis_status"]["required"] == "image_matched"
 
 
-def test_screenshot_placeholder_names_preserve_unique_recorded_keys():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[
-            ParamField(path="description", key="description", type="enum"),
-            ParamField(path="remark", key="remark", type="enum"),
-        ],
-    )])
-    fields = [{
-        "step_id": "submit", "wire_path": path, "public_name": "-",
-        "business_type": "string", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "-", "control_kind": "text", "editable": True,
-        }],
-    } for path in ("description", "remark")]
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(
-        _screenshot_match_plan(fields), spec,
-    )["semantic_plan"]["field_semantics"]
-
-    assert [field["public_name"] for field in normalized] == ["description", "remark"]
-    assert all(field["business_type"] == "string" for field in normalized)
-    assert all(field["source_kind"] == "user_input" for field in normalized)
 
 
-def test_screenshot_without_name_evidence_preserves_existing_display_name():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(path="reasonDes", key="reasonDes", label="事项描述")],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "reasonDes", "public_name": "猜测名称",
-        "business_type": "textarea", "category": "user_param",
-        "source_kind": "user_input", "confidence": 0.98,
-        "axis_status": {"type": "image_matched"},
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "control_kind": "textarea", "editable": True, "axes": ["type"],
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["public_name"] == "事项描述"
-    assert field["business_type"] == "string"
 
 
-def test_screenshot_visible_value_never_overwrites_recorded_default():
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        params=[ParamField(
-            path="roomCount", key="房间数量", value=1, default_value=1,
-            type="number", wire_type="number",
-        )],
-    )])
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "roomCount", "public_name": "房间数量",
-        "default_value": 99, "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.98,
-        "axis_status": {"default_value": "image_matched"},
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "房间数量", "visible_value": 99,
-            "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert field["default_value"] == 1
-    assert field["axis_status"]["default_value"] == "preserved_fact"
 
 
 @pytest.mark.parametrize("existing_capabilities", [False, True])
@@ -3231,35 +1791,6 @@ async def test_partial_screenshot_semantics_require_typed_operations(
     assert session.spec.model_dump(mode="json") == before
 
 
-def test_screenshot_field_uses_recorder_alias_label_from_flow_metadata():
-    spec = FlowSpec(
-        steps=[FlowStep(
-            step_id="submit", method="POST", path="/api/hotel/apply",
-            source_meta={"role": "business_write"},
-            params=[ParamField(path="roomCount", key="roomCount", label="roomCount")],
-        )],
-        meta={"field_evidence": [{
-            "field_aliases": ["roomCount"],
-            "label": "房间数量",
-            "control_kind": "number",
-        }]},
-    )
-    plan = _screenshot_match_plan([{
-        "public_name": "房间数量", "business_type": "number",
-        "category": "user_param", "source_kind": "user_input",
-        "required": True, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "hotel.png",
-            "visible_label": "房间数量", "control_kind": "number", "editable": True,
-        }],
-    }])
-
-    field = agent_tools_module._normalize_recording_plan_submission(
-        plan, spec,
-    )["semantic_plan"]["field_semantics"][0]
-
-    assert (field["step_id"], field["wire_path"]) == ("submit", "roomCount")
-    assert field["public_name"] == "房间数量"
 
 
 @pytest.mark.asyncio
@@ -3310,79 +1841,5 @@ async def test_invalid_screenshot_plan_finishes_without_model_retry(monkeypatch)
     assert session.last_submission_kind == "plan"
 
 
-def test_capability_memberships_use_recorded_internal_roles_not_model_execute_labels():
-    spec = FlowSpec(steps=[
-        FlowStep(
-            step_id="options", method="GET", path="/api/seals/options",
-            source_meta={"role": "read_option"},
-        ),
-        FlowStep(
-            step_id="definition", method="GET", path="/api/process-definition",
-            source_meta={"role": "process_definition", "control_preflight_for_write": True},
-        ),
-        FlowStep(
-            step_id="submit", method="POST", path="/api/seal/submit",
-            source_meta={"role": "business_write"},
-            params=[ParamField(path="sealId", key="公章")],
-        ),
-    ])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "Submit seal request"},
-        "request_roles": [],
-        "field_semantics": [],
-        "capabilities": [{
-            "name": "submit_seal", "title": "Submit seal request",
-            "intent": "Submit seal request", "kind": "submit",
-            "request_refs": [
-                {"step_id": "options", "usage": "execute"},
-                {"step_id": "definition", "usage": "execute"},
-                {"step_id": "submit", "usage": "preflight"},
-            ],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-    capability = normalized["semantic_plan"]["capabilities"][0]
-    usages = {item["step_id"]: item["usage"] for item in capability["request_refs"]}
-
-    assert usages == {
-        "options": "option_source",
-        "definition": "preflight",
-        "submit": "execute",
-    }
-    assert capability["step_ids"] == ["definition", "submit"]
 
 
-@pytest.mark.parametrize(
-    ("method", "requested_kind", "expected_kind"),
-    [
-        ("POST", "query_status", "submit"),
-        ("GET", "submit", "query_status"),
-    ],
-)
-def test_capability_kind_cannot_contradict_recorded_execute_method(
-    method: str,
-    requested_kind: str,
-    expected_kind: str,
-):
-    role = "business_write" if method == "POST" else "business_get"
-    path = "/api/task/submit" if method == "POST" else "/api/task/page"
-    response_json = None if method == "POST" else {"data": {"list": [], "total": 0}}
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="anchor", method=method, path=path,
-        source_meta={"role": role}, response_json=response_json,
-    )])
-    raw_plan = {"semantic_plan": {
-        "business_understanding": {"summary": "Task"},
-        "request_roles": [], "field_semantics": [],
-        "capabilities": [{
-            "name": "task", "title": "Task", "intent": "Task",
-            "kind": requested_kind, "step_ids": ["anchor"],
-        }],
-        "capability_relations": [], "unresolved_items": [],
-    }, "ops": []}
-
-    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
-
-    assert normalized["semantic_plan"]["capabilities"][0]["kind"] == expected_kind

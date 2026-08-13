@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import dano.agent_tools.tools as agent_tools
 from dano.execution.page import flow_spec as flow_module
 from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
 from dano.gateway import app as gateway
@@ -36,14 +35,6 @@ def _six_field_spec() -> FlowSpec:
     )])
 
 
-def test_screenshot_prose_only_plan_keeps_the_fact_baseline_available() -> None:
-    incident = _incident()
-
-    normalized = agent_tools._normalize_recording_plan_submission(
-        incident["bridge_output_plan"], _six_field_spec(),
-    )
-
-    assert normalized["semantic_plan"]["field_semantics"] == []
 
 
 def test_screenshot_zero_match_report_is_non_blocking_review() -> None:

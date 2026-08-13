@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from dano.agent_tools import tools as agent_tools_module
 from dano.execution.page.flow_spec import (
     FlowCapability,
     FlowSpec,
@@ -1345,47 +1344,6 @@ def test_analysis_report_only_requires_review_for_real_unapplied_work() -> None:
     assert applied_with_advisory["status"] == "applied"
 
 
-def test_normalized_unmatched_screenshot_field_reaches_application_report() -> None:
-    before = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[ParamField(path="reason", key="原因")],
-    )])
-    normalized = agent_tools_module._normalize_recording_plan_submission({
-        "_analysis_screenshot_count": 1,
-        "semantic_plan": {
-            "business_understanding": {"summary": "提交"},
-            "request_roles": [],
-            "field_semantics": [{
-                "public_name": "截图中的未知字段", "business_type": "string",
-                "category": "user_param", "source_kind": "user_input",
-                "confidence": 0.95,
-                "evidence": [{
-                    "source": "screenshot", "visible_label": "截图中的未知字段",
-                    "control_kind": "text", "editable": True,
-                }],
-            }],
-            "capabilities": [], "capability_relations": [], "unresolved_items": [],
-        },
-        "ops": [],
-    }, before)
-    after = before.model_copy(deep=True)
-    after.meta = {"capability_model": {"semantic_plan": normalized["semantic_plan"]}}
-
-    report = gateway._analysis_application_report(
-        before=before, after=after,
-        operation_report={
-            "changed": True, "changes": {"flow": 1}, "field_changes": [],
-            "proposal_gate": {"accepted": True},
-        },
-        screenshots=[{"name": "form.png"}], delivered_image_count=1,
-        operation_id="plan-unmatched",
-    )
-
-    # Unmatched screenshot evidence is advisory. A separate accepted flow
-    # change remains applied instead of being mislabeled as wholly unapplied.
-    assert report["status"] == "applied"
-    assert report["unmatched_field_count"] == 1
-    assert report["unmatched_fields"][0]["kind"] == "unmatched_field"
 
 
 def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> None:
