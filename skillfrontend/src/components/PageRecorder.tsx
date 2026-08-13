@@ -9,6 +9,7 @@ import {
   Col,
   ConfigProvider,
   Collapse,
+  Drawer,
   Empty,
   Form,
   Input,
@@ -16,6 +17,7 @@ import {
   Modal,
   Row,
   Space,
+  Steps,
   Switch,
   Tabs,
   Tag,
@@ -298,7 +300,29 @@ const KEYMAP: Record<string, string> = {
 };
 const SAFE_COMBO_KEYS = new Set(["a", "c", "x", "z", "y", "Enter", "Backspace"]);
 const MOD_ORDER = ["Control", "Meta", "Alt", "Shift"];
-const POINTER_MOVE_INTERVAL_MS = 20;
+const POINTER_MOVE_INTERVAL_MS = 80;
+
+function subsystemFromUrl(configured: string, url: string) {
+  if (configured.trim()) return configured.trim();
+  try {
+    const host = new URL(url).host.toLowerCase();
+    return host.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "recorded-web";
+  } catch {
+    return "recorded-web";
+  }
+}
+
+function initialRecordingDraft() {
+  try {
+    const draft = JSON.parse(window.sessionStorage.getItem("dano.recording-ui-draft") || "{}");
+    return {
+      startUrl: typeof draft.startUrl === "string" ? draft.startUrl : "",
+      goalText: typeof draft.goalText === "string" ? draft.goalText : "",
+    };
+  } catch {
+    return { startUrl: "", goalText: "" };
+  }
+}
 
 function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | null {
   if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return null;
@@ -1307,6 +1331,7 @@ async function prepareAnalysisScreenshot(file: File): Promise<AnalysisScreenshot
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
 }) {
+  const [initialDraft] = useState(initialRecordingDraft);
   const wsRef = useRef<WebSocket | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const kbRef = useRef<HTMLInputElement | null>(null);
@@ -1335,14 +1360,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const reconnectRestoreOperationRef = useRef<string | null>(null);
   const piRecordingScopeRef = useRef("");
   const piRecordingIdRef = useRef<string | null>(null);
+  const sessionStartUrlRef = useRef("");
+  const sessionSubsystemRef = useRef("");
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
   const [phase, setPhase] = useState<"idle" | "recording" | "publishing" | "done">("idle");
+  const [workspaceStage, setWorkspaceStage] = useState(0);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
   useEffect(() => { phaseRef.current = phase; }, [phase]);
-  const [startUrl, setStartUrl] = useState("");
-  const [goalText, setGoalText] = useState("");
+  const [startUrl, setStartUrl] = useState(initialDraft.startUrl);
+  const [goalText, setGoalText] = useState(initialDraft.goalText);
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem("dano.recording-ui-draft", JSON.stringify({ startUrl, goalText }));
+    } catch {
+      // In-memory state still preserves the draft while this page remains open.
+    }
+  }, [startUrl, goalText]);
   const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
   const [recordingStopped, setRecordingStopped] = useState(false);
   const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
@@ -1350,9 +1386,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [frameMeta, setFrameMeta] = useState<RecorderFrameMeta>({});
   const hasFrameRef = useRef(false);
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
-  const [reqs, setReqs] = useState<RecReq[]>([]);
+  const [hasRequests, setHasRequests] = useState(false);
+  const hasRequestsRef = useRef(false);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentInsights, setAgentInsights] = useState<AgentInsight[]>([]);
+  const agentInsightsRef = useRef<AgentInsight[]>([]);
+  const assistantOpenRef = useRef(false);
+  useEffect(() => { assistantOpenRef.current = assistantOpen; }, [assistantOpen]);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({
     state: "waiting", text: "等待录制助手连接",
   });
@@ -1886,12 +1926,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
-    if (!subsystem.trim()) { message.error("请填写业务系统标识"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
-    setErr(""); setResult(null); setReqs([]); setAgentQuestions([]); setAgentInsights([]);
+    agentInsightsRef.current = [];
+    setErr(""); setResult(null); hasRequestsRef.current = false; setHasRequests(false); setAgentQuestions([]); setAgentInsights([]);
     setAgentStatus({ state: "waiting", text: "正在连接录制助手" });
     setAgentAnswerDrafts({}); clearFrame();
     resetEditorState();
@@ -1902,7 +1942,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // reconnect path may reuse the opaque server resume id; otherwise a fresh
     // run can accidentally reopen the previous run's browser/draft snapshot.
     const targetUrl = startUrl.trim();
-    const piRecordingScope = piRecordingStorageKey(tenant, subsystem, targetUrl);
+    const recordingSubsystem = subsystemFromUrl(subsystem, targetUrl);
+    sessionStartUrlRef.current = targetUrl;
+    sessionSubsystemRef.current = recordingSubsystem;
+    const piRecordingScope = piRecordingStorageKey(tenant, recordingSubsystem, targetUrl);
     clearPiRecordingId(piRecordingScope);
     piRecordingScopeRef.current = piRecordingScope;
     piRecordingIdRef.current = null;
@@ -1910,6 +1953,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setRecordingStopped(false);
     setConnectionState("connecting");
     setPhase("recording");
+    setWorkspaceStage(1);
     openRecorderConnection(false);
   }
 
@@ -1926,7 +1970,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
 
   function scheduleRecorderReconnect() {
-    if (intentionalCloseRef.current || reconnectTimerRef.current != null || !tenant || !startUrl.trim()) return;
+    if (intentionalCloseRef.current || reconnectTimerRef.current != null || !tenant || !sessionStartUrlRef.current) return;
     const attempt = ++reconnectAttemptRef.current;
     const delay = Math.min(1000 * (2 ** Math.min(attempt - 1, 4)), 15000);
     setConnectionState("reconnecting");
@@ -1939,8 +1983,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function openRecorderConnection(isReconnect = false) {
     if (isReconnect) resetFrameStreamForReconnect();
-    const targetUrl = startUrl.trim();
-    const piRecordingScope = piRecordingStorageKey(tenant, subsystem, targetUrl);
+    const targetUrl = sessionStartUrlRef.current || startUrl.trim();
+    const recordingSubsystem = sessionSubsystemRef.current || subsystemFromUrl(subsystem, targetUrl);
+    const piRecordingScope = piRecordingStorageKey(tenant, recordingSubsystem, targetUrl);
     if (piRecordingScopeRef.current !== piRecordingScope) {
       piRecordingScopeRef.current = piRecordingScope;
       piRecordingIdRef.current = readPiRecordingId(piRecordingScope);
@@ -1955,7 +2000,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
       send({
-        type: "start", tenant, subsystem, start_url: targetUrl,
+        type: "start", tenant, subsystem: recordingSubsystem, start_url: targetUrl,
         goal_text: goalText.trim(),
         base_url: baseUrl.trim() || undefined,
         storage_state: storageState.trim() || undefined,
@@ -2029,7 +2074,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setReconnectedSessionNeedsCapture(false);
       }
       else if (m.type === "request") {
-        setReqs((r) => [...r, m.request].slice(-40));
+        if (!hasRequestsRef.current) {
+          hasRequestsRef.current = true;
+          setHasRequests(true);
+        }
         // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
         setReconnectedSessionNeedsCapture(false);
       }
@@ -2049,11 +2097,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "agent_insight") {
         if (m.text) {
-          setAgentInsights((items) => [...items, {
+          agentInsightsRef.current = [...agentInsightsRef.current, {
             kind: m.kind || "goal",
             text: String(m.text),
             refs: Array.isArray(m.refs) ? m.refs.map(String) : [],
-          }].slice(-60));
+          }].slice(-60);
+          if (assistantOpenRef.current) setAgentInsights(agentInsightsRef.current);
         }
       }
       else if (m.type === "agent_status") {
@@ -2092,6 +2141,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           // finalize 完成:无论之前 phase 是什么,都必须清回 recording,
           // 否则 "停止并分析请求" 按钮会一直转圈 (P5 引入的守卫漏判 finalize)。
           setPhase("recording");
+          setWorkspaceStage(2);
         }
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置,否则用户看到按钮闪退但后端仍在发布。
@@ -2286,6 +2336,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const point = normalizedPoint(e.clientX, e.clientY);
     if (!point) return;
     e.preventDefault();
+    // pointer_down already carries the final coordinates. Drop an older hover
+    // move so it cannot be dispatched after the press and delay the click.
+    pendingPointerMoveRef.current = null;
+    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
+    pointerMoveTimerRef.current = null;
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* pointer capture may be unavailable */ }
     const button = pointerButton(e.button);
     const previous = lastPointerClickRef.current;
@@ -2413,11 +2468,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
   }
   function onKbBeforeInput(e: React.FormEvent<HTMLInputElement>) {
-    const inputEvent = e.nativeEvent as InputEvent;
-    if (inputEvent.inputType === "deleteContentBackward") {
-      send({ type: "input", event: { kind: "key", key: "Backspace" } });
-      e.preventDefault();
-    }
+    // Key commands are relayed by keydown. Keeping Backspace in both handlers
+    // made browser-dependent beforeinput ordering either duplicate or swallow it.
+    if ((e.nativeEvent as InputEvent).inputType === "deleteContentBackward") e.preventDefault();
   }
   function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
@@ -2441,7 +2494,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       return;
     }
     if (!action.trim() || badAction(action.trim())) return;
-    if (!hasFrame && !reqs.length) { message.error("还没有可分析的页面画面或请求"); return; }
+    if (!hasFrame && !hasRequests) { message.error("还没有可分析的页面画面或请求"); return; }
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
     setResult(null); setVerifyProgress([]); setPhase("publishing");
@@ -4804,6 +4857,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setAgentAnswerDrafts((drafts) => ({ ...drafts, [questionId]: "" }));
   }
 
+  function showRecordingAssistant() {
+    setAgentInsights(agentInsightsRef.current);
+    setAssistantOpen(true);
+  }
+
   function renderRecordingAssistant() {
     const insightColor: Record<string, string> = {
       goal: "blue", role: "purple", param_source: "cyan", param_required: "geekblue",
@@ -4864,18 +4922,40 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   return (
     <ConfigProvider getPopupContainer={popupContainer}>
     <Card size="small" title="网页录制">
-      {phase === "idle" && (
+      <Steps
+        current={workspaceStage}
+        responsive={false}
+        onChange={(next) => {
+          if (phase === "idle" && next > 0) {
+            message.info("请先完成录制准备并开始录制");
+            return;
+          }
+          setWorkspaceStage(next);
+        }}
+        items={[
+          { title: "录制准备" },
+          { title: "页面录制" },
+          { title: "能力结果" },
+        ]}
+        style={{ maxWidth: 760, margin: "4px auto 20px" }}
+      />
+
+      {workspaceStage === 0 && (
         <>
           <Form.Item label="业务页地址" required style={{ marginBottom: 12 }}>
-            <Input value={startUrl} onChange={(e) => setStartUrl(e.target.value)}
+            <Input value={startUrl} disabled={phase !== "idle"} onChange={(e) => setStartUrl(e.target.value)}
               placeholder="https://oa.example.com/reimburse/new" onPressEnter={start} />
           </Form.Item>
-          <Form.Item label="本次录制目标" required tooltip="建议填写；允许留空，录制助手会在必要时询问" style={{ marginBottom: 12 }}>
-            <Input.TextArea rows={3} value={goalText} onChange={(event) => setGoalText(event.target.value)}
+          <Form.Item label="录制目标" required tooltip="建议填写；允许留空，录制助手会在必要时询问" style={{ marginBottom: 12 }}>
+            <Input.TextArea rows={3} value={goalText} disabled={phase !== "idle"} onChange={(event) => setGoalText(event.target.value)}
               placeholder="例如：创建一条申请，并确认列表中能查询到刚创建的记录" />
           </Form.Item>
           <Space align="center" wrap>
-            <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
+            {phase === "idle" ? (
+              <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
+            ) : (
+              <Button type="primary" onClick={() => setWorkspaceStage(1)}>返回页面录制</Button>
+            )}
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               页面操作始终按原逻辑真实执行，录制不会拦截请求。
             </Typography.Text>
@@ -4884,8 +4964,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         </>
       )}
 
+      {workspaceStage === 1 && phase === "idle" && <Empty description="请先在录制准备中开始录制" />}
+
       {(phase === "recording" || phase === "publishing") && (
-        <div>
+        <div style={{ display: workspaceStage === 1 ? "block" : "none" }}>
           <div style={{
             position: "sticky",
             top: 0,
@@ -4897,7 +4979,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             marginBottom: 8,
             boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
           }}>
-            <Space align="center" wrap size={12}>
+            <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", gap: 12, overflowX: "auto", paddingBottom: 2 }}>
               <Tag color={connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
                 {connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
               </Tag>
@@ -4911,12 +4993,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
                 <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
               </Form.Item>
-              <Button type="primary" loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !reqs.length)} onClick={finalize}>
+              <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
                 {flowSpec ? "重新抓取并分析请求" : "停止并分析请求"}
               </Button>
-            </Space>
+              <Button icon={<RobotOutlined />} style={{ flex: "0 0 auto" }} onClick={showRecordingAssistant}>
+                录制助手{agentQuestions.some((item) => !item.answered) ? ` (${agentQuestions.filter((item) => !item.answered).length})` : ""}
+              </Button>
+            </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 340px)", gap: 12, alignItems: "stretch" }}>
           <div>
           <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "auto", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
             <canvas ref={frameCanvasRef} draggable={false} role="img" aria-label="录制画面"
@@ -4941,13 +5025,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </Typography.Text>
           )}
           </div>
-          {renderRecordingAssistant()}
-          </div>
-
-          {renderFlowWorkbench()}
-
         </div>
       )}
+
+      {workspaceStage === 2 && (flowSpec ? renderFlowWorkbench() : <Empty description="完成请求分析后将在这里生成能力" />)}
+
+      <Drawer title="录制助手" open={assistantOpen} onClose={() => setAssistantOpen(false)} width={420}
+        styles={{ body: { padding: 12 } }}>
+        {assistantOpen && renderRecordingAssistant()}
+      </Drawer>
     </Card>
     </ConfigProvider>
   );
