@@ -1083,10 +1083,10 @@ async def test_dispatch_input_supports_pointer_drag_and_explicit_drag() -> None:
         "kind": "pointer_up", "nx": 0.7, "ny": 0.8, "button": 0, "click_count": 2,
     }))["ok"]
     assert page.mouse.events == [
-        ("move", 128.0, 160.0, 1),
+        ("move", 160.0, 160.0, 1),
         ("down", "left", 2),
-        ("move", 896.0, 640.0, 6),
-        ("move", 896.0, 640.0, 1),
+        ("move", 1120.0, 640.0, 6),
+        ("move", 1120.0, 640.0, 1),
         ("up", "left", 2),
     ]
 
@@ -1097,9 +1097,9 @@ async def test_dispatch_input_supports_pointer_drag_and_explicit_drag() -> None:
     })
     assert result["ok"]
     assert page.mouse.events == [
-        ("move", 256.0, 200.0, 1),
+        ("move", 320.0, 200.0, 1),
         ("down", "left", 1),
-        ("move", 1152.0, 600.0, 8),
+        ("move", 1440.0, 600.0, 8),
         ("up", "left", 1),
     ]
 
@@ -1114,9 +1114,9 @@ async def test_dispatch_input_supports_double_right_click_and_hover() -> None:
     assert (await sess.dispatch_input({"kind": "right_click", "nx": 0.25, "ny": 0.4}))["ok"]
     assert (await sess.dispatch_input({"kind": "hover", "nx": 0.8, "ny": 0.1, "steps": 3}))["ok"]
     assert page.mouse.events == [
-        ("dblclick", 640.0, 400.0, "right"),
-        ("click", 320.0, 320.0, "right"),
-        ("move", 1024.0, 80.0, 3),
+        ("dblclick", 800.0, 400.0, "right"),
+        ("click", 400.0, 320.0, "right"),
+        ("move", 1280.0, 80.0, 3),
     ]
 
 
@@ -1186,24 +1186,24 @@ async def test_screencast_uses_full_viewport_quality_and_emits_dimensions() -> N
 
     await sess.start_screencast(on_frame)
     start_params = next(params for method, params in cdp.calls if method == "Page.startScreencast")
-    assert start_params == {"format": "jpeg", "quality": 70, "maxWidth": 1280, "maxHeight": 800}
+    assert start_params == {"format": "jpeg", "quality": 70, "maxWidth": 1600, "maxHeight": 800}
     task = cdp.handlers["Page.screencastFrame"]({
         "sessionId": 7,
         "data": "jpeg-base64",
-        "metadata": {"deviceWidth": 1280, "deviceHeight": 800},
+        "metadata": {"deviceWidth": 1600, "deviceHeight": 800},
     })
     await task
     await asyncio.sleep(0)
     assert frames == [{
         "seq": 1,
         "data": "jpeg-base64",
-        "width": 1280,
+        "width": 1600,
         "height": 800,
-        "frame_width": 1280,
+        "frame_width": 1600,
         "frame_height": 800,
-        "viewport_width": 1280,
+        "viewport_width": 1600,
         "viewport_height": 800,
-        "viewport": {"width": 1280, "height": 800},
+        "viewport": {"width": 1600, "height": 800},
     }]
 
 

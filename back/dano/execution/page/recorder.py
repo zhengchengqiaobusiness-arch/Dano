@@ -78,7 +78,7 @@ def has_recorded_value(step: dict) -> bool:
     return value is not None and value != ""
 
 
-_VIEW_W, _VIEW_H = 1280, 800
+_VIEW_W, _VIEW_H = 1600, 800
 _CAST_W, _CAST_H = _VIEW_W, _VIEW_H
 _CAST_QUALITY = 70
 _CAST_ACTIVE_FPS = 10
