@@ -86,6 +86,45 @@ def _dom_enum(label, alias, selected_label, selected_value, options, *, page_id=
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_duplicate_request_identity_materializes_only_the_selected_business_request(self):
+        initial = _get("https://oa.example.test/items/page?pageNo=1&pageSize=10", {"list": []})
+        initial.update({"request_id": "req-page", "index": 1, "sequence": 1})
+        searched = _get(
+            "https://oa.example.test/items/page?pageNo=1&pageSize=10&type=2&reason=annual",
+            {"list": [{"id": 1}]},
+        )
+        searched.update({
+            "request_id": "req-page",
+            "index": 2,
+            "sequence": 2,
+            "trigger_action_id": "search-click",
+            "trigger_transaction_id": "txn-search",
+            "trigger_op": "click",
+        })
+
+        spec = to_flow_spec(
+            [initial, searched],
+            request_role_overrides={
+                "req-page": {
+                    "role": "business_get",
+                    "keep": True,
+                    "reason": "用户主动搜索业务列表",
+                    "confidence": 0.99,
+                    "evidence": {"actor": "agent"},
+                },
+            },
+        )
+
+        matching_steps = [
+            step for step in spec.steps
+            if str((step.source_meta or {}).get("request_id") or "") == "req-page"
+        ]
+        assert len(matching_steps) == 1
+        assert {param.path: param.value for param in matching_steps[0].params}["query.type"] == "2"
+        fact = next(item for item in spec.request_facts.requests if item.request_id == "req-page")
+        assert fact.request_index == 2
+        assert spec.request_facts.analysis["req-page"].role == "business_get"
+
     def test_seal_query_fields_and_page_enum_stay_bound_to_their_own_wire_fields(self):
         """公章真实场景：同值 query、候选接口 status 与页面流程状态不得串名/串枚举。"""
         page = _get(

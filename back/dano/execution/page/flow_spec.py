@@ -3189,6 +3189,20 @@ def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
     ]
 
 
+def _dedupe_request_identities(requests: list[dict]) -> list[dict]:
+    """Keep one canonical capture when the recorder repeats a durable identity."""
+    best_by_identity: dict[Any, dict] = {}
+    for request in requests:
+        key = _request_role_key(request)
+        current = best_by_identity.get(key)
+        if current is None or _preread_candidate_score(request) >= _preread_candidate_score(current):
+            best_by_identity[key] = request
+    return [
+        request for request in requests
+        if best_by_identity.get(_request_role_key(request)) is request
+    ]
+
+
 def _attach_request_role(req: dict, role: dict) -> dict:
     out = dict(req)
     out["_request_role"] = role
@@ -3460,6 +3474,7 @@ def _build_request_facts(
 ) -> RequestFacts:
     """Build the canonical request ledger directly from recorder evidence."""
     facts_by_id: dict[str, RequestFact] = {}
+    fact_scores: dict[str, tuple[int, int, int, float]] = {}
     analysis: dict[str, RequestAnalysis] = {}
     usage: dict[str, RequestUsage] = {}
     selected_signatures: set[tuple[str, str]] = set()
@@ -3469,9 +3484,11 @@ def _build_request_facts(
             continue
         rid = _request_fact_key(entry)
         fact = _request_fact_from_entry(entry)
-        previous = facts_by_id.get(rid)
-        if previous is None or (fact.response_json is not None and previous.response_json is None):
+        fact_score = _preread_candidate_score(req)
+        replace_fact = rid not in facts_by_id or fact_score >= fact_scores[rid]
+        if replace_fact:
             facts_by_id[rid] = fact
+            fact_scores[rid] = fact_score
 
         key = _request_role_key(req)
         role_name = str(role.get("role") or "")
@@ -3487,14 +3504,15 @@ def _build_request_facts(
             bucket = "candidate_reads"
         else:
             bucket = "filtered_requests"
-        analysis[rid] = _request_analysis_from_entry(entry, role, bucket)
+        if replace_fact:
+            analysis[rid] = _request_analysis_from_entry(entry, role, bucket)
 
-        materialized_step_id = str(req.get("materialized_step_id") or "")
-        usage[rid] = RequestUsage(
-            request_id=rid,
-            materialized_step_id=materialized_step_id,
-            state="materialized" if materialized_step_id else "captured",
-        )
+            materialized_step_id = str(req.get("materialized_step_id") or "")
+            usage[rid] = RequestUsage(
+                request_id=rid,
+                materialized_step_id=materialized_step_id,
+                state="materialized" if materialized_step_id else "captured",
+            )
 
     requests = sorted(
         facts_by_id.values(),
@@ -6435,11 +6453,11 @@ def to_flow_spec(
     flow_reads = _merge_flow_read_sources(reads, captured_requests, request_roles)
 
     # 1) 业务写请求
-    write_cands = [
+    write_cands = _dedupe_request_identities([
         c for c in write_requests(captured_requests)
         if (role_by_key.get(_request_role_key(c), {}).get("keep")
             and role_by_key.get(_request_role_key(c), {}).get("role") in {"submit_anchor", "business_write"})
-    ]
+    ])
     selected_write_request_ids = {
         str(request.get("request_id") or "") for request in write_cands if request.get("request_id")
     }
@@ -6573,7 +6591,9 @@ def to_flow_spec(
         preread_cands = _dedupe_preread_candidates([*preread_cands, *operation_reads])
     preread_keys = {_request_role_key(r) for r in preread_cands}
     potential_keys = selected_write_keys | preread_keys
-    potential_steps = [r for r in captured_requests if _request_role_key(r) in potential_keys]
+    potential_steps = _dedupe_request_identities([
+        r for r in captured_requests if _request_role_key(r) in potential_keys
+    ])
     # Build explicit preflight ownership per write request. A boolean
     # "preflight" flag cannot represent a recording containing multiple forms:
     # shared BPM endpoints would otherwise be copied into every submit ability.
@@ -6783,7 +6803,9 @@ def to_flow_spec(
         page_events=page_events,
         field_evidence=field_evidence,
     )
-    cands = [r for r in captured_requests if _request_role_key(r) in selected_keys]
+    cands = _dedupe_request_identities([
+        r for r in captured_requests if _request_role_key(r) in selected_keys
+    ])
 
     # 4) 每条 → FlowStep
     step_objs: list[FlowStep] = []
