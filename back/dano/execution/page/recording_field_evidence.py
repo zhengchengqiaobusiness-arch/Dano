@@ -153,7 +153,12 @@ def _enrich_enum_aliases(
 ) -> None:
     """Merge an exact same-control enum identity into DOM evidence."""
     label = _normalize_identifier(evidence.get("label") or evidence.get("field"))
-    if not label or _evidence_aliases(evidence):
+    # ``field`` is also used by the recorder for the visible form label.  It is
+    # not a structural wire alias: treating e.g. ``请假类型`` as one made us
+    # skip the exact ``type`` alias already captured with the page dictionary.
+    # Only identities coming from DOM/request attributes may short-circuit the
+    # enum enrichment.
+    if not label or _structural_evidence_aliases(evidence):
         return
     matches: list[dict[str, Any]] = []
     for name, raw in (page_enum_options or {}).items():
@@ -203,6 +208,15 @@ def _evidence_aliases(evidence: dict[str, Any]) -> set[str]:
         evidence.get("path"),
         evidence.get("key"),
         evidence.get("field"),
+    ]
+    return {normalized for value in raw if (normalized := _normalize_identifier(value))}
+
+
+def _structural_evidence_aliases(evidence: dict[str, Any]) -> set[str]:
+    raw = [
+        *(evidence.get("field_aliases") or []),
+        evidence.get("path"),
+        evidence.get("key"),
     ]
     return {normalized for value in raw if (normalized := _normalize_identifier(value))}
 
@@ -270,9 +284,11 @@ def bind_field_evidence(
 ) -> list[dict[str, Any]]:
     """Return evidence annotated with an explicit bound/ambiguous/unbound result.
 
-    Recorded values never participate in identity.  An exact structural alias
-    must resolve to one field in the same page/frame/route, with an exact action
-    or transaction match used only to disambiguate otherwise valid candidates.
+    Structural aliases are authoritative.  When a framework exposes only a
+    human label, a recorded value may be used as a bounded fallback only when
+    it resolves to one request field in the same page/frame/route and the
+    request happened after the control interaction.  Ambiguous values remain
+    unbound.
     """
     requests = [item for item in (captured_requests or []) if isinstance(item, dict)]
     events = [item for item in (page_events or []) if isinstance(item, dict)]
@@ -300,7 +316,8 @@ def bind_field_evidence(
             for key in ("action_id", "transaction_id", "observed_at"):
                 if evidence.get(key) in (None, "") and related_event.get(key) not in (None, ""):
                     evidence[key] = related_event[key]
-        aliases = _evidence_aliases(evidence)
+        structural_aliases = _structural_evidence_aliases(evidence)
+        aliases = structural_aliases
         candidates: list[dict[str, Any]] = []
         if aliases:
             for request in requests:
@@ -334,13 +351,27 @@ def bind_field_evidence(
                                 request.get("trigger_action_id") or request.get("trigger_transaction_id")
                             ),
                         })
-        elif evidence.get("value") not in (None, ""):
+        if (
+            not candidates
+            and not structural_aliases
+            and evidence.get("value") not in (None, "")
+        ):
             value_candidates: list[dict[str, Any]] = []
             for request in requests:
-                if not _same_scope(request, evidence) or not _causal_match(request, evidence):
+                if not _same_scope(request, evidence):
                     continue
                 request_id = str(request.get("request_id") or request.get("id") or request.get("index") or "")
                 if not request_id:
+                    continue
+                request_time = _timestamp(request.get("timestamp") or request.get("captured_at"))
+                evidence_time = _timestamp(evidence.get("observed_at"))
+                causal_match = _causal_match(request, evidence)
+                temporal_match = bool(
+                    request_time is not None
+                    and evidence_time is not None
+                    and request_time >= evidence_time
+                )
+                if not causal_match and not temporal_match:
                     continue
                 for wire_path, value in _request_field_values(request):
                     if _same_recorded_value(evidence.get("value"), value):
@@ -348,10 +379,16 @@ def bind_field_evidence(
                             "request_id": request_id,
                             "wire_path": wire_path,
                             "match_score": 0,
-                            "causal_match": True,
-                            "temporal_match": True,
-                            "time_delta": 0,
-                            "has_request_causality": True,
+                            "causal_match": causal_match,
+                            "temporal_match": temporal_match,
+                            "time_delta": (
+                                request_time - evidence_time
+                                if temporal_match and request_time is not None and evidence_time is not None
+                                else 0
+                            ),
+                            "has_request_causality": bool(
+                                request.get("trigger_action_id") or request.get("trigger_transaction_id")
+                            ),
                         })
             if len({(item["request_id"], item["wire_path"]) for item in value_candidates}) == 1:
                 candidates = value_candidates
@@ -368,13 +405,18 @@ def bind_field_evidence(
         if exact_causal:
             selected = exact_causal
             binding_method = (
-                "exact_alias_same_transaction" if aliases
+                "exact_alias_same_transaction"
+                if candidates[0]["match_score"]
                 else "unique_value_same_transaction"
             )
         elif ordered_causal:
             nearest = min(float(item["time_delta"]) for item in ordered_causal)
             selected = [item for item in ordered_causal if float(item["time_delta"]) == nearest]
-            binding_method = "exact_alias_same_scope_causal_order"
+            binding_method = (
+                "exact_alias_same_scope_causal_order"
+                if aliases and candidates[0]["match_score"]
+                else "unique_value_same_scope_causal_order"
+            )
         else:
             selected = []
             binding_method = ""

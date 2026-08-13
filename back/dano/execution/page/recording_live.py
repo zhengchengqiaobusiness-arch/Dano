@@ -771,6 +771,10 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
 
     origin_request_id = str(edit.get("origin_request_id") or "")
     origin_path = str(edit.get("origin_path") or "").removeprefix("response.")
+    # Source and requiredness are independent field axes.  Reclassifying the
+    # source used to replace the whole source object and silently erase the DOM
+    # required marker captured moments earlier.
+    required_state = str((param.source or {}).get("required_state") or "")
 
     if source_kind == "user_input":
         param.source_kind = "user_input"
@@ -968,6 +972,9 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         }
         param.category = "runtime_var"
         param.exposed_to_user = False
+
+    if required_state:
+        param.source = {**(param.source or {}), "required_state": required_state}
 
     advice = _field_source_configuration_advice(param)
     if advice:

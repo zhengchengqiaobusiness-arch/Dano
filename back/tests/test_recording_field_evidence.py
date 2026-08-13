@@ -257,3 +257,83 @@ def test_bound_aliasless_control_projects_all_grounded_axes_to_flow_spec() -> No
     assert start.source_kind == "user_input"
     assert start.required is True
     assert start.default_value is None
+
+
+def test_complete_enum_alias_binds_the_matching_required_control_without_a_selected_value() -> None:
+    requests = [{
+        "request_id": "req-submit",
+        "method": "POST",
+        "url": "https://example.test/leave/submit",
+        "post_data": '{"type":2,"reason":"home"}',
+        "page_id": "page-1",
+        "frame_id": "main",
+        "trigger_action_id": "action-submit",
+        "timestamp": 400,
+        "page_context": {"path": "/leave/create"},
+    }]
+
+    [bound] = bind_field_evidence(requests, [], [{
+        "event_id": "event-type",
+        "label": "Leave category",
+        "field": "Leave category",
+        "field_aliases": [],
+        "control_kind": "select",
+        "action_id": "action-select-type",
+        "required": True,
+        "value": "",
+        "observed_at": 300,
+        "page_id": "page-1",
+        "frame_id": "main",
+        "page_context": {"path": "/leave/create"},
+    }], page_enum_options={
+        "Leave category": {
+            "field_key": "Leave category",
+            "field_aliases": ["type"],
+            "control_kind": "select",
+            "page_id": "page-1",
+            "frame_id": "main",
+            "page_context": {"path": "/leave/create"},
+            "mapping_complete": True,
+            "options": [
+                {"label": "Annual", "value": 1},
+                {"label": "Personal", "value": 2},
+            ],
+        },
+    })
+
+    assert bound["binding_status"] == "bound"
+    assert (bound["request_id"], bound["wire_path"]) == ("req-submit", "body.type")
+    assert bound["required_observed"] is True
+
+
+def test_unique_value_binds_a_control_filled_before_the_later_submit_action() -> None:
+    requests = [{
+        "request_id": "req-submit",
+        "method": "POST",
+        "url": "https://example.test/leave/submit",
+        "post_data": '{"reason":"family matter","other":"x"}',
+        "page_id": "page-1",
+        "frame_id": "main",
+        "trigger_action_id": "action-submit",
+        "timestamp": 400,
+        "page_context": {"path": "/leave/create"},
+    }]
+
+    [bound] = bind_field_evidence(requests, [], [{
+        "event_id": "event-reason",
+        "action_id": "action-fill-reason",
+        "label": "Reason",
+        "field": "Reason",
+        "field_aliases": [],
+        "control_kind": "textarea",
+        "required": True,
+        "value": "family matter",
+        "observed_at": 300,
+        "page_id": "page-1",
+        "frame_id": "main",
+        "page_context": {"path": "/leave/create"},
+    }])
+
+    assert bound["binding_status"] == "bound"
+    assert (bound["request_id"], bound["wire_path"]) == ("req-submit", "body.reason")
+    assert bound["binding_method"] == "unique_value_same_scope_causal_order"

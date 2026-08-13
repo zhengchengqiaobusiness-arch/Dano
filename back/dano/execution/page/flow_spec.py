@@ -16898,7 +16898,22 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
         ((current.meta or {}).get("capability_model") or {}).get("semantic_plan") or {},
     )
     current = _ensure_external_transform_relations(_sync_capability_io_schemas(current))
-    return ensure_recorded_goal(current)
+    current = ensure_recorded_goal(current)
+    # Verification and canonical schema projection can add trusted, derived
+    # contract details after the planner originally accepted a capability.
+    # Refresh only machine-owned confirmations on that final canonical shape;
+    # user-owned/locked confirmations must continue to detect later edits.
+    if bool(((current.meta or {}).get("verification_run") or {}).get("complete")):
+        for cap in current.capabilities or []:
+            if (
+                cap.confirmed
+                and not cap.locked
+                and cap.updated_by in {"planner", "repair", "agent", "system"}
+            ):
+                cap.confirmation_hash = _capability_confirmation_hash(
+                    current, cap, prepared=True,
+                )
+    return current
 
 
 def prepare_flow_release_candidate(spec: FlowSpec) -> tuple[FlowSpec, dict[str, Any]]:
@@ -21088,7 +21103,11 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
             # verified readback/fact_check to the same executable contract, so
             # refresh that machine-owned fingerprint after verification. User
             # confirmations remain immutable and still detect later changes.
-            if verification_complete and cap.updated_by == "planner":
+            if (
+                verification_complete
+                and not cap.locked
+                and cap.updated_by in {"planner", "repair", "agent", "system"}
+            ):
                 cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
             continue
         if not verification_complete and float(cap.confidence or 0) <= 0.7:

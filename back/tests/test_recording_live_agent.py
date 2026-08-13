@@ -301,6 +301,23 @@ def test_live_field_semantics_resolve_request_id_and_qualified_body_path():
     assert updated.steps[1].params[0].source_kind == "page_context"
 
 
+def test_source_reclassification_preserves_the_independent_required_axis():
+    spec = _flow()
+    spec.steps[1].params[0].required = True
+    spec.steps[1].params[0].source = {"required_state": "required"}
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_source",
+        "step_id": "req-submit",
+        "path": "jobId",
+        "source_kind": "user_input",
+        "reason": "调用方填写",
+    }])
+
+    param = updated.steps[1].params[0]
+    assert param.required is True
+    assert param.source["required_state"] == "required"
+
+
 def test_live_field_semantics_reject_wrong_transport_namespace():
     with pytest.raises(ValueError, match="target.*not found"):
         apply_flow_edits(_flow(), [{

@@ -772,6 +772,31 @@ def test_verification_refreshes_planner_confirmation_hash():
     assert not any("确认后合同已变化" in error for error in validate_flow_spec(refreshed)["errors"])
 
 
+def test_verification_refreshes_all_machine_owned_confirmation_hashes():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query", method="GET", path="/api/records",
+            params=[ParamField(path="query.page", key="page", value="1")],
+        )],
+        capabilities=[FlowCapability(
+            capability_id="query-cap", name="query_records", kind="query",
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            confirmed=True, requires_human_confirm=False, updated_by="repair",
+        )],
+    )
+    cap = spec.capabilities[0]
+    cap.confirmation_hash = flow_spec_module._capability_confirmation_hash(spec, cap)
+    spec.steps[0].source_meta = {"unverified_reason": "verification was still pending"}
+    spec.meta["verification_run"] = {"complete": True}
+
+    refreshed = flow_spec_module._auto_confirm_ready_capabilities(spec)
+
+    assert refreshed.capabilities[0].confirmation_hash == flow_spec_module._capability_confirmation_hash(
+        refreshed, refreshed.capabilities[0]
+    )
+    assert not any("确认后合同已变化" in error for error in validate_flow_spec(refreshed)["errors"])
+
+
 def test_dependency_verification_receipt_does_not_hide_dependency_contract_changes():
     spec = FlowSpec(
         steps=[
