@@ -112,6 +112,33 @@ async def test_recording_plan_compilation_does_not_block_browser_event_loop(monk
     assert tick_elapsed < 0.04
 
 
+@pytest.mark.asyncio
+async def test_live_evidence_binding_does_not_block_browser_event_loop(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "a" * 32,
+    )
+    session.bind_flow_spec(_flow())
+    session.bind_live_recording(_Recorder())
+
+    def slow_binding(*_args, **_kwargs):
+        time.sleep(0.08)
+        return []
+
+    monkeypatch.setattr(
+        "dano.execution.page.recording_field_identity.bind_field_evidence",
+        slow_binding,
+    )
+    operation = asyncio.create_task(session.refresh_live_evidence())
+    started = time.monotonic()
+    await asyncio.sleep(0.01)
+    tick_elapsed = time.monotonic() - started
+    await operation
+
+    assert tick_elapsed < 0.04
+
+
 def _flow() -> FlowSpec:
     return FlowSpec(
         flow_id="live-flow",

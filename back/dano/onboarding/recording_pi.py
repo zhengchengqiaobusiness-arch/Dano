@@ -440,9 +440,19 @@ class RecordingPiSession:
         from dano.execution.page.flow_spec import _option_sources_from_page_enum_options
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
-        bound_fields = bind_field_evidence(
-            captured, page_events, raw_fields,
+        # Binding a large DOM/request fact set is CPU-heavy. It must not share
+        # the gateway event-loop thread with the recorder WebSocket heartbeat.
+        bound_fields = await asyncio.to_thread(
+            bind_field_evidence,
+            captured,
+            page_events,
+            raw_fields,
             page_enum_options=page_enums,
+        )
+        option_sources = await asyncio.to_thread(
+            _option_sources_from_page_enum_options,
+            page_enums,
+            captured,
         )
         async with self._state_lock:
             if marker == self._live_evidence_marker:
@@ -466,9 +476,7 @@ class RecordingPiSession:
                     and source.get("kind") == "page_enum_options"
                 )
             ]
-            retained_sources.extend(
-                _option_sources_from_page_enum_options(page_enums, captured)
-            )
+            retained_sources.extend(option_sources)
             current.request_facts.option_sources = retained_sources
             self.flow_spec = current
             self._live_evidence_marker = marker
