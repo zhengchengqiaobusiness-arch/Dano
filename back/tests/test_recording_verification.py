@@ -681,7 +681,7 @@ async def test_final_verification_has_one_total_deadline_and_returns_publishable
     assert report["all_verified"] is False
     assert report["errors"]
     assert session.flow_spec.meta["verification_run"]["complete"] is True
-    assert session.flow_spec.meta["skill_docs_generation"]["fallback_required"] is True
+    assert "skill_docs_generation" not in session.flow_spec.meta
 
 
 @pytest.mark.asyncio
@@ -710,51 +710,8 @@ async def test_zero_operator_verification_loop_completes_with_executor_evidence(
 
     class AgentSession(_UnavailableSession):
         verification_calls = 0
-        docs_calls = 0
 
         async def prompt(self, text, **_kwargs):
-            if "submit_skill_docs" in text:
-                self.docs_calls += 1
-                spec = self.current_flow_spec()
-                spec.meta = {
-                    **(spec.meta or {}),
-                    "skill_docs": {
-                        "skill_md": """---
-name: update-item
-description: Update one item
----
-
-## Transport
-Direct HTTP JSON.
-
-## Preconditions
-Provide runtime authentication.
-
-## Steps
-1. Run update_item.
-   Done when: the response and read-back both report success.
-
-## Branch exit
-Stop on the first failed request.
-
-## Pitfalls
-Do not reuse recorded credentials.
-""",
-                        "reference_md": f"""# Reference
-
-## API chain
-- update_item: GET /items/detail -> POST /items/update; verification_id: {link_id}
-
-## Business hard rules
-- Do not delete records.
-
-## Fallback browser steps
-1. Use visible role/name labels, never coordinates.
-""",
-                    },
-                }
-                self.bind_flow_spec(spec)
-                return {"status": "submitted"}
             assert "verification_todos" in text
             self.verification_calls += 1
             self.flow_spec = apply_flow_edits(self.flow_spec, [
@@ -773,12 +730,11 @@ Do not reuse recorded credentials.
     session = AgentSession(spec)
     report = await run_recording_verification(session)
     assert session.verification_calls == 1
-    assert session.docs_calls == 1
     assert report["all_verified"] is True
     assert report["unverified"] == []
     assert require_verification_complete(session.flow_spec)["all_verified"] is True
     assert session.flow_spec.capabilities[0].confirmed is True
-    assert session.flow_spec.meta["skill_docs_generation"]["valid"] is True
+    assert "skill_docs_generation" not in session.flow_spec.meta
     assert recorded_goal_slug(session.flow_spec) == "update_item"
 
 

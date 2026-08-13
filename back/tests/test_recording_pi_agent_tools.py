@@ -22,7 +22,6 @@ from dano.agent_tools.tools import (
     submit_recording_plan,
     submit_recording_repair,
     submit_recording_review,
-    submit_skill_docs,
     verify_recording_dependency,
 )
 from dano.shared.enums import AssetType
@@ -752,22 +751,6 @@ async def test_invalid_assertion_does_not_consume_write_verification(monkeypatch
 
     assert result["ok"] is True
     assert calls == 1
-
-
-def test_submit_skill_docs_returns_appended_flow_version(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-skill-docs")
-    before_version = int((session.spec.meta or {}).get("current_version") or 0)
-
-    result = asyncio.run(submit_skill_docs("run-skill-docs", {
-        "recording_id": "rec-skill-docs",
-        "skill_md": "# Skill\n",
-        "reference_md": "# Reference\n",
-    }))
-
-    assert result["flow_version"] == before_version + 1
-    assert result["flow_version"] == int(
-        (session.spec.meta or {}).get("current_version") or 0
-    )
 
 
 def test_recording_core_has_no_direct_llm_conversation_or_cache_path():

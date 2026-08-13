@@ -389,106 +389,6 @@ def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
     return current
 
 
-async def generate_skill_documents(
-    session,
-    *,
-    prompt_runner: PromptRunner | None = None,
-    max_rounds: int = 3,
-    deadline: float | None = None,
-) -> dict[str, Any]:  # noqa: ANN001
-    """Ask the same Pi session for package docs, bounded by deterministic validation."""
-    from dano.export.skill_package import (
-        flow_spec_unverified_capability_names,
-        flow_spec_verification_ids,
-        validate_skill_documents,
-    )
-
-    errors: list[str] = []
-    issues: list[dict[str, Any]] = []
-    attempts = 0
-    for attempt in range(1, max(1, min(int(max_rounds), 3)) + 1):
-        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
-            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
-            break
-        attempts = attempt
-        suffix = (
-            "上轮校验问题=" + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
-            if issues else ""
-        )
-        prompt = (
-            "验证阶段已结束。调用 get_recording_state 读取当前 FlowSpec，只基于其中事实生成自包含"
-            " skill 包文档，然后调用 submit_skill_docs。skill_md 必须是完整 SKILL.md，含 YAML"
-            " name/description 与 Transport、Preconditions、Steps、Branch exit、Pitfalls；Steps 的"
-            "每一步都有 Done when:。reference_md 必须含 API chain、业务硬规则和 Fallback browser"
-            " steps；每条 API chain 标真实 verification_id 或明确 unverified。禁止写入任何 token、"
-            "cookie、密码或录制凭证。" + suffix
-        )
-        try:
-            if deadline is None:
-                operation = session.prompt(prompt, timeout_s=None)
-                await (prompt_runner(operation) if prompt_runner is not None else operation)
-            else:
-                await _prompt_before_deadline(
-                    session,
-                    prompt,
-                    deadline=deadline,
-                    prompt_runner=prompt_runner,
-                )
-        except asyncio.TimeoutError:
-            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
-            break
-        except Exception as exc:  # noqa: BLE001 - renderer has a deterministic fallback
-            errors.append(str(exc)[:500])
-            if (
-                "no Pi model or credentials" in str(exc)
-                or "DANO_PI_API_KEY" in str(exc)
-                or "超时" in str(exc)
-            ):
-                break
-        docs = dict((session.current_flow_spec().meta or {}).get("skill_docs") or {})
-        current = session.current_flow_spec()
-        validation = validate_skill_documents(
-            str(docs.get("skill_md") or ""),
-            str(docs.get("reference_md") or ""),
-            allowed_verification_ids=flow_spec_verification_ids(current),
-            required_chain_names={cap.name for cap in current.capabilities if cap.name},
-            required_unverified_chains=flow_spec_unverified_capability_names(current),
-        )
-        issues = list(validation["issues"])
-        if validation["ok"]:
-            break
-
-    spec = session.current_flow_spec()
-    docs = dict((spec.meta or {}).get("skill_docs") or {})
-    validation = validate_skill_documents(
-        str(docs.get("skill_md") or ""),
-        str(docs.get("reference_md") or ""),
-        allowed_verification_ids=flow_spec_verification_ids(spec),
-        required_chain_names={cap.name for cap in spec.capabilities if cap.name},
-        required_unverified_chains=flow_spec_unverified_capability_names(spec),
-    )
-    spec.meta = {
-        **(spec.meta or {}),
-        "skill_docs_generation": {
-            "complete": True,
-            "valid": validation["ok"],
-            "attempts": attempts,
-            "max_rounds": max(1, min(int(max_rounds), 3)),
-            "issues": validation["issues"],
-            "errors": errors,
-            "fallback_required": not validation["ok"],
-        },
-    }
-    session.bind_flow_spec(spec)
-    return {
-        "valid": validation["ok"],
-        "attempts": attempts,
-        "issues": validation["issues"],
-        "errors": errors,
-        "fallback_required": not validation["ok"],
-    }
-
-
 async def run_recording_verification(
     session,
     *,
@@ -568,15 +468,10 @@ async def run_recording_verification(
         errors=errors,
     )
     session.bind_flow_spec(current)
-    skill_docs = await generate_skill_documents(
-        session,
-        prompt_runner=prompt_runner,
-        deadline=deadline,
-    )
     await _emit(progress, _progress(
         "completed",
         "验证全部通过，准备自动发布" if final_report["all_verified"] else "验证结束，未决项已标注 unverified，准备发布",
         final_report,
         round_number=rounds,
     ))
-    return {**final_report, "rounds": rounds, "errors": errors, "skill_docs": skill_docs}
+    return {**final_report, "rounds": rounds, "errors": errors}

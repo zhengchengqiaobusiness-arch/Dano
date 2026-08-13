@@ -796,17 +796,6 @@ export const recordingTools = [
     ),
   }),
   proxyTool({
-    name: "submit_skill_docs",
-    label: "提交自包含 Skill 文档",
-    description:
-      "基于当前 FlowSpec 事实提交完整 SKILL.md 与 reference.md 正文。API chain 必须逐条标 verification_id 或 unverified，不得包含凭证。",
-    parameters: Type.Object({
-      ...RecordingIdentity,
-      skill_md: Type.String({ minLength: 1 }),
-      reference_md: Type.String({ minLength: 1 }),
-    }, { additionalProperties: false }),
-  }),
-  proxyTool({
     name: "submit_recording_review",
     label: "提交发布审核",
     description:

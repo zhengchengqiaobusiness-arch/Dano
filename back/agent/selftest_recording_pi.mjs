@@ -34,7 +34,6 @@ const expectedTools = [
   "submit_recording_plan",
   "get_validation_report",
   "submit_recording_repair",
-  "submit_skill_docs",
   "submit_recording_review",
 ];
 

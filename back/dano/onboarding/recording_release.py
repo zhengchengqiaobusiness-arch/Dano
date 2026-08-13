@@ -25,7 +25,6 @@ from dano.execution.page.flow_spec import (
 )
 from dano.execution.page.verification_log import find_verification
 from dano.execution.page.recording_live import dependency_link_signature
-from dano.export.skill_package.renderer import validate_flow_spec_package
 
 
 _LEGAL_USAGES = frozenset({"execute", "preflight", "option_source", "fact_check"})
@@ -347,15 +346,6 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
     checks["dry_run"] = bool(dry_run.get("ok"))
     if not dry_run.get("ok"):
         reasons.append("dry run 未通过")
-
-    package = validate_flow_spec_package(scoped)
-    checks["self_contained_package"] = bool(package.get("ok"))
-    if not package.get("ok"):
-        reasons.extend(
-            f"包校验 {item.get('code')}: {item.get('message')}"
-            for item in package.get("issues") or []
-            if item.get("severity") != "warning"
-        )
 
     reasons = list(dict.fromkeys(reason for reason in reasons if reason))
     return CapabilityReleaseDecision(

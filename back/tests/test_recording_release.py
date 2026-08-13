@@ -147,6 +147,7 @@ def test_release_keeps_verified_query_callable_and_write_in_draft_only():
         "query_items": True,
         "submit_item": False,
     }
+    assert "self_contained_package" not in decision.capabilities[0].checks
     assert draft.model_dump(mode="json") == before
     assert [cap.name for cap in draft.capabilities] == ["query_items", "submit_item"]
 
