@@ -146,24 +146,50 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
             "completion_op": "bind_verify_read",
         })
     for step in spec.steps:
-        for binding in step.selects:
-            target_id = f"{step.step_id}:{binding.path or binding.id_path}"
-            incomplete = (
-                not binding.verification_id
+        bindings = {
+            binding.path or binding.id_path: binding
+            for binding in step.selects
+            if binding.path or binding.id_path
+        }
+        enum_paths = {
+            param.path
+            for param in step.params
+            if param.type in {"enum", "list-enum"}
+            and param.source_kind != "api_option"
+            and not param.enum_options
+        }
+        enum_paths.update(bindings)
+        for path in sorted(enum_paths):
+            binding = bindings.get(path)
+            verification_id = str(binding.verification_id or "") if binding is not None else ""
+            binding_incomplete = bool(
+                binding is not None
                 and (
                     binding.enum_confirmed is not True
                     or (binding.count and len(binding.options or []) < binding.count)
                 )
             )
-            if incomplete and ("enum", target_id) not in skipped:
+            param = next((item for item in step.params if item.path == path), None)
+            param_incomplete = bool(
+                param is not None
+                and param.type in {"enum", "list-enum"}
+                and param.source_kind != "api_option"
+                and not param.enum_options
+            )
+            target_id = f"{step.step_id}:{path}"
+            if (
+                not verification_id
+                and (binding_incomplete or param_incomplete)
+                and ("enum", target_id) not in skipped
+            ):
                 todos.append({
                     "kind": "enum",
                     "target_id": target_id,
                     "step_id": step.step_id,
-                    "path": binding.path or binding.id_path,
-                    "source_request_id": binding.source_request_id,
-                    "known_count": len(binding.options or []),
-                    "expected_count": binding.count,
+                    "path": path,
+                    "source_request_id": str(binding.source_request_id or "") if binding is not None else "",
+                    "known_count": len(binding.options or []) if binding is not None else len(param.enum_options or []),
+                    "expected_count": binding.count if binding is not None else 0,
                     "suggested_tools": ["browser_snapshot", "browser_click", "replay_request"],
                     "completion_op": "attach_enum_options",
                 })

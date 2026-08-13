@@ -150,6 +150,35 @@ def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     assert candidate["completion_ops"] == ["propose_dependency", "verify_dependency", "confirm_dependency"]
 
 
+def test_enum_param_without_select_binding_is_still_a_verification_todo():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            path="/items/page",
+            source_meta={"request_id": "req-query"},
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/items/page"),
+            RequestFact(request_id="req-options", method="GET", path="/items/options"),
+        ]),
+    )
+    spec.steps[0].params = [ParamField(
+        path="query.type",
+        key="type",
+        type="enum",
+        source_kind="form_option",
+        enum_options=[],
+    )]
+
+    todo = next(item for item in verification_todos(spec) if item["kind"] == "enum")
+
+    assert todo["target_id"] == "query:query.type"
+    assert todo["step_id"] == "query"
+    assert todo["path"] == "query.type"
+    assert todo["completion_op"] == "attach_enum_options"
+
+
 def test_finalize_marks_unresolved_dependency_candidates_without_crashing():
     finalized, report = finalize_verification_state(
         _spec_with_unproposed_value_link(),

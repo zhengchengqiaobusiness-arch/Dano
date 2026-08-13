@@ -7,6 +7,7 @@ import time
 import pytest
 
 from dano.execution.page.flow_spec import (
+    _auto_confirm_ready_capabilities,
     FlowCapability,
     FlowSpec,
     FlowLink,
@@ -20,6 +21,7 @@ from dano.execution.page.flow_spec import (
     flow_spec_to_api_request,
     recording_agent_state,
     recording_agent_validation,
+    validate_flow_spec,
 )
 from dano.execution.page.recording_live import (
     apply_recording_agent_edit,
@@ -817,6 +819,80 @@ def test_enum_binding_accepts_complete_option_alias_when_control_binding_is_unbo
     )]
     report_text = json.dumps(validate_flow_spec(updated), ensure_ascii=False)
     assert "capability_internal_field_exposed" not in report_text
+
+
+@pytest.mark.asyncio
+async def test_verified_enum_repair_refreshes_machine_owned_capability_contract():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.type",
+        key="type",
+        value="2",
+        type="enum",
+        wire_type="number",
+        category="user_param",
+        source_kind="form_option",
+        exposed_to_user=True,
+    )]
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-type",
+        "request_id": "req-detail",
+        "path": "query.type",
+        "field_aliases": ["type"],
+        "label": "请假类型",
+        "required": False,
+        "control_kind": "select",
+    })
+    spec.request_facts.option_sources.append({
+        "kind": "page_enum_options",
+        "options": {
+            "请假类型": {
+                "field_key": "请假类型",
+                "field_aliases": ["type"],
+                "dict_type": "leave_type",
+                "mapping_complete": True,
+                "options": [
+                    {"label": "病假", "value": 1},
+                    {"label": "事假", "value": 2},
+                ],
+            },
+        },
+    })
+    spec.capabilities = [FlowCapability(
+        name="query_records",
+        kind="query",
+        nodes=[{"id": "query", "type": "call", "step_id": "detail"}],
+        confidence=0.95,
+    )]
+    spec.meta = {**(spec.meta or {}), "verification_run": {"complete": True}}
+    spec = _auto_confirm_ready_capabilities(spec)
+    spec.meta["verification_run"] = {"complete": False}
+    old_confirmation_hash = spec.capabilities[0].confirmation_hash
+
+    updated = await apply_recording_agent_submission(spec, mode="repair", submission={
+        "ops": [{
+            "op": "set_param_enum",
+            "step_id": "detail",
+            "path": "query.type",
+            "dictionary_source": "leave_type",
+            "options": [
+                {"label": "病假", "value": 1},
+                {"label": "事假", "value": 2},
+            ],
+            "reason": "页面控件与字典快照一致",
+            "evidence_refs": ["evt-type"],
+        }],
+    })
+
+    op_result = updated.meta["recording_agent_session"]["op_results"][0]
+    assert op_result["status"] == "applied", op_result
+    assert updated.steps[0].params[0].enum_value_map == {"病假": 1, "事假": 2}
+    assert updated.capabilities[0].confirmation_hash != old_confirmation_hash
+    after_validation = validate_flow_spec(updated)
+    assert not any(
+        "缺少可执行枚举选项" in item
+        for item in after_validation["capability_validation"]["errors"]
+    )
 
 
 def test_finalize_replays_deferred_enum_from_complete_unbound_snapshot():

@@ -21093,7 +21093,11 @@ async def auto_fix_flow_spec(
     return append_flow_version(refresh_review_items(current), "auto_fix", reason="一键自动修正")
 
 
-def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
+def _auto_confirm_ready_capabilities(
+    spec: FlowSpec,
+    *,
+    refresh_machine_owned: bool = False,
+) -> FlowSpec:
     """置信度超过 70% 的能力默认采纳，低置信能力仍可人工采纳。"""
     _normalize_capability_references(spec)
     verification_complete = bool(((spec.meta or {}).get("verification_run") or {}).get("complete"))
@@ -21104,7 +21108,7 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
             # refresh that machine-owned fingerprint after verification. User
             # confirmations remain immutable and still detect later changes.
             if (
-                verification_complete
+                (verification_complete or refresh_machine_owned)
                 and not cap.locked
                 and cap.updated_by in {"planner", "repair", "agent", "system"}
             ):
@@ -21348,7 +21352,10 @@ async def apply_recording_agent_submission(
                 status = str(outcome.get("status") or "applied")
                 reason = str(outcome.get("reason") or "")
                 if status == "applied":
-                    candidate = refresh_review_items(_sync_capability_io_schemas(candidate))
+                    candidate = _auto_confirm_ready_capabilities(
+                        refresh_review_items(_sync_capability_io_schemas(candidate)),
+                        refresh_machine_owned=True,
+                    )
                     accepted, gate = _semantic_candidate_gate(current, candidate)
                     if accepted:
                         current = candidate
