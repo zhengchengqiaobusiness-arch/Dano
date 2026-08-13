@@ -26,6 +26,7 @@ from dano.execution.page.verification_log import (
     record_verification,
 )
 from dano.onboarding.recording_verify import (
+    finalize_verification_state,
     recorded_goal_slug,
     require_verification_complete,
     run_recording_verification,
@@ -147,6 +148,30 @@ def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     assert candidate["target_path"] == "body.jobId"
     assert candidate["suggested_tool"] == "submit_recording_repair"
     assert candidate["completion_ops"] == ["propose_dependency", "verify_dependency", "confirm_dependency"]
+
+
+def test_finalize_marks_unresolved_dependency_candidates_without_crashing():
+    finalized, report = finalize_verification_state(
+        _spec_with_unproposed_value_link(),
+        rounds=3,
+        max_rounds=3,
+        errors=["agent turn ended before confirmation"],
+    )
+
+    assert report["complete"] is True
+    assert verification_todos(finalized) == []
+    assert {
+        (item["target_kind"], item["target_id"])
+        for item in finalized.meta["unverified"]
+    } == {
+        ("dependency_candidate", next(
+            item["link_id"]
+            for item in verification_todos(_spec_with_unproposed_value_link())
+            if item["kind"] == "dependency_candidate"
+        )),
+        ("write_verify", "submit"),
+    }
+    assert finalized.meta["verification_run"]["complete"] is True
 
 
 def test_candidate_link_id_supports_propose_verify_then_confirm():

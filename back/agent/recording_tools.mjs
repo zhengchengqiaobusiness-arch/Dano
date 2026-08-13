@@ -552,7 +552,8 @@ const LiveRecordingOperation = Type.Union([
   Type.Object({
     op: Type.Literal("mark_unverified"),
     target_kind: Type.Union([
-      Type.Literal("dependency"), Type.Literal("write_verify"), Type.Literal("enum"),
+      Type.Literal("dependency"), Type.Literal("dependency_candidate"),
+      Type.Literal("write_verify"), Type.Literal("enum"),
     ]),
     target_id: Type.String({ minLength: 1 }),
     reason: Type.String({ minLength: 1 }),

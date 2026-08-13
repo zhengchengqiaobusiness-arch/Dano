@@ -1638,7 +1638,9 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         target_kind = str(edit.get("target_kind") or "")
         target_id = str(edit.get("target_id") or "")
         reason = str(edit.get("reason") or "").strip()
-        if target_kind not in {"dependency", "write_verify", "enum"} or not target_id or not reason:
+        if target_kind not in {
+            "dependency", "dependency_candidate", "write_verify", "enum",
+        } or not target_id or not reason:
             raise ValueError("mark_unverified requires target_kind, target_id and reason")
         _append_meta_list(spec, "unverified", {
             "target_kind": target_kind,
@@ -1656,7 +1658,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             if step is None:
                 raise ValueError("mark_unverified write step does not exist")
             step.source_meta = {**(step.source_meta or {}), "unverified_reason": reason}
-        else:
+        elif target_kind == "enum":
             if ":" not in target_id:
                 raise ValueError("mark_unverified enum target must be step_id:path")
             step_id, path = target_id.split(":", 1)
