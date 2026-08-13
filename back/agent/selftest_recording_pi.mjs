@@ -261,11 +261,10 @@ function verifyServerOwnedRecordingContext() {
 }
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
-  const planArgument = planTool?.parameters?.properties?.plan;
-  const planSchema = planArgument?.anyOf?.find((schema) => schema?.type === "object");
+  const planSchema = planTool?.parameters?.properties?.plan;
   assert(
-    planArgument?.anyOf?.some((schema) => schema?.type === "string") && planSchema,
-    "plan boundary must accept an object or one JSON-stringified object",
+    planSchema?.type === "object" && !planSchema?.anyOf,
+    "plan boundary must expose one structured object schema",
   );
   assert(
     planTool?.description?.includes("plan.ops")
@@ -411,9 +410,8 @@ function verifyPlanToolCompatibility() {
     plan: JSON.stringify(plan),
   });
   assert(
-    stringified.plan.semantic_plan.capabilities[0].anchor_step_id === "submit"
-      && stringified.plan.ops[0].op === "set_param_source",
-    "one JSON-stringified plan object was not decoded at the tool boundary",
+    stringified.submission_error === "invalid_non_object_plan",
+    "JSON-stringified plans must not bypass the structured tool schema",
   );
 }
 

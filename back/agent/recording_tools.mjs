@@ -287,28 +287,16 @@ export function sanitizeRecordingToolParams(name, params) {
     && typeof sanitized.plan === "object"
     && !Array.isArray(sanitized.plan)
   ) ? { ...sanitized.plan } : sanitized.plan;
-  // Some OpenAI-compatible models serialize a nested object argument as one
-  // JSON string even though the tool schema says object.  Decode exactly one
-  // object layer here; the canonicalizer and Python fact/version gates remain
-  // authoritative for its contents.
-  if (typeof plan === "string" && plan.trim()) {
-    try {
-      const decoded = JSON.parse(plan);
-      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
-        plan = decoded;
-      }
-    } catch {
-      // Keep the original value so the existing missing-plan path reports a
-      // deterministic rejected submission rather than accepting malformed JSON.
-    }
-  }
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
     // A completed tool-call stream can be cut at the model output limit after
     // the small version fields but before the large plan object.  Send that
     // deterministic condition to Python so the turn terminates with a visible
     // unchanged result instead of letting the SDK retry indefinitely.
+    const submissionError = "plan" in sanitized
+      ? "invalid_non_object_plan"
+      : "model_output_truncated_missing_plan";
     delete sanitized.plan;
-    sanitized.submission_error = "model_output_truncated_missing_plan";
+    sanitized.submission_error = submissionError;
     return sanitized;
   }
   if (plan && typeof plan === "object" && !Array.isArray(plan)) {
@@ -613,11 +601,6 @@ const RecordingPlan = Type.Object({
   ops: Type.Optional(Type.Array(LiveRecordingOperation)),
 }, { additionalProperties: false });
 
-const RecordingPlanArgument = Type.Union([
-  RecordingPlan,
-  Type.String({ minLength: 2 }),
-]);
-
 const RecordingScalarAssertion = Type.Object({
   path: Type.Optional(Type.String()),
   response_path: Type.Optional(Type.String()),
@@ -784,7 +767,7 @@ export const recordingTools = [
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: Type.Optional(RecordingPlanArgument),
+        plan: Type.Optional(RecordingPlan),
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.
