@@ -4925,13 +4925,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Steps
         current={workspaceStage}
         responsive={false}
-        onChange={(next) => {
-          if (phase === "idle" && next > 0) {
-            message.info("请先完成录制准备并开始录制");
-            return;
-          }
-          setWorkspaceStage(next);
-        }}
+        onChange={setWorkspaceStage}
         items={[
           { title: "录制准备" },
           { title: "页面录制" },
