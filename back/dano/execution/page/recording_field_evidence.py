@@ -154,7 +154,7 @@ def _enrich_enum_aliases(
     """Merge an exact same-control enum identity into DOM evidence."""
     label = _normalize_identifier(evidence.get("label") or evidence.get("field"))
     # ``field`` is also used by the recorder for the visible form label.  It is
-    # not a structural wire alias: treating e.g. ``请假类型`` as one made us
+    # not a structural wire alias: treating a localized label as one made us
     # skip the exact ``type`` alias already captured with the page dictionary.
     # Only identities coming from DOM/request attributes may short-circuit the
     # enum enrichment.
