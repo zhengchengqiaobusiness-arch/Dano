@@ -1281,13 +1281,16 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
     storage_state = None
     if recorder is not None and callable(getattr(recorder, "storage_state", None)):
         storage_state = await recorder.storage_state()
-    result = await verify_dependency(
-        spec,
-        str(params["link_id"]),
-        requests,
-        auth_headers=await _recording_auth_headers(session, requests),
-        storage_state=storage_state,
-    )
+    try:
+        result = await verify_dependency(
+            spec,
+            str(params["link_id"]),
+            requests,
+            auth_headers=await _recording_auth_headers(session, requests),
+            storage_state=storage_state,
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     await session.add_verifications(result["verification_ids"])
     return result
 

@@ -841,15 +841,17 @@ class RecordingPiSession:
                     log.warning("recording_pi.stdout_invalid", run_id=self.run_id, line=line[:300])
                     continue
                 event_type = event.get("type")
+                event_error = str(event.get("error") or "")
                 if (
                     event_type == "agent_event"
                     and (event.get("stop_reason") == "error" or event.get("error"))
+                    and event_error.strip().casefold() != "request aborted"
                 ):
                     log.error(
                         "recording_pi.agent_error",
                         run_id=self.run_id,
                         agent_event=str(event.get("event") or "unknown"),
-                        error=str(event.get("error") or "provider returned an error")[:2000],
+                        error=(event_error or "provider returned an error")[:2000],
                     )
                 request_id = str(event.get("request_id") or "")
                 future = self._pending.get(request_id)

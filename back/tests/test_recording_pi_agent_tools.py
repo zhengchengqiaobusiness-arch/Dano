@@ -23,6 +23,7 @@ from dano.agent_tools.tools import (
     submit_recording_repair,
     submit_recording_review,
     submit_skill_docs,
+    verify_recording_dependency,
 )
 from dano.shared.enums import AssetType
 from dano.execution.page import flow_spec as flow_module
@@ -446,6 +447,24 @@ async def test_perturb_replay_rejects_request_id_keyed_overrides_before_executio
         })
 
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_verify_dependency_rejects_stale_link_as_tool_error(monkeypatch):
+    session = SimpleNamespace(
+        current_flow_spec=lambda: FlowSpec(flow_id="recording-test", title="test"),
+        _live_recorder=None,
+    )
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(agent_tools_module, "_captured_recording_requests", lambda *_args: [])
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+
+    with pytest.raises(ToolError, match="dependency link does not exist"):
+        await verify_recording_dependency("run-recording", {"link_id": "stale-link"})
 
 
 @pytest.mark.asyncio
