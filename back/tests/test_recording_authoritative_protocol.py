@@ -320,6 +320,16 @@ def test_publish_request_is_logged_before_expensive_review() -> None:
     assert '"recording.operation_started"' in source[publish_start:review_start]
 
 
+def test_publish_response_uses_defined_verification_result() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    publish_start = source.index('elif t == "publish_request":')
+    publish_end = source.index('elif t == "stop":', publish_start)
+    publish_source = source[publish_start:publish_end]
+
+    assert '"verification": verification_result' in publish_source
+    assert "verification_gate" not in publish_source
+
+
 def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 

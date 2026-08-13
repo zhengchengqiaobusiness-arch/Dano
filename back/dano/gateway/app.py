@@ -1862,7 +1862,6 @@ async def record_ws(ws: WebSocket) -> None:
                 pending_live_analysis_reason = None
                 if not reason:
                     return
-                current_count = len(captured_all_requests())
                 since_seq = last_live_scheduled_count
                 await _run_live_analysis(reason, since_seq)
                 # Pi 一次只能处理一轮。分析期间到达的事实必须合并成尾批，
@@ -2855,11 +2854,16 @@ async def record_ws(ws: WebSocket) -> None:
                             **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
+                    from dano.onboarding.recording_verify import verification_report
+
                     verification_run = dict((pending_flow_spec.meta or {}).get("verification_run") or {})
+                    verification_result = verification_report(pending_flow_spec)
                     if not bool(msg.get("skip_verify")) and (
                         bool(msg.get("reverify")) or not verification_run.get("complete")
                     ):
-                        await _verify_finalized_recording(force=bool(msg.get("reverify")))
+                        verification_result = await _verify_finalized_recording(
+                            force=bool(msg.get("reverify")),
+                        )
                         current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
                     # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
@@ -3046,7 +3050,7 @@ async def record_ws(ws: WebSocket) -> None:
                             "report": {**rep, "check_report": check_report,
                                        "release": release_candidate,
                                        "recording_mode": recording_mode,
-                                       "verification": verification_gate},
+                                       "verification": verification_result},
                             **_recording_flow_projection(pending_flow_spec),
                             "parsed_steps": len(last_params), "via": "flow_spec",
                             "recording_mode": recording_mode,
