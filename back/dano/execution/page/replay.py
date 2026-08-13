@@ -48,6 +48,22 @@ def _deep_merge(original, patch):  # noqa: ANN001, ANN202
     return deepcopy(patch)
 
 
+def _merge_headers_case_insensitively(*groups: dict | None) -> dict[str, object]:
+    """Merge HTTP headers with last-writer-wins semantics independent of casing."""
+    merged: dict[str, object] = {}
+    names: dict[str, str] = {}
+    for group in groups:
+        for raw_name, value in (group or {}).items():
+            name = str(raw_name)
+            folded = name.casefold()
+            previous = names.get(folded)
+            if previous is not None and previous != name:
+                merged.pop(previous, None)
+            merged[name] = value
+            names[folded] = name
+    return merged
+
+
 def _request_body(request: dict):  # noqa: ANN202
     raw = request.get("post_data")
     if isinstance(raw, (dict, list)):
@@ -149,9 +165,11 @@ async def replay_request(
         or next((value for key, value in (request.get("headers") or {}).items() if str(key).casefold() == "content-type"), "")
         or "application/json"
     )
-    headers = extract_auth_headers(request.get("headers"))
-    headers.update(auth_headers)
-    headers.update(overrides.get("headers") or {})
+    headers = _merge_headers_case_insensitively(
+        extract_auth_headers(request.get("headers")),
+        auth_headers,
+        overrides.get("headers"),
+    )
     api_request = {
         "method": str(request.get("method") or "GET").upper(),
         "url": url,

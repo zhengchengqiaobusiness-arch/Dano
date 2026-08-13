@@ -49,6 +49,14 @@ async def replay_server():
     async def business_failure(_request):
         return web.json_response({"code": 500, "message": "business rejected"})
 
+    async def inspect_headers(request):
+        names = [name.decode("latin-1").casefold() for name, _value in request.raw_headers]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        return web.json_response({
+            "duplicates": duplicates,
+            "tenant_id": request.headers.get("Tenant-Id"),
+        })
+
     async def approval_detail(_request):
         return web.json_response({"data": {"activityNodes": [
             {"id": "Activity_runtime_leader", "name": "领导审批"},
@@ -64,6 +72,7 @@ async def replay_server():
     app.router.add_get("/http-failure", http_failure)
     app.router.add_post("/http-failure", http_failure)
     app.router.add_get("/business-failure", business_failure)
+    app.router.add_get("/inspect-headers", inspect_headers)
     app.router.add_get("/approval-detail", approval_detail)
     app.router.add_post("/submit-approval", submit_approval)
     runner = web.AppRunner(app)
@@ -102,6 +111,31 @@ async def test_replay_request_uses_existing_executor_and_redacts_credentials(rep
     assert record["kind"] == "write_execute"
     assert record["status"] == "passed"
     assert record["subject"]["request_id"] == "req-write"
+
+
+@pytest.mark.asyncio
+async def test_replay_merges_runtime_headers_case_insensitively(replay_server):
+    result = await replay_request(
+        {
+            "request_id": "req-read",
+            "method": "GET",
+            "url": f"{replay_server}/inspect-headers",
+            "headers": {
+                "authorization": "Bearer captured-token",
+                "tenant-id": "captured-tenant",
+            },
+        },
+        auth_headers={
+            "Authorization": "Bearer current-token",
+            "Tenant-Id": "current-tenant",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["response"] == {
+        "duplicates": [],
+        "tenant_id": "current-tenant",
+    }
 
 
 @pytest.mark.asyncio
