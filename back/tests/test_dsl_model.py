@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from dano.schemas.validate import SchemaError, validate_asset_body
-from dano.shared.asset_bodies import WorkflowSkillBody, WorkflowStep
+from dano.shared.asset_bodies import WorkflowSkillBody
 from dano.shared.enums import AssetType
 
 

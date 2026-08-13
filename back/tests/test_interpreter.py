@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest
-
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.skills import SkillRegistry
 from dano.orchestrator.types import Intent, SkillSpec

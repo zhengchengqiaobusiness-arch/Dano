@@ -1609,7 +1609,7 @@ def test_suggest_selects_binds_short_code_in_big_dict_when_recorded_confirms():
     """大全局字典(上千项)里短码 type=2:无录制佐证不绑(防误报);录制确实选了『病假』→ 精确绑对 oa_leave_type 那项。
     修"假期类型在全局字典里绑不上"的根因 —— 用录制选中值消歧/确认,不靠列表大小一刀切。"""
     big = ([{"dictType": "sys_yes_no", "value": "2", "label": "否"}]
-           + [{"dictType": "oa_leave_type", "value": v, "label": l} for v, l in (("1", "事假"), ("2", "病假"))]
+           + [{"dictType": "oa_leave_type", "value": value, "label": label} for value, label in (("1", "事假"), ("2", "病假"))]
            + [{"dictType": "x", "value": "2", "label": "噪声"} for _ in range(1430)])
     read = [{"url": "/admin-api/system/dict-data/simple-list", "json": {"code": 0, "data": big}}]
     sub = '{"type": 2, "reason": "x"}'
@@ -1703,13 +1703,17 @@ async def test_execute_resolves_select_name_to_id_and_identity(tmp_path):
         def do_GET(self):
             body = _j.dumps({"rows": [{"userId": 12, "nickName": "张经理"},
                                       {"userId": 34, "nickName": "李总"}]}).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(body)
 
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             received.update(_j.loads(self.rfile.read(n) or b"{}"))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(b'{"code":200}')
 
     httpd = _s.TCPServer(("127.0.0.1", 0), H)
@@ -1749,7 +1753,9 @@ async def test_execute_business_fail_despite_http_200():
 
         def do_POST(self):
             self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(_j.dumps({"code": mode["code"], "msg": "结果"}).encode())
 
     httpd = _s.TCPServer(("127.0.0.1", 0), H)
@@ -1794,11 +1800,15 @@ async def test_execute_api_grounded_fact_check():
             body = _j.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             if state["persist"]:
                 state["records"].append({"reason": body.get("reason")})
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(b'{"code":200}')
 
         def do_GET(self):
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(_j.dumps({"rows": state["records"]}).encode())
 
     httpd = _s.TCPServer(("127.0.0.1", 0), H)
@@ -2010,7 +2020,9 @@ async def test_execute_api_workflow_chains_taskid_two_steps():
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             payload = _j.loads(self.rfile.read(n) or b"{}")
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             if self.path.endswith("/start"):
                 self.wfile.write(_j.dumps({"code": 200, "data": {"taskId": "TASK-77"}}).encode())
             else:
@@ -3171,14 +3183,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             import json as _j
             body = _j.dumps({"rows": [{"userId": 12, "nickName": "张经理"},
                                       {"userId": 34, "nickName": "李总"}]}).encode("utf-8")
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-            self.wfile.write(body); return
-        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
         self.wfile.write(_HTML)
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
-        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        n = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(n)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
         self.wfile.write(b'{"code":200,"echo":' + (raw or b'{}') + b'}')   # 回显收到的 body
 
 
@@ -3215,7 +3235,9 @@ async def test_recorder_captures_required_star_elementui():
             pass
 
         def do_GET(self):
-            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
             self.wfile.write(html)
 
     httpd = socketserver.TCPServer(("127.0.0.1", 0), H)
@@ -3742,11 +3764,15 @@ async def test_onboarding_live_verify_reaches_verified():
         def do_POST(self):                                   # 写接口:存下提交的 reason,回 code=200
             n = int(self.headers.get("Content-Length", 0))
             store["reason"] = _json.loads(self.rfile.read(n).decode()).get("reason")
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(b'{"code":200}')
 
         def do_GET(self):                                    # 「我的记录」:返回刚提交的值(供 fact_check 回查)
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(_json.dumps({"rows": [{"reason": store.get("reason")}]}).encode())
 
         def log_message(self, *a):
