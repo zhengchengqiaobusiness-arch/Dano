@@ -176,139 +176,6 @@ async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsyst
     return subs or [Subsystem(value) for value in business_subsystems(tenant)]
 
 
-def _upgrade_recorded_skill_for_export(skill: SkillSpec) -> SkillSpec:
-    """Rebuild a recorded Skill from its immutable release evidence.
-
-    Older published page assets kept the full request facts in
-    ``_release_snapshot.flow_spec`` but persisted a lossy top-level capability
-    projection (no defaults, empty record item schema, stale required flags).
-    Re-running the current deterministic compiler over that same snapshot is a
-    compatibility migration, not new inference: enums/defaults/response fields
-    still come only from recorded evidence.
-    """
-    api_request = dict(getattr(skill, "api_request", {}) or {})
-    release = dict(api_request.get("_release_snapshot") or {})
-    frozen_flow = release.get("flow_spec")
-    if not isinstance(frozen_flow, dict) or not frozen_flow.get("steps"):
-        return skill
-    try:
-        from dano.execution.page.flow_spec import (
-            FlowSpec,
-            flow_spec_to_api_request,
-            prepare_flow_spec_for_publish,
-        )
-
-        prepared = prepare_flow_spec_for_publish(FlowSpec.model_validate(frozen_flow))
-        rebuilt, errors = flow_spec_to_api_request(prepared)
-    except Exception as exc:  # noqa: BLE001 - legacy asset stays exportable via its stored contract
-        log.warning("export.release_contract_upgrade_failed", skill_id=skill.skill_id, error=str(exc))
-        return skill
-    if rebuilt is None or errors:
-        log.warning(
-            "export.release_contract_upgrade_rejected",
-            skill_id=skill.skill_id,
-            errors=list(errors or []),
-        )
-        return skill
-
-    rebuilt = dict(rebuilt)
-    rebuilt["_release_snapshot"] = release
-    capabilities = [item for item in (rebuilt.get("capabilities") or []) if isinstance(item, dict)]
-    if not capabilities:
-        return skill
-
-    rebuilt_steps = [item for item in (rebuilt.get("steps") or []) if isinstance(item, dict)]
-    step_by_id = {
-        str(step.get("step_id") or ""): step
-        for step in rebuilt_steps
-        if str(step.get("step_id") or "")
-    }
-    for capability in capabilities:
-        capability_steps = [
-            step_by_id[step_id]
-            for step_id in (str(value) for value in (capability.get("step_ids") or []))
-            if step_id in step_by_id
-        ]
-        cap_has_fact_check = any(bool(step.get("fact_check")) for step in capability_steps)
-        cap_has_success_rule = any(bool(step.get("success_rule")) for step in capability_steps)
-        capability["verification_status"] = "partially_verified"
-        capability["verification_basis"] = (
-            "fact_check_configured" if cap_has_fact_check
-            else "success_rule_configured" if cap_has_success_rule
-            else "structure_only"
-        )
-        capability["verify_required"] = bool(
-            cap_has_fact_check
-            and str(capability.get("kind") or "")
-            not in {"query", "query_status", "list_options", "validate"}
-        )
-
-    write_step_ids = {
-        str(step_id)
-        for capability in capabilities
-        if str(capability.get("kind") or "")
-        not in {"query", "query_status", "list_options", "validate"}
-        for step_id in (capability.get("step_ids") or [])
-    }
-    write_steps = [
-        step for step in rebuilt_steps
-        if str(step.get("step_id") or "") in write_step_ids
-    ]
-    # Skill-level verification describes side-effecting business work. A GET
-    # response success rule can validate the query capability itself, but must
-    # not make an unrelated submit/withdraw capability look verified.
-    has_fact_check = bool(
-        rebuilt.get("fact_check")
-        or any(step.get("fact_check") for step in write_steps)
-    )
-    has_success_rule = bool(
-        rebuilt.get("success_rule")
-        or any(step.get("success_rule") for step in write_steps)
-    )
-    verification_basis = (
-        "fact_check_configured" if has_fact_check
-        else "success_rule_configured" if has_success_rule
-        else "structure_only"
-    )
-
-    required: list[str] = []
-    all_fields: list[str] = []
-    field_types = dict(getattr(skill, "field_types", {}) or {})
-    for capability in capabilities:
-        schema = capability.get("input_schema") or capability.get("parameters") or {}
-        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-        for name, prop in props.items():
-            if name not in all_fields:
-                all_fields.append(name)
-            if isinstance(prop, dict) and prop.get("type"):
-                field_types[name] = str(prop["type"])
-        for name in schema.get("required") or []:
-            if name in props and name not in required:
-                required.append(name)
-
-    upgraded = skill.model_copy(deep=True)
-    upgraded.api_request = rebuilt
-    upgraded.capabilities = capabilities
-    upgraded.capability_relations = list(rebuilt.get("capability_relations") or [])
-    upgraded.required_fields = required
-    upgraded.optional_fields = [name for name in all_fields if name not in required]
-    upgraded.field_types = field_types
-    upgraded.verification_status = "partially_verified"
-    upgraded.verification_basis = verification_basis
-    upgraded.recording_mode = str(rebuilt.get("recording_mode") or upgraded.recording_mode or "unknown")
-    upgraded.call_metadata = {
-        **dict(upgraded.call_metadata or {}),
-        "recording_mode": upgraded.recording_mode,
-        "verification_status": upgraded.verification_status,
-        "verification_basis": upgraded.verification_basis,
-        "capabilities": capabilities,
-    }
-    if not has_fact_check:
-        upgraded.fact_check_query = None
-        upgraded.fact_check_expr = None
-    return upgraded
-
-
 def _slug(skill_id: str) -> str:
     """skill_id(如 workflow.submit_entry)→ 文件夹名(kebab,如 dano-workflow-submit-entry)。
 
@@ -3405,8 +3272,7 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     reference_docs = _load_reference_markdown(_configured_reference_dir())
     _validate_reference_markdown(reference_docs)
     excluded = set(exclude_skill_ids or set())
-    export_skills = [_upgrade_recorded_skill_for_export(skill) for skill in reg.skills]
-    manifests = [m for m in build_manifests(export_skills) if m.name not in excluded]
+    manifests = [m for m in build_manifests(reg.skills) if m.name not in excluded]
     valid_manifests: list[SkillManifest] = []
     for manifest in manifests:
         errors = _export_contract_errors(manifest)

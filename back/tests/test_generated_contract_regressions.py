@@ -20,7 +20,6 @@ from dano.execution.page.flow_spec import (
 from dano.export.agent_skills import (
     _question_collection_block,
     _question_request_template,
-    _upgrade_recorded_skill_for_export,
 )
 from dano.orchestrator.types import SkillSpec
 from dano.orchestrator.capability_runtime import schema_issues
@@ -811,7 +810,7 @@ def test_identifier_relation_never_binds_an_unrelated_text_field_by_value():
     )
 
 
-def test_export_rebuilds_lossy_persisted_capabilities_from_frozen_recording_evidence():
+def test_export_preserves_published_contract_without_recompiling_release_snapshot():
     requests = [
         _get(
             1,
@@ -874,14 +873,9 @@ def test_export_rebuilds_lossy_persisted_capabilities_from_frozen_recording_evid
         },
     )
 
-    upgraded = _upgrade_recorded_skill_for_export(skill)
-    capability = next(item for item in upgraded.capabilities if item["name"] == "query_hotel_apply")
+    capability = next(item for item in skill.capabilities if item["name"] == "query_hotel_apply")
     properties = capability["input_schema"]["properties"]
-    record_properties = capability["output_schema"]["properties"]["records"]["items"]["properties"]
 
-    assert capability["input_schema"]["required"] == []
-    assert properties["pageNo"]["default"] == 1
-    assert properties["pageSize"]["default"] == 10
-    assert "default" not in properties["酒店名称"]
-    assert properties["酒店名称"]["x-dano-wire-type"] == "string"
-    assert record_properties["id"]["type"] == "string"
+    assert capability["input_schema"]["required"] == ["酒店名称"]
+    assert set(properties) == {"酒店名称"}
+    assert capability["output_schema"]["properties"]["records"]["items"] == {}

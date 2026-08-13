@@ -73,68 +73,19 @@ def _flow_spec(skill):  # noqa: ANN001, ANN202
     from dano.execution.page.flow_spec import FlowSpec
 
     try:
-        spec = FlowSpec.model_validate(raw)
-        trusted_write_ids = {
-            str(item.get("verification_id"))
-            for item in ((raw.get("meta") or {}).get("verification_log") or [])
-            if isinstance(item, dict)
-            and item.get("kind") == "write_execute"
-            and item.get("status") == "passed"
-            and item.get("verification_id")
-        }
-        # Legacy model normalization may prune a fact_check that was bound by
-        # the executor after recording. Restore only evidence present in the
-        # frozen executor-owned verification log; never trust an orphaned id.
-        raw_steps = {
-            str(step.get("step_id") or ""): step
-            for step in raw.get("steps") or []
-            if isinstance(step, dict)
-        }
-        for step in spec.steps:
-            fact_check = (raw_steps.get(step.step_id) or {}).get("fact_check") or {}
-            if (
-                fact_check.get("verified") is True
-                and str(fact_check.get("verification_id") or "") in trusted_write_ids
-            ):
-                step.fact_check = dict(fact_check)
-        return spec
-    except Exception as exc:  # noqa: BLE001 - legacy assets still render from api_request
-        log.warning("export.package_flow_spec_invalid", skill_id=skill.skill_id, error=str(exc))
-        return None
+        return FlowSpec.model_validate(raw)
+    except Exception as exc:  # noqa: BLE001 - published contract must fail closed
+        raise ValueError(
+            f"{skill.skill_id} has an invalid published FlowSpec contract: {exc}"
+        ) from exc
 
 
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
-    if spec is not None:
-        from dano.execution.page.flow_spec import flow_spec_to_api_request
-
-        compiled, errors = flow_spec_to_api_request(spec)
-        if compiled is not None and not errors:
-            raw = dict(((skill.api_request or {}).get("_release_snapshot") or {}).get("flow_spec") or {})
-            trusted_write_ids = {
-                str(item.get("verification_id"))
-                for item in ((raw.get("meta") or {}).get("verification_log") or [])
-                if isinstance(item, dict)
-                and item.get("kind") == "write_execute"
-                and item.get("status") == "passed"
-                and item.get("verification_id")
-            }
-            raw_steps = {
-                str(step.get("step_id") or ""): step
-                for step in raw.get("steps") or []
-                if isinstance(step, dict)
-            }
-            compiled_steps = compiled.get("steps") if isinstance(compiled.get("steps"), list) else [compiled]
-            for step in compiled_steps:
-                if not isinstance(step, dict):
-                    continue
-                fact_check = (raw_steps.get(str(step.get("step_id") or "")) or {}).get("fact_check") or {}
-                if (
-                    fact_check.get("verified") is True
-                    and str(fact_check.get("verification_id") or "") in trusted_write_ids
-                ):
-                    step["fact_check"] = dict(fact_check)
-            return compiled
-    return dict(skill.api_request or {})
+    del spec
+    published = dict(skill.api_request or {})
+    if not _steps(published) or not isinstance(published.get("capabilities"), list):
+        raise ValueError(f"{skill.skill_id} has no canonical published capability contract")
+    return published
 
 
 def _steps(api_request: dict) -> list[dict]:
@@ -146,28 +97,10 @@ def _steps(api_request: dict) -> list[dict]:
 
 
 def _capabilities(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
-    raw = (
-        [cap.model_dump(mode="json", exclude_none=True) for cap in spec.capabilities]
-        if spec is not None and spec.capabilities
-        else list(api_request.get("capabilities") or skill.capabilities or [])
-    )
+    del skill, spec
+    raw = list(api_request.get("capabilities") or [])
     out = [dict(cap) for cap in raw if isinstance(cap, dict)]
-    if out or spec is not None:
-        return out
-    params = list(api_request.get("params") or [])
-    field_types = dict(api_request.get("field_types") or {})
-    return [{
-        "name": skill.action,
-        "title": skill.title or skill.action,
-        "kind": "query" if all((step.get("method") or "GET").upper() in {"GET", "HEAD"} for step in _steps(api_request)) else "submit",
-        "step_ids": [str(step.get("step_id") or "") for step in _steps(api_request)],
-        "input_schema": {
-            "type": "object",
-            "properties": {name: {"type": field_types.get(name, "string")} for name in params},
-            "required": list(skill.required_fields or []),
-        },
-        "output_schema": {"type": "object"},
-    }]
+    return out
 
 
 def _base_url(steps: list[dict]) -> str:

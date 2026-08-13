@@ -469,9 +469,9 @@ def test_invalid_model_docs_fall_back_to_complete_deterministic_docs(tmp_path):
 
 def test_skill_package_never_expands_empty_capability_to_all_steps(tmp_path):
     skill = _recording_skill("https://example.invalid")
-    release = skill.api_request["_release_snapshot"]["flow_spec"]
-    release["capabilities"][0]["step_ids"] = []
-    release["capabilities"][0]["nodes"] = []
+    skill.api_request["capabilities"][0]["step_ids"] = []
+    skill.api_request["capabilities"][0]["compiled_step_ids"] = []
+    skill.api_request["capabilities"][0]["nodes"] = []
 
     with pytest.raises(ValueError, match="does not reference any compiled request step"):
         render_skill_package(skill, str(tmp_path), tenant="tenant-a")
@@ -520,8 +520,10 @@ stop
 
 def test_self_contained_script_enforces_full_input_schema(tmp_path):
     skill = _recording_skill("https://example.invalid")
-    release = skill.api_request["_release_snapshot"]["flow_spec"]
-    create = next(cap for cap in release["capabilities"] if cap["name"] == "create_item")
+    create = next(
+        cap for cap in skill.api_request["capabilities"]
+        if cap["name"] == "create_item"
+    )
     create["input_schema"]["properties"]["name"].update({
         "minLength": 3,
         "pattern": "^[A-Z]",
