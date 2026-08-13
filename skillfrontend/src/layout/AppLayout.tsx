@@ -45,7 +45,7 @@ export default function AppLayout() {
             </Space>
           </Header>
         )}
-        <Content style={selected === "recording" ? { padding: 16, height: "100vh", overflow: "auto" } : { padding: 20 }}>
+        <Content style={selected === "recording" ? { padding: 8, height: "100vh", overflow: "auto" } : { padding: 20 }}>
           <Outlet />
         </Content>
       </Layout>

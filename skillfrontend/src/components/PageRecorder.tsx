@@ -5001,7 +5001,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
               onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
               style={{
-                width: "auto", maxWidth: "100%", height: "auto", maxHeight: "calc(100vh - 230px)",
+                width: "auto", maxWidth: "100%", height: "auto", maxHeight: "calc(100vh - 170px)",
                 display: hasFrame ? "block" : "none", margin: "0 auto", cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
                 touchAction: "none", userSelect: "none",
               }} />
