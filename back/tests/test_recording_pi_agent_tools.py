@@ -1598,17 +1598,11 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
         generation_mode="optimize",
     ))
 
-    assert {cap.kind for cap in repaired.capabilities} == {"query_status", "submit"}
-    repaired_submit = next(cap for cap in repaired.capabilities if cap.kind == "submit")
-    repaired_query = next(cap for cap in repaired.capabilities if cap.kind == "query_status")
-    assert repaired_query.step_ids == ["page"]
-    # Model membership and a bare ``confirmed=True`` are not executor evidence.
-    # Unverified reads stay outside the callable submit chain.
-    assert repaired_submit.step_ids == ["submit"]
-    repaired_seal = next(param for param in repaired.steps[3].params if param.path == "sealId")
-    assert repaired_seal.source_kind == "api_option"
-    option_ref = next(ref for ref in repaired_submit.request_refs if ref.step_id == "options")
-    assert option_ref.usage == "option_source"
+    # The compatibility normalizer is not a second production ability
+    # producer. Its legacy plan has no strict request_refs contract and is
+    # therefore rejected instead of silently rebuilding public abilities.
+    assert repaired.capabilities == []
+    assert repaired.meta["capability_model"]["source"] == "strict_plan_rejected"
 
 def test_recording_plan_normalizes_labeled_step_ids_from_real_agent_output():
     spec = FlowSpec(steps=[
@@ -2816,9 +2810,11 @@ def test_name_only_screenshot_cannot_change_other_field_axes() -> None:
         spec, submission=normalized, generation_mode="optimize",
     ))
     final = optimized.steps[0].params[0]
+    # Legacy semantic field paragraphs are display-only and cannot bypass the
+    # typed rename/source/required operations used by the live recording path.
     assert (
         final.label, final.type, final.category, final.source_kind, final.required,
-    ) == ("金额", "string", "runtime_var", "current_user", False)
+    ) == ("amount", "string", "runtime_var", "current_user", False)
 
 
 def test_screenshot_run_cannot_change_field_without_screenshot_evidence() -> None:
@@ -2902,9 +2898,10 @@ def test_later_screenshot_replaces_derived_evidence_from_prior_analysis(
         item for item in field.evidence
         if item.get("canonical_screenshot_control") is True
     ]
-    assert field.type == expected_type
-    assert len(canonicals) == 1
-    assert canonicals[0]["control_kind"] == expected_control
+    # The retired semantic-plan screenshot overlay is no longer a mutation
+    # channel. New recording submissions must use the typed field operations.
+    assert field.type == "string"
+    assert canonicals == []
 
 
 def test_equal_strength_conflicting_control_types_preserve_recorded_type() -> None:

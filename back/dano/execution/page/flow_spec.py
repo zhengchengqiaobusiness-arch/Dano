@@ -9612,7 +9612,7 @@ def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep
     method = (step.method or "GET").upper()
     if method in _WRITE_METHODS:
         return True
-    if kind in {"submit", "submit_batch", "validate_batch"}:
+    if kind in WRITE_CAPABILITY_KINDS:
         closure_ids = {st.step_id for st in _submit_capability_steps(spec)}
         return step.step_id in closure_ids
     if kind == "query_status":
@@ -11433,29 +11433,14 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         if isinstance(ref, dict) and str(ref.get("step_id") or "")
     }
 
-    # Public ability count is the number of distinct recorded business anchors,
-    # not the number of preflights, option endpoints, or fact-check reads.
-    required_business_steps: dict[str, bool] = {}
-    for step in spec.steps:
-        role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
-        method = str(step.method or "GET").upper()
-        if role in {"business_write", "submit_anchor"} and method in _WRITE_METHODS:
-            required_business_steps[step.step_id] = True
-        elif (
-            role == "business_get"
-            and method in {"GET", "HEAD", "POST"}
-            and _is_business_query_step(step)
-        ):
-            required_business_steps[step.step_id] = False
-    for item in _request_fact_items(spec):
-        is_write = _eligible_business_write_fact(item)
-        is_read = _eligible_business_get_fact(item)
-        if not (is_write or is_read):
-            continue
-        step_id = _materialized_step_id_for_request(spec, item)
-        step = step_by_id.get(step_id)
-        if step_id and (is_write or (step is not None and _is_business_query_step(step))):
-            required_business_steps[step_id] = is_write
+    # Public ability count is the number of distinct recorded business actions,
+    # not the number of HTTP writes. One click can execute several preflight/
+    # write requests, while two independently anchored actions must never be
+    # merged merely because their URLs share a domain.
+    required_business_steps = {
+        step_id: str((step_by_id[step_id].method or "GET")).upper() in _WRITE_METHODS
+        for step_id in _public_capability_anchor_step_ids(spec)
+    }
 
     required_fields = [
         (step.step_id, param)
@@ -11559,6 +11544,40 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         "covered_fields": len(covered_fields),
         "total_fields": len(required_fields),
     }
+
+
+def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
+    """Derive the complete public action set from recorder-owned facts."""
+    write_groups: dict[str, list[FlowStep]] = {}
+    write_steps = [
+        step for step in spec.steps
+        if _is_write_step(step)
+        and not str((step.source_meta or {}).get("duplicate_observation_of") or "")
+        and str((step.source_meta or {}).get("role") or step.semantic_role or "").lower()
+        not in {"auth", "noise", "read_context", "read_option", "option_source"}
+    ]
+    for step in write_steps:
+        operation_key = _write_operation_key(step)
+        group_key = (
+            operation_key
+            if operation_key.startswith("action_")
+            else f"{operation_key}:{_capability_operation_kind(step)}"
+        )
+        write_groups.setdefault(group_key, []).append(step)
+
+    anchors = [steps[-1].step_id for steps in write_groups.values() if steps]
+    submit_closure = {
+        step.step_id for step in _submit_capability_steps(spec)
+    } if write_steps else set()
+    for step in _read_status_steps(spec):
+        meta = step.source_meta or {}
+        independently_triggered = _has_query_action_evidence(
+            meta.get("trigger_op"), meta.get("trigger_locator"),
+        )
+        if step.step_id not in submit_closure or independently_triggered:
+            anchors.append(step.step_id)
+    order = {step.step_id: index for index, step in enumerate(spec.steps)}
+    return sorted(dict.fromkeys(anchors), key=lambda step_id: order.get(step_id, 10**9))
 
 
 def _legacy_semantic_plan_coverage(
@@ -13420,10 +13439,10 @@ async def orchestrate_flow_capabilities(
     submission; this function only compiles whitelisted operations and applies
     deterministic fact/schema/quality gates.
 
-    重复提交的语义：增量优化，不全量重生成。
-    - 已有 capabilities：保留人工编辑（confirmed / locked / step_ids / fields / dependencies），
-      仅由 Pi 提交的 patch ops 增量修正。
-    - 首次生成：调用 build_default_flow_capabilities 出 baseline，再应用 Pi plan。
+    Public capability boundaries have exactly one machine-owned producer:
+    strict semantic plan -> verified request graph compiler.  Recorder
+    heuristics remain facts/candidates and never become a publishable fallback.
+    Operator-owned capabilities are preserved by the compiler.
     """
     if not isinstance(submission, dict):
         raise ValueError("recording plan submission must be an object")
@@ -13454,8 +13473,9 @@ async def orchestrate_flow_capabilities(
         )
     )
     if auto_generated_existing:
-        # Re-run deterministic boundaries after classifier/link repairs. Old
-        # Planner output must not freeze an invalid generated capability forever.
+        # Machine-owned definitions are reproducible only from an accepted
+        # strict plan. Drop stale deterministic/legacy output before deciding
+        # whether a current plan can rebuild it.
         current.capabilities = []
         current.capability_relations = []
     had_existing = bool(current.capabilities)
@@ -13464,22 +13484,11 @@ async def orchestrate_flow_capabilities(
     # It may repair capability membership, but request IDs outside FlowSpec
     # remain unavailable to both deterministic and model planners.
     scope_baseline = current.model_copy(deep=True)
-    if not had_existing:
-        current.capabilities = _build_initial_flow_capabilities(current)
-    else:
-        current.capabilities = _merge_capability_lists(
-            list(current.capabilities or []),
-            _build_initial_flow_capabilities(current),
-            spec=current,
-            allow_new=True,
-        )
-    # The deterministic baseline guarantees a runnable fallback. Pi may replace
-    # its generated boundaries, but still cannot invent steps or override human
-    # memberships because planner edits are fact-checked below.
-    initial_scope_established = bool(initial_generation and current.capabilities)
-    baseline_ids = {cap.capability_id for cap in current.capabilities} if initial_generation and not had_existing else set()
+    # Do not manufacture a deterministic capability baseline here.  The
+    # compiler below preserves explicit operator-owned definitions and replaces
+    # every machine-owned definition from the strict plan in one pass.
     current = _prune_empty_capabilities(current)
-    source = "deterministic_reanalysis" if had_existing else "deterministic"
+    source = "strict_plan_pending"
     reason = ""
     semantic_plan: dict[str, Any] = {}
     semantic_coverage: dict[str, Any] = {}
@@ -13529,32 +13538,25 @@ async def orchestrate_flow_capabilities(
     # the same complete boundary decision as ``step_ids``.  Treat that stored
     # representation as a full replacement during optimize so an obsolete
     # planner-owned aggregate cannot survive beside its replacement abilities.
-    legacy_semantic_submission = bool(
-        isinstance(proposed_semantic_plan.get("request_roles"), list)
-        and isinstance(proposed_semantic_plan.get("field_semantics"), list)
-        and isinstance(proposed_semantic_plan.get("capabilities"), list)
-        and proposed_semantic_plan.get("capabilities")
+    previous_strict_plan = bool(
+        isinstance(previous_semantic_plan.get("capabilities"), list)
+        and previous_semantic_plan.get("capabilities")
         and all(
             isinstance(item, dict)
             and item.get("name")
             and item.get("kind")
-            and isinstance(item.get("step_ids"), list)
-            and item.get("step_ids")
-            for item in proposed_semantic_plan.get("capabilities") or []
+            and item.get("anchor_step_id")
+            and isinstance(item.get("request_refs"), list)
+            and item.get("request_refs")
+            for item in previous_semantic_plan.get("capabilities") or []
         )
     )
-    complete_semantic_submission = strict_semantic_submission or legacy_semantic_submission
-    if complete_semantic_submission and not initial_generation:
-        baseline_ids.update(
-            capability.capability_id
-            for capability in current.capabilities or []
-            if not capability.locked
-            and capability.updated_by != "user"
-            and not any(
-                ref.origin in {"manual", "user"}
-                for ref in (capability.request_refs or [])
-            )
-        )
+    effective_semantic_plan = (
+        proposed_semantic_plan
+        if strict_semantic_submission
+        else previous_semantic_plan if previous_strict_plan else {}
+    )
+    complete_semantic_submission = strict_semantic_submission
     preserved_human_relations: list[CapabilityRelation] = []
     if complete_semantic_submission:
         # A complete re-analysis owns the automatic relation set as well as
@@ -13571,7 +13573,7 @@ async def orchestrate_flow_capabilities(
     if initial_generation or complete_semantic_submission:
         # A fresh full screenshot analysis replaces the previous accepted
         # semantic memory only after the candidate quality gate succeeds.
-        semantic_plan = proposed_semantic_plan
+        semantic_plan = effective_semantic_plan
         semantic_coverage = _semantic_plan_coverage(current, submission)
     else:
         # Ops-only submissions remain incremental and retain the last accepted
@@ -13588,9 +13590,11 @@ async def orchestrate_flow_capabilities(
             ),
             "complete_semantic_submission": complete_semantic_submission,
         }
-    semantic_ops = _semantic_plan_to_ops(
-        current, submission, include_relations=False,
-    )
+    # Field/source/required/enum edits are applied through the live operation
+    # channel before this function. Capability membership is compiler-owned;
+    # translating the semantic plan back into generic edit ops would reintroduce
+    # a second producer.
+    semantic_ops: list[dict[str, Any]] = []
     screenshot_field_candidate: FlowSpec | None = None
     if screenshot_analysis:
         field_ops = [
@@ -13619,7 +13623,7 @@ async def orchestrate_flow_capabilities(
             if fields_accepted and _flow_fingerprint(candidate) != _flow_fingerprint(proposal_baseline):
                 screenshot_field_candidate = candidate
 
-    combined_ops = [*semantic_ops, *(submission.get("ops") or [])]
+    combined_ops = semantic_ops
     if combined_ops:
         edits = _planner_patch_edits(
             current,
@@ -13628,41 +13632,11 @@ async def orchestrate_flow_capabilities(
         if edits:
             current = apply_flow_edits(current, [{**edit, "actor": "planner"} for edit in edits])
             source = "pi_agent_patch"
-    if proposed_semantic_plan.get("capability_relations"):
-        current = _sync_capability_io_schemas(sync_flow_spec_models(current))
-        relation_ops = [
-            operation
-            for operation in _semantic_plan_to_ops(current, submission)
-            if operation.get("op") == "set_capability_relation"
-        ]
-        relation_edits = _planner_patch_edits(current, _autofix_ops_to_edits(current, relation_ops))
-        if relation_edits:
-            current = apply_flow_edits(
-                current,
-                [{**edit, "actor": "planner"} for edit in relation_edits],
-            )
-            source = "pi_agent_patch"
     # Screenshot-corrected names/control evidence can make a recorded option
     # endpoint uniquely matchable. Ordinary no-image analysis already ran the
     # binder above and does not need another full scan.
     if screenshot_analysis:
         _repair_structural_option_bindings(current)
-    raw_abilities = submission.get("abilities")
-    if isinstance(raw_abilities, list) and initial_generation and not initial_scope_established:
-        step_ids = {step.step_id for step in current.steps}
-        used = {cap.name for cap in current.capabilities if cap.name}
-        generated = [
-            cap for raw in raw_abilities
-            if (cap := _capability_from_agent(raw, step_ids, used)) is not None
-        ]
-        current.capabilities = _merge_capability_lists(
-            list(current.capabilities or []), generated, spec=current, allow_new=True,
-        )
-        if generated and source != "pi_agent_patch":
-            source = "pi_agent_plan"
-
-    if baseline_ids:
-        current = _drop_superseded_baseline_capabilities(current, baseline_ids)
     _normalize_capability_references(current)
     if initial_generation:
         current = _repair_generated_capability_contracts(
@@ -13675,7 +13649,7 @@ async def orchestrate_flow_capabilities(
     capability_compilation_audit: dict[str, Any] = {}
     capability_compilation_errors: list[str] = []
     planned_capability_contracts = [
-        item for item in (proposed_semantic_plan.get("capabilities") or [])
+        item for item in (effective_semantic_plan.get("capabilities") or [])
         if isinstance(item, dict)
     ]
     strict_anchor_contract = bool(planned_capability_contracts) and all(
@@ -13685,19 +13659,41 @@ async def orchestrate_flow_capabilities(
     if strict_anchor_contract:
         from dano.execution.page.capability_compiler import compile_capabilities
 
-        compilation = compile_capabilities(current, proposed_semantic_plan)
+        compilation = compile_capabilities(current, effective_semantic_plan)
         current = _ensure_external_transform_relations(
             _sync_capability_io_schemas(sync_flow_spec_models(compilation.spec))
         )
         capability_compilation_audit = dict(compilation.audit)
         capability_compilation_errors = list(compilation.errors)
+        semantic_coverage = _semantic_plan_coverage(
+            current,
+            {"semantic_plan": effective_semantic_plan},
+        )
+        if not semantic_coverage.get("complete"):
+            capability_compilation_errors.append(
+                "strict semantic plan is incomplete: "
+                + ", ".join(str(item) for item in semantic_coverage.get("missing") or [])
+            )
         if compilation.capabilities:
             source = "verified_request_graph"
-    proposal_accepted, proposal_gate = _semantic_candidate_gate(
-        proposal_baseline,
-        current,
-        allow_screenshot_query_additions=screenshot_analysis,
-    )
+    if strict_anchor_contract and not capability_compilation_errors:
+        proposal_accepted = True
+        proposal_gate = {
+            "accepted": True,
+            "reasons": [],
+            "producer": "verified_request_graph",
+        }
+    else:
+        proposal_accepted = False
+        proposal_gate = {
+            "accepted": False,
+            "reasons": (
+                ["capability_compilation_failed"]
+                if capability_compilation_errors
+                else ["strict_semantic_plan_required"]
+            ),
+            "producer": "verified_request_graph",
+        }
     if not proposal_accepted:
         current = screenshot_field_candidate or proposal_baseline
         # Reject only the unsafe model proposal. Grounded recorder repairs are
@@ -13724,7 +13720,7 @@ async def orchestrate_flow_capabilities(
             semantic_plan = previous_semantic_plan
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
         if screenshot_field_candidate is None:
-            source = "deterministic" if initial_generation else "incremental_rejected"
+            source = "strict_plan_pending" if not strict_anchor_contract else "strict_plan_rejected"
         reason = (
             "自动语义 Proposal 未通过单调质量准入，已保留安全截图字段修正: "
             if screenshot_field_candidate is not None
@@ -13746,7 +13742,32 @@ async def orchestrate_flow_capabilities(
                     current, relation.model_dump(exclude_none=True),
                 )
     current = _apply_semantic_business_understanding(current, semantic_plan)
-    semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
+    if strict_anchor_contract and not capability_compilation_errors:
+        semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
+    else:
+        # Never synthesize a strict plan from an old/default capability.  Doing
+        # so would turn the fallback back into the apparent source of truth on
+        # the next analysis pass.
+        semantic_plan = {
+            "business_understanding": (
+                copy.deepcopy(semantic_plan.get("business_understanding"))
+                if isinstance(semantic_plan.get("business_understanding"), dict)
+                else {}
+            ),
+            "capabilities": [],
+            "unresolved_items": [
+                *[
+                    copy.deepcopy(item)
+                    for item in (semantic_plan.get("unresolved_items") or [])
+                    if isinstance(item, dict)
+                ],
+                {
+                    "type": "capability_plan",
+                    "title": "需要严格能力边界计划",
+                    "blocking": True,
+                },
+            ],
+        }
     semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)
@@ -19753,28 +19774,9 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             continue
 
         if op == "generate_capabilities":
-            existing = list(new_spec.capabilities or [])
-            generated = (
-                build_default_flow_capabilities(new_spec)
-                if existing
-                else _build_initial_flow_capabilities(new_spec)
+            raise ValueError(
+                "generate_capabilities is retired; submit a strict semantic plan"
             )
-            new_spec.capabilities = _merge_capability_lists(
-                existing,
-                generated,
-                spec=new_spec,
-                allow_new=not bool(existing),
-            )
-            new_spec.meta = {
-                **(new_spec.meta or {}),
-                "capability_model": {
-                    "status": "ready",
-                    "source": "deterministic",
-                    "generated_count": len(new_spec.capabilities),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            continue
 
         if op == "add_capability":
             raw = dict(edit.get("capability") or {})
@@ -21259,7 +21261,7 @@ def _validate_recording_agent_ops(ops: list[dict[str, Any]]) -> None:
 
 
 def _auto_fix_target_capability_name(spec: FlowSpec) -> str:
-    caps = list(spec.capabilities or build_default_flow_capabilities(spec))
+    caps = list(spec.capabilities or [])
     for kind in ("submit_batch", "submit", "query_status", "list_options", "validate_batch"):
         cap = next((c for c in caps if c.kind == kind and c.name), None)
         if cap is not None:
@@ -21284,7 +21286,7 @@ def _capability_sequence_window(spec: FlowSpec, cap: FlowCapability) -> tuple[fl
 
 def _auto_fix_target_capability_for_request(spec: FlowSpec, item: dict[str, Any]) -> str:
     """Choose the capability that should own a newly promoted captured request."""
-    caps = list(spec.capabilities or build_default_flow_capabilities(spec))
+    caps = list(spec.capabilities or [])
     if not caps:
         return "submit_batch"
     role = str(item.get("role") or "")
@@ -21419,8 +21421,6 @@ async def auto_fix_flow_spec(
         report = validate_flow_spec(current)
         edits: list[dict[str, Any]] = []
         preflight_rejected_edits: list[dict[str, Any]] = []
-        if not current.capabilities and current.steps:
-            edits.append({"op": "generate_capabilities"})
         cap_report = report.get("capability_validation") or {}
         edits.extend(_deterministic_capability_repair_edits(current, report))
         for item in (cap_report.get("unused_high_confidence_requests") or []) if expand_requests else []:
@@ -21433,6 +21433,8 @@ async def auto_fix_flow_spec(
                     "request_id": item.get("request_id") or "",
                     "request_index": item.get("request_index"),
                 })
+                continue
+            if not current.capabilities:
                 continue
             edits.append({
                 "op": "add_capability_step",

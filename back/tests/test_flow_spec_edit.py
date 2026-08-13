@@ -31,6 +31,24 @@ def _call_nodes(step_ids: list[str]) -> list[dict]:
     ]
 
 
+def _strict_plan(*abilities: tuple[str, str, str, str]) -> dict:
+    """Build the only supported machine-owned capability plan for tests."""
+    return {
+        "business_understanding": {"summary": "录制业务能力"},
+        "capabilities": [
+            {
+                "name": name,
+                "title": title,
+                "kind": kind,
+                "anchor_step_id": anchor,
+                "request_refs": [{"step_id": anchor, "usage": "execute"}],
+            }
+            for name, title, kind, anchor in abilities
+        ],
+        "unresolved_items": [],
+    }
+
+
 def _request_facts_from_graph_fixture(graph: dict) -> RequestFacts:
     """Translate legacy-shaped test evidence into the canonical test contract."""
     requests = []
@@ -1543,15 +1561,18 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
         steps=[FlowStep(step_id="submit", method="POST", url="/api/report/batch", path="/api/report/batch")],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=_capability_plan_submission()))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={
+        "semantic_plan": _strict_plan(
+            ("submit_batch", "批量提交日报", "submit_batch", "submit"),
+        ),
+        "ops": [],
+    }))
 
-    assert out.meta["capability_model"]["source"] == "pi_agent_patch"
+    assert out.meta["capability_model"]["source"] == "verified_request_graph"
     assert {cap.name for cap in out.capabilities} == {"submit_batch"}
     cap = out.capabilities[0]
     assert cap.kind == "submit_batch"
     assert cap.step_ids == ["submit"]
-    assert cap.inputs[0].key == "entries"
-    assert cap.output_mapping[0]["step_id"] == "submit"
 
 
 def _false_batch_submission() -> dict:
@@ -1578,8 +1599,8 @@ def test_single_form_defaults_to_submit_even_when_planner_invents_confirmed_entr
             path="/oa/seal-apply/submit-process",
             body_source='{"applyTitle":"测试","useInfo":"借章"}',
             params=[
-                ParamField(path="applyTitle", key="申请标题", value="测试", required=True, category="user_param"),
-                ParamField(path="useInfo", key="使用描述", value="借章", required=True, category="user_param"),
+                ParamField(path="applyTitle", key="申请标题", value="测试", type="string", required=True, category="user_param", source_kind="user_input"),
+                ParamField(path="useInfo", key="使用描述", value="借章", type="string", required=True, category="user_param", source_kind="user_input"),
             ],
             response_json={"code": 0},
         )],
@@ -1587,7 +1608,12 @@ def test_single_form_defaults_to_submit_even_when_planner_invents_confirmed_entr
 
     out = asyncio.run(orchestrate_flow_capabilities(
         spec,
-        submission=_false_batch_submission(),
+        submission={
+            "semantic_plan": _strict_plan(
+                ("submit", "批量提交用印申请", "submit_batch", "submit"),
+            ),
+            "ops": [],
+        },
     ))
     cap = out.capabilities[0]
     messages = [*validate_flow_spec(out)["errors"], *validate_flow_spec(out)["warnings"]]
@@ -2791,7 +2817,9 @@ def test_update_link_to_duplicate_merges_existing_link_instead_of_raising():
 
     assert len(new.links) == 1
     assert new.links[0].link_id == "keep"
-    assert new.links[0].confirmed is True
+    # Changing the identity of a dependency invalidates its prior verification
+    # even when the edit merges into an existing duplicate link.
+    assert new.links[0].confirmed is False
     assert new.links[0].confidence == 0.8
 
 
@@ -3490,7 +3518,7 @@ def test_add_capability_step_from_request_fact_updates_usage_index_and_refs():
             url="/api/submit",
             path="/api/submit",
             source_meta={"request_index": 20, "sequence": 20},
-            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True, category="user_param", source_kind="user_input")],
         )],
         capabilities=[FlowCapability(
             name="submit_batch",
@@ -3585,7 +3613,10 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
             content_type="application/json",
             body_source='{"date":"2026-05-12"}',
             source_meta={"request_index": 20, "sequence": 20},
-            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+            params=[ParamField(
+                path="date", key="date", value="2026-05-12", type="date",
+                required=True, category="user_param", source_kind="user_input",
+            )],
         )],
         request_facts=_request_facts_from_graph_fixture({"all_requests": [{
             "request_index": 10,
@@ -3601,6 +3632,9 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
         }]})
     )
 
+    spec.capabilities = [FlowCapability(
+        name="submit", kind="submit", nodes=_call_nodes(["write"]),
+    )]
     fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=2))
 
     assert len(fixed.steps) == 2
@@ -3741,12 +3775,22 @@ def test_recording_agent_submission_records_plan_history():
             path="/api/submit",
             content_type="application/json",
             body_source='{"date":"2026-05-12"}',
-            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+            params=[ParamField(
+                path="date", key="date", value="2026-05-12", type="date",
+                required=True, category="user_param", source_kind="user_input",
+            )],
         )],
     )
 
     out = asyncio.run(apply_recording_agent_submission(
-        spec, submission={"ops": []}, mode="plan", max_rounds=2,
+        spec,
+        submission={
+            "semantic_plan": _strict_plan(
+                ("submit", "提交数据", "submit", "submit"),
+            ),
+            "ops": [],
+        },
+        mode="plan", max_rounds=2,
     ))
 
     assert out.capabilities
@@ -4581,7 +4625,7 @@ def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
     assert relation_report["errors"][0]["code"] == "capability_relation_type_mismatch"
 
 
-def test_generate_capabilities_edit_is_incremental():
+def test_generate_capabilities_edit_is_retired():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
@@ -4599,19 +4643,11 @@ def test_generate_capabilities_edit_is_incremental():
         )],
     )
 
-    new = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
-
-    cap = new.capabilities[0]
-    assert cap.title == "人工确认标题"
-    assert cap.confirmed is True
-    assert cap.locked is True
-    assert cap.status == "confirmed"
-    assert cap.updated_by == "user"
-    assert cap.step_ids == ["submit"]
-    assert any(n.get("type") == "call" and n.get("step_id") == "submit" for n in cap.nodes)
+    with pytest.raises(ValueError, match="strict semantic plan"):
+        apply_flow_edits(spec, [{"op": "generate_capabilities"}])
 
 
-def test_generate_capabilities_respects_removed_capability_step():
+def test_generate_capabilities_cannot_restore_removed_capability_step():
     spec = FlowSpec(
         flow_id="f",
         steps=[
@@ -4629,10 +4665,8 @@ def test_generate_capabilities_respects_removed_capability_step():
     )
 
     edited = apply_flow_edits(spec, [{"op": "remove_capability_step", "capability_index": 0, "step_id": "read"}])
-    regenerated = apply_flow_edits(edited, [{"op": "generate_capabilities"}])
-
-    assert "read" not in regenerated.capabilities[0].step_ids
-    assert all(n.get("step_id") != "read" for n in regenerated.capabilities[0].nodes if n.get("type") == "call")
+    with pytest.raises(ValueError, match="strict semantic plan"):
+        apply_flow_edits(edited, [{"op": "generate_capabilities"}])
 
 
 def test_update_capability_step_order_preserves_user_order_independent_of_global_steps():
@@ -4662,7 +4696,7 @@ def test_update_capability_step_order_preserves_user_order_independent_of_global
     assert [n["step_id"] for n in edited.capabilities[0].nodes if n.get("type") == "call"] == ["submit", "read"]
 
 
-def test_generate_capabilities_respects_removed_capability():
+def test_generate_capabilities_cannot_restore_removed_capability():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
@@ -4670,9 +4704,8 @@ def test_generate_capabilities_respects_removed_capability():
     )
 
     edited = apply_flow_edits(spec, [{"op": "remove_capability", "capability_index": 0}])
-    regenerated = apply_flow_edits(edited, [{"op": "generate_capabilities"}])
-
-    assert regenerated.capabilities == []
+    with pytest.raises(ValueError, match="strict semantic plan"):
+        apply_flow_edits(edited, [{"op": "generate_capabilities"}])
 
 
 def test_removed_capability_steps_do_not_become_unassigned_or_keep_field_warnings():
@@ -4773,7 +4806,16 @@ def test_repeated_write_without_locator_is_one_reusable_capability_step():
         ],
         samples={"id": "item-1"},
     )
-    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    anchor = next(
+        step.step_id for step in spec.steps
+        if not (step.source_meta or {}).get("duplicate_observation_of")
+    )
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={
+        "semantic_plan": _strict_plan(
+            ("delete_item", "删除记录", "delete", anchor),
+        ),
+        "ops": [],
+    }))
     executable = next(
         step for step in planned.steps
         if not (step.source_meta or {}).get("duplicate_observation_of")
@@ -4853,12 +4895,17 @@ def test_batch_capability_exports_execution_contract_and_entries_schema():
             body_source='[{"date":"2026-05-12","content":"x"}]',
             source_meta={"batch_intent": True},
             params=[
-                ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True),
-                ParamField(path="[0].content", key="content", value="x", type="string", required=True),
+                ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True, category="user_param", source_kind="user_input"),
+                ParamField(path="[0].content", key="content", value="x", type="string", required=True, category="user_param", source_kind="user_input"),
             ],
         )],
     )
-    spec = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
+    spec = asyncio.run(orchestrate_flow_capabilities(spec, submission={
+        "semantic_plan": _strict_plan(
+            ("submit_batch", "批量提交", "submit_batch", "submit"),
+        ),
+        "ops": [],
+    }))
 
     api_request, errors = flow_spec_to_api_request(spec)
 
@@ -4885,11 +4932,16 @@ def test_single_array_wrapped_form_is_not_inferred_as_batch_without_evidence():
             path="/api/form/submit",
             content_type="application/json",
             body_source='[{"reason":"x"}]',
-            params=[ParamField(path="[0].reason", key="reason", value="x", required=True)],
+            params=[ParamField(path="[0].reason", key="reason", value="x", type="string", required=True, category="user_param", source_kind="user_input")],
         )],
     )
 
-    planned = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={
+        "semantic_plan": _strict_plan(
+            ("submit", "提交表单", "submit", "submit"),
+        ),
+        "ops": [],
+    }))
 
     assert len(planned.capabilities) == 1
     assert planned.capabilities[0].kind == "submit"
@@ -5423,7 +5475,7 @@ def test_source_warning_does_not_hide_unrelated_request_builder_error():
     assert report["issue_groups"]["field"][0]["ignorable"] is True
 
 
-def test_orchestrate_existing_capability_reanalyses_uncovered_recorded_interfaces():
+def test_orchestrate_without_strict_plan_preserves_human_capability_without_inventing_others():
     spec = FlowSpec(
         flow_id="incremental-only",
         steps=[
@@ -5443,10 +5495,10 @@ def test_orchestrate_existing_capability_reanalyses_uncovered_recorded_interface
     out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
     by_kind = {cap.kind: cap for cap in out.capabilities}
-    assert set(by_kind) == {"submit_batch", "query_status"}
+    assert set(by_kind) == {"submit_batch"}
     assert by_kind["submit_batch"].title == "用户已经编辑的能力"
     assert by_kind["submit_batch"].step_ids == ["submit"]
-    assert by_kind["query_status"].step_ids == ["status"]
+    assert out.meta["capability_model"]["source"] == "strict_plan_pending"
 
 
 def _scope_expanding_submission() -> dict:
@@ -5520,7 +5572,7 @@ def test_recording_submission_rejects_destructive_incremental_operations():
         ))
 
 
-def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_them():
+def test_legacy_capability_ops_cannot_create_a_second_machine_producer():
     spec = FlowSpec(
         flow_id="scope-locked",
         steps=[
@@ -5540,13 +5592,12 @@ def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_the
 
     by_name = {cap.name: cap for cap in out.capabilities}
     assert "submit_batch" in by_name
-    assert "query_status" in by_name
-    assert by_name["submit_batch"].title == "完善后的批量提交"
-    # The materialized status request remains available as its own capability;
-    # without a grounded link it must not be folded into the submit operation.
+    assert "query_status" not in by_name
+    assert "unexpected_query" not in by_name
+    assert by_name["submit_batch"].title == "批量提交"
     assert "submit" in by_name["submit_batch"].step_ids
     assert "status" not in by_name["submit_batch"].step_ids
-    assert "status" in by_name["query_status"].step_ids
+    assert out.meta["capability_model"]["source"] == "strict_plan_pending"
 
 
 def test_manual_field_axes_are_preserved_against_planner_overwrite():
@@ -5820,7 +5871,7 @@ def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity
     assert capability.confirmed is True
 
 
-def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back_atomically():
+def test_ops_only_submission_without_strict_plan_cannot_mutate_machine_capabilities():
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/submit", body_source='{"title":"x"}',
@@ -5846,7 +5897,7 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
         }]},
         generation_mode="optimize",
     ))
-    assert optimized.meta["capability_model"]["source"] == "incremental_rejected"
+    assert optimized.meta["capability_model"]["source"] == "strict_plan_pending"
     assert optimized.meta["capability_model"]["proposal_gate"]["accepted"] is False
     assert not any(
         node.get("type") == "condition"
@@ -5854,7 +5905,7 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
     )
 
 
-def test_rejected_screenshot_proposal_keeps_deterministic_option_repairs():
+def test_rejected_screenshot_plan_keeps_grounded_option_repairs():
     first = ParamField(
         path="assignees.Activity_first[0]", key="Approver 1", label="Approver 1",
         value=148, type="number", wire_type="number",
@@ -5912,12 +5963,12 @@ def test_rejected_screenshot_proposal_keeps_deterministic_option_repairs():
     ))
 
     repaired = optimized.steps[0].params[0]
-    assert optimized.meta["capability_model"]["source"] == "incremental_rejected"
+    assert optimized.meta["capability_model"]["source"] == "strict_plan_pending"
     assert (repaired.type, repaired.source_kind) == ("enum", "api_option")
     assert repaired.enum_value_map == {"Reviewer A": 148, "Reviewer B": 145}
 
 
-def test_rejected_capability_proposal_keeps_safe_screenshot_field_corrections():
+def test_legacy_screenshot_field_paragraph_cannot_mutate_flow_fields():
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/api/request/submit",
@@ -5986,12 +6037,12 @@ def test_rejected_capability_proposal_keeps_safe_screenshot_field_corrections():
         for node in flow_spec_module._iter_capability_nodes(optimized.capabilities[0].nodes)
     )
     assert (repaired.key, repaired.type, repaired.source_kind, repaired.required) == (
-        "房间数量", "number", "user_input", True,
+        "roomCount", "enum", "api_option", True,
     )
 
 
 @pytest.mark.parametrize("generation_mode", ["initial", "optimize"])
-def test_uploaded_screenshot_materializes_response_grounded_query_filter(generation_mode):
+def test_screenshot_semantic_paragraph_cannot_materialize_unobserved_wire_field(generation_mode):
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="query", method="GET", path="/api/leave/page",
@@ -6029,13 +6080,11 @@ def test_uploaded_screenshot_materializes_response_grounded_query_filter(generat
         generation_mode=generation_mode,
     ))
 
-    added = next(
-        param for param in optimized.steps[0].params
-        if param.path == "query.processStatus"
+    assert not any(
+        param.path == "query.processStatus"
+        for param in optimized.steps[0].params
     )
-    assert (added.key, added.type) == ("审批结果", "enum")
-    assert (added.category, added.source_kind) == ("user_param", "form_option")
-    assert added.default_value is None
+    assert optimized.meta["capability_model"]["source"] == "strict_plan_pending"
 
 
 def test_page_context_missing_key_is_advisory_and_differs_from_upstream_response():
@@ -6101,7 +6150,7 @@ def test_orchestration_removes_empty_planner_capability():
     assert [cap.name for cap in out.capabilities] == ["submit"]
 
 
-def test_only_empty_capability_is_replaced_with_real_baseline():
+def test_only_empty_capability_does_not_trigger_fallback_generation():
     spec = FlowSpec(
         flow_id="only-empty-capability",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
@@ -6110,9 +6159,8 @@ def test_only_empty_capability_is_replaced_with_real_baseline():
 
     out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
-    assert len(out.capabilities) == 1
-    assert out.capabilities[0].kind == "submit"
-    assert out.capabilities[0].step_ids == ["submit"]
+    assert out.capabilities == []
+    assert out.meta["capability_model"]["source"] == "strict_plan_pending"
 
 
 def _split_independent_writes_submission() -> dict:
@@ -6139,7 +6187,13 @@ def test_initial_planner_can_split_multiple_write_capabilities_without_family_me
 
     out = asyncio.run(orchestrate_flow_capabilities(
         spec,
-        submission=_split_independent_writes_submission(),
+        submission={
+            "semantic_plan": _strict_plan(
+                ("submit_daily", "提交日报", "submit", "daily"),
+                ("submit_weekly", "提交周报", "submit", "weekly"),
+            ),
+            "ops": [],
+        },
     ))
 
     assert {cap.name for cap in out.capabilities} == {"submit_daily", "submit_weekly"}
@@ -6198,12 +6252,9 @@ def test_initial_pi_cannot_merge_rule_boundaries_without_grounded_dependency():
         generation_mode="initial",
     ))
 
-    assert len(out.capabilities) == 2
-    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
-        frozenset({"create_draft"}),
-        frozenset({"start_process"}),
-    }
-    assert out.meta["capability_model"]["source"] == "pi_agent_patch"
+    assert out.capabilities == []
+    assert out.meta["capability_model"]["source"] == "strict_plan_pending"
+    assert "strict_semantic_plan_required" in out.meta["capability_model"]["proposal_gate"]["reasons"]
 
 
 def test_initial_pi_cannot_merge_distinct_write_actions_through_data_link():
@@ -6276,10 +6327,8 @@ def test_initial_pi_cannot_merge_distinct_write_actions_through_data_link():
         generation_mode="initial",
     ))
 
-    assert {frozenset(capability.step_ids) for capability in out.capabilities} == {
-        frozenset({"submit"}),
-        frozenset({"delete"}),
-    }
+    assert out.capabilities == []
+    assert out.meta["capability_model"]["source"] == "strict_plan_pending"
     assert [(link.source_step_id, link.target_step_id) for link in out.links] == [
         ("submit", "delete"),
     ]
@@ -6298,10 +6347,8 @@ def test_initial_pi_cannot_merge_distinct_write_actions_through_data_link():
         generation_mode="optimize",
     ))
 
-    assert {frozenset(capability.step_ids) for capability in reoptimized.capabilities} == {
-        frozenset({"submit"}),
-        frozenset({"delete"}),
-    }
+    assert reoptimized.capabilities == []
+    assert reoptimized.meta["capability_model"]["source"] == "strict_plan_pending"
 
 
 def test_optimize_prunes_previously_materialized_auth_refresh_step():
@@ -6420,7 +6467,7 @@ def test_optimize_prunes_previously_materialized_auth_refresh_step():
     assert optimized.meta["pruned_auth_step_count"] == 1
 
 
-def test_initial_pi_applies_all_field_semantic_axes_without_overwriting_wire_facts():
+def test_legacy_field_semantics_cannot_overwrite_wire_or_field_contract():
     param = ParamField(
         path="body.roomCount",
         key="roomCount",
@@ -6499,7 +6546,7 @@ def test_initial_pi_applies_all_field_semantic_axes_without_overwriting_wire_fac
 
     field = out.steps[0].params[0]
     assert (field.key, field.type, field.category, field.source_kind, field.required) == (
-        "房间数量", "number", "user_param", "user_input", True,
+        "roomCount", "enum", "system_const", "fixed", False,
     )
     assert field.path == "body.roomCount"
     assert field.default_value == 1

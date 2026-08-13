@@ -2427,17 +2427,8 @@ async def record_ws(ws: WebSocket) -> None:
                     _checkpoint_resume()
                     pi_session = None
                     delivered_image_count = 0
-                    if not before_operation.capabilities:
-                        # Always establish the runnable fact baseline first.
-                        # Pi then owns the semantic boundary/field intervention,
-                        # with the baseline retained only as a safe fallback.
-                        pending_flow_spec = await orchestrate_flow_capabilities(
-                            before_operation,
-                            submission={"ops": []},
-                            generation_mode="initial",
-                        )
                     pi_session = await _ensure_recording_pi(fresh=True)
-                    pi_session.bind_flow_spec(pending_flow_spec)
+                    pi_session.bind_flow_spec(before_operation)
                     pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
                     async with _recording_operation_keepalive(
                         sender,
@@ -2560,15 +2551,12 @@ async def record_ws(ws: WebSocket) -> None:
                         error=str(e),
                     )
                     try:
-                        from dano.execution.page.flow_spec import (
-                            flow_operation_report,
-                            orchestrate_flow_capabilities,
-                        )
+                        from dano.execution.page.flow_spec import flow_operation_report
 
-                        pending_flow_spec = await orchestrate_flow_capabilities(
-                            pending_flow_spec or before_operation,
-                            submission={"ops": []},
-                        )
+                        # A failed Pi turn must not silently create a different
+                        # deterministic ability model. Keep the authoritative
+                        # facts and any previously accepted strict plan intact.
+                        pending_flow_spec = pending_flow_spec or before_operation
                         operation_report = flow_operation_report(
                             before_operation, pending_flow_spec, operation="plan",
                         )
@@ -2583,9 +2571,7 @@ async def record_ws(ws: WebSocket) -> None:
                         analysis_application.update({
                             "status": "needs_review",
                             "summary": (
-                                f"模型分析未完成，已生成并保留可运行的事实基线：{e}"
-                                if operation_report.get("changed")
-                                else f"模型分析未完成，未修改当前配置：{e}"
+                                f"模型分析未完成，未修改当前配置：{e}"
                             ),
                         })
                         pending_flow_spec.meta = {

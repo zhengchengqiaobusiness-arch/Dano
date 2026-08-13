@@ -132,21 +132,21 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"status": "rejected"' in branch
     assert "原配置保持不变" in branch
     assert "orchestrate_flow_capabilities" in branch
-    assert "if not before_operation.capabilities:" in branch
+    assert "if not before_operation.capabilities:" not in branch
+    assert "submission={\"ops\": []}" not in branch
     assert "needs_pi =" not in branch
-    baseline_start = branch.index("if not before_operation.capabilities:")
     pi_start = branch.index("pi_session = await _ensure_recording_pi(fresh=True)")
-    assert baseline_start < pi_start
-    assert 'generation_mode="initial"' in branch
+    assert pi_start > branch.index("_checkpoint_resume()")
+    assert 'generation_mode="initial"' not in branch
     assert "timeout_s=0" in branch
     identity_check = branch.index("check_fingerprint=False")
     replay_check = branch.index("if await _replay_costly(msg):")
     fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
     assert identity_check < replay_check < fingerprint_check
-    assert "pending_flow_spec or before_operation" in branch
+    assert "pending_flow_spec = pending_flow_spec or before_operation" in branch
     assert '"operation_warning": str(e)' in branch
     assert '"type": "flow_spec"' in branch
-    fallback = branch[branch.index("pending_flow_spec = await orchestrate_flow_capabilities"):]
+    fallback = branch[branch.index("pending_flow_spec = pending_flow_spec or before_operation"):]
     assert fallback.index("except WebSocketDisconnect:") < fallback.index("except Exception as fallback_error:")
 
 

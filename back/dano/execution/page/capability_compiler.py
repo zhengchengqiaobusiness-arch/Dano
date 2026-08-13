@@ -14,6 +14,9 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     READ_CAPABILITY_KINDS,
     WRITE_CAPABILITY_KINDS,
+    _capability_operation_kind,
+    _default_capability_nodes,
+    _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
     sync_capability_scoped_views,
@@ -316,6 +319,13 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         ):
             errors.append(f"{prefix}: capability kind does not match the anchor request method")
             continue
+        grounded_kind = _capability_operation_kind(anchor)
+        grounded_batch = bool(is_write and _write_contract_is_batch(current, [anchor]))
+        if kind != grounded_kind and not (kind == "submit_batch" and grounded_batch):
+            warnings.append(
+                f"{prefix}: model kind {kind!r} replaced by grounded kind {grounded_kind!r}"
+            )
+        kind = "submit_batch" if grounded_batch else grounded_kind
 
         if is_write:
             step_ids, dependency_errors = _verified_dependency_order(current, anchor_step_id)
@@ -361,7 +371,11 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             capability_id=_stable_capability_id(name, kind, anchor_step_id),
             request_refs=refs,
             step_ids=step_ids,
-            nodes=_compiled_nodes(step_ids, anchor_step_id),
+            nodes=(
+                _default_capability_nodes(member_steps, kind="submit_batch")
+                if kind == "submit_batch"
+                else _compiled_nodes(step_ids, anchor_step_id)
+            ),
             confirmed=False,
             confidence=1.0,
             evidence=[{

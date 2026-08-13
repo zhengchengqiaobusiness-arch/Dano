@@ -4,6 +4,7 @@ import asyncio
 
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_spec import (
+    FlowCapability,
     FlowLink,
     FlowSpec,
     FlowStep,
@@ -147,6 +148,7 @@ def _verified_graph() -> FlowSpec:
 
 def _semantic_plan() -> dict:
     return {
+        "business_understanding": {"summary": "查询并提交请假"},
         "capabilities": [
             {
                 "name": "query_leave",
@@ -170,6 +172,7 @@ def _semantic_plan() -> dict:
                 ],
             },
         ],
+        "unresolved_items": [],
     }
 
 
@@ -230,6 +233,88 @@ def test_strict_pi_plan_is_recompiled_before_orchestration_is_persisted():
     assert result.meta["capability_model"]["capability_compilation"]["errors"] == []
     submit = next(cap for cap in result.capabilities if cap.name == "submit_leave")
     assert submit.step_ids == ["definition", "approval", "submit"]
+
+
+def test_orchestration_without_strict_plan_does_not_generate_fallback_abilities():
+    result = asyncio.run(orchestrate_flow_capabilities(
+        _verified_graph(),
+        submission={"ops": []},
+        generation_mode="initial",
+    ))
+
+    assert result.capabilities == []
+    assert result.meta["capability_model"]["source"] == "strict_plan_pending"
+    assert result.meta["capability_model"]["proposal_gate"] == {
+        "accepted": False,
+        "reasons": ["strict_semantic_plan_required"],
+        "producer": "verified_request_graph",
+    }
+
+
+def test_legacy_abilities_payload_cannot_create_public_abilities():
+    result = asyncio.run(orchestrate_flow_capabilities(
+        _verified_graph(),
+        submission={
+            "abilities": [{
+                "name": "legacy_submit",
+                "title": "旧提交能力",
+                "kind": "submit",
+                "step_ids": ["submit"],
+            }],
+            "ops": [],
+        },
+        generation_mode="initial",
+    ))
+
+    assert result.capabilities == []
+    assert result.meta["capability_model"]["source"] == "strict_plan_pending"
+
+
+def test_strict_compiler_replaces_stale_machine_generated_ability():
+    spec = _verified_graph()
+    spec.capabilities = [FlowCapability(
+        capability_id="stale",
+        name="stale_fallback",
+        title="旧启发式能力",
+        kind="submit",
+        step_ids=["submit"],
+        nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        updated_by="planner",
+    )]
+    spec.meta["capability_model"] = {"source": "deterministic"}
+
+    result = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": _semantic_plan(), "ops": []},
+        generation_mode="initial",
+    ))
+
+    assert {cap.name for cap in result.capabilities} == {"query_leave", "submit_leave"}
+    assert "stale_fallback" not in {cap.name for cap in result.capabilities}
+
+
+def test_compiler_uses_recorded_operation_kind_instead_of_model_guess():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/applications/create",
+        source_meta={"role": "business_write"},
+    )])
+    plan = {
+        "capabilities": [{
+            "name": "create_application",
+            "title": "创建申请",
+            "kind": "submit_batch",
+            "anchor_step_id": "submit",
+            "request_refs": [{"step_id": "submit", "usage": "execute"}],
+        }],
+    }
+
+    result = compile_capabilities(spec, plan)
+
+    assert result.errors == []
+    assert result.capabilities[0].kind == "create"
+    assert "replaced by grounded kind 'create'" in result.warnings[0]
 
 
 def test_strict_pi_plan_coverage_uses_the_declared_anchor_contract() -> None:

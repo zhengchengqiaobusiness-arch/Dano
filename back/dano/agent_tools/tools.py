@@ -1454,6 +1454,30 @@ async def get_recording_verification(run_id: str, params: dict) -> dict:
     return {"verification": record}
 
 
+def _normalize_strict_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ARG001, ANN001
+    """Copy the already validated strict plan without semantic reinterpretation.
+
+    The TypeBox boundary and ``_validate_strict_recording_plan`` own shape
+    validation.  This adapter must not infer memberships, add legacy semantic
+    axes, or generate deterministic capabilities after that validation.
+    """
+    semantic = deepcopy(raw_plan.get("semantic_plan") or {})
+    operations = deepcopy(raw_plan.get("ops") or [])
+    submission = {
+        "semantic_plan": semantic,
+        "ops": operations,
+    }
+    if "_analysis_screenshot_count" in raw_plan:
+        submission["_analysis_screenshot_count"] = int(
+            raw_plan.get("_analysis_screenshot_count") or 0
+        )
+    if "_submitted_semantic_keys" in raw_plan:
+        submission["_submitted_semantic_keys"] = deepcopy(
+            raw_plan.get("_submitted_semantic_keys") or []
+        )
+    return submission
+
+
 def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ANN001
     """Adapt common Pi JSON variants without weakening fact/version gates."""
     semantic_keys = {
@@ -2686,6 +2710,10 @@ _STRICT_UNRESOLVED_KEYS = {
     "type", "title", "description", "reason", "status", "severity", "blocking",
     "request_id", "step_id", "wire_path", "evidence_refs",
 }
+_STRICT_RECORDING_PLAN_KEYS = {
+    "semantic_plan", "ops", "_submitted_semantic_keys",
+    "_analysis_screenshot_count",
+}
 _TYPED_RECORDING_OPERATION_NAMES = {
     "set_goal", "set_request_role", "set_param_source", "set_param_required",
     "set_param_enum", "rename_field", "propose_dependency", "add_pitfall",
@@ -2764,6 +2792,11 @@ def _validate_typed_recording_operations(operations: object, *, label: str) -> N
 
 
 def _validate_strict_recording_plan(raw_plan: dict) -> None:
+    unknown_plan_keys = sorted(set(raw_plan).difference(_STRICT_RECORDING_PLAN_KEYS))
+    if unknown_plan_keys:
+        if "flow_spec" in unknown_plan_keys:
+            raise ToolError("plan 格式错误：禁止提交 flow_spec")
+        raise ToolError("plan 包含禁止或未知字段：" + ", ".join(unknown_plan_keys))
     semantic = raw_plan.get("semantic_plan")
     if semantic is None:
         semantic = {}
@@ -2908,7 +2941,7 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
                 warning="截图与当前配置一致，未发现有证据支持的修改；当前配置未修改",
             )
     try:
-        submission = _normalize_recording_plan_submission(
+        submission = _normalize_strict_recording_plan_submission(
             raw_plan, session.current_flow_spec()
         )
         submission.setdefault("submission_id", str(uuid4()))
@@ -2923,7 +2956,7 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             field_only = _screenshot_field_only_plan(raw_plan)
             if field_only is not None:
                 try:
-                    submission = _normalize_recording_plan_submission(
+                    submission = _normalize_strict_recording_plan_submission(
                         field_only, session.current_flow_spec()
                     )
                     submission.setdefault("submission_id", str(uuid4()))
