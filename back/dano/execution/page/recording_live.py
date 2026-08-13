@@ -754,6 +754,19 @@ def dependency_link_signature(link) -> str:  # noqa: ANN001
     ).hexdigest()
 
 
+def invalidate_dependency_verification(link, reason: str) -> None:  # noqa: ANN001
+    """Invalidate executor evidence whenever the dependency identity changes."""
+    link.confirmed = False
+    meta = dict(getattr(link, "meta", None) or {})
+    meta.pop("verification_id", None)
+    meta["verified"] = False
+    meta["unverified_reason"] = str(reason or "依赖定义已变化，需要重新验证")
+    link.meta = meta
+    evidence = dict(getattr(link, "evidence", None) or {})
+    evidence.pop("verification_id", None)
+    link.evidence = evidence
+
+
 def _step_request_id(spec, step_id: str) -> str:  # noqa: ANN001
     step = next((item for item in spec.steps if item.step_id == step_id), None)
     return str(((step.source_meta if step else {}) or {}).get("request_id") or "")
@@ -1502,10 +1515,10 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 kind=link_kind,
                 **dynamic_contract,
             )
+            invalidate_dependency_verification(link, "依赖提案已更新，需要重新执行 dependency_execute 验证")
             link.kind = link_kind
             for field, value in dynamic_contract.items():
                 setattr(link, field, deepcopy(value))
-            link.confirmed = False
             link.confidence = max(float(link.confidence or 0), float(edit.get("confidence") or 0.75))
             link.reason = str(edit.get("reason") or "agent 提出的待验证依赖")
             link.evidence = {
@@ -1515,7 +1528,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 "source_request_id": source_request_id,
                 "target_request_id": target_request_id,
             }
-            link.meta = {**(link.meta or {}), "verified": False, "actor": "agent"}
+            link.meta = {**(link.meta or {}), "actor": "agent"}
             if link_kind in {"structure", "response_key_map"}:
                 link.meta["kind"] = link_kind
             if existing is None:

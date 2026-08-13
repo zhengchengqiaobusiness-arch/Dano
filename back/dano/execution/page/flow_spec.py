@@ -4353,8 +4353,14 @@ def _retarget_step_references(spec: FlowSpec, replacements: dict[str, str]) -> N
                     retarget_nodes(node[child_key])
 
     for link in spec.links or []:
-        link.source_step_id = replace(link.source_step_id)
-        link.target_step_id = replace(link.target_step_id)
+        source_step_id = replace(link.source_step_id)
+        target_step_id = replace(link.target_step_id)
+        if source_step_id != link.source_step_id or target_step_id != link.target_step_id:
+            from dano.execution.page.recording_live import invalidate_dependency_verification
+
+            invalidate_dependency_verification(link, "依赖步骤已重定向，需要重新验证")
+        link.source_step_id = source_step_id
+        link.target_step_id = target_step_id
     for item in spec.review_items or []:
         item.target = {
             key: replace(value) if key in {"step_id", "source_step_id", "target_step_id"} else value
@@ -20218,6 +20224,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 value = edit.get("value")
                 if not field:
                     raise ValueError("link update missing field")
+                identity_fields = {
+                    "source_step_id", "source_path", "target_step_id", "target_path",
+                }
+                old_identity_value = str(getattr(link, field, "")) if field in identity_fields else ""
                 if field == "confirmed":
                     link.confirmed = bool(value)
                 elif field == "param_name":
@@ -20243,6 +20253,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 else:
                     # H19 修复:不再 hasattr 兜底(避免改 link_id/reason/internal 等关键字段)
                     raise ValueError(f"unknown link field: {field}")
+                if field in identity_fields and str(getattr(link, field, "")) != old_identity_value:
+                    from dano.execution.page.recording_live import invalidate_dependency_verification
+
+                    invalidate_dependency_verification(link, f"依赖字段 {field} 已变化，需要重新验证")
                 duplicate = _matching_link(new_spec, link)
                 if duplicate is not None:
                     _merge_link(duplicate, link)

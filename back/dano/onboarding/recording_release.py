@@ -24,6 +24,7 @@ from dano.execution.page.flow_spec import (
     validate_flow_spec,
 )
 from dano.execution.page.verification_log import find_verification
+from dano.execution.page.recording_live import dependency_link_signature
 from dano.export.skill_package.renderer import validate_flow_spec_package
 
 
@@ -174,6 +175,17 @@ def _active_link_errors(spec: FlowSpec) -> list[str]:
             and _passed_verification(spec, verification_id, kind="dependency_execute")
         ):
             errors.append(f"依赖 `{link.link_id}` 缺少 passed dependency_execute 验证")
+            continue
+        record = find_verification(
+            verification_id,
+            list((spec.meta or {}).get("verification_log") or []),
+        )
+        subject = dict((record or {}).get("subject") or {})
+        if (
+            str(subject.get("link_id") or "") != link.link_id
+            or str(subject.get("signature") or "") != dependency_link_signature(link)
+        ):
+            errors.append(f"依赖 `{link.link_id}` 的 dependency_execute 验证与当前依赖定义不一致")
     return errors
 
 

@@ -34,6 +34,7 @@ from dano.onboarding.recording_verify import (
     verification_todos,
 )
 from dano.onboarding.recording_pi import RecordingPiSession
+from dano.onboarding.recording_release import _active_link_errors
 
 
 @pytest.fixture(autouse=True)
@@ -419,6 +420,60 @@ def test_confirm_dependency_rejects_forged_and_mismatched_verification_ids():
             "link_id": "link-1",
             "verification_id": wrong,
         }])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_step_id", "detail-v2"),
+        ("source_path", "response.data.otherJobId"),
+        ("target_step_id", "submit-v2"),
+        ("target_path", "body.otherJobId"),
+    ],
+)
+def test_editing_dependency_identity_invalidates_executor_verification(field, value):
+    spec = _spec()
+    spec.steps.extend([
+        FlowStep(step_id="detail-v2", method="GET", path="/items/detail-v2"),
+        FlowStep(step_id="submit-v2", method="POST", path="/items/update-v2"),
+    ])
+    verification_id = _record_dependency_verification(spec)
+    confirmed = apply_flow_edits(spec, [{
+        "op": "confirm_dependency",
+        "link_id": "link-1",
+        "verification_id": verification_id,
+    }])
+
+    updated = apply_flow_edits(confirmed, [{
+        "op": "update",
+        "link_id": "link-1",
+        "field": field,
+        "value": value,
+    }])
+
+    link = updated.links[0]
+    assert link.confirmed is False
+    assert link.meta.get("verified") is False
+    assert "verification_id" not in link.meta
+    assert "verification_id" not in link.evidence
+
+
+def test_release_rechecks_dependency_verification_against_current_signature():
+    spec = _spec()
+    verification_id = _record_dependency_verification(spec)
+    confirmed = apply_flow_edits(spec, [{
+        "op": "confirm_dependency",
+        "link_id": "link-1",
+        "verification_id": verification_id,
+    }])
+    assert _active_link_errors(confirmed) == []
+
+    # Simulate a stale persisted/client draft that changed after verification.
+    confirmed.links[0].target_path = "body.otherJobId"
+
+    assert _active_link_errors(confirmed) == [
+        "依赖 `link-1` 的 dependency_execute 验证与当前依赖定义不一致"
+    ]
 
 
 def test_verified_ops_confirm_link_bind_write_check_and_attach_enum():
