@@ -610,6 +610,15 @@ class RecordingPiSession:
             }
             existing = attempts.get(str(step_id))
             if existing is not None:
+                # A deterministic business rejection did not mutate the
+                # target system, so corrected inputs may consume the still
+                # unused successful-write opportunity. Unknown failures and
+                # writes that reached read-back remain one-shot.
+                if existing.get("status") == "failed_before_write":
+                    attempts[str(step_id)] = {"status": "running"}
+                    current.meta["write_verification_attempts"] = attempts
+                    self.flow_spec = current
+                    return None
                 return existing
             attempts[str(step_id)] = {"status": "running"}
             current.meta["write_verification_attempts"] = attempts

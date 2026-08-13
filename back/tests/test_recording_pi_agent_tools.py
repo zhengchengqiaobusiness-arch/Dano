@@ -555,6 +555,73 @@ async def test_failed_write_verification_is_not_reexecuted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_business_rejection_before_write_can_retry_with_corrected_inputs(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "a" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    calls = 0
+
+    async def fake_execute(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        passed = calls == 2
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={"write_step_id": kwargs["write_step_id"]},
+            status="passed" if passed else "failed",
+            evidence={"passed": passed},
+        )
+        return {
+            "ok": passed,
+            "write": {
+                "ok": passed,
+                "application_ok": passed,
+                "verification_status": "passed" if passed else "failed",
+            },
+            "verify": {} if passed else None,
+            "assertion": {} if passed else None,
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST"},
+            {"request_id": "req-verify", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+    params = {
+        "write_step_id": "submit",
+        "inputs": {"title": "corrected"},
+        "verify_request_id": "req-verify",
+        "assertion": {"path": "data.id", "operator": "exists"},
+    }
+
+    first = await execute_recording_write_with_verify("run-recording", params)
+    second = await execute_recording_write_with_verify("run-recording", params)
+    third = await execute_recording_write_with_verify("run-recording", params)
+
+    assert first["ok"] is False
+    assert second["ok"] is True
+    assert second["duplicate"] is False
+    assert third["duplicate"] is True
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_invalid_assertion_does_not_consume_write_verification(monkeypatch):
     session = RecordingPiSession(
         tenant="tenant",

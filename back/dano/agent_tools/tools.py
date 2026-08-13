@@ -1365,9 +1365,15 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
         except BaseException:
             await session.finish_write_verification(step.step_id, status="failed")
             raise
+        write_result = result.get("write") if isinstance(result.get("write"), dict) else {}
+        failed_before_write = bool(
+            result.get("ok") is False
+            and write_result.get("verification_status") == "failed"
+            and write_result.get("application_ok") is False
+        )
         await session.finish_write_verification(
             step.step_id,
-            status="succeeded",
+            status="failed_before_write" if failed_before_write else "succeeded",
             verification_id=str(result.get("verification_id") or ""),
         )
         return {**result, "duplicate": False, "write_executed": True}
