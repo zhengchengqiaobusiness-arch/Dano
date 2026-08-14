@@ -427,6 +427,50 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
         sys.path.remove(str(scripts))
 
 
+def test_self_contained_client_omits_absent_optional_request_fields(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    from dano.execution.page import wire_format as wire_format_module
+
+    (scripts / "wire_format.py").write_text(
+        Path(wire_format_module.__file__).read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    config = json.dumps({"tenant": "tenant", "subsystem": "system", "base_url": "https://example.test"})
+    client_path = scripts / "client.py"
+    client_path.write_text(_CLIENT_TEMPLATE.replace("__CONFIG__", repr(config)), encoding="utf-8")
+    sys.path.insert(0, str(scripts))
+    try:
+        module_spec = importlib.util.spec_from_file_location("generated_optional_client", client_path)
+        module = importlib.util.module_from_spec(module_spec)
+        assert module_spec.loader is not None
+        module_spec.loader.exec_module(module)
+        sent = []
+
+        def fake_http(method, path="", **kwargs):
+            sent.append({"method": method, "path": path, **kwargs})
+            return {"ok": True, "status": 200, "data": {"code": 0}}
+
+        module.http_json = fake_http
+        result = module.execute_plan({
+            "steps": [{
+                "step_id": "query",
+                "method": "GET",
+                "path": "/items",
+                "query_template": {
+                    "pageNo": "{{pageNo}}",
+                    "type": "{{type}}",
+                    "createTime[0]": "{{startTime}}",
+                },
+            }],
+            "links": [],
+        }, {"pageNo": 1})
+
+        assert result["ok"] is True
+        assert sent[0]["query"] == {"pageNo": 1}
+    finally:
+        sys.path.remove(str(scripts))
+
+
 def test_unrelated_system_package_runs_without_tenant_pack_or_code_changes(tmp_path):
     _AlternateBusinessApi.records = [{"recordKey": "R1", "label": "seed"}]
     server = ThreadingHTTPServer(("127.0.0.1", 0), _AlternateBusinessApi)

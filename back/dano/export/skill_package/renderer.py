@@ -511,6 +511,7 @@ from wire_format import apply_wire_formats, date_span_days
 CONFIG = json.loads(__CONFIG__)
 BASE_URL = os.environ.get("DANO_BUSINESS_BASE_URL", CONFIG["base_url"]).rstrip("/")
 _PLACEHOLDER = re.compile(r"^\{\{([^{}]+)\}\}$")
+_MISSING = object()
 
 
 def emit(payload):
@@ -607,16 +608,17 @@ def deep_set(node, path, value):
 
 def render(node, values):
     if isinstance(node, dict):
-        return {key: render(value, values) for key, value in node.items()}
+        rendered = {key: render(value, values) for key, value in node.items()}
+        return {key: value for key, value in rendered.items() if value is not _MISSING}
     if isinstance(node, list):
-        return [render(value, values) for value in node]
+        return [value for item in node if (value := render(item, values)) is not _MISSING]
     if not isinstance(node, str):
         return copy.deepcopy(node)
     match = _PLACEHOLDER.fullmatch(node)
     if match:
         key = match.group(1)
         if key not in values:
-            raise RuntimeError(f"missing input: {key}")
+            return _MISSING
         return copy.deepcopy(values[key])
     return re.sub(r"\{\{([^{}]+)\}\}", lambda match: str(values[match.group(1)]), node)
 
