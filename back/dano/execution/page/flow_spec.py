@@ -9542,7 +9542,11 @@ def _business_query_evidence_score(step: FlowStep) -> int:
         or re.search(r"(?:^|/)(?:system|im)/users?(?:/|$)", path)
     ):
         return -10
-    score = 2 if role == "business_get" else 0
+    # An accepted recording-agent business_get classification is already the
+    # semantic evidence required by the public capability gate.  Requiring a
+    # second URL/DOM heuristic made valid non-REST search endpoints disappear
+    # after materialization even though Pi had explicitly approved them.
+    score = 3 if role == "business_get" else 0
     if _has_query_action_evidence(
         (step.source_meta or {}).get("trigger_op"),
         (step.source_meta or {}).get("trigger_locator"),

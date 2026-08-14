@@ -433,8 +433,14 @@ def _analysis_application_report(
         )
     )
     changed = bool(operation_report.get("changed"))
+    missing_capabilities = bool(
+        str(operation_id or "").startswith("auto-plan-")
+        and not after.capabilities
+    )
     status = (
-        "applied"
+        "needs_review"
+        if missing_capabilities
+        else "applied"
         if changed
         else "rejected"
         if proposal_gate.get("accepted") is False
@@ -445,7 +451,11 @@ def _analysis_application_report(
     return {
         "status": status,
         "analysis_kind": analysis_kind,
-        "summary": operation_report.get("summary") or "",
+        "summary": (
+            "分析未生成可调用能力，结果未应用"
+            if missing_capabilities
+            else operation_report.get("summary") or ""
+        ),
         "screenshot_count": len(screenshots),
         "model_image_count": delivered_image_count,
         "screenshot_names": [item["name"] for item in screenshots],

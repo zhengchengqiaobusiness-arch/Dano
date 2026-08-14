@@ -347,6 +347,37 @@ def test_analysis_application_report_is_persistable_and_explicit(
     assert len(report["change_details"]) == int(changed)
 
 
+def test_analysis_application_does_not_report_applied_when_no_capability_was_generated() -> None:
+    before = SimpleNamespace(capabilities=[], steps=[SimpleNamespace(params=[])], meta={})
+    after = SimpleNamespace(
+        capabilities=[],
+        steps=[SimpleNamespace(step_id="search", params=[])],
+        meta={
+            "capability_model": {
+                "semantic_coverage": {"complete": False},
+            },
+        },
+    )
+
+    report = gateway._analysis_application_report(
+        before=before,
+        after=after,
+        operation_report={
+            "changed": True,
+            "summary": "实际修改：接口步骤1项，流程说明1项",
+            "changes": {"steps": 1, "capabilities": 0},
+            "proposal_gate": {"accepted": False, "reasons": ["capability_compilation_failed"]},
+        },
+        screenshots=[],
+        delivered_image_count=0,
+        operation_id="auto-plan-empty",
+    )
+
+    assert report["status"] == "needs_review"
+    assert report["capability_count_after"] == 0
+    assert "未生成可调用能力" in report["summary"]
+
+
 class _ConcurrentWriteProbe:
     def __init__(self) -> None:
         self.active_writes = 0

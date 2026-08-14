@@ -403,6 +403,95 @@ def test_recording_plan_accepts_the_supported_param_type_operation():
     }
 
 
+def test_recording_plan_keeps_one_search_capability_when_page_navigation_is_context():
+    def search_param(path: str, key: str) -> ParamField:
+        return ParamField(
+            path=path,
+            key=key,
+            label="搜索关键词",
+            value="唐",
+            type="string",
+            wire_type="string",
+            category="user_param",
+            source_kind="user_input",
+            exposed_to_user=True,
+            required=False,
+        )
+
+    spec = FlowSpec(
+        flow_id="recorded-search",
+        steps=[
+            FlowStep(
+                step_id="ajax-search",
+                method="GET",
+                path="/shiwen2017/ajaxSearchSoD.aspx?valuekey=唐",
+                params=[search_param("query.keyword", "keyword")],
+                semantic_role="business_get",
+                source_meta={
+                    "request_id": "req-ajax",
+                    "role": "business_get",
+                    "trigger_op": "fill",
+                    "trigger_locator": "input[name=keyword]",
+                },
+            ),
+            FlowStep(
+                step_id="search-page",
+                method="GET",
+                path="/search?value=唐",
+                params=[search_param("query.value", "value")],
+                semantic_role="business_get",
+                source_meta={
+                    "request_id": "req-page",
+                    "role": "business_get",
+                    "trigger_op": "fill",
+                    "trigger_locator": "input[name=keyword]",
+                },
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-ajax", request_index=1, method="GET",
+                path="/shiwen2017/ajaxSearchSoD.aspx?valuekey=唐",
+            ),
+            RequestFact(
+                request_id="req-page", request_index=2, method="GET",
+                path="/search?value=唐",
+            ),
+        ]),
+    )
+
+    updated = asyncio.run(apply_recording_agent_submission(
+        spec,
+        submission={
+            "semantic_plan": {
+                "business_understanding": {"summary": "按关键词搜索内容"},
+                "capabilities": [{
+                    "name": "search_content",
+                    "title": "搜索内容",
+                    "kind": "query",
+                    "anchor_step_id": "ajax-search",
+                    "request_refs": [
+                        {"step_id": "ajax-search", "usage": "execute"},
+                        {"step_id": "search-page", "usage": "fact_check"},
+                    ],
+                }],
+                "unresolved_items": [],
+            },
+            "ops": [{
+                "op": "set_request_role",
+                "request_id": "req-page",
+                "role": "read_context",
+                "reason": "页面跳转只负责展示同一次搜索结果",
+                "evidence_refs": ["req-page"],
+            }],
+        },
+        mode="plan",
+    ))
+
+    assert [capability.name for capability in updated.capabilities] == ["search_content"]
+    assert updated.meta["capability_generation"]["status"] == "ready"
+
+
 def test_param_type_rejects_a_model_type_that_contradicts_the_cited_control():
     spec = _flow()
     spec.request_facts.field_evidence.append({
