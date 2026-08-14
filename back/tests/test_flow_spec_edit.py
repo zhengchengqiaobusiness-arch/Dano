@@ -2604,7 +2604,7 @@ def test_automated_add_cannot_claim_manual_param_ownership(actor):
     assert param.locked is False
     assert not any(item.get("source") == "manual_edit" for item in param.evidence)
     # Pagination has a safe default but remains caller-overridable.
-    assert (param.category, param.source_kind) == ("user_param", "user_input")
+    assert (param.category, param.source_kind) == ("user_param", "page_context")
 
 
 def test_remove_param():

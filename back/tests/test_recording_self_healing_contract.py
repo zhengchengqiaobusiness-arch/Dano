@@ -1,9 +1,4 @@
-"""Red-capable contracts for the recording self-healing work.
-
-These tests describe public release, verification and websocket behaviour.  They
-start as strict xfails so the test-only baseline remains runnable; each feature
-stage removes its matching xfail before changing production code.
-"""
+"""Regression contracts for recording self-healing and operator takeover."""
 
 from __future__ import annotations
 
@@ -256,6 +251,50 @@ def test_operator_timeout_is_a_resumable_waiting_state() -> None:
     assert "issue_id: String(m.issue_id" in frontend
     assert "issue_id: question.issue_id" in frontend
     assert "按最佳假设继续" not in runtime_prompt
+
+
+def test_operator_answer_resumes_the_exact_waiting_operation() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    resolver = source[source.index("def _resolve_agent_answer"):source.index("async def _ask_operator")]
+
+    assert 'question_id != str(pending.get("question_id") or "")' in resolver
+    assert 'issue_id != str(pending.get("issue_id") or "")' in resolver
+    assert 'resumed = dict(resume_message)' in resolver
+    assert 'resumed["operator_resume"] = True' in resolver
+    assert "deferred_messages.insert(0, resumed)" in resolver
+
+
+def test_release_feedback_reenters_repair_then_retries_the_same_publish_request() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    publish_start = source.index('elif t == "publish_request":')
+    publish_end = source.index("except asyncio.CancelledError:", publish_start)
+    publish = source[publish_start:publish_end]
+
+    assert 'item.resolver in {"machine_repair", "operator"}' in publish
+    assert 'pending_flow_spec.meta["release_feedback_issues"]' in publish
+    assert "repair_report = await _verify_finalized_recording(" in publish
+    assert 'if repair_report.get("all_verified"):' in publish
+    assert "deferred_messages.insert(0, {" in publish
+    assert "**msg," in publish
+
+
+def test_one_termination_generation_covers_every_recording_analysis_path() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    terminate = source[
+        source.index("async def _terminate_analysis"):
+        source.index("async def _handle_live_recording_message")
+    ]
+
+    assert "analysis_generation += 1" in terminate
+    assert "task.cancel()" in terminate
+    assert "future.cancel()" in terminate
+    assert "recording_pi.cancel_active_prompt()" in terminate
+    assert 'queued.get("operation_id")' in terminate
+    assert '"auto-plan-", "auto-repair-", "auto-publish-"' in terminate
+    assert "prompt_runner=run_verification_prompt" in source
+    assert source.count("pi_session.prompt(") == source.count("_responsive_prompt(pi_session.prompt(")
+    assert "if submission_generation != analysis_generation:" in source
+    assert '"recording.stale_submission_discarded"' in source
 
 
 def test_specialized_pi_mutations_use_only_plan_or_repair_entrypoints() -> None:
