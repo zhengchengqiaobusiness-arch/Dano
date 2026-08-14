@@ -20,13 +20,15 @@ RECORDING_THREE = f"recording_{'3' * 32}"
 RECORDING_SAFE = f"recording_{'4' * 32}"
 
 
-def test_recording_pi_runtime_has_no_automatic_deadline() -> None:
+def test_recording_pi_operations_use_the_session_deadline_by_default() -> None:
     timeout = inspect.signature(recording_pi.RecordingPiSession.prompt).parameters["timeout_s"]
     runtime_source = (
         Path(recording_pi.__file__).parents[2] / "agent" / "run_recording_pi.mjs"
     ).read_text(encoding="utf-8")
 
-    assert timeout.default == 0
+    assert timeout.default is None
+    # The provider stream itself stays open; the Python operation boundary is
+    # what supplies the finite deadline and performs the cancel handshake.
     assert "httpIdleTimeoutMs: 0" in runtime_source
     assert "DANO_RECORDING_PI_PROVIDER_TIMEOUT_MS" not in runtime_source
     assert 'DANO_PI_MAX_TOKENS", 32768' in runtime_source
