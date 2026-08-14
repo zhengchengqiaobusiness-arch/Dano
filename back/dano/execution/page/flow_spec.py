@@ -9999,6 +9999,80 @@ def _step_page_id_from_facts(spec: FlowSpec, step: FlowStep) -> str:
 
 
 
+def _compact_repeated_endpoint_observations(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse repeated background reads in the model-only projection.
+
+    Raw RequestFacts stay append-only.  The model needs the endpoint shape and
+    causal samples, not dozens of identical polling/option-read payloads.
+    Business, retained and materialized requests are never collapsed.
+    """
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for item in items:
+        role = str(item.get("role") or "")
+        kind = str(item.get("kind") or "")
+        path = str(item.get("path") or item.get("url") or "")
+        collapsible = bool(path) and (
+            kind == "api_response"
+            or (
+                str(item.get("method") or "GET").upper() in {"GET", "HEAD", "OPTIONS"}
+                and role not in {"business_get", "business_write", "submit_anchor"}
+                and item.get("keep") is not True
+                and not item.get("materialized_step_id")
+            )
+        )
+        if not collapsible:
+            passthrough.append(item)
+            continue
+        schema = json.dumps(
+            item.get("response_schema") or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        signature = (
+            kind or role,
+            str(item.get("method") or "GET").upper(),
+            path,
+            json.dumps(item.get("query_paths") or [], ensure_ascii=False, sort_keys=True),
+            json.dumps(item.get("body_paths") or [], ensure_ascii=False, sort_keys=True),
+            schema,
+        )
+        groups.setdefault(signature, []).append(item)
+
+    compacted = list(passthrough)
+    for observations in groups.values():
+        latest = dict(observations[-1])
+        if len(observations) > 1:
+            request_ids = [
+                str(item.get("request_id") or "") for item in observations
+                if item.get("request_id")
+            ]
+            event_ids = [
+                str(item.get("trigger_event_id") or "") for item in observations
+                if item.get("trigger_event_id")
+            ]
+            action_ids = [
+                str(item.get("trigger_action_id") or "") for item in observations
+                if item.get("trigger_action_id")
+            ]
+            latest.update({
+                "observation_count": len(observations),
+                "request_id_samples": list(dict.fromkeys(request_ids[:1] + request_ids[-3:])),
+                "trigger_event_id_samples": list(dict.fromkeys(event_ids[:1] + event_ids[-3:])),
+                "trigger_action_id_samples": list(dict.fromkeys(action_ids[:1] + action_ids[-3:])),
+            })
+        compacted.append(latest)
+    return sorted(
+        compacted,
+        key=lambda item: _request_order_value(item)
+        if _request_order_value(item) is not None else -1,
+    )
+
+
 def _model_visible_request_facts(
     request_facts: list[dict[str, Any]], *, max_items: int = 40,
 ) -> list[dict[str, Any]]:
@@ -10008,6 +10082,7 @@ def _model_visible_request_facts(
     This state projection prioritizes business/causal/materialized facts, then
     fills remaining slots from the newest observations.
     """
+    request_facts = _compact_repeated_endpoint_observations(request_facts)
     priority_roles = {"business_get", "business_write", "submit_anchor", "read_option"}
     priority = [
         item for item in request_facts
@@ -10034,6 +10109,9 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     from dano.execution.page.recording_field_identity import canonical_wire_path
 
     request_facts = _request_fact_items(spec)
+    option_sources = _compact_repeated_endpoint_observations(
+        copy.deepcopy(spec.request_facts.option_sources or []),
+    )
     return {
         "protocol": "dano.recording-semantic-facts.v1",
         "tenant": spec.tenant,
@@ -10121,6 +10199,10 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "state": request.get("state"),
                 "materialized_step_id": request.get("materialized_step_id"),
                 "used_by_capabilities": list(request.get("used_by_capabilities") or []),
+                "observation_count": request.get("observation_count"),
+                "request_id_samples": list(request.get("request_id_samples") or []),
+                "trigger_event_id_samples": list(request.get("trigger_event_id_samples") or []),
+                "trigger_action_id_samples": list(request.get("trigger_action_id_samples") or []),
                 "response_schema": compact_model_payload(
                     request.get("response_schema") or {},
                     max_depth=6,
@@ -10143,7 +10225,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
         "option_source_count": len(spec.request_facts.option_sources or []),
         "option_sources": _client_redact_sensitive(
             compact_model_payload(
-                copy.deepcopy((spec.request_facts.option_sources or [])[-80:]),
+                option_sources[-80:],
                 max_depth=7,
                 max_items=80,
                 max_string=800,

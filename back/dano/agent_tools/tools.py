@@ -1057,6 +1057,15 @@ def _recording_facts(spec) -> dict:  # noqa: ANN001
     # fields) remains immutable recording evidence and is compared fail-closed.
     facts.pop("analysis", None)
     facts.pop("usage", None)
+    # field_evidence binding results are likewise server-derived: the sync
+    # pipeline (_rebind_saved_field_evidence) deliberately re-evaluates
+    # unresolved/heuristic DOM-to-wire bindings against authoritative saved
+    # bodies on every apply. After finalize merges the full recorder facts,
+    # that repair pass legitimately rewrites bindings; comparing it here made
+    # every subsequent plan/repair submission fail as a fake fact violation.
+    # Raw captures (requests, page_events, diagnostics, option_sources) stay
+    # guarded below.
+    facts.pop("field_evidence", None)
     # RequestFacts stores analysis and usage separately from captured HTTP evidence.
     # Compare only fields declared by RequestFact so derived or imported extras cannot
     # trigger a false immutable-evidence violation.

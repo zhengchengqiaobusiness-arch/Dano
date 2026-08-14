@@ -197,7 +197,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     pi_start = branch.index("pi_session = await _ensure_recording_pi(fresh=True)")
     assert pi_start > branch.index("_checkpoint_resume()")
     assert 'generation_mode="initial"' not in branch
-    assert "timeout_s=0" in branch
+    assert "timeout_s=None" in branch
     identity_check = branch.index("check_fingerprint=False")
     replay_check = branch.index("if await _replay_costly(msg):")
     fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
@@ -297,11 +297,12 @@ def test_recording_operation_identity_requires_the_full_snapshot(
     assert "截图未分析" in conflict["detail"]
 
 
-def test_recording_pi_plan_has_no_artificial_deadline() -> None:
+def test_recording_pi_plan_uses_the_session_deadline() -> None:
     source = inspect.getsource(gateway.record_ws)
 
     assert "timeout_s=3000" not in source
-    assert "timeout_s=0" in source
+    assert "timeout_s=0" not in source
+    assert "timeout_s=None" in source
 
 
 def test_independent_recording_operations_use_fresh_pi_context() -> None:

@@ -124,7 +124,10 @@ class RecordingPiSession:
         subsystem: str,
         recording_id: str,
         session_root: str | Path | None = None,
-        timeout_s: float = 180.0,
+        # One live-analysis turn covers delta reads plus a full plan
+        # submission; slow model chains legitimately exceed 3 minutes, and a
+        # timed-out turn silently drops that batch's conclusions.
+        timeout_s: float = 360.0,
         resume_history: bool = True,
         on_submission_accepted: Callable[[Any, str], None] | None = None,
     ) -> None:

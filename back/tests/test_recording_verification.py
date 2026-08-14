@@ -779,6 +779,73 @@ async def test_zero_operator_verification_loop_completes_with_executor_evidence(
     assert "skill_docs_generation" not in session.flow_spec.meta
 
 
+@pytest.mark.asyncio
+async def test_passed_write_execution_binds_even_when_the_model_turn_times_out():
+    """The executor result is authoritative: a passed write read-back must not
+    be lost because the Pi turn died before submitting bind_verify_read."""
+    spec = _spec()
+    assertion = {"path": "data.kind", "equals_input": "kind"}
+    write_id = record_verification(
+        kind="write_execute",
+        subject={"write_step_id": "submit", "verify_request_id": "req-verify", "assertion": assertion},
+        status="passed",
+        evidence={"passed": True},
+    )
+    spec.meta = {"verification_log": [get_verification(write_id)]}
+
+    class TimingOutSession(_UnavailableSession):
+        async def prompt(self, *_args, **_kwargs):
+            raise RuntimeError("录制 Pi 操作超时，已取消；未切换到其他模型链路")
+
+    session = TimingOutSession(spec)
+    report = await run_recording_verification(session)
+
+    write_step = next(step for step in session.flow_spec.steps if step.step_id == "submit")
+    assert write_step.fact_check["verified"] is True
+    assert write_step.fact_check["verification_id"] == write_id
+    assert report["verify_coverage"] == 1
+    assert "write_verify" not in {item["target_kind"] for item in report["unverified"]}
+
+
+@pytest.mark.asyncio
+async def test_timed_out_round_with_progress_gets_another_slice():
+    """One slow turn must not abort the phase when executor evidence landed."""
+    spec = _spec()
+    assertion = {"path": "data.kind", "equals_input": "kind"}
+
+    class SlowSession(_UnavailableSession):
+        calls = 0
+
+        async def prompt(self, *_args, **_kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                write_id = record_verification(
+                    kind="write_execute",
+                    subject={
+                        "write_step_id": "submit",
+                        "verify_request_id": "req-verify",
+                        "assertion": assertion,
+                    },
+                    status="passed",
+                    evidence={"passed": True},
+                )
+                self.flow_spec.meta = {
+                    **(self.flow_spec.meta or {}),
+                    "verification_log": [get_verification(write_id)],
+                }
+            raise RuntimeError("录制 Pi 操作超时，已取消；未切换到其他模型链路")
+
+    session = SlowSession(spec)
+    report = await run_recording_verification(session)
+
+    # Round 1 timed out but its executor evidence bound the write, so the loop
+    # ran a second round; round 2 timed out with zero progress and stopped.
+    assert SlowSession.calls == 2
+    assert report["complete"] is True
+    write_step = next(step for step in session.flow_spec.steps if step.step_id == "submit")
+    assert write_step.fact_check["verified"] is True
+
+
 def test_machine_publish_gate_rejects_unfinished_verification_but_has_debug_escape():
     with pytest.raises(ValueError, match="尚未完成"):
         require_verification_complete(_spec())

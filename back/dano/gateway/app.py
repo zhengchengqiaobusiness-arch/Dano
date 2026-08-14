@@ -2464,7 +2464,10 @@ async def record_ws(ws: WebSocket) -> None:
                             f" recording_id={recording_id}"
                             + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
                             + _analysis_screenshot_guidance(analysis_screenshots),
-                            timeout_s=0,
+                            # Use the session's bounded deadline. A missing
+                            # model terminal event must not leave the accepted
+                            # operation running forever.
+                            timeout_s=None,
                         ))
                     delivered_image_count = _verified_pi_image_count(
                         pi_result, len(analysis_screenshots),

@@ -1287,6 +1287,47 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
     assert session.last_review == {"sentinel": "preserve"}
 
 
+@pytest.mark.parametrize("mode", ["plan", "repair"])
+def test_server_side_field_evidence_rebinding_is_not_a_fact_violation(monkeypatch, mode):
+    """sync_flow_spec_models deliberately re-evaluates unresolved DOM bindings
+    against saved bodies; that server-derived rewrite must not reject the
+    submission as if the model had tampered with raw request facts."""
+    session = _bind(monkeypatch, recording_id=f"rec-rebind-{mode}")
+    session.spec.request_facts.field_evidence = [
+        {"evidence_id": "ev-1", "binding_status": "unbound", "wire_path": ""},
+    ]
+
+    async def _rebind(_submission, *, mode, base_flow_version):
+        assert base_flow_version == 1
+        session.spec.request_facts.field_evidence = [
+            {"evidence_id": "ev-1", "binding_status": "bound", "wire_path": "body.reason"},
+        ]
+        session.last_submission_kind = mode
+        return {"flow_version": 2, "op_results": [], "all_applied": True, "must_retry": []}
+
+    session.apply_submission = _rebind
+    params = {
+        "recording_id": f"rec-rebind-{mode}",
+        "base_flow_version": 1,
+    }
+    if mode == "plan":
+        params["plan"] = {
+            "semantic_plan": {
+                "business_understanding": {},
+                "capabilities": [],
+                "unresolved_items": [],
+            },
+            "ops": [],
+        }
+        call = submit_recording_plan
+    else:
+        params["operations"] = []
+        call = submit_recording_repair
+    result = asyncio.run(call(f"run-rebind-{mode}", params))
+    assert result["all_applied"] is True
+    assert session.spec.request_facts.field_evidence[0]["binding_status"] == "bound"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "param_name"),
     [

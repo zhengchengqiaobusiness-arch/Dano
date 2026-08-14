@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any, Awaitable, Callable
 
 from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
@@ -13,7 +14,13 @@ from dano.execution.page.value_tracing import discover_response_key_maps, discov
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 PromptRunner = Callable[[Awaitable[Any]], Awaitable[Any]]
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_FINAL_ANALYSIS_TIMEOUT_S = 180.0
+# One slow-model verify round needs: context reads, a real write with read-back
+# (execute_write_with_verify), and the repair submission. 180s for the whole
+# phase starved the executor before the write tool ever ran, so every publish
+# ended partially verified. The phase budget stays bounded but realistic, and
+# each round gets its own slice so one slow turn cannot consume every retry.
+_FINAL_ANALYSIS_TIMEOUT_S = 900.0
+_VERIFY_ROUND_TIMEOUT_S = 360.0
 _FINAL_ANALYSIS_TIMEOUT_MESSAGE = "录制最终分析超过总时限，剩余待办已标记为 unverified"
 
 
@@ -249,13 +256,16 @@ async def _prompt_before_deadline(
     deadline: float,
     prompt_runner: PromptRunner | None,
 ) -> Any:  # noqa: ANN001
-    """Run one Pi turn inside the single final-analysis deadline."""
+    """Run one Pi turn inside the given deadline.
+
+    The deadline is the round budget; it deliberately overrides the session's
+    default per-command timeout because a verify turn (real write + read-back
+    + submission) legitimately outlasts an ordinary command.
+    """
     remaining = deadline - asyncio.get_running_loop().time()
     if remaining <= 0:
         raise asyncio.TimeoutError(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
-    session_timeout = float(getattr(session, "timeout_s", 0) or 0)
-    turn_timeout = remaining if session_timeout <= 0 else min(session_timeout, remaining)
-    operation = session.prompt(prompt, timeout_s=turn_timeout)
+    operation = session.prompt(prompt, timeout_s=remaining)
     awaited = prompt_runner(operation) if prompt_runner is not None else operation
     return await asyncio.wait_for(awaited, timeout=remaining)
 
@@ -315,6 +325,55 @@ def finalize_verification_state(
         },
     }
     return _auto_confirm_ready_capabilities(current), final_report
+
+
+def _consume_write_executor_evidence(spec):  # noqa: ANN001, ANN202
+    """Bind passed write read-back executions even when the model turn died.
+
+    ``execute_write_with_verify`` is the authoritative executor: once its
+    verification record passed, the conclusion must not be lost because the Pi
+    turn timed out before submitting ``bind_verify_read``. The op below reuses
+    the exact executed subject (step, read request, assertion), so the guarded
+    apply path still validates everything.
+    """
+    from dano.execution.page.flow_spec import apply_flow_edits
+
+    current = spec
+    latest_by_step: dict[str, dict[str, Any]] = {}
+    for record in list((spec.meta or {}).get("verification_log") or []):
+        if not isinstance(record, dict) or record.get("kind") != "write_execute":
+            continue
+        step_id = str((record.get("subject") or {}).get("write_step_id") or "")
+        if step_id:
+            latest_by_step[step_id] = record
+    for step_id, record in latest_by_step.items():
+        if record.get("status") != "passed" or not str(record.get("verification_id") or ""):
+            continue
+        step = next((item for item in current.steps if item.step_id == step_id), None)
+        if step is None:
+            continue
+        fact_check = step.fact_check or {}
+        if fact_check.get("verified") is True and fact_check.get("verification_id"):
+            continue
+        subject = record.get("subject") or {}
+        assertion = subject.get("assertion")
+        read_request_id = str(subject.get("verify_request_id") or "")
+        if not isinstance(assertion, dict) or not assertion or not read_request_id:
+            continue
+        try:
+            current = apply_flow_edits(current, [{
+                "op": "bind_verify_read",
+                "write_step_id": step_id,
+                "read_request_id": read_request_id,
+                "verification_id": str(record.get("verification_id") or ""),
+                "assertion": deepcopy(assertion),
+                "actor": "agent",
+            }])
+        except ValueError:
+            # The guarded op rejects evidence that no longer matches the
+            # current draft; such a write stays pending for the next round.
+            continue
+    return current
 
 
 def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
@@ -380,6 +439,8 @@ def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
             # longer matches the current draft; such a link must stay pending.
             continue
 
+    current = _consume_write_executor_evidence(current)
+
     # Capability membership is compiled from the verified dependency graph,
     # not from the model's proposed request_refs.  Dependency verification can
     # therefore expand the executable closure after the original capability
@@ -407,7 +468,8 @@ async def run_recording_verification(
     """Run bounded agent turns under one deadline, then converge to publishable state."""
     errors: list[str] = []
     rounds = 0
-    deadline = asyncio.get_running_loop().time() + max(0.01, float(timeout_s))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.01, float(timeout_s))
     for round_number in range(1, max(1, min(int(max_rounds), 5)) + 1):
         before_settle = session.current_flow_spec()
         current = _consume_dependency_executor_evidence(before_settle)
@@ -415,6 +477,9 @@ async def run_recording_verification(
             session.bind_flow_spec(current)
         report = verification_report(current)
         if report["complete"]:
+            break
+        if deadline - loop.time() <= 0:
+            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
             break
         rounds = round_number
         await _emit(progress, _progress(
@@ -424,8 +489,9 @@ async def run_recording_verification(
             round_number=round_number,
         ))
         prompt = (
-            "进入录后自主验证。先调用 get_recording_state 和 get_validation_report，逐项处理下面的"
-            " verification_todos。已提议的依赖只用 verify_dependency(link_id) 验证，写步骤用 execute_write_with_verify，"
+            "进入录后自主验证。verification_todos 已完整列在下方 todos 中，直接逐项执行对应工具；"
+            "仅在确实缺少上下文时才读取 get_recording_state 或 get_validation_report。"
+            "已提议的依赖只用 verify_dependency(link_id) 验证，写步骤用 execute_write_with_verify，"
             "枚举待办按 completion_op 处理：attach_enum_options 先用 browser_* 补采并使用工具返回的"
             " verification_id；set_param_enum 必须使用录制状态中已有的 field_evidence 和完整字典 label/value。"
             "最后调用 submit_recording_repair 提交对应操作以及 confirm_dependency、bind_verify_read。"
@@ -437,24 +503,26 @@ async def run_recording_verification(
             "本轮不要提交 mark_unverified；重试耗尽由后端统一处理。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )
+        round_deadline = min(deadline, loop.time() + _VERIFY_ROUND_TIMEOUT_S)
+        timed_out = False
         try:
             await _prompt_before_deadline(
                 session,
                 prompt,
-                deadline=deadline,
+                deadline=round_deadline,
                 prompt_runner=prompt_runner,
             )
         except asyncio.TimeoutError:
-            errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
-            break
+            errors.append(f"第 {round_number} 轮验证超时，已取消本轮")
+            timed_out = True
         except Exception as exc:  # noqa: BLE001 - failures become explicit unverified output
             errors.append(str(exc)[:500])
             if (
                 "no Pi model or credentials" in str(exc)
                 or "DANO_PI_API_KEY" in str(exc)
-                or "超时" in str(exc)
             ):
                 break
+            timed_out = "超时" in str(exc)
         before_settle = session.current_flow_spec()
         settled = _consume_dependency_executor_evidence(before_settle)
         if settled.model_dump(mode="json") != before_settle.model_dump(mode="json"):
@@ -466,6 +534,11 @@ async def run_recording_verification(
             updated,
             round_number=round_number,
         ))
+        # A timed-out round that still moved the todo queue (executor evidence
+        # landed mid-turn) deserves another slice; a timed-out round with zero
+        # progress means the model chain is stuck and retrying only burns time.
+        if timed_out and updated["todos"] == report["todos"]:
+            break
 
     bounded_max_rounds = max(1, min(int(max_rounds), 5))
     current, final_report = finalize_verification_state(

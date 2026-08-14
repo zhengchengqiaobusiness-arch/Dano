@@ -2248,6 +2248,57 @@ def test_recording_state_compacts_large_response_schemas_without_mutating_facts(
     assert spec.request_facts.requests[0].response_schema == before
 
 
+def test_recording_state_collapses_repeated_background_endpoint_observations():
+    spec = _flow()
+    repeated_schema = {
+        "type": "object",
+        "properties": {
+            f"field_{index}": {"type": "string", "description": "x" * 200}
+            for index in range(20)
+        },
+    }
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id=f"req-option-{index}",
+            request_index=index,
+            method="GET",
+            path="/approval/detail",
+            role="read_option",
+            keep=False,
+            response_schema=repeated_schema,
+        )
+        for index in range(50)
+    ]
+    spec.request_facts.option_sources = [
+        {
+            "kind": "api_response",
+            "request_id": f"req-option-{index}",
+            "method": "GET",
+            "path": "/approval/detail",
+            "sequence": index,
+            "query_paths": ["query.processDefinitionId"],
+            "response_schema": repeated_schema,
+        }
+        for index in range(50)
+    ]
+
+    state = recording_agent_state(spec)
+    requests = [
+        item for item in state["facts"]["captured_requests"]
+        if item.get("path") == "/approval/detail"
+    ]
+    sources = [
+        item for item in state["facts"]["option_sources"]
+        if item.get("path") == "/approval/detail"
+    ]
+
+    assert len(requests) == 1
+    assert requests[0]["observation_count"] == 50
+    assert len(sources) == 1
+    assert sources[0]["observation_count"] == 50
+    assert len(json.dumps(state, ensure_ascii=False)) < 80_000
+
+
 def test_recording_state_projects_canonical_transport_qualified_field_paths():
     state = recording_agent_state(_flow())
     params = {
