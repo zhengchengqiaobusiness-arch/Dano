@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_spec import (
     FlowCapability,
     FlowLink,
@@ -229,6 +230,48 @@ def test_finalize_consumes_persisted_passed_dependency_verification():
         and str(item.get("target_kind") or "").startswith("dependency")
         for item in (finalized.meta or {}).get("unverified") or []
     )
+
+
+def test_finalize_recompiles_capability_membership_after_dependency_verification():
+    spec = _spec()
+    plan = {
+        "capabilities": [{
+            "name": "update_item",
+            "title": "更新项目",
+            "kind": "submit",
+            "anchor_step_id": "submit",
+            "request_refs": [
+                {"step_id": "detail", "usage": "preflight"},
+                {"step_id": "submit", "usage": "execute"},
+            ],
+        }],
+    }
+    spec.capabilities = []
+    spec = compile_capabilities(spec, plan).spec
+    spec.meta = {
+        **(spec.meta or {}),
+        "capability_model": {
+            "source": "verified_request_graph",
+            "semantic_plan": plan,
+        },
+    }
+    assert spec.capabilities[0].step_ids == ["submit"]
+    verification_id = _record_dependency_verification(spec)
+    spec.meta["verification_log"] = [get_verification(verification_id)]
+    _clear_verifications_for_tests()
+
+    finalized, _report = finalize_verification_state(
+        spec,
+        rounds=1,
+        max_rounds=3,
+    )
+
+    assert finalized.capabilities[0].step_ids == ["detail", "submit"]
+    assert [
+        (ref.step_id, ref.usage)
+        for ref in finalized.capabilities[0].request_refs
+        if ref.usage in {"preflight", "execute"}
+    ] == [("detail", "preflight"), ("submit", "execute")]
 
 
 def test_finalize_rejects_agent_dependency_with_latest_matching_failed_evidence():

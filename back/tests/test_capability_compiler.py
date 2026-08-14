@@ -12,6 +12,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     SelectBinding,
+    flow_spec_to_api_request,
     orchestrate_flow_capabilities,
 )
 from dano.execution.page import flow_spec as flow_spec_module
@@ -210,6 +211,38 @@ def test_unverified_dependency_is_not_admitted_as_preflight():
 
     assert submit.step_ids == ["approval", "submit"]
     assert "definition" not in {ref.step_id for ref in submit.request_refs}
+
+
+def test_capability_request_builder_ignores_links_outside_compiled_membership():
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="support", method="GET", path="/support"),
+            FlowStep(step_id="query", method="GET", path="/items"),
+        ],
+        links=[FlowLink(
+            link_id="pending-link",
+            source_step_id="support",
+            source_path="data.id",
+            target_step_id="query",
+            target_path="query.id",
+            confirmed=False,
+        )],
+        capabilities=[FlowCapability(
+            name="query_items",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[
+                {"id": "call_1", "type": "call", "step_id": "query"},
+                {"id": "return_final", "type": "return", "from": "query", "path": "response"},
+            ],
+        )],
+    )
+
+    request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert request is not None
+    assert request["path"] == "/items"
 
 
 def test_query_can_be_public_and_the_same_request_can_verify_a_write():

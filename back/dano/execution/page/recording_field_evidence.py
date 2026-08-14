@@ -396,20 +396,28 @@ def bind_field_evidence(
                             ),
                             "request_priority": _request_binding_priority(request),
                         })
-            # A short value such as ``1`` often appears in earlier paging or
-            # option requests. First select the causally aligned business
-            # request, then require uniqueness inside that request. Global
-            # value uniqueness discarded valid form evidence.
-            exact_value_candidates = [item for item in value_candidates if item["causal_match"]]
+            # A short value such as ``1`` often appears in paging/option reads
+            # caused by the control interaction itself and later in the real
+            # business submission. Prefer the business request before using
+            # action timing; otherwise a textarea value can be bound to an
+            # unrelated helper request's pageNo merely because both equal 1.
+            preferred_candidates = value_candidates
+            if preferred_candidates:
+                priority = max(int(item["request_priority"]) for item in preferred_candidates)
+                preferred_candidates = [
+                    item for item in preferred_candidates
+                    if int(item["request_priority"]) == priority
+                ]
+            exact_value_candidates = [
+                item for item in preferred_candidates if item["causal_match"]
+            ]
             aligned = exact_value_candidates
             if not aligned:
                 aligned = [
-                    item for item in value_candidates
+                    item for item in preferred_candidates
                     if item["temporal_match"] and item["has_request_causality"]
                 ]
                 if aligned:
-                    priority = max(int(item["request_priority"]) for item in aligned)
-                    aligned = [item for item in aligned if int(item["request_priority"]) == priority]
                     nearest = min(float(item["time_delta"]) for item in aligned)
                     aligned = [item for item in aligned if float(item["time_delta"]) == nearest]
             if len({(item["request_id"], item["wire_path"]) for item in aligned}) == 1:

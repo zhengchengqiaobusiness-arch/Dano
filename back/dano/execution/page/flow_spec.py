@@ -4544,7 +4544,14 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
         index
         for index, item in enumerate(evidence)
         if isinstance(item, dict)
-        and str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+        and (
+            str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+            # Value-only bindings are deliberately heuristic. Re-evaluate
+            # them against the authoritative saved request bodies so improved
+            # disambiguation can repair an older binding instead of freezing a
+            # textarea value onto an unrelated paging/option request forever.
+            or str(item.get("binding_method") or "").startswith("unique_value_")
+        )
     ]
     if not unresolved_indexes:
         return
@@ -14123,8 +14130,12 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                 ))
 
     for lk in spec.links:
+        # A capability-scoped request may compile only links whose two
+        # endpoints are inside that capability's verified closure.  Including
+        # a half-owned pending link made its outside endpoint look like a
+        # missing step and blocked an otherwise valid ability.
         if active_step_ids is not None and not (
-            lk.source_step_id in active_step_ids or lk.target_step_id in active_step_ids
+            lk.source_step_id in active_step_ids and lk.target_step_id in active_step_ids
         ):
             continue
         source_step = steps_by_id.get(lk.source_step_id)
@@ -15473,7 +15484,7 @@ def flow_spec_to_api_request(
 
     for lk in spec.links:
         if active_step_ids is not None and not (
-            lk.source_step_id in active_step_ids or lk.target_step_id in active_step_ids
+            lk.source_step_id in active_step_ids and lk.target_step_id in active_step_ids
         ):
             continue
         if lk.source_step_id not in step_id_to_index or lk.target_step_id not in step_id_to_index:
@@ -16450,7 +16461,7 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 )
     for lk in spec.links:
         if active_step_ids is not None and not (
-            lk.source_step_id in active_step_ids or lk.target_step_id in active_step_ids
+            lk.source_step_id in active_step_ids and lk.target_step_id in active_step_ids
         ):
             continue
         if not lk.confirmed:

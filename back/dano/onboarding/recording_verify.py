@@ -386,6 +386,20 @@ def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
             # The guarded op rejects stale evidence whose link signature no
             # longer matches the current draft; such a link must stay pending.
             continue
+
+    # Capability membership is compiled from the verified dependency graph,
+    # not from the model's proposed request_refs.  Dependency verification can
+    # therefore expand the executable closure after the original capability
+    # plan was compiled.  Refresh that same stored plan here so verified
+    # preflight steps do not remain orphaned until another planning turn.
+    capability_model = dict((current.meta or {}).get("capability_model") or {})
+    semantic_plan = capability_model.get("semantic_plan")
+    if isinstance(semantic_plan, dict) and semantic_plan.get("capabilities"):
+        from dano.execution.page.capability_compiler import compile_capabilities
+
+        compilation = compile_capabilities(current, semantic_plan)
+        if not compilation.errors:
+            current = compilation.spec
     return current
 
 
