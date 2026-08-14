@@ -21,6 +21,7 @@ from dano.execution.page.flow_spec import (
     _param_exposed_to_caller,
     dry_run_flow_spec,
     flow_spec_to_api_request,
+    prepare_flow_spec_for_publish,
     validate_flow_spec,
 )
 from dano.execution.page.verification_log import find_verification
@@ -359,7 +360,11 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
 
 def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
     """Evaluate and derive the callable subset without mutating the draft."""
-    source = spec.model_copy(deep=True)
+    # All release checks must inspect the exact canonical contract consumed by
+    # request compilation.  Looking at the pre-sync draft here could reject a
+    # field as unconfirmed even though bound recorder evidence had already
+    # normalized that same field for execution.
+    source = prepare_flow_spec_for_publish(spec)
     decisions = tuple(_evaluate_capability(source, cap) for cap in source.capabilities)
     passed_ids = {item.capability_id for item in decisions if item.passed}
     if not passed_ids:

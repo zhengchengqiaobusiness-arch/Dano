@@ -134,6 +134,67 @@ def test_publish_sync_projects_bound_page_required_evidence_to_write_contract():
     assert reason.source["required_state"] == "required"
 
 
+def test_release_evaluates_the_canonical_required_contract(monkeypatch):
+    """Release must inspect the same normalized field state used by execution."""
+    monkeypatch.setattr(
+        "dano.onboarding.recording_release.dry_run_flow_spec",
+        lambda _spec: {"ok": True},
+    )
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="https://example.test/items/create",
+            path="/items/create",
+            body_source='{"reason":"recorded"}',
+            body_template={"reason": "{{reason}}"},
+            sample_inputs={"reason": "recorded"},
+            params=[ParamField(
+                path="body.reason",
+                key="reason",
+                value="recorded",
+                required=False,
+                category="user_param",
+                source_kind="user_input",
+                source={"kind": "user_input", "required_state": "unknown"},
+                evidence=[{
+                    "kind": "page_required",
+                    "source": "recorder_dom",
+                    "request_path": "body.reason",
+                    "binding_status": "bound",
+                }],
+            )],
+            source_meta={"request_id": "req-submit", "role": "business_write"},
+            fact_check={"verified": True, "verification_id": "verify-write"},
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-submit", method="POST", path="/items/create"),
+        ]),
+    )
+    spec = compile_capabilities(spec, {"capabilities": [{
+        "name": "submit_item",
+        "title": "提交项目",
+        "kind": "submit",
+        "anchor_step_id": "submit",
+    }]}).spec
+    # This is the shape observed after live/finalize projections: immutable
+    # bound evidence survives, while the denormalized source cache is stale.
+    spec.steps[0].params[0].required = False
+    spec.steps[0].params[0].source = {
+        **spec.steps[0].params[0].source,
+        "required_state": "unknown",
+    }
+
+    decision = evaluate_recording_release(spec)
+
+    assert decision.status == "ready", decision.to_dict()
+    assert decision.callable_spec is not None
+    assert [cap.name for cap in decision.callable_spec.capabilities] == ["submit_item"]
+    released_reason = decision.callable_spec.steps[0].params[0]
+    assert released_reason.required is True
+    assert released_reason.source["required_state"] == "required"
+
+
 def test_release_keeps_verified_query_callable_and_write_in_draft_only():
     draft = _mixed_spec()
     before = draft.model_dump(mode="json")
