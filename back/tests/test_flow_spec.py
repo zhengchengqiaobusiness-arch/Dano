@@ -412,7 +412,11 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertIn("startDate=2026-07-01", step.url)
         self.assertEqual(by_path["query.pageNo"].category, "user_param")
         self.assertEqual(by_path["query.pageNo"].type, "number")
-        self.assertEqual(by_path["query.pageNo"].source_kind, "user_input")
+        self.assertEqual(by_path["query.pageNo"].source_kind, "page_context")
+        self.assertEqual(by_path["query.pageNo"].source["context_key"], "pageNo")
+        self.assertEqual(by_path["query.pageNo"].source["default_value"], "1")
+        self.assertTrue(by_path["query.pageNo"].source["caller_override"])
+        self.assertEqual(by_path["query.pageNo"].source["required_state"], "optional")
         self.assertTrue(by_path["query.pageNo"].exposed_to_user)
         self.assertFalse(by_path["query.pageNo"].required)
         self.assertNotIn("query.pageNo", {select.path for select in step.selects})
@@ -626,7 +630,9 @@ class ToFlowSpecTest(unittest.TestCase):
         by_path = {p.path: p for p in step.params}
 
         self.assertEqual(by_path["query.pageNo"].category, "user_param")
-        self.assertEqual(by_path["query.pageNo"].source_kind, "user_input")
+        self.assertEqual(by_path["query.pageNo"].source_kind, "page_context")
+        self.assertEqual(by_path["query.pageNo"].source["context_key"], "pageNo")
+        self.assertTrue(by_path["query.pageNo"].source["caller_override"])
         self.assertEqual(by_path["query.pageSize"].category, "user_param")
         self.assertFalse(by_path["query.pageNo"].required)
         self.assertTrue(by_path["query.pageNo"].exposed_to_user)
@@ -2416,7 +2422,10 @@ def test_empty_query_filters_keep_page_control_contract_and_empty_multi_select()
         assert (
             fields[path].key, fields[path].default_value, fields[path].type,
             fields[path].category, fields[path].source_kind, fields[path].required,
-        ) == (path, default, "number", "user_param", "user_input", False)
+        ) == (path, default, "number", "user_param", "page_context", False)
+        assert fields[path].source["context_key"] == path
+        assert fields[path].source["caller_override"] is True
+        assert fields[path].source["required_state"] == "optional"
     status = fields["statuss"]
     assert (status.key, status.type, status.category, status.source_kind) == (
         "审批状态", "list-enum", "user_param", "page_enum",

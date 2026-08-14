@@ -102,12 +102,27 @@ def test_release_exposes_structured_repair_issues() -> None:
     } <= set(submit["issues"][0])
 
 
-@pytest.mark.xfail(strict=True, reason="fact-check fields still contaminate write inputs")
 def test_fact_check_query_fields_do_not_become_write_capability_inputs() -> None:
     decision = evaluate_recording_release(_fact_check_query_leaking_into_write())
     submit = next(item for item in decision.capabilities if item.name == "submit_item")
 
     assert not any("query.pageNo" in reason for reason in submit.reasons)
+
+
+def test_pagination_context_survives_capability_compilation() -> None:
+    spec = _fact_check_query_leaking_into_write()
+    page = next(param for param in spec.steps[0].params if param.path == "query.pageNo")
+
+    assert page.source_kind == "page_context"
+    assert page.category == "user_param"
+    assert page.exposed_to_user is True
+    assert page.editable is True
+    assert page.required is False
+    assert page.source["kind"] == "page_context"
+    assert page.source["context_key"] == "pageNo"
+    assert page.source["default_value"] == 1
+    assert page.source["caller_override"] is True
+    assert page.source["required_state"] == "optional"
 
 
 def test_unconfirmed_write_required_axis_is_an_operator_issue() -> None:

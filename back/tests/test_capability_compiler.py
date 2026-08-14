@@ -27,8 +27,15 @@ def _verified_graph() -> FlowSpec:
             params=[
                 ParamField(
                     path="query.pageNo", key="pageNo", value=1,
-                    category="user_param", source_kind="user_input",
-                    exposed_to_user=True, required=False,
+                    category="user_param", source_kind="page_context",
+                    source={
+                        "kind": "page_context",
+                        "context_key": "pageNo",
+                        "default_value": 1,
+                        "caller_override": True,
+                        "required_state": "optional",
+                    },
+                    exposed_to_user=True, editable=True, required=False,
                 ),
                 ParamField(
                     path="query.type", key="type", value=1,
@@ -200,6 +207,10 @@ def test_compiler_ignores_model_membership_and_builds_verified_graph_roles():
     ]
     assert {field.key for field in submit.inputs} == {"approvers"}
     assert "pageNo" not in {field.key for field in submit.inputs}
+    page = next(field for field in query.inputs if field.key == "pageNo")
+    assert page.source_kind == "page_context"
+    assert page.required is False
+    assert page.source["default_value"] == 1
 
 
 def test_orchestration_keeps_safely_compiled_capabilities_when_one_boundary_is_invalid():

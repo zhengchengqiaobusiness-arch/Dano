@@ -993,6 +993,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.editable = pagination
         if pagination:
             param.required = False
+            required_state = "optional"
             if param.default_value in (None, ""):
                 param.default_value = param.value
 

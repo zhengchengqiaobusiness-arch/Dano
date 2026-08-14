@@ -1024,10 +1024,20 @@ def _param_source_guess(
         }
 
     if _looks_pagination_field(key, path):
+        default_value = field.get("visible_default")
+        if default_value in (None, ""):
+            default_value = field.get("raw_value", field.get("value"))
         return {
             "category": "user_param",
-            "source_kind": "user_input",
-            "source": {"kind": "pagination", "path": path},
+            "source_kind": "page_context",
+            "source": {
+                "kind": "page_context",
+                "context_key": str(field.get("key") or key or path).split(".")[-1].split("[")[0],
+                "path": path,
+                "default_value": default_value,
+                "caller_override": True,
+                "required_state": "optional",
+            },
             "editable": True,
             "exposed_to_user": True,
             "reason": "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖",
@@ -5142,9 +5152,26 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             if not _param_axis_manually_edited(
                 param, "category", "source_kind", "source", "exposed_to_user", "editable",
             ) and not _param_source_agent_classified(param):
+                existing_source = dict(param.source or {})
+                context_key = str(existing_source.get("context_key") or "")
+                if not context_key:
+                    context_key = str(param.key or param.path).split(".")[-1].split("[")[0]
+                default_value = existing_source.get("default_value")
+                if default_value in (None, ""):
+                    default_value = param.default_value
+                if default_value in (None, ""):
+                    default_value = param.value
                 param.category = "user_param"
-                param.source_kind = "user_input"
-                param.source = {"kind": "pagination", "path": param.path}
+                param.source_kind = "page_context"
+                param.source = {
+                    **existing_source,
+                    "kind": "page_context",
+                    "context_key": context_key,
+                    "path": param.path,
+                    "default_value": default_value,
+                    "caller_override": True,
+                    "required_state": "optional",
+                }
                 param.exposed_to_user = True
                 param.editable = True
             if not _param_field_manually_edited(param, "need_human_confirm"):

@@ -391,6 +391,11 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
     issues: list[ReleaseIssue] = []
     steps = {step.step_id: step for step in spec.steps}
     member_ids = set(_member_step_ids(capability))
+    execute_step_ids = {
+        str(ref.step_id)
+        for ref in capability.request_refs
+        if ref.step_id and ref.usage == "execute"
+    }
     compiled_names = set(_api_params(compiled))
     compiled_paths = {
         str(field.get("x-flow-path") or "").removeprefix("body.")
@@ -402,7 +407,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
     }
     is_write = any(
         (steps[step_id].method or "GET").upper() not in _READ_METHODS
-        for step_id in member_ids if step_id in steps
+        for step_id in execute_step_ids if step_id in steps
     )
     for step_id in member_ids:
         step = steps.get(step_id)
@@ -423,7 +428,8 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                 ))
             normalized_path = str(param.path or "").removeprefix("body.")
             if (
-                _param_exposed_to_caller(param)
+                step_id in execute_step_ids
+                and _param_exposed_to_caller(param)
                 and str(param.key or param.path) not in compiled_names
                 and normalized_path not in compiled_paths
             ):
@@ -438,7 +444,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                     evidence_refs=_param_evidence_refs(param),
                     suggested_operations=("reconcile_capability_membership",),
                 ))
-            if is_write and _param_exposed_to_caller(param):
+            if is_write and step_id in execute_step_ids and _param_exposed_to_caller(param):
                 state = str((param.source or {}).get("required_state") or "")
                 if state not in {"required", "optional"}:
                     issues.append(ReleaseIssue(
