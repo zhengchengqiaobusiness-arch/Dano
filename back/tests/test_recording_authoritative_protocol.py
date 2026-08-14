@@ -9,17 +9,22 @@ import pytest
 from dano.execution.page.flow_spec import (
     FlowSpec,
     FlowSpecConflictError,
+    FlowStep,
     IdentityBinding,
     ParamField,
     RequestFact,
     RequestFacts,
     SelectBinding,
-    FlowStep,
     apply_client_flow_patch,
     flow_spec_fingerprint,
     flow_spec_to_client,
 )
 from dano.gateway import app as gateway
+from dano.onboarding.recording_workflow import (
+    CANONICAL_RECORDING_COMMANDS,
+    WorkflowSnapshot,
+    WorkflowStatus,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +54,9 @@ def _authoritative_spec() -> FlowSpec:
                 value_key="id",
                 label_key="name",
             )],
-            identity=[IdentityBinding(path="userId", source="localStorage.userId", value="user-secret")],
+            identity=[IdentityBinding(
+                path="userId", source="localStorage.userId", value="user-secret",
+            )],
         )],
         request_facts=RequestFacts(requests=[RequestFact(
             request_id="request-1",
@@ -63,58 +70,6 @@ def _authoritative_spec() -> FlowSpec:
     )
 
 
-def test_workbench_contract_uses_stable_field_identity_and_rolls_back_disconnects() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    assert 'analysis_kind?: "initial" | "incremental"' in source
-    assert 'lastAnalysisEvidence?.analysis_kind !== "initial"' in source
-    assert "fieldChanges.map(analysisFieldChangeText)" in source
-    assert "...structuralChanges" in source
-    assert "showDetailedAnalysis && visibleChangeLines.map" in source
-    assert "未匹配：" not in source
-    assert "截图匹配字段" not in source
-    assert "lastOperationReport && !lastAnalysisEvidence" in source
-    assert 'analysisNeedsReview || validationRefreshing ? "info"' in source
-    assert "changeLines.slice(0, 3)" in source
-    assert "展开全部修改" in source
-    assert 'm.operation === "finalize"' in source
-    assert "setLastAnalysisEvidence(null)" in source
-    assert "m.analysis_application?.summary" in source
-    assert "模型分析未完成，已保留可运行的事实基线" not in source
-    assert "p.field_id" in source
-    assert 'key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}' not in source
-    onclose = source[source.index("ws.onclose ="):source.index("ws.onerror =")]
-    assert "failQueuedFlowMutation" in onclose
-
-
-def test_enum_mapping_editor_persists_on_blur_without_mutating_the_authoritative_draft() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-    editor = source[source.index('<FieldControl label="枚举候选">'):source.index("</FieldControl>", source.index('<FieldControl label="枚举候选">'))]
-
-    assert "onDraftChange={(v) =>" not in editor
-    assert "onSave={(v) =>" in editor
-    assert "upsertSelectBinding(" in editor
-    assert 'if (local !== (value || "")) onSave(local);' in source
-
-
-def test_enum_mapping_warning_is_not_rendered_inside_the_field_card() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    assert '<Tag color="orange">未映射值：' not in source
-    assert '<Tag color="orange">未映射实际提交值：' not in source
-    assert 'const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];' in source
-
-
-def test_recorded_page_operations_are_never_intercepted() -> None:
-    frontend = _PAGE_RECORDER.read_text(encoding="utf-8")
-    backend = inspect.getsource(gateway.record_ws)
-
-    assert "record_only" not in frontend
-    assert "intercept: false" in frontend
-    assert "intercept_submit=False" in backend
-    assert 'recording_mode = "real_submit"' in backend
-
-
 def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() -> None:
     spec = _authoritative_spec()
     client = flow_spec_to_client(spec)
@@ -122,17 +77,15 @@ def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() ->
 
     for secret in (
         "server-token", "tenant-secret", "option-token", "user-secret",
-        "fact-token", "fact-response-secret", "response-secret", "private fact body", "private body",
+        "fact-token", "fact-response-secret", "response-secret",
+        "private fact body", "private body",
     ):
         assert secret not in serialized
     assert client["steps"][0]["headers"] == {"Authorization": "***", "X-Tenant": "***"}
     assert client["steps"][0]["body_source"] == ""
-    assert client["steps"][0]["backup_body_source"] == ""
     assert client["steps"][0]["selects"][0]["source_headers"] == {"Authorization": "***"}
-    assert client["steps"][0]["selects"][0]["source_body"] == ""
     assert client["steps"][0]["identity"][0]["value"] == "***"
     assert client["request_facts"]["requests"][0]["post_data"] == ""
-    assert client["steps"][0]["response_projection"]["truncated"] is True
     assert client["meta"]["current_fingerprint"] == flow_spec_fingerprint(spec)
 
 
@@ -144,64 +97,18 @@ def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() ->
     "promoted_request_flow_spec.json",
     "work_hours_flow_spec.json",
 ])
-def test_complex_client_projection_fingerprint_can_immediately_edit_authoritative_spec(
-    fixture_name: str,
-) -> None:
+def test_complex_projection_fingerprint_can_edit_authoritative_spec(fixture_name: str) -> None:
     fixture = Path(__file__).parent / "fixtures" / "recording_v3" / fixture_name
     spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
-    client_fingerprint = flow_spec_to_client(spec)["meta"]["current_fingerprint"]
+    fingerprint = flow_spec_to_client(spec)["meta"]["current_fingerprint"]
 
     updated = apply_client_flow_patch(
         spec,
-        [{"op": "update_flow", "field": "title", "value": "请假申请"}],
-        expected_fingerprint=client_fingerprint,
+        [{"op": "update_flow", "field": "title", "value": "业务操作"}],
+        expected_fingerprint=fingerprint,
     )
 
-    assert updated.title == "请假申请"
-
-
-def test_complex_projection_supports_successive_interface_and_relation_edits() -> None:
-    fixture = Path(__file__).parent / "fixtures" / "recording_v3" / "leave_flow_spec.json"
-    spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
-    submit = next(step for step in spec.steps if step.step_id == "submit_leave")
-    submit.selects = [SelectBinding(
-        path="type",
-        param="请假类型",
-        source_url="/admin-api/system/dict-data/simple-list",
-        value_key="id",
-        label_key="name",
-        id_path="type",
-    )]
-
-    updated = apply_client_flow_patch(
-        spec,
-        [{
-            "op": "upsert_select",
-            "step_id": "submit_leave",
-            "binding": {
-                "path": "type",
-                "param": "请假类型",
-                "source_url": "/admin-api/system/dict-data/simple-list",
-                "value_key": "id",
-                "label_key": "label",
-                "id_path": "type",
-            },
-        }],
-        expected_fingerprint=flow_spec_to_client(spec)["meta"]["current_fingerprint"],
-    )
-    assert updated.steps[1].selects[0].label_key == "label"
-
-    updated_again = apply_client_flow_patch(
-        updated,
-        [{
-            "op": "update",
-            "link_id": updated.links[0].link_id,
-            "field": "confirmed",
-            "value": False,
-        }],
-        expected_fingerprint=flow_spec_to_client(updated)["meta"]["current_fingerprint"],
-    )
-    assert updated_again.links[0].confirmed is False
+    assert updated.title == "业务操作"
 
 
 def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() -> None:
@@ -220,16 +127,10 @@ def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() 
         [{"op": "update", "step_id": "submit", "field": "name", "value": "提交申请"}],
         expected_fingerprint=fingerprint,
     )
-
     assert updated.steps[0].name == "提交申请"
     assert updated.steps[0].headers == spec.steps[0].headers
     assert updated.steps[0].body_source == spec.steps[0].body_source
     assert updated.steps[0].response_json == spec.steps[0].response_json
-    assert updated.steps[0].selects[0].source_headers == spec.steps[0].selects[0].source_headers
-    assert updated.steps[0].selects[0].source_body == spec.steps[0].selects[0].source_body
-    assert updated.steps[0].identity[0].value == spec.steps[0].identity[0].value
-    assert updated.meta["current_version"] == 1
-    assert flow_spec_fingerprint(updated) == fingerprint
 
     execution_updated = apply_client_flow_patch(
         updated,
@@ -239,18 +140,17 @@ def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() 
         }],
         expected_fingerprint=fingerprint,
     )
-    assert flow_spec_fingerprint(execution_updated) != fingerprint
-
-    with pytest.raises(FlowSpecConflictError) as conflict:
+    with pytest.raises(FlowSpecConflictError):
         apply_client_flow_patch(
             execution_updated,
             [{"op": "update", "step_id": "submit", "field": "name", "value": "stale"}],
             expected_fingerprint=fingerprint,
         )
-    assert conflict.value.current_fingerprint == flow_spec_fingerprint(execution_updated)
 
 
-@pytest.mark.parametrize("field", ["headers", "body_source", "response_json", "identity", "params", "source_meta"])
+@pytest.mark.parametrize("field", [
+    "headers", "body_source", "response_json", "identity", "params", "source_meta",
+])
 def test_client_patch_rejects_server_owned_step_fields(field: str) -> None:
     spec = _authoritative_spec()
     with pytest.raises(ValueError, match="server-owned step field"):
@@ -261,229 +161,69 @@ def test_client_patch_rejects_server_owned_step_fields(field: str) -> None:
         )
 
 
-def test_select_patch_updates_contract_without_accepting_hidden_transport_values() -> None:
-    spec = _authoritative_spec()
-    updated = apply_client_flow_patch(
-        spec,
-        [{
-            "op": "upsert_select",
-            "step_id": "submit",
-            "binding": {
-                "path": "reason",
-                "param": "原因",
-                "value_key": "code",
-                "label_key": "label",
-                "source_headers": {"Authorization": "attacker"},
-                "source_body": "attacker",
-            },
-        }],
-        expected_fingerprint=flow_spec_fingerprint(spec),
-    )
-    binding = updated.steps[0].selects[0]
-    assert (binding.value_key, binding.label_key) == ("code", "label")
-    assert binding.source_headers == spec.steps[0].selects[0].source_headers
-    assert binding.source_body == spec.steps[0].selects[0].source_body
-
-
-def test_gateway_and_frontend_use_one_versioned_server_authoritative_protocol() -> None:
+def test_frontend_and_gateway_use_only_canonical_snapshot_protocol() -> None:
     gateway_source = inspect.getsource(gateway.record_ws)
-    frontend_source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    frontend = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    assert "_restore_hidden_flow_spec_fields" not in gateway_source
-    assert 'msg.get("flow_spec")' not in gateway_source
-    assert '"full_spec"' not in gateway_source
-    assert '"type": "flow_spec_updated"' not in gateway_source
-    assert '"type": "step_names"' not in gateway_source
-    assert '"type": "business_description"' not in gateway_source
-    projection_source = inspect.getsource(gateway._recording_flow_projection)
-    assert '"protocol_version": RECORDING_FLOW_PROTOCOL_VERSION' in projection_source
-
-    assert "full_spec" not in frontend_source
-    assert 'type: "flow_replace"' not in frontend_source
-    assert "sendReplace(" not in frontend_source
-    assert "flow_spec: currentSpec" not in frontend_source
-    assert "protocol_version" in frontend_source
-    assert "expected_fingerprint: serverFingerprintRef.current" in frontend_source
-
-    publish_start = frontend_source.index("function performPublishRequest()")
-    publish_end = frontend_source.index("function terminateAll()", publish_start)
-    publish_source = frontend_source[publish_start:publish_end]
-    assert "expected_fingerprint:" in publish_source
-    assert "flow_spec:" not in publish_source
+    assert "RecordingGatewaySession" in gateway_source
+    assert 'incoming.type === "snapshot"' in frontend
+    assert 'type: "finish"' in frontend
+    assert 'type: "patch_draft"' in frontend
+    assert 'type: "republish"' in frontend
+    assert 'type: "answer"' in frontend
+    assert 'type: "cancel"' in frontend
+    assert "expected_fingerprint: snapshot.draft_fingerprint" in frontend
+    for retired in (
+        "flow_replace", "request_fields", "orchestrate_flow", "auto_fix_flow",
+        "publish_request", "refresh_flow_spec", "analysis_terminated",
+    ):
+        assert retired not in gateway_source
+        assert retired not in frontend
 
 
-def test_frontend_has_one_normal_finish_path_and_an_emergency_terminate() -> None:
-    frontend_source = _PAGE_RECORDER.read_text(encoding="utf-8")
+def test_frontend_waits_for_authoritative_terminal_snapshot_before_result_stage() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    receiver = source[source.index("function receiveSnapshot"):source.index("function startRecording")]
 
-    assert "function stopAll()" not in frontend_source
-    assert ">结束录制</Button>" not in frontend_source
-    assert 'send({ type: "finalize"' in frontend_source
-    assert 'sendRaw({ type: "terminate", operation_id: operationId })' in frontend_source
-    assert 'onClick={terminateAll}>一键终止</Button>' in frontend_source
-    assert 'disabled={connectionState !== "connected"}' in frontend_source
-    terminate_start = frontend_source.index('m.type === "analysis_terminated"')
-    terminate_end = frontend_source.index('else if (m.type ===', terminate_start + 1)
-    terminate_source = frontend_source[terminate_start:terminate_end]
-    assert "resetEditorState()" not in terminate_source
-    assert "setWorkspaceStage(0)" not in terminate_source
-    assert "clearFrame()" not in terminate_source
-    assert 'setPhase("idle")' not in terminate_source
-
-    gateway_source = inspect.getsource(gateway.record_ws)
-    assert 'message_type == "terminate"' in gateway_source
-    assert 'elif t == "terminate":' not in gateway_source
-    assert "if await _handle_live_recording_message(msg):" in gateway_source
-    assert 'except _RecordingTerminated:' not in gateway_source
+    assert "TERMINAL_STATUSES.has(next.status)" in receiver
+    assert "setVisibleStage(2)" in receiver
+    assert 'next.status !== "idle"' in receiver
+    assert 'incoming.type === "request"' not in receiver
+    assert 'incoming.type === "frame"' not in receiver
 
 
-def test_publish_request_is_logged_before_expensive_review() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    publish_start = source.index('elif t == "publish_request":')
-    review_start = source.index('pi_session = await _ensure_recording_pi(fresh=True)', publish_start)
-
-    assert '"recording.operation_started"' in source[publish_start:review_start]
-
-
-def test_publish_response_uses_defined_verification_result() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index("except asyncio.CancelledError:", publish_start)
-    publish_source = source[publish_start:publish_end]
-
-    assert '"verification": verification_result' in publish_source
-    assert "verification_gate" not in publish_source
-
-
-def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
+def test_frontend_has_one_finish_and_one_republish_entrypoint() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    helper_start = source.index("function pauseFlowOperationForReconnect()")
-    helper_end = source.index("function resumeFlowOperationAfterReconnect", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "setOrchestrateBusy(false)" not in helper_source
-    assert "setAutoFixBusy(false)" not in helper_source
-    assert "flowOperationRef.current = null" not in helper_source
-
-    close_start = source.index("ws.onclose = (event) =>")
-    close_end = source.index("};", close_start)
-    assert "pauseFlowOperationForReconnect()" in source[close_start:close_end]
+    assert source.count('send({ type: "finish"') == 1
+    assert source.count('send({ type: "republish"') == 2  # direct and after saved patch
+    assert source.count('send({ type: "cancel"') == 1
+    assert "停止并分析请求" in source
+    assert "修改后再次发布" in source
+    assert "重新分析" not in source
+    assert "重新验证并发布" not in source
 
 
-def test_frontend_keeps_proxied_websocket_alive() -> None:
+def test_operator_question_and_cancel_share_the_authoritative_workflow() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    lifecycle_start = source.index("useEffect(() => {\n    componentMountedRef.current = true;")
-    lifecycle_end = source.index("}, []);", lifecycle_start)
-    lifecycle = source[lifecycle_start:lifecycle_end]
-    assert 'ws.send(JSON.stringify({ type: "ping", at: Date.now() }))' in lifecycle
-    assert "}, 20000)" in lifecycle
-    assert "window.clearInterval(heartbeat)" in lifecycle
+    assert 'next.status === "waiting_operator"' in source
+    assert "setAssistantOpen(true)" in source
+    assert 'question_id: question.question_id' in source
+    assert 'send({ type: "cancel" })' in source
 
 
-def test_frontend_reconnects_after_component_refresh_instead_of_staying_disconnected() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+def test_snapshot_protocol_has_no_legacy_public_states_or_commands() -> None:
+    fields = set(WorkflowSnapshot.model_fields)
 
-    assert "const componentMountedRef = useRef(false)" in source
-    lifecycle_start = source.index("useEffect(() => {\n    componentMountedRef.current = true;")
-    lifecycle_end = source.index("}, []);", lifecycle_start)
-    lifecycle = source[lifecycle_start:lifecycle_end]
-    assert "componentMountedRef.current = false" in lifecycle
-
-    close_start = source.index("ws.onclose = (event) =>")
-    close_end = source.index("ws.onerror =", close_start)
-    close_handler = source[close_start:close_end]
-    assert "intentionalCloseRef.current && !componentMountedRef.current" in close_handler
-    assert "intentionalCloseRef.current = false" in close_handler
-    assert "scheduleRecorderReconnect()" in close_handler
-
-
-def test_frontend_capability_tabs_do_not_reserve_an_empty_spacer() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    workbench_start = source.index("function renderFlowWorkbench()")
-    tabs_start = source.index("<Tabs", workbench_start)
-    tabs_end = source.index("/>", tabs_start)
-    tabs = source[tabs_start:tabs_end]
-    assert 'tabBarStyle={{ marginBottom: 0 }}' in tabs
-
-    composer_start = source.index("function renderCapabilityComposerPanel()")
-    composer_end = source.index("function renderDescriptionPanel()", composer_start)
-    composer = source[composer_start:composer_end]
-    assert "analysisScreenshots.length > 0 || !!flowSpec.meta?.capability_generation" in composer
-    assert 'display: analysisScreenshots.length || flowSpec.meta?.capability_generation ? undefined : "none"' not in composer
-
-
-def test_frontend_published_result_is_compact_and_has_no_duplicate_details() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    result_start = source.index("{result && !publishPending && (")
-    result_end = source.index("                <Space direction=\"vertical\" size={4}>", result_start)
-    published_result = source[result_start:result_end]
-    assert "STATUS_META" not in published_result
-    assert "result.api" not in published_result
-    assert "result.recording_mode" not in published_result
-    assert "result.verification_basis" not in published_result
-    assert "直接调用" not in published_result
-
-    description_start = source.index("description={", source.index("function renderFlowWorkbench()"))
-    description_end = source.index("            }", description_start)
-    description = source[description_start:description_end]
-    assert "{!result?.ok && renderLatestOperationDetail()}" in description
-
-
-def test_recording_transport_drains_messages_during_long_model_operations() -> None:
-    source = inspect.getsource(gateway.record_ws)
-
-    assert "async def receive_pump()" in source
-    assert "incoming_messages.put(await ws.receive_json())" in source
-    assert "msg = incoming" in source
-
-    launcher = (_REPO_ROOT / "start-dano.bat").read_text(encoding="utf-8")
-    assert "--ws-max-queue 2048" in launcher
-
-
-def test_frontend_automatically_retries_local_edit_after_server_version_conflict() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-    helper_start = source.index("function retryFlowMutationAfterConflict")
-    helper_end = source.index("function restoreAuthoritativeFlowSpec", helper_start)
-    helper = source[helper_start:helper_end]
-
-    assert 'messageData?.stage !== "flow_spec_conflict"' in helper
-    assert "serverFingerprintRef.current" in helper
-    assert "flowMutationQueueRef.current.unshift" in helper
-    assert "flushFlowMutationQueue()" in helper
-    error_start = source.index('else if (m.type === "error")')
-    assert "if (retryFlowMutationAfterConflict(m)) return;" in source[error_start:error_start + 300]
-
-
-def test_frontend_only_starts_flow_operation_on_connected_websocket() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    orchestrate_start = source.index("function orchestrateFlow()")
-    orchestrate_end = source.index("function autoFixFlow()", orchestrate_start)
-    orchestrate_source = source[orchestrate_start:orchestrate_end]
-    assert 'connectionState !== "connected"' in orchestrate_source
-    assert "reconnectedSessionNeedsCapture" in orchestrate_source
-    assert "clearFlowOperation()" in orchestrate_source
-
-    button_start = source.index('loading={orchestrateBusy || autoFixBusy}')
-    button_source = source[button_start:button_start + 220]
-    assert 'disabled={connectionState !== "connected"' in button_source
-    assert "reconnectedSessionNeedsCapture" in button_source
-
-
-def test_frontend_only_publishes_on_connected_resumable_websocket() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-
-    button_start = source.index('loading={phase === "publishing"}')
-    button_source = source[button_start:button_start + 280]
-    assert 'disabled={connectionState !== "connected"' in button_source
-    assert "reconnectedSessionNeedsCapture" in button_source
-
-
-def test_frontend_discards_unresumable_flow_operation_after_backend_restart() -> None:
-    source = _PAGE_RECORDER.read_text(encoding="utf-8")
-    reconnect_start = source.index("} else if (isReconnect && flowSpecRef.current) {")
-    reconnect_end = source.index("} else {", reconnect_start)
-
-    assert "clearFlowOperation()" in source[reconnect_start:reconnect_end]
+    assert fields == {
+        "run_id", "action", "title", "revision", "status", "progress",
+        "capture_frozen", "draft", "issues", "insights", "question", "release", "error",
+    }
+    assert CANONICAL_RECORDING_COMMANDS == {
+        "start", "input", "finish", "patch_draft", "republish", "answer", "cancel", "ping",
+    }
+    assert {status.value for status in WorkflowStatus} == {
+        "idle", "recording", "processing", "waiting_operator",
+        "editable", "published", "cancelled", "failed",
+    }

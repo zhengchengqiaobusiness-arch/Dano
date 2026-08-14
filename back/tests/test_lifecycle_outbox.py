@@ -114,12 +114,13 @@ def test_pg_migration_defines_durable_idempotent_outbox() -> None:
 
 
 def test_recording_publish_and_client_expose_lifecycle_pending_state() -> None:
-    gateway_source = inspect.getsource(gateway.record_ws)
+    gateway_source = inspect.getsource(gateway._publish_canonical_recording)
     frontend_source = (
         REPO_ROOT / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
     ).read_text(encoding="utf-8")
 
     assert "_lifecycle_reconciler.register_or_defer" in gateway_source
-    assert "rep = {**rep, **lifecycle_result}" in gateway_source
-    assert "result.lifecycle_pending" in frontend_source
+    assert '"lifecycle_pending"' not in gateway_source
+    assert "**lifecycle" in gateway_source
+    assert "snapshot?.release?.lifecycle_pending" in frontend_source
     assert "资产已发布，生命周期登记待补偿" in frontend_source

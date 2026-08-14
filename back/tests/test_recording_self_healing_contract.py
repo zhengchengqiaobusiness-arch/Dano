@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,6 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
 )
-from dano.gateway import app as gateway
 from dano.onboarding.recording_release import evaluate_recording_release
 from dano.onboarding.recording_verify import run_recording_verification, verification_report
 
@@ -175,25 +173,8 @@ async def test_verification_stops_after_three_identical_no_progress_attempts() -
     assert session.flow_spec.meta.get("unverified") in (None, [])
 
 
-def test_terminate_protocol_preserves_recording_workspace() -> None:
-    source = inspect.getsource(gateway.record_ws)
-
-    assert '"type": "analysis_terminated"' in source
-    assert 'raise _RecordingTerminated' not in source
-    assert 'resume_state["analysis_generation"]' in source
-    assert "pending_operator_question" in source
 
 
-def test_frontend_termination_preserves_draft_stage_and_canvas() -> None:
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
-    ).read_text(encoding="utf-8")
-    handler = source[source.index('m.type === "analysis_terminated"'):]
-    handler = handler[:handler.index('else if (m.type ===', 1)]
-
-    for forbidden in ("resetEditorState()", "setWorkspaceStage(0)", "clearFrame()", 'setPhase("idle")'):
-        assert forbidden not in handler
 
 
 @pytest.mark.asyncio
@@ -232,50 +213,10 @@ async def test_verification_termination_stops_without_marking_the_draft_unverifi
     assert session.flow_spec.meta.get("unverified") in (None, [])
 
 
-def test_operator_timeout_is_a_resumable_waiting_state() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    ask = source[source.index("async def _ask_operator"):source.index("async def _run_live_analysis")]
-    frontend = (
-        Path(__file__).resolve().parents[2]
-        / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
-    ).read_text(encoding="utf-8")
-    runtime_prompt = (
-        Path(__file__).resolve().parents[2]
-        / "back" / "agent" / "run_recording_pi.mjs"
-    ).read_text(encoding="utf-8")
-
-    assert '"status": "waiting_for_operator"' in ask
-    assert "pending_operator_question" in ask
-    assert "asyncio.wait({future}, timeout=60)" in ask
-    assert 'message.get("issue_id")' in source
-    assert "issue_id: String(m.issue_id" in frontend
-    assert "issue_id: question.issue_id" in frontend
-    assert "按最佳假设继续" not in runtime_prompt
 
 
-def test_operator_answer_resumes_the_exact_waiting_operation() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    resolver = source[source.index("def _resolve_agent_answer"):source.index("async def _ask_operator")]
-
-    assert 'question_id != str(pending.get("question_id") or "")' in resolver
-    assert 'issue_id != str(pending.get("issue_id") or "")' in resolver
-    assert 'resumed = dict(resume_message)' in resolver
-    assert 'resumed["operator_resume"] = True' in resolver
-    assert "deferred_messages.insert(0, resumed)" in resolver
 
 
-def test_release_feedback_reenters_repair_then_retries_the_same_publish_request() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index("except asyncio.CancelledError:", publish_start)
-    publish = source[publish_start:publish_end]
-
-    assert 'item.resolver in {"machine_repair", "collect_evidence", "operator"}' in publish
-    assert 'pending_flow_spec.meta["release_feedback_issues"]' in publish
-    assert "repair_report = await _verify_finalized_recording(" in publish
-    assert 'if repair_report.get("all_verified"):' in publish
-    assert "deferred_messages.insert(0, {" in publish
-    assert "**msg," in publish
 
 
 def test_runtime_review_prompt_requires_structured_self_healing_issues() -> None:
@@ -288,36 +229,3 @@ def test_runtime_review_prompt_requires_structured_self_healing_issues() -> None
     assert "issues" in review_prompt
     assert "final_review_rejected" in review_prompt
     assert "拒绝时" in review_prompt and "必须" in review_prompt
-
-
-def test_one_termination_generation_covers_every_recording_analysis_path() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    terminate = source[
-        source.index("async def _terminate_analysis"):
-        source.index("async def _handle_live_recording_message")
-    ]
-
-    assert "analysis_generation += 1" in terminate
-    assert "task.cancel()" in terminate
-    assert "future.cancel()" in terminate
-    assert "recording_pi.cancel_active_prompt()" in terminate
-    assert 'queued.get("operation_id")' in terminate
-    assert '"auto-plan-", "auto-repair-", "auto-publish-"' in terminate
-    assert "prompt_runner=run_verification_prompt" in source
-    assert source.count("pi_session.prompt(") == source.count("_responsive_prompt(pi_session.prompt(")
-    assert "if submission_generation != analysis_generation:" in source
-    assert '"recording.stale_submission_discarded"' in source
-
-
-def test_specialized_pi_mutations_use_only_plan_or_repair_entrypoints() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    frontend = (
-        Path(__file__).resolve().parents[2]
-        / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
-    ).read_text(encoding="utf-8")
-
-    assert 'elif t == "step_naming":' not in source
-    assert 'elif t == "business_description":' not in source
-    assert 'type: "step_naming"' not in frontend
-    assert 'type: "business_description"' not in frontend
-    assert 'onClick={orchestrateFlow}' in frontend

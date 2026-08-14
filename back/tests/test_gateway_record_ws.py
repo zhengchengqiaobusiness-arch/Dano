@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import inspect
 import re
 import sys
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from fastapi import WebSocketDisconnect
 
-from dano.execution.page.flow_spec import (
-    FlowCapability,
-    FlowSpec,
-    FlowStep,
-    ParamField,
-)
 from dano.gateway import app as gateway
-from dano.onboarding.recording_release import ReleaseDecision
+from dano.onboarding.recording_workflow import CANONICAL_RECORDING_COMMANDS
 
 
 def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch) -> None:
@@ -26,10 +20,10 @@ def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_recording_auto_export_only_writes_the_new_skill(monkeypatch, tmp_path) -> None:
+async def test_recording_auto_export_only_writes_the_current_skill(monkeypatch, tmp_path) -> None:
     import dano.export.agent_skills as exports
 
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
 
     async def write_exports(tenant, out_dir, **kwargs):  # noqa: ANN001
         calls.append({"tenant": tenant, "out_dir": out_dir, **kwargs})
@@ -53,1563 +47,151 @@ async def test_recording_auto_export_only_writes_the_new_skill(monkeypatch, tmp_
     }]
 
 
-def test_publish_failure_report_exposes_machine_gate_reasons() -> None:
-    decision = ReleaseDecision(
-        status="verification_incomplete",
-        callable_spec=None,
-        capabilities=(),
-        blocking_reasons=(
-            "查询订单: dry run 未通过",
-            "提交订单: 缺少写后回读验证",
-        ),
-    )
+def test_recording_action_is_safe_and_process_unique() -> None:
+    values = {gateway._new_recording_action() for _ in range(100)}
 
-    report = gateway._recording_release_failure_report(decision)
-
-    assert report["reason"] == "查询订单: dry run 未通过"
-    assert report["clarifications"] == list(decision.blocking_reasons)
-    assert report["release_policy"]["blocking_reasons"] == list(
-        decision.blocking_reasons
-    )
-
-
-def test_publish_report_names_the_complete_released_capability_plan() -> None:
-    decision = ReleaseDecision(
-        status="ready",
-        callable_spec=FlowSpec(capabilities=[
-            FlowCapability(name="query_items"),
-            FlowCapability(name="submit_item"),
-        ]),
-        capabilities=(
-            SimpleNamespace(name="query_items", passed=True),
-            SimpleNamespace(name="submit_item", passed=True),
-        ),
-        blocking_reasons=(),
-    )
-
-    report = gateway._recording_release_report(decision)
-
-    assert report == {
-        "status": "ready",
-        "released_capabilities": ["query_items", "submit_item"],
-        "draft_only_capabilities": [],
-        "blocking_reasons": [],
-    }
-
-
-def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
-    raw = b"\x89PNG\r\n\x1a\n" + b"screenshot-content"
-    screenshots = gateway._normalize_analysis_screenshots([{
-        "name": "form-screen.png",
-        "mime_type": "image/png",
-        "data": base64.b64encode(raw).decode("ascii"),
-    }])
-
-    assert screenshots == [{
-        "name": "form-screen.png",
-        "type": "image",
-        "data": base64.b64encode(raw).decode("ascii"),
-        "mimeType": "image/png",
-        "byte_size": len(raw),
-    }]
-    assert gateway._pi_analysis_images(screenshots) == [{
-        "type": "image",
-        "data": base64.b64encode(raw).decode("ascii"),
-        "mimeType": "image/png",
-    }]
-    assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
-    assert "strong references, not an admission gate" in gateway._analysis_screenshot_guidance(screenshots)
-    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
-    assert "set_param_type" in protocol
-    assert "step_id" in protocol and "wire_path" in protocol
-    assert "field_semantics" in protocol and "must not contain" in protocol
-    assert "capability_relations" in protocol and "must not contain" in protocol
-    assert "matching recorded field evidence" in protocol
-    assert "Never submit flow_spec" in protocol
-
-
-
-def test_pi_image_delivery_count_is_reported_without_blocking_the_plan() -> None:
-    assert gateway._verified_pi_image_count({"image_count": 2}, 2) == 2
-    assert gateway._verified_pi_image_count({}, 0) == 0
-    assert gateway._verified_pi_image_count({"image_count": 1}, 2) == 1
-
-
-def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
-    jpeg = base64.b64encode(b"\xff\xd8\xffcontent").decode("ascii")
-    with pytest.raises(ValueError, match="does not match"):
-        gateway._normalize_analysis_screenshots([{
-            "mime_type": "image/png", "data": jpeg,
-        }])
-
-    with pytest.raises(ValueError, match="at most 4"):
-        gateway._normalize_analysis_screenshots([
-            {"mime_type": "image/jpeg", "data": jpeg} for _ in range(5)
-        ])
-
-
-def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
-    assert gateway._normalize_analysis_screenshots(None) == []
-    assert gateway._analysis_screenshot_guidance([]) == ""
-    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=False)
-    assert "screenshot-derived" not in protocol
-    for axis in ("path", "name", "default", "type", "category", "source", "required"):
-        assert axis in protocol
-    assert "typed plan.ops" in protocol
-    assert "Do not cite screenshot" in protocol
-    assert "recorded default stay immutable" in protocol
-
-
-def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    branch_start = source.index('elif t == "orchestrate_flow":')
-    branch_end = source.index('elif t == "auto_fix_flow":', branch_start)
-    branch = source[branch_start:branch_end]
-
-    assert '"recording.operation_started"' in branch
-    assert '"recording.operation_completed"' in branch
-    assert '"recording.operation_failed"' in branch
-    disconnect_guard = branch.index("except WebSocketDisconnect:")
-    failure_handler = branch.index("except Exception as e:")
-    assert disconnect_guard < failure_handler
-    assert "raise" in branch[disconnect_guard:failure_handler]
-    assert "_remember_costly(msg, error_response)" in branch
-    assert '"operation_id": operation_id' in branch
-    assert '"status": "rejected"' in branch
-    assert "原配置保持不变" in branch
-    assert "pi_session.prompt" in branch
-    assert "if not before_operation.capabilities:" not in branch
-    assert "submission={\"ops\": []}" not in branch
-    assert "needs_pi =" not in branch
-    pi_start = branch.index("pi_session = await _ensure_recording_pi(fresh=True)")
-    assert pi_start > branch.index("_checkpoint_resume()")
-    assert 'generation_mode="initial"' not in branch
-    assert "timeout_s=None" in branch
-    identity_check = branch.index("check_fingerprint=False")
-    replay_check = branch.index("if await _replay_costly(msg):")
-    fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
-    assert identity_check < replay_check < fingerprint_check
-    assert "pending_flow_spec = pending_flow_spec or before_operation" in branch
-    assert '"operation_warning": str(e)' in branch
-    assert '"type": "flow_spec"' in branch
-    fallback = branch[branch.index("pending_flow_spec = pending_flow_spec or before_operation"):]
-    assert fallback.index("except WebSocketDisconnect:") < fallback.index("except Exception as fallback_error:")
-
-
-def test_auto_fix_flow_checks_identity_around_costly_replay() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    branch_start = source.index('elif t == "auto_fix_flow":')
-    branch_end = source.index('elif t == "console_log_upload":', branch_start)
-    branch = source[branch_start:branch_end]
-
-    identity_check = branch.index("check_fingerprint=False")
-    replay_check = branch.index("if await _replay_costly(msg):")
-    fingerprint_check = branch.index("current_flow_spec=pending_flow_spec")
-    assert identity_check < replay_check < fingerprint_check
-    assert '"operation": "repair"' in branch
-    assert '"operation_id": operation_id' in branch
-    assert "_verify_finalized_recording(" in branch
-    assert "pi_session.prompt(" not in branch
-
-
-def test_recording_operation_identity_rejects_other_action_or_recording() -> None:
-    by_action = gateway._recording_operation_identity_conflict(
-        {"action": "action_old", "recording_id": "recording_current"},
-        session_action="action_current",
-        recording_id="recording_current",
-        check_fingerprint=False,
-    )
-    by_recording = gateway._recording_operation_identity_conflict(
-        {"action": "action_current", "recording_id": "recording_old"},
-        session_action="action_current",
-        recording_id="recording_current",
-        check_fingerprint=False,
-    )
-
-    assert by_action and by_action["stage"] == "operation_identity"
-    assert by_recording and by_recording["stage"] == "operation_identity"
-
-
-def test_recording_operation_identity_rejects_stale_flow_but_accepts_current() -> None:
-    from dano.execution.page.flow_spec import flow_spec_fingerprint
-
-    spec = FlowSpec(steps=[FlowStep(step_id="submit", method="POST", path="/submit")])
-    current = flow_spec_fingerprint(spec)
-    common = {
-        "action": "action_current",
-        "recording_id": "recording_current",
-    }
-
-    conflict = gateway._recording_operation_identity_conflict(
-        {**common, "expected_fingerprint": "stale"},
-        session_action="action_current",
-        recording_id="recording_current",
-        current_flow_spec=spec,
-    )
-    accepted = gateway._recording_operation_identity_conflict(
-        {**common, "expected_fingerprint": current},
-        session_action="action_current",
-        recording_id="recording_current",
-        current_flow_spec=spec,
-    )
-
-    assert conflict and conflict["stage"] == "flow_spec_conflict"
-    assert accepted is None
-
-
-@pytest.mark.parametrize(
-    ("message", "check_fingerprint"),
-    [
-        ({"recording_id": "recording_current"}, False),
-        ({"action": "action_current"}, False),
-        ({
-            "action": "action_current",
-            "recording_id": "recording_current",
-        }, True),
-    ],
-)
-def test_recording_operation_identity_requires_the_full_snapshot(
-    message: dict,
-    check_fingerprint: bool,
-) -> None:
-    spec = FlowSpec(steps=[FlowStep(step_id="submit", method="POST", path="/submit")])
-
-    conflict = gateway._recording_operation_identity_conflict(
-        message,
-        session_action="action_current",
-        recording_id="recording_current",
-        current_flow_spec=spec,
-        check_fingerprint=check_fingerprint,
-    )
-
-    assert conflict is not None
-    assert "截图未分析" in conflict["detail"]
-
-
-def test_recording_pi_plan_uses_the_session_deadline() -> None:
-    source = inspect.getsource(gateway.record_ws)
-
-    assert "timeout_s=3000" not in source
-    assert "timeout_s=0" not in source
-    assert "timeout_s=None" in source
-
-
-def test_independent_recording_operations_use_fresh_pi_context() -> None:
-    source = inspect.getsource(gateway.record_ws)
-
-    assert "async def _ensure_recording_pi(*, fresh: bool = False):" in source
-    # Only the canonical semantic plan and final release review start a fresh
-    # context.  Naming, description and auto-fix no longer own Pi branches.
-    assert source.count("_ensure_recording_pi(fresh=True)") == 2
-    assert "resume_history=bool(resumed_flow_spec is not None and not fresh)" in source
-
-
-def test_publish_review_failure_explains_cause_and_retry() -> None:
-    report = gateway._recording_publish_review_failure(
-        RuntimeError("Pi 未通过 submit_recording_review 提交发布审核"),
-    )
-
-    assert report["stage"] == "recording_pi_review"
-    assert "结构化发布审核" in report["reason"]
-    assert any("模型响应流" in item for item in report["clarifications"])
-    assert any("重新点击“发布当前流程”" in item for item in report["clarifications"])
-
-
-@pytest.mark.parametrize(
-    ("changed", "accepted", "expected_status"),
-    [
-        (True, True, "applied"),
-        (False, True, "no_change"),
-        (True, False, "applied"),
-        (False, False, "rejected"),
-    ],
-)
-def test_analysis_application_report_is_persistable_and_explicit(
-    changed: bool,
-    accepted: bool,
-    expected_status: str,
-) -> None:
-    before = SimpleNamespace(
-        capabilities=[object()],
-        steps=[SimpleNamespace(params=[object()])],
-    )
-    after = SimpleNamespace(
-        capabilities=[object(), object()],
-        steps=[SimpleNamespace(
-            step_id="submit",
-            params=[
-                SimpleNamespace(
-                    path="reason", label="原因", key="reason", locked=False,
-                    evidence=[{"actor": "agent", "kind": "param_type"}],
-                ),
-                SimpleNamespace(
-                    path="remark", label="备注", key="remark", locked=False,
-                    evidence=[{"actor": "agent", "kind": "field_name"}],
-                ),
-            ],
-        )],
-        meta={
-            "capability_model": {
-                "semantic_plan": {"unresolved_items": []},
-                "semantic_coverage": {"complete": True},
-            },
-            "capability_generation": {"last_mode": "optimize"},
-        },
-    )
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": changed,
-            "summary": "analysis complete",
-            "changes": {"capabilities": int(changed), "fields": int(changed)},
-            "field_changes": ([{"step_id": "submit", "path": "reason", "name": "原因", "axes": {"type": {"before": "string", "after": "enum"}}}] if changed else []),
-            "change_details": (["能力「提交申请」：名称已修改"] if changed else []),
-            "proposal_gate": {"accepted": accepted, "reasons": []},
-        },
-        screenshots=[{"name": "form.png"}],
-        delivered_image_count=1,
-        operation_id="plan-1",
-    )
-
-    assert report["status"] == expected_status
-    assert report["screenshot_count"] == report["model_image_count"] == 1
-    assert report["capability_count_before"] == 1
-    assert report["capability_count_after"] == 2
-    assert report["field_count_before"] == 1
-    assert report["field_count_after"] == 2
-    assert report["operation_id"] == "plan-1"
-    assert len(report["field_changes"]) == int(changed)
-    assert len(report["change_details"]) == int(changed)
-
-
-def test_analysis_application_does_not_report_applied_when_no_capability_was_generated() -> None:
-    before = SimpleNamespace(capabilities=[], steps=[SimpleNamespace(params=[])], meta={})
-    after = SimpleNamespace(
-        capabilities=[],
-        steps=[SimpleNamespace(step_id="search", params=[])],
-        meta={
-            "capability_model": {
-                "semantic_coverage": {"complete": False},
-            },
-        },
-    )
-
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": True,
-            "summary": "实际修改：接口步骤1项，流程说明1项",
-            "changes": {"steps": 1, "capabilities": 0},
-            "proposal_gate": {"accepted": False, "reasons": ["capability_compilation_failed"]},
-        },
-        screenshots=[],
-        delivered_image_count=0,
-        operation_id="auto-plan-empty",
-    )
-
-    assert report["status"] == "needs_review"
-    assert report["capability_count_after"] == 0
-    assert "未生成可调用能力" in report["summary"]
-
-
-class _ConcurrentWriteProbe:
-    def __init__(self) -> None:
-        self.active_writes = 0
-        self.max_active_writes = 0
-        self.messages: list[dict] = []
-
-    async def send_json(self, message: dict) -> None:
-        self.active_writes += 1
-        self.max_active_writes = max(self.max_active_writes, self.active_writes)
-        try:
-            await asyncio.sleep(0)
-            self.messages.append(message)
-        finally:
-            self.active_writes -= 1
+    assert len(values) == 100
+    assert all(re.fullmatch(r"action_[0-9a-f]{32}", value) for value in values)
 
 
 @pytest.mark.asyncio
-async def test_websocket_send_queue_serializes_concurrent_writes_and_drains() -> None:
-    ws = _ConcurrentWriteProbe()
-    sender = gateway._WebSocketSendQueue(ws)
-
-    await asyncio.gather(*(sender.send_json({"index": index}) for index in range(30)))
-    await sender.close()
-
-    assert ws.max_active_writes == 1
-    assert [message["index"] for message in ws.messages] == list(range(30))
-    assert sender._writer.done()
-
-
-@pytest.mark.asyncio
-async def test_websocket_send_queue_coalesces_frames_without_dropping_controls() -> None:
-    class SlowWriteProbe(_ConcurrentWriteProbe):
-        def __init__(self) -> None:
-            super().__init__()
-            self.write_started = asyncio.Event()
-            self.release_write = asyncio.Event()
-
-        async def send_json(self, message: dict) -> None:
-            self.write_started.set()
-            await self.release_write.wait()
-            await super().send_json(message)
-
-    ws = SlowWriteProbe()
-    sender = gateway._WebSocketSendQueue(ws)
-    first_control = asyncio.create_task(sender.send_json({"type": "control", "index": 0}))
-    await ws.write_started.wait()
-
-    for index in range(1_000):
-        assert sender.send_latest_frame({"type": "frame", "index": index})
-    assert sender._queue.qsize() == 1
-    assert sender._latest_frame == {"type": "frame", "index": 999}
-    assert not sender._background
-
-    second_control = asyncio.create_task(sender.send_json({"type": "control", "index": 1}))
-    third_control = asyncio.create_task(sender.send_json({"type": "control", "index": 2}))
-    await asyncio.sleep(0)
-    assert sender._queue.qsize() == 3
-
-    for index in range(1_000, 2_000):
-        sender.send_latest_frame({"type": "frame", "index": index})
-    assert sender._queue.qsize() == 3
-    assert sender._latest_frame == {"type": "frame", "index": 1_999}
-
-    ws.release_write.set()
-    await asyncio.gather(first_control, second_control, third_control)
-    await sender.close()
-
-    assert ws.messages == [
-        {"type": "control", "index": 0},
-        {"type": "frame", "index": 1_999},
-        {"type": "control", "index": 1},
-        {"type": "control", "index": 2},
-    ]
-    assert ws.max_active_writes == 1
-
-
-def test_recording_action_uses_safe_uuid_and_retries_recent_collision(monkeypatch) -> None:  # noqa: ANN001
-    gateway._RECENT_RECORDING_ACTIONS.clear()
-    repeated = SimpleNamespace(hex="1" * 32)
-    fresh = SimpleNamespace(hex="2" * 32)
-    generated = iter((repeated, repeated, fresh))
-    monkeypatch.setattr(gateway.uuid, "uuid4", lambda: next(generated))
-
-    first = gateway._new_recording_action()
-    second = gateway._new_recording_action()
-
-    assert first == f"action_{'1' * 32}"
-    assert second == f"action_{'2' * 32}"
-    assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", first)
-    assert first != second
-
-
-def test_recording_resume_state_is_scoped_reused_and_bounded(monkeypatch) -> None:  # noqa: ANN001
-    monkeypatch.setattr(gateway, "_MAX_RECORDING_RESUME_STATES", 2)
-    gateway._RECORDING_RESUME_STATES.clear()
-    first_key = ("tenant-a", "system-a", f"recording_{'1' * 32}")
-    second_key = ("tenant-a", "system-a", f"recording_{'2' * 32}")
-    third_key = ("tenant-b", "system-a", f"recording_{'3' * 32}")
-
-    first = gateway._recording_resume_state(first_key)
-    first["flow_spec"] = "authoritative"
-    assert gateway._recording_resume_state(first_key)["flow_spec"] == "authoritative"
-    gateway._recording_resume_state(second_key)
-    # Touching first makes second the least recently used entry.
-    gateway._recording_resume_state(first_key)
-    gateway._recording_resume_state(third_key)
-
-    assert first_key in gateway._RECORDING_RESUME_STATES
-    assert second_key not in gateway._RECORDING_RESUME_STATES
-    assert third_key in gateway._RECORDING_RESUME_STATES
-
-
-def test_recording_storage_cache_does_not_replace_authenticated_state_with_login_page() -> None:
-    state: dict = {}
-    authenticated = {
-        "cookies": [{"name": "sid", "value": "secret"}],
-        "origins": [{
-            "origin": "https://oa.example.test",
-            "localStorage": [
-                {"name": "ACCESS_TOKEN", "value": "secret"},
-                {"name": "tenantId", "value": "1"},
-            ],
-        }],
-    }
-    login_page = {
-        "cookies": [],
-        "origins": [{
-            "origin": "https://oa.example.test",
-            "localStorage": [{"name": "tenantId", "value": "1"}],
-        }],
-    }
-
-    gateway._remember_recording_storage(state, authenticated)
-    gateway._remember_recording_storage(state, login_page)
-
-    assert state["storage_state"] == authenticated
-
-@pytest.mark.asyncio
-async def test_recording_connection_lease_waits_for_previous_owner_cleanup() -> None:
-    claim = getattr(gateway, "_claim_recording_connection", None)
-    release = getattr(gateway, "_release_recording_connection", None)
-    assert claim is not None, "recording connection handoff is not implemented"
-    assert release is not None, "recording connection release is not implemented"
-
-    key = ("tenant-a", "A-OA", f"recording_{'b' * 32}")
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    old_started = asyncio.Event()
-    old_cleaned = asyncio.Event()
-    release_old = asyncio.Event()
-
-    async def old_handler() -> None:
-        lease = await claim(key)
-        old_started.set()
-        try:
-            await release_old.wait()
-        finally:
-            old_cleaned.set()
-            release(key, lease)
-
-    old_task = asyncio.create_task(old_handler())
-    await old_started.wait()
-
-    replacement_task = asyncio.create_task(claim(key))
-    await asyncio.sleep(0)
-
-    assert not replacement_task.done()
-    assert not old_task.cancelled()
-    release_old.set()
-    await old_task
-    replacement = await replacement_task
-
-    assert old_cleaned.is_set()
-    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is replacement
-    release(key, replacement)
-    assert key not in gateway._ACTIVE_RECORDING_CONNECTIONS
-
-
-@pytest.mark.asyncio
-async def test_cancelled_connection_waiter_never_replaces_or_cancels_owner() -> None:
-    key = ("tenant-a", "A-OA", f"recording_{'d' * 32}")
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    current_task = asyncio.current_task()
-    assert current_task is not None
-    original = gateway._RecordingConnectionLease(
-        task=current_task, released=asyncio.Event(),
-    )
-    gateway._ACTIVE_RECORDING_CONNECTIONS[key] = original
-
-    second_task = asyncio.create_task(gateway._claim_recording_connection(key))
-    await asyncio.sleep(0)
-    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is original
-
-    second_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await second_task
-    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is original
-
-    gateway._release_recording_connection(key, original)
-    assert key not in gateway._ACTIVE_RECORDING_CONNECTIONS
-
-
-@pytest.mark.asyncio
-async def test_recording_connection_lease_old_release_cannot_remove_replacement() -> None:
-    claim = getattr(gateway, "_claim_recording_connection", None)
-    release = getattr(gateway, "_release_recording_connection", None)
-    assert claim is not None, "recording connection handoff is not implemented"
-    assert release is not None, "recording connection release is not implemented"
-
-    key = ("tenant-a", "A-OA", f"recording_{'c' * 32}")
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    current_task = asyncio.current_task()
-    assert current_task is not None
-    old = gateway._RecordingConnectionLease(task=current_task, released=asyncio.Event())
-    replacement = gateway._RecordingConnectionLease(task=current_task, released=asyncio.Event())
-    gateway._ACTIVE_RECORDING_CONNECTIONS[key] = replacement
-
-    release(key, old)
-
-    assert old.released.is_set()
-    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is replacement
-    release(key, replacement)
-
-
-@pytest.mark.asyncio
-async def test_recording_pi_candidate_failed_start_is_closed_and_not_reused() -> None:
-    start_candidate = getattr(gateway, "_start_recording_pi_candidate", None)
-    assert start_candidate is not None, "transactional Pi startup is not implemented"
-
+async def test_pi_candidate_is_closed_when_start_fails() -> None:
     class Candidate:
-        def __init__(self, error: Exception | None = None) -> None:
-            self.error = error
-            self.started = 0
-            self.closed = 0
+        closed = False
 
-        async def start(self):  # noqa: ANN201
-            self.started += 1
-            if self.error is not None:
-                raise self.error
-            return self
+        async def start(self) -> None:
+            raise RuntimeError("start failed")
 
         async def close(self) -> None:
-            self.closed += 1
+            self.closed = True
 
-    failed = Candidate(RuntimeError("scope busy"))
-    healthy = Candidate()
+    candidate = Candidate()
+    with pytest.raises(RuntimeError, match="start failed"):
+        await gateway._start_recording_pi_candidate(lambda: candidate)
 
-    with pytest.raises(RuntimeError, match="scope busy"):
-        await start_candidate(lambda: failed)
-    result = await start_candidate(lambda: healthy)
-
-    assert failed.started == 1
-    assert failed.closed == 1
-    assert healthy.started == 1
-    assert healthy.closed == 0
-    assert result is healthy
+    assert candidate.closed is True
 
 
-def test_recording_storage_cache_accepts_richer_checkpoint() -> None:
-    state = {
-        "storage_state": {
-            "cookies": [],
-            "origins": [{"origin": "https://oa.example.test", "localStorage": []}],
-        },
-    }
-    authenticated = {
-        "cookies": [{"name": "sid", "value": "secret"}],
-        "origins": [{
-            "origin": "https://oa.example.test",
-            "localStorage": [{"name": "ACCESS_TOKEN", "value": "secret"}],
-        }],
-    }
+@pytest.mark.asyncio
+async def test_send_queue_serializes_controls_and_coalesces_frames() -> None:
+    class Socket:
+        sent: list[dict[str, Any]] = []
 
-    gateway._remember_recording_storage(state, authenticated)
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            await asyncio.sleep(0)
+            self.sent.append(payload)
 
-    assert state["storage_state"] == authenticated
+    socket = Socket()
+    queue = gateway._WebSocketSendQueue(socket)
+    await asyncio.gather(
+        queue.send_json({"type": "frame", "seq": 1}),
+        queue.send_json({"type": "frame", "seq": 2}),
+        queue.send_json({"type": "snapshot", "snapshot": {"revision": 1}}),
+    )
+    await queue.close()
+
+    assert any(item["type"] == "snapshot" for item in socket.sent)
+    frames = [item for item in socket.sent if item["type"] == "frame"]
+    assert frames[-1]["seq"] == 2
 
 
-class _FakeWebSocket(_ConcurrentWriteProbe):
-    def __init__(self, incoming: list[dict]) -> None:
-        super().__init__()
-        self.incoming = list(incoming)
+class _FakeWebSocket:
+    def __init__(self, messages: list[dict[str, Any]]) -> None:
+        self.messages = iter(messages)
+        self.sent: list[dict[str, Any]] = []
         self.accepted = False
-        self.closed = False
-        self.close_code: int | None = None
-        self.close_reason = ""
 
     async def accept(self) -> None:
         self.accepted = True
 
-    async def receive_json(self) -> dict:
-        if not self.incoming:
-            raise gateway.WebSocketDisconnect(code=1000)
-        return self.incoming.pop(0)
+    async def receive_json(self) -> dict[str, Any]:
+        try:
+            return next(self.messages)
+        except StopIteration as exc:
+            raise WebSocketDisconnect() from exc
 
-    async def close(self, code: int = 1000, reason: str = "") -> None:
-        self.closed = True
-        self.close_code = code
-        self.close_reason = reason
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
 
-
-@pytest.mark.asyncio
-async def test_record_ws_termination_preserves_resume_state(monkeypatch) -> None:  # noqa: ANN001
-    import dano.execution.page.recorder as recorder_module
-
-    sessions = []
-
-    class FakeRecordSession:
-        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
-            self.stopped = False
-            sessions.append(self)
-
-        async def start(self, *_args, **_kwargs) -> None:
-            return None
-
-        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
-            return None
-
-        async def storage_state(self) -> dict:
-            return {}
-
-        async def stop(self) -> None:
-            self.stopped = True
-
-    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
-    gateway._RECORDING_RESUME_STATES.clear()
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    recording_id = f"recording_{'f' * 32}"
-    ws = _FakeWebSocket([{
-        "type": "start",
-        "start_url": "https://example.test",
-        "tenant": "tenant-a",
-        "pi_recording_id": recording_id,
-    }, {"type": "terminate"}])
-
-    await gateway.record_ws(ws)
-
-    terminated = next(item for item in ws.messages if item.get("type") == "analysis_terminated")
-    assert terminated["draft_preserved"] is True
-    assert terminated["stage"] == 2
-    assert ws.close_reason != "terminated_by_user"
-    resume_key = next(key for key in gateway._RECORDING_RESUME_STATES if key[2] == recording_id)
-    assert gateway._RECORDING_RESUME_STATES[resume_key]["analysis_generation"] == 1
-    assert sessions[0].stopped is True
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
-async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverable(monkeypatch) -> None:  # noqa: ANN001
-    import dano.execution.page.recorder as recorder_module
+async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypatch) -> None:
+    import dano.onboarding.recording_gateway as recording_gateway
 
-    sessions = []
+    instances = []
 
-    class FakeRecordSession:
-        def __init__(self, on_request, **_kwargs) -> None:  # noqa: ANN001
-            self.on_request = on_request
-            self.events: list[dict] = []
-            self.stopped = False
-            self.paused = False
-            sessions.append(self)
+    class FakeSession:
+        def __init__(self, *, config, send, pi_factory, publisher) -> None:  # noqa: ANN001
+            self.config = config
+            self.send = send
+            self.pi_factory = pi_factory
+            self.publisher = publisher
+            self.dispatched: list[dict[str, Any]] = []
+            self.closed = False
+            self.capture = None
+            self.workflow = None
+            self._pi = None
+            instances.append(self)
 
-        async def start(self, *_args, **_kwargs) -> None:
-            return None
+        async def start(self) -> None:
+            await self.send({
+                "type": "snapshot",
+                "snapshot": {
+                    "action": self.config.action,
+                    "status": "recording",
+                    "revision": 1,
+                },
+            })
 
-        async def start_screencast(self, on_frame) -> None:  # noqa: ANN001
-            self.on_request({"method": "POST"})
-            await on_frame({"image": "frame"})
-
-        async def dispatch_input(self, event: dict) -> dict:
-            self.events.append(event)
-            if len(self.events) == 1:
-                return {
-                    "ok": False,
-                    "recoverable": True,
-                    "kind": event.get("kind"),
-                    "error": "target navigated",
-                    "error_type": "TargetClosedError",
-                }
-            if len(self.events) == 2:
-                raise RuntimeError("transient input failure")
-            return {"ok": True}
-
-        async def flush_recording(self) -> None:
-            return None
-
-        def pause_recording(self) -> None:
-            self.paused = True
-
-        async def storage_state(self) -> dict:
-            return {}
-
-        async def stop(self) -> None:
-            self.stopped = True
-
-    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
-    gateway._RECENT_RECORDING_ACTIONS.clear()
-
-    resume_id = f"recording_{'a' * 32}"
-
-    def incoming(resume_action: str = "") -> list[dict]:
-        return [
-            {"type": "start", "start_url": "https://example.test", "tenant": "tenant-a",
-             "pi_recording_id": resume_id, **({"resume_action": resume_action} if resume_action else {})},
-            {"type": "input", "event": {"kind": "pointer_move", "nx": 0.1, "ny": 0.2}},
-            {"type": "input", "event": {"kind": "dblclick", "nx": 0.3, "ny": 0.4}},
-            {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.6}},
-            {"type": "ping", "at": 123456},
-            {"type": "stop"},
-            {"type": "ping", "at": 654321},
-        ]
-
-    first_ws = _FakeWebSocket(incoming())
-    second_ws = _FakeWebSocket(incoming())
-    await gateway.record_ws(first_ws)
-    await gateway.record_ws(second_ws)
-
-    first_started = next(message for message in first_ws.messages if message["type"] == "started")
-    second_started = next(message for message in second_ws.messages if message["type"] == "started")
-    resumed_ws = _FakeWebSocket(incoming(first_started["action"]))
-    await gateway.record_ws(resumed_ws)
-    resumed_started = next(message for message in resumed_ws.messages if message["type"] == "started")
-    assert re.fullmatch(r"action_[0-9a-f]{32}", first_started["action"])
-    assert first_started["action"] != second_started["action"]
-    assert resumed_started["action"] == first_started["action"]
-    assert first_started["pi_recording_id"] == resume_id
-    assert second_started["pi_recording_id"] == resume_id
-
-    errors = [message for message in first_ws.messages if message["type"] == "input_error"]
-    assert [error["kind"] for error in errors] == ["pointer_move", "dblclick"]
-    assert errors[0]["event"] == {"kind": "pointer_move", "nx": 0.1, "ny": 0.2}
-    assert errors[0]["error_type"] == "TargetClosedError"
-    assert errors[1]["detail"] == "transient input failure"
-    assert all(error["recoverable"] for error in errors)
-    assert sessions[0].events[-1]["kind"] == "pointer_up"
-    assert {"type": "pong", "at": 123456} in first_ws.messages
-    assert {"type": "stopped", "connection_retained": True} in first_ws.messages
-    assert {"type": "stopped", "connection_retained": True} in second_ws.messages
-    assert {"type": "pong", "at": 654321} in first_ws.messages
-    assert all(session.paused for session in sessions)
-    assert all(session.stopped for session in sessions)
-    assert first_ws.accepted and first_ws.closed
-    assert first_ws.close_code == 1000
-    assert first_ws.max_active_writes == 1
-
-
-@pytest.mark.asyncio
-async def test_record_ws_concurrent_live_analysis_starts_only_one_pi_session(monkeypatch) -> None:  # noqa: ANN001
-    import dano.execution.page.recorder as recorder_module
-    import dano.onboarding.recording_pi as recording_pi_module
-
-    class FakeRecordSession:
-        def __init__(self, on_request, **_kwargs) -> None:  # noqa: ANN001
-            self.on_request = on_request
-            self.requests: list[dict] = []
-
-        async def start(self, *_args, **_kwargs) -> None:
-            return None
-
-        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
-            return None
-
-        async def dispatch_input(self, _event: dict) -> dict:
-            self.requests.extend({"method": "POST", "index": index} for index in range(15))
-            await asyncio.sleep(0)
-            return {"ok": True}
-
-        def captured_all_requests(self) -> list[dict]:
-            return list(self.requests)
-
-        def recorded_field_evidence(self) -> list[dict]:
-            return []
-
-        async def flush_recording(self) -> None:
-            await asyncio.sleep(0.15)
-
-        def pause_recording(self) -> None:
-            return None
-
-        async def storage_state(self) -> dict:
-            return {}
-
-        async def stop(self) -> None:
-            return None
-
-    sessions = []
-
-    class FakePiSession:
-        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
-            self.flow_spec = None
-            self.notify_calls = 0
-            sessions.append(self)
-
-        async def start(self):  # noqa: ANN201
-            await asyncio.sleep(0.05)
-            return self
-
-        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
-            return None
-
-        def bind_flow_spec(self, flow_spec) -> None:  # noqa: ANN001
-            self.flow_spec = flow_spec
-
-        async def notify_live_batch(self, _delta: dict) -> None:
-            self.notify_calls += 1
-            await asyncio.sleep(0.1)
-
-        def current_flow_spec(self):  # noqa: ANN201
-            return self.flow_spec
+        async def dispatch(self, message: dict[str, Any]) -> None:
+            self.dispatched.append(message)
 
         async def close(self) -> None:
-            return None
+            self.closed = True
 
-    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
-    monkeypatch.setattr(recording_pi_module, "RecordingPiSession", FakePiSession)
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    gateway._RECORDING_RESUME_STATES.clear()
-
-    recording_id = f"recording_{'e' * 32}"
-    ws = _FakeWebSocket([
+    monkeypatch.setattr(recording_gateway, "RecordingGatewaySession", FakeSession)
+    socket = _FakeWebSocket([
         {
             "type": "start",
-            "start_url": "https://example.test",
+            "start_url": "https://example.test/page",
             "tenant": "tenant-a",
-            "pi_recording_id": recording_id,
+            "goal_text": "完成目标操作",
         },
-        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
-        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
-        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
-        {"type": "stop"},
+        {"type": "input", "event": {"kind": "key", "key": "Enter"}},
+        {"type": "finish", "title": "目标能力"},
     ])
 
-    await gateway.record_ws(ws)
+    await gateway.record_ws(socket)
 
-    assert len(sessions) == 1
-    assert sessions[0].notify_calls == 1
-    assert any(
-        message.get("type") == "agent_status"
-        and message.get("state") == "analyzing"
-        for message in ws.messages
-    )
-    # The fake peer disconnects immediately after ``stop``.  A still-running
-    # analysis is cancelled on disconnect so stopping capture never waits for
-    # the model; a real workbench connection remains open and receives ready.
-    assert not any(
-        message.get("type") == "agent_status"
-        and message.get("state") == "error"
-        for message in ws.messages
-    )
-
-
-@pytest.mark.asyncio
-async def test_record_ws_live_analysis_drains_requests_captured_while_pi_is_busy(monkeypatch) -> None:  # noqa: ANN001
-    import dano.execution.page.recorder as recorder_module
-    import dano.onboarding.recording_pi as recording_pi_module
-
-    analysis_started = asyncio.Event()
-
-    class FakeRecordSession:
-        def __init__(self, on_capture_count=None, **_kwargs) -> None:  # noqa: ANN001
-            self.on_capture_count = on_capture_count
-            self.requests: list[dict] = []
-
-        async def start(self, *_args, **_kwargs) -> None:
-            return None
-
-        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
-            return None
-
-        async def dispatch_input(self, _event: dict) -> dict:
-            await analysis_started.wait()
-            for index in range(15):
-                self.requests.append({"method": "POST", "index": index})
-                if self.on_capture_count is not None:
-                    self.on_capture_count(len(self.requests))
-            return {"ok": True}
-
-        def captured_all_requests(self) -> list[dict]:
-            return list(self.requests)
-
-        def recorded_field_evidence(self) -> list[dict]:
-            return []
-
-        async def flush_recording(self) -> None:
-            return None
-
-        def pause_recording(self) -> None:
-            return None
-
-        async def storage_state(self) -> dict:
-            return {}
-
-        async def stop(self) -> None:
-            return None
-
-    sessions = []
-
-    class FakePiSession:
-        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
-            self.flow_spec = None
-            self.notify_calls: list[dict] = []
-            self.cursor = 0
-            sessions.append(self)
-
-        async def start(self):  # noqa: ANN201
-            return self
-
-        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
-            return None
-
-        def bind_flow_spec(self, flow_spec) -> None:  # noqa: ANN001
-            self.flow_spec = flow_spec
-
-        async def notify_live_batch(self, delta: dict) -> None:
-            self.notify_calls.append(dict(delta))
-            analysis_started.set()
-            await asyncio.sleep(0.05)
-            # The Pi tool paged through ten requests while this prompt was
-            # running. The next server turn must continue from that consumed
-            # cursor, not from the zero-request snapshot at scheduling time.
-            self.cursor = 10 if len(self.notify_calls) == 1 else 15
-
-        def recording_delta_cursor(self) -> int:
-            return self.cursor
-
-        def current_flow_spec(self):  # noqa: ANN201
-            return self.flow_spec
-
-        async def close(self) -> None:
-            return None
-
-    class DelayedDisconnectWebSocket(_FakeWebSocket):
-        async def receive_json(self) -> dict:
-            if not self.incoming:
-                await asyncio.sleep(0.2)
-            return await super().receive_json()
-
-    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
-    monkeypatch.setattr(recording_pi_module, "RecordingPiSession", FakePiSession)
-    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
-    gateway._RECORDING_RESUME_STATES.clear()
-
-    ws = DelayedDisconnectWebSocket([
-        {
-            "type": "start",
-            "start_url": "https://example.test",
-            "tenant": "tenant-a",
-            "pi_recording_id": f"recording_{'f' * 32}",
-        },
-        {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.5}},
-        {"type": "stop"},
-    ])
-
-    await gateway.record_ws(ws)
-
-    assert len(sessions) == 1
-    assert sessions[0].notify_calls == [
-        {"reason": "recording_started", "since_seq": 0},
-        {"reason": "request_batch", "since_seq": 10},
+    assert socket.accepted is True
+    assert len(instances) == 1
+    assert instances[0].dispatched == [
+        {"type": "input", "event": {"kind": "key", "key": "Enter"}},
+        {"type": "finish", "title": "目标能力"},
     ]
-    assert any(
-        message.get("type") == "agent_status"
-        and message.get("captured_count") == 15
-        for message in ws.messages
-    )
+    assert instances[0].closed is True
+    assert socket.sent[0]["type"] == "snapshot"
 
 
-def test_recording_gateway_skips_queued_live_batch_after_cursor_catches_up() -> None:
+def test_gateway_registers_one_recording_route_and_no_legacy_branches() -> None:
     source = inspect.getsource(gateway.record_ws)
+    app_source = inspect.getsource(gateway)
 
-    assert 'reason == "request_batch"' in source
-    assert "len(captured_all_requests()) <= since_seq" in source
-
-
-def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
-    from dano.onboarding.page_onboard import run_request_onboarding
-
-    source = inspect.getsource(gateway.record_ws)
-    assert source.count("RecordingPiSession(") == 1
-    assert "_page_semantic_client" not in source
-    assert "OpenAICompatClient" not in source
-    assert "run_recording_pi_loop" not in source
-    assert "begin_llm_budget" not in source
-    assert "submit_recording_review" in source
-    assert "run_id=pi_session.run_id" in source
-    assert "recording_pi_required=True" in source
-    assert "run_id" in inspect.signature(run_request_onboarding).parameters
-    assert "recording_pi_required" in inspect.signature(run_request_onboarding).parameters
-    assert "未切换" not in source  # errors are surfaced; no hidden alternate model branch
-
-
-def test_publish_review_does_not_reject_downstream_skill_docs_or_field_names() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index("except asyncio.CancelledError:", publish_start)
-    publish_source = source[publish_start:publish_end]
-
-    assert "Skill 文档由发布后的导出链路生成，不属于本轮 FlowSpec 审核对象" in publish_source
-    assert "不得因缺少 Skill 级失败处理或异常边界说明而拒绝" in publish_source
-    assert "不得仅凭字段名称、录制样例值像 ID 或短码而拒绝" in publish_source
-    assert "必须以字段的 source_kind、category、" in publish_source
-    assert "expose_to_caller、枚举或接口来源绑定等结构化证据" in publish_source
-
-
-def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
-    source = inspect.getsource(gateway.record_ws)
-
-    assert source.count("recorded_page_enum_options()") == 1
-    assert "recorded_page_options = sess.recorded_page_enum_options()" in source
-    assert "_project_recorded_page_enum_options(" in source
-
-
-def test_finalize_log_redacts_secret_query_values() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    finalize = source[source.index('elif t == "finalize":'):source.index('elif t == "flow_update":')]
-
-    assert "_redact_url" in finalize
-
-
-def test_finalize_freezes_capture_before_waiting_for_live_analysis() -> None:
-    source = inspect.getsource(gateway.record_ws)
-    finalize = source[source.index('elif t == "finalize":'):]
-
-    assert finalize.index("await _pause_recording_capture()") < finalize.index("if live_analysis_tasks:")
-    assert finalize.index("await _pause_recording_capture()") < finalize.index("sess.captured_all_requests()")
-
-
-@pytest.mark.asyncio
-async def test_recording_operation_keepalive_sends_progress_until_completion() -> None:
-    class Sender:
-        def __init__(self) -> None:
-            self.messages: list[dict] = []
-
-        async def send_json(self, message: dict) -> None:
-            self.messages.append(message)
-
-    sender = Sender()
-    async with gateway._recording_operation_keepalive(
-        sender, operation="plan", operation_id="plan-1", interval=0.01,
+    assert app_source.count('@app.websocket("/onboarding/page/record")') == 1
+    assert "RecordingGatewaySession" in source
+    assert "await session.dispatch(message)" in source
+    assert "_retired_record_ws" not in app_source
+    for retired in (
+        "orchestrate_flow", "auto_fix_flow", "publish_request", "finalize",
+        "flow_update", "refresh_flow_spec", "analysis_terminated",
     ):
-        await asyncio.sleep(0.035)
-
-    sent = len(sender.messages)
-    assert sent >= 2
-    assert all(message["type"] == "operation_progress" for message in sender.messages)
-    assert all(message["operation_id"] == "plan-1" for message in sender.messages)
-    await asyncio.sleep(0.02)
-    assert len(sender.messages) == sent
+        assert retired not in source
 
 
-@pytest.mark.asyncio
-async def test_recording_operation_keepalive_does_not_cancel_live_work_on_disconnect() -> None:
-    class DisconnectedSender:
-        async def send_json(self, _message: dict) -> None:
-            raise gateway.WebSocketDisconnect(code=1006)
-
-    completed = False
-    async with gateway._recording_operation_keepalive(
-        DisconnectedSender(), operation="plan", operation_id="plan-disconnected",
-        interval=0.01,
-    ):
-        await asyncio.sleep(0.03)
-        completed = True
-
-    assert completed is True
-
-
-@pytest.mark.asyncio
-async def test_long_operation_drains_page_input_without_cancelling_on_disconnect() -> None:
-    incoming: asyncio.Queue = asyncio.Queue()
-    release_operation = asyncio.Event()
-    all_inputs_handled = asyncio.Event()
-    handled: list[int] = []
-
-    async def operation() -> str:
-        await release_operation.wait()
-        return "completed"
-
-    async def handle_live(message: dict) -> bool:
-        if message.get("type") != "input":
-            return False
-        handled.append(int(message["index"]))
-        if len(handled) == 40:
-            all_inputs_handled.set()
-        return True
-
-    waiting = asyncio.create_task(
-        gateway._await_operation_while_draining_recording_input(
-            operation(), incoming, handle_live,
-        )
-    )
-    for index in range(40):
-        await incoming.put({"type": "input", "index": index})
-    await incoming.put({"type": "flow_update", "operation_id": "edit-1"})
-    await incoming.put(gateway.WebSocketDisconnect(code=1006))
-
-    await asyncio.wait_for(all_inputs_handled.wait(), timeout=0.5)
-    assert handled == list(range(40))
-    for _ in range(20):
-        if incoming.empty():
-            break
-        await asyncio.sleep(0)
-    assert incoming.empty()
-    assert not waiting.done()
-
-    release_operation.set()
-    result, deferred = await asyncio.wait_for(waiting, timeout=0.5)
-
-    assert result == "completed"
-    assert deferred[0] == {"type": "flow_update", "operation_id": "edit-1"}
-    assert isinstance(deferred[1], gateway.WebSocketDisconnect)
-
-
-@pytest.mark.asyncio
-async def test_explicit_termination_finishes_a_long_recording_operation_without_closing_transport() -> None:
-    incoming: asyncio.Queue = asyncio.Queue()
-    operation_cancelled = asyncio.Event()
-
-    async def operation() -> dict:
-        try:
-            await operation_cancelled.wait()
-            return {"status": "analysis_terminated"}
-        finally:
-            pass
-
-    async def handle_live(message: dict) -> bool:
-        if message.get("type") == "terminate":
-            operation_cancelled.set()
-            return True
-        return False
-
-    waiting = asyncio.create_task(
-        gateway._await_operation_while_draining_recording_input(
-            operation(), incoming, handle_live,
-        )
-    )
-    await incoming.put({"type": "terminate"})
-
-    result, deferred = await asyncio.wait_for(waiting, timeout=0.5)
-    assert result == {"status": "analysis_terminated"}
-    assert deferred == []
-
-
-@pytest.mark.asyncio
-async def test_long_operation_preserves_deferred_messages_when_model_fails() -> None:
-    incoming: asyncio.Queue = asyncio.Queue()
-    release_operation = asyncio.Event()
-    deferred: list[object] = []
-
-    async def operation() -> None:
-        await release_operation.wait()
-        raise RuntimeError("model failed")
-
-    waiting = asyncio.create_task(
-        gateway._await_operation_while_draining_recording_input(
-            operation(), incoming, lambda _message: asyncio.sleep(0, result=False), deferred,
-        )
-    )
-    update = {"type": "flow_update", "operation_id": "edit-1"}
-    await incoming.put(update)
-    for _ in range(20):
-        if incoming.empty():
-            break
-        await asyncio.sleep(0)
-    release_operation.set()
-
-    with pytest.raises(RuntimeError, match="model failed"):
-        await waiting
-    assert deferred == [update]
-
-
-@pytest.mark.asyncio
-async def test_deferred_message_is_an_ordering_barrier_for_later_page_input() -> None:
-    incoming: asyncio.Queue = asyncio.Queue()
-    release_operation = asyncio.Event()
-    handled: list[dict] = []
-
-    async def operation() -> str:
-        await release_operation.wait()
-        return "completed"
-
-    async def handle_live(message: dict) -> bool:
-        handled.append(message)
-        return message.get("type") == "input"
-
-    waiting = asyncio.create_task(
-        gateway._await_operation_while_draining_recording_input(
-            operation(), incoming, handle_live,
-        )
-    )
-    reset = {"type": "reset"}
-    later_input = {"type": "input", "event": {"kind": "click"}}
-    await incoming.put(reset)
-    await incoming.put(later_input)
-    for _ in range(20):
-        if incoming.empty():
-            break
-        await asyncio.sleep(0)
-    release_operation.set()
-
-    result, deferred = await waiting
-
-    assert result == "completed"
-    assert handled == [reset]
-    assert deferred == [reset, later_input]
-
-
-@pytest.mark.asyncio
-async def test_websocket_send_queue_normalizes_write_failure_as_disconnect() -> None:
-    class DisconnectedSocket:
-        async def send_json(self, _message: dict) -> None:
-            raise RuntimeError("transport closed")
-
-    sender = gateway._WebSocketSendQueue(DisconnectedSocket())
-    with pytest.raises(gateway.WebSocketDisconnect):
-        await sender.send_json({"type": "operation_progress"})
-    await sender.close()
-
-
-@pytest.mark.asyncio
-async def test_reconnect_waits_without_cancelling_previous_transport_owner() -> None:
-    key = ("tenant", "subsystem", "recording_test")
-    ready = asyncio.Event()
-    finish = asyncio.Event()
-
-    async def owner() -> None:
-        lease = await gateway._claim_recording_connection(key)
-        ready.set()
-        try:
-            await finish.wait()
-        finally:
-            gateway._release_recording_connection(key, lease)
-
-    previous = asyncio.create_task(owner())
-    await ready.wait()
-
-    replacement_task = asyncio.create_task(gateway._claim_recording_connection(key))
-    await asyncio.sleep(0)
-    assert not replacement_task.done()
-    assert not previous.cancelled()
-    finish.set()
-    await previous
-    replacement = await asyncio.wait_for(replacement_task, timeout=0.5)
-    gateway._release_recording_connection(key, replacement)
-
-
-def test_finalize_projection_preserves_recorded_enum_fact_metadata() -> None:
-    raw = {
-        "requestType": {
-            "field_key": "requestType",
-            "field_aliases": ["申请类型"],
-            "options": [
-                {"label": "病假", "value": "2"},
-                {"label": "事假", "value": "3"},
-            ],
-            "selected": "病假",
-            "selected_label": "病假",
-            "selected_value": "2",
-            "mapping_complete": False,
-            "mapping_conflict": True,
-            "truncated": True,
-            "action_id": "action-select-request-type",
-            "transaction_id": "page-1|main|action-select-request-type",
-            "observed_at": 1784563200000,
-        },
+def test_canonical_command_set_is_small_and_explicit() -> None:
+    assert CANONICAL_RECORDING_COMMANDS == {
+        "start", "input", "finish", "patch_draft", "republish", "answer", "cancel", "ping",
     }
-
-    projected = gateway._project_recorded_page_enum_options(raw, samples={})
-    fact = projected["requestType"]
-
-    assert fact["selected_label"] == "病假"
-    assert fact["selected_value"] == "2"
-    assert fact["mapping_complete"] is False
-    assert fact["mapping_conflict"] is True
-    assert fact["truncated"] is True
-    assert fact["action_id"] == "action-select-request-type"
-    assert fact["transaction_id"] == "page-1|main|action-select-request-type"
-    assert fact["observed_at"] == 1784563200000
-
-
-def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> None:
-    before = FlowSpec(
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/submit",
-            params=[
-                ParamField(path="reason", key="原因", value="leave"),
-                ParamField(path="days", key="天数", value="2", locked=True),
-            ],
-        )],
-    )
-    after = before.model_copy(deep=True)
-    after.meta = {
-        "capability_generation": {"initial_completed": True, "last_mode": "initial"},
-        "capability_model": {
-            "semantic_coverage": {"complete": False},
-            "semantic_plan": {
-                "unresolved_items": [{
-                    "kind": "field_axis",
-                    "step_id": "submit",
-                    "path": "days",
-                    "axis": "required",
-                    "reason": "required marker not visible",
-                }, {
-                    "kind": "field_axis", "step_id": "submit", "path": "days",
-                    "axis": "required", "reason": "required marker not visible",
-                }, {
-                    "kind": "capability_relation", "relation_id": "rel-1",
-                    "status": "rejected", "reason": "conflict with recorded order",
-                }],
-            },
-        },
-    }
-
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": True,
-            "summary": "initial analysis",
-            "changes": {"fields": 1},
-            "field_changes": [],
-            "proposal_gate": {"accepted": True},
-        },
-        screenshots=[{"name": "form.png"}],
-        delivered_image_count=1,
-        operation_id="initial-1",
-    )
-
-    assert report["analysis_kind"] == "initial"
-    assert report["unmatched_fields"] == []
-    assert report["unmatched_field_count"] == 0
-    assert report["unresolved_items"][0]["axis"] == "required"
-    assert report["unresolved_field_count"] == len(report["unresolved_items"])
-    assert report["locked_field_count"] == 1
-    assert len(report["locked_items"]) == 1
-    assert report["rejected_field_count"] == 1
-    assert len(report["rejected_items"]) == 1
-    assert "field" in report["issue_groups"]
-
-
-def test_analysis_report_only_requires_review_for_real_unapplied_work() -> None:
-    before = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[ParamField(path="reason", key="原因")],
-    )])
-
-    def report_for(issue: dict, *, changed: bool = False) -> dict:
-        after = before.model_copy(deep=True)
-        after.meta = {"capability_model": {"semantic_plan": {
-            "field_semantics": [], "unresolved_items": [issue],
-        }}}
-        return gateway._analysis_application_report(
-            before=before, after=after,
-            operation_report={
-                "changed": changed, "changes": {}, "field_changes": [],
-                "proposal_gate": {"accepted": True},
-            },
-            screenshots=[{"name": "form.png"}], delivered_image_count=1,
-            operation_id="review-status",
-        )
-
-    advisory = report_for({
-        "kind": "field", "step_id": "submit", "path": "reason",
-        "reason": "control is outside the supplied screenshot",
-    })
-    assert advisory["status"] == "no_change"
-
-    unmatched = report_for({
-        "kind": "unmatched_field", "status": "unmatched", "blocking": False,
-        "reason": "visible control has no unique recorded field match",
-    })
-    assert unmatched["status"] == "needs_review"
-    assert unmatched["unmatched_field_count"] == 1
-
-    blocking = report_for({
-        "kind": "field", "step_id": "submit", "path": "reason",
-        "blocking": True, "reason": "contradicts recorded API facts",
-    })
-    assert blocking["status"] == "needs_review"
-
-    applied_with_advisory = report_for({
-        "kind": "unmatched_field", "status": "unmatched", "blocking": False,
-        "reason": "visible control has no unique recorded field match",
-    }, changed=True)
-    assert applied_with_advisory["status"] == "applied"
-
-
-
-
-def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> None:
-    before = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[ParamField(path="useInfo", key="使用描述")],
-    )])
-    after = before.model_copy(deep=True)
-    after.meta = {
-        "capability_generation": {"initial_completed": True, "last_mode": "initial"},
-        "capability_model": {
-            "semantic_plan": {"field_semantics": [], "unresolved_items": []},
-        },
-    }
-
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": True, "summary": "initial analysis",
-            "changes": {"fields": 1}, "field_changes": [],
-            "proposal_gate": {"accepted": True},
-        },
-        screenshots=[], delivered_image_count=0, operation_id="initial-plain",
-    )
-
-    assert report["analysis_kind"] == "initial"
-    assert report["matched_field_count"] == 0
-    assert report["unmatched_field_count"] == 0
-    assert report["unmatched_fields"] == []
-
-
-def test_analysis_kind_uses_completed_operation_history_not_generation_metadata() -> None:
-    before = FlowSpec(steps=[])
-    after = before.model_copy(deep=True)
-    after.meta = {"capability_generation": {"last_mode": "optimize"}}
-
-    first = gateway._analysis_application_report(
-        before=before, after=after,
-        operation_report={"changed": False, "changes": {}, "field_changes": []},
-        screenshots=[], delivered_image_count=0, operation_id="first",
-    )
-    assert first["analysis_kind"] == "initial"
-
-    before.meta = {"last_analysis_application": first}
-    second = gateway._analysis_application_report(
-        before=before, after=after,
-        operation_report={"changed": False, "changes": {}, "field_changes": []},
-        screenshots=[], delivered_image_count=0, operation_id="second",
-    )
-    assert second["analysis_kind"] == "incremental"
-
-
-def test_completed_analysis_cache_reuses_only_the_exact_state_and_evidence() -> None:
-    spec = FlowSpec(
-        steps=[FlowStep(step_id="query", method="GET", path="/api/items")],
-        capabilities=[FlowCapability(
-            name="query_items",
-            kind="query_status",
-            step_ids=["query"],
-            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
-        )],
-    )
-    screenshots = [{
-        "name": "list.png",
-        "mimeType": "image/png",
-        "data": "recorded-image",
-    }]
-    spec.meta = {
-        **(spec.meta or {}),
-        "last_analysis_application": {"status": "applied"},
-        "last_analysis_cache": {
-            "flow_fingerprint": gateway._analysis_flow_fingerprint(spec),
-            "evidence_fingerprint": gateway._analysis_evidence_fingerprint(screenshots),
-        },
-    }
-
-    assert gateway._recording_analysis_cache_matches(spec, screenshots) is True
-    assert gateway._recording_analysis_cache_matches(spec, [{
-        **screenshots[0], "data": "changed-image",
-    }]) is False
-
-    spec.steps[0].path = "/api/other-items"
-    assert gateway._recording_analysis_cache_matches(spec, screenshots) is False
-
-    spec.steps[0].path = "/api/items"
-    spec.capabilities[0].title = "新的业务标题"
-    assert gateway._recording_analysis_cache_matches(spec, screenshots) is False
-
-
-def test_analysis_report_ignores_malformed_axis_status_instead_of_failing_operation() -> None:
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[ParamField(path="reason", key="原因")],
-    )])
-    spec.meta = {
-        "capability_model": {"semantic_plan": {
-            "field_semantics": [{
-                "step_id": "submit", "wire_path": "reason",
-                "axis_status": ["name", "type"],
-            }],
-            "unresolved_items": [],
-        }},
-    }
-
-    report = gateway._analysis_application_report(
-        before=spec, after=spec,
-        operation_report={"changed": False, "changes": {}, "field_changes": []},
-        screenshots=[], delivered_image_count=0, operation_id="plan-malformed-axis",
-    )
-
-    assert report["status"] == "no_change"
-    assert report["locked_field_count"] == 0

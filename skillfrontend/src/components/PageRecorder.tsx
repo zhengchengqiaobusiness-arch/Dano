@@ -901,6 +901,11 @@ export default function PageRecorder({
         {status === "published" && snapshot?.release ? (
           <Text type="success">能力已验证并发布；Skill 导出仅包含本次动作的发布结果。</Text>
         ) : null}
+        {status === "published" && snapshot?.release?.lifecycle_pending ? (
+          <Text type="warning">
+            {String(snapshot.release.lifecycle_message || "资产已发布，生命周期登记待补偿")}
+          </Text>
+        ) : null}
       </Space>
     );
     return (

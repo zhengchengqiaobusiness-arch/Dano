@@ -2427,52 +2427,10 @@ def _page_recorder_source() -> str:
     ).read_text(encoding="utf-8")
 
 
-def test_r7_workbench_uses_one_stable_status_panel_without_duplicate_success_toast():
-    source = _page_recorder_source()
-    workbench = source[
-        source.index("function renderFlowWorkbench()"):
-        source.index("function renderRequestsPanel()")
-    ]
-    composer = source[
-        source.index("function renderCapabilityComposerPanel()"):
-        source.index("function renderDescriptionPanel()")
-    ]
-
-    assert workbench.count("<Alert") + composer.count("<Alert") == 1
-    assert 'key="flow-status-panel"' in workbench
-    assert "minHeight:" in workbench
-    assert "lastAnalysisEvidence" in workbench
-    assert "renderLatestOperationDetail()" in workbench
-    assert "lastOperationReport" in source
-    assert "publishIssueGroups" in workbench
-    assert 'if (report.changed) message.success' not in source
 
 
-def test_r7_editor_state_uses_stable_identity_and_reorder_rolls_back_in_place():
-    source = _page_recorder_source()
-
-    assert "Record<string, string[]>" in source
-    assert "expandedCapabilitySections[capabilityUiKey]" in source
-    assert "optimisticCapabilityStepOrder" in source
-    assert "_rollback" in source
-    assert "active?._rollback?.()" in source
-    assert 'key={`${step.step_id}:param:${paramIndex}`}' not in source
-    assert "function Button(props: ButtonProps)" in source
-    assert 'htmlType="button"' in source
-    assert "if (!addStepToCapability" in source
-    assert "if (!send({ type: \"flow_update\", edits: [{" in source
-    assert "_rollback: () =>" in source
 
 
-def test_r7_only_explicit_error_location_scrolls_the_page():
-    source = _page_recorder_source()
-
-    assert source.count("scrollIntoView(") == 1
-    locate_start = source.index("function locatePublishIssue(")
-    locate_end = source.index("function publishIssueReviewId(")
-    locator = source[locate_start:locate_end]
-    assert "scrollIntoView(" in locator
-    assert "cap!.capability_id || cap!.name || capIdx" in locator
 
 
 @pytest.mark.parametrize(
