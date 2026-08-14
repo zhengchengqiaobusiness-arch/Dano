@@ -624,6 +624,59 @@ async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_change
 
 
 @pytest.mark.asyncio
+async def test_partially_rejected_plan_is_checkpointed_but_not_marked_complete(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        title="original",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        meta={"current_version": 4},
+    )
+    candidate = before.model_copy(deep=True)
+    candidate.meta = {
+        **candidate.meta,
+        "current_version": 5,
+        "recording_agent_session": {
+            "op_results": [{
+                "index": 3,
+                "op": "rename_field",
+                "status": "rejected",
+                "reason": "field evidence not found",
+            }],
+        },
+    }
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        return candidate.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    checkpoints: list[str] = []
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+        on_submission_accepted=lambda _spec, mode: checkpoints.append(mode),
+    )
+    client.bind_flow_spec(before)
+
+    result = await client.apply_submission(
+        {"semantic_plan": {"capabilities": []}, "ops": []},
+        mode="plan",
+        base_flow_version=4,
+    )
+
+    assert result["all_applied"] is False
+    assert result["must_retry"] == [3]
+    assert client.current_flow_spec().meta["current_version"] == 5
+    assert client.last_submission_kind == ""
+    assert checkpoints == ["plan"]
+
+
+@pytest.mark.asyncio
 async def test_unmatched_screenshot_plan_can_finish_without_mutating_or_checkpointing(
     tmp_path,
 ) -> None:

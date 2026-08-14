@@ -63,6 +63,12 @@ export function acceptRecordingToolSubmission(name, turn = activeTurnBudget) {
   return true;
 }
 
+function recordingSubmissionIsComplete(output) {
+  if (!output || typeof output !== "object") return true;
+  if (output.all_applied === false) return false;
+  return !Array.isArray(output.must_retry) || output.must_retry.length === 0;
+}
+
 export function recordRecordingToolRead(name, output, turn = activeTurnBudget) {
   if (!turn || !output || typeof output !== "object") return;
   const version = Number(output.flow_version);
@@ -119,12 +125,14 @@ export async function runRecordingSubmissionAttempt(name, operation) {
           accepted_submission: turn.acceptedSubmission,
         },
         duplicate: true,
+        accepted: true,
       };
     }
     guardRecordingToolAttempt(name, turn);
     const output = await operation();
-    acceptRecordingToolSubmission(name, turn);
-    return { output, duplicate: false };
+    const accepted = recordingSubmissionIsComplete(output);
+    if (accepted) acceptRecordingToolSubmission(name, turn);
+    return { output, duplicate: false, accepted };
   } finally {
     release();
   }
@@ -172,16 +180,17 @@ function proxyTool({ name, label, description, parameters }) {
       const sanitizedParams = sanitizeRecordingToolParams(name, params);
       if (SUBMISSION_TOOLS.has(name)) {
         requireRecordingSubmissionPrerequisite(name, sanitizedParams);
-        const { output } = await runRecordingSubmissionAttempt(
+        const { output, accepted } = await runRecordingSubmissionAttempt(
           name,
           () => callRecordingTool(name, sanitizedParams, toolCallId),
         );
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
           isError: false,
-          // This is the SDK-native terminal signal. The abort callback in the
-          // runtime remains a fallback for mixed parallel tool batches.
-          terminate: true,
+          // A partially applied mutation is authoritative but not terminal:
+          // Pi must read the returned version and correct must_retry entries.
+          // Only a complete submission aborts the current model turn.
+          terminate: accepted,
         };
       }
       const output = await callRecordingTool(name, sanitizedParams, toolCallId);

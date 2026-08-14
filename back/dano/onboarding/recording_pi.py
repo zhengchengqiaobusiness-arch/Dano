@@ -696,7 +696,6 @@ class RecordingPiSession:
                 ),
             )
             self.flow_spec = updated
-            self.last_submission_kind = mode
             # A plan/repair changes the authoritative contract. Any review
             # submitted earlier in the same or a previous Pi turn is stale.
             self.last_review = {}
@@ -704,7 +703,12 @@ class RecordingPiSession:
                 # The gateway checkpoint is part of accepting the tool result,
                 # not a best-effort action after the Pi prompt response.
                 self._on_submission_accepted(updated.model_copy(deep=True), mode)
-            return recording_agent_validation(updated)
+            validation = recording_agent_validation(updated)
+            # A partial submission may persist grounded operations so Pi can
+            # retry from the new version, but it has not completed this turn.
+            # The gateway must never treat must_retry as a finished plan.
+            self.last_submission_kind = mode if validation.get("all_applied", True) else ""
+            return validation
 
     async def accept_unchanged_plan(
         self,

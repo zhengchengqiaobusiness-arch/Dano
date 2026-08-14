@@ -131,6 +131,34 @@ async function verifyRejectedThenAcceptedSubmissionIsTerminal() {
     endRecordingToolTurn();
   }
 }
+
+async function verifyIncompleteSubmissionCanBeCorrectedInTheSameTurn() {
+  const accepted = [];
+  beginRecordingToolTurn({
+    maxSubmissionAttempts: 2,
+    onSubmissionAccepted: (name) => accepted.push(name),
+  });
+  try {
+    let backendCalls = 0;
+    const incomplete = await runRecordingSubmissionAttempt("submit_recording_plan", async () => {
+      backendCalls += 1;
+      return { all_applied: false, must_retry: [3] };
+    });
+    const corrected = await runRecordingSubmissionAttempt("submit_recording_plan", async () => {
+      backendCalls += 1;
+      return { all_applied: true, must_retry: [] };
+    });
+
+    assert(incomplete.duplicate === false, "incomplete plan was marked duplicate");
+    assert(incomplete.accepted === false, "incomplete plan incorrectly ended the turn");
+    assert(corrected.duplicate === false, "corrected plan was suppressed as a duplicate");
+    assert(corrected.accepted === true, "corrected plan did not end the turn");
+    assert(backendCalls === 2, "corrected plan did not reach the backend");
+    assert(JSON.stringify(accepted) === JSON.stringify(["submit_recording_plan"]), "only the complete plan may be terminal");
+  } finally {
+    endRecordingToolTurn();
+  }
+}
 function verifyFreshReadPrerequisites() {
   beginRecordingToolTurn();
   try {
@@ -505,6 +533,7 @@ try {
   verifyFreshReadPrerequisites();
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
+  await verifyIncompleteSubmissionCanBeCorrectedInTheSameTurn();
   verifyReviewToolSchema();
 verifyWriteAssertionSchema();
   verifyStringifiedWriteAssertionCompatibility();
