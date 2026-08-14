@@ -71,6 +71,32 @@ def test_frontend_relays_backward_delete_without_relying_only_on_keydown() -> No
     assert "onBeforeInput={onKbBeforeInput}" in source
 
 
+def test_recording_workspace_waits_for_terminal_analysis_before_showing_results() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    finalize_start = source.index('if (m.operation === "finalize")')
+    finalize_end = source.index("// 发布请求可能与最后一次字段更新响应交错到达", finalize_start)
+    finalize_handler = source[finalize_start:finalize_end]
+    assert "setWorkspaceStage(2)" not in finalize_handler
+    assert 'setPhase("recording")' not in finalize_handler
+
+    result_start = source.index('else if (m.type === "result")')
+    result_end = source.index('else if (m.type === "error")', result_start)
+    assert "setWorkspaceStage(2)" in source[result_start:result_end]
+
+
+def test_empty_automatic_capability_plan_returns_a_terminal_result() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    plan_start = source.index('elif t == "orchestrate_flow":')
+    plan_end = source.index('elif t == "auto_fix_flow":', plan_start)
+    plan_source = source[plan_start:plan_end]
+    skipped_start = plan_source.index('"recording.auto_publish_skipped"')
+    skipped_branch = plan_source[skipped_start:]
+
+    assert '"type": "result"' in skipped_branch
+    assert '"stage": "capability_plan"' in skipped_branch
+
+
 def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:
     assert gateway.InvokeReq(input={"month": "2026-07"}).input == {"month": "2026-07"}
     assert gateway.ToolCallReq(name="A-OA__query", input={}).input == {}

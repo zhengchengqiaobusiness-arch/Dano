@@ -2159,19 +2159,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.operation === "finalize") {
           finalizeOperationRef.current = null;
-          updateAgentStatus({ state: "ready", text: "请求抓取完成，能力草稿已生成" });
+          updateAgentStatus({ state: "analyzing", text: "请求抓取完成，正在生成、验证并发布能力…" });
           setLastAnalysisEvidence(null);
           setLastOperationReport(null);
           setShowAllAnalysisChanges(false);
-          // finalize 完成:无论之前 phase 是什么,都必须清回 recording,
-          // 否则 "停止并分析请求" 按钮会一直转圈 (P5 引入的守卫漏判 finalize)。
-          setPhase("recording");
-          setWorkspaceStage(2);
         }
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置,否则用户看到按钮闪退但后端仍在发布。
-        const finalizeJustCleared = m.operation === "finalize" && !finalizeOperationRef.current;
-        if (finalizeJustCleared || phaseRef.current !== "publishing") setPhase("recording");
+        if (phaseRef.current !== "publishing") setPhase("recording");
         const fs = m.flow_spec;
         const acknowledgesActiveMutation = m.operation === "flow_update"
           && (!m.operation_id || m.operation_id === flowMutationInFlightRef.current?.operation_id);
@@ -2244,6 +2239,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         finalizeOperationRef.current = null;
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         setResult(m.report); setPhase("recording");
+        setWorkspaceStage(2);
         if (m.report?.ok && m.report?.lifecycle_pending) {
           message.warning(m.report.lifecycle_message || "资产已发布，生命周期登记待补偿");
         }
@@ -2261,6 +2257,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setDescBusy(false); clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
+        if (m.operation === "plan" || m.operation === "publish") {
+          setPhase("recording");
+          setWorkspaceStage(2);
+        }
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         if (m.check_report) setCheckReport(m.check_report);
         if (m.operation === "plan" && m.analysis_application) {

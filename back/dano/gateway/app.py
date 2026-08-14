@@ -2556,6 +2556,22 @@ async def record_ws(ws: WebSocket) -> None:
                                 action=session_action,
                                 reason="capability plan completed without capabilities",
                             )
+                            terminal_response = {
+                                "type": "result",
+                                "operation": "plan",
+                                "operation_id": operation_id,
+                                "report": {
+                                    "ok": False,
+                                    "stage": "capability_plan",
+                                    "reason": (
+                                        "自动分析已完成，但未生成可发布的业务能力；"
+                                        "完整录制草稿已保留"
+                                    ),
+                                },
+                                **_recording_flow_projection(pending_flow_spec),
+                            }
+                            _remember_costly(msg, terminal_response)
+                            await sender.send_json(terminal_response)
                 except WebSocketDisconnect:
                     # The plan was already applied and checkpointed. A client
                     # closing before the acknowledgement is a transport event,
