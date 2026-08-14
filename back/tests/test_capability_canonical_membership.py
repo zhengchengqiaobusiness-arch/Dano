@@ -175,6 +175,8 @@ def test_frontend_edits_capability_membership_through_one_typed_path() -> None:
 
     assert 'field: "request_refs"' not in source
     assert 'updateCapabilityField(idx, "step_ids"' not in source
+    assert 'op: "add_capability_step"' in source
+    assert 'op: "remove_capability_step"' in source
     assert 'op: "reorder_capability_steps"' in source
 
 
@@ -190,7 +192,7 @@ def test_frontend_renders_every_non_execute_capability_interface() -> None:
     assert 'ref.usage !== "execute"' in source
     assert "{capabilityUsageLabel(ref.usage)}" in source
     assert "const auxiliaryStepIds = new Set" in source
-    assert "${stepIds.length + auxiliaryStepIds.size} 接口" in source
+    assert "接口 {stepIds.length + auxiliaryStepIds.size}" in source
 
 
 def test_frontend_optimistically_keeps_added_step_visible() -> None:
@@ -201,9 +203,6 @@ def test_frontend_optimistically_keeps_added_step_visible() -> None:
         / "components"
         / "PageRecorder.tsx"
     ).read_text(encoding="utf-8")
-    handler = source.split("function addStepToCapability", 1)[1].split(
-        "function removeStepFromCapability", 1,
-    )[0]
-
-    assert "optimisticNodes" in handler
-    assert "_rollback:" in handler
+    assert "localCapabilityStepIds" in source
+    assert "replaceCapabilityMembershipEdits(capability, index, [...current, stepId])" in source
+    assert 'type: "patch_draft"' in source

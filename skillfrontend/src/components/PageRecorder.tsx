@@ -114,8 +114,13 @@ interface FlowCapability {
   kind?: string;
   confidence?: number;
   confirmed?: boolean;
-  request_refs?: Array<Record<string, unknown>>;
+  request_refs?: Array<{
+    step_id?: string;
+    usage?: string;
+    [key: string]: unknown;
+  }>;
   step_ids?: string[];
+  nodes?: Array<Record<string, unknown>>;
   dependencies?: Array<Record<string, unknown>>;
 }
 
@@ -269,6 +274,7 @@ export default function PageRecorder({
   const [frameMeta, setFrameMeta] = useState<FrameMeta>({ width: 1280, height: 800 });
   const [pendingEdits, setPendingEdits] = useState<DraftEdit[]>([]);
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
+  const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const actionRef = useRef("");
@@ -382,6 +388,7 @@ export default function PageRecorder({
       republishAfterRevisionRef.current = null;
       setPendingEdits([]);
       setLocalValues({});
+      setLocalCapabilityStepIds({});
       send({ type: "republish", title: next.title || title });
     }
   }
@@ -403,6 +410,7 @@ export default function PageRecorder({
     setSnapshot(null);
     setPendingEdits([]);
     setLocalValues({});
+    setLocalCapabilityStepIds({});
     setHasFrame(false);
     setTitle("");
     setVisibleStage(1);
@@ -531,6 +539,113 @@ export default function PageRecorder({
     return Object.prototype.hasOwnProperty.call(localValues, key)
       ? String(localValues[key] || "")
       : String(capability[field] || "");
+  }
+
+  function capabilityReference(capability: FlowCapability, index: number) {
+    return {
+      capability_id: capability.capability_id,
+      capability_name: capability.name,
+      capability_index: index,
+    };
+  }
+
+  function capabilityKey(capability: FlowCapability, index: number) {
+    return String(capability.capability_id || capability.name || index);
+  }
+
+  function serverCapabilityExecuteStepIds(capability: FlowCapability) {
+    return Array.from(new Set([
+      ...(capability.step_ids || []),
+      ...(capability.request_refs || [])
+        .filter((ref) => (ref.usage || "execute") === "execute")
+        .map((ref) => String(ref.step_id || "")),
+    ].filter(Boolean)));
+  }
+
+  function capabilityExecuteStepIds(capability: FlowCapability, index: number) {
+    const key = capabilityKey(capability, index);
+    if (Object.prototype.hasOwnProperty.call(localCapabilityStepIds, key)) {
+      return localCapabilityStepIds[key];
+    }
+    return serverCapabilityExecuteStepIds(capability);
+  }
+
+  function replaceCapabilityMembershipEdits(
+    capability: FlowCapability,
+    index: number,
+    nextStepIds: string[],
+  ) {
+    const reference = capabilityReference(capability, index);
+    const originalStepIds = serverCapabilityExecuteStepIds(capability);
+    const targetsCapability = (edit: DraftEdit) => (
+      (Boolean(capability.capability_id) && edit.capability_id === capability.capability_id)
+      || (Boolean(capability.name) && edit.capability_name === capability.name)
+      || edit.capability_index === index
+    );
+    const membershipOps = new Set([
+      "add_capability_step", "remove_capability_step", "reorder_capability_steps",
+    ]);
+    const edits: DraftEdit[] = [
+      ...originalStepIds
+        .filter((stepId) => !nextStepIds.includes(stepId))
+        .map((stepId) => ({
+          op: "remove_capability_step", actor: "user" as const, ...reference, step_id: stepId,
+        })),
+      ...nextStepIds
+        .filter((stepId) => !originalStepIds.includes(stepId))
+        .map((stepId) => ({
+          op: "add_capability_step", actor: "user" as const, ...reference,
+          step_id: stepId, usage: "execute", origin: "manual", confirmed: true,
+        })),
+      {
+        op: "reorder_capability_steps", actor: "user", ...reference, step_ids: nextStepIds,
+      },
+    ];
+    setLocalCapabilityStepIds((current) => ({
+      ...current,
+      [capabilityKey(capability, index)]: nextStepIds,
+    }));
+    setPendingEdits((current) => [
+      ...current.filter((edit) => !(membershipOps.has(edit.op) && targetsCapability(edit))),
+      ...edits,
+    ]);
+  }
+
+  function addStepToCapability(index: number, stepId?: string) {
+    const capability = capabilities[index];
+    if (!capability || !stepId) return;
+    const current = capabilityExecuteStepIds(capability, index);
+    if (current.includes(stepId)) return;
+    replaceCapabilityMembershipEdits(capability, index, [...current, stepId]);
+  }
+
+  function removeStepFromCapability(index: number, stepId: string) {
+    const capability = capabilities[index];
+    if (!capability) return;
+    replaceCapabilityMembershipEdits(
+      capability,
+      index,
+      capabilityExecuteStepIds(capability, index).filter((item) => item !== stepId),
+    );
+  }
+
+  function moveStepInCapability(index: number, stepId: string, delta: number) {
+    const capability = capabilities[index];
+    if (!capability) return;
+    const current = capabilityExecuteStepIds(capability, index);
+    const from = current.indexOf(stepId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= current.length) return;
+    const next = [...current];
+    next.splice(from, 1);
+    next.splice(to, 0, stepId);
+    replaceCapabilityMembershipEdits(capability, index, next);
+  }
+
+  function capabilityUsageLabel(usage?: string) {
+    return ({
+      execute: "执行", preflight: "前置", option_source: "选项源", fact_check: "校验",
+    } as Record<string, string>)[usage || "execute"] || usage || "关联";
   }
 
   function republish() {
@@ -820,11 +935,16 @@ export default function PageRecorder({
     return (
       <Collapse
         items={capabilities.map((capability, index) => {
-          const stepIds = new Set([
-            ...(capability.step_ids || []),
-            ...(capability.request_refs || []).map((item) => String(item.step_id || "")),
-          ]);
-          const capabilitySteps = steps.filter((step) => stepIds.has(step.step_id));
+          const stepIds = capabilityExecuteStepIds(capability, index);
+          const auxiliaryRefs = (capability.request_refs || []).filter(
+            (ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id),
+          );
+          const auxiliaryStepIds = new Set(auxiliaryRefs.map((ref) => String(ref.step_id)));
+          const stepById = new Map(steps.map((step) => [step.step_id, step]));
+          const capabilitySteps = stepIds.map((stepId) => stepById.get(stepId)).filter(Boolean) as FlowStep[];
+          const unusedSteps = steps.filter(
+            (step) => !stepIds.includes(step.step_id) && !auxiliaryStepIds.has(step.step_id),
+          );
           return {
             key: capability.capability_id || capability.name || String(index),
             label: (
@@ -854,11 +974,29 @@ export default function PageRecorder({
                     onChange={(event) => updateCapability(capability, "intent", event.target.value)}
                   />
                 </div>
-                {capabilitySteps.map((step) => (
+                <Space wrap>
+                  <Text type="secondary">接口 {stepIds.length + auxiliaryStepIds.size}</Text>
+                  <Select
+                    value={undefined}
+                    placeholder="添加执行接口"
+                    style={{ minWidth: 260 }}
+                    options={unusedSteps.map((step) => ({
+                      value: step.step_id,
+                      label: `${step.method || "HTTP"} ${step.path || step.url || step.name || step.step_id}`,
+                    }))}
+                    onChange={(stepId) => addStepToCapability(index, stepId)}
+                  />
+                </Space>
+                {capabilitySteps.map((step, stepIndex) => (
                   <Card
                     key={step.step_id}
                     size="small"
-                    title={<Space><Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
+                    title={<Space><Tag color="blue">{capabilityUsageLabel("execute")}</Tag><Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
+                    extra={<Space>
+                      <Button size="small" disabled={stepIndex === 0} onClick={() => moveStepInCapability(index, step.step_id, -1)}>上移</Button>
+                      <Button size="small" disabled={stepIndex === capabilitySteps.length - 1} onClick={() => moveStepInCapability(index, step.step_id, 1)}>下移</Button>
+                      <Button size="small" danger onClick={() => removeStepFromCapability(index, step.step_id)}>移除</Button>
+                    </Space>}
                   >
                     <div
                       style={{
@@ -875,6 +1013,19 @@ export default function PageRecorder({
                     {(step.params || []).map((param) => renderParamEditor(step, param))}
                   </Card>
                 ))}
+                {auxiliaryRefs.map((ref) => {
+                  const step = stepById.get(String(ref.step_id));
+                  if (!step) return null;
+                  return (
+                    <Card
+                      key={`${ref.usage || "auxiliary"}:${step.step_id}`}
+                      size="small"
+                      title={<Space><Tag color="purple">{capabilityUsageLabel(ref.usage)}</Tag><Tag>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
+                    >
+                      <Text type="secondary">该接口由能力编排引用，不作为主执行步骤重复执行。</Text>
+                    </Card>
+                  );
+                })}
                 {capability.dependencies?.length ? (
                   <Card size="small" title={`依赖 ${capability.dependencies.length}`}>
                     <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(capability.dependencies, null, 2)}</pre>

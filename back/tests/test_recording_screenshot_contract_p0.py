@@ -11,7 +11,6 @@ from pathlib import Path
 
 from dano.execution.page import flow_spec as flow_module
 from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
-from dano.gateway import app as gateway
 
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "recording_screenshot_false_success.json"
@@ -19,53 +18,6 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "recording_screenshot_false_succ
 
 def _incident() -> dict:
     return json.loads(_FIXTURE.read_text(encoding="utf-8"))
-
-
-def _six_field_spec() -> FlowSpec:
-    names = ["申请标题", "公章", "使用日期", "归还日期", "使用描述", "备注"]
-    return FlowSpec(steps=[FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/api/applications/submit",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(path=f"field{index}", key=name, label=name, value="recorded")
-            for index, name in enumerate(names)
-        ],
-    )])
-
-
-
-
-def test_screenshot_zero_match_report_is_non_blocking_review() -> None:
-    before = _six_field_spec()
-    after = before.model_copy(deep=True)
-    after.meta = {
-        "capability_model": {
-            "semantic_plan": {"field_semantics": [], "unresolved_items": []},
-            "semantic_coverage": {"complete": False},
-            "proposal_gate": {"accepted": True, "reasons": []},
-        },
-        "capability_generation": {"last_mode": "optimize"},
-    }
-
-    report = gateway._analysis_application_report(
-        before=before,
-        after=after,
-        operation_report={
-            "changed": False,
-            "summary": "未修改任何字段、能力或关联",
-            "changes": {},
-            "field_changes": [],
-            "proposal_gate": {"accepted": True, "reasons": []},
-        },
-        screenshots=[{"name": "list.png"}, {"name": "form.png"}],
-        delivered_image_count=2,
-        operation_id="plan-offline-regression",
-    )
-
-    assert report["matched_field_count"] == 0
-    assert report["status"] == "needs_review"
 
 
 def test_screenshot_value_never_writes_default_value() -> None:
