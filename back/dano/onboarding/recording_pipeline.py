@@ -61,7 +61,10 @@ class CanonicalRecordingRuntime:
         elif seed.kind == "edited_spec":
             if seed.draft is None:
                 raise ValueError("edited_spec requires a draft")
-            draft = dict(seed.draft)
+            # A human-edited draft is already the authoritative capability
+            # boundary. Republish must validate it, never ask Pi to divide it
+            # into a different set of capabilities again.
+            return dict(seed.draft)
         else:
             raise ValueError(f"unsupported recording pipeline seed: {seed.kind}")
 
@@ -74,6 +77,8 @@ class CanonicalRecordingRuntime:
         )
 
     async def check(self, draft: Draft, context: PipelineContext) -> PipelineCheck:
+        context.ensure_active()
+        await context.progress(WorkflowStep.COMPILING, "正在编译能力调用结构", 0)
         context.ensure_active()
         await context.progress(WorkflowStep.VERIFYING, "正在验证接口、字段和依赖", 0)
         verified, verification_issues = await self.services.verify(draft, context)
@@ -103,7 +108,4 @@ class CanonicalRecordingRuntime:
     async def publish(self, draft: Draft, context: PipelineContext) -> dict[str, Any]:
         context.ensure_active()
         await context.progress(WorkflowStep.PUBLISHING, "正在原子冻结全部能力", 0)
-        release = await self.services.publish(draft, context)
-        context.ensure_active()
-        await context.progress(WorkflowStep.EXPORTING, "正在导出当前动作的 Skill", 0)
-        return release
+        return await self.services.publish(draft, context)

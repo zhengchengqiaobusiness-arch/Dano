@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from dano.execution.page.flow_spec import FlowSpec
-from dano.onboarding.recording_runtime import ProductionRecordingServices
+from dano.onboarding.recording_runtime import (
+    ProductionRecordingServices,
+    _submit_with_protocol_recovery,
+)
 from dano.onboarding.recording_workflow import PipelineContext
 
 
@@ -59,3 +62,27 @@ def test_verification_todo_becomes_structured_generic_issue() -> None:
     assert issue.resolver == "collect_evidence"
     assert issue.target["step_id"] == "step-1"
     assert issue.allowed_operations == ["execute_write_with_verify"]
+
+
+@pytest.mark.asyncio
+async def test_pi_protocol_error_is_retried_inside_the_same_operation() -> None:
+    class Pi:
+        last_submission_kind = ""
+        prompts: list[str] = []
+
+        async def prompt(self, prompt: str) -> None:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                raise ValueError("unknown field: evidence")
+            self.last_submission_kind = "plan"
+
+    pi = Pi()
+    await _submit_with_protocol_recovery(
+        pi,
+        prompt="生成能力",
+        accepted_kinds={"plan"},
+        context=_context(),
+    )
+
+    assert len(pi.prompts) == 2
+    assert "只使用工具 schema 声明的字段" in pi.prompts[1]

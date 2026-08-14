@@ -773,6 +773,7 @@ async def _publish_canonical_recording(
     run_id: str,
     release_flow_spec,
     release_candidate: dict,
+    context,
 ) -> dict:
     """Freeze and export one complete recording release through one boundary."""
     from dano.execution.page.flow_spec import (
@@ -838,7 +839,10 @@ async def _publish_canonical_recording(
         action=action,
         asset_version=version,
     )
-    await _auto_export(tenant, skill_ids={skill_id})
+    context.ensure_active()
+    from dano.onboarding.recording_workflow import WorkflowStep
+    await context.progress(WorkflowStep.EXPORTING, "正在导出当前动作的 Skill", 0)
+    await _auto_export(tenant, skill_ids={skill_id}, strict=True)
     return {
         **report,
         **lifecycle,
@@ -915,6 +919,7 @@ async def record_ws(ws: WebSocket) -> None:
                 run_id=str(getattr(current._pi, "run_id", "")),
                 release_flow_spec=release_spec,
                 release_candidate=candidate,
+                context=context,
             )
 
         global _recording_session_registry
@@ -966,11 +971,12 @@ async def _auto_export(
     *,
     mode: Literal["proxy", "package", "both"] = "package",
     skill_ids: set[str] | None = None,
+    strict: bool = False,
 ) -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
     目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
-    best-effort:导出失败不影响接入结果。
+    普通接入保持 best-effort；录制原子发布传 strict=True，导出失败不得伪装成 published。
     """
     try:
         from dano.export.agent_skills import write_exports
@@ -992,6 +998,8 @@ async def _auto_export(
         )
     except Exception as e:  # noqa: BLE001
         log.warning("onboard.auto_export_failed", error=str(e))
+        if strict:
+            raise
 
 
 # ── 异步接入(接入向导:启动后台生成 + 轮询进度,避免几分钟同步阻塞/超时)──

@@ -221,22 +221,36 @@ class SelfHealingPipeline:
     runtime: PipelineRuntime
     max_rounds: int = 5
     max_unchanged_rounds: int = 2
+    max_review_retries: int = 2
+    operation_timeout_s: float = 240.0
+    overall_timeout_s: float = 900.0
 
     async def run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
+        try:
+            async with asyncio.timeout(self.overall_timeout_s):
+                return await self._run(seed, context)
+        except TimeoutError:
+            return PipelineOutcome(
+                status=WorkflowStatus.FAILED,
+                error=f"录制处理超过 {int(self.overall_timeout_s)} 秒总时间预算",
+            )
+
+    async def _run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
         context.ensure_active()
         await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
-        draft = await self.runtime.prepare(seed, context)
+        draft = await self._bounded(self.runtime.prepare(seed, context))
         unchanged = 0
+        review_retries = 0
         previous = _stable_payload(draft)
 
         for round_number in range(1, self.max_rounds + 1):
             context.ensure_active()
             await context.progress(WorkflowStep.VERIFYING, "正在检查和验证能力", round_number)
-            checked = await self.runtime.check(draft, context)
+            checked = await self._bounded(self.runtime.check(draft, context))
             draft = checked.draft
             if not checked.issues:
                 await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
-                release = await self.runtime.publish(draft, context)
+                release = await self._bounded(self.runtime.publish(draft, context))
                 return PipelineOutcome(
                     status=WorkflowStatus.PUBLISHED,
                     draft=draft,
@@ -253,6 +267,16 @@ class SelfHealingPipeline:
                     issues=external,
                 )
 
+            if any(issue.code == "final_review_rejected" for issue in checked.issues):
+                review_retries += 1
+                if review_retries > self.max_review_retries:
+                    return PipelineOutcome(
+                        status=WorkflowStatus.EDITABLE,
+                        draft=draft,
+                        issues=checked.issues,
+                        error=f"最终审核修复达到 {self.max_review_retries} 次上限",
+                    )
+
             answers: dict[str, str] = {}
             for issue in checked.issues:
                 if issue.resolver != "operator":
@@ -267,12 +291,12 @@ class SelfHealingPipeline:
                 answers[issue.issue_id] = answer
 
             await context.progress(WorkflowStep.RESOLVING, "正在解决验证问题", round_number)
-            repaired = await self.runtime.repair(
+            repaired = await self._bounded(self.runtime.repair(
                 draft,
                 checked.issues,
                 answers,
                 context,
-            )
+            ))
             current = _stable_payload(repaired)
             unchanged = unchanged + 1 if current == previous else 0
             draft = repaired
@@ -285,13 +309,17 @@ class SelfHealingPipeline:
                     error="自动处理连续没有产生有效变化",
                 )
 
-        final = await self.runtime.check(draft, context)
+        final = await self._bounded(self.runtime.check(draft, context))
         return PipelineOutcome(
             status=WorkflowStatus.EDITABLE,
             draft=final.draft,
             issues=final.issues,
             error=f"自动处理达到 {self.max_rounds} 轮上限",
         )
+
+    async def _bounded(self, operation: Awaitable[Any]) -> Any:
+        async with asyncio.timeout(self.operation_timeout_s):
+            return await operation
 
 
 def _stable_payload(value: dict[str, Any]) -> str:

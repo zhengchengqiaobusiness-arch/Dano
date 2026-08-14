@@ -9,6 +9,8 @@ from typing import Any
 
 from dano.execution.page.flow_spec import (
     FlowSpec,
+    auto_fix_flow_spec,
+    flow_spec_fingerprint,
     prepare_flow_release_candidate,
 )
 from dano.onboarding.recording_pipeline import RecordingPipelineServices
@@ -30,6 +32,39 @@ from dano.onboarding.recording_workflow import (
 PiProvider = Callable[[bool], Awaitable[Any]]
 Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
+_PROTOCOL_ATTEMPTS = 3
+
+
+async def _submit_with_protocol_recovery(
+    pi: Any,
+    *,
+    prompt: str,
+    accepted_kinds: set[str],
+    context: PipelineContext,
+) -> None:
+    """Keep schema mistakes inside the current operation instead of aborting the run."""
+
+    next_prompt = prompt
+    last_error: Exception | None = None
+    for attempt in range(1, _PROTOCOL_ATTEMPTS + 1):
+        try:
+            await pi.prompt(next_prompt)
+            context.ensure_active()
+            if pi.last_submission_kind in accepted_kinds:
+                return
+            last_error = RuntimeError(
+                "Pi 未通过规定工具提交结果：" + ", ".join(sorted(accepted_kinds))
+            )
+        except Exception as exc:  # noqa: BLE001 - retry only within this bounded operation
+            last_error = exc
+        if attempt < _PROTOCOL_ATTEMPTS:
+            next_prompt = (
+                "上一次工具提交未通过公开 schema。继续当前任务，不要询问业务用户。"
+                "先读取最新 recording state，只使用工具 schema 声明的字段；"
+                "不要增加 evidence、risk_level 或其他未声明字段，也不要提交空 request_refs。"
+                "重新提交同一个完整结果。"
+            )
+    raise RuntimeError(f"Pi 连续 {_PROTOCOL_ATTEMPTS} 次未提交有效结构") from last_error
 
 
 def _workflow_issue(issue: ReleaseIssue) -> WorkflowIssue:
@@ -119,18 +154,18 @@ class ProductionRecordingServices:
         spec = FlowSpec.model_validate(draft)
         pi = await self.pi_provider(not use_live_notebook)
         pi.bind_flow_spec(spec)
-        result = await pi.prompt(
+        await _submit_with_protocol_recovery(
+            pi,
+            prompt=(
             "为当前录制生成完整且可执行的业务能力契约。先读取录制状态，基于页面、HAR、"
             "字段证据、字典和上下游响应确定能力成员、字段七维属性和依赖编排；"
             "禁止使用固定页面、字段或接口假设。最后必须调用 submit_recording_plan，"
             "一次提交完整能力集合，不得部分发布。"
             f" recording_id={self.recording_id} use_live_notebook={str(use_live_notebook).lower()}"
+            ),
+            accepted_kinds={"plan"},
+            context=context,
         )
-        context.ensure_active()
-        if isinstance(result, dict) and result.get("status") == "analysis_terminated":
-            context.ensure_active()
-        if pi.last_submission_kind != "plan":
-            raise RuntimeError("Pi 未提交完整 recording plan")
         return pi.current_flow_spec().model_dump(mode="json")
 
     async def verify(
@@ -178,26 +213,32 @@ class ProductionRecordingServices:
         pi = await self.pi_provider(True)
         pi.bind_flow_spec(release_spec)
         version = int((release_spec.meta or {}).get("current_version") or 0)
-        try:
-            await pi.prompt(
+        last_error: Exception | None = None
+        for attempt in range(1, _PROTOCOL_ATTEMPTS + 1):
+            try:
+                await pi.prompt(
                 "审核当前完整发布候选。必须读取录制状态和验证报告，并调用 "
                 "submit_recording_review 提交 acceptance、security、compliance 三角色结论。"
                 "拒绝时必须给出结构化 issues，包含 resolver、定位字段和允许的修复操作；"
                 "不得解析或依赖中文错误文本。"
                 f" recording_id={self.recording_id} flow_version={version}"
-            )
-            context.ensure_active()
-            pi.require_publish_review(
-                flow_version=version,
-                flow_fingerprint=str(candidate["flow_fingerprint"]),
-                machine_decision=decision,
-            )
-        except Exception:
-            issues = review_release_issues(dict(getattr(pi, "last_review", None) or {}))
-            if not issues:
-                raise
-            return draft, tuple(_workflow_issue(issue) for issue in issues)
-        return release_spec.model_dump(mode="json"), ()
+                if attempt == 1 else
+                "上次审核提交未通过公开 schema。继续当前审核，不要询问用户。"
+                "读取最新状态并仅按 submit_recording_review 的 schema 重新提交三角色结论。"
+                )
+                context.ensure_active()
+                pi.require_publish_review(
+                    flow_version=version,
+                    flow_fingerprint=str(candidate["flow_fingerprint"]),
+                    machine_decision=decision,
+                )
+                return release_spec.model_dump(mode="json"), ()
+            except Exception as exc:  # noqa: BLE001 - distinguish review rejection below
+                last_error = exc
+                issues = review_release_issues(dict(getattr(pi, "last_review", None) or {}))
+                if issues:
+                    return draft, tuple(_workflow_issue(issue) for issue in issues)
+        raise RuntimeError("Pi 连续未提交有效发布审核") from last_error
 
     async def repair(
         self,
@@ -207,10 +248,23 @@ class ProductionRecordingServices:
         context: PipelineContext,
     ) -> dict[str, Any]:
         context.ensure_active()
+        spec = FlowSpec.model_validate(draft)
+        if not operator_answers:
+            deterministic = await auto_fix_flow_spec(
+                spec,
+                repair_ops=[],
+                max_rounds=1,
+                expand_requests=False,
+            )
+            if flow_spec_fingerprint(deterministic) != flow_spec_fingerprint(spec):
+                return deterministic.model_dump(mode="json")
+
         pi = await self.pi_provider(False)
-        pi.bind_flow_spec(FlowSpec.model_validate(draft))
+        pi.bind_flow_spec(spec)
         payload = [issue.model_dump(mode="json") for issue in issues]
-        await pi.prompt(
+        await _submit_with_protocol_recovery(
+            pi,
+            prompt=(
             "继续同一录制的修复闭环。只按结构化 issue 的 resolver、target、evidence 和 "
             "allowed_operations 处理；machine_repair 提交 FlowSpec 修复，collect_evidence 使用"
             "回放/页面/字典/依赖工具补证，operator 使用已绑定回答。不得降低闸门、猜测事实、"
@@ -218,10 +272,10 @@ class ProductionRecordingServices:
             + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             + " operator_answers="
             + json.dumps(operator_answers, ensure_ascii=False, separators=(",", ":"))
+            ),
+            accepted_kinds={"repair", "plan"},
+            context=context,
         )
-        context.ensure_active()
-        if pi.last_submission_kind not in {"repair", "plan"}:
-            raise RuntimeError("Pi 未提交 recording repair")
         return pi.current_flow_spec().model_dump(mode="json")
 
     async def publish(

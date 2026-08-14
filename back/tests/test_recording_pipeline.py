@@ -108,7 +108,7 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
-    assert calls == [("plan", False)]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -209,3 +209,37 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.issues == (issue,)
     assert published is False
+
+
+@pytest.mark.asyncio
+async def test_final_review_repairs_are_bounded_independently() -> None:
+    issue = WorkflowIssue(
+        issue_id="review", code="final_review_rejected", message="审核拒绝",
+        resolver="machine_repair",
+    )
+    repairs = 0
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {"draft": True}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            return type("Check", (), {"draft": draft, "issues": (issue,)})()
+
+        async def repair(self, draft, issues, answers, context):  # noqa: ANN001
+            nonlocal repairs
+            repairs += 1
+            return {**draft, "attempt": repairs}
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            raise AssertionError("rejected review must not publish")
+
+    outcome = await SelfHealingPipeline(
+        Runtime(),
+        max_rounds=5,
+        max_review_retries=2,
+    ).run(PipelineSeed(kind="recording"), _context())
+
+    assert outcome.status == WorkflowStatus.EDITABLE
+    assert outcome.error == "最终审核修复达到 2 次上限"
+    assert repairs == 2

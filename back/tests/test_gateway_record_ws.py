@@ -47,6 +47,19 @@ async def test_recording_auto_export_only_writes_the_current_skill(monkeypatch, 
     }]
 
 
+@pytest.mark.asyncio
+async def test_strict_recording_export_propagates_failure(monkeypatch) -> None:
+    import dano.export.agent_skills as exports
+
+    async def fail(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise OSError("disk full")
+
+    monkeypatch.setattr(exports, "write_exports", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        await gateway._auto_export("tenant-a", skill_ids={"system.action"}, strict=True)
+
+
 def test_recording_action_is_safe_and_process_unique() -> None:
     values = {gateway._new_recording_action() for _ in range(100)}
 
