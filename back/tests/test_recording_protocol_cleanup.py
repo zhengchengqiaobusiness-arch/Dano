@@ -73,6 +73,16 @@ def test_frontend_coalesces_high_frequency_input_and_frames() -> None:
     assert 'kind: "key", key: "Backspace"' in source
 
 
+def test_recording_canvas_preserves_captured_frame_aspect_ratio() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    recording_view = source.split("function renderRecording()", 1)[1].split(
+        "function renderParamEditor", 1,
+    )[0]
+
+    assert 'aspectRatio: `${frameMeta.width} / ${frameMeta.height}`' in recording_view
+    assert 'height: "calc(100vh - 245px)"' not in recording_view
+
+
 def test_frontend_does_not_drive_capability_results_from_frames_or_request_counts() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
     message_handler = source[source.index("socket.onmessage"):source.index("socket.onerror")]
