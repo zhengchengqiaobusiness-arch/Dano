@@ -111,6 +111,81 @@ def _dom_enum(label, alias, selected_label, selected_value, options, *, page_id=
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_agent_approved_business_get_materializes_even_when_capture_only_has_fill_evidence(self):
+        unrelated_login = _get(
+            "https://www.example.test/user/login.aspx",
+            "<html>login</html>",
+        )
+        unrelated_login.update({
+            "request_id": "req-login",
+            "index": 1,
+            "sequence": 1,
+            "content_type": "text/html; charset=utf-8",
+            "resource_type": "document",
+            "trigger_action_id": "action-login",
+            "trigger_transaction_id": "txn-login",
+            "trigger_event_id": "event-login",
+            "trigger_op": "click",
+            "trigger_locator": "text=登录",
+        })
+        request = _get(
+            "https://www.example.test/search.aspx?value=一家美",
+            "<html>search results</html>",
+        )
+        request.update({
+            "request_id": "req-search",
+            "index": 17,
+            "sequence": 17,
+            "content_type": "text/html; charset=utf-8",
+            "resource_type": "document",
+            "trigger_action_id": "action-fill",
+            "trigger_transaction_id": "txn-search",
+            "trigger_event_id": "event-fill",
+            "trigger_op": "fill",
+            "trigger_locator": 'css=[name="value"]',
+        })
+
+        spec = to_flow_spec(
+            [unrelated_login, request],
+            request_role_overrides={
+                "req-search": {
+                    "role": "business_get",
+                    "keep": True,
+                    "reason": "用户输入关键词后产生的主搜索请求",
+                    "confidence": 0.95,
+                    "evidence": {"actor": "agent"},
+                },
+            },
+        )
+
+        assert len(spec.steps) == 1
+        assert spec.steps[0].source_meta["request_id"] == "req-search"
+        assert spec.request_facts.usage["req-search"].state == "materialized"
+
+        live_spec = to_flow_spec([unrelated_login, request])
+        live_spec = asyncio.run(orchestrate_flow_capabilities(
+            live_spec,
+            submission={
+                "semantic_plan": {
+                    "business_understanding": {"summary": "按关键词搜索内容"},
+                    "capabilities": [{
+                        "name": "search_content",
+                        "title": "搜索内容",
+                        "kind": "query_status",
+                        "anchor_step_id": "req-search",
+                        "request_refs": [{"step_id": "req-search", "usage": "execute"}],
+                    }],
+                    "unresolved_items": [],
+                },
+                "ops": [],
+            },
+            generation_mode="initial",
+        ))
+        from dano.execution.page.recording_live import merge_live_agent_state
+
+        merged = merge_live_agent_state(live_spec, spec)
+        assert [capability.name for capability in merged.capabilities] == ["search_content"]
+
     def test_duplicate_request_identity_materializes_only_the_selected_business_request(self):
         initial = _get("https://oa.example.test/items/page?pageNo=1&pageSize=10", {"list": []})
         initial.update({"request_id": "req-page", "index": 1, "sequence": 1})

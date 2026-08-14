@@ -356,6 +356,53 @@ def test_param_type_is_grounded_by_the_exact_cited_control_and_preserves_wire_ty
     assert any(item.get("kind") == "param_type" for item in actual.evidence)
 
 
+def test_recording_plan_accepts_the_supported_param_type_operation():
+    spec = _flow()
+    param = spec.steps[1].params[0]
+    param.type = "number"
+    param.wire_type = "string"
+    spec.request_facts.field_evidence[0].update({
+        "evidence_id": "evt-job",
+        "binding_status": "bound",
+        "wire_path": "body.jobId",
+        "editable": True,
+    })
+
+    updated = asyncio.run(apply_recording_agent_submission(
+        spec,
+        submission={
+            "semantic_plan": {
+                "business_understanding": {"summary": "更新记录"},
+                "capabilities": [{
+                    "name": "update_item",
+                    "title": "更新记录",
+                    "kind": "submit",
+                    "anchor_step_id": "submit",
+                    "request_refs": [{"step_id": "submit", "usage": "execute"}],
+                }],
+                "unresolved_items": [],
+            },
+            "ops": [{
+                "op": "set_param_type",
+                "request_id": "req-submit",
+                "wire_path": "body.jobId",
+                "business_type": "string",
+                "reason": "页面中是文本输入框",
+                "evidence_refs": ["evt-job"],
+            }],
+        },
+        mode="plan",
+    ))
+
+    assert updated.steps[1].params[0].type == "string"
+    result = updated.meta["recording_agent_session"]["op_results"][0]
+    assert result["status"] == "applied"
+    assert result["requested_target"] == {
+        "request_id": "req-submit",
+        "wire_path": "body.jobId",
+    }
+
+
 def test_param_type_rejects_a_model_type_that_contradicts_the_cited_control():
     spec = _flow()
     spec.request_facts.field_evidence.append({

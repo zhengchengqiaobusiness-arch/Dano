@@ -7097,13 +7097,23 @@ def to_flow_spec(
     observer_command_anchors = any(
         _request_has_command_anchor(request) for request in captured_requests
     )
+    explicitly_approved_business_keys = {
+        _request_role_key(request)
+        for request in captured_requests
+        if (
+            isinstance(request_role_overrides.get(str(request.get("request_id") or "")), dict)
+            and request_role_overrides[str(request.get("request_id") or "")].get("role") == "business_get"
+            and request_role_overrides[str(request.get("request_id") or "")].get("keep") is True
+        )
+    }
     independent_business_keys = {
         _request_role_key(request)
         for request in preread_cands
         if str((role_by_key.get(_request_role_key(request)) or {}).get("role") or "") == "business_get"
         and _request_role_key(request) not in post_write_read_keys
         and (
-            _has_query_action_evidence(
+            _request_role_key(request) in explicitly_approved_business_keys
+            or _has_query_action_evidence(
                 request.get("trigger_op"),
                 " ".join(filter(None, (
                     str(request.get("trigger_action_id") or ""),
@@ -20144,7 +20154,7 @@ _RECORDING_AGENT_ALLOWED_OPS = {
     "upsert_computed_field", "upsert_output_field", "bind_dependency", "set_map",
     "set_condition", "set_output_mapping", "set_capability_relation",
     "add_request_to_capability", "remove_request_from_capability", "reject_dependency",
-    "set_goal", "set_request_role", "set_param_source", "set_param_required", "set_param_enum",
+    "set_goal", "set_request_role", "set_param_source", "set_param_type", "set_param_required", "set_param_enum",
     "rename_field", "propose_dependency", "add_pitfall",
     "confirm_dependency", "bind_verify_read", "attach_enum_options", "mark_unverified",
 }
@@ -20555,7 +20565,7 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
 
 
 _RECORDING_FIELD_OPS = frozenset({
-    "set_param_source", "set_param_required", "set_param_enum", "rename_field",
+    "set_param_source", "set_param_type", "set_param_required", "set_param_enum", "rename_field",
     "attach_enum_options",
 })
 
@@ -20671,7 +20681,10 @@ async def apply_recording_agent_submission(
             apply_recording_agent_edit,
         )
 
-        field_ops = {"set_param_source", "set_param_required", "set_param_enum", "rename_field"}
+        field_ops = {
+            "set_param_source", "set_param_type", "set_param_required",
+            "set_param_enum", "rename_field",
+        }
 
         for index, operation in enumerate(submitted_ops):
             kind = str(operation.get("op") or "")

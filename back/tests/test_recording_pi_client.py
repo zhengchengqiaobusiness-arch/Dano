@@ -30,6 +30,7 @@ def test_recording_pi_runtime_has_no_automatic_deadline() -> None:
     assert "httpIdleTimeoutMs: 0" in runtime_source
     assert "DANO_RECORDING_PI_PROVIDER_TIMEOUT_MS" not in runtime_source
     assert 'DANO_PI_MAX_TOKENS", 32768' in runtime_source
+    assert "set_param_source、set_param_type、set_param_required" in runtime_source
 
 
 class _FakeServer:
