@@ -861,6 +861,64 @@ def test_param_source_computed_requires_executable_strategy():
     assert param.source["sample_verified"] is True
 
 
+def test_param_source_computed_accepts_public_wire_paths_from_another_capability_step():
+    spec = FlowSpec(
+        flow_id="computed-preflight",
+        steps=[
+            FlowStep(
+                step_id="approval-detail",
+                method="GET",
+                path="/approval-detail?processVariablesStr=%7B%22day%22%3A1%7D",
+                params=[ParamField(
+                    path="processVariablesStr",
+                    key="processVariablesStr",
+                    value='{"day":1}',
+                )],
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                path="/submit",
+                params=[
+                    ParamField(path="startTime", key="startTime", value=1785945600000),
+                    ParamField(path="endTime", key="endTime", value=1786032000000),
+                ],
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_request",
+            kind="submit",
+            step_ids=["approval-detail", "submit"],
+        )],
+    )
+    spec = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source", "step_id": "submit", "path": "body.startTime",
+            "source_kind": "user_input", "reason": "调用方提供开始时间",
+        },
+        {
+            "op": "set_param_source", "step_id": "submit", "path": "body.endTime",
+            "source_kind": "user_input", "reason": "调用方提供结束时间",
+        },
+    ])
+
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_source",
+        "step_id": "approval-detail",
+        "path": "query.processVariablesStr",
+        "source_kind": "computed",
+        "strategy": "date_span_days_json",
+        "start_field": "body.startTime",
+        "end_field": "body.endTime",
+        "output_key": "day",
+        "reason": "预请求天数由提交字段的起止时间计算",
+    }])
+
+    param = updated.steps[0].params[0]
+    assert param.source_kind == "computed"
+    assert param.source["sample_verified"] is True
+
+
 @pytest.mark.asyncio
 async def test_computed_body_field_renders_and_executes_from_caller_dates():
     from dano.execution.page.request_capture import execute_api_request

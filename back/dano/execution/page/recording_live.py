@@ -1071,6 +1071,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                             item_param.key,
                             item_param.label,
                             item_param.path,
+                            canonical_wire_path(item_step, item_param.path),
                             str(item_param.path or "").split(".")[-1],
                         )
                         if str(value or "").strip()
