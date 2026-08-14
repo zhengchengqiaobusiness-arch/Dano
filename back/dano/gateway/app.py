@@ -1517,8 +1517,7 @@ def _recording_operation_identity_conflict(
             }
     return None
 
-@app.websocket("/onboarding/page/record")
-async def record_ws(ws: WebSocket) -> None:
+async def _retired_record_ws(ws: WebSocket) -> None:
     """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
     await ws.accept()
     sender = _WebSocketSendQueue(ws)
@@ -3503,6 +3502,202 @@ async def record_ws(ws: WebSocket) -> None:
             pass
         if connection_key is not None and connection_lease is not None:
             _release_recording_connection(connection_key, connection_lease)
+
+
+async def _publish_canonical_recording(
+    *,
+    tenant: str,
+    subsystem: str,
+    action: str,
+    title: str,
+    goal: dict,
+    deploy: str | None,
+    storage_state: dict | None,
+    run_id: str,
+    release_flow_spec,
+    release_candidate: dict,
+) -> dict:
+    """Freeze and export one complete recording release through one boundary."""
+    from dano.execution.page.flow_spec import (
+        flow_spec_release_payload,
+        flow_spec_required_params,
+        flow_spec_to_api_request,
+        flow_spec_to_summary,
+        validate_flow_spec,
+    )
+    from dano.execution.page.sessions import save_session
+    from dano.infra.token_store import headers_from_api_request, save_token
+    from dano.onboarding.page_onboard import run_request_onboarding
+
+    check_report = validate_flow_spec(release_flow_spec)
+    if not check_report.get("passed"):
+        raise ValueError("FlowSpec 发布前校验未通过：" + "；".join(check_report.get("errors") or []))
+    api_request, build_errors = flow_spec_to_api_request(release_flow_spec)
+    if build_errors or not api_request:
+        raise ValueError("FlowSpec 无法转换成可执行请求：" + "；".join(build_errors or []))
+    api_request["_flow_spec"] = flow_spec_to_summary(release_flow_spec)
+    api_request["_release_snapshot"] = {
+        **release_candidate,
+        "flow_spec": flow_spec_release_payload(release_flow_spec),
+    }
+    api_request["recording_mode"] = "real_submit"
+    required = flow_spec_required_params(release_flow_spec)
+    sample_inputs = api_request.get("sample_inputs") or (
+        (api_request.get("steps") or [{}])[-1].get("sample_inputs") or {}
+    )
+    save_session(tenant, subsystem, storage_state)
+    token_headers = headers_from_api_request(api_request)
+    if token_headers:
+        await save_token(tenant, subsystem, token_headers, source="recording")
+    report = await run_request_onboarding(
+        tenant=tenant,
+        subsystem=subsystem,
+        action=action,
+        title=title,
+        api_request=api_request,
+        sample_inputs=sample_inputs,
+        required=required,
+        goal=goal,
+        deploy=deploy,
+        storage_state=storage_state,
+        allow_repair=False,
+        run_id=run_id,
+        recording_pi_required=True,
+    )
+    if not report.get("ok"):
+        raise RuntimeError(str(report.get("reason") or "录制发布失败"))
+    skill_id = str(report.get("skill_id") or f"{subsystem}.{action}")
+    version = int(report.get("asset_version") or 0)
+    if not version:
+        version = await _latest_skill_version(
+            tenant,
+            Subsystem(subsystem),
+            action,
+            {"integration": "page"},
+        )
+    lifecycle = await _lifecycle_reconciler.register_or_defer(
+        skill_id=skill_id,
+        subsystem=Subsystem(subsystem),
+        action=action,
+        asset_version=version,
+    )
+    await _auto_export(tenant, skill_ids={skill_id})
+    return {
+        **report,
+        **lifecycle,
+        "skill_id": skill_id,
+        "asset_version": version,
+        "release": release_candidate,
+        "capability_count": len(release_flow_spec.capabilities or []),
+    }
+
+
+@app.websocket("/onboarding/page/record")
+async def record_ws(ws: WebSocket) -> None:
+    """Thin transport for the canonical recording workflow."""
+    from dano.onboarding.recording_gateway import (
+        RecordingGatewaySession,
+        RecordingSessionConfig,
+    )
+    from dano.onboarding.recording_pi import RecordingPiSession
+
+    await ws.accept()
+    sender = _WebSocketSendQueue(ws)
+    session = None
+    try:
+        init = await ws.receive_json()
+        if init.get("type") != "start" or not init.get("start_url"):
+            await sender.send_json({
+                "type": "error",
+                "detail": "首帧须为 {type:'start', start_url, ...}",
+            })
+            return
+        tenant = str(init.get("tenant") or "")
+        subsystem = _effective_subsystem(tenant, init.get("subsystem"))
+        requested_action = str(init.get("resume_action") or "")
+        action = (
+            requested_action
+            if re.fullmatch(r"action_[0-9a-f]{32}", requested_action)
+            else _new_recording_action()
+        )
+        requested_recording_id = str(init.get("pi_recording_id") or "")
+        recording_id = (
+            requested_recording_id
+            if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
+            else f"recording_{uuid.uuid4().hex}"
+        )
+        holder: dict[str, object] = {}
+
+        async def pi_factory(fresh: bool):  # noqa: ANN202
+            return await _start_recording_pi_candidate(lambda: RecordingPiSession(
+                tenant=tenant,
+                subsystem=subsystem,
+                recording_id=recording_id,
+                resume_history=not fresh,
+            ))
+
+        async def publisher(release_spec, candidate, context):  # noqa: ANN001, ANN202
+            context.ensure_active()
+            current = holder["session"]
+            capture = current.capture
+            storage_state = await capture.storage_state() if capture is not None else None
+            workflow = current.workflow
+            return await _publish_canonical_recording(
+                tenant=tenant,
+                subsystem=subsystem,
+                action=action,
+                title=workflow.snapshot.title if workflow is not None else "",
+                goal=(
+                    dict((release_spec.goal or {}))
+                    if release_spec is not None else {}
+                ),
+                deploy=init.get("deploy"),
+                storage_state=storage_state,
+                run_id=str(getattr(current._pi, "run_id", "")),
+                release_flow_spec=release_spec,
+                release_candidate=candidate,
+            )
+
+        session = RecordingGatewaySession(
+            config=RecordingSessionConfig(
+                tenant=tenant,
+                subsystem=subsystem,
+                recording_id=recording_id,
+                action=action,
+                start_url=str(init["start_url"]),
+                goal_text=str(init.get("goal_text") or ""),
+                base_url=str(init.get("base_url") or ""),
+                token=str(init.get("token") or ""),
+                storage_state=init.get("storage_state") or None,
+            ),
+            send=sender.send_json,
+            pi_factory=pi_factory,
+            publisher=publisher,
+        )
+        holder["session"] = session
+        await session.start()
+        while True:
+            message = await ws.receive_json()
+            try:
+                await session.dispatch(message)
+            except ValueError as exc:
+                await sender.send_json({"type": "error", "detail": str(exc)})
+    except WebSocketDisconnect:
+        log.info("recording.websocket_disconnected", action=(session.config.action if session else ""))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("recording.websocket_failed", error=str(exc))
+        try:
+            await sender.send_json({"type": "error", "detail": str(exc)})
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        if session is not None:
+            await session.close()
+        await sender.close()
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _auto_export(

@@ -27,7 +27,7 @@ async def test_materializer_receives_live_notebook_policy() -> None:
         policies.append(use_live)
         return FlowSpec(tenant="tenant", subsystem="system")
 
-    async def pi_provider():
+    async def pi_provider(_fresh):  # noqa: ANN001
         raise AssertionError("Pi is not needed")
 
     async def publish(*_args):  # noqa: ANN002

@@ -27,7 +27,7 @@ from dano.onboarding.recording_workflow import (
 )
 
 
-PiProvider = Callable[[], Awaitable[Any]]
+PiProvider = Callable[[bool], Awaitable[Any]]
 Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
 
@@ -117,7 +117,7 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
-        pi = await self.pi_provider()
+        pi = await self.pi_provider(not use_live_notebook)
         pi.bind_flow_spec(spec)
         result = await pi.prompt(
             "为当前录制生成完整且可执行的业务能力契约。先读取录制状态，基于页面、HAR、"
@@ -175,7 +175,7 @@ class ProductionRecordingServices:
             return draft, issues
 
         release_spec, candidate = prepare_flow_release_candidate(decision.callable_spec)
-        pi = await self.pi_provider()
+        pi = await self.pi_provider(True)
         pi.bind_flow_spec(release_spec)
         version = int((release_spec.meta or {}).get("current_version") or 0)
         try:
@@ -207,7 +207,7 @@ class ProductionRecordingServices:
         context: PipelineContext,
     ) -> dict[str, Any]:
         context.ensure_active()
-        pi = await self.pi_provider()
+        pi = await self.pi_provider(False)
         pi.bind_flow_spec(FlowSpec.model_validate(draft))
         payload = [issue.model_dump(mode="json") for issue in issues]
         await pi.prompt(

@@ -72,12 +72,14 @@ class WorkflowQuestion(BaseModel):
 class WorkflowSnapshot(BaseModel):
     run_id: str
     action: str
+    title: str = ""
     revision: int = Field(default=0, ge=0)
     status: WorkflowStatus = WorkflowStatus.IDLE
     progress: WorkflowProgress = Field(default_factory=WorkflowProgress)
     capture_frozen: bool = False
     draft: dict[str, Any] | None = None
     issues: list[WorkflowIssue] = Field(default_factory=list)
+    insights: list[dict[str, Any]] = Field(default_factory=list)
     question: WorkflowQuestion | None = None
     release: dict[str, Any] | None = None
     error: str = ""
@@ -329,6 +331,40 @@ class RecordingWorkflow:
             return self.snapshot
         await self._launch(PipelineSeed(kind="recording", use_live_notebook=True))
         return self.snapshot
+
+    async def update_recording(
+        self,
+        *,
+        request_count: int,
+        insights: list[dict[str, Any]] | None = None,
+    ) -> WorkflowSnapshot:
+        if self.snapshot.status != WorkflowStatus.RECORDING:
+            return self.snapshot
+        changes: dict[str, Any] = {}
+        if insights is not None:
+            changes["insights"] = insights
+        await self._set(
+            WorkflowStatus.RECORDING,
+            progress=WorkflowProgress(
+                step=WorkflowStep.CAPTURING,
+                label=f"已捕获 {request_count} 个请求",
+                request_count=request_count,
+            ),
+            **changes,
+        )
+        return self.snapshot
+
+    async def set_title(self, title: str) -> WorkflowSnapshot:
+        if title == self.snapshot.title:
+            return self.snapshot
+        await self._set(self.snapshot.status, title=title)
+        return self.snapshot
+
+    async def ask_operator_question(self, question: WorkflowQuestion) -> str:
+        """Let the active Pi tool use the same persisted workflow question."""
+        if not self._active():
+            raise ValueError("operator questions require an active analysis")
+        return await self._ask_operator(question)
 
     async def republish(self) -> WorkflowSnapshot:
         if self._active():
