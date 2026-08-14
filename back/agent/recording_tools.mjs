@@ -65,6 +65,9 @@ export function acceptRecordingToolSubmission(name, turn = activeTurnBudget) {
 
 function recordingSubmissionIsComplete(output) {
   if (!output || typeof output !== "object") return true;
+  if (typeof output.submission_complete === "boolean") {
+    return output.submission_complete;
+  }
   if (output.all_applied === false) return false;
   return !Array.isArray(output.must_retry) || output.must_retry.length === 0;
 }
@@ -258,16 +261,66 @@ export function canonicalizeRecordingPlan(value) {
     }
   }
   semantic.business_understanding = (
+    typeof semantic.business_understanding === "string"
+    && semantic.business_understanding.trim()
+  ) ? { summary: semantic.business_understanding.trim() } : (
     semantic.business_understanding
     && typeof semantic.business_understanding === "object"
     && !Array.isArray(semantic.business_understanding)
-  ) ? semantic.business_understanding : {};
-  semantic.capabilities = asSemanticArray(semantic.capabilities);
+  ) ? { ...semantic.business_understanding } : {};
+  // Risk is machine-derived from captured HTTP facts.  Older/model-drifted
+  // plans sometimes put a descriptive risk_level here; it has no authority
+  // and must not make the entire semantic plan fail.
+  delete semantic.business_understanding.risk_level;
+  semantic.capabilities = asSemanticArray(semantic.capabilities).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const capability = { ...item };
+    if (
+      (!Array.isArray(capability.request_refs) || capability.request_refs.length === 0)
+      && typeof capability.anchor_step_id === "string"
+      && capability.anchor_step_id.trim()
+    ) {
+      capability.request_refs = [{
+        step_id: capability.anchor_step_id.trim(),
+        usage: "execute",
+      }];
+    }
+    return capability;
+  });
   semantic.unresolved_items = asSemanticArray(semantic.unresolved_items);
+  const fieldOps = new Set([
+    "set_param_source", "set_param_type", "set_param_required",
+    "set_param_enum", "rename_field", "attach_enum_options",
+  ]);
+  const evidenceRefOps = new Set([
+    "set_request_role", "set_param_source", "set_param_type",
+    "set_param_required", "set_param_enum", "rename_field",
+  ]);
+  const ops = (Array.isArray(value.ops) ? value.ops : []).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const operation = { ...item };
+    if (fieldOps.has(operation.op) && !operation.wire_path && operation.path) {
+      operation.wire_path = operation.path;
+      delete operation.path;
+    }
+    if (evidenceRefOps.has(operation.op) && "evidence" in operation) {
+      const raw = Array.isArray(operation.evidence)
+        ? operation.evidence : [operation.evidence];
+      if (!Array.isArray(operation.evidence_refs) || operation.evidence_refs.length === 0) {
+        operation.evidence_refs = raw.map((entry) => (
+          entry && typeof entry === "object"
+            ? String(entry.ref ?? entry.source ?? "")
+            : String(entry ?? "")
+        )).filter(Boolean);
+      }
+      delete operation.evidence;
+    }
+    return operation;
+  });
   return normalizeConfidenceDeep({
     _submitted_semantic_keys: submittedSemanticKeys,
     semantic_plan: semantic,
-    ops: Array.isArray(value.ops) ? value.ops : [],
+    ops,
   });
 }
 
@@ -786,7 +839,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和已验证依赖图重新编译实际成员，模型不能强行加入无关请求。set_param_source 六分类为 user_input、constant、session_header、page_context、chained、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后必须检查 op_results；deferred、rejected、rolled_back 都没有完整落地，必须按 reason 和 must_retry 修正后读取新版本重试。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和已验证依赖图重新编译实际成员，模型不能强行加入无关请求。set_param_source 六分类为 user_input、constant、session_header、page_context、chained、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

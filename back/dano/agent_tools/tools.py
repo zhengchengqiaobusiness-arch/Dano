@@ -1547,6 +1547,68 @@ _TYPED_RECORDING_OPERATION_KEYS = {
 }
 
 
+def _canonicalize_recording_plan_aliases(raw_plan: dict) -> dict:
+    """Normalize harmless model transport drift without changing facts.
+
+    Pi occasionally emits descriptive metadata or aliases that carry no
+    executable authority.  Canonicalize only representations whose meaning is
+    already explicit; unknown contract mutations still fail strict validation.
+    """
+    plan = deepcopy(raw_plan)
+    semantic = plan.get("semantic_plan")
+    if isinstance(semantic, dict):
+        understanding = semantic.get("business_understanding")
+        if isinstance(understanding, str):
+            understanding = {"summary": understanding}
+            semantic["business_understanding"] = understanding
+        if isinstance(understanding, dict):
+            # Risk is derived from captured request facts and write semantics;
+            # a model annotation here has never been an executable field.
+            understanding.pop("risk_level", None)
+        capabilities = semantic.get("capabilities")
+        if isinstance(capabilities, list):
+            for capability in capabilities:
+                if not isinstance(capability, dict) or capability.get("request_refs"):
+                    continue
+                anchor = str(capability.get("anchor_step_id") or "").strip()
+                if anchor:
+                    capability["request_refs"] = [{"step_id": anchor, "usage": "execute"}]
+
+    field_operations = {
+        "set_param_source", "set_param_type", "set_param_required",
+        "set_param_enum", "rename_field", "attach_enum_options",
+    }
+    evidence_ref_operations = {
+        "set_request_role", "set_param_source", "set_param_type",
+        "set_param_required", "set_param_enum", "rename_field",
+    }
+    operations = plan.get("ops")
+    if isinstance(operations, list):
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            kind = str(operation.get("op") or "")
+            if kind in field_operations and not operation.get("wire_path") and operation.get("path"):
+                operation["wire_path"] = operation.pop("path")
+            if kind not in evidence_ref_operations or "evidence" not in operation:
+                continue
+            raw_evidence = operation.pop("evidence")
+            if operation.get("evidence_refs"):
+                continue
+            if isinstance(raw_evidence, (str, dict)):
+                raw_evidence = [raw_evidence]
+            if isinstance(raw_evidence, list):
+                refs = [
+                    str(item.get("ref") or item.get("source") or "")
+                    if isinstance(item, dict) else str(item)
+                    for item in raw_evidence
+                    if item not in (None, "", {})
+                ]
+                if any(refs):
+                    operation["evidence_refs"] = [ref for ref in refs if ref]
+    return plan
+
+
 def _validate_typed_recording_operations(operations: object, *, label: str) -> None:
     if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
         raise ToolError(f"{label} 必须是对象数组")
@@ -1686,6 +1748,7 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
             **deepcopy(raw_plan),
             "_analysis_screenshot_count": int(session.analysis_image_count),
         }
+    raw_plan = _canonicalize_recording_plan_aliases(raw_plan)
     _validate_strict_recording_plan(raw_plan)
     screenshot_count = int(getattr(session, "analysis_image_count", 0) or 0)
     _require_complete_submitted_semantic_keys(

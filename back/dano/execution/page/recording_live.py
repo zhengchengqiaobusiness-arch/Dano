@@ -1163,7 +1163,10 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         and {key: value for key, value in existing.items() if key != "_deferred"} == stored
         for existing in (spec.meta or {}).get("recording_agent_ops") or []
     ):
-        return {"status": "rejected", "reason": "duplicate operation"}
+        # Pi may repeat a conclusion after compaction or after reading a fresh
+        # flow version.  The requested state is already authoritative, so this
+        # is an idempotent success rather than a validation failure.
+        return {"status": "applied", "reason": "operation already applied"}
 
     result = {"status": "applied"}
 

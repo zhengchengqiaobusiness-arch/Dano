@@ -704,10 +704,18 @@ class RecordingPiSession:
                 # not a best-effort action after the Pi prompt response.
                 self._on_submission_accepted(updated.model_copy(deep=True), mode)
             validation = recording_agent_validation(updated)
-            # A partial submission may persist grounded operations so Pi can
-            # retry from the new version, but it has not completed this turn.
-            # The gateway must never treat must_retry as a finished plan.
-            self.last_submission_kind = mode if validation.get("all_applied", True) else ""
+            # A plan can contain independently guarded field hypotheses.  A
+            # rejected optional hypothesis stays visible in must_retry, but it
+            # must not erase a grounded capability plan that compiled safely.
+            # Repairs remain strict because their sole purpose is to resolve
+            # those outstanding findings.
+            submission_complete = bool(validation.get("submission_complete", True))
+            if mode == "plan" and updated.capabilities:
+                submission_complete = True
+            if mode == "repair":
+                submission_complete = bool(validation.get("all_applied", True))
+            validation["submission_complete"] = submission_complete
+            self.last_submission_kind = mode if submission_complete else ""
             return validation
 
     async def accept_unchanged_plan(

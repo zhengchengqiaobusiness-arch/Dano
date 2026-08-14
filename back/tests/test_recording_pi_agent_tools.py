@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import re
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -1498,58 +1497,61 @@ def test_transport_allows_incremental_semantic_keys():
     }, allow_screenshot_field_overlay=True)
 
 
-@pytest.mark.parametrize(
-    ("plan", "message"),
-    [
-        (
-            {
-                "semantic_plan": {
-                    "business_understanding": {
-                        "summary": "提交申请",
-                        "risk_level": "low",
-                    },
-                    "capabilities": [],
-                    "unresolved_items": [],
-                },
-                "ops": [],
+def test_real_pi_harmless_schema_drift_is_canonicalized_before_validation():
+    plan = {
+        "semantic_plan": {
+            "business_understanding": {
+                "summary": "提交申请",
+                "risk_level": "low",
             },
-            "business_understanding 包含未知字段：risk_level",
-        ),
-        (
-            {
-                "semantic_plan": {
-                    "business_understanding": {"summary": "提交申请"},
-                    "capabilities": [],
-                    "unresolved_items": [],
-                },
-                "ops": [{
-                    "op": "set_goal",
-                    "goal": "提交申请",
-                    "evidence": ["req-1"],
-                }],
-            },
-            "plan.ops[0] 包含未知字段: evidence",
-        ),
-    ],
-)
+            "capabilities": [{
+                "name": "submit_request",
+                "title": "提交申请",
+                "kind": "submit",
+                "anchor_step_id": "req-submit",
+            }],
+            "unresolved_items": [],
+        },
+        "ops": [{
+            "op": "set_request_role",
+            "request_id": "req-submit",
+            "role": "business_write",
+            "reason": "提交业务表单",
+            "evidence": ["req-submit"],
+        }],
+    }
+
+    normalized = agent_tools_module._canonicalize_recording_plan_aliases(plan)
+    agent_tools_module._validate_strict_recording_plan(normalized)
+
+    assert "risk_level" not in normalized["semantic_plan"]["business_understanding"]
+    assert normalized["semantic_plan"]["capabilities"][0]["request_refs"] == [{
+        "step_id": "req-submit",
+        "usage": "execute",
+    }]
+    assert normalized["ops"][0]["evidence_refs"] == ["req-submit"]
+    assert "evidence" not in normalized["ops"][0]
 
 
-def test_real_pi_schema_drift_is_rejected_without_mutating_flow(
-    monkeypatch,
-    plan: dict,
-    message: str,
-):
-    session = _bind(monkeypatch, recording_id="rec-schema-drift")
-    before = session.spec.model_dump(mode="json")
+def test_real_pi_unknown_contract_mutation_is_still_rejected():
+    plan = {
+        "semantic_plan": {
+            "business_understanding": {"summary": "提交申请"},
+            "capabilities": [],
+            "unresolved_items": [],
+        },
+        "ops": [{
+            "op": "set_request_role",
+            "request_id": "req-submit",
+            "role": "business_write",
+            "reason": "提交业务表单",
+            "evidence_refs": ["req-submit"],
+            "force_verified": True,
+        }],
+    }
 
-    with pytest.raises(ToolError, match=re.escape(message)):
-        asyncio.run(submit_recording_plan("run-schema-drift", {
-            "recording_id": session.recording_id,
-            "base_flow_version": int(session.spec.meta["current_version"]),
-            "plan": plan,
-        }))
-
-    assert session.spec.model_dump(mode="json") == before
+    with pytest.raises(ToolError, match="force_verified"):
+        agent_tools_module._validate_strict_recording_plan(plan)
 
 
 @pytest.mark.asyncio

@@ -1935,6 +1935,52 @@ def test_retrying_identical_deferred_field_op_remains_retryable_not_duplicate():
     assert len(first.meta["recording_agent_ops"]) == 1
 
 
+def test_repeating_an_applied_agent_conclusion_is_idempotent_success():
+    spec = _flow()
+    edit = {
+        "op": "set_param_source",
+        "request_id": "req-submit",
+        "wire_path": "body.jobId",
+        "source_kind": "page_context",
+        "reason": "页面上下文自动提供",
+    }
+
+    applied = apply_flow_edits(spec, [edit])
+    repeated = apply_recording_agent_edit(applied, edit)
+
+    assert repeated == {
+        "status": "applied",
+        "reason": "operation already applied",
+    }
+    assert len(applied.meta["recording_agent_ops"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_deferred_live_field_conclusion_is_staged_without_requiring_resubmission():
+    spec = FlowSpec(
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-submit", method="POST", path="/records/submit"),
+        ]),
+        meta={"current_version": 1},
+    )
+
+    updated = await apply_recording_agent_submission(spec, submission={
+        "semantic_plan": {},
+        "ops": [{
+            "op": "set_param_source",
+            "request_id": "req-submit",
+            "wire_path": "body.reason",
+            "source_kind": "user_input",
+            "reason": "输入控件由操作人填写",
+        }],
+    })
+    validation = recording_agent_validation(updated)
+
+    assert validation["op_results"][0]["status"] == "deferred"
+    assert validation["must_retry"] == []
+    assert validation["submission_complete"] is True
+
+
 def test_finalize_merge_turns_still_unresolved_deferred_field_op_into_rejection():
     live = FlowSpec(
         flow_id="early-unresolved",
@@ -2001,6 +2047,56 @@ async def test_live_field_op_survives_rejected_semantic_proposal_and_reports_eac
     assert updated.steps[1].params[0].source_kind == "page_context"
     results = updated.meta["recording_agent_session"]["op_results"]
     assert [item["status"] for item in results] == ["rolled_back", "applied"]
+
+
+@pytest.mark.asyncio
+async def test_helper_read_capability_does_not_reject_grounded_business_capabilities():
+    spec = _flow()
+    spec.steps[0].semantic_role = "read_context"
+    spec.steps[0].source_meta = {
+        **spec.steps[0].source_meta,
+        "role": "read_context",
+    }
+    spec.steps[1].semantic_role = "business_write"
+    spec.steps[1].source_meta = {
+        **spec.steps[1].source_meta,
+        "role": "business_write",
+    }
+    spec.steps[1].params[0].label = "任务编号"
+    spec.steps[1].params[0].type = "string"
+    spec.steps[1].params[0].category = "user_param"
+    spec.steps[1].params[0].source_kind = "user_input"
+    spec.steps[1].params[0].required = False
+
+    updated = await apply_recording_agent_submission(spec, submission={
+        "semantic_plan": {
+            "business_understanding": {"summary": "读取上下文后更新记录"},
+            "capabilities": [
+                {
+                    "name": "update_record",
+                    "title": "更新记录",
+                    "kind": "submit",
+                    "anchor_step_id": "submit",
+                    "request_refs": [{"step_id": "submit", "usage": "execute"}],
+                },
+                {
+                    "name": "inspect_internal_context",
+                    "title": "读取内部上下文",
+                    "kind": "inspect",
+                    "anchor_step_id": "detail",
+                    "request_refs": [{"step_id": "detail", "usage": "execute"}],
+                },
+            ],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    })
+
+    assert [cap.name for cap in updated.capabilities] == ["update_record"]
+    assert updated.meta["capability_model"]["proposal_gate"]["accepted"] is True
+    assert updated.meta["capability_model"]["ignored_non_public_capabilities"] == [
+        "inspect_internal_context",
+    ]
 
 
 class _Recorder:

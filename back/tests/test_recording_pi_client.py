@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from dano.agent_tools import materials, runs
-from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
+from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep, ParamField
 from dano.onboarding import recording_pi
 
 
@@ -674,6 +674,63 @@ async def test_partially_rejected_plan_is_checkpointed_but_not_marked_complete(
     assert client.current_flow_spec().meta["current_version"] == 5
     assert client.last_submission_kind == ""
     assert checkpoints == ["plan"]
+
+
+@pytest.mark.asyncio
+async def test_grounded_capability_plan_is_complete_when_only_optional_edits_are_rejected(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        title="original",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        meta={"current_version": 4},
+    )
+    candidate = before.model_copy(deep=True)
+    candidate.capabilities = [FlowCapability(
+        name="submit_record",
+        title="提交记录",
+        kind="submit",
+        anchor_step_id="submit",
+        request_refs=[{"step_id": "submit", "usage": "execute"}],
+    )]
+    candidate.meta = {
+        **candidate.meta,
+        "current_version": 5,
+        "recording_agent_session": {
+            "op_results": [{
+                "index": 3,
+                "op": "rename_field",
+                "status": "rejected",
+                "reason": "field evidence not found",
+            }],
+        },
+    }
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        return candidate.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+    )
+    client.bind_flow_spec(before)
+
+    result = await client.apply_submission(
+        {"semantic_plan": {"capabilities": []}, "ops": []},
+        mode="plan",
+        base_flow_version=4,
+    )
+
+    assert result["all_applied"] is False
+    assert result["must_retry"] == [3]
+    assert result["submission_complete"] is True
+    assert client.last_submission_kind == "plan"
 
 
 @pytest.mark.asyncio

@@ -432,6 +432,37 @@ function verifyPlanToolCompatibility() {
   assert(sanitized.plan.ops.length === 1, "typed operation was discarded");
   assert(!("field_semantics" in semantic), "field semantics bypassed plan.ops");
 
+  const drifted = sanitizeRecordingToolParams("submit_recording_plan", {
+    base_flow_version: 3,
+    plan: {
+      semantic_plan: {
+        business_understanding: { summary: "Submit", risk_level: "low" },
+        capabilities: [{
+          name: "submit_request", title: "Submit", kind: "submit",
+          anchor_step_id: "req-submit",
+        }],
+      },
+      ops: [{
+        op: "set_request_role", request_id: "req-submit",
+        role: "business_write", reason: "form submit",
+        evidence: ["req-submit"],
+      }],
+    },
+  });
+  assert(
+    !("risk_level" in drifted.plan.semantic_plan.business_understanding),
+    "descriptive risk_level was not removed before strict validation",
+  );
+  assert(
+    drifted.plan.semantic_plan.capabilities[0].request_refs[0].usage === "execute",
+    "missing request_refs were not derived from the explicit anchor",
+  );
+  assert(
+    drifted.plan.ops[0].evidence_refs[0] === "req-submit"
+      && !("evidence" in drifted.plan.ops[0]),
+    "evidence alias was not canonicalized",
+  );
+
   const stringified = sanitizeRecordingToolParams("submit_recording_plan", {
     base_flow_version: 3,
     plan: JSON.stringify(plan),

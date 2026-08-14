@@ -12503,6 +12503,27 @@ async def orchestrate_flow_capabilities(
             if isinstance(item, dict)
         )
     )
+    ignored_non_public_capabilities: list[str] = []
+    if strict_semantic_submission and not pre_materialization_strict_plan:
+        public_capabilities = [
+            item
+            for item in (effective_semantic_plan.get("capabilities") or [])
+            if isinstance(item, dict)
+            and _planned_capability_has_public_anchor(
+                current,
+                str(item.get("kind") or ""),
+                [str(item.get("anchor_step_id") or "")],
+            )
+        ]
+        if public_capabilities:
+            ignored_non_public_capabilities = [
+                str(item.get("name") or item.get("title") or item.get("anchor_step_id") or "")
+                for item in (effective_semantic_plan.get("capabilities") or [])
+                if isinstance(item, dict) and item not in public_capabilities
+            ]
+            if ignored_non_public_capabilities:
+                effective_semantic_plan = copy.deepcopy(effective_semantic_plan)
+                effective_semantic_plan["capabilities"] = public_capabilities
     complete_semantic_submission = strict_semantic_submission
     preserved_human_relations: list[CapabilityRelation] = []
     if complete_semantic_submission:
@@ -12711,6 +12732,7 @@ async def orchestrate_flow_capabilities(
             "last_incremental_review": incremental_review,
             "proposal_gate": proposal_gate,
             "capability_compilation": capability_compilation_audit,
+            "ignored_non_public_capabilities": ignored_non_public_capabilities,
         },
         "capability_orchestration_audit": {
             "mode": "initial" if initial_generation else "boundary_reanalysis",
@@ -20541,7 +20563,7 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     must_retry = [
         int(item.get("index") or 0)
         for item in op_results
-        if str(item.get("status") or "") != "applied"
+        if str(item.get("status") or "") in {"rejected", "rolled_back"}
     ]
     unresolved_targets = [
         dict(item.get("requested_target") or {})
@@ -20562,7 +20584,14 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
             _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
         ),
         "op_results": op_results,
-        "all_applied": not must_retry,
+        "all_applied": all(
+            str(item.get("status") or "") == "applied"
+            for item in op_results
+        ),
+        # A deferred live field conclusion is durably staged in
+        # recording_agent_ops and is replayed after request materialization.
+        # It must not consume another Pi submission attempt.
+        "submission_complete": not must_retry,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }
