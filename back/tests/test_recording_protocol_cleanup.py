@@ -89,23 +89,24 @@ def test_frontend_does_not_drive_capability_results_from_frames_or_request_count
 
     assert 'incoming.type === "snapshot"' in message_handler
     assert 'incoming.type === "frame"' in message_handler
-    assert 'incoming.type === "request"' in message_handler
+    assert 'incoming.type === "request"' not in message_handler
     assert "setVisibleStage(2)" not in message_handler
 
 
 def test_capability_edits_are_deltas_not_client_owned_flow_replacements() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    patcher = source[source.index("function flushDraftEdits()"):source.index("function scheduleFrameDecode")]
     republish = source[source.index("function republish()"):source.index("function normalizedPoint")]
 
-    assert 'type: "patch_draft"' in republish
-    assert "edits: pendingEdits" in republish
-    assert "expected_revision: snapshot.revision" in republish
-    assert "expected_fingerprint: snapshot.draft_fingerprint" in republish
+    assert 'type: "patch_draft"' in patcher
+    assert "edits," in patcher
+    assert "expected_revision: current.revision" in patcher
+    assert "expected_fingerprint: current.draft_fingerprint" in patcher
     assert "flow_spec" not in republish
 
 
 def test_skill_export_is_only_called_at_the_publish_boundary_for_current_skill() -> None:
     publisher = inspect.getsource(gateway._publish_canonical_recording)
 
-    assert "await _auto_export(tenant, skill_ids={skill_id})" in publisher
+    assert "await _auto_export(tenant, skill_ids={skill_id}, strict=True)" in publisher
     assert "write_exports" not in inspect.getsource(gateway.record_ws)

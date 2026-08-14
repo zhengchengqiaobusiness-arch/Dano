@@ -165,27 +165,13 @@ const CATEGORY_OPTIONS = [
 ];
 
 const SOURCE_OPTIONS = [
-  ["unknown", "来源未确认"],
-  ["user_input", "用户输入"],
-  ["api_option", "接口候选"],
-  ["selected_option_field", "候选关联字段"],
-  ["page_enum", "页面枚举"],
-  ["form_option", "表单选项"],
-  ["static_enum", "静态枚举"],
-  ["manual_enum", "人工枚举"],
-  ["previous_response", "上游响应"],
-  ["request_header", "请求头"],
-  ["current_user", "当前用户"],
-  ["system_time", "系统时间"],
-  ["system_generated", "系统生成"],
-  ["computed", "系统计算"],
-  ["page_context", "调用上下文"],
+  ["caller_input", "调用方输入"],
   ["constant", "固定值"],
+  ["session", "登录会话"],
+  ["context", "调用上下文"],
+  ["response_binding", "上游响应"],
+  ["computed", "明确计算"],
 ].map(([value, label]) => ({ value, label }));
-
-const TERMINAL_STATUSES = new Set<WorkflowStatus>([
-  "editable", "published", "cancelled", "failed",
-]);
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   idle: "等待开始",
@@ -197,6 +183,12 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
   cancelled: "分析已终止",
   failed: "处理失败",
 };
+
+function pageStage(status: WorkflowStatus) {
+  if (status === "idle") return 0;
+  if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
+  return 2;
+}
 
 function recorderWebSocketUrl() {
   const configured = String(import.meta.env.VITE_DANO_RECORDING_WS_URL || "").trim();
@@ -228,6 +220,19 @@ function readSetupDraft() {
     };
   } catch {
     return { startUrl: "", goalText: "" };
+  }
+}
+
+function readActiveRecording() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem("dano.recording.active") || "{}");
+    return {
+      action: typeof parsed.action === "string" ? parsed.action : "",
+      tenant: typeof parsed.tenant === "string" ? parsed.tenant : "",
+      subsystem: typeof parsed.subsystem === "string" ? parsed.subsystem : "",
+    };
+  } catch {
+    return { action: "", tenant: "", subsystem: "" };
   }
 }
 
@@ -264,19 +269,19 @@ export default function PageRecorder({
   const [goalText, setGoalText] = useState(setup.goalText);
   const [title, setTitle] = useState("");
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
-  const [visibleStage, setVisibleStage] = useState(0);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [answer, setAnswer] = useState("");
-  const [requests, setRequests] = useState<Array<Record<string, unknown>>>([]);
   const [hasFrame, setHasFrame] = useState(false);
+  const [finishRequested, setFinishRequested] = useState(false);
   const [frameMeta, setFrameMeta] = useState<FrameMeta>({ width: 1280, height: 800 });
   const [pendingEdits, setPendingEdits] = useState<DraftEdit[]>([]);
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
   const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
+  const snapshotRef = useRef<WorkflowSnapshot | null>(null);
   const actionRef = useRef("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const keyboardRef = useRef<HTMLInputElement | null>(null);
@@ -291,27 +296,69 @@ export default function PageRecorder({
   const wheelTimerRef = useRef<number | null>(null);
   const composingRef = useRef(false);
   const lastBackspaceRef = useRef(0);
-  const republishAfterRevisionRef = useRef<number | null>(null);
+  const pendingEditsRef = useRef<DraftEdit[]>([]);
+  const patchInFlightRef = useRef<{ revision: number; edits: DraftEdit[] } | null>(null);
+  const patchTimerRef = useRef<number | null>(null);
+  const republishRequestedRef = useRef(false);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const closingRef = useRef(false);
+  const finishRequestedRef = useRef(false);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
   const draft = snapshot?.draft || null;
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
-  const capturedRequests = draft?.request_facts?.requests || requests;
+  const capturedRequests = draft?.request_facts?.requests || [];
+  const visibleStage = pageStage(status);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({ startUrl, goalText }));
   }, [startUrl, goalText]);
 
-  useEffect(() => () => {
-    frameGenerationRef.current += 1;
-    if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
-    if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
-    const socket = wsRef.current;
-    wsRef.current = null;
-    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
+  useEffect(() => {
+    closingRef.current = false;
+    return () => {
+      closingRef.current = true;
+      frameGenerationRef.current += 1;
+      if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
+      if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
+      if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+      const socket = wsRef.current;
+      wsRef.current = null;
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
+    };
   }, []);
+
+  useEffect(() => {
+    const active = readActiveRecording();
+    if (
+      active.action
+      && active.tenant === tenant
+      && active.subsystem === subsystem
+      && startUrl.trim()
+      && goalText.trim()
+    ) {
+      actionRef.current = active.action;
+      openRecordingSocket(active.action);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pendingEdits.length || patchInFlightRef.current || processing) return undefined;
+    if (!snapshot || !draft || !["editable", "published"].includes(status)) return undefined;
+    if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
+    patchTimerRef.current = window.setTimeout(() => {
+      patchTimerRef.current = null;
+      flushDraftEdits();
+    }, 350);
+    return () => {
+      if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
+      patchTimerRef.current = null;
+    };
+  }, [pendingEdits, processing, snapshot?.revision, status]);
 
   function send(payload: Record<string, unknown>) {
     const socket = wsRef.current;
@@ -321,6 +368,77 @@ export default function PageRecorder({
     }
     socket.send(JSON.stringify(payload));
     return true;
+  }
+
+  function editIdentity(edit: DraftEdit) {
+    return [
+      edit.op,
+      edit.capability_id || edit.capability_name || edit.capability_index || "",
+      edit.step_id || "",
+      edit.param_path || "",
+      edit.field || "",
+    ].join("\u0000");
+  }
+
+  function replacePendingEdits(update: (current: DraftEdit[]) => DraftEdit[]) {
+    const next = update(pendingEditsRef.current);
+    pendingEditsRef.current = next;
+    setPendingEdits(next);
+  }
+
+  function mergePendingEdits(older: DraftEdit[], newer: DraftEdit[]) {
+    const merged = new Map<string, DraftEdit>();
+    [...older, ...newer].forEach((edit) => merged.set(editIdentity(edit), edit));
+    return Array.from(merged.values());
+  }
+
+  function localValueKeyForEdit(edit: DraftEdit) {
+    if (edit.op === "update" && edit.step_id && edit.param_path && edit.field) {
+      return editKey(String(edit.step_id), String(edit.param_path), String(edit.field));
+    }
+    if (edit.op === "update_capability" && edit.field) {
+      const reference = String(edit.capability_id || edit.capability_name || "");
+      return `capability\u0000${reference}\u0000${String(edit.field)}`;
+    }
+    return "";
+  }
+
+  function clearAcknowledgedLocalValues(edits: DraftEdit[]) {
+    setLocalValues((current) => {
+      const next = { ...current };
+      edits.forEach((edit) => {
+        const key = localValueKeyForEdit(edit);
+        if (key && Object.is(next[key], edit.value)) delete next[key];
+      });
+      return next;
+    });
+    if (!pendingEditsRef.current.some((edit) => [
+      "add_capability_step", "remove_capability_step", "reorder_capability_steps",
+    ].includes(edit.op))) {
+      setLocalCapabilityStepIds({});
+    }
+  }
+
+  function flushDraftEdits() {
+    const current = snapshotRef.current;
+    if (!current?.draft || patchInFlightRef.current) return false;
+    if (!["editable", "published"].includes(current.status)) return false;
+    const edits = pendingEditsRef.current;
+    if (!edits.length) return false;
+    pendingEditsRef.current = [];
+    setPendingEdits([]);
+    patchInFlightRef.current = { revision: current.revision, edits };
+    const sent = send({
+      type: "patch_draft",
+      edits,
+      expected_revision: current.revision,
+      expected_fingerprint: current.draft_fingerprint,
+    });
+    if (!sent) {
+      patchInFlightRef.current = null;
+      replacePendingEdits((queued) => mergePendingEdits(edits, queued));
+    }
+    return sent;
   }
 
   function scheduleFrameDecode() {
@@ -373,24 +491,97 @@ export default function PageRecorder({
   }
 
   function receiveSnapshot(next: WorkflowSnapshot) {
-    setSnapshot((current) => {
-      if (current && next.revision < current.revision) return current;
-      return next;
-    });
+    const current = snapshotRef.current;
+    if (current && next.revision < current.revision) return;
+    snapshotRef.current = next;
+    setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
     if (next.status === "waiting_operator") setAssistantOpen(true);
-    if (TERMINAL_STATUSES.has(next.status)) setVisibleStage(2);
-    else if (next.status !== "idle") setVisibleStage(1);
-
-    const patchRevision = republishAfterRevisionRef.current;
-    if (patchRevision !== null && next.revision > patchRevision && next.status === "editable") {
-      republishAfterRevisionRef.current = null;
-      setPendingEdits([]);
-      setLocalValues({});
-      setLocalCapabilityStepIds({});
-      send({ type: "republish", title: next.title || title });
+    if (finishRequestedRef.current && next.status !== "recording") {
+      finishRequestedRef.current = false;
+      setFinishRequested(false);
     }
+
+    const inFlight = patchInFlightRef.current;
+    if (inFlight && next.revision > inFlight.revision) {
+      patchInFlightRef.current = null;
+      clearAcknowledgedLocalValues(inFlight.edits);
+      if (pendingEditsRef.current.length) {
+        window.setTimeout(flushDraftEdits, 0);
+      } else if (republishRequestedRef.current) {
+        republishRequestedRef.current = false;
+        send({ type: "republish", title: next.title || title });
+      }
+    }
+  }
+
+  function openRecordingSocket(action: string) {
+    if (closingRef.current || wsRef.current) return;
+    setConnecting(true);
+    const socket = new WebSocket(recorderWebSocketUrl());
+    wsRef.current = socket;
+    socket.onopen = () => {
+      reconnectAttemptRef.current = 0;
+      setConnected(true);
+      setConnecting(false);
+      socket.send(JSON.stringify({
+        type: "start",
+        tenant,
+        subsystem,
+        start_url: startUrl.trim(),
+        goal_text: goalText.trim(),
+        base_url: baseUrl.trim() || undefined,
+        storage_state: parseStorageState(storageState),
+        resume_action: action,
+      }));
+      // A disconnected finish command is safe to repeat: the authoritative
+      // workflow deduplicates it and returns the current snapshot.
+      if (finishRequestedRef.current) {
+        socket.send(JSON.stringify({ type: "finish", title: title.trim() }));
+      }
+    };
+    socket.onmessage = (event) => {
+      let incoming: Record<string, unknown>;
+      try {
+        incoming = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (incoming.type === "snapshot" && incoming.snapshot) {
+        receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
+      } else if (incoming.type === "frame") {
+        queueFrame(incoming);
+      } else if (incoming.type === "input_error") {
+        message.warning(String(incoming.detail || "页面操作没有执行"));
+      } else if (incoming.type === "error") {
+        const inFlight = patchInFlightRef.current;
+        if (inFlight) {
+          patchInFlightRef.current = null;
+          replacePendingEdits((queued) => mergePendingEdits(inFlight.edits, queued));
+          republishRequestedRef.current = false;
+          send({ type: "ping" });
+          message.warning("修改尚未保存，已请求最新草稿，请核对后再次发布");
+        } else {
+          finishRequestedRef.current = false;
+          setFinishRequested(false);
+          message.error(String(incoming.detail || "录制处理失败"));
+        }
+      }
+    };
+    socket.onerror = () => message.error("无法连接录制服务");
+    socket.onclose = () => {
+      if (wsRef.current === socket) wsRef.current = null;
+      setConnected(false);
+      setConnecting(false);
+      if (closingRef.current || !actionRef.current) return;
+      reconnectAttemptRef.current += 1;
+      const delay = Math.min(5000, 500 * (2 ** Math.min(4, reconnectAttemptRef.current)));
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        openRecordingSocket(actionRef.current);
+      }, delay);
+    };
   }
 
   function startRecording() {
@@ -405,66 +596,35 @@ export default function PageRecorder({
     if (wsRef.current) return;
     const action = newActionName();
     actionRef.current = action;
+    sessionStorage.setItem("dano.recording.active", JSON.stringify({ action, tenant, subsystem }));
     setConnecting(true);
-    setRequests([]);
+    snapshotRef.current = null;
     setSnapshot(null);
+    pendingEditsRef.current = [];
+    patchInFlightRef.current = null;
+    republishRequestedRef.current = false;
+    finishRequestedRef.current = false;
+    setFinishRequested(false);
     setPendingEdits([]);
     setLocalValues({});
     setLocalCapabilityStepIds({});
     setHasFrame(false);
     setTitle("");
-    setVisibleStage(1);
     renderedFrameRef.current = 0;
     latestFrameRef.current = null;
     frameGenerationRef.current += 1;
 
-    const socket = new WebSocket(recorderWebSocketUrl());
-    wsRef.current = socket;
-    socket.onopen = () => {
-      setConnected(true);
-      setConnecting(false);
-      socket.send(JSON.stringify({
-        type: "start",
-        tenant,
-        subsystem,
-        start_url: startUrl.trim(),
-        goal_text: goalText.trim(),
-        base_url: baseUrl.trim() || undefined,
-        storage_state: parseStorageState(storageState),
-        resume_action: action,
-      }));
-    };
-    socket.onmessage = (event) => {
-      let incoming: Record<string, unknown>;
-      try {
-        incoming = JSON.parse(String(event.data));
-      } catch {
-        return;
-      }
-      if (incoming.type === "snapshot" && incoming.snapshot) {
-        receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
-      } else if (incoming.type === "frame") {
-        queueFrame(incoming);
-      } else if (incoming.type === "request" && incoming.request) {
-        setRequests((current) => [...current.slice(-199), incoming.request as Record<string, unknown>]);
-      } else if (incoming.type === "input_error") {
-        message.warning(String(incoming.detail || "页面操作没有执行"));
-      } else if (incoming.type === "error") {
-        republishAfterRevisionRef.current = null;
-        message.error(String(incoming.detail || "录制处理失败"));
-      }
-    };
-    socket.onerror = () => message.error("无法连接录制服务");
-    socket.onclose = () => {
-      if (wsRef.current === socket) wsRef.current = null;
-      setConnected(false);
-      setConnecting(false);
-    };
+    openRecordingSocket(action);
   }
 
   function finishRecording() {
-    setAssistantOpen(true);
-    send({ type: "finish", title: title.trim() });
+    if (finishRequestedRef.current || status !== "recording") return;
+    finishRequestedRef.current = true;
+    setFinishRequested(true);
+    if (!send({ type: "finish", title: title.trim() })) {
+      finishRequestedRef.current = false;
+      setFinishRequested(false);
+    }
   }
 
   function cancelProcessing() {
@@ -494,7 +654,7 @@ export default function PageRecorder({
   function updateParam(step: FlowStep, param: FlowParam, field: keyof FlowParam, value: unknown) {
     const key = editKey(step.step_id, param.path, String(field));
     setLocalValues((current) => ({ ...current, [key]: value }));
-    setPendingEdits((current) => [
+    replacePendingEdits((current) => [
       ...current.filter((edit) => !(
         edit.op === "update"
         && edit.step_id === step.step_id
@@ -516,7 +676,7 @@ export default function PageRecorder({
     const reference = String(capability.capability_id || capability.name || "");
     const key = `capability\u0000${reference}\u0000${field}`;
     setLocalValues((current) => ({ ...current, [key]: value }));
-    setPendingEdits((current) => [
+    replacePendingEdits((current) => [
       ...current.filter((edit) => !(
         edit.op === "update_capability"
         && (edit.capability_id === capability.capability_id || edit.capability_name === capability.name)
@@ -605,7 +765,7 @@ export default function PageRecorder({
       ...current,
       [capabilityKey(capability, index)]: nextStepIds,
     }));
-    setPendingEdits((current) => [
+    replacePendingEdits((current) => [
       ...current.filter((edit) => !(membershipOps.has(edit.op) && targetsCapability(edit))),
       ...edits,
     ]);
@@ -650,14 +810,9 @@ export default function PageRecorder({
 
   function republish() {
     if (!snapshot || !draft || processing) return;
-    if (pendingEdits.length) {
-      republishAfterRevisionRef.current = snapshot.revision;
-      send({
-        type: "patch_draft",
-        edits: pendingEdits,
-        expected_revision: snapshot.revision,
-        expected_fingerprint: snapshot.draft_fingerprint,
-      });
+    if (pendingEditsRef.current.length || patchInFlightRef.current) {
+      republishRequestedRef.current = true;
+      flushDraftEdits();
       return;
     }
     send({ type: "republish", title: title.trim() });
@@ -815,7 +970,7 @@ export default function PageRecorder({
             <Text strong style={{ whiteSpace: "nowrap" }}>标题：</Text>
             <Input value={title} onChange={(event) => setTitle(event.target.value)} style={{ minWidth: 150, flex: 0.6 }} />
             {status === "recording" ? (
-              <Button type="primary" onClick={finishRecording}>停止并分析请求</Button>
+              <Button type="primary" loading={finishRequested} onClick={finishRecording}>停止并分析请求</Button>
             ) : processing ? (
               <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>一键终止</Button>
             ) : null}
@@ -870,7 +1025,6 @@ export default function PageRecorder({
             style={{ position: "absolute", width: 1, height: 1, opacity: 0, left: 0, top: 0 }}
           />
         </div>
-        <Text type="secondary">画面 {frameMeta.width}×{frameMeta.height} · 已捕获 {snapshot?.progress.request_count || requests.length} 个请求</Text>
       </div>
     );
   }
@@ -916,7 +1070,7 @@ export default function PageRecorder({
           aria-label="字段分类"
         />
         <Select
-          value={safeString(paramValue(step, param, "source_kind") || "unknown")}
+          value={safeString(paramValue(step, param, "source_kind") || "caller_input")}
           options={SOURCE_OPTIONS}
           onChange={(value) => updateParam(step, param, "source_kind", value)}
           aria-label="字段来源"
@@ -1155,11 +1309,6 @@ export default function PageRecorder({
     <div style={{ width: "100%", minWidth: 0, padding: "12px 18px 18px", boxSizing: "border-box" }}>
       <Steps
         current={visibleStage}
-        onChange={(stage) => {
-          if (stage === 0 || (stage === 1 && snapshot) || (stage === 2 && draft && TERMINAL_STATUSES.has(status))) {
-            setVisibleStage(stage);
-          }
-        }}
         items={[{ title: "录制准备" }, { title: "页面录制" }, { title: "能力结果" }]}
         style={{ maxWidth: 980, margin: "0 auto 18px" }}
       />

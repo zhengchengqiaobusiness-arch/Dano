@@ -193,7 +193,7 @@ def test_frontend_and_gateway_use_only_canonical_snapshot_protocol() -> None:
     assert 'type: "republish"' in frontend
     assert 'type: "answer"' in frontend
     assert 'type: "cancel"' in frontend
-    assert "expected_fingerprint: snapshot.draft_fingerprint" in frontend
+    assert "expected_fingerprint: current.draft_fingerprint" in frontend
     for retired in (
         "flow_replace", "request_fields", "orchestrate_flow", "auto_fix_flow",
         "publish_request", "refresh_flow_spec", "analysis_terminated",
@@ -204,13 +204,15 @@ def test_frontend_and_gateway_use_only_canonical_snapshot_protocol() -> None:
 
 def test_frontend_waits_for_authoritative_terminal_snapshot_before_result_stage() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
-    receiver = source[source.index("function receiveSnapshot"):source.index("function startRecording")]
+    stage = source[source.index("function pageStage"):source.index("function recorderWebSocketUrl")]
+    receiver = source[source.index("function receiveSnapshot"):source.index("function openRecordingSocket")]
 
-    assert "TERMINAL_STATUSES.has(next.status)" in receiver
-    assert "setVisibleStage(2)" in receiver
-    assert 'next.status !== "idle"' in receiver
-    assert 'incoming.type === "request"' not in receiver
-    assert 'incoming.type === "frame"' not in receiver
+    assert 'if (status === "idle") return 0' in stage
+    assert '["recording", "processing", "waiting_operator"].includes(status)' in stage
+    assert "return 2" in stage
+    assert "setVisibleStage" not in source
+    assert "setSnapshot(next)" in receiver
+    assert 'incoming.type === "request"' not in source
 
 
 def test_frontend_has_one_finish_and_one_republish_entrypoint() -> None:
@@ -223,6 +225,8 @@ def test_frontend_has_one_finish_and_one_republish_entrypoint() -> None:
     assert "修改后再次发布" in source
     assert "重新分析" not in source
     assert "重新验证并发布" not in source
+    assert "finishRequestedRef.current" in source
+    assert 'loading={finishRequested}' in source
 
 
 def test_operator_question_and_cancel_share_the_authoritative_workflow() -> None:
