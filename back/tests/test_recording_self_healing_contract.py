@@ -180,15 +180,15 @@ async def test_verification_stops_after_three_identical_no_progress_attempts() -
     assert session.flow_spec.meta.get("unverified") in (None, [])
 
 
-@pytest.mark.xfail(strict=True, reason="termination still closes the recording session")
 def test_terminate_protocol_preserves_recording_workspace() -> None:
     source = inspect.getsource(gateway.record_ws)
 
     assert '"type": "analysis_terminated"' in source
     assert 'raise _RecordingTerminated' not in source
+    assert 'resume_state["analysis_generation"]' in source
+    assert "pending_operator_question" in source
 
 
-@pytest.mark.xfail(strict=True, reason="frontend termination still resets stage and draft")
 def test_frontend_termination_preserves_draft_stage_and_canvas() -> None:
     source = (
         Path(__file__).resolve().parents[2]
@@ -199,6 +199,42 @@ def test_frontend_termination_preserves_draft_stage_and_canvas() -> None:
 
     for forbidden in ("resetEditorState()", "setWorkspaceStage(0)", "clearFrame()", 'setPhase("idle")'):
         assert forbidden not in handler
+
+
+@pytest.mark.asyncio
+async def test_verification_termination_stops_without_marking_the_draft_unverified() -> None:
+    class TerminatedSession:
+        def __init__(self) -> None:
+            self.flow_spec = _fact_check_query_leaking_into_write()
+            self.calls = 0
+
+        def current_flow_spec(self):
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_flow_spec(self, spec):
+            self.flow_spec = spec.model_copy(deep=True)
+
+        async def prompt(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"status": "completed"}
+
+    session = TerminatedSession()
+
+    async def terminate_prompt(_operation):
+        _operation.close()
+        return {"status": "analysis_terminated"}
+
+    report = await run_recording_verification(
+        session,
+        prompt_runner=terminate_prompt,
+        max_rounds=5,
+        timeout_s=10,
+    )
+
+    assert session.calls == 0
+    assert report["stop_reason"] == "analysis_terminated"
+    assert report["complete"] is False
+    assert session.flow_spec.meta.get("unverified") in (None, [])
 
 
 def test_operator_timeout_is_a_resumable_waiting_state() -> None:

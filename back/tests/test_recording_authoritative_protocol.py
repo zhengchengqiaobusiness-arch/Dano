@@ -306,7 +306,7 @@ def test_gateway_and_frontend_use_one_versioned_server_authoritative_protocol() 
     assert "expected_fingerprint: serverFingerprintRef.current" in frontend_source
 
     publish_start = frontend_source.index("function performPublishRequest()")
-    publish_end = frontend_source.index("function finishTermination()", publish_start)
+    publish_end = frontend_source.index("function terminateAll()", publish_start)
     publish_source = frontend_source[publish_start:publish_end]
     assert "expected_fingerprint:" in publish_source
     assert "flow_spec:" not in publish_source
@@ -318,21 +318,21 @@ def test_frontend_has_one_normal_finish_path_and_an_emergency_terminate() -> Non
     assert "function stopAll()" not in frontend_source
     assert ">结束录制</Button>" not in frontend_source
     assert 'send({ type: "finalize"' in frontend_source
-    assert 'sendRaw({ type: "terminate" })' in frontend_source
+    assert 'sendRaw({ type: "terminate", operation_id: operationId })' in frontend_source
     assert 'onClick={terminateAll}>一键终止</Button>' in frontend_source
     assert 'disabled={connectionState !== "connected"}' in frontend_source
-    terminate_start = frontend_source.index("function finishTermination()")
-    terminate_end = frontend_source.index("function terminateAll()", terminate_start)
+    terminate_start = frontend_source.index('m.type === "analysis_terminated"')
+    terminate_end = frontend_source.index('else if (m.type ===', terminate_start + 1)
     terminate_source = frontend_source[terminate_start:terminate_end]
-    assert "resetEditorState()" in terminate_source
-    assert "setAgentQuestions([])" in terminate_source
-    assert "setAgentInsights([])" in terminate_source
-    assert "setVerifyProgress([])" in terminate_source
+    assert "resetEditorState()" not in terminate_source
+    assert "setWorkspaceStage(0)" not in terminate_source
+    assert "clearFrame()" not in terminate_source
+    assert 'setPhase("idle")' not in terminate_source
 
     gateway_source = inspect.getsource(gateway.record_ws)
     assert 'message_type == "terminate"' in gateway_source
     assert 'elif t == "terminate":' in gateway_source
-    assert 'except _RecordingTerminated:' in gateway_source
+    assert 'except _RecordingTerminated:' not in gateway_source
 
 
 def test_publish_request_is_logged_before_expensive_review() -> None:

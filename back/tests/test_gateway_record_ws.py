@@ -711,7 +711,7 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
 
 
 @pytest.mark.asyncio
-async def test_record_ws_termination_removes_resume_state(monkeypatch) -> None:  # noqa: ANN001
+async def test_record_ws_termination_preserves_resume_state(monkeypatch) -> None:  # noqa: ANN001
     import dano.execution.page.recorder as recorder_module
 
     sessions = []
@@ -746,9 +746,12 @@ async def test_record_ws_termination_removes_resume_state(monkeypatch) -> None: 
 
     await gateway.record_ws(ws)
 
-    assert {"type": "terminated"} in ws.messages
-    assert ws.close_reason == "terminated_by_user"
-    assert gateway._RECORDING_RESUME_STATES == {}
+    terminated = next(item for item in ws.messages if item.get("type") == "analysis_terminated")
+    assert terminated["draft_preserved"] is True
+    assert terminated["stage"] == 2
+    assert ws.close_reason != "terminated_by_user"
+    resume_key = next(key for key in gateway._RECORDING_RESUME_STATES if key[2] == recording_id)
+    assert gateway._RECORDING_RESUME_STATES[resume_key]["analysis_generation"] == 1
     assert sessions[0].stopped is True
 
 
@@ -1218,19 +1221,21 @@ async def test_long_operation_drains_page_input_without_cancelling_on_disconnect
 
 
 @pytest.mark.asyncio
-async def test_explicit_termination_cancels_a_long_recording_operation() -> None:
+async def test_explicit_termination_finishes_a_long_recording_operation_without_closing_transport() -> None:
     incoming: asyncio.Queue = asyncio.Queue()
     operation_cancelled = asyncio.Event()
 
-    async def operation() -> None:
+    async def operation() -> dict:
         try:
-            await asyncio.Event().wait()
+            await operation_cancelled.wait()
+            return {"status": "analysis_terminated"}
         finally:
-            operation_cancelled.set()
+            pass
 
     async def handle_live(message: dict) -> bool:
         if message.get("type") == "terminate":
-            raise gateway._RecordingTerminated
+            operation_cancelled.set()
+            return True
         return False
 
     waiting = asyncio.create_task(
@@ -1240,9 +1245,9 @@ async def test_explicit_termination_cancels_a_long_recording_operation() -> None
     )
     await incoming.put({"type": "terminate"})
 
-    with pytest.raises(gateway._RecordingTerminated):
-        await asyncio.wait_for(waiting, timeout=0.5)
-    await asyncio.wait_for(operation_cancelled.wait(), timeout=0.5)
+    result, deferred = await asyncio.wait_for(waiting, timeout=0.5)
+    assert result == {"status": "analysis_terminated"}
+    assert deferred == []
 
 
 @pytest.mark.asyncio

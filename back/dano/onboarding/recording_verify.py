@@ -614,12 +614,18 @@ async def run_recording_verification(
         before_fingerprint = _verification_state_fingerprint(current, report)
         round_deadline = min(deadline, loop.time() + _VERIFY_ROUND_TIMEOUT_S)
         try:
-            await _prompt_before_deadline(
+            prompt_result = await _prompt_before_deadline(
                 session,
                 prompt,
                 deadline=round_deadline,
                 prompt_runner=prompt_runner,
             )
+            if (
+                isinstance(prompt_result, dict)
+                and prompt_result.get("status") == "analysis_terminated"
+            ):
+                stop_reason = "analysis_terminated"
+                break
         except asyncio.TimeoutError:
             errors.append(f"第 {round_number} 轮验证超时，已取消本轮")
         except Exception as exc:  # noqa: BLE001 - failures remain explicit blocked state

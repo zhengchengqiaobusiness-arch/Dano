@@ -877,10 +877,6 @@ async def _recording_operation_keepalive(
         await asyncio.gather(keepalive, return_exceptions=True)
 
 
-class _RecordingTerminated(Exception):
-    """The operator explicitly ended the recording and any active operation."""
-
-
 async def _await_operation_while_draining_recording_input(
     operation, incoming_messages: asyncio.Queue, handle_live_message,
     deferred: list[object] | None = None,
@@ -1680,6 +1676,9 @@ async def record_ws(ws: WebSocket) -> None:
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         costly_operation_results = dict(resume_state.get("operations") or {})
         recording_mode = "real_submit"
+        analysis_generation = int(resume_state.get("analysis_generation") or 0)
+        recording_pi_stale = False
+        active_analysis_operation: dict[str, str] = {}
         operator_operation_context: ContextVar[dict] = ContextVar(
             "recording_operator_operation",
             default={},
@@ -1704,9 +1703,22 @@ async def record_ws(ws: WebSocket) -> None:
                 resume_state["flow_spec_version"] = int((pending_flow_spec.meta or {}).get("current_version") or 0)
                 resume_state["flow_spec_fingerprint"] = flow_spec_fingerprint(pending_flow_spec)
             resume_state["operations"] = dict(costly_operation_results)
+            resume_state["analysis_generation"] = analysis_generation
 
-        def _accepted_pi_submission(flow_spec, submission_kind: str) -> None:  # noqa: ANN001
+        def _accepted_pi_submission(
+            flow_spec,
+            submission_kind: str,
+            submission_generation: int,
+        ) -> None:  # noqa: ANN001
             nonlocal pending_flow_spec
+            if submission_generation != analysis_generation:
+                log.info(
+                    "recording.stale_submission_discarded",
+                    submission_kind=submission_kind,
+                    submission_generation=submission_generation,
+                    current_generation=analysis_generation,
+                )
+                return
             if _checkpoint_accepted_recording_pi_submission(
                 resume_state,
                 flow_spec,
@@ -1718,14 +1730,16 @@ async def record_ws(ws: WebSocket) -> None:
 
         async def _ensure_recording_pi(*, fresh: bool = False):
             """Keep the browser connected while isolating independent Pi operations."""
-            nonlocal recording_pi
+            nonlocal recording_pi, recording_pi_stale
             async with recording_pi_lock:
+                fresh = fresh or recording_pi_stale
                 if fresh and recording_pi is not None:
                     await recording_pi.close()
                     recording_pi = None
                 if recording_pi is None:
                     from dano.onboarding.recording_pi import RecordingPiSession
 
+                    session_generation = analysis_generation
                     recording_pi = await _start_recording_pi_candidate(
                         lambda: RecordingPiSession(
                             tenant=str(init.get("tenant") or ""),
@@ -1734,9 +1748,16 @@ async def record_ws(ws: WebSocket) -> None:
                             ),
                             recording_id=recording_id,
                             resume_history=bool(resumed_flow_spec is not None and not fresh),
-                            on_submission_accepted=_accepted_pi_submission,
+                            on_submission_accepted=lambda flow_spec, submission_kind: (
+                                _accepted_pi_submission(
+                                    flow_spec,
+                                    submission_kind,
+                                    session_generation,
+                                )
+                            ),
                         )
                     )
+                    recording_pi_stale = False
                     recording_pi.bind_live_recording(
                         sess,
                         goal_text=goal_text,
@@ -1951,6 +1972,7 @@ async def record_ws(ws: WebSocket) -> None:
             nonlocal pending_flow_spec, live_agent_disabled, last_live_scheduled_count
             if live_agent_disabled:
                 return
+            operation_generation = analysis_generation
             try:
                 insights_before = emitted_agent_insights
                 captured_all_requests = getattr(sess, "captured_all_requests", None)
@@ -1978,6 +2000,8 @@ async def record_ws(ws: WebSocket) -> None:
                     await pi_session.notify_live_batch({"reason": reason, "since_seq": since_seq})
                 finally:
                     operator_operation_context.reset(context_token)
+                if operation_generation != analysis_generation:
+                    return
                 cursor_reader = getattr(pi_session, "recording_delta_cursor", None)
                 consumed_cursor = int(cursor_reader() or 0) if callable(cursor_reader) else captured_count
                 last_live_scheduled_count = max(last_live_scheduled_count, consumed_cursor)
@@ -2113,9 +2137,69 @@ async def record_ws(ws: WebSocket) -> None:
             _checkpoint_resume(storage_state=await sess.storage_state())
             await _send_live_message({"type": "stopped", "connection_retained": True})
 
-        async def _terminate_recording() -> None:
-            await _send_live_message({"type": "terminated"})
-            raise _RecordingTerminated
+        async def _terminate_analysis(message: dict) -> None:
+            """Cancel current analysis work without closing or resetting the recorder."""
+            nonlocal analysis_generation, recording_pi_stale, pending_live_analysis_reason
+            operation_id = str(message.get("operation_id") or "")
+            if operation_id and any(
+                key.endswith(f":{operation_id}") for key in costly_operation_results
+            ):
+                await _send_live_message({
+                    "type": "analysis_terminated",
+                    "operation_id": operation_id,
+                    "status": "already_completed",
+                    "already_completed": True,
+                    "stage": 2,
+                    "draft_preserved": True,
+                })
+                return
+
+            analysis_generation += 1
+            recording_pi_stale = True
+            pending_live_analysis_reason = None
+            resume_state.pop("pending_operator_question", None)
+            _checkpoint_resume()
+
+            for future in tuple(agent_question_futures.values()):
+                if not future.done():
+                    future.cancel()
+            current_task = asyncio.current_task()
+            cancellable_live_tasks = [
+                task for task in live_analysis_tasks
+                if task is not current_task and not task.done()
+            ]
+            for task in cancellable_live_tasks:
+                task.cancel()
+            if cancellable_live_tasks:
+                await asyncio.gather(*cancellable_live_tasks, return_exceptions=True)
+
+            deferred_messages[:] = [
+                queued for queued in deferred_messages
+                if not (
+                    isinstance(queued, dict)
+                    and (
+                        str(queued.get("operation_id") or "").startswith(
+                            ("auto-plan-", "auto-repair-", "auto-publish-")
+                        )
+                        or bool(queued.get("_auto_publish"))
+                        or bool(queued.get("_auto_publish_after_plan"))
+                    )
+                )
+            ]
+            if recording_pi is not None:
+                try:
+                    await recording_pi.cancel_active_prompt()
+                except Exception as exc:  # noqa: BLE001 - cancellation remains best effort
+                    log.warning("recording.analysis_cancel_failed", error=str(exc))
+
+            active_operation_id = str(active_analysis_operation.get("operation_id") or "")
+            await _send_live_message({
+                "type": "analysis_terminated",
+                "operation_id": operation_id or active_operation_id,
+                "status": "cancelled",
+                "stage": 2,
+                "draft_preserved": True,
+            })
 
         async def _handle_live_recording_message(message: dict) -> bool:
             message_type = message.get("type")
@@ -2129,7 +2213,8 @@ async def record_ws(ws: WebSocket) -> None:
                 await _pause_recording_capture()
                 return True
             if message_type == "terminate":
-                await _terminate_recording()
+                await _terminate_analysis(message)
+                return True
             if message_type == "agent_answer":
                 _resolve_agent_answer(message)
                 return True
@@ -2142,6 +2227,13 @@ async def record_ws(ws: WebSocket) -> None:
             operation_id: str = "",
             resume_message: dict | None = None,
         ) -> object:  # noqa: ANN001
+            operation_generation = analysis_generation
+            previous_active_operation = dict(active_analysis_operation)
+            active_analysis_operation.clear()
+            active_analysis_operation.update({
+                "operation_type": operation_type,
+                "operation_id": operation_id,
+            })
             context_token = operator_operation_context.set({
                 "operation_type": operation_type,
                 "operation_id": operation_id,
@@ -2151,11 +2243,45 @@ async def record_ws(ws: WebSocket) -> None:
                 result, _deferred = await _await_operation_while_draining_recording_input(
                     prompt, incoming_messages, _handle_live_recording_message, deferred_messages,
                 )
+                if operation_generation != analysis_generation:
+                    return {
+                        "status": "analysis_terminated",
+                        "operation_id": operation_id,
+                    }
                 return result
             finally:
                 operator_operation_context.reset(context_token)
+                active_analysis_operation.clear()
+                active_analysis_operation.update(previous_active_operation)
 
         deferred_messages: list[object] = []
+
+        def _analysis_was_terminated(result: object) -> bool:
+            return bool(
+                isinstance(result, dict)
+                and result.get("status") == "analysis_terminated"
+            )
+
+        async def _consume_pending_termination() -> bool:
+            """Honor a queued cancel before crossing the atomic publish boundary."""
+            pending_messages: list[object] = []
+            terminated = False
+            while True:
+                try:
+                    queued = incoming_messages.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if (
+                    not terminated
+                    and isinstance(queued, dict)
+                    and queued.get("type") == "terminate"
+                ):
+                    await _terminate_analysis(queued)
+                    terminated = True
+                else:
+                    pending_messages.append(queued)
+            deferred_messages[:0] = pending_messages
+            return terminated
 
         async def _verify_finalized_recording(
             *,
@@ -2328,7 +2454,14 @@ async def record_ws(ws: WebSocket) -> None:
                     async def _finish_live_analysis_tasks() -> None:
                         await asyncio.gather(*list(live_analysis_tasks), return_exceptions=True)
 
-                    await _responsive_prompt(_finish_live_analysis_tasks())
+                    drain_result = await _responsive_prompt(
+                        _finish_live_analysis_tasks(),
+                        operation_type="finalize",
+                        operation_id=str(msg.get("operation_id") or ""),
+                        resume_message=msg,
+                    )
+                    if _analysis_was_terminated(drain_result):
+                        continue
                 await sess.flush_recording()
                 observed_required_labels = await sess.observed_required_labels()
                 observed_page_context = await sess.observed_page_context()
@@ -2413,13 +2546,15 @@ async def record_ws(ws: WebSocket) -> None:
                         )
                     finalize_since_seq = last_live_scheduled_count
                     if not live_agent_disabled:
-                        await _responsive_prompt(_run_live_analysis(
+                        finalize_result = await _responsive_prompt(_run_live_analysis(
                             "finalize",
                             finalize_since_seq,
                             bind_spec=pending_flow_spec,
                             operation_id=str(msg.get("operation_id") or ""),
                             resume_message=msg,
                         ))
+                        if _analysis_was_terminated(finalize_result):
+                            continue
                     _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
@@ -2652,6 +2787,8 @@ async def record_ws(ws: WebSocket) -> None:
                             # operation running forever.
                             timeout_s=None,
                         ), operation_type="plan", operation_id=operation_id, resume_message=msg)
+                    if _analysis_was_terminated(pi_result):
+                        continue
                     delivered_image_count = _verified_pi_image_count(
                         pi_result, len(analysis_screenshots),
                     )
@@ -2939,11 +3076,13 @@ async def record_ws(ws: WebSocket) -> None:
                     before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await _responsive_prompt(pi_session.prompt(
+                    repair_result = await _responsive_prompt(pi_session.prompt(
                         "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
                         "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
                         f" recording_id={recording_id}"
                     ), operation_type="repair", operation_id=operation_id, resume_message=msg)
+                    if _analysis_was_terminated(repair_result):
+                        continue
                     if pi_session.last_submission_kind != "repair":
                         raise RuntimeError("Pi 未提交 recording repair")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -2976,11 +3115,13 @@ async def record_ws(ws: WebSocket) -> None:
 
                     pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await _responsive_prompt(pi_session.prompt(
+                    naming_result = await _responsive_prompt(pi_session.prompt(
                         "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
                         "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
                         f" recording_id={recording_id}"
                     ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
+                    if _analysis_was_terminated(naming_result):
+                        continue
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 step naming plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -3002,12 +3143,14 @@ async def record_ws(ws: WebSocket) -> None:
 
                     pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await _responsive_prompt(pi_session.prompt(
+                    description_result = await _responsive_prompt(pi_session.prompt(
                         "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
                         " business_understanding.summary；不得改写人工业务文本。必须先调用"
                         " get_recording_state，最后调用 submit_recording_plan。"
                         f" recording_id={recording_id}"
                     ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
+                    if _analysis_was_terminated(description_result):
+                        continue
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 business description plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -3104,6 +3247,8 @@ async def record_ws(ws: WebSocket) -> None:
                             operation_id=str(msg.get("operation_id") or ""),
                             resume_message=msg,
                         )
+                        if verification_result.get("stop_reason") == "analysis_terminated":
+                            continue
                         current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
                     # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
@@ -3187,7 +3332,7 @@ async def record_ws(ws: WebSocket) -> None:
                     pi_session = await _ensure_recording_pi(fresh=True)
                     pi_session.bind_flow_spec(release_flow_spec)
                     review_version = int((release_flow_spec.meta or {}).get("current_version") or 0)
-                    await _responsive_prompt(pi_session.prompt(
+                    review_result = await _responsive_prompt(pi_session.prompt(
                         "对当前录制发布候选执行最终审核。必须先调用 get_recording_state 和 "
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
                         "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
@@ -3208,6 +3353,8 @@ async def record_ws(ws: WebSocket) -> None:
                         "提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}",
                     ), operation_type="publish_review", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
+                    if _analysis_was_terminated(review_result):
+                        continue
                     pi_session.require_publish_review(
                         flow_version=review_version,
                         flow_fingerprint=str(release_candidate["flow_fingerprint"]),
@@ -3243,6 +3390,8 @@ async def record_ws(ws: WebSocket) -> None:
                             operation_id=str(msg.get("operation_id") or ""),
                             resume_message=msg,
                         )
+                        if repair_report.get("stop_reason") == "analysis_terminated":
+                            continue
                         if repair_report.get("all_verified"):
                             deferred_messages.insert(0, {
                                 **msg,
@@ -3278,6 +3427,8 @@ async def record_ws(ws: WebSocket) -> None:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 release_title = str(msg.get("title") or "")
+                if await _consume_pending_termination():
+                    continue
                 try:
                     rep = await run_request_onboarding(
                         tenant=init["tenant"], subsystem=sub, action=publish_action,
@@ -3351,18 +3502,14 @@ async def record_ws(ws: WebSocket) -> None:
                     ok=bool(rep.get("ok")),
                 )
             elif t == "terminate":
-                await _terminate_recording()
+                await _terminate_analysis(msg)
+                continue
             elif t == "stop":
                 # Ending capture is not ending the workbench session. Keep the
                 # websocket, browser, draft and Pi context alive for later edits,
                 # screenshot analysis, optimization and publishing.
                 await _pause_recording_capture()
                 continue
-    except _RecordingTerminated:
-        if connection_key is not None:
-            _RECORDING_RESUME_STATES.pop(connection_key, None)
-        close_reason = "terminated_by_user"
-        log.info("recording.terminated", action=session_action)
     except asyncio.CancelledError:
         log.info(
             "recording.websocket_cancelled",

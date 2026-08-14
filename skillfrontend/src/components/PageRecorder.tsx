@@ -2094,11 +2094,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setRecordingStopped(true);
         message.success("录制已结束，连接和当前分析结果继续保留");
       }
-      else if (m.type === "terminated") {
-        intentionalCloseRef.current = true;
-        ws.close(1000, "terminated_by_user");
-        wsRef.current = null;
-        finishTermination();
+      else if (m.type === "analysis_terminated") {
+        terminatingRef.current = false;
+        setTerminating(false);
+        finalizeOperationRef.current = null;
+        publishOperationRef.current = null;
+        clearFlowOperation();
+        setDescBusy(false);
+        verifyProgressRef.current = [];
+        setVerifyProgress([]);
+        setAgentQuestions((items) => items.filter((item) => item.answered));
+        setAgentAnswerDrafts({});
+        updateAgentStatus({ state: "ready", text: "当前分析已终止，录制和草稿已保留" });
+        if (phaseRef.current === "publishing") setPhase("recording");
+        if (m.already_completed) message.info("当前操作已经完成，录制和草稿已保留");
+        else message.success("当前分析已终止，录制和草稿已保留");
       }
       else if (m.type === "frame") {
         queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
@@ -2330,8 +2340,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
       if (terminatingRef.current) {
-        finishTermination();
-        return;
+        terminatingRef.current = false;
+        setTerminating(false);
       }
       if (intentionalCloseRef.current && !componentMountedRef.current) {
         setConnectionState("idle");
@@ -2607,40 +2617,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
     }
   }
-  function finishTermination() {
-    terminatingRef.current = false;
-    setTerminating(false);
-    finalizeOperationRef.current = null;
-    publishOperationRef.current = null;
-    clearFlowOperation();
-    clearPiRecordingId(piRecordingScopeRef.current);
-    piRecordingIdRef.current = null;
-    agentInsightsRef.current = [];
-    agentStatusRef.current = { state: "waiting", text: "录制和分析已终止" };
-    verifyProgressRef.current = [];
-    hasRequestsRef.current = false;
-    setErr("");
-    setResult(null);
-    setHasRequests(false);
-    setAgentQuestions([]);
-    setAgentInsights([]);
-    setAgentStatus(agentStatusRef.current);
-    setVerifyProgress([]);
-    setAgentAnswerDrafts({});
-    assistantOpenRef.current = false;
-    setAssistantOpen(false);
-    resetEditorState();
-    setRecordingStopped(true);
-    setConnectionState("idle");
-    setPhase("idle");
-    setWorkspaceStage(0);
-    clearFrame();
-  }
   function terminateAll() {
     terminatingRef.current = true;
     setTerminating(true);
-    if (sendRaw({ type: "terminate" })) {
-      message.info("正在终止当前录制和分析…");
+    const operationId = publishOperationRef.current
+      || finalizeOperationRef.current
+      || flowOperationRef.current?.operationId
+      || "";
+    if (sendRaw({ type: "terminate", operation_id: operationId })) {
+      message.info("正在终止当前分析…");
       return;
     }
     terminatingRef.current = false;

@@ -320,6 +320,13 @@ class RecordingPiSession:
             finally:
                 self._active_analysis_image_count = 0
 
+    async def cancel_active_prompt(self) -> dict[str, Any]:
+        """Abort only the active Pi turn while keeping its recording session reusable."""
+        if self._proc is None or self._proc.returncode is not None:
+            return {"status": "already_completed"}
+        event = await self._command("cancel", timeout_s=min(self.timeout_s, 10.0))
+        return {"status": "analysis_terminated", "event": event.get("event")}
+
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
         self.flow_spec = spec.model_copy(deep=True)
