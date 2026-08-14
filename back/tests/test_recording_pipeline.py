@@ -33,6 +33,13 @@ def _context() -> PipelineContext:
     )
 
 
+def test_default_pipeline_budgets_allow_slow_pi_and_multi_round_repair() -> None:
+    pipeline = SelfHealingPipeline(runtime=object())  # type: ignore[arg-type]
+
+    assert pipeline.operation_timeout_s == 1800.0
+    assert pipeline.overall_timeout_s == 10800.0
+
+
 @pytest.mark.asyncio
 async def test_first_publication_consumes_live_notebook_once() -> None:
     calls: list[tuple[str, bool]] = []

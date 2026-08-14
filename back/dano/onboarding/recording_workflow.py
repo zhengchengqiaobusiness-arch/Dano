@@ -226,8 +226,8 @@ class SelfHealingPipeline:
     max_rounds: int = 5
     max_unchanged_rounds: int = 2
     max_review_retries: int = 2
-    operation_timeout_s: float = 240.0
-    overall_timeout_s: float = 900.0
+    operation_timeout_s: float = 1800.0
+    overall_timeout_s: float = 10800.0
 
     async def run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
         if seed.draft is not None:
