@@ -113,4 +113,4 @@ async def test_pi_submission_checkpoints_before_validation_response(monkeypatch)
     result = await session.apply_submission({}, mode="plan", base_flow_version=0)
 
     assert validation_started.is_set()
-    assert result == {"ok": True, "version": 1}
+    assert result == {"ok": True, "version": 1, "submission_complete": True}
