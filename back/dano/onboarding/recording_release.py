@@ -8,6 +8,7 @@ Model review may add blockers later, but it cannot change this decision.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from typing import Any
 
@@ -30,6 +31,55 @@ from dano.execution.page.recording_live import dependency_link_signature
 
 _LEGAL_USAGES = frozenset({"execute", "preflight", "option_source", "fact_check"})
 _READ_METHODS = frozenset({"GET", "HEAD"})
+_ISSUE_RESOLVERS = frozenset({
+    "machine_repair", "collect_evidence", "operator", "external_blocked",
+})
+
+
+@dataclass(frozen=True)
+class ReleaseIssue:
+    check_code: str
+    message: str
+    resolver: str
+    capability_id: str = ""
+    step_id: str = ""
+    field_id: str = ""
+    wire_path: str = ""
+    evidence_refs: tuple[str, ...] = ()
+    suggested_operations: tuple[str, ...] = ()
+    issue_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.resolver not in _ISSUE_RESOLVERS:
+            raise ValueError(f"unsupported release issue resolver: {self.resolver}")
+        if self.issue_id:
+            return
+        identity = json.dumps({
+            "check_code": self.check_code,
+            "capability_id": self.capability_id,
+            "step_id": self.step_id,
+            "field_id": self.field_id,
+            "wire_path": self.wire_path,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        object.__setattr__(
+            self,
+            "issue_id",
+            hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issue_id": self.issue_id,
+            "check_code": self.check_code,
+            "capability_id": self.capability_id,
+            "step_id": self.step_id,
+            "field_id": self.field_id,
+            "wire_path": self.wire_path,
+            "resolver": self.resolver,
+            "evidence_refs": list(self.evidence_refs),
+            "suggested_operations": list(self.suggested_operations),
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True)
@@ -39,6 +89,7 @@ class CapabilityReleaseDecision:
     passed: bool
     reasons: tuple[str, ...] = ()
     checks: dict[str, bool] = field(default_factory=dict)
+    issues: tuple[ReleaseIssue, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +98,7 @@ class CapabilityReleaseDecision:
             "passed": self.passed,
             "reasons": list(self.reasons),
             "checks": dict(self.checks),
+            "issues": [item.to_dict() for item in self.issues],
         }
 
 
@@ -164,8 +216,8 @@ def _passed_verification(spec: FlowSpec, verification_id: str, *, kind: str) -> 
     return bool(record and record.get("status") == "passed" and record.get("kind") == kind)
 
 
-def _active_link_errors(spec: FlowSpec) -> list[str]:
-    errors: list[str] = []
+def _active_link_issues(spec: FlowSpec, capability_id: str = "") -> list[ReleaseIssue]:
+    issues: list[ReleaseIssue] = []
     for link in spec.links:
         verification_id = str((link.meta or {}).get("verification_id") or "")
         if not (
@@ -174,7 +226,14 @@ def _active_link_errors(spec: FlowSpec) -> list[str]:
             and verification_id
             and _passed_verification(spec, verification_id, kind="dependency_execute")
         ):
-            errors.append(f"依赖 `{link.link_id}` 缺少 passed dependency_execute 验证")
+            issues.append(ReleaseIssue(
+                check_code="dependency_verification_missing",
+                message=f"依赖 `{link.link_id}` 缺少 passed dependency_execute 验证",
+                resolver="collect_evidence",
+                capability_id=capability_id,
+                evidence_refs=(verification_id,) if verification_id else (),
+                suggested_operations=("verify_dependency", "confirm_dependency"),
+            ))
             continue
         record = find_verification(
             verification_id,
@@ -185,8 +244,20 @@ def _active_link_errors(spec: FlowSpec) -> list[str]:
             str(subject.get("link_id") or "") != link.link_id
             or str(subject.get("signature") or "") != dependency_link_signature(link)
         ):
-            errors.append(f"依赖 `{link.link_id}` 的 dependency_execute 验证与当前依赖定义不一致")
-    return errors
+            issues.append(ReleaseIssue(
+                check_code="dependency_verification_stale",
+                message=f"依赖 `{link.link_id}` 的 dependency_execute 验证与当前依赖定义不一致",
+                resolver="collect_evidence",
+                capability_id=capability_id,
+                evidence_refs=(verification_id,) if verification_id else (),
+                suggested_operations=("verify_dependency", "confirm_dependency"),
+            ))
+    return issues
+
+
+def _active_link_errors(spec: FlowSpec) -> list[str]:
+    """Compatibility projection for existing callers and tests."""
+    return [item.message for item in _active_link_issues(spec)]
 
 
 def _recorded_body(step) -> Any:  # noqa: ANN001
@@ -210,8 +281,8 @@ def _path_value(value: Any, path: str) -> Any:
     return current
 
 
-def _dynamic_structure_errors(spec: FlowSpec, capability: FlowCapability) -> list[str]:
-    errors: list[str] = []
+def _dynamic_structure_issues(spec: FlowSpec, capability: FlowCapability) -> list[ReleaseIssue]:
+    issues: list[ReleaseIssue] = []
     steps = {step.step_id: step for step in spec.steps}
     public_names = set((capability.input_schema.get("properties") or {}).keys())
     for link in spec.links:
@@ -220,7 +291,15 @@ def _dynamic_structure_errors(spec: FlowSpec, capability: FlowCapability) -> lis
         binding = dict(link.value_binding or {})
         input_field = str(binding.get("input_field") or "")
         if binding.get("kind") != "caller_map_by_label" or not input_field:
-            errors.append(f"动态结构依赖 `{link.link_id}` 缺少 caller_map_by_label 契约")
+            issues.append(ReleaseIssue(
+                check_code="dynamic_structure_binding_missing",
+                message=f"动态结构依赖 `{link.link_id}` 缺少 caller_map_by_label 契约",
+                resolver="machine_repair",
+                capability_id=capability.capability_id,
+                step_id=link.target_step_id,
+                wire_path=str(link.target_container_path or link.target_path or ""),
+                suggested_operations=("propose_dependency",),
+            ))
             continue
         target = steps.get(link.target_step_id)
         container = str(link.target_container_path or link.target_path or "")
@@ -228,9 +307,15 @@ def _dynamic_structure_errors(spec: FlowSpec, capability: FlowCapability) -> lis
         recorded_keys = {str(key) for key in recorded} if isinstance(recorded, dict) else set()
         leaked = sorted(recorded_keys & public_names)
         if leaked:
-            errors.append(
-                f"动态结构依赖 `{link.link_id}` 的录制键残留在公共输入: {leaked}"
-            )
+            issues.append(ReleaseIssue(
+                check_code="dynamic_structure_recorded_key_exposed",
+                message=f"动态结构依赖 `{link.link_id}` 的录制键残留在公共输入: {leaked}",
+                resolver="machine_repair",
+                capability_id=capability.capability_id,
+                step_id=link.target_step_id,
+                wire_path=container,
+                suggested_operations=("reconcile_dynamic_structure",),
+            ))
         prefix = container.removeprefix("body.").rstrip(".*") + "."
         stale_fields = [
             param.path for param in (target.params if target is not None else [])
@@ -238,14 +323,32 @@ def _dynamic_structure_errors(spec: FlowSpec, capability: FlowCapability) -> lis
             and (param.exposed_to_user or param.source_kind != "dynamic_structure")
         ]
         if stale_fields:
-            errors.append(
-                f"动态结构依赖 `{link.link_id}` 仍包含固定录制叶子字段: {stale_fields}"
-            )
-    return errors
+            issues.append(ReleaseIssue(
+                check_code="dynamic_structure_stale_leaf",
+                message=f"动态结构依赖 `{link.link_id}` 仍包含固定录制叶子字段: {stale_fields}",
+                resolver="machine_repair",
+                capability_id=capability.capability_id,
+                step_id=link.target_step_id,
+                wire_path=container,
+                suggested_operations=("reconcile_dynamic_structure",),
+            ))
+    return issues
 
 
-def _field_errors(spec: FlowSpec, capability: FlowCapability, compiled: dict) -> list[str]:
-    errors: list[str] = []
+def _param_evidence_refs(param) -> tuple[str, ...]:  # noqa: ANN001
+    refs: list[str] = []
+    for item in param.evidence or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("verification_id", "event_id", "event_ref", "evidence_ref"):
+            value = str(item.get(key) or "")
+            if value:
+                refs.append(value)
+    return tuple(dict.fromkeys(refs))
+
+
+def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) -> list[ReleaseIssue]:
+    issues: list[ReleaseIssue] = []
     steps = {step.step_id: step for step in spec.steps}
     member_ids = set(_member_step_ids(capability))
     compiled_names = set(_api_params(compiled))
@@ -267,42 +370,101 @@ def _field_errors(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
             continue
         for param in step.params:
             if param.source_kind == "unknown":
-                errors.append(f"字段 `{step_id}:{param.path}` 来源为 unknown")
+                issues.append(ReleaseIssue(
+                    check_code="field_source_unknown",
+                    message=f"字段 `{step_id}:{param.path}` 来源为 unknown",
+                    resolver="collect_evidence",
+                    capability_id=capability.capability_id,
+                    step_id=step_id,
+                    field_id=str(param.field_id or ""),
+                    wire_path=str(param.path or ""),
+                    evidence_refs=_param_evidence_refs(param),
+                    suggested_operations=("set_param_source",),
+                ))
             normalized_path = str(param.path or "").removeprefix("body.")
             if (
                 _param_exposed_to_caller(param)
                 and str(param.key or param.path) not in compiled_names
                 and normalized_path not in compiled_paths
             ):
-                errors.append(f"调用方字段 `{step_id}:{param.path}` 未编译进实际请求")
+                issues.append(ReleaseIssue(
+                    check_code="caller_field_not_compiled",
+                    message=f"调用方字段 `{step_id}:{param.path}` 未编译进实际请求",
+                    resolver="machine_repair",
+                    capability_id=capability.capability_id,
+                    step_id=step_id,
+                    field_id=str(param.field_id or ""),
+                    wire_path=str(param.path or ""),
+                    evidence_refs=_param_evidence_refs(param),
+                    suggested_operations=("reconcile_capability_membership",),
+                ))
             if is_write and _param_exposed_to_caller(param):
                 state = str((param.source or {}).get("required_state") or "")
                 if state not in {"required", "optional"}:
-                    errors.append(f"写能力字段 `{step_id}:{param.path}` 的 required 轴未确认")
+                    issues.append(ReleaseIssue(
+                        check_code="required_axis_unconfirmed",
+                        message=f"写能力字段 `{step_id}:{param.path}` 的 required 轴未确认",
+                        resolver="operator",
+                        capability_id=capability.capability_id,
+                        step_id=step_id,
+                        field_id=str(param.field_id or ""),
+                        wire_path=str(param.path or ""),
+                        evidence_refs=_param_evidence_refs(param),
+                        suggested_operations=("set_param_required",),
+                    ))
             enum_issue = _capability_param_enum_issue(param)
             if enum_issue:
-                errors.append(f"枚举字段 `{step_id}:{param.path}` {enum_issue}")
+                issues.append(ReleaseIssue(
+                    check_code="enum_options_unverified",
+                    message=f"枚举字段 `{step_id}:{param.path}` {enum_issue}",
+                    resolver="collect_evidence",
+                    capability_id=capability.capability_id,
+                    step_id=step_id,
+                    field_id=str(param.field_id or ""),
+                    wire_path=str(param.path or ""),
+                    evidence_refs=_param_evidence_refs(param),
+                    suggested_operations=("set_param_enum",),
+                ))
             if param.source_kind == "computed" and (param.source or {}).get("sample_verified") is not True:
-                errors.append(f"计算字段 `{step_id}:{param.path}` 未通过录制样例验证")
-    return errors
+                issues.append(ReleaseIssue(
+                    check_code="computed_sample_unverified",
+                    message=f"计算字段 `{step_id}:{param.path}` 未通过录制样例验证",
+                    resolver="collect_evidence",
+                    capability_id=capability.capability_id,
+                    step_id=step_id,
+                    field_id=str(param.field_id or ""),
+                    wire_path=str(param.path or ""),
+                    evidence_refs=_param_evidence_refs(param),
+                    suggested_operations=("submit_recording_repair",),
+                ))
+    return issues
 
 
-def _write_verification_errors(spec: FlowSpec, capability: FlowCapability) -> list[str]:
+def _write_verification_issues(spec: FlowSpec, capability: FlowCapability) -> list[ReleaseIssue]:
     steps = {step.step_id: step for step in spec.steps}
-    errors: list[str] = []
+    issues: list[ReleaseIssue] = []
     for step_id in _member_step_ids(capability):
         step = steps.get(step_id)
         if step is None or (step.method or "GET").upper() in _READ_METHODS:
             continue
         if not step.fact_check or not _executor_fact_check_is_verified(spec, step.fact_check):
-            errors.append(f"写步骤 `{step_id}` 缺少 passed 写回读验证")
-    return errors
+            issues.append(ReleaseIssue(
+                check_code="write_readback_missing",
+                message=f"写步骤 `{step_id}` 缺少 passed 写回读验证",
+                resolver="collect_evidence",
+                capability_id=capability.capability_id,
+                step_id=step_id,
+                evidence_refs=(str((step.fact_check or {}).get("verification_id") or ""),)
+                if (step.fact_check or {}).get("verification_id") else (),
+                suggested_operations=("execute_write_with_verify", "bind_verify_read"),
+            ))
+    return issues
 
 
 def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> CapabilityReleaseDecision:
     scoped = _capability_spec(spec, capability)
     selected = scoped.capabilities[0]
-    reasons: list[str] = []
+    issues: list[ReleaseIssue] = []
     checks: dict[str, bool] = {}
 
     execute_refs = [ref for ref in selected.request_refs if ref.usage == "execute"]
@@ -314,47 +476,82 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
     anchor_ok = len(execute_refs) == 1 and execute_refs[0].step_id in execute_call_ids
     checks["unique_public_anchor"] = anchor_ok
     if not anchor_ok:
-        reasons.append("capability 必须有且仅有一个绑定 call 节点的公共 execute anchor")
+        issues.append(ReleaseIssue(
+            check_code="public_execute_anchor_invalid",
+            message="capability 必须有且仅有一个绑定 call 节点的公共 execute anchor",
+            resolver="machine_repair",
+            capability_id=selected.capability_id,
+            suggested_operations=("reconcile_capability_membership",),
+        ))
 
     illegal = sorted({ref.usage for ref in selected.request_refs if ref.usage not in _LEGAL_USAGES})
     checks["legal_membership_usage"] = not illegal
     if illegal:
-        reasons.append(f"capability 包含非法 request usage: {illegal}")
+        issues.append(ReleaseIssue(
+            check_code="capability_usage_invalid",
+            message=f"capability 包含非法 request usage: {illegal}",
+            resolver="machine_repair",
+            capability_id=selected.capability_id,
+            suggested_operations=("reconcile_capability_membership",),
+        ))
 
     report = validate_flow_spec(scoped)
     checks["capability_validation"] = bool(report.get("passed"))
     if not report.get("passed"):
-        reasons.extend(str(item) for item in report.get("errors") or ["capability_validation failed"])
+        issues.extend(ReleaseIssue(
+            check_code="capability_validation_failed",
+            message=str(item),
+            resolver="machine_repair",
+            capability_id=selected.capability_id,
+            suggested_operations=("submit_recording_repair",),
+        ) for item in (report.get("errors") or ["capability_validation failed"]))
 
     compiled, build_errors = flow_spec_to_api_request(scoped)
     checks["request_compilation"] = compiled is not None and not build_errors
     if compiled is None or build_errors:
-        reasons.extend(str(item) for item in build_errors or ["FlowSpec 无法编译"])
+        issues.extend(ReleaseIssue(
+            check_code="request_compilation_failed",
+            message=str(item),
+            resolver="machine_repair",
+            capability_id=selected.capability_id,
+            suggested_operations=("submit_recording_repair",),
+        ) for item in (build_errors or ["FlowSpec 无法编译"]))
     else:
-        reasons.extend(_field_errors(scoped, selected, compiled))
+        issues.extend(_field_issues(scoped, selected, compiled))
 
-    link_errors = _active_link_errors(scoped)
-    checks["verified_links"] = not link_errors
-    reasons.extend(link_errors)
-    dynamic_errors = _dynamic_structure_errors(scoped, selected)
-    checks["dynamic_structure"] = not dynamic_errors
-    reasons.extend(dynamic_errors)
-    write_errors = _write_verification_errors(scoped, selected)
-    checks["write_readback"] = not write_errors
-    reasons.extend(write_errors)
+    link_issues = _active_link_issues(scoped, selected.capability_id)
+    checks["verified_links"] = not link_issues
+    issues.extend(link_issues)
+    dynamic_issues = _dynamic_structure_issues(scoped, selected)
+    checks["dynamic_structure"] = not dynamic_issues
+    issues.extend(dynamic_issues)
+    write_issues = _write_verification_issues(scoped, selected)
+    checks["write_readback"] = not write_issues
+    issues.extend(write_issues)
 
     dry_run = dry_run_flow_spec(scoped)
     checks["dry_run"] = bool(dry_run.get("ok"))
     if not dry_run.get("ok"):
-        reasons.append("dry run 未通过")
+        issues.append(ReleaseIssue(
+            check_code="dry_run_failed",
+            message="dry run 未通过",
+            resolver="machine_repair",
+            capability_id=selected.capability_id,
+            suggested_operations=("submit_recording_repair",),
+        ))
 
-    reasons = list(dict.fromkeys(reason for reason in reasons if reason))
+    unique_issues = {
+        item.issue_id: item for item in issues if item.message
+    }
+    issues = list(unique_issues.values())
+    reasons = list(dict.fromkeys(item.message for item in issues))
     return CapabilityReleaseDecision(
         capability_id=selected.capability_id,
         name=selected.name,
         passed=not reasons and all(checks.values()),
         reasons=tuple(reasons),
         checks=checks,
+        issues=tuple(issues),
     )
 
 

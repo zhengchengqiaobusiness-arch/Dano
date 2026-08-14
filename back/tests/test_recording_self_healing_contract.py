@@ -91,7 +91,6 @@ def _fact_check_query_leaking_into_write() -> FlowSpec:
     return spec
 
 
-@pytest.mark.xfail(strict=True, reason="release issues are not structured yet")
 def test_release_exposes_structured_repair_issues() -> None:
     decision = evaluate_recording_release(_fact_check_query_leaking_into_write())
     submit = next(item for item in decision.to_dict()["capabilities"] if item["name"] == "submit_item")
@@ -111,7 +110,6 @@ def test_fact_check_query_fields_do_not_become_write_capability_inputs() -> None
     assert not any("query.pageNo" in reason for reason in submit.reasons)
 
 
-@pytest.mark.xfail(strict=True, reason="required blockers are not classified for operator handling")
 def test_unconfirmed_write_required_axis_is_an_operator_issue() -> None:
     spec = _fact_check_query_leaking_into_write()
     reason = next(param for param in spec.steps[1].params if param.path == "body.reason")
@@ -119,7 +117,11 @@ def test_unconfirmed_write_required_axis_is_an_operator_issue() -> None:
     decision = evaluate_recording_release(spec)
     submit = next(item for item in decision.to_dict()["capabilities"] if item["name"] == "submit_item")
 
-    issue = next(item for item in submit["issues"] if item["check_code"] == "required_axis_unconfirmed")
+    issue = next(
+        item for item in submit["issues"]
+        if item["check_code"] == "required_axis_unconfirmed"
+        and item["wire_path"] == "body.reason"
+    )
     assert issue["resolver"] == "operator"
     assert issue["step_id"] == "submit"
     assert issue["wire_path"] == "body.reason"
