@@ -404,8 +404,9 @@ function verifyPlanToolCompatibility() {
       op: "set_param_source",
       request_id: "req-submit",
       wire_path: "body.title",
-      source_kind: "user_input",
+      source_kind: "caller_input",
       reason: "operator entered this field",
+      evidence_refs: ["event-title"],
     }],
   };
   const sanitized = sanitizeRecordingToolParams("submit_recording_plan", {

@@ -11,6 +11,7 @@ from dano.onboarding.recording_workflow import CANONICAL_RECORDING_COMMANDS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PAGE_RECORDER = _REPO_ROOT / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
+_PI_RUNTIME = _REPO_ROOT / "back" / "agent" / "run_recording_pi.mjs"
 
 
 def test_recording_gateway_contains_one_public_route_and_one_dispatch_owner() -> None:
@@ -110,3 +111,16 @@ def test_skill_export_is_only_called_at_the_publish_boundary_for_current_skill()
 
     assert "await _auto_export(tenant, skill_ids={skill_id}, strict=True)" in publisher
     assert "write_exports" not in inspect.getsource(gateway.record_ws)
+
+
+def test_pi_runtime_prompt_uses_the_same_public_semantic_contract_as_tools() -> None:
+    source = _PI_RUNTIME.read_text(encoding="utf-8")
+
+    assert "caller_input/constant/session/context/response_binding/computed" in source
+    assert "auth/support/option/context/business_read/business_write" in source
+    assert "kind=response_key_map" in source
+    for retired in (
+        "user_input/constant/session_header/page_context/chained/computed",
+        "kind=structure",
+    ):
+        assert retired not in source
