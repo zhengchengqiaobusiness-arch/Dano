@@ -16,7 +16,7 @@ from dano.execution.page.flow_spec import (
     prepare_flow_spec_for_publish,
 )
 from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
-from dano.onboarding.recording_release import evaluate_recording_release
+from dano.onboarding.recording_release import evaluate_recording_release, review_release_issues
 
 
 def _mixed_spec() -> FlowSpec:
@@ -65,6 +65,27 @@ def _mixed_spec() -> FlowSpec:
         {"name": "submit_item", "title": "提交项目", "kind": "submit", "anchor_step_id": "submit"},
     ]}
     return compile_capabilities(source, plan).spec
+
+
+def test_final_review_rejection_keeps_structured_repair_target() -> None:
+    issues = review_release_issues({
+        "issues": [{
+            "check_code": "final_review_rejected",
+            "resolver": "machine_repair",
+            "capability_id": "submit-item",
+            "step_id": "submit",
+            "field_id": "field-reason",
+            "wire_path": "body.reason",
+            "evidence_refs": ["event-1"],
+            "suggested_operations": ["set_param_required"],
+            "message": "必填契约与页面证据冲突",
+        }],
+    })
+
+    assert len(issues) == 1
+    assert issues[0].check_code == "final_review_rejected"
+    assert issues[0].resolver == "machine_repair"
+    assert issues[0].wire_path == "body.reason"
 
 
 def test_publish_sync_keeps_capability_anchor_execute_when_step_is_shared_preflight():

@@ -2019,6 +2019,7 @@ async def record_ws(ws: WebSocket) -> None:
                     current,
                     rounds=0,
                     max_rounds=5,
+                    stop_reason="completed",
                 )
             elif live_agent_disabled:
                 pending_flow_spec, report = finalize_verification_state(
@@ -2026,6 +2027,7 @@ async def record_ws(ws: WebSocket) -> None:
                     rounds=0,
                     max_rounds=5,
                     errors=["录制 Agent 不可用"],
+                    stop_reason="external_blocked",
                 )
             else:
                 try:
@@ -2038,22 +2040,24 @@ async def record_ws(ws: WebSocket) -> None:
                         max_rounds=5,
                     )
                     pending_flow_spec = pi_session.current_flow_spec()
-                except Exception as exc:  # noqa: BLE001 - publish continues with explicit unverified items
+                except Exception as exc:  # noqa: BLE001 - preserve the blocked draft
                     pending_flow_spec, report = finalize_verification_state(
                         current,
                         rounds=0,
                         max_rounds=5,
                         errors=[str(exc)[:500]],
+                        stop_reason="external_blocked",
                     )
+            verification_run = dict((pending_flow_spec.meta or {}).get("verification_run") or {})
             await emit_progress({
-                "stage": "completed",
+                "stage": str(verification_run.get("status") or "pending"),
                 "detail": (
-                    "验证全部通过，准备自动发布"
+                    "验证和机器发布闸门全部通过，准备最终审核"
                     if report["all_verified"]
-                    else "验证结束，未决项已标注 unverified，准备发布"
+                    else "验证已暂停，当前草稿和未决问题已保留"
                 ),
-                "round": int(((pending_flow_spec.meta or {}).get("verification_run") or {}).get("rounds") or 0),
-                "pending": 0,
+                "round": int(verification_run.get("rounds") or 0),
+                "pending": len(report.get("todos") or []),
                 "confirmed_links": report["confirmed_links"],
                 "verify_coverage": report["verify_coverage"],
                 "write_count": report["write_count"],
@@ -2997,6 +3001,10 @@ async def record_ws(ws: WebSocket) -> None:
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
                         "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
                         "reasons(string[])，model_id 由服务器记录；review 顶层还可包含 blocking_reasons。"
+                        "若任一角色拒绝，必须同时提交 issues：check_code 固定为 final_review_rejected，"
+                        "并用 resolver 标明 machine_repair、operator 或 external_blocked，附带可定位的"
+                        " capability_id/step_id/field_id/wire_path 和 suggested_operations；"
+                        "不得要求后端解析 reasons 文本决定修复。"
                         "审核不通过时设置 passed=false 并填写 reasons，也可增加 blocking_reasons。"
                         "录制事实中的撤回、删除、驳回、终止等"
                         "可能是管理员刚刚真实执行的合法业务写操作；不得仅凭 HTTP 方法、路径关键词或"
@@ -3020,6 +3028,39 @@ async def record_ws(ws: WebSocket) -> None:
                         operation_id=msg.get("operation_id"),
                     )
                 except Exception as e:  # noqa: BLE001
+                    from dano.execution.page.flow_spec import flow_spec_fingerprint
+                    from dano.onboarding.recording_release import review_release_issues
+
+                    review_feedback = review_release_issues(
+                        dict(getattr(pi_session, "last_review", None) or {}),
+                    )
+                    actionable_feedback = [
+                        item for item in review_feedback
+                        if item.resolver in {"machine_repair", "operator"}
+                    ]
+                    if actionable_feedback:
+                        feedback_fingerprint = flow_spec_fingerprint(pending_flow_spec)
+                        pending_flow_spec.meta = dict(pending_flow_spec.meta or {})
+                        pending_flow_spec.meta["release_feedback_issues"] = [
+                            {**item.to_dict(), "flow_fingerprint": feedback_fingerprint}
+                            for item in actionable_feedback
+                        ]
+                        pending_flow_spec.meta.pop("verification_run", None)
+                        _checkpoint_resume()
+                        repair_report = await _verify_finalized_recording(force=True)
+                        if repair_report.get("all_verified"):
+                            deferred_messages.insert(0, {
+                                **msg,
+                                "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
+                                "review_feedback_retry": int(msg.get("review_feedback_retry") or 0) + 1,
+                            })
+                            await _send_live_message({
+                                "type": "verify_progress",
+                                "stage": "validating",
+                                "detail": "最终审核问题已修复，正在重新审核同一发布操作",
+                                "pending": 0,
+                            })
+                            continue
                     await sender.send_json({
                         "type": "result",
                         "operation": "publish",

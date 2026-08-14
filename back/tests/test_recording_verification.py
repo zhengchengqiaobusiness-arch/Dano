@@ -180,7 +180,7 @@ def test_enum_param_without_select_binding_is_still_a_verification_todo():
     assert todo["completion_op"] == "set_param_enum"
 
 
-def test_finalize_marks_unresolved_dependency_candidates_without_crashing():
+def test_finalize_preserves_unresolved_dependency_candidates_without_publishing():
     finalized, report = finalize_verification_state(
         _spec_with_unproposed_value_link(),
         rounds=3,
@@ -188,20 +188,12 @@ def test_finalize_marks_unresolved_dependency_candidates_without_crashing():
         errors=["agent turn ended before confirmation"],
     )
 
-    assert report["complete"] is True
-    assert verification_todos(finalized) == []
-    assert {
-        (item["target_kind"], item["target_id"])
-        for item in finalized.meta["unverified"]
-    } == {
-        ("dependency_candidate", next(
-            item["link_id"]
-            for item in verification_todos(_spec_with_unproposed_value_link())
-            if item["kind"] == "dependency_candidate"
-        )),
-        ("write_verify", "submit"),
+    assert report["complete"] is False
+    assert {item["kind"] for item in verification_todos(finalized)} == {
+        "dependency_candidate", "write_verify",
     }
-    assert finalized.meta["verification_run"]["complete"] is True
+    assert finalized.meta.get("unverified") in (None, [])
+    assert finalized.meta["verification_run"]["complete"] is False
 
 
 def test_finalize_consumes_persisted_passed_dependency_verification():
@@ -691,7 +683,7 @@ class _UnavailableSession:
 
 
 @pytest.mark.asyncio
-async def test_verification_exhaustion_marks_every_todo_and_still_completes():
+async def test_unavailable_agent_preserves_every_todo_and_blocks_publish():
     session = _UnavailableSession(_spec())
     progress = []
 
@@ -699,16 +691,18 @@ async def test_verification_exhaustion_marks_every_todo_and_still_completes():
         progress.append(payload)
 
     report = await run_recording_verification(session, progress=emit)
-    assert report["complete"] is True
+    assert report["complete"] is False
     assert report["all_verified"] is False
-    assert {item["target_kind"] for item in report["unverified"]} == {"dependency", "write_verify", "enum"}
-    assert session.flow_spec.meta["verification_run"]["complete"] is True
-    assert session.flow_spec.capabilities[0].confirmed is True
-    assert progress[-1]["stage"] == "completed"
+    assert report["unverified"] == []
+    assert {item["kind"] for item in report["todos"]} == {"dependency", "write_verify", "enum"}
+    assert session.flow_spec.meta["verification_run"]["complete"] is False
+    assert session.flow_spec.meta["verification_run"]["status"] == "external_blocked"
+    assert session.flow_spec.capabilities[0].confirmed is False
+    assert progress[-1]["stage"] == "external_blocked"
 
 
 @pytest.mark.asyncio
-async def test_final_verification_has_one_total_deadline_and_returns_publishable_state():
+async def test_final_verification_has_one_total_deadline_and_preserves_blocked_state():
     class HangingSession(_UnavailableSession):
         async def prompt(self, *_args, **_kwargs):
             await asyncio.Event().wait()
@@ -719,10 +713,11 @@ async def test_final_verification_has_one_total_deadline_and_returns_publishable
     report = await run_recording_verification(session, timeout_s=0.02)
 
     assert time.monotonic() - started < 0.5
-    assert report["complete"] is True
+    assert report["complete"] is False
     assert report["all_verified"] is False
     assert report["errors"]
-    assert session.flow_spec.meta["verification_run"]["complete"] is True
+    assert session.flow_spec.meta["verification_run"]["complete"] is False
+    assert session.flow_spec.meta["verification_run"]["status"] == "timeout"
     assert "skill_docs_generation" not in session.flow_spec.meta
 
 
@@ -838,10 +833,11 @@ async def test_timed_out_round_with_progress_gets_another_slice():
     session = SlowSession(spec)
     report = await run_recording_verification(session)
 
-    # Round 1 timed out but its executor evidence bound the write, so the loop
-    # ran a second round; round 2 timed out with zero progress and stopped.
-    assert SlowSession.calls == 2
-    assert report["complete"] is True
+    # Round 1 landed executor evidence. Three subsequent identical attempts
+    # then prove no progress, so the loop stops without publishing.
+    assert SlowSession.calls == 4
+    assert report["complete"] is False
+    assert report["stop_reason"] == "no_progress"
     write_step = next(step for step in session.flow_spec.steps if step.step_id == "submit")
     assert write_step.fact_check["verified"] is True
 

@@ -21,7 +21,7 @@ _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # each round gets its own slice so one slow turn cannot consume every retry.
 _FINAL_ANALYSIS_TIMEOUT_S = 900.0
 _VERIFY_ROUND_TIMEOUT_S = 360.0
-_FINAL_ANALYSIS_TIMEOUT_MESSAGE = "录制最终分析超过总时限，剩余待办已标记为 unverified"
+_FINAL_ANALYSIS_TIMEOUT_MESSAGE = "录制最终分析超过总时限，当前草稿已保留"
 
 
 def _unverified_targets(spec) -> set[tuple[str, str]]:  # noqa: ANN001
@@ -208,8 +208,82 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
     return todos
 
 
+def _release_issue_todos(spec, existing: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:  # noqa: ANN001
+    """Project machine-release blockers into the existing verification queue.
+
+    Release evaluation starts only after a capability has a materialized call
+    graph.  Earlier recording drafts deliberately remain governed by the
+    capture/semantic-plan todos instead of producing noisy anchor failures.
+    """
+    if not any(cap.nodes and cap.request_refs for cap in spec.capabilities):
+        return [], []
+
+    from dano.execution.page.flow_spec import flow_spec_fingerprint
+    from dano.onboarding.recording_release import evaluate_recording_release
+
+    decision = evaluate_recording_release(spec)
+    issues = [
+        issue.to_dict()
+        for capability in decision.capabilities
+        for issue in capability.issues
+    ]
+    current_fingerprint = flow_spec_fingerprint(spec)
+    for issue in (spec.meta or {}).get("release_feedback_issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        bound_fingerprint = str(issue.get("flow_fingerprint") or "")
+        if bound_fingerprint and bound_fingerprint != current_fingerprint:
+            continue
+        issues.append(dict(issue))
+
+    existing_kinds = {str(item.get("kind") or "") for item in existing}
+    covered_codes: set[str] = set()
+    if "dependency" in existing_kinds:
+        covered_codes.update({"dependency_verification_missing", "dependency_verification_stale"})
+    if "write_verify" in existing_kinds:
+        covered_codes.add("write_readback_missing")
+    if "enum" in existing_kinds:
+        covered_codes.add("enum_options_unverified")
+
+    unique_issues: dict[str, dict[str, Any]] = {}
+    for issue in issues:
+        issue_id = str(issue.get("issue_id") or "")
+        if issue_id:
+            unique_issues[issue_id] = issue
+    todos = [
+        {
+            "kind": "release_issue",
+            "target_id": issue_id,
+            "issue_id": issue_id,
+            "check_code": str(issue.get("check_code") or ""),
+            "capability_id": str(issue.get("capability_id") or ""),
+            "step_id": str(issue.get("step_id") or ""),
+            "field_id": str(issue.get("field_id") or ""),
+            "wire_path": str(issue.get("wire_path") or ""),
+            "resolver": str(issue.get("resolver") or "machine_repair"),
+            "evidence_refs": list(issue.get("evidence_refs") or []),
+            "suggested_operations": list(issue.get("suggested_operations") or []),
+            "message": str(issue.get("message") or ""),
+            "suggested_tool": (
+                "submit_recording_repair"
+                if str(issue.get("resolver") or "") == "machine_repair"
+                else "collect_evidence"
+                if str(issue.get("resolver") or "") == "collect_evidence"
+                else "ask_operator"
+                if str(issue.get("resolver") or "") == "operator"
+                else "report_external_blocker"
+            ),
+        }
+        for issue_id, issue in unique_issues.items()
+        if str(issue.get("check_code") or "") not in covered_codes
+    ]
+    return list(unique_issues.values()), todos
+
+
 def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001
     todos = verification_todos(spec)
+    release_issues, release_todos = _release_issue_todos(spec, todos)
+    todos.extend(release_todos)
     unverified = [
         dict(item)
         for item in (spec.meta or {}).get("unverified") or []
@@ -225,6 +299,7 @@ def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001
         "complete": not todos,
         "all_verified": not todos and not unverified,
         "todos": todos,
+        "release_issues": release_issues,
         "unverified": unverified,
         "confirmed_links": confirmed_links,
         "link_count": len(spec.links),
@@ -288,34 +363,31 @@ def finalize_verification_state(
     rounds: int,
     max_rounds: int,
     errors: list[str] | None = None,
+    stop_reason: str = "",
 ):  # noqa: ANN001, ANN202
-    """Turn every remaining todo into an explicit, publishable unverified record."""
-    from dano.execution.page.flow_spec import (
-        _auto_confirm_ready_capabilities,
-        append_flow_version,
-        apply_flow_edits,
-    )
+    """Checkpoint verification without converting blockers into publishable state."""
+    from dano.execution.page.flow_spec import _auto_confirm_ready_capabilities
 
     current = _consume_dependency_executor_evidence(spec)
     report = verification_report(current)
-    if report["todos"]:
-        current = apply_flow_edits(current, [
-            {
-                "op": "mark_unverified",
-                "target_kind": item["kind"],
-                "target_id": item["target_id"],
-                "reason": "自主验证达到重试上限，发布时保留为 unverified",
-                "actor": "agent",
-            }
-            for item in report["todos"]
-        ])
-        current = append_flow_version(current, "verification_exhausted", reason="自主验证未决项已显式标注")
-    final_report = verification_report(current)
+    final_report = report
+    resolvers = {
+        str(item.get("resolver") or "")
+        for item in final_report.get("release_issues") or []
+        if isinstance(item, dict)
+    }
+    status = "completed" if final_report["all_verified"] else (
+        "waiting_for_operator" if "operator" in resolvers else
+        "external_blocked" if stop_reason == "external_blocked" or "external_blocked" in resolvers else
+        stop_reason or "pending"
+    )
     current.meta = {
         **(current.meta or {}),
         "verification_run": {
-            "complete": True,
+            "complete": final_report["complete"],
             "all_verified": final_report["all_verified"],
+            "status": status,
+            "stop_reason": stop_reason,
             "rounds": rounds,
             "max_rounds": max_rounds,
             "errors": list(errors or []),
@@ -324,7 +396,32 @@ def finalize_verification_state(
             )},
         },
     }
-    return _auto_confirm_ready_capabilities(current), final_report
+    if final_report["all_verified"]:
+        current = _auto_confirm_ready_capabilities(current)
+    return current, final_report
+
+
+def _verification_state_fingerprint(spec, report: dict[str, Any]) -> str:  # noqa: ANN001
+    """Fingerprint executable FlowSpec state plus the unresolved problem set."""
+    from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+    problems = sorted(
+        (
+            str(item.get("kind") or ""),
+            str(item.get("target_id") or ""),
+            str(item.get("check_code") or ""),
+            str(item.get("resolver") or ""),
+        )
+        for item in report.get("todos") or []
+        if isinstance(item, dict)
+    )
+    raw = json.dumps(
+        {"flow": flow_spec_fingerprint(spec), "problems": problems},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _consume_write_executor_evidence(spec):  # noqa: ANN001, ANN202
@@ -465,31 +562,37 @@ async def run_recording_verification(
     max_rounds: int = 5,
     timeout_s: float = _FINAL_ANALYSIS_TIMEOUT_S,
 ) -> dict[str, Any]:  # noqa: ANN001
-    """Run bounded agent turns under one deadline, then converge to publishable state."""
+    """Run one evidence/repair loop until verified, blocked, or out of time."""
     errors: list[str] = []
     rounds = 0
+    unchanged_attempts = 0
+    stop_reason = ""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.01, float(timeout_s))
-    for round_number in range(1, max(1, min(int(max_rounds), 5)) + 1):
+    while True:
         before_settle = session.current_flow_spec()
         current = _consume_dependency_executor_evidence(before_settle)
         if current.model_dump(mode="json") != before_settle.model_dump(mode="json"):
             session.bind_flow_spec(current)
         report = verification_report(current)
         if report["complete"]:
+            stop_reason = "completed"
             break
         if deadline - loop.time() <= 0:
             errors.append(_FINAL_ANALYSIS_TIMEOUT_MESSAGE)
+            stop_reason = "timeout"
             break
+        round_number = rounds + 1
         rounds = round_number
         await _emit(progress, _progress(
             "analyzing",
-            f"第 {round_number} 轮：分析 {len(report['todos'])} 个验证待办",
+            f"第 {round_number} 轮：处理 {len(report['todos'])} 个验证或发布待办",
             report,
             round_number=round_number,
         ))
         prompt = (
-            "进入录后自主验证。verification_todos 已完整列在下方 todos 中，直接逐项执行对应工具；"
+            "进入录后自主验证与发布自愈闭环。verification_todos/todos 已完整列在下方，"
+            "直接逐项执行对应工具；"
             "仅在确实缺少上下文时才读取 get_recording_state 或 get_validation_report。"
             "已提议的依赖只用 verify_dependency(link_id) 验证，写步骤用 execute_write_with_verify，"
             "枚举待办按 completion_op 处理：attach_enum_options 先用 browser_* 补采并使用工具返回的"
@@ -500,11 +603,14 @@ async def run_recording_verification(
             "再用它返回的 verification_id 提交 confirm_dependency。dependency_kind=response_key_map 时必须按"
             "待办给出的 collection/key/label/container 路径提交 response_key_map，并使用"
             " value_binding.kind=caller_map_by_label，不能退化成固定动态键。"
-            "本轮不要提交 mark_unverified；重试耗尽由后端统一处理。todos="
+            "release_issue 必须只按 resolver 和 suggested_operations 处理：machine_repair 使用现有修复操作，"
+            "collect_evidence 使用回放、依赖、页面或字典工具补证；operator 只能调用 ask_operator，"
+            "external_blocked 不得猜测。禁止解析 message 中文文本决定修复。"
+            "本轮不要提交 mark_unverified，也不得通过降低闸门标准绕过问题。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
         )
+        before_fingerprint = _verification_state_fingerprint(current, report)
         round_deadline = min(deadline, loop.time() + _VERIFY_ROUND_TIMEOUT_S)
-        timed_out = False
         try:
             await _prompt_before_deadline(
                 session,
@@ -514,15 +620,14 @@ async def run_recording_verification(
             )
         except asyncio.TimeoutError:
             errors.append(f"第 {round_number} 轮验证超时，已取消本轮")
-            timed_out = True
-        except Exception as exc:  # noqa: BLE001 - failures become explicit unverified output
+        except Exception as exc:  # noqa: BLE001 - failures remain explicit blocked state
             errors.append(str(exc)[:500])
             if (
                 "no Pi model or credentials" in str(exc)
                 or "DANO_PI_API_KEY" in str(exc)
             ):
+                stop_reason = "external_blocked"
                 break
-            timed_out = "超时" in str(exc)
         before_settle = session.current_flow_spec()
         settled = _consume_dependency_executor_evidence(before_settle)
         if settled.model_dump(mode="json") != before_settle.model_dump(mode="json"):
@@ -534,24 +639,38 @@ async def run_recording_verification(
             updated,
             round_number=round_number,
         ))
-        # A timed-out round that still moved the todo queue (executor evidence
-        # landed mid-turn) deserves another slice; a timed-out round with zero
-        # progress means the model chain is stuck and retrying only burns time.
-        if timed_out and updated["todos"] == report["todos"]:
+        after_fingerprint = _verification_state_fingerprint(settled, updated)
+        if after_fingerprint == before_fingerprint:
+            unchanged_attempts += 1
+        else:
+            unchanged_attempts = 0
+        if unchanged_attempts >= 3:
+            stop_reason = "no_progress"
             break
 
-    bounded_max_rounds = max(1, min(int(max_rounds), 5))
     current, final_report = finalize_verification_state(
         session.current_flow_spec(),
         rounds=rounds,
-        max_rounds=bounded_max_rounds,
+        max_rounds=int(max_rounds),
         errors=errors,
+        stop_reason=stop_reason,
     )
     session.bind_flow_spec(current)
+    run_state = dict((current.meta or {}).get("verification_run") or {})
     await _emit(progress, _progress(
-        "completed",
-        "验证全部通过，准备自动发布" if final_report["all_verified"] else "验证结束，未决项已标注 unverified，准备发布",
+        str(run_state.get("status") or "pending"),
+        (
+            "验证和发布闸门全部通过，准备最终审核"
+            if final_report["all_verified"]
+            else "验证已暂停，当前草稿和未决问题已保留"
+        ),
         final_report,
         round_number=rounds,
     ))
-    return {**final_report, "rounds": rounds, "errors": errors}
+    return {
+        **final_report,
+        "rounds": rounds,
+        "errors": errors,
+        "stop_reason": stop_reason,
+        "status": run_state.get("status") or "pending",
+    }

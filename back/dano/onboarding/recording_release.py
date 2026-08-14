@@ -126,6 +126,46 @@ class ReleaseDecision:
         return payload
 
 
+def review_release_issues(review: dict[str, Any], *, capability_id: str = "") -> list[ReleaseIssue]:
+    """Normalize a rejected final review without parsing human-readable text."""
+    raw_issues = review.get("issues") or [] if isinstance(review, dict) else []
+    issues: list[ReleaseIssue] = []
+    for raw in raw_issues:
+        if not isinstance(raw, dict):
+            continue
+        resolver = str(raw.get("resolver") or "external_blocked")
+        if resolver not in _ISSUE_RESOLVERS:
+            resolver = "external_blocked"
+        issues.append(ReleaseIssue(
+            check_code="final_review_rejected",
+            message=str(raw.get("message") or "最终审核拒绝当前发布候选"),
+            resolver=resolver,
+            capability_id=str(raw.get("capability_id") or capability_id),
+            step_id=str(raw.get("step_id") or ""),
+            field_id=str(raw.get("field_id") or ""),
+            wire_path=str(raw.get("wire_path") or ""),
+            evidence_refs=tuple(str(value) for value in raw.get("evidence_refs") or [] if value),
+            suggested_operations=tuple(
+                str(value) for value in raw.get("suggested_operations") or [] if value
+            ),
+        ))
+    if issues:
+        return issues
+
+    messages = [str(value) for value in review.get("blocking_reasons") or [] if value]
+    for verdict in review.get("verdicts") or []:
+        if isinstance(verdict, dict) and verdict.get("passed") is False:
+            messages.extend(str(value) for value in verdict.get("reasons") or [] if value)
+    if not messages:
+        return []
+    return [ReleaseIssue(
+        check_code="final_review_rejected",
+        message="；".join(dict.fromkeys(messages)),
+        resolver="external_blocked",
+        capability_id=capability_id,
+    )]
+
+
 def _member_step_ids(capability: FlowCapability) -> list[str]:
     values = [*_capability_node_step_ids(capability)]
     values.extend(

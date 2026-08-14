@@ -1837,7 +1837,7 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
     review = params.get("review")
     if not isinstance(review, dict):
         raise ToolError("review 必须是对象")
-    allowed_review_keys = {"acceptance", "security", "compliance", "blocking_reasons"}
+    allowed_review_keys = {"acceptance", "security", "compliance", "blocking_reasons", "issues"}
     if set(review) - allowed_review_keys:
         raise ToolError("review 包含未知字段")
     blocking_reasons = review.get("blocking_reasons") or []
@@ -1846,6 +1846,29 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         or any(not isinstance(reason, str) for reason in blocking_reasons)
     ):
         raise ToolError("review.blocking_reasons 必须是字符串数组")
+    raw_issues = review.get("issues") or []
+    if not isinstance(raw_issues, list) or any(not isinstance(item, dict) for item in raw_issues):
+        raise ToolError("review.issues 必须是对象数组")
+    issue_keys = {
+        "check_code", "resolver", "capability_id", "step_id", "field_id", "wire_path",
+        "evidence_refs", "suggested_operations", "message",
+    }
+    resolvers = {"machine_repair", "operator", "external_blocked"}
+    normalized_issues: list[dict[str, object]] = []
+    for index, issue in enumerate(raw_issues):
+        if set(issue) - issue_keys:
+            raise ToolError(f"review.issues[{index}] 包含未知字段")
+        if issue.get("check_code") != "final_review_rejected":
+            raise ToolError(f"review.issues[{index}].check_code 必须是 final_review_rejected")
+        if issue.get("resolver") not in resolvers:
+            raise ToolError(f"review.issues[{index}].resolver 无效")
+        if not str(issue.get("message") or "").strip():
+            raise ToolError(f"review.issues[{index}].message 不能为空")
+        for key in ("evidence_refs", "suggested_operations"):
+            values = issue.get(key) or []
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ToolError(f"review.issues[{index}].{key} 必须是字符串数组")
+        normalized_issues.append({key: issue[key] for key in issue_keys if key in issue})
     verdicts: list[dict[str, object]] = []
     server_model_id = str(getattr(session, "model_id", "pi-agent-session"))
     for role in ("acceptance", "security", "compliance"):
@@ -1869,6 +1892,7 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         "base_flow_version": params["base_flow_version"],
         "verdicts": verdicts,
         "blocking_reasons": blocking_reasons,
+        "issues": normalized_issues,
         "all_passed": not blocking_reasons and all(bool(item["passed"]) for item in verdicts),
     }
     from dano.execution.page.flow_spec import flow_spec_fingerprint
