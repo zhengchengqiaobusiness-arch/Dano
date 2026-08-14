@@ -2135,6 +2135,17 @@ def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
 def recording_agent_evidence_issues(spec) -> list[dict]:  # noqa: ANN001
     """Report agent conclusions that lack their required evidence."""
     issues: list[dict] = []
+    dynamic_structure_targets = {
+        (
+            str(link.target_step_id or ""),
+            str(link.target_container_path or link.target_path or "").removeprefix("body."),
+        )
+        for link in spec.links
+        if (
+            link.kind == "response_key_map"
+            and (link.value_binding or {}).get("kind") == "caller_map_by_label"
+        )
+    }
     for request_id, analysis in (spec.request_facts.analysis or {}).items():
         evidence = analysis.evidence or {}
         if evidence.get("actor") == "agent" and (not evidence.get("reason") or not evidence.get("evidence_refs")):
@@ -2142,7 +2153,15 @@ def recording_agent_evidence_issues(spec) -> list[dict]:  # noqa: ANN001
     for step in spec.steps:
         for param in step.params:
             agent_evidence = [item for item in param.evidence or [] if isinstance(item, dict) and item.get("actor") == "agent"]
-            if agent_evidence and not all(item.get("reason") for item in agent_evidence):
+            missing_reason = [item for item in agent_evidence if not item.get("reason")]
+            legacy_dynamic_target = (
+                str(step.step_id or ""),
+                str(param.path or "").removeprefix("body."),
+            ) in dynamic_structure_targets
+            if missing_reason and not (
+                legacy_dynamic_target
+                and all(item.get("source") == "response_key_map" for item in missing_reason)
+            ):
                 issues.append({"kind": "param_source", "target": f"{step.step_id}:{param.path}", "reason": "missing agent reason"})
     for link in spec.links:
         if (link.meta or {}).get("actor") == "agent" and not (link.evidence or {}).get("actor"):

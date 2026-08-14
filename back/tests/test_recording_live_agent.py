@@ -1631,6 +1631,16 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
         for param in updated.steps[1].params
         if "Activity_recorded" in param.path
     )
+
+    # Existing drafts created before response_key_map reasons were persisted
+    # remain valid only while their matching dynamic contract still exists.
+    legacy = updated.model_copy(deep=True)
+    legacy_public = next(param for param in legacy.steps[1].params if param.key == "approvers")
+    next(item for item in legacy_public.evidence if item.get("source") == "response_key_map").pop("reason")
+    assert recording_agent_evidence_issues(legacy) == []
+    legacy.links = []
+    assert any(item["kind"] == "param_source" for item in recording_agent_evidence_issues(legacy))
+
     schema = _capability_input_schema([public])
     assert schema["properties"]["approvers"]["x-dano-option-source"] == {
         "capability": "list_approval_users",
