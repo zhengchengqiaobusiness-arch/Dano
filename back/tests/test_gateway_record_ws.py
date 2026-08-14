@@ -25,6 +25,34 @@ def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch
     assert gateway._default_export_dir() == "/opt/dano/runtime-data/.agents/skills"
 
 
+@pytest.mark.asyncio
+async def test_recording_auto_export_only_writes_the_new_skill(monkeypatch, tmp_path) -> None:
+    import dano.export.agent_skills as exports
+
+    calls: list[dict] = []
+
+    async def write_exports(tenant, out_dir, **kwargs):  # noqa: ANN001
+        calls.append({"tenant": tenant, "out_dir": out_dir, **kwargs})
+        return ["new-package"]
+
+    async def frozen_skill_ids() -> set[str]:
+        return {"system.frozen"}
+
+    monkeypatch.setattr(exports, "write_exports", write_exports)
+    monkeypatch.setattr(gateway, "_current_export_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(gateway, "_frozen_skill_ids", frozen_skill_ids)
+
+    await gateway._auto_export("tenant-a", skill_ids={"system.action_unique"})
+
+    assert calls == [{
+        "tenant": "tenant-a",
+        "out_dir": str(tmp_path),
+        "mode": "package",
+        "exclude_skill_ids": {"system.frozen"},
+        "skill_ids": {"system.action_unique"},
+    }]
+
+
 def test_publish_failure_report_exposes_machine_gate_reasons() -> None:
     decision = ReleaseDecision(
         status="verification_incomplete",

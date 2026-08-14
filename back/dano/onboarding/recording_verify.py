@@ -234,13 +234,6 @@ def require_verification_complete(spec, *, skip_verify: bool = False) -> dict[st
     return report
 
 
-def recorded_goal_slug(spec) -> str:  # noqa: ANN001
-    from dano.onboarding.goal import _slug
-
-    intent = str((spec.goal or {}).get("intent") or spec.title or "goal")
-    return _slug(intent).lower()[:64]
-
-
 async def _emit(progress: ProgressCallback | None, payload: dict[str, Any]) -> None:
     if progress is None:
         return

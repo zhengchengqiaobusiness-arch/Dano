@@ -35,7 +35,10 @@ def _slug(value: str) -> str:
     slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]+", "-", raw.casefold().replace(".", "-").replace("_", "-"))).strip("-")
     if not slug or slug in {"skill", "dano"}:
         slug = "skill-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
-    return slug[:80]
+    if len(slug) > 80:
+        suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+        slug = f"{slug[:69].rstrip('-')}-{suffix}"
+    return slug
 
 
 def package_slug(skill_id: str) -> str:

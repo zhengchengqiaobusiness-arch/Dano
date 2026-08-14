@@ -2220,8 +2220,6 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import flow_spec_fingerprint
 
                     if pending_flow_spec.capabilities:
-                        from dano.onboarding.recording_verify import recorded_goal_slug
-
                         deferred_messages.insert(0, {
                             "type": "publish_request",
                             "operation_id": (
@@ -2229,7 +2227,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 f"{flow_spec_fingerprint(pending_flow_spec)[:16]}"
                             ),
                             "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
-                            "action": recorded_goal_slug(pending_flow_spec),
+                            "action": session_action,
                             "title": str(
                                 (pending_flow_spec.goal or {}).get("intent")
                                 or pending_flow_spec.title
@@ -2532,7 +2530,6 @@ async def record_ws(ws: WebSocket) -> None:
                     if bool(msg.get("_auto_publish_after_plan")):
                         if pending_flow_spec.capabilities:
                             from dano.execution.page.flow_spec import flow_spec_fingerprint
-                            from dano.onboarding.recording_verify import recorded_goal_slug
 
                             deferred_messages.insert(0, {
                                 "type": "publish_request",
@@ -2541,7 +2538,7 @@ async def record_ws(ws: WebSocket) -> None:
                                     f"{flow_spec_fingerprint(pending_flow_spec)[:16]}"
                                 ),
                                 "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
-                                "action": recorded_goal_slug(pending_flow_spec),
+                                "action": session_action,
                                 "title": str(
                                     (pending_flow_spec.goal or {}).get("intent")
                                     or pending_flow_spec.title
@@ -2834,13 +2831,7 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
-                auto_publish = bool(msg.get("_auto_publish"))
-                if auto_publish and pending_flow_spec is not None:
-                    from dano.onboarding.recording_verify import recorded_goal_slug
-
-                    publish_action = recorded_goal_slug(pending_flow_spec)
-                else:
-                    publish_action = session_action
+                publish_action = session_action
                 log.info(
                     "recording.operation_started",
                     action=publish_action,
@@ -3075,7 +3066,7 @@ async def record_ws(ws: WebSocket) -> None:
                         asset_version=version,
                     )
                     rep = {**rep, **lifecycle_result}
-                    await _auto_export(init["tenant"])
+                    await _auto_export(init["tenant"], skill_ids={str(skill_id)})
                 response = {"type": "result", "operation": "publish", "action": publish_action,
                             "operation_id": msg.get("operation_id"),
                             "report": {**rep, "check_report": check_report,
@@ -3159,7 +3150,12 @@ async def record_ws(ws: WebSocket) -> None:
             _release_recording_connection(connection_key, connection_lease)
 
 
-async def _auto_export(tenant: str, *, mode: Literal["proxy", "package", "both"] = "package") -> None:
+async def _auto_export(
+    tenant: str,
+    *,
+    mode: Literal["proxy", "package", "both"] = "package",
+    skill_ids: set[str] | None = None,
+) -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
     目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
@@ -3173,8 +3169,16 @@ async def _auto_export(tenant: str, *, mode: Literal["proxy", "package", "both"]
             out,
             mode=mode,
             exclude_skill_ids=await _frozen_skill_ids(),
+            skill_ids=skill_ids,
         )
-        log.info("onboard.auto_export", tenant=tenant, out=out, mode=mode, count=len(written))
+        log.info(
+            "onboard.auto_export",
+            tenant=tenant,
+            out=out,
+            mode=mode,
+            count=len(written),
+            skill_ids=sorted(skill_ids) if skill_ids is not None else None,
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("onboard.auto_export_failed", error=str(e))
 

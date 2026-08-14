@@ -97,6 +97,21 @@ def test_empty_automatic_capability_plan_returns_a_terminal_result() -> None:
     assert '"stage": "capability_plan"' in skipped_branch
 
 
+def test_recording_publish_keeps_the_unique_recording_action() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    finalize_start = source.index('elif t == "finalize":')
+    finalize_end = source.index('elif t == "flow_update":', finalize_start)
+    publish_start = source.index('elif t == "publish_request":')
+    publish_end = source.index('elif t == "stop":', publish_start)
+
+    finalize_source = source[finalize_start:finalize_end]
+    publish_source = source[publish_start:publish_end]
+    assert '"action": session_action' in finalize_source
+    assert "publish_action = session_action" in publish_source
+    assert "recorded_goal_slug" not in finalize_source
+    assert "recorded_goal_slug" not in publish_source
+
+
 def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:
     assert gateway.InvokeReq(input={"month": "2026-07"}).input == {"month": "2026-07"}
     assert gateway.ToolCallReq(name="A-OA__query", input={}).input == {}

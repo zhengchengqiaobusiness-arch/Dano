@@ -3136,7 +3136,8 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
 
 
 async def write_skills(tenant: str, out_dir: str, *,
-                       exclude_skill_ids: set[str] | None = None) -> list[str]:
+                       exclude_skill_ids: set[str] | None = None,
+                       skill_ids: set[str] | None = None) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
     带 business 标签的操作**按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
@@ -3149,7 +3150,11 @@ async def write_skills(tenant: str, out_dir: str, *,
     reference_docs = _load_reference_markdown(_configured_reference_dir())
     _validate_reference_markdown(reference_docs)
     excluded = set(exclude_skill_ids or set())
-    manifests = [m for m in build_manifests(reg.skills) if m.name not in excluded]
+    selected = None if skill_ids is None else set(skill_ids)
+    manifests = [
+        m for m in build_manifests(reg.skills)
+        if m.name not in excluded and (selected is None or m.name in selected)
+    ]
     valid_manifests: list[SkillManifest] = []
     for manifest in manifests:
         errors = _export_contract_errors(manifest)
@@ -3206,27 +3211,38 @@ async def write_exports(
     *,
     mode: str = "package",
     exclude_skill_ids: set[str] | None = None,
+    skill_ids: set[str] | None = None,
 ) -> list[str]:
     """Write proxy packages, self-contained packages, or both without collisions."""
     if mode not in {"proxy", "package", "both"}:
         raise ValueError("mode 必须是 proxy/package/both")
     excluded = set(exclude_skill_ids or set())
+    selected = None if skill_ids is None else set(skill_ids) - excluded
     written: list[str] = []
     if mode in {"proxy", "both"}:
-        written.extend(await write_skills(tenant, out_dir, exclude_skill_ids=excluded))
+        written.extend(await write_skills(
+            tenant,
+            out_dir,
+            exclude_skill_ids=excluded,
+            skill_ids=selected,
+        ))
     if mode in {"package", "both"}:
         from dano.export.skill_package.renderer import write_skill_packages
 
-        selected: list[str] | None = None
-        if excluded:
+        package_skill_ids = sorted(selected) if selected is not None else None
+        if package_skill_ids is None and excluded:
             repo = AssetRepository()
             subs = await _tenant_subsystems(repo, tenant)
             registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
-            selected = [
+            package_skill_ids = [
                 skill.skill_id for skill in registry.skills
                 if skill.recording_asset_id is not None and skill.skill_id not in excluded
             ]
-        written.extend(await write_skill_packages(tenant, out_dir, skill_ids=selected))
+        written.extend(await write_skill_packages(
+            tenant,
+            out_dir,
+            skill_ids=package_skill_ids,
+        ))
     return written
 
 

@@ -29,6 +29,15 @@ _LINK_VERIFICATION = "550e8400-e29b-41d4-a716-446655440000"
 _WRITE_VERIFICATION = "550e8400-e29b-41d4-a716-446655440001"
 
 
+def test_package_slug_keeps_long_action_ids_distinct() -> None:
+    shared = "very-long-business-system-name-" * 3
+
+    first = package_slug(f"{shared}.action_{'a' * 32}")
+    second = package_slug(f"{shared}.action_{'b' * 32}")
+
+    assert first != second
+
+
 class _BusinessApi(BaseHTTPRequestHandler):
     items = [{"recordId": "record-1", "name": "seed"}]
 
@@ -622,6 +631,41 @@ async def test_export_mode_defaults_to_self_contained_package(monkeypatch, tmp_p
 
     assert await exports.write_exports("tenant-a", str(tmp_path)) == ["package-folder"]
     assert calls == ["package"]
+
+
+@pytest.mark.asyncio
+async def test_export_mode_forwards_an_exact_skill_selection(monkeypatch, tmp_path):
+    import dano.export.agent_skills as exports
+    import dano.export.skill_package.renderer as packages
+
+    calls = []
+
+    async def proxy(*_args, **kwargs):
+        calls.append(("proxy", kwargs))
+        return ["proxy-folder"]
+
+    async def package(*_args, **kwargs):
+        calls.append(("package", kwargs))
+        return ["package-folder"]
+
+    monkeypatch.setattr(exports, "write_skills", proxy)
+    monkeypatch.setattr(packages, "write_skill_packages", package)
+
+    result = await exports.write_exports(
+        "tenant-a",
+        str(tmp_path),
+        mode="both",
+        skill_ids={"system.action_unique"},
+    )
+
+    assert result == ["proxy-folder", "package-folder"]
+    assert calls == [
+        ("proxy", {
+            "exclude_skill_ids": set(),
+            "skill_ids": {"system.action_unique"},
+        }),
+        ("package", {"skill_ids": ["system.action_unique"]}),
+    ]
 
 
 @pytest.mark.asyncio

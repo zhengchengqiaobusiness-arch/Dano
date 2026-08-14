@@ -28,7 +28,6 @@ from dano.execution.page.verification_log import (
 )
 from dano.onboarding.recording_verify import (
     finalize_verification_state,
-    recorded_goal_slug,
     require_verification_complete,
     run_recording_verification,
     verification_report,
@@ -778,7 +777,6 @@ async def test_zero_operator_verification_loop_completes_with_executor_evidence(
     assert require_verification_complete(session.flow_spec)["all_verified"] is True
     assert session.flow_spec.capabilities[0].confirmed is True
     assert "skill_docs_generation" not in session.flow_spec.meta
-    assert recorded_goal_slug(session.flow_spec) == "update_item"
 
 
 def test_machine_publish_gate_rejects_unfinished_verification_but_has_debug_escape():

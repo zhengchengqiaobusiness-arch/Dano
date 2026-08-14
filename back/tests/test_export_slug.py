@@ -144,6 +144,48 @@ async def test_write_skills_removes_stale_business_index_without_regenerating_it
     assert not stale_index.exists()
 
 
+@pytest.mark.asyncio
+async def test_write_skills_only_renders_explicit_skill_ids(tmp_path, monkeypatch):
+    import dano.export.agent_skills as agent_skills
+
+    manifests = [
+        SimpleNamespace(
+            name=f"system.action_{suffix}",
+            subsystem="system",
+            business="",
+            action=f"action_{suffix}",
+        )
+        for suffix in ("one", "two")
+    ]
+
+    async def fake_subsystems(_repo, _tenant):
+        return [Subsystem.OA]
+
+    async def fake_registry(_repo, *, tenant, subsystems):  # noqa: ARG001
+        return SimpleNamespace(skills=[])
+
+    monkeypatch.setattr(agent_skills, "AssetRepository", lambda: object())
+    monkeypatch.setattr(agent_skills, "_tenant_subsystems", fake_subsystems)
+    monkeypatch.setattr(agent_skills.SkillRegistry, "from_store", fake_registry)
+    monkeypatch.setattr(agent_skills, "_load_reference_markdown", lambda _path: [])
+    monkeypatch.setattr(agent_skills, "_validate_reference_markdown", lambda _docs: None)
+    monkeypatch.setattr(agent_skills, "build_manifests", lambda _skills: manifests)
+    monkeypatch.setattr(agent_skills, "_export_contract_errors", lambda _manifest: [])
+    monkeypatch.setattr(
+        agent_skills,
+        "_write_skill",
+        lambda out, manifest, **_kwargs: out / manifest.action,
+    )
+
+    written = await agent_skills.write_skills(
+        "tenant-a",
+        str(tmp_path),
+        skill_ids={"system.action_two"},
+    )
+
+    assert written == ["action_two"]
+
+
 def test_write_skill_exports_runtime_contract_and_compact_navigation(tmp_path):
     manifest = to_manifest(SkillSpec(
         skill_id="A-OA.export_contract",
