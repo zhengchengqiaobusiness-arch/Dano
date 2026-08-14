@@ -20634,7 +20634,7 @@ def _auto_confirm_ready_capabilities(
             ):
                 cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
             continue
-        if not verification_complete and float(cap.confidence or 0) <= 0.7:
+        if not (verification_complete or refresh_machine_owned) and float(cap.confidence or 0) <= 0.7:
             continue
         cap.confirmed = True
         cap.requires_human_confirm = False

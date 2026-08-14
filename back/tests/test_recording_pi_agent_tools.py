@@ -449,7 +449,7 @@ async def test_perturb_replay_rejects_request_id_keyed_overrides_before_executio
 
 
 @pytest.mark.asyncio
-async def test_verify_dependency_rejects_stale_link_as_tool_error(monkeypatch):
+async def test_verify_dependency_resolves_stale_link_without_retry_loop(monkeypatch):
     session = SimpleNamespace(
         current_flow_spec=lambda: FlowSpec(flow_id="recording-test", title="test"),
         _live_recorder=None,
@@ -462,8 +462,16 @@ async def test_verify_dependency_rejects_stale_link_as_tool_error(monkeypatch):
     monkeypatch.setattr(agent_tools_module, "_captured_recording_requests", lambda *_args: [])
     monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
 
-    with pytest.raises(ToolError, match="dependency link does not exist"):
-        await verify_recording_dependency("run-recording", {"link_id": "stale-link"})
+    result = await verify_recording_dependency("run-recording", {"link_id": "stale-link"})
+
+    assert result == {
+        "ok": False,
+        "status": "stale_link",
+        "link_id": "stale-link",
+        "refresh_required": True,
+        "next_tool": "get_validation_report",
+        "verification_ids": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -1229,22 +1237,45 @@ def test_active_recording_review_missing_stale_or_duplicate_hard_fails(monkeypat
     assert store.recorded == []
 
 
-def test_pi_review_can_add_blocking_reasons_and_publish_gate_rejects_them(monkeypatch):
+def test_pi_review_rejection_requires_actionable_structured_issues(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-review-blocked")
+    with pytest.raises(ToolError, match="issues"):
+        asyncio.run(submit_recording_review("run-review-blocked", {
+            "recording_id": "rec-review-blocked",
+            "base_flow_version": 1,
+            "review": {
+                **{
+                    role: {"passed": True, "reasons": []}
+                    for role in ("acceptance", "security", "compliance")
+                },
+                "blocking_reasons": ["仍有越权风险"],
+            },
+        }))
+    assert session.last_review == {}
+
     result = asyncio.run(submit_recording_review("run-review-blocked", {
         "recording_id": "rec-review-blocked",
         "base_flow_version": 1,
         "review": {
-            **{
-                role: {"passed": True, "reasons": []}
-                for role in ("acceptance", "security", "compliance")
-            },
-            "blocking_reasons": ["仍有越权风险"],
+            "acceptance": {"passed": False, "reasons": ["字段证据尚未采集"]},
+            "security": {"passed": True, "reasons": []},
+            "compliance": {"passed": True, "reasons": []},
+            "blocking_reasons": ["字段证据尚未采集"],
+            "issues": [{
+                "check_code": "final_review_rejected",
+                "resolver": "collect_evidence",
+                "capability_id": "cap-submit",
+                "step_id": "submit",
+                "field_id": "field-reviewers",
+                "wire_path": "body.reviewers",
+                "evidence_refs": ["request-submit"],
+                "suggested_operations": ["replay_request"],
+                "message": "字段证据尚未采集",
+            }],
         },
     }))
     assert result["accepted"] is True
-    assert session.last_review["all_passed"] is False
-    assert session.last_review["blocking_reasons"] == ["仍有越权风险"]
+    assert session.last_review["issues"][0]["resolver"] == "collect_evidence"
 
 
 @pytest.mark.parametrize("mode", ["plan", "repair"])

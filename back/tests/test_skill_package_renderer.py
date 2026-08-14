@@ -402,7 +402,7 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
                 "target_step": 1, "target_container_path": "startUserSelectAssignees",
                 "value_binding": {
                     "kind": "caller_map_by_label", "input_field": "approvers",
-                    "value_shape": "single_item_list",
+                    "value_shape": "item_list",
                 },
             }],
         }
@@ -410,7 +410,7 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
         result = module.execute_plan(plan, {
             "startTime": "2026-08-06T00:00:00+08:00",
             "endTime": "2026-08-07T00:00:00+08:00",
-            "approvers": {"领导审批": 200, "HR审批": 201},
+            "approvers": {"领导审批": [200, 202], "HR审批": 201},
         })
 
         assert result["ok"] is True
@@ -420,7 +420,7 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
             "processVariablesStr": '{"day":1}',
         }
         assert sent[1]["body"]["startUserSelectAssignees"] == {
-            "Activity_runtime_leader": [200],
+            "Activity_runtime_leader": [200, 202],
             "Activity_runtime_hr": [201],
         }
     finally:

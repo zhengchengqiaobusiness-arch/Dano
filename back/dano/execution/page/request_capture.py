@@ -2713,7 +2713,7 @@ def _apply_structure_overrides(body, overrides: list[dict]) -> list[str]:  # noq
             rebuilt = {
                 key: (
                     value if isinstance(value, list) else [value]
-                    if shape == "single_item_list" else value
+                    if shape in {"single_item_list", "item_list"} else value
                 )
                 for label in required_labels
                 for key in [row_by_label[label]]

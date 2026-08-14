@@ -270,12 +270,24 @@ def test_release_feedback_reenters_repair_then_retries_the_same_publish_request(
     publish_end = source.index("except asyncio.CancelledError:", publish_start)
     publish = source[publish_start:publish_end]
 
-    assert 'item.resolver in {"machine_repair", "operator"}' in publish
+    assert 'item.resolver in {"machine_repair", "collect_evidence", "operator"}' in publish
     assert 'pending_flow_spec.meta["release_feedback_issues"]' in publish
     assert "repair_report = await _verify_finalized_recording(" in publish
     assert 'if repair_report.get("all_verified"):' in publish
     assert "deferred_messages.insert(0, {" in publish
     assert "**msg," in publish
+
+
+def test_runtime_review_prompt_requires_structured_self_healing_issues() -> None:
+    runtime_prompt = (
+        Path(__file__).resolve().parents[2]
+        / "back" / "agent" / "run_recording_pi.mjs"
+    ).read_text(encoding="utf-8")
+    review_prompt = runtime_prompt.split("审核任务必须", 1)[1].split("不得泄漏", 1)[0]
+
+    assert "issues" in review_prompt
+    assert "final_review_rejected" in review_prompt
+    assert "拒绝时" in review_prompt and "必须" in review_prompt
 
 
 def test_one_termination_generation_covers_every_recording_analysis_path() -> None:

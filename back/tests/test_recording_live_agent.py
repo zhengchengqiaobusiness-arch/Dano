@@ -1556,7 +1556,7 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     spec.steps[1].body_source = json.dumps({
         "jobId": "J1",
         "startUserSelectAssignees": {
-            "Activity_recorded_leader": [160],
+            "Activity_recorded_leader": [160, 161],
             "Activity_recorded_hr": [159],
         },
     })
@@ -1613,6 +1613,10 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     op_result = updated.meta["recording_agent_session"]["op_results"][0]
     assert op_result["status"] == "applied", json.dumps(op_result, ensure_ascii=False)
 
+    from dano.execution.page.recording_live import recording_agent_evidence_issues
+
+    assert recording_agent_evidence_issues(updated) == []
+
     link = updated.links[0]
     assert link.kind == "response_key_map"
     assert link.source_collection_path == "data.activityNodes"
@@ -1620,7 +1624,7 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     assert link.value_binding["required_labels"] == ["领导审批", "HR审批"]
     assert link.value_binding["ignored_labels"] == ["发起人", "结束"]
     public = next(param for param in updated.steps[1].params if param.key == "approvers")
-    assert public.value == {"领导审批": 160, "HR审批": 159}
+    assert public.value == {"领导审批": [160, 161], "HR审批": [159]}
     assert public.type == "object"
     assert all(
         not param.exposed_to_user
@@ -1646,17 +1650,17 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
         ]},
     }
     out = await execute_api_workflow(api_request, {
-        "approvers": {"领导审批": 200, "HR审批": 201},
+        "approvers": {"领导审批": [200, 202], "HR审批": [201]},
     }, send=False)
     assert out["ok"] is True
     assert out["final"]["body"]["startUserSelectAssignees"] == {
-        "Activity_runtime_leader": [200],
+        "Activity_runtime_leader": [200, 202],
         "Activity_runtime_hr": [201],
     }
     assert "Activity_recorded" not in json.dumps(out["final"]["body"], ensure_ascii=False)
 
     rejected = await execute_api_workflow(api_request, {
-        "approvers": {"领导审批": 200},
+        "approvers": {"领导审批": [200]},
     }, send=False)
     assert rejected["ok"] is False
     assert any("审批节点与调用方输入不一致" in issue for issue in rejected["step_result"]["self_check"])

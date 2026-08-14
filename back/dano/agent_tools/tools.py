@@ -1289,6 +1289,20 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
     )
     session = _recording_session(run_id, params)
     spec = session.current_flow_spec()
+    link_id = str(params["link_id"])
+    if not any(str(link.link_id or "") == link_id for link in spec.links):
+        # A prior repair may have rejected or replaced the proposed link while
+        # the model still holds an older todo. This is a stale task, not an
+        # executor failure; refresh the authoritative report instead of
+        # spending further turns on an impossible link id.
+        return {
+            "ok": False,
+            "status": "stale_link",
+            "link_id": link_id,
+            "refresh_required": True,
+            "next_tool": "get_validation_report",
+            "verification_ids": [],
+        }
     requests = _captured_recording_requests(session)
     recorder = getattr(session, "_live_recorder", None)
     storage_state = None
@@ -1297,7 +1311,7 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
     try:
         result = await verify_dependency(
             spec,
-            str(params["link_id"]),
+            link_id,
             requests,
             auth_headers=await _recording_auth_headers(session, requests),
             storage_state=storage_state,
@@ -1853,7 +1867,7 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         "check_code", "resolver", "capability_id", "step_id", "field_id", "wire_path",
         "evidence_refs", "suggested_operations", "message",
     }
-    resolvers = {"machine_repair", "operator", "external_blocked"}
+    resolvers = {"machine_repair", "collect_evidence", "operator", "external_blocked"}
     normalized_issues: list[dict[str, object]] = []
     for index, issue in enumerate(raw_issues):
         if set(issue) - issue_keys:
@@ -1887,6 +1901,11 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
             "reasons": reasons,
             "model_id": server_model_id,
         })
+    if (blocking_reasons or any(not bool(item["passed"]) for item in verdicts)) and not normalized_issues:
+        raise ToolError(
+            "审核拒绝必须提供 review.issues，包含可定位目标、resolver 和 suggested_operations，"
+            "以便系统继续自愈或向操作人提问"
+        )
     normalized = {
         "recording_id": str(params["recording_id"]),
         "base_flow_version": params["base_flow_version"],

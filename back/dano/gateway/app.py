@@ -3324,7 +3324,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     actionable_feedback = [
                         item for item in review_feedback
-                        if item.resolver in {"machine_repair", "operator"}
+                        if item.resolver in {"machine_repair", "collect_evidence", "operator"}
                     ]
                     if actionable_feedback:
                         feedback_fingerprint = flow_spec_fingerprint(pending_flow_spec)

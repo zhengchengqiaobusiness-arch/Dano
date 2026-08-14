@@ -14,6 +14,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     prepare_flow_spec_for_publish,
+    validate_flow_spec,
 )
 from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
 from dano.onboarding.recording_release import evaluate_recording_release, review_release_issues
@@ -301,3 +302,10 @@ def test_release_evaluates_abilities_independently_from_global_generation_marker
     assert decision.status == "ready"
     assert decision.callable_spec is not None
     assert [cap.name for cap in decision.callable_spec.capabilities] == ["query_items"]
+    released = decision.callable_spec.capabilities[0]
+    assert released.confirmed is True
+    assert released.requires_human_confirm is False
+    assert not any(
+        "未确认的公开能力" in message
+        for message in validate_flow_spec(decision.callable_spec)["suggestions"]
+    )

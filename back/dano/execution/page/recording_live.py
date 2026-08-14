@@ -1629,9 +1629,13 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     )
                 matched_labels = [source_labels[index] for index in matched_positions]
                 recorded_values = list(recorded_container.values())
-                if all(isinstance(value, list) and len(value) == 1 for value in recorded_values):
-                    value_shape = "single_item_list"
-                    public_values = [value[0] for value in recorded_values]
+                if all(isinstance(value, list) for value in recorded_values):
+                    # A selector may allow one or many values.  Keep the wire
+                    # arrays intact so the public contract does not collapse a
+                    # multi-select field into a scalar merely because this
+                    # recording happened to choose one item.
+                    value_shape = "item_list"
+                    public_values = deepcopy(recorded_values)
                 elif all(not isinstance(value, (dict, list)) for value in recorded_values):
                     value_shape = "direct"
                     public_values = recorded_values
@@ -1699,6 +1703,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     "wire_path": f"body.{target_path.removeprefix('body.')}",
                     "labels": source_labels,
                     "actor": "agent",
+                    "reason": "上游返回稳定业务标签和运行期键，页面选择值按标签映射后组装动态容器",
                 })
                 dynamic_contract = {
                     "source_collection_path": source_collection_path,

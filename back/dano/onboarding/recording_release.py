@@ -15,6 +15,7 @@ from typing import Any
 from dano.execution.page.flow_spec import (
     FlowCapability,
     FlowSpec,
+    _auto_confirm_ready_capabilities,
     _api_params,
     _capability_node_step_ids,
     _capability_param_enum_issue,
@@ -620,7 +621,13 @@ def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
                 for item in decisions for reason in item.reasons
             ) or ("没有通过机器发布闸门的可调用能力",),
         )
-    callable_spec = source.model_copy(deep=True)
+    # Reaching this branch means every capability has passed the deterministic
+    # executable release checks.  Freeze that machine decision into the
+    # candidate so final review does not mistake the planner's pre-verification
+    # draft flag for an unresolved operator decision.
+    callable_spec = _auto_confirm_ready_capabilities(
+        source.model_copy(deep=True), refresh_machine_owned=True,
+    )
     callable_spec.meta = {
         **(callable_spec.meta or {}),
         "recording_release": {

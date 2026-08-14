@@ -741,7 +741,7 @@ def _response_key_map(link, source, body, values):
             f"dynamic structure labels changed: source_missing={missing_source!r}, "
             f"source_unexpected={unexpected_source!r}, missing={missing!r}, extra={extra!r}"
         )
-    wrap = str(binding.get("value_shape") or "direct") == "single_item_list"
+    wrap = str(binding.get("value_shape") or "direct") in {"single_item_list", "item_list"}
     rebuilt = {
         key: (value if isinstance(value, list) else [value]) if wrap else value
         for label in required_labels

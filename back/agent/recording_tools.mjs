@@ -876,7 +876,7 @@ export const recordingTools = [
     name: "submit_recording_review",
     label: "提交发布审核",
     description:
-      "提交当前录制版本的验收、安全、合规审核候选。后端发布闸门拥有最终决定权。",
+      "提交当前录制版本的验收、安全、合规审核候选。拒绝时必须提供结构化 issues，后端据此继续自愈或人工接管；后端发布闸门拥有最终决定权。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,
@@ -900,6 +900,7 @@ export const recordingTools = [
               check_code: Type.Literal("final_review_rejected"),
               resolver: Type.Union([
                 Type.Literal("machine_repair"),
+                Type.Literal("collect_evidence"),
                 Type.Literal("operator"),
                 Type.Literal("external_blocked"),
               ]),
