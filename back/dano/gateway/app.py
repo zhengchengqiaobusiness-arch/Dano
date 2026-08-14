@@ -86,6 +86,16 @@ _ANALYSIS_SCREENSHOT_MAX_COUNT = 4
 _ANALYSIS_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024
 
 
+def _recording_capability_plan_complete(flow_spec) -> bool:  # noqa: ANN001
+    """Automatic publish is allowed only after the complete boundary plan compiled."""
+    from dano.execution.page.flow_spec import recording_capability_plan_complete
+
+    return bool(
+        getattr(flow_spec, "capabilities", None)
+        and recording_capability_plan_complete(flow_spec)
+    )
+
+
 def _analysis_evidence_fingerprint(screenshots: list[dict] | None) -> str:
     """Stable digest for deciding whether a completed analysis can be reused."""
     rows = [
@@ -2239,7 +2249,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json(response)
                     from dano.execution.page.flow_spec import flow_spec_fingerprint
 
-                    if pending_flow_spec.capabilities:
+                    if _recording_capability_plan_complete(pending_flow_spec):
                         deferred_messages.insert(0, {
                             "type": "publish_request",
                             "operation_id": (
@@ -2548,7 +2558,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     await sender.send_json(response)
                     if bool(msg.get("_auto_publish_after_plan")):
-                        if pending_flow_spec.capabilities:
+                        if _recording_capability_plan_complete(pending_flow_spec):
                             from dano.execution.page.flow_spec import flow_spec_fingerprint
 
                             deferred_messages.insert(0, {

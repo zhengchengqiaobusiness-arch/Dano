@@ -815,7 +815,7 @@ def test_gateway_finalize_queues_automatic_plan_before_publish():
     finalize = source[source.index('elif t == "finalize":'):source.index('elif t == "flow_update":')]
     assert '"type": "orchestrate_flow"' in finalize
     assert '"_auto_publish_after_plan": True' in finalize
-    assert "if pending_flow_spec.capabilities:" in finalize
+    assert "if _recording_capability_plan_complete(pending_flow_spec):" in finalize
 
 
 def test_gateway_automatic_plan_only_queues_publish_after_capabilities_exist():
@@ -826,5 +826,5 @@ def test_gateway_automatic_plan_only_queues_publish_after_capabilities_exist():
     source = inspect.getsource(record_ws)
     plan = source[source.index('elif t == "orchestrate_flow":'):source.index('elif t == "auto_fix_flow":')]
     assert 'msg.get("_auto_publish_after_plan")' in plan
-    assert "pending_flow_spec.capabilities" in plan
+    assert "_recording_capability_plan_complete(pending_flow_spec)" in plan
     assert '"type": "publish_request"' in plan

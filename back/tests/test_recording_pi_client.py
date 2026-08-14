@@ -699,6 +699,10 @@ async def test_grounded_capability_plan_is_complete_when_only_optional_edits_are
     candidate.meta = {
         **candidate.meta,
         "current_version": 5,
+        "capability_generation": {
+            "initial_completed": True,
+            "status": "ready",
+        },
         "recording_agent_session": {
             "op_results": [{
                 "index": 3,
@@ -731,6 +735,69 @@ async def test_grounded_capability_plan_is_complete_when_only_optional_edits_are
     assert result["must_retry"] == [3]
     assert result["submission_complete"] is True
     assert client.last_submission_kind == "plan"
+
+
+@pytest.mark.asyncio
+async def test_partial_capability_plan_is_not_marked_terminal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        meta={"current_version": 4},
+    )
+    candidate = before.model_copy(deep=True)
+    candidate.capabilities = [FlowCapability(
+        name="submit_record",
+        title="提交记录",
+        kind="submit",
+        anchor_step_id="submit",
+        request_refs=[{"step_id": "submit", "usage": "execute"}],
+    )]
+    candidate.meta = {
+        **candidate.meta,
+        "current_version": 5,
+        "capability_generation": {
+            "initial_completed": False,
+            "status": "incomplete_agent_plan",
+        },
+        "recording_agent_session": {"op_results": []},
+    }
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        return candidate.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+    )
+    client.bind_flow_spec(before)
+
+    result = await client.apply_submission(
+        {
+            "semantic_plan": {
+                "capabilities": [{
+                    "name": "submit_record",
+                    "title": "提交记录",
+                    "kind": "submit",
+                    "anchor_step_id": "submit",
+                    "request_refs": [{"step_id": "submit", "usage": "execute"}],
+                }],
+            },
+            "ops": [],
+        },
+        mode="plan",
+        base_flow_version=4,
+    )
+
+    assert result["capability_plan_complete"] is False
+    assert result["submission_complete"] is False
+    assert client.last_submission_kind == ""
 
 
 @pytest.mark.asyncio

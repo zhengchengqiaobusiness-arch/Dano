@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from dano.execution.page.flow_spec import FlowCapability, FlowSpec
 from dano.gateway import app as gateway
 
 
@@ -95,6 +96,32 @@ def test_empty_automatic_capability_plan_returns_a_terminal_result() -> None:
 
     assert '"type": "result"' in skipped_branch
     assert '"stage": "capability_plan"' in skipped_branch
+
+
+def test_automatic_publish_waits_for_the_complete_capability_plan() -> None:
+    incomplete = FlowSpec(
+        capabilities=[FlowCapability(name="query_items", kind="query_status")],
+        meta={
+            "capability_generation": {
+                "initial_completed": False,
+                "status": "incomplete_agent_plan",
+            },
+        },
+    )
+    complete = incomplete.model_copy(deep=True)
+    complete.meta["capability_generation"] = {
+        "initial_completed": True,
+        "status": "ready",
+    }
+
+    assert gateway._recording_capability_plan_complete(incomplete) is False
+    assert gateway._recording_capability_plan_complete(complete) is True
+
+    source = inspect.getsource(gateway.record_ws)
+    finalize_start = source.index('elif t == "finalize":')
+    finalize_end = source.index('elif t == "flow_update":', finalize_start)
+    finalize_source = source[finalize_start:finalize_end]
+    assert "_recording_capability_plan_complete(pending_flow_spec)" in finalize_source
 
 
 def test_recording_publish_keeps_the_unique_recording_action() -> None:

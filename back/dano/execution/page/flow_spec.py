@@ -12578,6 +12578,7 @@ async def orchestrate_flow_capabilities(
     )
     capability_compilation_audit: dict[str, Any] = {}
     capability_compilation_errors: list[str] = []
+    partial_safe_compilation = False
     planned_capability_contracts = [
         item for item in (effective_semantic_plan.get("capabilities") or [])
         if isinstance(item, dict)
@@ -12595,6 +12596,9 @@ async def orchestrate_flow_capabilities(
         )
         capability_compilation_audit = dict(compilation.audit)
         capability_compilation_errors = list(compilation.errors)
+        partial_safe_compilation = bool(
+            compilation.capabilities and capability_compilation_errors
+        )
         semantic_coverage = _semantic_plan_coverage(
             current,
             {"semantic_plan": effective_semantic_plan},
@@ -12638,7 +12642,13 @@ async def orchestrate_flow_capabilities(
             "producer": "verified_request_graph",
         }
     if not proposal_accepted:
-        current = proposal_baseline
+        # The compiler validates each public anchor independently. Keep its
+        # safely compiled subset when another proposed boundary is malformed;
+        # the incomplete generation state still forces Pi to correct the full
+        # plan before automatic publishing. Rolling the whole candidate back
+        # here made one bad helper/boundary erase unrelated valid abilities.
+        if not partial_safe_compilation:
+            current = proposal_baseline
         # Reject only the unsafe model proposal. Grounded recorder repairs are
         # independent facts and must survive the rollback; otherwise one bad
         # screenshot suggestion also restores stale user-input/option bindings.
@@ -12648,7 +12658,12 @@ async def orchestrate_flow_capabilities(
         if not initial_generation:
             semantic_plan = previous_semantic_plan
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
-        source = "strict_plan_pending" if not strict_anchor_contract else "strict_plan_rejected"
+        source = (
+            "strict_plan_partial"
+            if partial_safe_compilation
+            else "strict_plan_pending" if not strict_anchor_contract
+            else "strict_plan_rejected"
+        )
         reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(
             proposal_gate["reasons"]
         )
@@ -20588,6 +20603,7 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
             str(item.get("status") or "") == "applied"
             for item in op_results
         ),
+        "capability_plan_complete": recording_capability_plan_complete(current),
         # A deferred live field conclusion is durably staged in
         # recording_agent_ops and is replayed after request materialization.
         # It must not consume another Pi submission attempt.
@@ -20595,6 +20611,16 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }
+
+
+def recording_capability_plan_complete(spec: FlowSpec) -> bool:
+    """Whether the authoritative semantic boundary plan reached a safe terminal state."""
+    meta = spec.meta or {}
+    generation = dict(meta.get("capability_generation") or {})
+    model = dict(meta.get("capability_model") or {})
+    if generation:
+        return bool(generation.get("initial_completed"))
+    return str(model.get("status") or "") in {"ready", "awaiting_materialization"}
 
 
 _RECORDING_FIELD_OPS = frozenset({

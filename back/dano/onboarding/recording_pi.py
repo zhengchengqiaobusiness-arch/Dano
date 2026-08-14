@@ -710,8 +710,21 @@ class RecordingPiSession:
             # Repairs remain strict because their sole purpose is to resolve
             # those outstanding findings.
             submission_complete = bool(validation.get("submission_complete", True))
-            if mode == "plan" and updated.capabilities:
-                submission_complete = True
+            semantic_plan = (
+                submission.get("semantic_plan")
+                if isinstance(submission.get("semantic_plan"), dict)
+                else submission.get("plan") if isinstance(submission.get("plan"), dict)
+                else {}
+            )
+            submitted_capabilities = (
+                semantic_plan.get("capabilities")
+                if isinstance(semantic_plan.get("capabilities"), list)
+                else []
+            )
+            if mode == "plan" and (
+                submitted_capabilities or validation.get("capability_plan_complete")
+            ):
+                submission_complete = bool(validation.get("capability_plan_complete"))
             if mode == "repair":
                 submission_complete = bool(validation.get("all_applied", True))
             validation["submission_complete"] = submission_complete

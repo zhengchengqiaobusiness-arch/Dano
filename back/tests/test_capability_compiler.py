@@ -202,6 +202,28 @@ def test_compiler_ignores_model_membership_and_builds_verified_graph_roles():
     assert "pageNo" not in {field.key for field in submit.inputs}
 
 
+def test_orchestration_keeps_safely_compiled_capabilities_when_one_boundary_is_invalid():
+    plan = _semantic_plan()
+    plan["capabilities"].append({
+        "name": "duplicate_query_boundary",
+        "title": "重复查询边界",
+        "kind": "query",
+        "anchor_step_id": "query",
+        "request_refs": [{"step_id": "query", "usage": "execute"}],
+    })
+
+    result = asyncio.run(orchestrate_flow_capabilities(
+        _verified_graph(),
+        submission={"semantic_plan": plan, "ops": []},
+        generation_mode="initial",
+    ))
+
+    assert [cap.name for cap in result.capabilities] == ["query_leave", "submit_leave"]
+    assert result.meta["capability_model"]["status"] == "needs_review"
+    assert result.meta["capability_model"]["proposal_gate"]["accepted"] is False
+    assert result.meta["capability_model"]["capability_compilation"]["errors"]
+
+
 def test_unverified_dependency_is_not_admitted_as_preflight():
     spec = _verified_graph()
     spec.links[0].meta["verification_id"] = "missing-verification"
