@@ -206,6 +206,41 @@ async def test_recording_workflow_same_draft_republish_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_republish_preserves_draft_and_can_retry_new_revision() -> None:
+    class FailOncePipeline:
+        calls = 0
+
+        async def run(self, seed, context):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return PipelineOutcome(status=WorkflowStatus.FAILED, error="temporary failure")
+            return PipelineOutcome(
+                status=WorkflowStatus.PUBLISHED,
+                draft=dict(seed.draft or {}),
+                release={"skill_id": "skill-1"},
+            )
+
+    pipeline = FailOncePipeline()
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="run-1", action="action-1", status=WorkflowStatus.EDITABLE,
+            capture_frozen=True, draft={"flow_id": "edited"},
+        ),
+        pipeline,
+    )
+
+    await workflow.republish()
+    failed = await workflow.wait()
+    assert failed.status == WorkflowStatus.FAILED
+    assert failed.draft == {"flow_id": "edited"}
+
+    await workflow.republish()
+    published = await workflow.wait()
+    assert published.status == WorkflowStatus.PUBLISHED
+    assert pipeline.calls == 2
+
+
+@pytest.mark.asyncio
 async def test_recording_workflow_persists_each_authoritative_snapshot(tmp_path) -> None:
     path = tmp_path / "action.json"
     workflow = RecordingWorkflow(_snapshot(), _ImmediatePipeline(), snapshot_path=path)

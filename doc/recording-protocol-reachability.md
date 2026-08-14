@@ -23,7 +23,7 @@ flowchart TD
     M --> N["published：返回终态快照"]
 ```
 
-`republish` 从现有权威草稿进入同一条 `analyzing → verifying → reviewing → publishing → exporting` 流水线，不重放已经结束的实时分析记录。
+`republish` 从现有权威草稿进入同一条 `compiling → verifying → reviewing → publishing → exporting` 流水线，不重做能力划分，也不重放已经结束的实时分析记录。
 
 ## WebSocket 命令
 
@@ -38,7 +38,7 @@ flowchart TD
 | `cancel` | “一键终止” | 终止当前分析/验证/发布任务，保留已经冻结的草稿，不退回录制准备。 |
 | `ping` | 连接保活 | 不改变业务状态。 |
 
-服务端只发送 `snapshot`、`frame`、`request`、`input_error`、`pong` 和传输级 `error`。其中只有 `snapshot` 能改变前端工作阶段。
+服务端只发送 `snapshot`、`frame`、`question`、`input_error` 和传输级 `error`。`ping` 返回最新 `snapshot`；其中只有 `snapshot` 能改变前端工作阶段。
 
 ## 权威状态
 

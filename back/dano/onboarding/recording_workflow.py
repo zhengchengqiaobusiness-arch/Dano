@@ -347,7 +347,6 @@ class RecordingWorkflow:
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
-    _last_republish_fingerprint: str = field(default="", init=False, repr=False)
 
     async def start(self) -> WorkflowSnapshot:
         if self.snapshot.status == WorkflowStatus.IDLE:
@@ -402,19 +401,19 @@ class RecordingWorkflow:
     async def republish(self) -> WorkflowSnapshot:
         if self._active():
             return self.snapshot
+        # A published draft can only be republished after patch_draft moves it
+        # back to editable.  Failed/cancelled runs have a newer authoritative
+        # revision and must remain retryable even when the draft is unchanged.
+        if self.snapshot.status == WorkflowStatus.PUBLISHED:
+            return self.snapshot
         if self.snapshot.status not in {
             WorkflowStatus.EDITABLE,
-            WorkflowStatus.PUBLISHED,
             WorkflowStatus.CANCELLED,
             WorkflowStatus.FAILED,
         }:
             raise ValueError(f"cannot republish recording in state {self.snapshot.status}")
         if self.snapshot.draft is None:
             raise ValueError("cannot republish without a draft")
-        fingerprint = _stable_payload(self.snapshot.draft)
-        if fingerprint == self._last_republish_fingerprint:
-            return self.snapshot
-        self._last_republish_fingerprint = fingerprint
         await self._launch(PipelineSeed(
             kind="edited_spec",
             draft=self.snapshot.draft,
@@ -519,7 +518,7 @@ class RecordingWorkflow:
                 raise ValueError(f"pipeline returned non-terminal state {outcome.status}")
             await self._set(
                 outcome.status,
-                draft=outcome.draft,
+                draft=(outcome.draft if outcome.draft is not None else self.snapshot.draft),
                 issues=list(outcome.issues),
                 release=outcome.release,
                 error=outcome.error,
@@ -532,8 +531,6 @@ class RecordingWorkflow:
                     label=("发布完成" if outcome.status == WorkflowStatus.PUBLISHED else "处理已结束"),
                 ),
             )
-            if seed.kind == "edited_spec" and self.snapshot.draft is not None:
-                self._last_republish_fingerprint = _stable_payload(self.snapshot.draft)
         except (asyncio.CancelledError, WorkflowCancelled):
             return
         except Exception as exc:  # noqa: BLE001 - the authoritative draft must survive

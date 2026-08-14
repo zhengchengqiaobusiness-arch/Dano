@@ -2426,11 +2426,10 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
         return {"status": "submitted"}
 
     session.prompt = fake_prompt
-    result = await session.notify_live_batch({"reason": "finalize", "since_seq": 2})
+    result = await session.notify_live_batch({"reason": "request_batch", "since_seq": 2})
     assert result["status"] == "submitted"
     assert "get_recording_delta(since_seq=2)" in prompts[0][0]
-    assert "finalize" in prompts[0][0]
+    assert "request_batch" in prompts[0][0]
     assert "submit_recording_plan" in prompts[0][0]
     assert "plan.ops" in prompts[0][0]
-    assert "plan.semantic_plan.capabilities" in prompts[0][0]
-    assert "request_refs" in prompts[0][0]
+    assert "caller_input/constant/session/context/response_binding/computed" in prompts[0][0]
