@@ -1,5131 +1,1024 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import type { ButtonProps } from "antd";
 import {
   Alert,
-  Button as AntButton,
+  Button,
   Card,
   Checkbox,
-  Col,
-  ConfigProvider,
   Collapse,
   Drawer,
   Empty,
-  Form,
   Input,
   List,
-  Modal,
-  Row,
+  Select,
   Space,
   Steps,
-  Switch,
   Tabs,
   Tag,
-  Tooltip,
   Typography,
   message,
 } from "antd";
+import { RobotOutlined, StopOutlined } from "@ant-design/icons";
 import {
-  BranchesOutlined,
-  DeleteOutlined,
-  FileTextOutlined,
-  LinkOutlined,
-  PlusOutlined,
-  RobotOutlined,
-  UpOutlined,
-  DownOutlined,
-} from "@ant-design/icons";
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  FormEvent,
+  KeyboardEvent,
+  PointerEvent,
+  WheelEvent,
+} from "react";
 
-function Button(props: ButtonProps) {
-  return <AntButton htmlType="button" {...props} />;
-}
+const { Text, Title } = Typography;
 
-interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
-interface AgentQuestion {
-  question_id: string; issue_id: string; operation_id?: string;
-  text: string; options?: string[]; context_ref?: string;
-  answered?: boolean; answer?: string;
-}
-interface AgentInsight { kind: "role" | "param_source" | "link" | "goal"; text: string; refs?: string[] }
-interface AgentStatus { state: "waiting" | "analyzing" | "ready" | "error"; text: string }
-interface VerifyProgress {
-  stage: string; detail: string; round?: number; pending?: number;
-  confirmed_links?: number; verify_coverage?: number; write_count?: number;
-}
-interface AnalysisScreenshotPayload {
-  name: string;
-  mime_type: "image/jpeg" | "image/png" | "image/webp";
-  data: string;
-  width: number;
-  height: number;
-  byte_size: number;
+type WorkflowStatus =
+  | "idle"
+  | "recording"
+  | "processing"
+  | "waiting_operator"
+  | "editable"
+  | "published"
+  | "cancelled"
+  | "failed";
+
+interface WorkflowIssue {
+  issue_id: string;
+  code: string;
+  message: string;
+  severity?: string;
+  resolver?: string;
+  target?: Record<string, string>;
 }
 
-interface AnalysisScreenshot extends AnalysisScreenshotPayload {
-  id: string;
-  preview_url: string;
+interface WorkflowQuestion {
+  question_id: string;
+  issue_id: string;
+  text: string;
+  options?: string[];
+  context_ref?: string;
 }
 
-interface AnalysisFieldChange {
-  capability?: string; step_id: string; path: string; name: string;
-  axes: Record<string, { before?: any; after?: any }>;
-}
-
-interface AnalysisApplication {
-  status: "applied" | "no_change" | "needs_review" | "rejected";
-  analysis_kind?: "initial" | "incremental";
-  summary?: string;
-  screenshot_count: number;
-  model_image_count?: number;
-  screenshot_names?: string[];
-  changes?: Record<string, number>;
-  field_changes?: AnalysisFieldChange[];
-  change_details?: string[];
-  capability_count_before?: number;
-  capability_count_after?: number;
-  field_count_before?: number;
-  field_count_after?: number;
-  matched_field_count?: number;
-  unmatched_field_count?: number;
-  locked_field_count?: number;
-  rejected_field_count?: number;
-  unresolved_field_count?: number;
-  unresolved_relation_count?: number;
-  unmatched_fields?: AnalysisIssue[];
-  unresolved_items?: AnalysisIssue[];
-  locked_items?: AnalysisIssue[];
-  rejected_items?: AnalysisIssue[];
-  issue_groups?: Record<string, AnalysisIssue[]>;
-  proposal_gate?: { accepted?: boolean; reasons?: string[] };
-  operation_id?: string;
-}
-interface AnalysisIssue {
-  kind?: string; step_id?: string; path?: string; name?: string; axis?: string; reason?: string;
-  missing_axes?: string[]; suggested_action?: string; target?: Record<string, any>; axes?: string[];
+interface WorkflowSnapshot {
+  run_id: string;
+  action: string;
+  title?: string;
+  revision: number;
+  status: WorkflowStatus;
+  progress: {
+    step: string;
+    label: string;
+    round?: number;
+    request_count?: number;
+  };
+  capture_frozen?: boolean;
+  draft?: FlowSpec | null;
+  draft_fingerprint?: string;
+  check_report?: Record<string, unknown>;
+  issues?: WorkflowIssue[];
+  insights?: Array<Record<string, unknown>>;
+  question?: WorkflowQuestion | null;
+  release?: Record<string, unknown> | null;
+  error?: string;
 }
 
 interface FlowParam {
   field_id?: string;
-  path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
-  default_value?: any;
-  category?: string; source_kind?: string; source?: any; reason?: string;
-  exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
-  // 系统化:enum_options 兼容 list[string] 与 list[{label, value}];label→value 表由后端 enum_value_map 提供
-  enum_options?: Array<string | { label: string; value?: any }> | null;
-  enum_value_map?: Record<string, any> | null;
+  path: string;
+  key: string;
+  label?: string;
+  value?: unknown;
+  default_value?: unknown;
+  type?: string;
+  category?: string;
+  source_kind?: string;
+  required?: boolean;
+  reason?: string;
+  enum_options?: unknown[];
 }
-interface FlowSelectBinding {
-  param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
-  source_method?: string; source_headers?: Record<string, string>; source_body?: any;
-  source_content_type?: string; source_role?: string; source_request_id?: string;
-  options?: Array<string | { label: string; value?: any }> | null; count?: number; multi?: boolean;
-  option_map?: Record<string, any> | null;
-  enum_source?: string | null; enum_confirmed?: boolean | null;
-  verification_id?: string | null;
-  id_path?: string | null;
-  field_projections?: Record<string, string>;
+
+interface FlowStep {
+  step_id: string;
+  name?: string;
+  method?: string;
+  path?: string;
+  url?: string;
+  params?: FlowParam[];
 }
-interface FlowStepData {
-  step_id: string; name: string; method: string; url: string; path: string; risk_level: string;
-  params: FlowParam[]; selects?: FlowSelectBinding[]; identity?: any[];
-  source_meta?: { role?: string; [k: string]: any }; semantic_role?: string;
-  content_type?: string; body_source?: string; backup_body_source?: string; headers?: Record<string, string>;
-  sample_inputs?: Record<string, string>; response_json?: any; success_rule?: any; fact_check?: any;
-}
-interface FlowLinkData {
-  link_id: string; source_step_id: string; source_path: string;
-  target_step_id: string; target_path: string;
-  confirmed?: boolean; confidence?: number; param_name?: string | null; reason?: string;
-  meta?: Record<string, any>; evidence?: Record<string, any>;
-}
-interface FlowCapabilityFieldData {
-  field_id?: string; scope?: string; display_name?: string; path?: string; key?: string; type?: string;
-  required?: boolean; request_id?: string; request_index?: number | string | null; step_id?: string;
-  source_kind?: string; source?: any; exposed_to_caller?: boolean; confidence?: number;
-  confirmed?: boolean; locked?: boolean; evidence?: any[];
-}
-interface FlowCapabilityDependencyData {
-  dependency_id?: string; type?: string; source?: Record<string, any>; target?: Record<string, any>;
-  confidence?: number; confirmed?: boolean; locked?: boolean; reason?: string; evidence?: Record<string, any>;
-}
-interface FlowCapabilityData {
-  name?: string; title?: string; intent?: string; kind?: string; capability_id?: string;
-  request_refs?: FlowCapabilityRequestRefData[];
-  step_ids?: string[];
-  inputs?: FlowCapabilityFieldData[];
-  request_fields?: FlowCapabilityFieldData[];
-  internal_fields?: FlowCapabilityFieldData[];
-  computed_fields?: FlowCapabilityFieldData[];
-  outputs?: FlowCapabilityFieldData[];
-  dependencies?: FlowCapabilityDependencyData[];
-  nodes?: Array<Record<string, any>>;
-  input_schema?: Record<string, any>;
-  output_schema?: Record<string, any>;
-  output_mapping?: Array<Record<string, any>>;
-  preconditions?: Array<Record<string, any>>;
-  confirmed?: boolean; confidence?: number; requires_human_confirm?: boolean;
-  evidence?: Array<Record<string, any>>;
-  caller_responsibilities?: string[]; skill_responsibilities?: string[];
-  status?: string; locked?: boolean; updated_by?: string;
-}
-type CapabilityUsage = "execute" | "option_source" | "fact_check" | "preflight";
-interface FlowCapabilityRequestRefData {
-  request_id?: string; request_index?: number | string | null; step_id?: string;
-  role?: string; method?: string; path?: string; sequence?: number | string | null;
-  confidence?: number; reason?: string; usage?: CapabilityUsage; origin?: string;
+
+interface FlowCapability {
+  capability_id?: string;
+  name?: string;
+  title?: string;
+  intent?: string;
+  kind?: string;
+  confidence?: number;
   confirmed?: boolean;
+  request_refs?: Array<Record<string, unknown>>;
+  step_ids?: string[];
+  dependencies?: Array<Record<string, unknown>>;
 }
-interface FlowCapabilityRelationData {
-  relation_id?: string; type?: string; mode?: string;
-  from_capability?: string; from_output?: string;
-  to_capability?: string; to_input?: string;
-  transform_owner?: string; requires_user_confirmation?: boolean;
-  confidence?: number; confirmed?: boolean; reason?: string;
-}
-interface ReviewItemData {
-  id: string; type: string; severity: string; title: string; reason: string;
-  current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
-  blocking?: boolean; ignorable?: boolean;
-  code?: string;
-  target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [k: string]: any };
-  llm_suggestions?: Array<{
-    action: "bind_previous_response" | "set_runtime_source" | "ask_human";
-    confidence?: number; reason?: string;
-    source_step_id?: string; source_path?: string;
-    target_step_id?: string; target_path?: string; source_kind?: string;
-  }>;
-}
-interface RequestRoleData {
-  index?: number; method: string; path: string; role: string; keep: boolean;
-  reason: string; confidence?: number;
-}
-interface RequestFactEntry {
-  request_index?: number | string | null; request_id?: string; method?: string; url?: string; path?: string; role?: string;
-  keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
-  response_json?: any; response_schema?: any; evidence?: any;
-  page_id?: string | null; frame_id?: string | null; sequence?: number | string | null;
-  state?: string; materialized_step_id?: string;
-  used_by_capabilities?: string[];
-  headers?: Record<string, string>; post_data?: any; content_type?: string;
-  query?: Record<string, any>;
-  occurrence_count?: number;
-}
-interface FlowSpecData {
-  flow_id: string; title: string; business_description?: string;
-  steps: FlowStepData[]; links: FlowLinkData[]; capabilities?: FlowCapabilityData[];
-  capability_relations?: FlowCapabilityRelationData[];
-  risk_level: string; review_items?: ReviewItemData[];
+
+interface FlowSpec {
+  flow_id?: string;
+  title?: string;
+  steps?: FlowStep[];
+  links?: Array<Record<string, unknown>>;
+  capabilities?: FlowCapability[];
   request_facts?: {
-    requests?: RequestFactEntry[];
-    diagnostics?: any[];
-    page_events?: any[];
-    option_sources?: any[];
-    analysis?: Record<string, RequestRoleData & Record<string, any>>;
-    usage?: Record<string, { request_id?: string; materialized_step_id?: string; state?: string; used_by_capabilities?: string[] }>;
+    requests?: Array<Record<string, unknown>>;
   };
-  meta?: {
-    request_roles?: RequestRoleData[];
-    capability_model?: { status?: string; source?: string; generated_count?: number };
-    capability_removed_steps?: Record<string, string[]>;
-    capability_generation?: {
-      protocol?: string; status?: string; initial_completed?: boolean; last_mode?: string;
-      indexed_range_changes?: any[]; [k: string]: any;
-    };
-    recording_agent_session?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
-    last_analysis_application?: AnalysisApplication;
-    versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
-    current_version?: number;
-    current_fingerprint?: string;
-    verification_log?: Array<Record<string, any>>;
-    unverified?: Array<Record<string, any>>;
-  };
-}
-interface FlowCheckReport {
-  passed?: boolean; errors?: string[]; warnings?: string[]; suggestions?: string[];
-  dry_run?: {
-    ok?: boolean; mode?: string; stage?: string; request_count?: number;
-    missing_params?: string[]; self_check?: string[]; build_errors?: string[];
-    fact_check?: { configured?: boolean; passed?: boolean; reason?: string; missing?: string[] };
-  };
-  review_items?: ReviewItemData[];
-  review_summary?: { total?: number; high?: number; medium?: number; low?: number };
-  api_preview?: { workflow_steps?: number; method?: string; path?: string; params?: string[]; required?: string[] };
-  capability_preview?: Array<Record<string, any>>;
-  capability_validation?: {
-    passed?: boolean; errors?: string[]; warnings?: string[];
-    capabilities?: Array<Record<string, any>>;
-    checked_requests?: Array<Record<string, any>>;
-    checked_manual_requests?: Array<Record<string, any>>;
-    unused_high_confidence_requests?: Array<Record<string, any>>;
-  };
-  issue_groups?: Record<string, Array<{
-    severity?: string; message?: string; source?: string; target?: Record<string, any>;
-    audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
-    ignorable?: boolean; issue_id?: string; code?: string; review_id?: string; suggested_action?: string;
-  }>>;
-}
-interface FlowOperationReport {
-  operation?: "plan" | "repair";
-  changed?: boolean;
-  changes?: Record<string, number>;
-  change_details?: string[];
-  summary?: string;
-  edit_errors?: string[];
-  errors_before?: number;
-  errors_after?: number;
-  warnings_before?: number;
-  warnings_after?: number;
-}
-interface RecResult {
-  ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
-  status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
-  recording_mode?: string; verification_status?: string; verification_basis?: string; skill_id?: string; asset_id?: string;
-  asset_version?: number; lifecycle_pending?: boolean; lifecycle_message?: string; lifecycle_error?: string;
-  api?: { method?: string; path?: string; params?: string[] };
-  check_report?: FlowCheckReport;
-  capability_release?: {
-    status?: "ready" | string;
-    released_capabilities?: string[];
-  };
-}
-type RecorderConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
-
-interface RecorderFrameMeta {
-  frameWidth?: number;
-  frameHeight?: number;
+  meta?: Record<string, unknown>;
 }
 
-const KEYMAP: Record<string, string> = {
-  Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete",
-  ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
-  Escape: "Escape", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+interface PageRecorderProps {
+  tenant: string;
+  subsystem: string;
+  baseUrl: string;
+  storageState: string;
+}
+
+interface FrameMeta {
+  width: number;
+  height: number;
+}
+
+interface DraftEdit {
+  op: string;
+  actor: "user";
+  [key: string]: unknown;
+}
+
+const TYPE_OPTIONS = [
+  "string", "number", "boolean", "date", "datetime", "enum", "list-enum", "object", "array",
+].map((value) => ({ value, label: value }));
+
+const CATEGORY_OPTIONS = [
+  { value: "user_param", label: "用户参数" },
+  { value: "runtime_var", label: "运行期变量" },
+  { value: "system_const", label: "系统常量" },
+];
+
+const SOURCE_OPTIONS = [
+  ["unknown", "来源未确认"],
+  ["user_input", "用户输入"],
+  ["api_option", "接口候选"],
+  ["selected_option_field", "候选关联字段"],
+  ["page_enum", "页面枚举"],
+  ["form_option", "表单选项"],
+  ["static_enum", "静态枚举"],
+  ["manual_enum", "人工枚举"],
+  ["previous_response", "上游响应"],
+  ["request_header", "请求头"],
+  ["current_user", "当前用户"],
+  ["system_time", "系统时间"],
+  ["system_generated", "系统生成"],
+  ["computed", "系统计算"],
+  ["page_context", "调用上下文"],
+  ["constant", "固定值"],
+].map(([value, label]) => ({ value, label }));
+
+const TERMINAL_STATUSES = new Set<WorkflowStatus>([
+  "editable", "published", "cancelled", "failed",
+]);
+
+const STATUS_LABELS: Record<WorkflowStatus, string> = {
+  idle: "等待开始",
+  recording: "录制中",
+  processing: "分析中",
+  waiting_operator: "等待确认",
+  editable: "能力草稿待处理",
+  published: "发布完成",
+  cancelled: "分析已终止",
+  failed: "处理失败",
 };
-const SAFE_COMBO_KEYS = new Set(["a", "c", "x", "z", "y", "Enter", "Backspace"]);
-const MOD_ORDER = ["Control", "Meta", "Alt", "Shift"];
-const POINTER_MOVE_INTERVAL_MS = 80;
 
-function subsystemFromUrl(configured: string, url: string) {
-  if (configured.trim()) return configured.trim();
-  try {
-    const host = new URL(url).host.toLowerCase();
-    return host.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "recorded-web";
-  } catch {
-    return "recorded-web";
+function recorderWebSocketUrl() {
+  const configured = String(import.meta.env.VITE_DANO_RECORDING_WS_URL || "").trim();
+  if (configured) return configured;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  if (
+    import.meta.env.DEV
+    && location.port === "5173"
+    && ["localhost", "127.0.0.1", "::1"].includes(location.hostname)
+  ) {
+    return "ws://127.0.0.1:8077/onboarding/page/record";
   }
+  return `${proto}://${location.host}/onboarding/page/record`;
 }
 
-function initialRecordingDraft() {
+function newActionName() {
+  const value = typeof crypto?.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `${Date.now().toString(16)}${Math.random().toString(16).slice(2).padEnd(20, "0")}`.slice(0, 32);
+  return `action_${value.toLowerCase()}`;
+}
+
+function readSetupDraft() {
   try {
-    const draft = JSON.parse(window.sessionStorage.getItem("dano.recording-ui-draft") || "{}");
+    const parsed = JSON.parse(sessionStorage.getItem("dano.recording.setup") || "{}");
     return {
-      startUrl: typeof draft.startUrl === "string" ? draft.startUrl : "",
-      goalText: typeof draft.goalText === "string" ? draft.goalText : "",
+      startUrl: typeof parsed.startUrl === "string" ? parsed.startUrl : "",
+      goalText: typeof parsed.goalText === "string" ? parsed.goalText : "",
     };
   } catch {
     return { startUrl: "", goalText: "" };
   }
 }
 
-function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | null {
-  if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return null;
-  if (e.altKey) return null;
-  if (!e.ctrlKey && !e.metaKey && !e.shiftKey) return KEYMAP[e.key] || null;
-  const base = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
-    if (base !== "Tab" && base !== "Enter") return null;
-    return `Shift+${base}`;
-  }
-  if (!SAFE_COMBO_KEYS.has(base)) return null;
-  const normalizedBase = base.length === 1 ? base.toUpperCase() : base;
-  const mods: string[] = [];
-  if (e.ctrlKey) mods.push("Control");
-  if (e.metaKey) mods.push("Meta");
-  const ordered = MOD_ORDER.filter((m) => mods.includes(m));
-  const key = [...ordered, normalizedBase].join("+");
-  return key;
-}
-
-function recorderWebSocketUrl(attempt = 0) {
-  const configured = String(import.meta.env.VITE_DANO_RECORDING_WS_URL || "").trim();
-  if (configured) return configured;
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const sameOrigin = `${proto}://${location.host}/onboarding/page/record`;
-  // Prefer the backend directly during local development. If that route is not
-  // reachable in the current browser environment, alternate with Vite's proxy
-  // on retries instead of leaving the recording permanently disconnected.
-  if (import.meta.env.DEV && location.port === "5173" && ["localhost", "127.0.0.1", "::1"].includes(location.hostname)) {
-    return attempt % 2 === 0 ? "ws://127.0.0.1:8077/onboarding/page/record" : sameOrigin;
-  }
-  return sameOrigin;
-}
-
-const PI_RECORDING_ID_PATTERN = /^recording_[0-9a-f]{32}$/;
-
-function piRecordingStorageKey(tenant: string, subsystem: string, startUrl: string) {
-  return ["dano", "recording-pi", tenant, subsystem, startUrl]
-    .map((part) => encodeURIComponent(part))
-    .join(":");
-}
-
-function readPiRecordingId(storageKey: string): string | null {
+function parseStorageState(value: string): Record<string, unknown> | undefined {
+  if (!value.trim()) return undefined;
   try {
-    const value = window.sessionStorage.getItem(storageKey);
-    return value && PI_RECORDING_ID_PATTERN.test(value) ? value : null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : undefined;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
-function writePiRecordingId(storageKey: string, value: string) {
-  if (!PI_RECORDING_ID_PATTERN.test(value)) return;
-  try {
-    // The opaque resume ID is tab-scoped. Server paths, session files and
-    // credentials are never accepted or persisted by the browser.
-    window.sessionStorage.setItem(storageKey, value);
-  } catch {
-    // The component ref still supports reconnects when storage is unavailable.
-  }
+function safeString(value: unknown) {
+  if (value === null || value === undefined) return "";
+  return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function clearPiRecordingId(storageKey: string) {
-  try {
-    window.sessionStorage.removeItem(storageKey);
-  } catch {
-    // The in-memory ref is still cleared when tab storage is unavailable.
-  }
+function issueType(status: WorkflowStatus): "success" | "warning" | "error" | "info" {
+  if (status === "published") return "success";
+  if (status === "failed") return "error";
+  if (status === "editable") return "warning";
+  return "info";
 }
 
-function piRecordingIdFromMessage(messageData: any): string | null {
-  const value = messageData?.pi_session?.recording_id ?? messageData?.pi_recording_id;
-  return typeof value === "string" && PI_RECORDING_ID_PATTERN.test(value) ? value : null;
-}
-const CATEGORY_OPTIONS = [
-  { label: "用户参数", value: "user_param" },
-  { label: "运行期变量", value: "runtime_var" },
-  { label: "系统常量", value: "system_const" },
-];
-// 来源按"由谁/什么注入"归类：
-//   用户侧: 用户输入
-//   活接口侧: api_option(运行期拉接口取)
-//   枚举侧: page_enum / form_option / static_enum / manual_enum
-//   上游链侧: previous_response(本能力内 step 响应)
-//   系统侧: current_user / system_time / request_header / page_context / constant
-const SOURCE_KIND_OPTIONS = [
-  { label: "来源不明", value: "unknown" },
-  { label: "用户输入", value: "user_input" },
-  { label: "接口候选", value: "api_option" },
-  { label: "候选关联字段", value: "selected_option_field" },
-  { label: "页面枚举", value: "page_enum" },
-  { label: "表单选项", value: "form_option" },
-  { label: "静态枚举", value: "static_enum" },
-  { label: "人工枚举", value: "manual_enum" },
-  { label: "上游响应", value: "previous_response" },
-  { label: "请求头", value: "request_header" },
-  { label: "当前用户", value: "current_user" },
-  { label: "系统时间", value: "system_time" },
-  { label: "系统生成值", value: "system_generated" },
-  { label: "系统计算值", value: "computed" },
-  { label: "调用上下文", value: "page_context" },
-  { label: "固定值", value: "constant" },
-];
-const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "form_option", "static_enum", "manual_enum"];
-const ENUM_SOURCE_KINDS = ["page_enum", "form_option", "static_enum", "manual_enum"];
-const SOURCE_REVIEW_TYPES = new Set([
-  "field_source_unknown", "field_source_incomplete", "runtime_var_missing_source", "runtime_var_source",
-]);
-const RUNTIME_SUPPLIED_SOURCE_KINDS = new Set([
-  "previous_response", "current_user", "storage", "cookie", "page_context",
-  "request_header", "system_time", "system_generated", "computed", "constant", "loop_item",
-]);
-
-function paramExposedToCaller(p: FlowParam) {
-  return p.category === "user_param"
-    && p.exposed_to_user !== false
-    && !RUNTIME_SUPPLIED_SOURCE_KINDS.has(p.source_kind || "");
-}
-
-function paramRequiredFromCaller(p: FlowParam) {
-  return !!p.required && paramExposedToCaller(p);
-}
-const PARAM_TYPE_LABELS: Record<string, string> = {
-  string: "文本",
-  number: "数字",
-  boolean: "布尔",
-  datetime: "日期时间",
-  date: "日期",
-  enum: "单选枚举",
-  array: "数组",
-  object: "对象",
-  "list-enum": "多选枚举",
-  single_enum: "单选枚举",
-  multi_enum: "多选枚举",
-  text: "文本",
-};
-const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
-  .map((x) => ({ label: PARAM_TYPE_LABELS[x] || x, value: x }));
-const CAPABILITY_KIND_OPTIONS = [
-  { label: "查询", value: "query" },
-  { label: "状态查询", value: "query_status" },
-  { label: "选项列表", value: "list_options" },
-  { label: "校验", value: "validate" },
-  { label: "批量校验", value: "validate_batch" },
-  { label: "预览", value: "preview" },
-  { label: "查看详情", value: "inspect" },
-  { label: "导出", value: "export" },
-  { label: "新增", value: "create" },
-  { label: "更新", value: "update" },
-  { label: "保存草稿", value: "save_draft" },
-  { label: "批量提交", value: "submit_batch" },
-  { label: "提交", value: "submit" },
-  { label: "审批通过", value: "approve" },
-  { label: "驳回", value: "reject" },
-  { label: "撤回", value: "withdraw" },
-  { label: "删除", value: "delete" },
-];
-const CAPABILITY_USAGE_OPTIONS: Array<{ label: string; value: CapabilityUsage }> = [
-  { label: "执行", value: "execute" },
-  { label: "选项来源", value: "option_source" },
-  { label: "事实核查", value: "fact_check" },
-  { label: "前置检查", value: "preflight" },
-];
-function fallbackStepName(method: string, path: string) {
-  const seg = (path || "").split("/").filter(Boolean).pop() || "default";
-  return `${(method || "POST").toUpperCase()}_${seg}`;
-}
-function stripHost(url: string) {
-  return (url || "").replace(/^https?:\/\/[^/]+/, "");
-}
-function purePath(url: string) {
-  const raw = stripHost(url || "");
-  return raw.split("?", 1)[0] || raw || "/";
-}
-function splitUrlQuery(url?: string) {
-  const raw = url || "";
-  const idx = raw.indexOf("?");
-  return {
-    base: idx >= 0 ? raw.slice(0, idx) : raw,
-    query: idx >= 0 ? raw.slice(idx + 1) : "",
-  };
-}
-function queryToLines(url?: string) {
-  const query = splitUrlQuery(url).query;
-  if (!query) return "";
-  return query.split("&").filter(Boolean).map((part) => {
-    const [k, ...rest] = part.split("=");
-    const value = rest.join("=");
-    try {
-      return `${decodeURIComponent(k || "")}=${decodeURIComponent(value || "")}`;
-    } catch {
-      return part;
-    }
-  }).join("\n");
-}
-function mergeUrlQuery(url: string | undefined, lines: string) {
-  const { base } = splitUrlQuery(url);
-  const parts = lines.split(/[\n&]/).map((x) => x.trim()).filter(Boolean).map((line) => {
-    const [k, ...rest] = line.split("=");
-    const key = k.trim();
-    const val = rest.join("=").trim();
-    if (!key) return "";
-    return `${encodeURIComponent(key)}=${encodeURIComponent(val)}`;
-  }).filter(Boolean);
-  return parts.length ? `${base || ""}?${parts.join("&")}` : (base || "");
-}
-function stripBodyPrefix(path: string) {
-  return path?.startsWith("body.") ? path.slice(5) : path;
-}
-
-function newRecordingActionName() {
-  let uuid: string;
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    uuid = crypto.randomUUID();
-  } else if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    const bytes = crypto.getRandomValues(new Uint8Array(16));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
-  } else {
-    uuid = `${Date.now().toString(16)}${Math.random().toString(16).slice(2).padEnd(16, "0")}`;
-  }
-  return `action_${uuid.replace(/-/g, "").toLowerCase()}`;
-}
-
-function positiveNumber(...values: unknown[]) {
-  for (const value of values) {
-    const number = Number(value);
-    if (Number.isFinite(number) && number > 0) return number;
-  }
-  return undefined;
-}
-
-function frameMetaFromMessage(message: any): RecorderFrameMeta {
-  const frame = message?.frame || message?.frame_meta || message?.metadata || message?.meta || {};
-  return {
-    frameWidth: positiveNumber(message?.frame_width, message?.width, frame?.frame_width, frame?.width),
-    frameHeight: positiveNumber(message?.frame_height, message?.height, frame?.frame_height, frame?.height),
-  };
-}
-
-function domAnchorPart(value: unknown) {
-  return String(value ?? "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
-}
-function fieldEditorAnchorId(stepId: string, path: string) {
-  return `field-${domAnchorPart(stepId)}-${domAnchorPart(stripBodyPrefix(path))}`;
-}
-function popupContainer(_node?: HTMLElement) {
-  return document.body;
-}
-function optionLabel(options: Array<{ label: string; value: string }>, value: string) {
-  return options.find((o) => o.value === value)?.label || value;
-}
-function normalizeSourceKindForUi(sourceKind?: string | null) {
-  return sourceKind || "";
-}
-function sourceDescriptor(sourceKind: string, p: FlowParam, current?: Record<string, any>) {
-  const path = p.path;
-  const previous = current || {};
-  if (sourceKind === "unknown") return {};
-  if (sourceKind === "user_input") return { kind: "sample", path };
-  if (sourceKind === "constant") return { kind: "constant", path, manual: true };
-  if (sourceKind === "page_context") return {
-    kind: "page_context",
-    context_key: previous.context_key || p.key || stripBodyPrefix(path).split(".").pop() || "",
-    path,
-    manual: true,
-  };
-  if (sourceKind === "request_header") return {
-    kind: "request_header",
-    header: previous.header || "",
-    path,
-    manual: true,
-  };
-  if (sourceKind === "system_time") return { kind: "system_time", path, manual: true };
-  if (sourceKind === "system_generated") return {
-    kind: "system_generated",
-    strategy: previous.strategy || "uuid",
-    path,
-    manual: true,
-  };
-  if (sourceKind === "computed") return {
-    ...previous,
-    kind: "computed",
-    path,
-    manual: true,
-  };
-  if (sourceKind === "current_user") return { kind: "current_user", path, manual: true };
-  if (sourceKind === "previous_response" && (previous.step_id || previous.response_path)) {
-    return { ...previous, kind: "previous_response", path };
-  }
-  return { kind: sourceKind, path, manual: true };
-}
-function sourceNeedsConfiguration(sourceKind: string, source?: Record<string, any>) {
-  if (sourceKind === "unknown") return true;
-  if (sourceKind === "request_header") return !source?.header;
-  if (sourceKind === "page_context") return !source?.context_key;
-  if (sourceKind === "previous_response") return !(source?.step_id && (source?.response_path || source?.path));
-  if (sourceKind === "system_generated") return !["uuid", "random_string", "random_number"].includes(source?.strategy || "");
-  if (sourceKind === "computed") return !(source?.strategy && source?.start_field && source?.end_field);
-  return false;
-}
-function sourceSelectOptionsForParam(p: FlowParam) {
-  const current = normalizeSourceKindForUi(p.source_kind);
-  if (!current || SOURCE_KIND_OPTIONS.some((option) => option.value === current)) return SOURCE_KIND_OPTIONS;
-  return [
-    { label: optionLabel(SOURCE_KIND_OPTIONS, current), value: current },
-    ...SOURCE_KIND_OPTIONS,
-  ];
-}
-
-function typeSelectOptionsForParam(p: FlowParam) {
-  if (!p.type || PARAM_TYPE_OPTIONS.some((option) => option.value === p.type)) return PARAM_TYPE_OPTIONS;
-  return [
-    { label: PARAM_TYPE_LABELS[p.type] || p.type, value: p.type },
-    ...PARAM_TYPE_OPTIONS,
-  ];
-}
-function NativeSelect({
-  value,
-  options,
-  onChange,
-  width = 140,
-  disabled = false,
-}: {
-  value?: string;
-  options: Array<{ label: string; value: string }>;
-  onChange: (value: string) => void;
-  width?: number | string;
-  disabled?: boolean;
-}) {
-  const safeOptions = uniqueOptions(options);
-  return (
-    <select
-      value={value || ""}
-      disabled={disabled}
-      onChange={(e) => {
-        onChange(e.target.value);
-      }}
-      style={{
-        width,
-        height: 32,
-        border: "1px solid #d9d9d9",
-        borderRadius: 6,
-        padding: "0 26px 0 8px",
-        background: disabled ? "#f5f5f5" : "#fff",
-        color: disabled ? "#999" : "#111",
-        fontSize: 14,
-      }}
-    >
-      {safeOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-    </select>
-  );
-}
-function uniqueOptions(options: Array<{ label: string; value: string }>) {
-  const seen = new Set<string>();
-  const out: Array<{ label: string; value: string }> = [];
-  for (const opt of options || []) {
-    const value = String(opt.value ?? "");
-    if (seen.has(value)) continue;
-    seen.add(value);
-    out.push({ label: opt.label, value });
-  }
-  return out;
-}
-function EditableText({
-  value,
-  onSave,
-  width = 180,
-  placeholder = "",
-}: {
-  value?: string;
-  onSave: (value: string) => void;
-  width?: number | string;
-  placeholder?: string;
-}) {
-  const [local, setLocal] = useState(value || "");
-  useEffect(() => setLocal(value || ""), [value]);
-  function save() {
-    const next = local.trim();
-    if (next !== (value || "")) onSave(next);
-  }
-  return (
-    <Input
-      value={local}
-      placeholder={placeholder}
-      style={{ width }}
-      onChange={(e) => setLocal(e.target.value)}
-      onBlur={save}
-      onPressEnter={(e) => e.currentTarget.blur()}
-    />
-  );
-}
-function ComboInput({
-  value,
-  options,
-  onChange,
-  width = 260,
-  disabled = false,
-  placeholder = "",
-}: {
-  value?: string;
-  options: Array<{ label: string; value: string }>;
-  onChange: (value: string) => void;
-  width?: number | string;
-  disabled?: boolean;
-  placeholder?: string;
-}) {
-  const [local, setLocal] = useState(value || "");
-  const listIdRef = useRef(`combo_${Math.random().toString(36).slice(2, 10)}`);
-  useEffect(() => setLocal(value || ""), [value]);
-  return (
-    <>
-      <Input
-        value={local}
-        list={listIdRef.current}
-        disabled={disabled}
-        placeholder={placeholder}
-        style={{ width }}
-        onChange={(e) => {
-          setLocal(e.target.value);
-          onChange(e.target.value);
-        }}
-        onBlur={() => onChange(local.trim())}
-        onPressEnter={(e) => e.currentTarget.blur()}
-      />
-      <datalist id={listIdRef.current}>
-        {uniqueOptions(options).filter((opt) => opt.value).map((opt) => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
-        ))}
-      </datalist>
-    </>
-  );
-}
-function EnumValueInput({
-  value,
-  options,
-  onSave,
-  width = "100%",
-}: {
-  value?: string;
-  options: Array<{ label: string; value: string }>;
-  onSave: (value: string) => void;
-  width?: number | string;
-}) {
-  const [local, setLocal] = useState(value || "");
-  const listIdRef = useRef(`enum_${Math.random().toString(36).slice(2, 10)}`);
-  useEffect(() => setLocal(value || ""), [value]);
-  function save() {
-    const next = local.trim();
-    if (next !== (value || "")) onSave(next);
-  }
-  return (
-    <>
-      <Input
-        value={local}
-        list={listIdRef.current}
-        placeholder="选择或输入枚举值"
-        style={{ width }}
-        onChange={(e) => setLocal(e.target.value)}
-        onBlur={save}
-        onPressEnter={(e) => e.currentTarget.blur()}
-      />
-      <datalist id={listIdRef.current}>
-        {uniqueOptions(options).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-      </datalist>
-    </>
-  );
-}
-function EditableComboInput({
-  value,
-  options,
-  onSave,
-  width = "100%",
-  placeholder = "",
-}: {
-  value?: string;
-  options: Array<{ label: string; value: string }>;
-  onSave: (value: string) => void;
-  width?: number | string;
-  placeholder?: string;
-}) {
-  const [local, setLocal] = useState(value || "");
-  const listIdRef = useRef(`edit_combo_${Math.random().toString(36).slice(2, 10)}`);
-  useEffect(() => setLocal(value || ""), [value]);
-  function save() {
-    const next = local.trim();
-    if (next !== (value || "")) onSave(next);
-  }
-  return (
-    <>
-      <Input
-        value={local}
-        list={listIdRef.current}
-        placeholder={placeholder}
-        style={{ width }}
-        onChange={(e) => setLocal(e.target.value)}
-        onBlur={save}
-        onPressEnter={(e) => e.currentTarget.blur()}
-      />
-      <datalist id={listIdRef.current}>
-        {uniqueOptions(options).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-      </datalist>
-    </>
-  );
-}
-function EditableTextArea({
-  value,
-  onSave,
-  onDraftChange,
-  rows = 3,
-  placeholder = "",
-}: {
-  value?: string;
-  onSave: (value: string) => void;
-  onDraftChange?: (value: string) => void;
-  rows?: number;
-  placeholder?: string;
-}) {
-  const [local, setLocal] = useState(value || "");
-  useEffect(() => setLocal(value || ""), [value]);
-  function save() {
-    if (local !== (value || "")) onSave(local);
-  }
-  return (
-    <Input.TextArea
-      rows={rows}
-      value={local}
-      placeholder={placeholder}
-      onChange={(e) => {
-        setLocal(e.target.value);
-        onDraftChange?.(e.target.value);
-      }}
-      onBlur={save}
-    />
-  );
-}
-function FieldControl({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{label}</Typography.Text>
-      {children}
-    </div>
-  );
-}
-function PathText({ value, maxWidth = 520 }: { value?: string; maxWidth?: number | string }) {
-  return (
-    <Typography.Text
-      code
-      title={value || ""}
-      style={{
-        display: "inline-block",
-        maxWidth,
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        verticalAlign: "middle",
-      }}
-    >
-      {value || ""}
-    </Typography.Text>
-  );
-}
-function leafPaths(node: any, prefix = ""): string[] {
-  const out: string[] = [];
-  if (node == null) return out;
-  if (Array.isArray(node)) {
-    node.forEach((v, i) => out.push(...leafPaths(v, `${prefix}[${i}]`)));
-    return out;
-  }
-  if (typeof node === "object") {
-    Object.entries(node).forEach(([k, v]) => out.push(...leafPaths(v, prefix ? `${prefix}.${k}` : k)));
-    return out;
-  }
-  return prefix ? [prefix] : [];
-}
-function leafPathValues(node: any, prefix = ""): Array<{ path: string; value: string }> {
-  const out: Array<{ path: string; value: string }> = [];
-  if (node == null) return out;
-  if (Array.isArray(node)) {
-    node.forEach((v, i) => out.push(...leafPathValues(v, `${prefix}[${i}]`)));
-    return out;
-  }
-  if (typeof node === "object") {
-    Object.entries(node).forEach(([k, v]) => out.push(...leafPathValues(v, prefix ? `${prefix}.${k}` : k)));
-    return out;
-  }
-  if (prefix) out.push({ path: prefix, value: String(node) });
-  return out;
-}
-function requestFactPath(req: RequestFactEntry) {
-  return (req.path || stripHost(req.url || "") || "").split("?", 1)[0];
-}
-function requestFactSignature(req: RequestFactEntry) {
-  return `${(req.method || "GET").toUpperCase()} ${requestFactPath(req)}`;
-}
-function requestFactKey(req: RequestFactEntry) {
-  if (req.request_id) return `id:${req.request_id}`;
-  if (req.request_index != null) return `idx:${String(req.request_index)}`;
-  return `sig:${requestFactSignature(req)}`;
-}
-function requestQueryValues(req: RequestFactEntry) {
-  if (req.query && Object.keys(req.query).length) return req.query;
-  const raw = String(req.url || "");
-  const queryText = raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "";
-  const values: Record<string, string[]> = {};
-  new URLSearchParams(queryText).forEach((value, key) => {
-    values[key] = [...(values[key] || []), value];
-  });
-  return values;
-}
-function isPaginationQueryKey(key: string) {
-  return /^(?:page(?:no|num|number|index|size)?|current|limit|offset|rows?)$/i.test(key.replace(/[._-]/g, ""));
-}
-function requestBusinessFilterCount(req: RequestFactEntry) {
-  return Object.entries(requestQueryValues(req)).filter(([key, value]) =>
-    !isPaginationQueryKey(key) && (Array.isArray(value) ? value : [value]).some((item) => String(item ?? "").trim())
-  ).length;
-}
-function requestQueryFieldCount(req: RequestFactEntry) {
-  return Object.keys(requestQueryValues(req)).length;
-}
-function richerRequestFact(candidate: RequestFactEntry, current: RequestFactEntry) {
-  const candidateScore = [requestBusinessFilterCount(candidate), requestQueryFieldCount(candidate), candidate.response_json != null ? 1 : 0];
-  const currentScore = [requestBusinessFilterCount(current), requestQueryFieldCount(current), current.response_json != null ? 1 : 0];
-  for (let idx = 0; idx < candidateScore.length; idx += 1) {
-    if (candidateScore[idx] !== currentScore[idx]) return candidateScore[idx] > currentScore[idx];
-  }
-  return Number(candidate.sequence ?? candidate.request_index ?? 0) > Number(current.sequence ?? current.request_index ?? 0);
-}
-function isApiLikeRequest(req: RequestFactEntry) {
-  const path = (req.path || stripHost(req.url || "") || "").split("?", 1)[0].toLowerCase();
-  if (!path) return false;
-  if (/\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$/i.test(path)) return false;
-  if (["noise", "auth"].includes(req.role || "")) return false;
-  const role = req.role || "";
-  if (["submit_anchor", "business_write", "business_get", "read_context", "read_option"].includes(role)) return true;
-  if (req.response_json != null) return true;
-  return false;
-}
-function allCapturedRequests(spec?: FlowSpecData | null) {
-  const facts = spec?.request_facts;
-  const factSource = (facts?.requests || []).map((req) => {
-    const key = requestFactKey(req);
-    const analysis = (facts?.analysis?.[req.request_id || key] || facts?.analysis?.[key] || {}) as Partial<RequestRoleData & Record<string, any>>;
-    const usage = facts?.usage?.[req.request_id || key] || facts?.usage?.[key] || {};
-    return {
-      ...req,
-      role: req.role || analysis.role,
-      keep: req.keep ?? analysis.keep,
-      reason: req.reason || analysis.reason,
-      confidence: typeof req.confidence === "number" ? req.confidence : analysis.confidence,
-      state: req.state || usage.state,
-      materialized_step_id: req.materialized_step_id || usage.materialized_step_id,
-      used_by_capabilities: Array.from(new Set([
-        ...(req.used_by_capabilities || []),
-        ...(usage.used_by_capabilities || []),
-      ].filter(Boolean))),
-    };
-  });
-  const source = factSource;
-  const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
-  const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
-    const meta = s.source_meta || {};
-    const out: string[] = [];
-    if (meta.request_id) out.push(`id:${meta.request_id}`);
-    if (meta.request_index != null) out.push(`idx:${String(meta.request_index)}`);
-    return out;
-  }));
-  const selectedRank = (req: RequestFactEntry) => (
-    req.state === "materialized" ||
-    stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
-    stepReqKeys.has(requestFactKey(req))
-  ) ? 0 : 1;
-  const sorted = source
-    .filter(isApiLikeRequest)
-    .filter((req, idx, arr) => arr.findIndex((x) => requestFactKey(x) === requestFactKey(req)) === idx)
-    .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
-  const grouped = new Map<string, RequestFactEntry>();
-  for (const req of sorted) {
-    const signature = requestFactSignature(req);
-    const current = grouped.get(signature);
-    if (!current) {
-      grouped.set(signature, { ...req, occurrence_count: 1 });
-      continue;
-    }
-    current.occurrence_count = (current.occurrence_count || 1) + 1;
-    current.used_by_capabilities = Array.from(new Set([
-      ...(current.used_by_capabilities || []),
-      ...(req.used_by_capabilities || []),
-    ]));
-    if (richerRequestFact(req, current)) {
-      grouped.set(signature, {
-        ...req,
-        occurrence_count: current.occurrence_count,
-        used_by_capabilities: current.used_by_capabilities,
-      });
-    }
-  }
-  return Array.from(grouped.values());
-}
-function requestRoleRank(req: RequestFactEntry) {
-  const role = req.role || "";
-  if (["submit_anchor", "business_write"].includes(role)) return 0;
-  if (role === "business_get") return 1;
-  if (role === "read_context") return 2;
-  if (role === "read_option") return 3;
-  return 9;
-}
-function requestOptionValue(req: RequestFactEntry) {
-  return requestFactKey(req);
-}
-function findCapturedRequest(spec: FlowSpecData | null | undefined, key?: string) {
-  if (!key) return undefined;
-  return allCapturedRequests(spec).find((req) => requestOptionValue(req) === key);
-}
-function stepRequestSignature(step: FlowStepData) {
-  return `${(step.method || "").toUpperCase()} ${purePath(step.path || step.url)}`;
-}
-const CAPABILITY_NODE_CHILD_KEYS = ["children", "steps", "then", "else", "otherwise"] as const;
-function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
-  const ordered: string[] = [];
-  const seen = new Set<string>();
-  const visit = (items: any) => {
-    if (!Array.isArray(items)) return;
-    for (const node of items) {
-      if (!node || typeof node !== "object") continue;
-      if (String(node.type || "") === "call") {
-        const stepId = String(node.step_id || "").trim();
-        if (stepId && !seen.has(stepId)) {
-          seen.add(stepId);
-          ordered.push(stepId);
-        }
-      }
-      for (const key of CAPABILITY_NODE_CHILD_KEYS) visit(node[key]);
-    }
-  };
-  visit(nodes || []);
-  return ordered;
-}
-function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
-  return capabilityNodeStepIds(cap?.nodes);
-}
-function removedCapabilityStepIds(spec?: FlowSpecData | null) {
-  return new Set(
-    Object.values(spec?.meta?.capability_removed_steps || {})
-      .flat()
-      .filter((ref) => ref.startsWith("step:"))
-      .map((ref) => ref.slice(5)),
-  );
-}
-function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined, stepId: string) {
-  return (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
-}
-function capabilityUsageLabel(usage?: string) {
-  return optionLabel(CAPABILITY_USAGE_OPTIONS, usage || "execute");
-}
-function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
-  const signature = requestFactSignature(req);
-  const exact = (spec?.steps || []).filter((step) => {
-    const meta = step.source_meta || {};
-    return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
-      (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index));
-  });
-  if (req.request_id || req.request_index != null) return exact;
-  return (spec?.steps || []).filter((step) => {
-    return stepRequestSignature(step) === signature;
-  });
-}
-function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
-  const requestStepIds = new Set(capturedRequestSteps(spec, req).map((step) => step.step_id));
-  const names = (spec?.capabilities || [])
-    .filter((cap) => capabilityActualStepIds(cap).some((stepId) => requestStepIds.has(stepId)))
-    .map((cap) => String(cap.title || cap.name || cap.capability_id || "").trim())
-    .filter(Boolean);
-  return Array.from(new Set(names));
-}
-function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
-  if (req.role === "read_option") return true;
-  const reqPath = requestFactPath(req);
-  const usedAsSelectSource = (spec?.steps || []).some((step) => (step.selects || []).some((select) =>
-    (req.request_id && String(select.source_request_id || "") === String(req.request_id)) ||
-    (select.source_url && purePath(select.source_url) === purePath(reqPath))
-  ));
-  if (usedAsSelectSource) return true;
-  return (spec?.request_facts?.option_sources || []).some((source: any) => {
-    if (!source || typeof source !== "object") return false;
-    return (req.request_id && [source.request_id, source.source_request_id].some((value) => String(value || "") === String(req.request_id))) ||
-      [source.path, source.url, source.source_url].some((value) => value && purePath(String(value)) === purePath(reqPath));
-  });
-}
-function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
-  return capturedRequestSteps(spec, req).length > 0;
-}
-function confidencePercent(value?: number) {
-  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "待评估";
-  return `${Math.round(value * 100)}%`;
-}
-function confidenceColor(value?: number) {
-  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "default";
-  if (value >= 0.9) return "success";
-  if (value >= 0.7) return "warning";
-  return "error";
-}
-function inferredSchemaBusinessType(spec: Record<string, any>) {
-  if (Array.isArray(spec.enum) && spec.enum.length) return "enum";
-  if (spec.type === "array" && Array.isArray(spec.items?.enum) && spec.items.enum.length) return "list-enum";
-  if (spec.format === "date-time") return "datetime";
-  if (spec.format === "date") return "date";
-  if (spec.format === "name-ref" || spec["x-options-source"] || Array.isArray(spec["x-options"])) return "enum";
-  return String(spec.type || spec.format || "any");
-}
-function schemaBusinessType(spec: Record<string, any>) {
-  return String(spec["x-dano-business-type"] || inferredSchemaBusinessType(spec));
-}
-function schemaWireType(spec: Record<string, any>) {
-  const explicit = String(spec["x-dano-wire-type"] || "");
-  if (explicit) return explicit;
-  const type = String(spec.type || "any");
-  const itemType = spec.items && typeof spec.items === "object" ? String(spec.items.type || "") : "";
-  return type === "array" && itemType ? `${type}<${itemType}>` : type;
-}
-function schemaFieldRows(schema?: Record<string, any>) {
-  if (!schema || typeof schema !== "object") return [];
-  const props = schema.properties && typeof schema.properties === "object" ? schema.properties : schema;
-  const required = new Set(Array.isArray(schema.required) ? schema.required.map(String) : []);
-  return Object.entries(props || {})
-    .filter(([, spec]) => spec && typeof spec === "object")
-    .map(([name, spec]) => ({
-      name,
-      businessType: schemaBusinessType(spec as Record<string, any>),
-      wireType: schemaWireType(spec as Record<string, any>),
-      description: String((spec as any).description || (spec as any).title || ""),
-      required: required.has(name),
-    }));
-}
-function preferredSkillTitle(spec?: FlowSpecData | null) {
-  if (!spec) return "";
-  const caps = spec.capabilities || [];
-  if (caps.length === 1) return (caps[0].title || spec.title || caps[0].name || "").trim();
-  return (spec.title || caps.map((c) => c.title || c.name).filter(Boolean).join(" / ")).trim();
-}
-function jsonSchemaForParam(p: FlowParam) {
-  const t = (p.type || "string").toLowerCase();
-  const schema: Record<string, any> =
-    t === "number" ? { type: "number" } :
-    t === "boolean" ? { type: "boolean" } :
-    t === "date" ? { type: "string", format: "date" } :
-    t === "datetime" ? { type: "string", format: "date-time" } :
-    t === "array" || t === "list-enum" ? { type: "array", items: { type: "string" } } :
-    t === "object" ? { type: "object" } :
-    { type: "string" };
-  if (p.label || p.key) schema.description = p.label || p.key;
-  const opts = enumOptionRecordList(p.enum_options || []);
-  if (t === "enum" && opts.length) schema.enum = opts.map((x) => x.label);
-  if (t === "list-enum" && opts.length) schema.items = { type: "string", enum: opts.map((x) => x.label) };
-  return schema;
-}
-function enumOptionRecordList(raw: any[]) {
-  const out: Array<{ label: string; value?: any }> = [];
-  for (const x of raw || []) {
-    if (x == null) continue;
-    if (typeof x === "object") {
-      const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
-      if (label) out.push({ label, ...(Object.prototype.hasOwnProperty.call(x, "value") ? { value: x.value } : {}) });
-    } else {
-      const label = String(x).trim();
-      if (label) out.push({ label });
-    }
-  }
-  return out;
-}
-function inferJsonSchema(value: any): Record<string, any> {
-  if (Array.isArray(value)) return { type: "array", items: value.length ? inferJsonSchema(value[0]) : {} };
-  if (value && typeof value === "object") {
-    return {
-      type: "object",
-      properties: Object.fromEntries(Object.entries(value).slice(0, 80).map(([k, v]) => [k, inferJsonSchema(v)])),
-    };
-  }
-  if (typeof value === "number") return { type: "number" };
-  if (typeof value === "boolean") return { type: "boolean" };
-  return { type: "string" };
-}
-
-const RECORDING_FLOW_PROTOCOL_VERSION = 2;
-const MAX_ANALYSIS_SCREENSHOTS = 4;
-const MAX_ANALYSIS_SCREENSHOT_BYTES = 1_400_000;
-
-const ANALYSIS_AXIS_LABELS: Record<string, string> = {
-  name: "名称", path: "路径", type: "类型", category: "分类", source: "来源",
-  required: "必填性", default: "默认值", enum_options: "候选项",
-};
-const ANALYSIS_VALUE_LABELS: Record<string, string> = {
-  string: "文本", number: "数字", integer: "整数", boolean: "布尔值",
-  date: "日期", datetime: "日期时间", enum: "单选枚举", "list-enum": "多选枚举",
-  user_param: "用户参数", runtime_var: "运行变量", system_const: "系统常量",
-  user_input: "用户输入", page_enum: "页面枚举", static_enum: "静态枚举",
-  form_option: "表单选项", api_option: "接口候选", previous_response: "上游响应",
-  current_user: "当前用户", constant: "固定值", unknown: "来源未知",
-};
-
-function analysisValueLabel(axis: string, value: any) {
-  if (axis === "required") return value ? "必填" : "非必填";
-  if (axis === "enum_options" && Array.isArray(value)) return `${value.length} 项`;
-  const key = String(value ?? "");
-  if (ANALYSIS_VALUE_LABELS[key]) return ANALYSIS_VALUE_LABELS[key];
-  const text = (typeof value === "string" ? value : JSON.stringify(value)) ?? "";
-  return text.length > 24 ? `${text.slice(0, 21)}...` : text;
-}
-
-function analysisFieldChangeText(change: AnalysisFieldChange) {
-  const target = `${change.capability ? `能力「${change.capability}」` : ""}字段「${change.name || change.path}」`;
-  const details = Object.entries(change.axes || {}).map(([axis, values]) => (
-    `${ANALYSIS_AXIS_LABELS[axis] || axis}从“${analysisValueLabel(axis, values.before)}”改为“${analysisValueLabel(axis, values.after)}”`
-  ));
-  return `${target}：${details.join("；")}`;
-}
-
-function base64ByteSize(data: string) {
-  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
-  return Math.floor(data.length * 3 / 4) - padding;
-}
-
-function loadScreenshotImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(file);
-    const image = new window.Image();
-    image.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("Unable to read screenshot"));
-    };
-    image.src = objectUrl;
-  });
-}
-
-async function prepareAnalysisScreenshot(file: File): Promise<AnalysisScreenshot> {
-  if (!file.type.startsWith("image/")) throw new Error("Only image files are supported");
-  const image = await loadScreenshotImage(file);
-  const sourceWidth = image.naturalWidth || image.width;
-  const sourceHeight = image.naturalHeight || image.height;
-  if (!sourceWidth || !sourceHeight) throw new Error("Screenshot has no readable dimensions");
-
-  if (
-    file.size <= MAX_ANALYSIS_SCREENSHOT_BYTES
-    && ["image/png", "image/jpeg", "image/webp"].includes(file.type)
-  ) {
-    const data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
-      reader.onerror = () => reject(new Error("Unable to read screenshot"));
-      reader.readAsDataURL(file);
-    });
-    return {
-      id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      name: file.name || "screenshot",
-      mime_type: file.type as AnalysisScreenshotPayload["mime_type"],
-      data,
-      width: sourceWidth,
-      height: sourceHeight,
-      byte_size: file.size,
-      preview_url: `data:${file.type};base64,${data}`,
-    };
-  }
-
-  let scale = Math.min(1, 1800 / Math.max(sourceWidth, sourceHeight));
-  let latest: AnalysisScreenshot | null = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const width = Math.max(1, Math.round(sourceWidth * scale));
-    const height = Math.max(1, Math.round(sourceHeight * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas is unavailable");
-    context.fillStyle = "#fff";
-    context.fillRect(0, 0, width, height);
-    context.drawImage(image, 0, 0, width, height);
-    const quality = Math.max(0.62, 0.92 - attempt * 0.08);
-    const previewUrl = canvas.toDataURL("image/jpeg", quality);
-    const data = previewUrl.slice(previewUrl.indexOf(",") + 1);
-    latest = {
-      id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      name: file.name || "screenshot.jpg",
-      mime_type: "image/jpeg",
-      data,
-      width,
-      height,
-      byte_size: base64ByteSize(data),
-      preview_url: previewUrl,
-    };
-    if (latest.byte_size <= MAX_ANALYSIS_SCREENSHOT_BYTES) return latest;
-    scale *= 0.78;
-  }
-  throw new Error(`Screenshot remains too large (${latest?.byte_size || 0} bytes)`);
-}
-
-export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
-  tenant: string; subsystem: string; baseUrl: string; storageState: string;
-}) {
-  const [initialDraft] = useState(initialRecordingDraft);
-  const wsRef = useRef<WebSocket | null>(null);
-  const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const kbRef = useRef<HTMLInputElement | null>(null);
-  const consoleBufRef = useRef<any[]>([]);
-  const latestFrameRef = useRef<{ seq: number; src: string; meta: RecorderFrameMeta } | null>(null);
-  const frameRafRef = useRef<number | null>(null);
-  const frameDecodeBusyRef = useRef(false);
-  const frameDecodeGenerationRef = useRef(0);
-  const renderedFrameSeqRef = useRef(0);
-  const pointerMoveTimerRef = useRef<number | null>(null);
-  const pendingPointerMoveRef = useRef<Record<string, unknown> | null>(null);
-  const wheelTimerRef = useRef<number | null>(null);
-  const pendingWheelRef = useRef<{ dx: number; dy: number; nx?: number; ny?: number } | null>(null);
-  const pointerGestureRef = useRef<{
-    pointerId: number; nx: number; ny: number; clientX: number; clientY: number;
-    button: string; buttons: number; pointerType: string; dragging: boolean; clickCount: number;
-  } | null>(null);
-  const lastPointerClickRef = useRef<{
-    at: number; clientX: number; clientY: number; button: string; clickCount: number;
-  } | null>(null);
-  const lastInputErrorNoticeRef = useRef(0);
-  const lastBackspaceKeydownAtRef = useRef(0);
-  const componentMountedRef = useRef(false);
-  const intentionalCloseRef = useRef(false);
-  const sessionStartedRef = useRef(false);
-  const connectionErrorRef = useRef("");
-  const reconnectTimerRef = useRef<number | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const reconnectRestoreOperationRef = useRef<string | null>(null);
-  const piRecordingScopeRef = useRef("");
-  const piRecordingIdRef = useRef<string | null>(null);
-  const sessionStartUrlRef = useRef("");
-  const sessionSubsystemRef = useRef("");
-  const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
-  const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
-
-  const [phase, setPhase] = useState<"idle" | "recording" | "publishing" | "done">("idle");
-  const [workspaceStage, setWorkspaceStage] = useState(0);
-  const workspaceStageRef = useRef(workspaceStage);
-  useEffect(() => {
-    workspaceStageRef.current = workspaceStage;
-    if (workspaceStage === 1) scheduleLatestFrameDecode();
-  }, [workspaceStage]);
-  const [assistantOpen, setAssistantOpen] = useState(false);
-  const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
-  const [startUrl, setStartUrl] = useState(initialDraft.startUrl);
-  const [goalText, setGoalText] = useState(initialDraft.goalText);
-  useEffect(() => {
-    try {
-      window.sessionStorage.setItem("dano.recording-ui-draft", JSON.stringify({ startUrl, goalText }));
-    } catch {
-      // In-memory state still preserves the draft while this page remains open.
-    }
-  }, [startUrl, goalText]);
-  const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
-  const [recordingStopped, setRecordingStopped] = useState(false);
-  const [terminating, setTerminating] = useState(false);
-  const terminatingRef = useRef(false);
-  const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
-  const [hasFrame, setHasFrame] = useState(false);
-  const hasFrameRef = useRef(false);
-  useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
-  const [hasRequests, setHasRequests] = useState(false);
-  const hasRequestsRef = useRef(false);
-  const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
-  const [agentInsights, setAgentInsights] = useState<AgentInsight[]>([]);
-  const agentInsightsRef = useRef<AgentInsight[]>([]);
-  const assistantOpenRef = useRef(false);
-  useEffect(() => { assistantOpenRef.current = assistantOpen; }, [assistantOpen]);
-  const [agentStatus, setAgentStatus] = useState<AgentStatus>({
-    state: "waiting", text: "等待录制助手连接",
-  });
-  const agentStatusRef = useRef<AgentStatus>({
-    state: "waiting", text: "等待录制助手连接",
-  });
-  const [verifyProgress, setVerifyProgress] = useState<VerifyProgress[]>([]);
-  const verifyProgressRef = useRef<VerifyProgress[]>([]);
-  const [agentAnswerDrafts, setAgentAnswerDrafts] = useState<Record<string, string>>({});
-  const [action, setAction] = useState(() => newRecordingActionName());
-  const actionRef = useRef(action);
-  useEffect(() => { actionRef.current = action; }, [action]);
+export default function PageRecorder({
+  tenant,
+  subsystem,
+  baseUrl,
+  storageState,
+}: PageRecorderProps) {
+  const setup = useMemo(readSetupDraft, []);
+  const [startUrl, setStartUrl] = useState(setup.startUrl);
+  const [goalText, setGoalText] = useState(setup.goalText);
   const [title, setTitle] = useState("");
-  const titleRef = useRef("");
-  const [result, setResult] = useState<RecResult | null>(null);
-  const [err, setErr] = useState("");
+  const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
+  const [visibleStage, setVisibleStage] = useState(0);
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [answer, setAnswer] = useState("");
+  const [requests, setRequests] = useState<Array<Record<string, unknown>>>([]);
+  const [hasFrame, setHasFrame] = useState(false);
+  const [frameMeta, setFrameMeta] = useState<FrameMeta>({ width: 1280, height: 800 });
+  const [pendingEdits, setPendingEdits] = useState<DraftEdit[]>([]);
+  const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
 
-  const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
-  const flowSpecRef = useRef<FlowSpecData | null>(null);
-  const authoritativeFlowSpecRef = useRef<FlowSpecData | null>(null);
-  const paramFieldIdSeqRef = useRef(0);
-  const serverFingerprintRef = useRef("");
-  useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
-  const pendingEditorScrollRef = useRef<number | null>(null);
-  function preserveEditorScrollForReorder() {
-    pendingEditorScrollRef.current = window.scrollY;
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-  }
-  useLayoutEffect(() => {
-    const scrollTop = pendingEditorScrollRef.current;
-    if (scrollTop == null) return;
-    pendingEditorScrollRef.current = null;
-    window.scrollTo({ top: scrollTop, left: window.scrollX, behavior: "auto" });
-  }, [flowSpec]);
-  const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
-  const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
-  const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
-  useEffect(() => { setTitleDraft(flowSpec?.title || ""); }, [flowSpec?.title]);
-  useEffect(() => { setDescDraft(flowSpec?.business_description || ""); }, [flowSpec?.business_description]);
+  const wsRef = useRef<WebSocket | null>(null);
+  const actionRef = useRef("");
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const keyboardRef = useRef<HTMLInputElement | null>(null);
+  const latestFrameRef = useRef<{ seq: number; src: string; meta: FrameMeta } | null>(null);
+  const renderedFrameRef = useRef(0);
+  const decodingFrameRef = useRef(false);
+  const frameGenerationRef = useRef(0);
+  const pointerRef = useRef<{ pointerId: number; button: string } | null>(null);
+  const pointerMoveRef = useRef<Record<string, unknown> | null>(null);
+  const pointerTimerRef = useRef<number | null>(null);
+  const wheelRef = useRef<Record<string, number> | null>(null);
+  const wheelTimerRef = useRef<number | null>(null);
+  const composingRef = useRef(false);
+  const lastBackspaceRef = useRef(0);
+  const republishAfterRevisionRef = useRef<number | null>(null);
 
-  // Capability-local UI state must follow the capability identity, not its
-  // current array position. Index keys made expanded panels/dropdowns jump to
-  // a different capability immediately after an up/down reorder.
-  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<string, string>>({});
-  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<string, CapabilityUsage | "">>({});
-  const pendingCapabilityMembershipRef = useRef<Array<{
-    capability: string; requestId?: string; requestIndex?: number | string | null; usage: CapabilityUsage;
-  }>>([]);
-  const [newParam, setNewParam] = useState({
-    step_id: "", path: "", key: "", type: "string", category: "user_param", source_kind: "unknown",
-  });
-  const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
-  const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
-
-  const [orchestrateBusy, setOrchestrateBusy] = useState(false);
-  const [autoFixBusy, setAutoFixBusy] = useState(false);
-  const [lastOperationReport, setLastOperationReport] = useState<FlowOperationReport | null>(null);
-  const [analysisScreenshots, setAnalysisScreenshots] = useState<AnalysisScreenshot[]>([]);
-  const analysisScreenshotsRef = useRef<AnalysisScreenshot[]>([]);
-  useEffect(() => { analysisScreenshotsRef.current = analysisScreenshots; }, [analysisScreenshots]);
-  const screenshotInputRef = useRef<HTMLInputElement>(null);
-  const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
-  const analysisScreenshotBusyRef = useRef(false);
-  const analysisScreenshotGenerationRef = useRef(0);
-  const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
-  const [showAllAnalysisChanges, setShowAllAnalysisChanges] = useState(false);
-  const [showAllPublishIssues, setShowAllPublishIssues] = useState(false);
-  const [maintenanceMode, setMaintenanceMode] = useState(false);
-  const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
-  const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
-  const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
-  const [optimisticCapabilityStepOrder, setOptimisticCapabilityStepOrder] = useState<Record<string, string[]>>({});
-  const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
-  const [expandedUnassignedSteps, setExpandedUnassignedSteps] = useState<string[]>([]);
-  const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
-  const flowOperationRef = useRef<{
-    mode: "plan" | "repair"; previousUpdatedAt?: string; operationId: string;
-    analysisScreenshots: AnalysisScreenshotPayload[];
-    action: string; recordingId: string; expectedFingerprint: string;
-  } | null>(null);
-  const finalizeOperationRef = useRef<string | null>(null);
-  const publishOperationRef = useRef<string | null>(null);
-  const flowOperationTimerRef = useRef<number | null>(null);
-  const flowMutationQueueRef = useRef<any[]>([]);
-  const flowMutationInFlightRef = useRef<any | null>(null);
-  const flowMutationSeqRef = useRef(0);
-  const afterFlowSyncRef = useRef<(() => void) | null>(null);
-  const publishLocateTokenRef = useRef(0);
-  const [activeFlowTab, setActiveFlowTab] = useState("abilities");
-
-  function withStableParamFieldIds(fs: FlowSpecData) {
-    const currentSteps = flowSpecRef.current?.steps || [];
-    return {
-      ...fs,
-      steps: (fs.steps || []).map((step) => {
-        const previous = currentSteps.find((item) => item.step_id === step.step_id)?.params || [];
-        return {
-          ...step,
-          params: (step.params || []).map((param) => {
-            if (param.field_id) return param;
-            const pathMatch = previous.find((item) => item.path === param.path);
-            const aliasMatches = previous.filter((item) =>
-              (!!param.key && item.key === param.key) || (!!param.label && item.label === param.label));
-            const prior = pathMatch || (aliasMatches.length === 1 ? aliasMatches[0] : undefined);
-            return {
-              ...param,
-              field_id: prior?.field_id || `${step.step_id}:field:${++paramFieldIdSeqRef.current}`,
-            };
-          }),
-        };
-      }),
-    };
-  }
-
-  function acceptFlowSpec(fs: FlowSpecData) {
-    const stable = withStableParamFieldIds(fs);
-    authoritativeFlowSpecRef.current = stable;
-    serverFingerprintRef.current = String(stable.meta?.current_fingerprint || "");
-    const pending = pendingCapabilityMembershipRef.current;
-    const remaining: typeof pending = [];
-    for (const item of pending) {
-      const capIdx = (fs.capabilities || []).findIndex(
-        (cap, idx) => capabilityRef(cap, idx) === item.capability,
-      );
-      const step = (fs.steps || []).find((candidate) => {
-        const meta = candidate.source_meta || {};
-        return (item.requestId && String(meta.request_id || "") === item.requestId) ||
-          (item.requestIndex != null && String(meta.request_index ?? "") === String(item.requestIndex));
-      });
-      const serverRef = capIdx >= 0 && step
-        ? capabilityRequestRefForStep(fs.capabilities?.[capIdx], step.step_id)
-        : undefined;
-      if (
-        capIdx < 0 || !step
-        || (item.usage === "execute" && !capabilityActualStepIds(fs.capabilities?.[capIdx]).includes(step.step_id))
-        || (item.usage !== "execute" && !serverRef)
-      ) {
-        remaining.push(item);
-      }
-    }
-    pendingCapabilityMembershipRef.current = remaining;
-    flowSpecRef.current = stable;
-    setFlowSpec(stable);
-    setOptimisticCapabilityStepOrder({});
-    if (fs.meta?.last_analysis_application) {
-      setLastAnalysisEvidence(fs.meta.last_analysis_application);
-    }
-    const nextTitle = preferredSkillTitle(fs);
-    if (nextTitle && !titleRef.current.trim()) {
-      titleRef.current = nextTitle;
-      setTitle(nextTitle);
-    }
-  }
-
-  function updateAgentStatus(next: AgentStatus) {
-    agentStatusRef.current = next;
-    if (assistantOpenRef.current) setAgentStatus(next);
-  }
-
-  function appendVerifyProgress(next: VerifyProgress) {
-    verifyProgressRef.current = [...verifyProgressRef.current, next].slice(-30);
-    if (assistantOpenRef.current) setVerifyProgress(verifyProgressRef.current);
-  }
-  function newCostlyOperationId(prefix: string) {
-    const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    return `${prefix}-${id}`;
-  }
-
-  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }, operation?: string, operationId?: string) {
-    const active = flowOperationRef.current;
-    if (
-      !active
-      || (operationId && operationId !== active.operationId)
-      || (operation && operation !== active.mode)
-      || (!operation && (
-        loop?.mode !== active.mode
-        || !loop.updated_at
-        || loop.updated_at === active.previousUpdatedAt
-      ))
-    ) return;
-    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
-    flowOperationTimerRef.current = null;
-    flowOperationRef.current = null;
-    setOrchestrateBusy(false);
-    setAutoFixBusy(false);
-  }
-
-  function clearFlowOperation() {
-    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
-    flowOperationTimerRef.current = null;
-    flowOperationRef.current = null;
-    setOrchestrateBusy(false);
-    setAutoFixBusy(false);
-  }
-
-  function pauseFlowOperationForReconnect() {
-    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
-    flowOperationTimerRef.current = null;
-    // Keep loading visible while the accepted server operation continues.
-    // Clearing it while retaining flowOperationRef made the button look usable
-    // even though every click was intentionally deduplicated.
-  }
-
-  function armFlowOperationWatchdog(label: string) {
-    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
-    const reportStillRunning = () => {
-      if (!flowOperationRef.current) return;
-      message.warning(`${label}仍在服务端执行，完成后页面会自动更新`);
-      // Long Pi tasks have no client-side deadline. Keep reporting progress
-      // without clearing the active operation while the connection is alive.
-      flowOperationTimerRef.current = window.setTimeout(reportStillRunning, 120000);
-    };
-    flowOperationTimerRef.current = window.setTimeout(reportStillRunning, 120000);
-  }
-
-  function resumeFlowOperationAfterReconnect(restoredSpec: FlowSpecData | null) {
-    const active = flowOperationRef.current;
-    const currentSpec = restoredSpec || flowSpecRef.current;
-    if (!active || !currentSpec) return;
-    finishFlowOperation(currentSpec.meta?.recording_agent_session);
-    const pending = flowOperationRef.current;
-    if (!pending) return;
-    if (pending.mode === "repair") {
-      setAutoFixBusy(true);
-      armFlowOperationWatchdog("自动修复");
-      if (!send({
-        type: "auto_fix_flow",
-        operation_id: pending.operationId,
-        action: pending.action,
-        recording_id: pending.recordingId,
-        expected_fingerprint: pending.expectedFingerprint,
-      })) clearFlowOperation();
-      return;
-    }
-    setOrchestrateBusy(true);
-    setAutoFixBusy(true);
-    armFlowOperationWatchdog("能力生成");
-    if (!send({
-      type: "orchestrate_flow",
-      operation_id: pending.operationId,
-      analysis_screenshots: pending.analysisScreenshots,
-      action: pending.action,
-      recording_id: pending.recordingId,
-      expected_fingerprint: pending.expectedFingerprint,
-    })) clearFlowOperation();
-  }
+  const status = snapshot?.status || "idle";
+  const processing = status === "processing" || status === "waiting_operator";
+  const draft = snapshot?.draft || null;
+  const capabilities = draft?.capabilities || [];
+  const steps = draft?.steps || [];
+  const capturedRequests = draft?.request_facts?.requests || requests;
 
   useEffect(() => {
-    componentMountedRef.current = true;
-    const heartbeat = window.setInterval(() => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ping", at: Date.now() }));
-      }
-    }, 20000);
-    return () => {
-      componentMountedRef.current = false;
-      window.clearInterval(heartbeat);
-      if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
-        intentionalCloseRef.current = true;
-        wsRef.current?.close();
-      }
-      if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-      if (wheelTimerRef.current != null) window.clearTimeout(wheelTimerRef.current);
-      if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
-      frameDecodeGenerationRef.current += 1;
-    };
+    sessionStorage.setItem("dano.recording.setup", JSON.stringify({ startUrl, goalText }));
+  }, [startUrl, goalText]);
+
+  useEffect(() => () => {
+    frameGenerationRef.current += 1;
+    if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
+    if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
+    const socket = wsRef.current;
+    wsRef.current = null;
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
   }, []);
 
-  useEffect(() => {
-    const onError = (event: ErrorEvent) => {
-      consoleBufRef.current.push({
-        type: "error",
-        source: "window.onerror",
-        text: `${event.message} (${event.filename || "?"}:${event.lineno || 0})`,
-        ts: Date.now(),
-      });
-    };
-    const onRej = (event: PromiseRejectionEvent) => {
-      const msg = event.reason?.message || (typeof event.reason === "string" ? event.reason : JSON.stringify(event.reason || ""));
-      consoleBufRef.current.push({ type: "error", source: "unhandledrejection", text: msg || "unknown", ts: Date.now() });
-    };
-    const origError = console.error;
-    console.error = (...args: any[]) => {
-      try {
-        consoleBufRef.current.push({
-          type: "error",
-          source: "console.error",
-          text: args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ").slice(0, 800),
-          ts: Date.now(),
-        });
-      } catch { /* ignore */ }
-      origError(...args);
-    };
-    window.addEventListener("error", onError);
-    window.addEventListener("unhandledrejection", onRej);
-    const tick = window.setInterval(() => {
-      if (!consoleBufRef.current.length) return;
-      if (consoleBufRef.current.length > 500) {
-        const dropped = consoleBufRef.current.length - 500;
-        consoleBufRef.current.splice(0, dropped);
-        consoleBufRef.current.unshift({
-          type: "warning",
-          source: "recorder",
-          text: `console logs truncated: dropped ${dropped} old entries`,
-          ts: Date.now(),
-        });
-      }
-      const entries = consoleBufRef.current.splice(0, 50);
-      send({ type: "console_log_upload", entries });
-    }, 5000);
-    return () => {
-      window.removeEventListener("error", onError);
-      window.removeEventListener("unhandledrejection", onRej);
-      window.clearInterval(tick);
-      console.error = origError;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function sendRaw(obj: unknown) {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-      return true;
+  function send(payload: Record<string, unknown>) {
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      message.error("录制连接不可用");
+      return false;
     }
-    // FC2 修复:不再每次 send 失败都弹 error(高频 click 触发会刷屏)
-    // 统一在 ws.onclose 里通过 wsAliveRef 标记后,首次发现时弹一次提示
-    if (wsAliveRef.current) {
-      wsAliveRef.current = false;
-      message.warning("录制连接已断开，正在自动恢复");
-    }
-    return false;
-  }
-
-  function flushFlowMutationQueue() {
-    if (flowMutationInFlightRef.current || !flowMutationQueueRef.current.length) return;
-    const queued = flowMutationQueueRef.current.shift();
-    const next = { ...queued, expected_fingerprint: serverFingerprintRef.current };
-    flowMutationInFlightRef.current = next;
-    const { _rollback, _conflictRetries, ...wireMessage } = next;
-    if (!sendRaw(wireMessage)) {
-      next._rollback?.();
-      restoreAuthoritativeFlowSpec();
-      flowMutationInFlightRef.current = null;
-      flowMutationQueueRef.current = [];
-      afterFlowSyncRef.current = null;
-    }
-  }
-
-  function enqueueFlowMutation(obj: any) {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      const { _rollback, ...wireMessage } = obj;
-      const sent = sendRaw(wireMessage);
-      if (!sent) {
-        _rollback?.();
-        restoreAuthoritativeFlowSpec();
-      }
-      return sent;
-    }
-    const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
-    flowMutationQueueRef.current.push({ ...obj, operation_id: operationId });
-    flushFlowMutationQueue();
-    return flowMutationInFlightRef.current?.operation_id === operationId
-      || flowMutationQueueRef.current.some((queued) => queued.operation_id === operationId);
-  }
-
-  function finishQueuedFlowMutation(operationId?: string) {
-    const active = flowMutationInFlightRef.current;
-    if (!active) return;
-    if (operationId && active.operation_id && operationId !== active.operation_id) return;
-    flowMutationInFlightRef.current = null;
-    flushFlowMutationQueue();
-    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length && afterFlowSyncRef.current) {
-      const callback = afterFlowSyncRef.current;
-      afterFlowSyncRef.current = null;
-      callback();
-    }
-  }
-
-  function failQueuedFlowMutation(operationId?: string, restoreLocal = true) {
-    const active = flowMutationInFlightRef.current;
-    if (operationId && active?.operation_id && operationId !== active.operation_id) return;
-    if (restoreLocal) {
-      [...flowMutationQueueRef.current].reverse().forEach((queued) => queued?._rollback?.());
-      active?._rollback?.();
-      restoreAuthoritativeFlowSpec();
-    }
-    flowMutationInFlightRef.current = null;
-    flowMutationQueueRef.current = [];
-    afterFlowSyncRef.current = null;
-  }
-
-  function retryFlowMutationAfterConflict(messageData: any) {
-    const active = flowMutationInFlightRef.current;
-    if (
-      !active
-      || messageData?.operation !== "flow_update"
-      || messageData?.stage !== "flow_spec_conflict"
-      || !messageData?.flow_spec
-      || Number(active._conflictRetries || 0) >= 3
-    ) return false;
-
-    const serverSpec = withStableParamFieldIds(messageData.flow_spec);
-    authoritativeFlowSpecRef.current = serverSpec;
-    serverFingerprintRef.current = String(serverSpec.meta?.current_fingerprint || "");
-    flowMutationInFlightRef.current = null;
-    flowMutationQueueRef.current.unshift({
-      ...active,
-      _conflictRetries: Number(active._conflictRetries || 0) + 1,
-    });
-    flushFlowMutationQueue();
-    message.info("服务端版本已自动同步，正在重新应用本次修改");
+    socket.send(JSON.stringify(payload));
     return true;
   }
 
-  function restoreAuthoritativeFlowSpec() {
-    if (!authoritativeFlowSpecRef.current) return;
-    flowSpecRef.current = authoritativeFlowSpecRef.current;
-    setFlowSpec(authoritativeFlowSpecRef.current);
-  }
-
-  function runAfterFlowSync(callback: () => void) {
-    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length) {
-      callback();
-      return;
-    }
-    afterFlowSyncRef.current = callback;
-    message.info("正在同步最后一次工作台修改，完成后继续");
-  }
-
-  function send(obj: any) {
-    if (obj?.type === "flow_update") return enqueueFlowMutation(obj);
-    return sendRaw(obj);
-  }
-
-  function clearFrame() {
-    frameDecodeGenerationRef.current += 1;
-    frameDecodeBusyRef.current = false;
-    latestFrameRef.current = null;
-    renderedFrameSeqRef.current = 0;
-    if (frameRafRef.current != null) {
-      window.cancelAnimationFrame(frameRafRef.current);
-      frameRafRef.current = null;
-    }
-    pendingWheelRef.current = null;
-    if (wheelTimerRef.current != null) {
-      window.clearTimeout(wheelTimerRef.current);
-      wheelTimerRef.current = null;
-    }
-    const canvas = frameCanvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
-    setHasFrame(false);
-  }
-
-  function scheduleLatestFrameDecode() {
-    if (workspaceStageRef.current !== 1 || frameDecodeBusyRef.current || frameRafRef.current != null) return;
-    frameRafRef.current = window.requestAnimationFrame(() => {
-      frameRafRef.current = null;
-      const frame = latestFrameRef.current;
-      if (!frame || frame.seq <= renderedFrameSeqRef.current || workspaceStageRef.current !== 1) return;
-
-      frameDecodeBusyRef.current = true;
-      const generation = frameDecodeGenerationRef.current;
-      const decoder = new Image();
-      decoder.decoding = "async";
-      decoder.src = frame.src;
-      const decoded = typeof decoder.decode === "function"
-        ? decoder.decode()
-        : new Promise<void>((resolve, reject) => {
-            decoder.onload = () => resolve();
-            decoder.onerror = () => reject(new Error("recording frame decode failed"));
-          });
-
-      decoded.then(() => {
-        if (
-          generation !== frameDecodeGenerationRef.current
-          || frame.seq <= renderedFrameSeqRef.current
-          || workspaceStageRef.current !== 1
-        ) return;
-        // Only expose a fully decoded, monotonically newer JPEG. Canvas keeps
-        // the previous pixels until this synchronous draw, so the recording
-        // surface never blanks while another JPEG is still decoding.
-        const canvas = frameCanvasRef.current;
-        const context = canvas?.getContext("2d", { alpha: false });
-        if (!canvas || !context) return;
-        const frameWidth = Math.max(1, Math.round(frame.meta.frameWidth || decoder.naturalWidth || 1));
-        const frameHeight = Math.max(1, Math.round(frame.meta.frameHeight || decoder.naturalHeight || 1));
-        if (canvas.width !== frameWidth) canvas.width = frameWidth;
-        if (canvas.height !== frameHeight) canvas.height = frameHeight;
-        context.drawImage(decoder, 0, 0, frameWidth, frameHeight);
-        renderedFrameSeqRef.current = frame.seq;
-        if (!hasFrameRef.current) setHasFrame(true);
-      }).catch(() => {
-        // A corrupt/superseded JPEG is simply skipped; the next latest frame
-        // will be decoded without blanking the currently visible image.
-        if (generation === frameDecodeGenerationRef.current) {
-          renderedFrameSeqRef.current = Math.max(renderedFrameSeqRef.current, frame.seq);
-        }
-      }).finally(() => {
-        if (generation !== frameDecodeGenerationRef.current) return;
-        frameDecodeBusyRef.current = false;
-        const latest = latestFrameRef.current;
-        if (latest && latest.seq > renderedFrameSeqRef.current) scheduleLatestFrameDecode();
+  function scheduleFrameDecode() {
+    if (decodingFrameRef.current) return;
+    const frame = latestFrameRef.current;
+    if (!frame || frame.seq <= renderedFrameRef.current) return;
+    decodingFrameRef.current = true;
+    const generation = frameGenerationRef.current;
+    const image = new Image();
+    image.src = frame.src;
+    const decoded = typeof image.decode === "function"
+      ? image.decode()
+      : new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("frame decode failed"));
       });
+    decoded.then(() => {
+      if (generation !== frameGenerationRef.current || frame.seq <= renderedFrameRef.current) return;
+      const canvas = canvasRef.current;
+      const context = canvas?.getContext("2d", { alpha: false });
+      if (!canvas || !context) return;
+      const width = Math.max(1, frame.meta.width || image.naturalWidth || 1280);
+      const height = Math.max(1, frame.meta.height || image.naturalHeight || 800);
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      context.drawImage(image, 0, 0, width, height);
+      renderedFrameRef.current = frame.seq;
+      setFrameMeta({ width, height });
+      setHasFrame(true);
+    }).catch(() => undefined).finally(() => {
+      if (generation !== frameGenerationRef.current) return;
+      decodingFrameRef.current = false;
+      if ((latestFrameRef.current?.seq || 0) > renderedFrameRef.current) scheduleFrameDecode();
     });
   }
 
-  function queueFrame(seq: number, data: string, meta: RecorderFrameMeta = {}) {
+  function queueFrame(messageData: Record<string, unknown>) {
+    const data = String(messageData.data || "");
     if (!data) return;
-    const normalizedSeq = Number(seq || 0) > 0 ? Number(seq) : renderedFrameSeqRef.current + 1;
-    latestFrameRef.current = { seq: normalizedSeq, src: `data:image/jpeg;base64,${data}`, meta };
-    scheduleLatestFrameDecode();
+    const seq = Number(messageData.seq || renderedFrameRef.current + 1);
+    const frame = (messageData.frame || messageData.frame_meta || {}) as Record<string, unknown>;
+    const width = Number(messageData.frame_width || messageData.width || frame.width || 1280);
+    const height = Number(messageData.frame_height || messageData.height || frame.height || 800);
+    latestFrameRef.current = {
+      seq,
+      src: `data:image/jpeg;base64,${data}`,
+      meta: { width, height },
+    };
+    scheduleFrameDecode();
   }
 
-  function resetEditorState() {
-    flowSpecRef.current = null;
-    authoritativeFlowSpecRef.current = null;
-    serverFingerprintRef.current = "";
-    setFlowSpec(null);
-    setCheckReport(null);
-    setBindDraft({});
-    setCapabilityAddValue({});
-    setCapabilityAddUsage({});
-    pendingCapabilityMembershipRef.current = [];
-    analysisScreenshotGenerationRef.current += 1;
-    analysisScreenshotBusyRef.current = false;
-    setAnalysisScreenshotBusy(false);
-    if (screenshotInputRef.current) screenshotInputRef.current.value = "";
-    analysisScreenshotsRef.current = [];
-    setAnalysisScreenshots([]);
-    setLastAnalysisEvidence(null);
-    setLastOperationReport(null);
-    setShowAllAnalysisChanges(false);
-    setActiveFlowTab("abilities");
-    flowMutationInFlightRef.current = null;
-    flowMutationQueueRef.current = [];
-    afterFlowSyncRef.current = null;
-    clearFlowOperation();
-  }
+  function receiveSnapshot(next: WorkflowSnapshot) {
+    setSnapshot((current) => {
+      if (current && next.revision < current.revision) return current;
+      return next;
+    });
+    actionRef.current = next.action;
+    if (next.title !== undefined) setTitle(next.title);
+    if (next.status === "waiting_operator") setAssistantOpen(true);
+    if (TERMINAL_STATUSES.has(next.status)) setVisibleStage(2);
+    else if (next.status !== "idle") setVisibleStage(1);
 
-  function start() {
-    if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
-    if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = null;
-    reconnectAttemptRef.current = 0;
-    agentInsightsRef.current = [];
-    agentStatusRef.current = { state: "waiting", text: "正在连接录制助手" };
-    verifyProgressRef.current = [];
-    setErr(""); setResult(null); hasRequestsRef.current = false; setHasRequests(false); setAgentQuestions([]); setAgentInsights([]);
-    setAgentStatus(agentStatusRef.current);
-    setVerifyProgress([]);
-    setAgentAnswerDrafts({}); clearFrame();
-    resetEditorState();
-    const nextAction = newRecordingActionName();
-    actionRef.current = nextAction;
-    setAction(nextAction);
-    // “开始录制” always creates a new logical recording.  Only the automatic
-    // reconnect path may reuse the opaque server resume id; otherwise a fresh
-    // run can accidentally reopen the previous run's browser/draft snapshot.
-    const targetUrl = startUrl.trim();
-    const recordingSubsystem = subsystemFromUrl(subsystem, targetUrl);
-    sessionStartUrlRef.current = targetUrl;
-    sessionSubsystemRef.current = recordingSubsystem;
-    const piRecordingScope = piRecordingStorageKey(tenant, recordingSubsystem, targetUrl);
-    clearPiRecordingId(piRecordingScope);
-    piRecordingScopeRef.current = piRecordingScope;
-    piRecordingIdRef.current = null;
-    setReconnectedSessionNeedsCapture(false);
-    setRecordingStopped(false);
-    terminatingRef.current = false;
-    setTerminating(false);
-    setConnectionState("connecting");
-    setPhase("recording");
-    setWorkspaceStage(1);
-    openRecorderConnection(false);
-  }
-
-  function resetFrameStreamForReconnect() {
-    // Keep the currently painted image as a stable fallback, but invalidate all
-    // in-flight decoders and the old session's sequence numbers. A replacement
-    // RecordSession starts again at frame 1.
-    frameDecodeGenerationRef.current += 1;
-    frameDecodeBusyRef.current = false;
-    latestFrameRef.current = null;
-    renderedFrameSeqRef.current = 0;
-    if (frameRafRef.current != null) window.cancelAnimationFrame(frameRafRef.current);
-    frameRafRef.current = null;
-  }
-
-  function scheduleRecorderReconnect() {
-    if (intentionalCloseRef.current || reconnectTimerRef.current != null || !tenant || !sessionStartUrlRef.current) return;
-    const attempt = ++reconnectAttemptRef.current;
-    const delay = Math.min(1000 * (2 ** Math.min(attempt - 1, 4)), 15000);
-    setConnectionState("reconnecting");
-    reconnectTimerRef.current = window.setTimeout(() => {
-      reconnectTimerRef.current = null;
-      if (intentionalCloseRef.current || wsRef.current) return;
-      openRecorderConnection(true);
-    }, delay);
-  }
-
-  function openRecorderConnection(isReconnect = false) {
-    if (isReconnect) resetFrameStreamForReconnect();
-    const targetUrl = sessionStartUrlRef.current || startUrl.trim();
-    const recordingSubsystem = sessionSubsystemRef.current || subsystemFromUrl(subsystem, targetUrl);
-    const piRecordingScope = piRecordingStorageKey(tenant, recordingSubsystem, targetUrl);
-    if (piRecordingScopeRef.current !== piRecordingScope) {
-      piRecordingScopeRef.current = piRecordingScope;
-      piRecordingIdRef.current = readPiRecordingId(piRecordingScope);
+    const patchRevision = republishAfterRevisionRef.current;
+    if (patchRevision !== null && next.revision > patchRevision && next.status === "editable") {
+      republishAfterRevisionRef.current = null;
+      setPendingEdits([]);
+      setLocalValues({});
+      send({ type: "republish", title: next.title || title });
     }
-    const piRecordingId = piRecordingIdRef.current;
-    intentionalCloseRef.current = false;
-    sessionStartedRef.current = false;
-    connectionErrorRef.current = "";
-    wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
-    const ws = new WebSocket(recorderWebSocketUrl(reconnectAttemptRef.current));
-    wsRef.current = ws;
-    ws.onopen = () => {
-      if (wsRef.current !== ws) return;
-      send({
-        type: "start", tenant, subsystem: recordingSubsystem, start_url: targetUrl,
+  }
+
+  function startRecording() {
+    if (!tenant) {
+      message.error("请先选择租户");
+      return;
+    }
+    if (!startUrl.trim() || !goalText.trim()) {
+      message.error("请填写业务页地址和录制目标");
+      return;
+    }
+    if (wsRef.current) return;
+    const action = newActionName();
+    actionRef.current = action;
+    setConnecting(true);
+    setRequests([]);
+    setSnapshot(null);
+    setPendingEdits([]);
+    setLocalValues({});
+    setHasFrame(false);
+    setTitle("");
+    setVisibleStage(1);
+    renderedFrameRef.current = 0;
+    latestFrameRef.current = null;
+    frameGenerationRef.current += 1;
+
+    const socket = new WebSocket(recorderWebSocketUrl());
+    wsRef.current = socket;
+    socket.onopen = () => {
+      setConnected(true);
+      setConnecting(false);
+      socket.send(JSON.stringify({
+        type: "start",
+        tenant,
+        subsystem,
+        start_url: startUrl.trim(),
         goal_text: goalText.trim(),
         base_url: baseUrl.trim() || undefined,
-        storage_state: storageState.trim() || undefined,
-        intercept: false,
-        pi_recording_id: piRecordingId || undefined,
-        resume_action: actionRef.current,
-      });
+        storage_state: parseStorageState(storageState),
+        resume_action: action,
+      }));
     };
-    ws.onmessage = (ev) => {
-      if (wsRef.current !== ws) return;
-      let m: any; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.flow_spec && m.protocol_version !== RECORDING_FLOW_PROTOCOL_VERSION) {
-        const detail = `不支持的录制协议版本：${m.protocol_version ?? "missing"}`;
-        connectionErrorRef.current = detail;
-        setErr(detail); message.error(detail); return;
-      }
-      const issuedPiRecordingId = piRecordingIdFromMessage(m);
-      if (issuedPiRecordingId) {
-        piRecordingScopeRef.current = piRecordingScope;
-        piRecordingIdRef.current = issuedPiRecordingId;
-        writePiRecordingId(piRecordingScope, issuedPiRecordingId);
-      }
-      if (m.type === "started") {
-        sessionStartedRef.current = true;
-        reconnectAttemptRef.current = 0;
-        setErr("");
-        const serverAction = m.action ?? m.action_name;
-        if (typeof serverAction === "string" && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(serverAction)) {
-          actionRef.current = serverAction;
-          setAction(serverAction);
-        }
-        setPhase("recording");
-        setConnectionState("connected");
-        updateAgentStatus({ state: "ready", text: "录制助手已连接，捕获到业务请求后会自动分析" });
-        setRecordingStopped(Boolean(m.recording_paused));
-        // The server draft is authoritative across a transient WebSocket
-        // reconnect.  In particular, an ability plan may have completed just
-        // before a 1006 close; restoring the older local empty draft here used
-        // to erase that successful first result.
-        const resumedServerSpec = m.resumed_server_draft && m.flow_spec ? m.flow_spec : null;
-        if (resumedServerSpec) {
-          acceptFlowSpec(resumedServerSpec);
-          if (m.check_report) setCheckReport(m.check_report);
-          reconnectRestoreOperationRef.current = null;
-          setReconnectedSessionNeedsCapture(false);
-          if (isReconnect) message.success("录制连接和最新能力已自动恢复");
-          if (isReconnect) resumeFlowOperationAfterReconnect(resumedServerSpec);
-        } else if (isReconnect && flowSpecRef.current) {
-          flowMutationInFlightRef.current = null;
-          flowMutationQueueRef.current = [];
-          afterFlowSyncRef.current = null;
-          reconnectRestoreOperationRef.current = null;
-          clearFlowOperation();
-          setReconnectedSessionNeedsCapture(true);
-          message.warning("服务端未找到可恢复草稿，请重新触发目标操作并分析");        } else {
-          reconnectRestoreOperationRef.current = null;
-          if (isReconnect) clearFlowOperation();
-          setReconnectedSessionNeedsCapture(isReconnect);
-          if (isReconnect) message.success("录制连接已自动恢复");
-        }
-      }
-      else if (m.type === "pong") return;
-      else if (m.type === "stopped") {
-        setRecordingStopped(true);
-        message.success("录制已结束，连接和当前分析结果继续保留");
-      }
-      else if (m.type === "analysis_terminated") {
-        terminatingRef.current = false;
-        setTerminating(false);
-        finalizeOperationRef.current = null;
-        publishOperationRef.current = null;
-        clearFlowOperation();
-        verifyProgressRef.current = [];
-        setVerifyProgress([]);
-        setAgentQuestions((items) => items.filter((item) => item.answered));
-        setAgentAnswerDrafts({});
-        updateAgentStatus({ state: "ready", text: "当前分析已终止，录制和草稿已保留" });
-        if (phaseRef.current === "publishing") setPhase("recording");
-        if (m.already_completed) message.info("当前操作已经完成，录制和草稿已保留");
-        else message.success("当前分析已终止，录制和草稿已保留");
-      }
-      else if (m.type === "frame") {
-        queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
-        // A fresh frame proves the replacement RecordSession is active. This also keeps
-        // GET-only recordings analyzable after reconnect, where no write callback exists.
-        setReconnectedSessionNeedsCapture(false);
-      }
-      else if (m.type === "request") {
-        if (!hasRequestsRef.current) {
-          hasRequestsRef.current = true;
-          setHasRequests(true);
-        }
-        // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
-        setReconnectedSessionNeedsCapture(false);
-      }
-      else if (m.type === "agent_question") {
-        const question: AgentQuestion = {
-          question_id: String(m.question_id || ""),
-          issue_id: String(m.issue_id || ""),
-          operation_id: String(m.operation_id || ""),
-          text: String(m.text || ""),
-          options: Array.isArray(m.options) ? m.options.map(String) : [],
-          context_ref: String(m.context_ref || ""),
-        };
-        if (question.question_id && question.text) {
-          setAgentQuestions((items) => [
-            ...items.filter((item) => item.question_id !== question.question_id),
-            question,
-          ].slice(-20));
-          showRecordingAssistant();
-        }
-      }
-      else if (m.type === "agent_insight") {
-        if (m.text) {
-          agentInsightsRef.current = [...agentInsightsRef.current, {
-            kind: m.kind || "goal",
-            text: String(m.text),
-            refs: Array.isArray(m.refs) ? m.refs.map(String) : [],
-          }].slice(-60);
-          if (assistantOpenRef.current) setAgentInsights(agentInsightsRef.current);
-        }
-      }
-      else if (m.type === "agent_status") {
-        if (m.text) {
-          const state = ["waiting", "analyzing", "ready", "error"].includes(m.state)
-            ? m.state as AgentStatus["state"] : "ready";
-          updateAgentStatus({ state, text: String(m.text) });
-        }
-      }
-      else if (m.type === "verify_progress") {
-        appendVerifyProgress({
-          stage: String(m.stage || "verifying"),
-          detail: String(m.detail || "正在验证"),
-          round: Number(m.round || 0),
-          pending: Number(m.pending || 0),
-          confirmed_links: Number(m.confirmed_links || 0),
-          verify_coverage: Number(m.verify_coverage || 0),
-          write_count: Number(m.write_count || 0),
-        });
-        setPhase("publishing");
-      }
-      else if (m.type === "flow_spec") {
-        const restoredAfterReconnect = !!reconnectRestoreOperationRef.current
-          && m.operation_id === reconnectRestoreOperationRef.current;
-        if (restoredAfterReconnect) {
-          reconnectRestoreOperationRef.current = null;
-          setReconnectedSessionNeedsCapture(false);
-          message.success("录制连接及编辑内容已自动恢复");
-        }
-        if (m.operation === "finalize") {
-          finalizeOperationRef.current = null;
-          updateAgentStatus({ state: "analyzing", text: "请求抓取完成，正在生成、验证并发布能力…" });
-          setLastAnalysisEvidence(null);
-          setLastOperationReport(null);
-          setShowAllAnalysisChanges(false);
-        }
-        // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
-        // loading/状态提前重置,否则用户看到按钮闪退但后端仍在发布。
-        if (phaseRef.current !== "publishing") setPhase("recording");
-        const fs = m.flow_spec;
-        const acknowledgesActiveMutation = m.operation === "flow_update"
-          && (!m.operation_id || m.operation_id === flowMutationInFlightRef.current?.operation_id);
-        const hasNewerLocalMutation = acknowledgesActiveMutation && flowMutationQueueRef.current.length > 0;
-        if (fs) {
-          // Even when a newer optimistic edit is already queued, its patch must
-          // use the fingerprint acknowledged by this server response.
-          serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
-          authoritativeFlowSpecRef.current = withStableParamFieldIds(fs);
-          // Every field mutation is serialized, but the user may already have made
-          // a newer local edit while the previous response is in flight.  Do not
-          // repaint that older snapshot over the newer draft.  The final queued
-          // response contains the complete server state and is accepted normally.
-          if (!hasNewerLocalMutation) acceptFlowSpec(fs);
-          finishFlowOperation(fs.meta?.recording_agent_session, m.operation, m.operation_id);
-        }
-        if (restoredAfterReconnect && fs) resumeFlowOperationAfterReconnect(fs);
-        if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
-        else if (hasNewerLocalMutation) setCheckReport(null);
-        if (m.operation === "plan" && (m.analysis_application || m.analysis_evidence)) {
-          const application = m.analysis_application || {
-            ...m.analysis_evidence,
-            status: m.operation_report?.changed ? "applied" : "no_change",
-            summary: m.operation_report?.summary,
-            changes: m.operation_report?.changes,
-          };
-          setShowAllAnalysisChanges(false);
-          setLastAnalysisEvidence(application);
-          updateAgentStatus({
-            state: application.status === "rejected" ? "error" : "ready",
-            text: application.summary || "能力分析已完成",
-          });
-        }
-        // A successful server mutation produces a new validation snapshot.
-        // Do not keep rendering clarifications from an older failed publish;
-        // fixed or explicitly ignored warnings must disappear with that old
-        // result as soon as the authoritative update is acknowledged.
-        if (!hasNewerLocalMutation && ["flow_update", "plan", "repair"].includes(String(m.operation || ""))) {
-          setResult(null);
-        }
-        if (m.operation_report) {
-          const report = m.operation_report as FlowOperationReport;
-          setLastOperationReport(report);
-          if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
-          else if (!report.changed) message.info(report.summary || "检查完成，没有可自动修改的内容");
-        }
-        if (m.operation_warning) {
-          message.warning(
-            m.analysis_application?.summary
-            || `模型分析未完成，未修改当前配置：${m.operation_warning}`,
-          );
-        }
-        if (m.operation === "flow_update") finishQueuedFlowMutation(m.operation_id);
-      }
-      else if (m.type === "input_error") {
-        const now = Date.now();
-        if (now - lastInputErrorNoticeRef.current >= 2000) {
-          lastInputErrorNoticeRef.current = now;
-          message.warning(m.detail || "本次页面操作未执行，请稍后重试");
-        }
-      }
-      else if (m.type === "result") {
-        publishOperationRef.current = null;
-        finalizeOperationRef.current = null;
-        if (m.flow_spec) acceptFlowSpec(m.flow_spec);
-        setResult(m.report); setPhase("recording");
-        const resultCapabilities = Array.isArray(m.flow_spec?.capabilities)
-          ? m.flow_spec.capabilities
-          : (flowSpecRef.current?.capabilities || []);
-        if (resultCapabilities.length > 0) {
-          setWorkspaceStage(2);
-        } else {
-          updateAgentStatus({
-            state: "error",
-            text: String(m.report?.reason || "分析已结束，但没有生成可用能力"),
-          });
-          showRecordingAssistant();
-        }
-        if (m.report?.ok && m.report?.lifecycle_pending) {
-          message.warning(m.report.lifecycle_message || "资产已发布，生命周期登记待补偿");
-        }
-        if (m.check_report || m.report?.check_report) {
-          setCheckReport(m.check_report || m.report.check_report);
-        }
-      }
-      else if (m.type === "error") {
-        const detail = m.detail || "录制出错";
-        if (retryFlowMutationAfterConflict(m)) return;
-        updateAgentStatus({ state: "error", text: String(detail) });
-        // Operation failures belong to the workbench, not the transport. Keep
-        // the socket healthy so a rejected Pi proposal cannot poison reconnect.
-        if (!m.operation) connectionErrorRef.current = detail;
-        clearFlowOperation();
-        publishOperationRef.current = null;
-        finalizeOperationRef.current = null;
-        if (m.operation === "publish") {
-          setPhase("recording");
-          setWorkspaceStage(2);
-        } else if (m.operation === "plan") {
-          setPhase("recording");
-          showRecordingAssistant();
-        }
-        if (m.flow_spec) acceptFlowSpec(m.flow_spec);
-        if (m.check_report) setCheckReport(m.check_report);
-        if (m.operation === "plan" && m.analysis_application) {
-          setLastAnalysisEvidence(m.analysis_application);
-          setLastOperationReport(null);
-        }
-        if (m.operation === "flow_update") failQueuedFlowMutation(m.operation_id, !m.flow_spec);
-        if (reconnectRestoreOperationRef.current && m.operation_id === reconnectRestoreOperationRef.current) {
-          reconnectRestoreOperationRef.current = null;
-          setReconnectedSessionNeedsCapture(true);
-        }
-        if (m.operation === "flow_update" && !m.flow_spec) {
-          sendRaw({ type: "refresh_flow_spec" });
-        }
-        if (detail.includes("step not found") || detail.includes("link not found")) {
-          message.warning("流程已变更，正在同步最新版本");
-          sendRaw({ type: "refresh_flow_spec" });
-        } else {
-          message.error(detail);
-          setErr(detail);
-        }
-      }
-    };
-    ws.onclose = (event) => {
-      if (wsRef.current !== ws) return;
-      if (!intentionalCloseRef.current && event.code !== 1000 && !connectionErrorRef.current) {
-        const reason = event.reason ? `：${event.reason}` : "";
-        connectionErrorRef.current = `录制连接异常关闭（代码 ${event.code || 1006}）${reason}`;
-      }
-      const hadStarted = sessionStartedRef.current;
-      sessionStartedRef.current = false;
-      wsRef.current = null;
-      wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
-      pointerGestureRef.current = null;
-      pendingPointerMoveRef.current = null;
-      if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-      pointerMoveTimerRef.current = null;
-      lastPointerClickRef.current = null;
-      finalizeOperationRef.current = null;
-      publishOperationRef.current = null;
-      failQueuedFlowMutation(undefined, true);
-      pauseFlowOperationForReconnect();
-      if (terminatingRef.current) {
-        terminatingRef.current = false;
-        setTerminating(false);
-      }
-      if (intentionalCloseRef.current && !componentMountedRef.current) {
-        setConnectionState("idle");
-        clearFlowOperation();
+    socket.onmessage = (event) => {
+      let incoming: Record<string, unknown>;
+      try {
+        incoming = JSON.parse(String(event.data));
+      } catch {
         return;
       }
-      // React Fast Refresh tears down and recreates effects without closing the
-      // page. The old cleanup closes this socket, but the mounted component must
-      // treat that close as transient and resume the recording session.
-      intentionalCloseRef.current = false;
-      reconnectRestoreOperationRef.current = null;
-      if (phaseRef.current === "publishing") setPhase("recording");
-      setErr((current) => current || connectionErrorRef.current || (hadStarted
-        ? "录制连接已断开，正在自动恢复，现场和编辑内容已保留"
-        : "录制服务暂时不可用，正在自动连接"));
-      scheduleRecorderReconnect();
-    };
-    ws.onerror = () => {
-      if (wsRef.current === ws && !connectionErrorRef.current) {
-        connectionErrorRef.current = "WebSocket 连接失败，当前画面和已录步骤已保留";
-        setErr(connectionErrorRef.current);
+      if (incoming.type === "snapshot" && incoming.snapshot) {
+        receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
+      } else if (incoming.type === "frame") {
+        queueFrame(incoming);
+      } else if (incoming.type === "request" && incoming.request) {
+        setRequests((current) => [...current.slice(-199), incoming.request as Record<string, unknown>]);
+      } else if (incoming.type === "input_error") {
+        message.warning(String(incoming.detail || "页面操作没有执行"));
+      } else if (incoming.type === "error") {
+        republishAfterRevisionRef.current = null;
+        message.error(String(incoming.detail || "录制处理失败"));
       }
+    };
+    socket.onerror = () => message.error("无法连接录制服务");
+    socket.onclose = () => {
+      if (wsRef.current === socket) wsRef.current = null;
+      setConnected(false);
+      setConnecting(false);
     };
   }
 
-  function pointerButton(button: number) {
-    if (button === 1) return "middle";
-    if (button === 2) return "right";
-    return "left";
+  function finishRecording() {
+    setAssistantOpen(true);
+    send({ type: "finish", title: title.trim() });
   }
+
+  function cancelProcessing() {
+    send({ type: "cancel" });
+  }
+
+  function answerQuestion(value?: string) {
+    const question = snapshot?.question;
+    const finalAnswer = String(value ?? answer).trim();
+    if (!question || !finalAnswer) return;
+    if (send({ type: "answer", question_id: question.question_id, answer: finalAnswer })) {
+      setAnswer("");
+    }
+  }
+
+  function editKey(stepId: string, path: string, field: string) {
+    return `${stepId}\u0000${path}\u0000${field}`;
+  }
+
+  function paramValue(step: FlowStep, param: FlowParam, field: keyof FlowParam) {
+    const key = editKey(step.step_id, param.path, String(field));
+    return Object.prototype.hasOwnProperty.call(localValues, key)
+      ? localValues[key]
+      : param[field];
+  }
+
+  function updateParam(step: FlowStep, param: FlowParam, field: keyof FlowParam, value: unknown) {
+    const key = editKey(step.step_id, param.path, String(field));
+    setLocalValues((current) => ({ ...current, [key]: value }));
+    setPendingEdits((current) => [
+      ...current.filter((edit) => !(
+        edit.op === "update"
+        && edit.step_id === step.step_id
+        && edit.param_path === param.path
+        && edit.field === field
+      )),
+      {
+        op: "update",
+        actor: "user",
+        step_id: step.step_id,
+        param_path: param.path,
+        field,
+        value,
+      },
+    ]);
+  }
+
+  function updateCapability(capability: FlowCapability, field: "name" | "title" | "intent", value: string) {
+    const reference = String(capability.capability_id || capability.name || "");
+    const key = `capability\u0000${reference}\u0000${field}`;
+    setLocalValues((current) => ({ ...current, [key]: value }));
+    setPendingEdits((current) => [
+      ...current.filter((edit) => !(
+        edit.op === "update_capability"
+        && (edit.capability_id === capability.capability_id || edit.capability_name === capability.name)
+        && edit.field === field
+      )),
+      {
+        op: "update_capability",
+        actor: "user",
+        capability_id: capability.capability_id,
+        capability_name: capability.name,
+        field,
+        value,
+      },
+    ]);
+  }
+
+  function capabilityValue(capability: FlowCapability, field: "name" | "title" | "intent") {
+    const reference = String(capability.capability_id || capability.name || "");
+    const key = `capability\u0000${reference}\u0000${field}`;
+    return Object.prototype.hasOwnProperty.call(localValues, key)
+      ? String(localValues[key] || "")
+      : String(capability[field] || "");
+  }
+
+  function republish() {
+    if (!snapshot || !draft || processing) return;
+    if (pendingEdits.length) {
+      republishAfterRevisionRef.current = snapshot.revision;
+      send({
+        type: "patch_draft",
+        edits: pendingEdits,
+        expected_revision: snapshot.revision,
+        expected_fingerprint: snapshot.draft_fingerprint,
+      });
+      return;
+    }
+    send({ type: "republish", title: title.trim() });
+  }
+
   function normalizedPoint(clientX: number, clientY: number) {
-    const img = frameCanvasRef.current;
-    if (!img) return null;
-    const rect = img.getBoundingClientRect();
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
     return {
       nx: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
       ny: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
     };
   }
-  function sendPendingPointerMove() {
-    pointerMoveTimerRef.current = null;
-    const event = pendingPointerMoveRef.current;
-    pendingPointerMoveRef.current = null;
-    if (event) send({ type: "input", event });
+
+  function pointerButton(button: number) {
+    return button === 1 ? "middle" : button === 2 ? "right" : "left";
   }
-  function queuePointerMove(event: Record<string, unknown>) {
-    pendingPointerMoveRef.current = event;
-    if (pointerMoveTimerRef.current != null) return;
-    // Coalesce display-rate pointer events while keeping remote hover and drag
-    // responsive. The backend and frame sender both drop superseded work.
-    pointerMoveTimerRef.current = window.setTimeout(sendPendingPointerMove, POINTER_MOVE_INTERVAL_MS);
-  }
-  function sendPendingWheel() {
-    wheelTimerRef.current = null;
-    const event = pendingWheelRef.current;
-    pendingWheelRef.current = null;
-    if (event) send({ type: "input", event: { kind: "scroll", ...event } });
-  }
-  function onImgPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (connectionState !== "connected" || e.button < 0) return;
-    const point = normalizedPoint(e.clientX, e.clientY);
+
+  function onPointerDown(event: PointerEvent<HTMLCanvasElement>) {
+    if (!connected || status !== "recording") return;
+    const point = normalizedPoint(event.clientX, event.clientY);
     if (!point) return;
-    e.preventDefault();
-    // pointer_down already carries the final coordinates. Drop an older hover
-    // move so it cannot be dispatched after the press and delay the click.
-    pendingPointerMoveRef.current = null;
-    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-    pointerMoveTimerRef.current = null;
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* pointer capture may be unavailable */ }
-    const button = pointerButton(e.button);
-    const previous = lastPointerClickRef.current;
-    const now = performance.now();
-    const clickCount = button === "left" && previous?.button === button && previous.clickCount === 1
-      && now - previous.at <= 350
-      && Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY) <= 8
-      ? 2
-      : 1;
-    pointerGestureRef.current = {
-      pointerId: e.pointerId,
+    event.preventDefault();
+    const button = pointerButton(event.button);
+    pointerRef.current = { pointerId: event.pointerId, button };
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* no-op */ }
+    send({ type: "input", event: { kind: "pointer_down", ...point, button, buttons: event.buttons } });
+    keyboardRef.current?.focus({ preventScroll: true });
+  }
+
+  function onPointerMove(event: PointerEvent<HTMLCanvasElement>) {
+    if (!connected || status !== "recording") return;
+    const point = normalizedPoint(event.clientX, event.clientY);
+    if (!point) return;
+    pointerMoveRef.current = { kind: "pointer_move", ...point, buttons: event.buttons };
+    if (pointerTimerRef.current !== null) return;
+    pointerTimerRef.current = window.setTimeout(() => {
+      pointerTimerRef.current = null;
+      const move = pointerMoveRef.current;
+      pointerMoveRef.current = null;
+      if (move) send({ type: "input", event: move });
+    }, 50);
+  }
+
+  function onPointerUp(event: PointerEvent<HTMLCanvasElement>) {
+    const pointer = pointerRef.current;
+    if (!pointer || pointer.pointerId !== event.pointerId) return;
+    pointerRef.current = null;
+    const point = normalizedPoint(event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    send({
+      type: "input",
+      event: { kind: "pointer_up", ...point, button: pointer.button, buttons: event.buttons },
+    });
+  }
+
+  function onWheel(event: WheelEvent<HTMLCanvasElement>) {
+    if (!connected || status !== "recording") return;
+    event.preventDefault();
+    const point = normalizedPoint(event.clientX, event.clientY) || {};
+    const current = wheelRef.current || { dx: 0, dy: 0 };
+    wheelRef.current = {
+      dx: current.dx + event.deltaX,
+      dy: current.dy + event.deltaY,
       ...point,
-      clientX: e.clientX,
-      clientY: e.clientY,
-      button,
-      buttons: e.buttons,
-      pointerType: e.pointerType || "mouse",
-      dragging: false,
-      clickCount,
     };
-    // Forward the press immediately. Waiting to decide between click and
-    // double-click made every button feel delayed and prevented press-driven
-    // lazy loaders from starting until 250 ms later.
-    send({
-      type: "input",
-      event: {
-        kind: "pointer_down", ...point, button, buttons: e.buttons,
-        pointer_type: e.pointerType || "mouse", click_count: clickCount,
-      },
-    });
-    kbRef.current?.focus({ preventScroll: true });
+    if (wheelTimerRef.current !== null) return;
+    wheelTimerRef.current = window.setTimeout(() => {
+      wheelTimerRef.current = null;
+      const wheel = wheelRef.current;
+      wheelRef.current = null;
+      if (wheel) send({ type: "input", event: { kind: "scroll", ...wheel } });
+    }, 50);
   }
-  function onImgPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (connectionState !== "connected") return;
-    const point = normalizedPoint(e.clientX, e.clientY);
-    if (!point) return;
-    const gesture = pointerGestureRef.current;
-    if (gesture?.pointerId === e.pointerId && !gesture.dragging) {
-      const distance = Math.hypot(e.clientX - gesture.clientX, e.clientY - gesture.clientY);
-      if (distance >= 5) {
-        gesture.dragging = true;
-        lastPointerClickRef.current = null;
-      }
-    }
-    queuePointerMove({
-      kind: "pointer_move", ...point, buttons: e.buttons, pointer_type: e.pointerType || "mouse",
-    });
-    if (gesture?.dragging) e.preventDefault();
+
+  function relayText(element: HTMLInputElement) {
+    if (!element.value) return;
+    send({ type: "input", event: { kind: "text", text: element.value } });
+    element.value = "";
   }
-  function onImgPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
-    const gesture = pointerGestureRef.current;
-    if (!gesture || gesture.pointerId !== e.pointerId) return;
-    pointerGestureRef.current = null;
-    const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
-    e.preventDefault();
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
-    if (pointerMoveTimerRef.current != null) {
-      window.clearTimeout(pointerMoveTimerRef.current);
-      sendPendingPointerMove();
-    }
-    send({
-      type: "input",
-      event: {
-        kind: "pointer_up", ...point, button: gesture.button, buttons: e.buttons,
-        pointer_type: gesture.pointerType, click_count: gesture.clickCount,
-      },
-    });
-    lastPointerClickRef.current = gesture.dragging ? null : {
-      at: performance.now(), clientX: e.clientX, clientY: e.clientY,
-      button: gesture.button, clickCount: gesture.clickCount,
+
+  function onKeyboardInput(event: FormEvent<HTMLInputElement>) {
+    if (composingRef.current) return;
+    relayText(event.currentTarget);
+  }
+
+  function onKeyboardDown(event: KeyboardEvent<HTMLInputElement>) {
+    const simpleKeys: Record<string, string> = {
+      Backspace: "Backspace", Delete: "Delete", Enter: "Enter", Tab: "Tab",
+      Escape: "Escape", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
+      ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Home: "Home", End: "End",
+      PageUp: "PageUp", PageDown: "PageDown",
     };
+    const key = simpleKeys[event.key];
+    if (!key) return;
+    if (key === "Backspace") lastBackspaceRef.current = performance.now();
+    send({ type: "input", event: { kind: "key", key } });
+    event.preventDefault();
   }
-  function onImgPointerCancel(e: React.PointerEvent<HTMLCanvasElement>) {
-    const gesture = pointerGestureRef.current;
-    if (!gesture || gesture.pointerId !== e.pointerId) return;
-    pointerGestureRef.current = null;
-    pendingPointerMoveRef.current = null;
-    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-    pointerMoveTimerRef.current = null;
-    lastPointerClickRef.current = null;
-    const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
-    send({
-      type: "input",
-      event: {
-        kind: "pointer_up", ...point, button: gesture.button, buttons: 0,
-        pointer_type: gesture.pointerType, click_count: gesture.clickCount,
-      },
-    });
-  }
-  function onImgWheel(e: React.WheelEvent<HTMLCanvasElement>) {
-    if (connectionState !== "connected") return;
-    const point = normalizedPoint(e.clientX, e.clientY);
-    e.preventDefault();
-    const previous = pendingWheelRef.current;
-    pendingWheelRef.current = {
-      dx: (previous?.dx || 0) + e.deltaX,
-      dy: (previous?.dy || 0) + e.deltaY,
-      ...(point || {}),
-    };
-    if (wheelTimerRef.current == null) {
-      wheelTimerRef.current = window.setTimeout(sendPendingWheel, POINTER_MOVE_INTERVAL_MS);
-    }
-  }
-  function relayKb(el: HTMLInputElement) {
-    const v = el.value;
-    if (v) {
-      send({ type: "input", event: { kind: "text", text: v } });
-      el.value = "";
-    }
-  }
-  function onKbInput(e: React.FormEvent<HTMLInputElement>) {
-    const ne = e.nativeEvent as { isComposing?: boolean };
-    if (ne.isComposing || isComposingRef.current) return;         // FH2:原生 + ref 双保险
-    relayKb(e.currentTarget);
-  }
-  function onKbCompositionStart(_e: React.CompositionEvent<HTMLInputElement>) {
-    // FH2 修复:compositionStart 显式标记 isComposing=true;某些浏览器在 CompositionStart→Input 之间 isComposing
-    // 可能短暂为 false,导致 onKbInput 误发未拼写完的中间字符(显示"拼字"而不是中文)→ ref 守门
-    isComposingRef.current = true;
-  }
-  function onKbCompositionUpdate(_e: React.CompositionEvent<HTMLInputElement>) {
-    isComposingRef.current = true;
-  }
-  function onKbCompositionEnd(e: React.CompositionEvent<HTMLInputElement>) {
-    isComposingRef.current = false;
-    relayKb(e.currentTarget);
-  }
-  function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    const key = recorderKeyName(e);
-    if (key) {
-      if (key === "Backspace") lastBackspaceKeydownAtRef.current = performance.now();
-      send({ type: "input", event: { kind: "key", key } });
-      e.preventDefault();
-    }
-  }
-  function onKbBeforeInput(e: React.FormEvent<HTMLInputElement>) {
-    const inputEvent = e.nativeEvent as InputEvent;
+
+  function onBeforeInput(event: FormEvent<HTMLInputElement>) {
+    const inputEvent = event.nativeEvent as InputEvent;
     if (inputEvent.inputType !== "deleteContentBackward") return;
-    // Chromium normally emits keydown first. Mobile/IME paths can emit only
-    // beforeinput; relay that case without duplicating a normal Backspace.
-    if (performance.now() - lastBackspaceKeydownAtRef.current > 80) {
+    if (performance.now() - lastBackspaceRef.current > 80) {
       send({ type: "input", event: { kind: "key", key: "Backspace" } });
     }
-    e.preventDefault();
-  }
-  function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
-    const text = e.clipboardData.getData("text");
-    if (text) {
-      send({ type: "input", event: { kind: "text", text } });
-      e.preventDefault();
-      e.currentTarget.value = "";
-    }
+    event.preventDefault();
   }
 
-  function resetFromHere() {
-    send({ type: "reset" });
-    setRecordingStopped(false);
-    setResult(null); resetEditorState();
-    message.success("已清空，从现在起只录业务步骤");
-  }
-  function finalize() {
-    if (finalizeOperationRef.current) return;
-    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
-      message.warning("请先在当前录制会话中重新触发并抓取提交请求");
-      return;
-    }
-    if (!action.trim() || badAction(action.trim())) return;
-    if (!hasFrame && !hasRequests) { message.error("还没有可分析的页面画面或请求"); return; }
-    showRecordingAssistant();
-    const operationId = newCostlyOperationId("finalize");
-    finalizeOperationRef.current = operationId;
-    verifyProgressRef.current = [];
-    setResult(null); setVerifyProgress([]); setPhase("publishing");
-    updateAgentStatus({ state: "analyzing", text: "正在汇总录制请求并生成能力分析…" });
-    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim() })) {
-      finalizeOperationRef.current = null;
-      setPhase("recording");
-    }
-  }
-  function badAction(a: string) {
-    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
-    return false;
-  }
-  function publishRequest() {
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    if (!action.trim() || badAction(action.trim())) return;
-    runAfterFlowSync(performPublishRequest);
-  }
-  function performPublishRequest() {
-    if (publishOperationRef.current) return;
-    const currentSpec = flowSpecRef.current || flowSpec;
-    if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
-    const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
-    const operationId = newCostlyOperationId("publish");
-    publishOperationRef.current = operationId;
-    // Keep the previous result until this operation receives its own reply.
-    // Clearing it here made the base validator's green state look like an
-    // instantaneous publish success while the backend was still reviewing.
-    setPhase("publishing");
-    if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle, reverify: true,
-      expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
-      publishOperationRef.current = null;
-      setPhase("recording");
-      setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
-    }
-  }
-  function terminateAll() {
-    terminatingRef.current = true;
-    setTerminating(true);
-    const operationId = publishOperationRef.current
-      || finalizeOperationRef.current
-      || flowOperationRef.current?.operationId
-      || "";
-    if (sendRaw({ type: "terminate", operation_id: operationId })) {
-      message.info("正在终止当前分析…");
-      return;
-    }
-    terminatingRef.current = false;
-    setTerminating(false);
-    message.warning("连接尚未恢复，暂时无法终止");
-  }
-
-  function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
-  function paramDraftKey(stepId: string, p: FlowParam) {
-    return `${stepId}:${p.field_id || `${p.path || ""}:${p.key || ""}:${p.label || ""}`}`;
-  }
-  function paramEdit(stepId: string, p: FlowParam, field: string, value: any) {
-    return {
-      op: "update",
-      step_id: stepId,
-      field_id: p.field_id,
-      param_path: p.path || p.key || p.label,
-      param_key: p.key,
-      param_label: p.label || p.key,
-      field,
-      value,
-    };
-  }
-  function paramRemoveEdit(stepId: string, p: FlowParam) {
-    return {
-      op: "remove",
-      step_id: stepId,
-      field_id: p.field_id,
-      param_path: p.path || p.key || p.label,
-      param_key: p.key,
-      param_label: p.label || p.key,
-    };
-  }
-  function removeParam(stepId: string, p: FlowParam) {
-    const edit = paramRemoveEdit(stepId, p);
-    if (!send({ type: "flow_update", edits: [edit] })) return;
-
-    // 删除立即反映到页面；服务端响应会用权威脱敏投影确认或回滚。
-    // 同时清理依赖和选择器，避免字段卡片消失后仍残留不可见引用。
-    const current = flowSpecRef.current;
-    if (!current) return;
-    const currentStep = (current.steps || []).find((step) => step.step_id === stepId);
-    const next: FlowSpecData = {
-      ...current,
-      steps: (current.steps || []).map((step) => {
-        if (step.step_id !== stepId) return step;
-        const sampleInputs = { ...(step.sample_inputs || {}) };
-        delete sampleInputs[p.key];
-        return {
-          ...step,
-          params: (step.params || []).filter((candidate) => !paramMatches(candidate, p)),
-          selects: (step.selects || []).filter((binding) => !selectBindingMatchesParam(step, binding, p)),
-          identity: (step.identity || []).filter((binding) =>
-            !referenceMatchesParam(step, String(binding?.path || ""), p)),
-          sample_inputs: sampleInputs,
-        };
-      }),
-      links: (current.links || []).filter((link) =>
-        !(link.target_step_id === stepId && currentStep
-          && referenceMatchesParam(currentStep, link.target_path || "", p))),
-      capabilities: (current.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
-        ? { ...cap, confirmed: false }
-        : cap),
-    };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    setCheckReport(null);
-  }
-  function paramMatches(a: FlowParam, b: FlowParam) {
-    if (a.field_id && b.field_id) return a.field_id === b.field_id;
-    const ap = String(a.path || "");
-    const bp = String(b.path || "");
-    if (ap && bp && ap === bp) return true;
-    if (!ap && !bp && a.key && b.key && a.key === b.key) return true;
-    if (!ap && !bp && a.label && b.label && a.label === b.label) return true;
-    return false;
-  }
-  function referenceMatchesParam(step: FlowStepData, referencePath: string, p: FlowParam) {
-    const reference = String(referencePath || "");
-    if (!reference) return false;
-    if (reference === String(p.path || "")) return true;
-    const normalized = stripBodyPrefix(reference);
-    const matches = (step.params || []).filter((candidate) =>
-      stripBodyPrefix(candidate.path || "") === normalized);
-    return matches.length === 1 && paramMatches(matches[0], p);
-  }
-  function selectBindingMatchesParam(step: FlowStepData, binding: FlowSelectBinding, p: FlowParam) {
-    if (referenceMatchesParam(step, binding.path || binding.id_path || "", p)) return true;
-    if (binding.path || binding.id_path) return false;
-    const sameKey = (step.params || []).filter((item) => item.key === p.key).length === 1
-      && binding.param === p.key;
-    const sameLabel = !!p.label
-      && (step.params || []).filter((item) => item.label === p.label).length === 1
-      && binding.param === p.label;
-    return sameKey || sameLabel;
-  }
-  function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
-    const base = flowSpecRef.current;
-    if (!base) return;
-
-    const next: FlowSpecData = {
-      ...base,
-      steps: (base.steps || []).map((step) => {
-        if (step.step_id !== stepId) return step;
-        const oldKey = p.key;
-        const newParams = (step.params || []).map((param) => {
-          if (!paramMatches(param, p)) return param;
-          const nextParam = { ...param, ...updates };
-          if (updates.key != null && (!updates.label || nextParam.label === oldKey || !nextParam.label)) {
-            nextParam.label = updates.key;
-          }
-          return nextParam;
-        });
-        const newSelects = (step.selects || []).map((sel) => {
-          const sameParam = selectBindingMatchesParam(step, sel, p);
-          if (!sameParam) return sel;
-          return {
-            ...sel,
-            ...(updates.key != null ? { param: updates.key } : {}),
-            ...(updates.path != null ? { path: updates.path, id_path: sel.id_path === p.path ? updates.path : sel.id_path } : {}),
-          };
-        });
-        const newSampleInputs = { ...(step.sample_inputs || {}) };
-        if (updates.key != null && oldKey && oldKey in newSampleInputs) {
-          newSampleInputs[updates.key] = newSampleInputs[oldKey];
-          delete newSampleInputs[oldKey];
-        }
-        return { ...step, params: newParams, selects: newSelects, sample_inputs: newSampleInputs };
-      }),
-      capabilities: (base.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
-        ? { ...cap, confirmed: false }
-        : cap),
-    };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    setCheckReport(null);
-  }
-  function patchLocalParams(stepId: string, p: FlowParam, updates: Record<string, any>) {
-    patchLocalParam(stepId, p, updates);
-  }
-  function patchLocalStep(stepId: string, updates: Partial<FlowStepData>) {
-    const base = flowSpecRef.current;
-    if (!base) return;
-    const next: FlowSpecData = {
-      ...base,
-      steps: (base.steps || []).map((step) => step.step_id === stepId ? { ...step, ...updates } : step),
-      capabilities: (base.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
-        ? { ...cap, confirmed: false }
-        : cap),
-    };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    setCheckReport(null);
-  }
-  function patchLocalCapability(idx: number, updates: Partial<FlowCapabilityData>, invalidateConfirmation = true) {
-    const base = flowSpecRef.current;
-    if (!base) return;
-    const next: FlowSpecData = {
-      ...base,
-      capabilities: (base.capabilities || []).map((cap, capIdx) => capIdx === idx
-        ? { ...cap, ...updates, ...(invalidateConfirmation ? { confirmed: false } : {}) }
-        : cap),
-    };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    setCheckReport(null);
-  }
-  function updateParam(stepId: string, p: FlowParam, field: string, value: any) {
-    patchLocalParam(stepId, p, {
-      [field]: value,
-      ...(field === "value" ? { default_value: value } : {}),
-    });
-    send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
-  }
-  function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
-    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === step.step_id) || step;
-    const currentParam = currentStep.params.find((item) => paramMatches(item, p)) || p;
-    patchLocalParam(step.step_id, currentParam, { type: value });
-    send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
-  }
-  function updateParamCategory(stepId: string, p: FlowParam, category: string) {
-    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === stepId);
-    const current = currentStep?.params.find((item) => paramMatches(item, p)) || p;
-    const updates = {
-      category,
-      editable: true,
-    };
-    patchLocalParams(stepId, current, updates);
-    send({ type: "flow_update", edits: Object.entries(updates).map(([field, value]) => paramEdit(stepId, current, field, value)) });
-  }
-  function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
-    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === stepId);
-    const current = currentStep?.params.find((item) => paramMatches(item, p)) || p;
-    const currentSource = current.source as any;
-    const nextSource = sourceDescriptor(sourceKind, current, currentSource);
-    const needsConfiguration = sourceNeedsConfiguration(sourceKind, nextSource);
-    const updates = {
-      source_kind: sourceKind,
-      source: nextSource,
-      need_human_confirm: needsConfiguration,
-      editable: true,
-    };
-    patchLocalParams(stepId, current, updates);
-    send({ type: "flow_update", edits: Object.entries(updates).map(([field, value]) => paramEdit(stepId, current, field, value)) });
-    if (sourceKind === "previous_response") {
-      const key = paramDraftKey(stepId, p);
-      setBindDraft((d) => ({
-        ...d,
-        [key]: d[key] || { source_step_id: (current.source as any)?.step_id || "", source_path: (current.source as any)?.response_path || "" },
-      }));
-      message.info("已在下方“绑定上游响应”里指定来源步骤和响应字段");
-    }
-  }
-  function updateRuntimeSourceDetail(stepId: string, p: FlowParam, patch: Record<string, any>) {
-    const source = { ...(p.source || {}), ...patch, kind: p.source_kind, path: p.path, manual: true };
-    const needsConfiguration = sourceNeedsConfiguration(p.source_kind || "unknown", source);
-    patchLocalParams(stepId, p, { source, need_human_confirm: needsConfiguration });
-    send({ type: "flow_update", edits: [
-      paramEdit(stepId, p, "source", source),
-      paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
-    ] });
-  }
-  function addLink() {
-    const { source_step_id, source_path, target_step_id, target_path } = newLink;
-    if (!source_step_id || !target_step_id || !source_path || !target_path) { message.warning("请填写完整的来源和目标"); return; }
-    send({ type: "flow_update", edits: [{ op: "add", step_id: source_step_id, link: { source_step_id, source_path, target_step_id, target_path, confirmed: false, reason: "人工新增依赖，需确认后才可发布" } }] });
-    setNewLink({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
-  }
-  function bindParamToPreviousResponse(step: FlowStepData, p: FlowParam) {
-    const currentSpec = flowSpecRef.current;
-    if (!currentSpec) return;
-    const key = paramDraftKey(step.step_id, p);
-    const draft = bindDraft[key] || {};
-    if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
-    const sourceStep = currentSpec.steps.find((item) => item.step_id === draft.source_step_id);
-    patchLocalParams(step.step_id, p, {
-      source_kind: "previous_response",
-      source: {
-        kind: "previous_response",
-        step_id: draft.source_step_id,
-        step_name: sourceStep?.name || "",
-        response_path: draft.source_path,
-        target_path: p.path,
-      },
-      need_human_confirm: false,
-      editable: true,
-    });
-    const edits: any[] = currentSpec.links
-      .filter((l) => l.target_step_id === step.step_id && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
-      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
-    edits.push({
-      op: "add",
-      step_id: draft.source_step_id,
-      link: {
-        source_step_id: draft.source_step_id,
-        source_path: draft.source_path,
-        target_step_id: step.step_id,
-        target_path: p.path,
-        confirmed: true,
-      },
-    });
-    send({ type: "flow_update", edits });
-  }
-
-  async function handleAnalysisScreenshotSelection(files: FileList | null) {
-    const selected = Array.from(files || []);
-    if (!selected.length) return;
-    const remaining = Math.max(0, MAX_ANALYSIS_SCREENSHOTS - analysisScreenshotsRef.current.length);
-    if (!remaining) {
-      message.warning("\u6700\u591a\u4e0a\u4f20 4 \u5f20\u53c2\u8003\u622a\u56fe");
-      if (screenshotInputRef.current) screenshotInputRef.current.value = "";
-      return;
-    }
-    if (selected.length > remaining) message.warning(`\u672c\u6b21\u53ea\u6dfb\u52a0\u524d ${remaining} \u5f20\u622a\u56fe`);
-    const generation = ++analysisScreenshotGenerationRef.current;
-    analysisScreenshotBusyRef.current = true;
-    setAnalysisScreenshotBusy(true);
-    const prepared: AnalysisScreenshot[] = [];
-    try {
-      for (const file of selected.slice(0, remaining)) {
-        try {
-          prepared.push(await prepareAnalysisScreenshot(file));
-        } catch (error) {
-          message.error(`${file.name}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      if (prepared.length && generation === analysisScreenshotGenerationRef.current) {
-        setAnalysisScreenshots((current) => {
-          const next = [...current, ...prepared].slice(0, MAX_ANALYSIS_SCREENSHOTS);
-          analysisScreenshotsRef.current = next;
-          return next;
-        });
-        setLastAnalysisEvidence(null);
-        message.success(`\u5df2\u6dfb\u52a0 ${prepared.length} \u5f20\u53c2\u8003\u622a\u56fe\uff0c\u4e0b\u6b21\u751f\u6210/\u4f18\u5316\u5c06\u91cd\u65b0\u53c2\u8003`);
-      }
-    } finally {
-      if (generation === analysisScreenshotGenerationRef.current) {
-        analysisScreenshotBusyRef.current = false;
-        setAnalysisScreenshotBusy(false);
-        if (screenshotInputRef.current) screenshotInputRef.current.value = "";
-      }
-    }
-  }
-
-  function removeAnalysisScreenshot(id: string) {
-    setAnalysisScreenshots((current) => {
-      const next = current.filter((item) => item.id !== id);
-      analysisScreenshotsRef.current = next;
-      return next;
-    });
-    setLastAnalysisEvidence(null);
-  }
-
-  function orchestrateFlow() {
-    if (!flowSpecRef.current || flowOperationRef.current) return;
-    if (analysisScreenshotBusyRef.current) {
-      message.warning("参考截图仍在处理中，请等待上传完成后再生成/优化");
-      return;
-    }
-    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
-      message.warning(reconnectedSessionNeedsCapture
-        ? "服务端草稿已失效，请重新抓取并分析请求"
-        : "录制连接正在恢复，连接正常后再生成/优化能力");
-      return;
-    }
-    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
-      runAfterFlowSync(orchestrateFlow);
-      return;
-    }
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    const currentSpec = flowSpecRef.current;
-    if (!currentSpec) return;
-    const screenshots = analysisScreenshotsRef.current.map((item) => ({
-      name: item.name,
-      mime_type: item.mime_type,
-      data: item.data,
-      width: item.width,
-      height: item.height,
-      byte_size: item.byte_size,
-    }));
-    flowOperationRef.current = {
-      mode: "plan",
-      previousUpdatedAt: currentSpec.meta?.recording_agent_session?.updated_at,
-      operationId: newCostlyOperationId("plan"),
-      analysisScreenshots: screenshots,
-      action: actionRef.current,
-      recordingId: piRecordingIdRef.current || "",
-      expectedFingerprint: serverFingerprintRef.current
-        || String(currentSpec.meta?.current_fingerprint || ""),
-    };
-    setOrchestrateBusy(true);
-    setAutoFixBusy(true);
-    armFlowOperationWatchdog("能力生成");
-    if (!send({
-      type: "orchestrate_flow",
-      operation_id: flowOperationRef.current.operationId,
-      analysis_screenshots: screenshots,
-      action: flowOperationRef.current.action,
-      recording_id: flowOperationRef.current.recordingId,
-      expected_fingerprint: flowOperationRef.current.expectedFingerprint,
-    })) clearFlowOperation();
-  }
-  function autoFixFlow() {
-    if (!flowSpecRef.current || flowOperationRef.current) return;
-    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
-      message.warning(reconnectedSessionNeedsCapture
-        ? "服务端草稿已失效，请重新抓取并分析请求"
-        : "录制连接正在恢复，连接正常后再自动修复");
-      return;
-    }
-    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
-      runAfterFlowSync(autoFixFlow);
-      return;
-    }
-    flowOperationRef.current = {
-      mode: "repair",
-      previousUpdatedAt: flowSpecRef.current.meta?.recording_agent_session?.updated_at,
-      operationId: newCostlyOperationId("repair"),
-      analysisScreenshots: [],
-      action: actionRef.current,
-      recordingId: piRecordingIdRef.current || "",
-      expectedFingerprint: serverFingerprintRef.current
-        || String(flowSpecRef.current.meta?.current_fingerprint || ""),
-    };
-    setAutoFixBusy(true);
-    armFlowOperationWatchdog("自动修复");
-    if (!send({
-      type: "auto_fix_flow",
-      operation_id: flowOperationRef.current.operationId,
-      action: flowOperationRef.current.action,
-      recording_id: flowOperationRef.current.recordingId,
-      expected_fingerprint: flowOperationRef.current.expectedFingerprint,
-    })) clearFlowOperation();
-  }
-  function addCapability() {
-    const current = flowSpecRef.current;
-    if (!current) return;
-    const idx = (current.capabilities?.length || 0) + 1;
-    const capability: FlowCapabilityData = {
-      capability_id: newCostlyOperationId("capability"),
-      name: `capability_${idx}`,
-      title: `能力 ${idx}`,
-      intent: "",
-      kind: "submit",
-      nodes: [],
-      input_schema: { type: "object", properties: {}, required: [] },
-      output_schema: { type: "object", properties: { raw: { type: "object" } } },
-      output_mapping: [{ kind: "final_response", name: "raw", response_path: "response" }],
-      confirmed: false,
-      requires_human_confirm: true,
-      confidence: 0.5,
-    };
-    const next = { ...current, capabilities: [...(current.capabilities || []), capability] };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    send({ type: "flow_update", edits: [{
-      op: "add_capability",
-      capability,
-    }], _rollback: () => {
-      flowSpecRef.current = current;
-      setFlowSpec(current);
-    } });
-  }
-  function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
-    patchLocalCapability(idx, { confirmed, requires_human_confirm: false }, false);
-    send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field: "confirmed", value: confirmed }] });
-  }
-  function updateCapabilityField(idx: number, field: string, value: any) {
-    patchLocalCapability(idx, { [field]: value });
-    send({ type: "flow_update", edits: [
-      { op: "update_capability", capability_index: idx, field, value },
-      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-    ] });
-  }
-  function removeCapability(idx: number) {
-    Modal.confirm({
-      title: "删除这个能力？",
-      content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
-      okText: "删除", okType: "danger", cancelText: "取消",
-      onOk: () => {
-        const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] });
-        if (!ok) return;
-        const current = flowSpecRef.current;
-        if (current) {
-          const removed = current.capabilities?.[idx];
-          const removedName = String(removed?.name || removed?.capability_id || "");
-          const removedRefs = capabilityActualStepIds(removed).map((stepId) => `step:${stepId}`);
-          const removedSteps = {
-            ...(current.meta?.capability_removed_steps || {}),
-            ...(removedName ? {
-              [removedName]: Array.from(new Set([
-                ...(current.meta?.capability_removed_steps?.[removedName] || []),
-                ...removedRefs,
-              ])),
-            } : {}),
-          };
-          const next = {
-            ...current,
-            capabilities: (current.capabilities || []).filter((_, capIdx) => capIdx !== idx),
-            meta: { ...(current.meta || {}), capability_removed_steps: removedSteps },
-          };
-          flowSpecRef.current = next;
-          setFlowSpec(next);
-        }
-        setCheckReport(null);
-      },
-    });
-  }
-  function addStepToCapability(idx: number, value?: string, usage?: CapabilityUsage | "") {
-    if (!value || !usage) return false;
-    const membership = { usage, origin: "manual", confirmed: true };
-    if (value.startsWith("step:")) {
-      const stepId = value.slice(5);
-      const current = flowSpecRef.current;
-      const cap = current?.capabilities?.[idx];
-      const step = current?.steps?.find((item) => item.step_id === stepId);
-      if (!current || !cap || !step) return false;
-      if (usage === "execute") {
-        const optimisticNodes = [...(cap.nodes || []), { type: "call", step_id: stepId }];
-        patchLocalCapability(idx, { nodes: optimisticNodes });
-      } else {
-        patchLocalCapability(idx, { request_refs: [
-          ...(cap.request_refs || []).filter((ref) => ref.step_id !== stepId),
-          {
-            step_id: stepId,
-            request_id: step.source_meta?.request_id,
-            request_index: step.source_meta?.request_index,
-            method: step.method,
-            path: step.path || stripHost(step.url),
-            ...membership,
-          },
-        ] });
-      }
-      return send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
-        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-      ], _rollback: () => {
-        flowSpecRef.current = current;
-        setFlowSpec(current);
-      } });
-    }
-    if (value.startsWith("req:")) {
-      const requestKey = value.slice(4);
-      const req = findCapturedRequest(flowSpecRef.current, requestKey);
-      if (!req) { message.warning("没有找到选中的捕获接口"); return false; }
-      const cap = flowSpecRef.current?.capabilities?.[idx];
-      const sent = send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id, ...membership },
-        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-      ] });
-      if (!sent) return false;
-      pendingCapabilityMembershipRef.current.push({
-        capability: capabilityRef(cap || {}, idx),
-        requestId: req.request_id,
-        requestIndex: req.request_index,
-        usage,
-      });
-      patchLocalCapability(idx, {});
-      return true;
-    }
-    return false;
-  }
-  function removeStepFromCapability(idx: number, stepId: string) {
-
-    send({ type: "flow_update", edits: [
-      { op: "remove_capability_step", capability_index: idx, step_id: stepId },
-      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-    ] });
-  }
-  function moveStepInCapability(idx: number, stepIds: string[], from: number, delta: number) {
-    const to = from + delta;
-    if (to < 0 || to >= stepIds.length) return;
-    const next = [...stepIds];
-    const [item] = next.splice(from, 1);
-    next.splice(to, 0, item);
-    const cap = flowSpecRef.current?.capabilities?.[idx];
-    if (!cap) return;
-    const capabilityUiKey = capabilityPanelKey(cap, idx);
-    preserveEditorScrollForReorder();
-    setOptimisticCapabilityStepOrder((current) => ({ ...current, [capabilityUiKey]: next }));
-    send({ type: "flow_update", edits: [
-      { op: "reorder_capability_steps", capability_index: idx, step_ids: next },
-      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-    ], _rollback: () => setOptimisticCapabilityStepOrder((current) => ({
-      ...current,
-      [capabilityUiKey]: stepIds,
-    })) });
-  }
-  function capabilityRef(cap: FlowCapabilityData, idx: number) {
-    return cap.name || cap.capability_id || `idx:${idx}`;
-  }
-  function capabilityPanelKey(cap: FlowCapabilityData, idx: number) {
-    void idx;
-    return ["capability", cap.capability_id || cap.name || "missing-id"].join(":");
-  }
-  function moveCapability(idx: number, delta: number) {
-    const current = flowSpecRef.current;
-    if (!current) return;
-    const caps = [...(current.capabilities || [])];
-    const to = idx + delta;
-    if (to < 0 || to >= caps.length) return;
-    const ordered = [...caps];
-    const [item] = ordered.splice(idx, 1);
-    ordered.splice(to, 0, item);
-    const refs = ordered.map(capabilityRef);
-    preserveEditorScrollForReorder();
-    const next = { ...current, capabilities: ordered };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    send({
-      type: "flow_update",
-      edits: [{ op: "reorder_capabilities", capability_refs: refs }],
-      _rollback: () => {
-        const restored = { ...current, capabilities: caps };
-        flowSpecRef.current = restored;
-        setFlowSpec(restored);
-      },
-    });
-  }
-  const stepById = useMemo(() => Object.fromEntries((flowSpec?.steps || []).map((s) => [s.step_id, s])), [flowSpec]);
-  function stepBrief(stepId?: string) {
-    const st = stepId ? stepById[stepId] : undefined;
-    if (!st) return stepId || "";
-    return `${st.name || fallbackStepName(st.method, st.path)} · ${st.method} ${st.path || stripHost(st.url)}`;
-  }
-  function groupedPublishIssues(report: FlowCheckReport | null) {
-    const order = [
-      { key: "capability", label: "能力编排", color: "geekblue" },
-      { key: "interface", label: "接口步骤", color: "purple" },
-      { key: "field", label: "字段配置", color: "gold" },
-      { key: "dependency", label: "依赖关系", color: "cyan" },
-      { key: "execution", label: "执行校验", color: "blue" },
-      { key: "diagnostic", label: "页面诊断", color: "volcano" },
-      { key: "flow", label: "整体流程", color: "default" },
-    ];
-    type OperatorIssue = {
-      message: string; severity: string; source?: string; target?: Record<string, any>;
-      audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
-      ignorable?: boolean; issue_id?: string; code?: string; review_id?: string; suggested_action?: string;
-    };
-    const isOperatorIssue = (item: OperatorIssue) => {
-      if (item.audience) return item.audience === "operator" && item.actionable !== false;
-      const severity = String(item.severity || "").toLowerCase();
-      if (severity === "error" || severity === "high") return true;
-      // Validator warnings are planner/schema diagnostics. They remain available to
-      // auto-repair and logs, but an operator cannot resolve them with business input.
-      if (item.source === "validator") return false;
-      const kind = String(item.target?.kind || "");
-      return item.source === "review" && [
-        "param", "capability_enum", "link", "step", "request_role",
-        "capability", "capability_relation", "flow",
-      ].includes(kind);
-    };
-    const by: Record<string, OperatorIssue[]> = {};
-    for (const [key, items] of Object.entries(report?.issue_groups || {})) {
-      by[key] = (items || []).map((item) => ({
-        message: item.message || "待处理问题",
-        severity: item.severity || "warning",
-        source: item.source,
-        target: item.target,
-        audience: item.audience,
-        actionable: item.actionable,
-        blocking: item.blocking,
-        auto_fixable: item.auto_fixable,
-        ignorable: item.ignorable,
-        issue_id: item.issue_id,
-        code: item.code,
-        review_id: item.review_id,
-        suggested_action: item.suggested_action,
-      })).filter(isOperatorIssue);
-    }
-    const representedReviewIds = new Set(Object.values(by).flat().map((item) => item.review_id).filter(Boolean));
-    for (const review of report?.review_items || []) {
-      if (review.resolved || !SOURCE_REVIEW_TYPES.has(review.type) || representedReviewIds.has(review.id)) continue;
-      by.field = by.field || [];
-      by.field.push({
-        message: review.reason ? `${review.title}：${review.reason}` : review.title,
-        severity: "warning",
-        source: "review",
-        target: review.target,
-        audience: "operator",
-        actionable: true,
-        blocking: review.blocking,
-        auto_fixable: false,
-        ignorable: review.ignorable !== false,
-        issue_id: `review:${review.id}`,
-        code: review.type,
-        review_id: review.id,
-        suggested_action: review.suggested_action,
-      });
-    }
-    if (!Object.keys(by).length) {
-      // ReviewItems are generated workbench advice, not publish failures.
-      // Reusing them as a fallback here made an accepted operator contract look
-      // blocked even when deterministic publish validation had passed.
-      for (const messageText of report?.errors || []) {
-        by.flow = by.flow || [];
-        by.flow.push({ message: messageText, severity: "error" });
-      }
-    }
-    const out: Array<{ key: string; label: string; color: string; items: OperatorIssue[] }> = [];
-    for (const item of order) {
-      if (by[item.key]?.length) out.push({ ...item, items: by[item.key] });
-    }
-    for (const key of Object.keys(by)) {
-      if (!order.some((item) => item.key === key)) out.push({ key, label: key, color: "default", items: by[key] });
-    }
-    return out;
-  }
-  function publishIssueTargetLabel(target?: Record<string, any>) {
-    if (!target) return "";
-    const cap = target.capability_name || target.capability_id || target.capability;
-    const sid = target.target_step_id || target.step_id || target.source_step_id;
-    const path = target.target_path || target.path || target.source_path || target.field;
-    return [cap ? `能力 ${cap}` : "", sid ? `接口 ${stepBrief(sid)}` : "", path ? `字段 ${path}` : ""]
-      .filter(Boolean).join(" · ");
-  }
-  function locatePublishIssue(target?: Record<string, any>) {
-    if (!target || !Object.keys(target).length) {
-      message.warning("该旧版错误项没有可定位的结构化目标，请重新校验后再定位");
-      return;
-    }
-    const capabilities = flowSpec?.capabilities || [];
-    const capabilityFields = (cap: FlowCapabilityData) => [
-      ...(cap.inputs || []), ...(cap.request_fields || []), ...(cap.internal_fields || []),
-      ...(cap.computed_fields || []), ...(cap.outputs || []),
-    ];
-    let sid = target.target_step_id || target.step_id || target.source_step_id;
-    const capRef = target.capability_name || target.capability_id || target.capability
-      || capabilities.find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
-    const capIdx = capabilities.findIndex((cap) =>
-      [cap.name, cap.capability_id, cap.title, cap.kind].filter(Boolean).includes(capRef)
-      || capabilityActualStepIds(cap).includes(sid || ""));
-    const cap = capIdx >= 0 ? capabilities[capIdx] : undefined;
-    if (!sid && target.field_id && cap) {
-      sid = capabilityFields(cap).find((field) => field.field_id === target.field_id)?.step_id;
-    }
-    const targetPath = target.target_path || target.path || target.source_path
-      || (target.field_id && cap
-        ? capabilityFields(cap).find((field) => field.field_id === target.field_id)?.path
-        : "");
-    const targetStep = sid ? stepById[String(sid)] : undefined;
-    const exactTargetParam = targetStep && targetPath
-      ? targetStep.params?.find((param) => param.path === String(targetPath))
-      : undefined;
-    const legacyTargetParams = targetStep && targetPath && !exactTargetParam
-      ? targetStep.params?.filter((param) =>
-        stripBodyPrefix(param.path || "") === stripBodyPrefix(String(targetPath))) || []
-      : [];
-    const targetParam = exactTargetParam || (legacyTargetParams.length === 1 ? legacyTargetParams[0] : undefined);
-    const targetAnchorRef = targetParam?.field_id || targetPath;
-    const isRequest = target.kind === "request_role";
-    const unassignedStepId = sid && capIdx < 0 && stepById[String(sid)] ? String(sid) : "";
-    setActiveFlowTab(isRequest || !!unassignedStepId ? "requests" : "abilities");
-    let anchor = "";
-    if (isRequest) {
-      setExpandedRequestPanels(["captured"]);
-      anchor = `request-${domAnchorPart(target.request_index ?? target.index ?? target.request_id ?? target.path ?? sid)}`;
-    } else if (unassignedStepId) {
-      setExpandedRequestPanels((keys) => Array.from(new Set([...keys, "unassigned-steps"])));
-      setExpandedUnassignedSteps((keys) => Array.from(new Set([...keys, unassignedStepId])));
-      anchor = targetAnchorRef
-        ? fieldEditorAnchorId(unassignedStepId, targetAnchorRef)
-        : `step-${domAnchorPart(unassignedStepId)}`;
-    } else if (capIdx >= 0) {
-      const panelKey = capabilityPanelKey(cap!, capIdx);
-      setExpandedCapabilityKeys((keys) => Array.from(new Set([...keys, panelKey])));
-      const section = ["link", "capability_dependency"].includes(target.kind) ? "deps"
-        : ["capability_output", "capability_node", "capability_precondition"].includes(target.kind) ? "io"
-          : "interfaces";
-      setExpandedCapabilitySections((current) => ({
-        ...current,
-        [panelKey]: Array.from(new Set([...(current[panelKey] || ["interfaces"]), section])),
-      }));
-      if (sid) {
-        setExpandedCapabilitySteps((current) => ({
-          ...current,
-          [panelKey]: Array.from(new Set([...(current[panelKey] || []), sid])),
-        }));
-      }
-      if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
-      else if (sid && targetAnchorRef) anchor = fieldEditorAnchorId(String(sid), String(targetAnchorRef));
-      else if (sid) anchor = `step-${domAnchorPart(sid)}`;
-      else anchor = `capability-${domAnchorPart(cap!.capability_id || cap!.name || capIdx)}`;
-    }
-    if (!anchor && capRef) anchor = `capability-${domAnchorPart(capRef)}`;
-    if (!anchor && target.kind === "capability_relation" && target.relation_id) {
-      setExpandedCapabilityRelationKeys(["capability-relations"]);
-      anchor = `capability-relation-${domAnchorPart(target.relation_id)}`;
-    }
-    if (!anchor && target.kind === "flow") anchor = "flow-workbench";
-    if (!anchor) {
-      message.warning("该错误项缺少能力、接口或字段锚点，请重新校验生成结构化目标");
-      return;
-    }
-    const locateToken = ++publishLocateTokenRef.current;
-    const focusAnchor = (attempt = 0) => {
-      if (locateToken !== publishLocateTokenRef.current) return;
-      const element = document.getElementById(anchor);
-      if (!element || element.getClientRects().length === 0) {
-        if (attempt < 30) {
-          window.setTimeout(() => focusAnchor(attempt + 1), 100);
-          return;
-        }
-        message.warning(`没有找到该错误项对应的编辑位置（${publishIssueTargetLabel(target) || target.kind || "旧版目标"}），请重新校验`);
-        return;
-      }
-      element.scrollIntoView({ behavior: "smooth", block: "center" });
-      element.animate(
-        [
-          { backgroundColor: "#fff1b8", outline: "3px solid #faad14", outlineOffset: "3px" },
-          { backgroundColor: "#fffbe6", outline: "2px solid #ffc53d", outlineOffset: "2px" },
-          { backgroundColor: "transparent", outline: "0 solid transparent", outlineOffset: "0" },
-        ],
-        { duration: 2200, easing: "ease-out" },
-      );
-    };
-    window.setTimeout(() => focusAnchor(), 180);
-  }
-  function publishIssueReviewId(item: { review_id?: string; issue_id?: string }) {
-    if (item.review_id) return item.review_id;
-    return item.issue_id?.startsWith("review:") ? item.issue_id.slice("review:".length) : "";
-  }
-  function ignorePublishReviewIssue(item: {
-    review_id?: string; issue_id?: string; message?: string; target?: Record<string, any>;
-  }) {
-    const reviewId = publishIssueReviewId(item);
-    if (!reviewId) {
-      message.warning("该告警缺少 review_id，请重新校验后再忽略");
-      return;
-    }
-    const queued = send({
-      type: "flow_update",
-      edits: [{ op: "resolve_review", review_id: reviewId, resolved: true }],
-    });
-    if (!queued) {
-      message.warning("录制连接不可用，暂时无法保存忽略状态");
-      return;
-    }
-
-    const base = flowSpecRef.current;
-    if (base) {
-      const next = {
-        ...base,
-        review_items: (base.review_items || []).map((review) => review.id === reviewId
-          ? { ...review, resolved: true }
-          : review),
-      };
-      flowSpecRef.current = next;
-      setFlowSpec(next);
-    }
-    setCheckReport((current) => {
-      if (!current) return current;
-      const matchesReview = (issue: { review_id?: string; issue_id?: string }) =>
-        publishIssueReviewId(issue) === reviewId;
-      return {
-        ...current,
-        review_items: (current.review_items || []).map((review) => review.id === reviewId
-          ? { ...review, resolved: true }
-          : review),
-        issue_groups: current.issue_groups
-          ? Object.fromEntries(Object.entries(current.issue_groups).map(([key, issues]) => [
-            key,
-            issues.filter((issue) => !matchesReview(issue)),
-          ]))
-          : current.issue_groups,
-      };
-    });
-    message.success(`已忽略告警${publishIssueTargetLabel(item.target) ? `：${publishIssueTargetLabel(item.target)}` : ""}`);
-  }
-  function sourcePathOptions(stepId?: string) {
-    const st = stepId ? stepById[stepId] : undefined;
-    return leafPaths(st?.response_json).map((p) => ({ label: p, value: p }));
-  }
-  function targetPathOptions(stepId?: string) {
-    const st = stepId ? stepById[stepId] : undefined;
-    return (st?.params || []).map((p) => ({ label: `${p.path} · ${p.key}`, value: p.path }));
-  }
-  function readSourceOptions() {
-    const seen = new Set<string>();
-    const out: Array<{ label: string; value: string }> = [];
-    for (const req of allCapturedRequests(flowSpec)) {
-      const value = req.url || req.path;
-      if (!value || seen.has(value)) continue;
-      seen.add(value);
-      const state = isRequestInSteps(flowSpec, req) ? "已纳入" : "已捕获";
-      out.push({
-        label: `${state} · ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
-        value,
-      });
-    }
-    return out;
-  }
-  function sourceStepForUrl(sourceUrl?: string) {
-    const pure = purePath(sourceUrl || "");
-    return (flowSpec?.steps || []).find((st) => {
-      const candidates = [st.url, st.path, purePath(st.url), purePath(st.path)];
-      return candidates.some((x) => x && (x === sourceUrl || purePath(x) === pure));
-    });
-  }
-  function responseKeyOptionsForSource(sourceUrl?: string) {
-    const st = sourceStepForUrl(sourceUrl);
-    const sourcePath = purePath(sourceUrl || "");
-    const captured = allCapturedRequests(flowSpec).find((req) => {
-      const candidates = [req.url, req.path, purePath(req.url || ""), purePath(req.path || "")];
-      return candidates.some((value) => value && (value === sourceUrl || purePath(value) === sourcePath));
-    });
-    const response = st?.response_json ?? captured?.response_json;
-    const seen = new Set<string>();
-    const out: Array<{ label: string; value: string }> = [];
-    for (const path of leafPaths(response)) {
-      const last = path.split(".").pop()?.replace(/\[\d+\]/g, "") || path;
-      if (!last || seen.has(last)) continue;
-      seen.add(last);
-      out.push({ label: `${last} · ${path}`, value: last });
-    }
-    return out;
-  }
-  function incomingLink(stepId: string, path: string) {
-    const step = (flowSpec?.steps || []).find((item) => item.step_id === stepId);
-    const param = step?.params?.find((item) => item.path === path);
-    return (flowSpec?.links || []).find((link) =>
-      link.target_step_id === stepId
-      && (step && param ? referenceMatchesParam(step, link.target_path, param) : link.target_path === path));
-  }
-  function selectBindingForParam(step: FlowStepData, p: FlowParam) {
-    const selects = step.selects || [];
-    return selects.find((binding) => selectBindingMatchesParam(step, binding, p));
-  }
-  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value?: any }>, optionMap?: Record<string, any> | null) {
-    const records = options.map(enumOptionRecord).filter((item): item is { label: string; value?: any } => !!item);
-    const mappingComplete = records.length > 0 && records.every((item) => item.value !== undefined);
-    return [
-      paramEdit(step.step_id, p, "enum_options", options),
-      paramEdit(step.step_id, p, "enum_value_map", optionMap || null),
-      paramEdit(step.step_id, p, "need_human_confirm", !mappingComplete),
-    ];
-  }
-  function enumSourceForKind(sourceKind?: string | null) {
-    if (sourceKind === "page_enum" || sourceKind === "form_option") return "dom";
-    if (sourceKind === "static_enum" || sourceKind === "manual_enum") return "manual";
-    return "manual";
-  }
-  function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
-    const previousSpec = flowSpecRef.current;
-    const existing = selectBindingForParam(step, p);
-    const hasExplicitIdPath = Object.prototype.hasOwnProperty.call(patch, "id_path");
-    const sourceChanged = Object.prototype.hasOwnProperty.call(patch, "source_url")
-      && (patch.source_url || "") !== (existing?.source_url || "");
-    const currentPath = p.path || existing?.path || p.key || "";
-    const nextBinding: FlowSelectBinding = {
-      source_url: "",
-      value_key: "",
-      label_key: "",
-      options: enumOptionRecordsForParam(step, p),
-      count: p.enum_options?.length || 0,
-      ...existing,
-      ...patch,
-      param: p.key,
-      path: currentPath,
-    };
-    if (sourceChanged) {
-      // 新接口必须以新响应重建候选，不能沿用首次误匹配留下的空值或旧值。
-      nextBinding.options = [];
-      nextBinding.option_map = null;
-      nextBinding.count = 0;
-      nextBinding.source_request_id = "";
-      nextBinding.source_role = "";
-      nextBinding.enum_source = "api";
-      // Selecting an endpoint only records the candidate source.  It is not proof
-      // that label/value keys or the complete option set have been captured.
-      nextBinding.enum_confirmed = false;
-      nextBinding.value_key = "";
-      nextBinding.label_key = "";
-      nextBinding.field_projections = {};
-    }
-    if (!hasExplicitIdPath && !nextBinding.id_path && (nextBinding.source_url || p.source_kind === "api_option")) {
-      nextBinding.id_path = currentPath;
-    }
-    if (nextBinding.options) nextBinding.count = nextBinding.options.length;
-    const replaced = (step.selects || []).some((binding) => binding === existing || selectBindingMatchesParam(step, binding, p));
-    const nextSelects = replaced
-      ? (step.selects || []).map((binding) => (binding === existing || selectBindingMatchesParam(step, binding, p) ? nextBinding : binding))
-      : [...(step.selects || []), nextBinding];
-    const edits: any[] = [{ op: "upsert_select", step_id: step.step_id, binding: nextBinding }];
-    const paramUpdates: Record<string, any> = {};
-    for (const edit of extraEdits) {
-      if (edit?.op === "update" && edit.step_id === step.step_id && (edit.param_path || edit.param_key || edit.param_label)) {
-        paramUpdates[edit.field] = edit.value;
-      }
-    }
-    patchLocalStep(step.step_id, { selects: nextSelects });
-    if (Object.keys(paramUpdates).length) patchLocalParam(step.step_id, p, paramUpdates);
-    send({
-      type: "flow_update",
-      edits: [...edits, ...extraEdits],
-      _rollback: () => {
-        if (!previousSpec) return;
-        flowSpecRef.current = previousSpec;
-        setFlowSpec(previousSpec);
-      },
-    });
-  }
-  function enumOptionRecord(x: any): { label: string; value?: any } | null {
-    if (x == null) return null;
-    if (typeof x === "object") {
-      const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
-      if (!label) return null;
-      return { label, ...(Object.prototype.hasOwnProperty.call(x, "value") ? { value: x.value } : {}) };
-    }
-    const label = String(x).trim();
-    return label ? { label } : null;
-  }
-  function enumOptionRecordsForParam(step: FlowStepData, p: FlowParam) {
-    const sel = selectBindingForParam(step, p);
-    const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
-    const map = p.enum_value_map || sel?.option_map || {};
-    const seen = new Set<string>();
-    const out: Array<{ label: string; value?: any }> = [];
-    for (const item of raw || []) {
-      const rec = enumOptionRecord(item);
-      if (!rec || seen.has(rec.label)) continue;
-      seen.add(rec.label);
-      const value = Object.prototype.hasOwnProperty.call(map, rec.label) ? map[rec.label] : rec.value;
-      out.push({ label: rec.label, ...(value !== undefined ? { value } : {}) });
-    }
-    return out;
-  }
-  function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
-    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "") && p.type !== "enum" && p.type !== "list-enum") return [];
-    return enumOptionRecordsForParam(step, p).map((x) => x.label);
-  }
-  function enumOptionsTextForParam(step: FlowStepData, p: FlowParam) {
-    return enumOptionRecordsForParam(step, p)
-      .map((x) => x.value === undefined ? x.label : `${x.label}=${String(x.value)}`)
-      .join("\n");
-  }
-  function enumMappingCompleteForParam(step: FlowStepData, p: FlowParam) {
-    const records = enumOptionRecordsForParam(step, p);
-    return records.length > 0 && records.every((item) => item.value !== undefined);
-  }
-  function parseEnumOptionsText(text: string): { options: Array<{ label: string; value?: any }>; optionMap: Record<string, any> | null; mappingComplete: boolean } {
-    const chunks = text.includes("\n") ? text.split(/\n/) : text.split(/[,，]/);
-    const seen = new Set<string>();
-    const options: Array<{ label: string; value?: any }> = [];
-    const optionMap: Record<string, any> = {};
-    let hasMapped = false;
-    for (const raw of chunks) {
-      const line = raw.trim();
-      if (!line) continue;
-      const m = line.match(/^(.+?)(?:\s*(?:=>|=|:|：|\t)\s*)(.+)$/);
-      const label = (m ? m[1] : line).trim();
-      const valueRaw = m ? m[2].trim() : "";
-      if (!label || seen.has(label)) continue;
-      seen.add(label);
-      if (!m) {
-        // A visible label is evidence for display only.  Never invent an API value
-        // by assuming value === label; that made incomplete snapshots executable.
-        options.push({ label });
-        continue;
-      }
-      const value = /^-?\d+(?:\.\d+)?$/.test(valueRaw) ? Number(valueRaw) : valueRaw;
-      options.push({ label, value });
-      optionMap[label] = value;
-      hasMapped = true;
-    }
-    return { options, optionMap: hasMapped ? optionMap : null, mappingComplete: options.length > 0 && options.every((item) => item.value !== undefined) };
-  }
-  function enumSourceLabel(sel?: FlowSelectBinding) {
-    if (!sel) return "未绑定";
-    if (sel.source_url) return "接口候选";
-    if ((sel.options || []).length || sel.enum_source) return "枚举";
-    return "未绑定";
-  }
-  function paramSourceText(step: FlowStepData, p: FlowParam, link?: FlowLinkData) {
-    const sourceStep = link ? stepById[link.source_step_id] : undefined;
-    const sel = selectBindingForParam(step, p);
-    if (link) {
-      return `实际接口返回：${sourceStep?.name || sourceStep?.path || link.source_step_id} 的 ${link.source_path}；当前默认值只是录制样例`;
-    }
-    if (p.source_kind === "previous_response" && p.source?.step_id) {
-      return `实际接口返回：${p.source.step_name || p.source.step_id} 的 ${p.source.response_path || ""}；当前默认值只是录制样例`;
-    }
-    if (p.source_kind === "request_header") return `请求头来源：运行期从请求头 ${p.source?.header || ""} 获取；当前默认值只是录制样例`;
-    if (p.source_kind === "user_input") return "用户输入：调用 Skill 时由用户填写；默认值来自录制样例";
-    if (p.source_kind === "api_option") return `接口候选：运行期从 ${sel?.source_url || "已绑定接口"} 获取候选；默认值是录制时选中的值`;
-    if (ENUM_SOURCE_KINDS.includes(p.source_kind || "")) return "枚举：候选来自录制页面、接口快照或人工维护；默认值是录制时选中的值";
-    if (p.source_kind === "constant") return "固定默认值：发布后按当前值写入，通常不暴露给用户";
-    if (p.source_kind === "current_user") return "当前用户：运行期从登录态/身份信息注入，不使用录制旧值";
-    if (p.source_kind === "system_time") return "系统时间：运行期自动生成，不使用录制旧值";
-    if (p.source_kind === "system_generated") return `系统生成值：运行期生成 ${({ uuid: "UUID", random_string: "随机字符串", random_number: "随机数字" } as Record<string, string>)[(p.source as any)?.strategy || "uuid"] || "动态值"}，不使用录制旧值`;
-    if (p.source_kind === "computed") return `系统计算值：运行期根据 ${(p.source as any)?.start_field || "开始字段"} 与 ${(p.source as any)?.end_field || "结束字段"} 自动计算`;
-    if (p.source_kind === "page_context") return `调用上下文：运行期从 ${(p.source as any)?.context_key || "未配置 context_key"} 注入；它不是上游接口响应`;
-    return "来源未确认：需要选择用户输入、上游响应、固定值或系统来源";
-  }
-  function renderLatestOperationDetail() {
-    if (!lastAnalysisEvidence && !lastOperationReport) return null;
-    const showDetailedAnalysis = lastAnalysisEvidence?.analysis_kind !== "initial";
-    const structuralChanges = lastAnalysisEvidence?.change_details || [];
-    const fieldChanges = lastAnalysisEvidence?.field_changes || [];
-    const changeLines = [
-      ...fieldChanges.map(analysisFieldChangeText),
-      ...structuralChanges,
-    ];
-    const visibleChangeLines = showAllAnalysisChanges ? changeLines : changeLines.slice(0, 3);
-    const hasActualChanges = changeLines.length > 0;
+  function renderSetup() {
     return (
-      <Space direction="vertical" size={2}>
-        {lastAnalysisEvidence && (
-          <>
-            {(!showDetailedAnalysis || !hasActualChanges) && (
-              <Typography.Text style={{ fontSize: 12 }}>
-                {showDetailedAnalysis
-                  ? (lastAnalysisEvidence.summary || "分析结果与当前配置相同，无需修改")
-                  : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
-              </Typography.Text>
-            )}
-            {showDetailedAnalysis && visibleChangeLines.map((detail, index) => (
-              <Typography.Text key={`analysis-change:${index}`} style={{ fontSize: 12 }}>
-                {detail}
-              </Typography.Text>
-            ))}
-            {showDetailedAnalysis && changeLines.length > 3 && (
-              <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
-                onClick={() => setShowAllAnalysisChanges((value) => !value)}>
-                {showAllAnalysisChanges ? "收起修改" : `展开全部修改（${changeLines.length} 项）`}
-              </Button>
-            )}
-          </>
-        )}
-        {lastOperationReport && !lastAnalysisEvidence && (
-          <Space wrap size={4}>
-            <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
-            {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
-            <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
-              错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
+      <Card>
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <label>
+            <Text strong><Text type="danger">* </Text>业务页地址</Text>
+            <Input
+              value={startUrl}
+              onChange={(event) => setStartUrl(event.target.value)}
+              placeholder="https://example.com/business/page"
+              style={{ marginTop: 8 }}
+            />
+          </label>
+          <label>
+            <Text strong><Text type="danger">* </Text>录制目标</Text>
+            <Input.TextArea
+              value={goalText}
+              onChange={(event) => setGoalText(event.target.value)}
+              placeholder="完整描述需要在页面完成的业务目标"
+              autoSize={{ minRows: 3, maxRows: 5 }}
+              style={{ marginTop: 8 }}
+            />
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Button type="primary" loading={connecting} onClick={startRecording}>开始录制</Button>
+          </div>
+        </Space>
+      </Card>
+    );
+  }
+
+  function renderRecording() {
+    return (
+      <div style={{ minWidth: 0 }}>
+        <Card size="small" styles={{ body: { padding: 10 } }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
+            <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
+              {STATUS_LABELS[status]}
             </Tag>
-            <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
-          </Space>
-        )}
+            <Button disabled={status !== "recording"}>从这里开始录</Button>
+            <Text strong style={{ whiteSpace: "nowrap" }}>动作名：</Text>
+            <Input value={snapshot?.action || actionRef.current} readOnly style={{ minWidth: 230, flex: 1 }} />
+            <Text strong style={{ whiteSpace: "nowrap" }}>标题：</Text>
+            <Input value={title} onChange={(event) => setTitle(event.target.value)} style={{ minWidth: 150, flex: 0.6 }} />
+            {status === "recording" ? (
+              <Button type="primary" onClick={finishRecording}>停止并分析请求</Button>
+            ) : processing ? (
+              <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>一键终止</Button>
+            ) : null}
+            <Button icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}>录制助手</Button>
+          </div>
+        </Card>
+        <div
+          style={{
+            position: "relative",
+            marginTop: 10,
+            width: "100%",
+            height: "calc(100vh - 245px)",
+            minHeight: 430,
+            overflow: "hidden",
+            border: "1px solid #d9d9d9",
+            borderRadius: 8,
+            background: "#eef1f5",
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={() => { pointerRef.current = null; }}
+            onWheel={onWheel}
+            onContextMenu={(event) => event.preventDefault()}
+            style={{
+              display: hasFrame ? "block" : "none",
+              width: "100%",
+              height: "100%",
+              touchAction: "none",
+              cursor: status === "recording" ? "default" : "not-allowed",
+            }}
+          />
+          {!hasFrame ? <Empty description={connecting ? "正在连接业务页面" : "等待页面画面"} style={{ paddingTop: 150 }} /> : null}
+          <input
+            ref={keyboardRef}
+            onInput={onKeyboardInput}
+            onKeyDown={onKeyboardDown}
+            onBeforeInput={onBeforeInput}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={(event) => {
+              composingRef.current = false;
+              relayText(event.currentTarget);
+            }}
+            onPaste={(event) => {
+              const text = event.clipboardData.getData("text");
+              if (text) send({ type: "input", event: { kind: "text", text } });
+              event.preventDefault();
+            }}
+            aria-label="录制页面键盘输入"
+            style={{ position: "absolute", width: 1, height: 1, opacity: 0, left: 0, top: 0 }}
+          />
+        </div>
+        <Text type="secondary">画面 {frameMeta.width}×{frameMeta.height} · 已捕获 {snapshot?.progress.request_count || requests.length} 个请求</Text>
+      </div>
+    );
+  }
+
+  function renderParamEditor(step: FlowStep, param: FlowParam) {
+    return (
+      <div
+        key={`${step.step_id}:${param.field_id || param.path}`}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.1fr 1.2fr 80px",
+          gap: 8,
+          alignItems: "center",
+          padding: "8px 0",
+          borderTop: "1px solid #f0f0f0",
+        }}
+      >
+        <Input
+          value={safeString(paramValue(step, param, "label") || param.key)}
+          onChange={(event) => updateParam(step, param, "label", event.target.value)}
+          aria-label="字段名称"
+        />
+        <Input
+          value={safeString(paramValue(step, param, "path"))}
+          onChange={(event) => updateParam(step, param, "path", event.target.value)}
+          aria-label="字段路径"
+        />
+        <Input
+          value={safeString(paramValue(step, param, "value") ?? param.default_value)}
+          onChange={(event) => updateParam(step, param, "value", event.target.value)}
+          aria-label="默认值"
+        />
+        <Select
+          value={safeString(paramValue(step, param, "type") || "string")}
+          options={TYPE_OPTIONS}
+          onChange={(value) => updateParam(step, param, "type", value)}
+          aria-label="字段类型"
+        />
+        <Select
+          value={safeString(paramValue(step, param, "category") || "user_param")}
+          options={CATEGORY_OPTIONS}
+          onChange={(value) => updateParam(step, param, "category", value)}
+          aria-label="字段分类"
+        />
+        <Select
+          value={safeString(paramValue(step, param, "source_kind") || "unknown")}
+          options={SOURCE_OPTIONS}
+          onChange={(value) => updateParam(step, param, "source_kind", value)}
+          aria-label="字段来源"
+        />
+        <Checkbox
+          checked={Boolean(paramValue(step, param, "required"))}
+          onChange={(event) => updateParam(step, param, "required", event.target.checked)}
+        >必填</Checkbox>
+      </div>
+    );
+  }
+
+  function renderCapabilities() {
+    if (!capabilities.length) return <Empty description="没有生成能力" />;
+    return (
+      <Collapse
+        items={capabilities.map((capability, index) => {
+          const stepIds = new Set([
+            ...(capability.step_ids || []),
+            ...(capability.request_refs || []).map((item) => String(item.step_id || "")),
+          ]);
+          const capabilitySteps = steps.filter((step) => stepIds.has(step.step_id));
+          return {
+            key: capability.capability_id || capability.name || String(index),
+            label: (
+              <Space wrap>
+                <Tag color={capability.confirmed ? "success" : "processing"}>{capability.confirmed ? "已确认" : "模型建议"}</Tag>
+                <Tag color="blue">{capability.kind || "capability"}</Tag>
+                <Text strong>{capability.title || capability.name || `能力 ${index + 1}`}</Text>
+                <Text code>{capability.name}</Text>
+              </Space>
+            ),
+            children: (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 2fr", gap: 10 }}>
+                  <Input
+                    addonBefore="名称"
+                    value={capabilityValue(capability, "title")}
+                    onChange={(event) => updateCapability(capability, "title", event.target.value)}
+                  />
+                  <Input
+                    addonBefore="标识"
+                    value={capabilityValue(capability, "name")}
+                    onChange={(event) => updateCapability(capability, "name", event.target.value)}
+                  />
+                  <Input
+                    addonBefore="用途"
+                    value={capabilityValue(capability, "intent")}
+                    onChange={(event) => updateCapability(capability, "intent", event.target.value)}
+                  />
+                </div>
+                {capabilitySteps.map((step) => (
+                  <Card
+                    key={step.step_id}
+                    size="small"
+                    title={<Space><Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
+                  >
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.1fr 1.2fr 80px",
+                        gap: 8,
+                        color: "#8c8c8c",
+                        paddingBottom: 6,
+                      }}
+                    >
+                      <span>名称</span><span>路径</span><span>默认值</span><span>类型</span>
+                      <span>分类</span><span>来源</span><span>必填性</span>
+                    </div>
+                    {(step.params || []).map((param) => renderParamEditor(step, param))}
+                  </Card>
+                ))}
+                {capability.dependencies?.length ? (
+                  <Card size="small" title={`依赖 ${capability.dependencies.length}`}>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(capability.dependencies, null, 2)}</pre>
+                  </Card>
+                ) : null}
+              </Space>
+            ),
+          };
+        })}
+      />
+    );
+  }
+
+  function renderResult() {
+    const description = (
+      <Space direction="vertical" size={4}>
+        <Text>{snapshot?.progress.label || STATUS_LABELS[status]}</Text>
+        {snapshot?.error ? <Text type="danger">{snapshot.error}</Text> : null}
+        {(snapshot?.issues || []).map((issue) => (
+          <Text key={issue.issue_id} type={issue.severity === "blocking" ? "danger" : "warning"}>
+            {issue.message}
+          </Text>
+        ))}
+        {status === "published" && snapshot?.release ? (
+          <Text type="success">能力已验证并发布；Skill 导出仅包含本次动作的发布结果。</Text>
+        ) : null}
       </Space>
     );
-  }
-  function renderFlowWorkbench() {
-    if (!flowSpec) return null;
-    const capabilities = flowSpec.capabilities || [];
-    const capturedTotal = allCapturedRequests(flowSpec).length;
-    // Before a capability contract exists there is nothing actionable to
-    // locate or confirm in the capability workbench.  Initial recording
-    // diagnostics remain in checkReport, but must not surface as field-source
-    // warnings before the operator has generated abilities.
-    const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];
-    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
-    const publishIssueCount = publishIssueGroups.reduce((count, group) => count + group.items.length, 0);
-    let remainingVisibleIssues = showAllPublishIssues ? Number.POSITIVE_INFINITY : 3;
-    const visiblePublishIssueGroups = publishIssueGroups.map((group) => {
-      const items = group.items.slice(0, remainingVisibleIssues);
-      remainingVisibleIssues -= items.length;
-      return { ...group, items };
-    }).filter((group) => group.items.length > 0);
-    const hasAutoFixableIssue = publishIssueGroups.some(
-      (group) => group.items.some((item) => item.auto_fixable === true),
-    );
-    const publishFailed = result?.ok === false;
-    const publishPending = phase === "publishing" && !!publishOperationRef.current;
-    const validationRefreshing = !checkReport;
-    const analysisPending = orchestrateBusy || autoFixBusy;
-    const analysisRejected = lastAnalysisEvidence?.status === "rejected";
-    const analysisNeedsReview = lastAnalysisEvidence?.status === "needs_review";
     return (
-      <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-          <Alert
-            key="flow-status-panel"
-            type={publishFailed || analysisRejected ? "error" : publishPending || analysisPending || analysisNeedsReview || validationRefreshing ? "info" : (!checkReport?.passed || hasPublishAdvice) ? "warning" : "success"}
-            showIcon
-            style={{ marginBottom: 12, minHeight: 96, height: 150, overflow: "hidden" }}
-            message={publishPending
-              ? "正在审核并发布当前流程"
-              : analysisPending
-              ? "正在分析并更新当前流程"
-              : publishFailed
-              ? "发布未完成"
-              : result?.ok
-              ? "发布完成"
-              : analysisRejected
-              ? "分析提出的修改未通过准入"
-              : analysisNeedsReview
-              ? "分析完成，证据不足的建议未应用"
-              : lastAnalysisEvidence?.status === "applied"
-              ? "分析结果已应用"
-              : lastAnalysisEvidence?.status === "no_change"
-              ? "已完整核验，当前配置无需修改"
-              : validationRefreshing
-              ? "\u6b63\u5728\u66f4\u65b0\u53d1\u5e03\u6821\u9a8c"
-              : checkReport?.passed
-                ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
-                : "发布校验需要处理"}
-            description={
-              !checkReport ? (
-                <Space direction="vertical" size={2} style={{ height: 230, overflowY: "auto", width: "100%" }}>
-                  {renderLatestOperationDetail()}
-                  <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
-                </Space>
-              ) : <Space direction="vertical" size={2} style={{ height: 230, overflowY: "auto", width: "100%" }}>
-                {!result?.ok && renderLatestOperationDetail()}
-                {result && !publishPending && (
-                  <Space direction="vertical" size={2}>
-                    <Typography.Text type={result.ok ? "success" : "danger"}>
-                      {result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}
-                    </Typography.Text>
-                    {result.ok && result.lifecycle_pending && (
-                      <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                        {result.lifecycle_message || "资产已发布，生命周期登记待补偿"}
-                        {result.asset_version ? `（资产版本 ${result.asset_version}）` : ""}
-                      </Typography.Text>
-                    )}
-                    {!result.ok && (result.clarifications || []).map((item, index) => <Typography.Text key={index} type="warning" style={{ fontSize: 12 }}>{item}</Typography.Text>)}
-                  </Space>
-                )}
-                <Space direction="vertical" size={4}>
-                  {visiblePublishIssueGroups.map((group) => (
-                    <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
-                      <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
-                      <Space direction="vertical" size={2}>
-                        {group.items.map((item, issueIdx) => (
-                          <Space key={item.issue_id || `${group.key}-${issueIdx}`} size={4} style={{ width: "100%", flexWrap: "nowrap" }}>
-                            {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
-                            {item.blocking === false && <Tag color="gold">不阻塞</Tag>}
-                            <Typography.Text ellipsis={{ tooltip: item.message }} type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
-                              {item.message}
-                            </Typography.Text>
-                            {item.target && Object.keys(item.target).length > 0 && (
-                              <Button type="link" size="small" onClick={() => locatePublishIssue(item.target)}>定位</Button>
-                            )}
-                            {item.ignorable === true && publishIssueReviewId(item) && (
-                              <Button type="link" size="small" onClick={() => ignorePublishReviewIssue(item)}>忽略此告警</Button>
-                            )}
-                          </Space>
-                        ))}
-                      </Space>
-                    </div>
-                  ))}
-                </Space>
-                {publishIssueCount > 3 && (
-                  <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
-                    onClick={() => setShowAllPublishIssues((value) => !value)}>
-                    {showAllPublishIssues ? "收起告警" : `展开其余 ${publishIssueCount - 3} 项`}
-                  </Button>
-                )}
-                {hasAutoFixableIssue && (
-                  <Button size="small" icon={<RobotOutlined />} loading={autoFixBusy} onClick={autoFixFlow}>
-                    修复可自动处理项
-                  </Button>
-                )}
-              </Space>
-            }
-          />
+      <Card>
+        <Alert
+          showIcon
+          type={issueType(status)}
+          message={STATUS_LABELS[status]}
+          description={description}
+        />
+        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, margin: "16px 0" }}>
+          {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
+          <Button
+            type="primary"
+            loading={processing}
+            disabled={!draft || processing}
+            onClick={republish}
+          >修改后再次发布</Button>
+        </div>
         <Tabs
-          activeKey={activeFlowTab}
-          onChange={setActiveFlowTab}
-          destroyOnHidden={false}
-          tabBarStyle={{ marginBottom: 0 }}
-          tabBarExtraContent={{
-            left: (
-              <Space wrap size={4} style={{ marginRight: 16 }}>
-                <Tooltip title="重新运行自动语义分析，并同步刷新字段、依赖与接口闭包">
-                  <Button icon={<RobotOutlined />} loading={orchestrateBusy || autoFixBusy}
-                    disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || analysisScreenshotBusy}
-                    onClick={orchestrateFlow}>重新分析</Button>
-                </Tooltip>
-              </Space>
-            ),
-            right: (
-              <Space wrap style={{ marginLeft: 12 }}>
-                <Space size={4}><Typography.Text type="secondary">维护模式</Typography.Text>
-                  <Switch size="small" checked={maintenanceMode} onChange={setMaintenanceMode} /></Space>
-                {maintenanceMode && <Button size="small" icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>}
-                <Button type="primary" loading={phase === "publishing"}
-                  disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || result?.ok === true}
-                  onClick={publishRequest}>{result?.ok ? "已发布" : "重新验证并发布"}</Button>
-              </Space>
-            ),
-          }}
           items={[
-            { key: "abilities", label: `能力列表 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
-            { key: "requests", label: `捕获接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
-            // { key: "desc", label: "整体说明", children: renderDescriptionPanel() },
-            { key: "json", label: "高级 JSON", children: renderJsonPanel() },
+            { key: "capabilities", label: `能力列表 ${capabilities.length}`, children: renderCapabilities() },
+            {
+              key: "requests",
+              label: `捕获接口 ${capturedRequests.length}`,
+              children: capturedRequests.length ? (
+                <List
+                  bordered
+                  dataSource={capturedRequests}
+                  renderItem={(item, index) => (
+                    <List.Item>
+                      <Space><Tag>{String(item.method || "")}</Tag><Text>{String(item.path || item.url || `请求 ${index + 1}`)}</Text></Space>
+                    </List.Item>
+                  )}
+                />
+              ) : <Empty description="没有捕获接口" />,
+            },
+            {
+              key: "json",
+              label: "高级 JSON",
+              children: <pre style={{ whiteSpace: "pre-wrap", overflow: "auto", maxHeight: "65vh" }}>{JSON.stringify(draft, null, 2)}</pre>,
+            },
           ]}
         />
       </Card>
     );
   }
-  function renderRequestsPanel() {
-    const capturedTotal = allCapturedRequests(flowSpec).length;
-    const assignedStepIds = new Set((flowSpec?.capabilities || []).flatMap((cap) => capabilityActualStepIds(cap)));
-    const removedStepIds = removedCapabilityStepIds(flowSpec);
-    const unassignedSteps = (flowSpec?.steps || []).filter(
-      (step) => !assignedStepIds.has(step.step_id) && !removedStepIds.has(step.step_id),
-    );
-    return (
-      <Collapse
-        activeKey={expandedRequestPanels}
-        onChange={(keys) => setExpandedRequestPanels((Array.isArray(keys) ? keys : [keys]).map(String))}
-        bordered={false}
-      >
-        <Collapse.Panel header={`捕获接口 ${capturedTotal}`} key="captured">
-          {renderCapturedRequestsPanel()}
-        </Collapse.Panel>
-        {unassignedSteps.length > 0 && (
-          <Collapse.Panel header={`未归属能力的接口与字段 ${unassignedSteps.length}`} key="unassigned-steps">
-            <Collapse
-              size="small"
-              activeKey={expandedUnassignedSteps}
-              onChange={(keys) => setExpandedUnassignedSteps((Array.isArray(keys) ? keys : [keys]).map(String))}
-            >
-              {unassignedSteps.map((step, index) => (
-                <Collapse.Panel
-                  key={step.step_id}
-                  header={(
-                    <Space wrap id={`step-${domAnchorPart(step.step_id)}`}>
-                      <Tag color="purple">接口 {index + 1}</Tag>
-                      <Tag color={(step.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                      <Typography.Text strong>{step.name || fallbackStepName(step.method, step.path)}</Typography.Text>
-                      <PathText value={step.path || stripHost(step.url)} maxWidth={420} />
-                      <Tag>{step.params?.length || 0} 字段</Tag>
-                    </Space>
-                  )}
-                >
-                  {renderStepFieldsInCapability(step)}
-                </Collapse.Panel>
-              ))}
-            </Collapse>
-          </Collapse.Panel>
-        )}
-      </Collapse>
-    );
-  }
-  function renderCapturedRequestsPanel() {
-    if (!flowSpec) return null;
-    const rows = allCapturedRequests(flowSpec);
-    if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有捕获接口" />;
-    return (
-      <List
-        size="small"
-        // allCapturedRequests is grouped by this signature, so it is the one
-        // identity guaranteed unique even if a recorder reuses request_id.
-        rowKey={(req) => requestFactSignature(req)}
-        dataSource={rows}
-        renderItem={(req, idx) => {
-          const capabilityNames = capturedRequestCapabilityNames(flowSpec, req);
-          const fieldCandidate = !capabilityNames.length && isCapturedRequestFieldCandidate(flowSpec, req);
-          return (
-            <List.Item
-              id={`request-${domAnchorPart(req.request_index ?? req.request_id ?? req.path ?? idx)}`}
-              style={{ paddingLeft: 0, paddingRight: 0 }}
-              actions={[
-                <Button key="goto" size="small" onClick={() => setActiveFlowTab("abilities")}>去能力处理</Button>,
-              ]}
-            >
-              <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                <Space wrap>
-                  <Tag>{idx + 1}</Tag>
-                  <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
-                  <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
-                  {(req.occurrence_count || 1) > 1 && <Tag>{req.occurrence_count} 次</Tag>}
-                  {capabilityNames.map((name) => <Tag color="success" key={name}>能力：{name}</Tag>)}
-                  {!capabilityNames.length && fieldCandidate && <Tag color="cyan">仅字段候选</Tag>}
-                  {!capabilityNames.length && !fieldCandidate && <Tag>仅事实</Tag>}
-                  {req.role && <Tag>{req.role}</Tag>}
-                  <Tag color={confidenceColor(req.confidence)}>置信度 {confidencePercent(req.confidence)}</Tag>
-                  {req.response_status != null && <Tag>{req.response_status}</Tag>}
-                </Space>
-                {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
+
+  const assistantBody = (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Alert
+        showIcon
+        type={status === "failed" ? "error" : status === "waiting_operator" ? "warning" : "info"}
+        message={snapshot?.progress.label || STATUS_LABELS[status]}
+        description={processing && snapshot?.progress.round
+          ? `自动处理第 ${snapshot.progress.round} 轮`
+          : undefined}
+      />
+      {snapshot?.question ? (
+        <Card size="small" title="需要你确认">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text>{snapshot.question.text}</Text>
+            {snapshot.question.options?.length ? (
+              <Space wrap>
+                {snapshot.question.options.map((option) => (
+                  <Button key={option} onClick={() => answerQuestion(option)}>{option}</Button>
+                ))}
+              </Space>
+            ) : (
+              <Space.Compact style={{ width: "100%" }}>
+                <Input value={answer} onChange={(event) => setAnswer(event.target.value)} onPressEnter={() => answerQuestion()} />
+                <Button type="primary" onClick={() => answerQuestion()}>继续处理</Button>
+              </Space.Compact>
+            )}
+          </Space>
+        </Card>
+      ) : null}
+      {(snapshot?.insights || []).length ? (
+        <List
+          size="small"
+          bordered
+          dataSource={snapshot?.insights || []}
+          renderItem={(item) => (
+            <List.Item>
+              <Space align="start">
+                <Tag>{String(item.kind || "分析")}</Tag>
+                <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
               </Space>
             </List.Item>
-          );
-        }}
-      />
-    );
-  }
-  function capabilityStepSelectOptions(cap: FlowCapabilityData) {
-    const existing = new Set(capabilityActualStepIds(cap));
-    const allStepReqKeys = new Set((flowSpec?.steps || []).flatMap((s) => {
-      const meta = s.source_meta || {};
-      const keys: string[] = [];
-      if (meta.request_id) keys.push(`id:${meta.request_id}`);
-      if (meta.request_index != null) keys.push(`idx:${String(meta.request_index)}`);
-      return keys;
-    }));
-    const existingReqKeys = new Set((flowSpec?.steps || [])
-      .filter((s) => existing.has(s.step_id))
-      .flatMap((s) => {
-        const meta = s.source_meta || {};
-        const keys: string[] = [];
-        if (meta.request_id) keys.push(`id:${meta.request_id}`);
-        if (meta.request_index != null) keys.push(`idx:${String(meta.request_index)}`);
-        return keys.length ? keys : [`step:${s.step_id}`];
-      }));
-    const stepItems = (flowSpec?.steps || [])
-      .filter((s) => !existing.has(s.step_id))
-      .map((s) => ({
-        label: `${s.name || fallbackStepName(s.method, s.path)} · ${s.method} ${s.path || stripHost(s.url)}`,
-        value: `step:${s.step_id}`,
-      }));
-    const reqItems = allCapturedRequests(flowSpec)
-      .filter((req) => !existingReqKeys.has(requestFactKey(req)) && !allStepReqKeys.has(requestFactKey(req)))
-      .map((req) => ({
-        label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
-        value: `req:${requestOptionValue(req)}`,
-      }));
-    return [...stepItems, ...reqItems];
-  }
-  function renderParamEditorInCapability(
-    step: FlowStepData,
-    p: FlowParam,
-  ) {
-    const bindKey = paramDraftKey(step.step_id, p);
-    const linked = incomingLink(step.step_id, p.path);
-    const currentBind = bindDraft[bindKey] || {
-      source_step_id: p.source?.step_id || linked?.source_step_id,
-      source_path: p.source?.response_path || linked?.source_path,
-    };
-    const linkedSourceComplete = p.source_kind === "previous_response"
-      && !!linked?.source_step_id
-      && !!linked?.source_path;
-    const sourceConfigurationIncomplete = sourceNeedsConfiguration(p.source_kind || "unknown", p.source as any)
-      && !linkedSourceComplete;
-    const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var";
-    const runtimeSourceComplete = !sourceConfigurationIncomplete;
-    const selectBinding = selectBindingForParam(step, p);
-    const enumOptions = enumOptionsForParam(step, p);
-    const enumMappingComplete = enumMappingCompleteForParam(step, p);
-    const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
-    const isApiOption = p.source_kind === "api_option";
-    const isTypedEnum = p.type === "enum" || p.type === "list-enum";
-    const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "") || isTypedEnum;
-    const hasBindingPanel = isApiOption || isEnumOption;
-    const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
-    const sourceSteps = (flowSpec?.steps || []).filter((s) => s.step_id !== step.step_id);
-    const sourceStepOptions = [
-      { label: "选择来源接口", value: "" },
-      ...sourceSteps.map((s) => ({
-        label: `${s.name || s.path} · ${s.method} ${s.path}`,
-        value: s.step_id,
-      })),
-    ];
-    const sourceRespOptions = [
-      { label: currentBind.source_step_id ? "选择响应字段" : "先选择来源接口", value: "" },
-      ...sourcePathOptions(currentBind.source_step_id),
-    ];
-    return (
-      <List.Item
-        // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
-        // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
-        key={p.field_id || `${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}
-        id={fieldEditorAnchorId(step.step_id, p.field_id || p.path)}
-        style={{ padding: "12px 0" }}
-      >
-        <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
-          <Row gutter={[12, 8]} align="top">
-            <Col flex="auto">
-              <Space wrap size={6}>
-                <Tag color={p.category === "runtime_var" ? "gold" : p.category === "system_const" ? "default" : "blue"}>{p.path}</Tag>
-                <Tag>{optionLabel(CATEGORY_OPTIONS, p.category || "user_param")}</Tag>
-                <Tag>{optionLabel(SOURCE_KIND_OPTIONS, normalizeSourceKindForUi(p.source_kind) || "unknown")}</Tag>
-                {linked && <Tag color="cyan">依赖字段</Tag>}
-                {isApiOption && <Tag color="geekblue">接口候选</Tag>}
-                {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
-                {needsManualConfirm && <Tag color="warning">待确认</Tag>}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
-              </Space>
-              <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
-                {paramSourceText(step, p, linked)}
-              </Typography.Text>
-            </Col>
-            <Col>
-              <Button
-                size="small"
-                danger
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => removeParam(step.step_id, p)}
-              >删除字段</Button>
-            </Col>
-          </Row>
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-            gap: 10,
-            alignItems: "end",
-            marginTop: 10,
-          }}>
-            <FieldControl label="名称">
-              <EditableText value={p.key} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "key", v)} />
-            </FieldControl>
-            <FieldControl label="路径">
-              <EditableText value={p.path} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "path", v)} />
-            </FieldControl>
-            <FieldControl label="默认值">
-              {enumOptions.length > 0 && enumMappingComplete ? (
-                <EnumValueInput value={String(p.default_value ?? p.value ?? "")} width="100%"
-                  options={enumSelectOptions}
-                  onSave={(v) => updateParam(step.step_id, p, "value", v)} />
-              ) : (
-                <EditableText value={String(p.default_value ?? p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
-              )}
-            </FieldControl>
-            <FieldControl label="类型">
-              <NativeSelect value={p.type} width="100%" options={typeSelectOptionsForParam(p)}
-                onChange={(v) => updateParamType(step, p, v)} />
-            </FieldControl>
-            <FieldControl label="分类">
-              <NativeSelect value={p.category || "user_param"} width="100%" options={CATEGORY_OPTIONS}
-                onChange={(v) => updateParamCategory(step.step_id, p, v)} />
-            </FieldControl>
-            <FieldControl label="来源">
-              <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || "unknown"} width="100%" options={sourceSelectOptionsForParam(p)}
-                onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
-            </FieldControl>
-            {paramExposedToCaller(p) && (
-              <FieldControl label="必填性">
-                <NativeSelect
-                  value={p.required ? "required" : "optional"}
-                  width="100%"
-                  options={[
-                    { label: "必填", value: "required" },
-                    { label: "非必填", value: "optional" },
-                  ]}
-                  onChange={(v) => updateParam(step.step_id, p, "required", v === "required")}
-                />
-              </FieldControl>
-            )}
-            <FieldControl label="展示">
-              {p.category === "user_param" ? (
-                <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给调用方</Checkbox>
-              ) : <Typography.Text type="secondary">不对调用方展示</Typography.Text>}
-            </FieldControl>
-          </div>
-          {needsManualConfirm && runtimeSourceComplete && (
-            <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>
-              确认当前来源
-            </Button>
           )}
-          {(hasBindingPanel || hasRuntimePanel) && (
-            <Collapse size="small" ghost style={{ marginTop: 10 }} defaultActiveKey={needsManualConfirm ? ["runtime"] : []}>
-              {hasBindingPanel && (
-                <Collapse.Panel key="binding" header={<Space><LinkOutlined />来源/枚举配置</Space>}>
-                  <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 8 }}>
-                    <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                      <Space wrap size={6}>
-                        <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
-                        <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
-                        {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
-                        {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
-                      </Space>
-                      {isApiOption && (
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, alignItems: "end" }}>
-                          <FieldControl label="来源接口">
-                            <EditableComboInput
-                              value={selectBinding?.source_url || ""}
-                              options={readSourceOptions()}
-                              placeholder="选择或输入接口地址"
-                              onSave={(v) => upsertSelectBinding(step, p, { source_url: v })}
-                            />
-                          </FieldControl>
-                          <FieldControl label="接口参数">
-                            <EditableTextArea
-                              rows={1}
-                              value={queryToLines(selectBinding?.source_url || "")}
-                              placeholder="每行一个参数，如 pageNo=1"
-                              onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
-                            />
-                          </FieldControl>
-                          <FieldControl label="值字段">
-                            <EditableComboInput
-                              value={selectBinding?.value_key || ""}
-                              options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                              placeholder="如 id/userId/dictValue"
-                              onSave={(v) => upsertSelectBinding(step, p, { value_key: v })}
-                            />
-                          </FieldControl>
-                          <FieldControl label="显示字段">
-                            <EditableComboInput
-                              value={selectBinding?.label_key || ""}
-                              options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                              placeholder="如 name/label/dictLabel"
-                              onSave={(v) => upsertSelectBinding(step, p, { label_key: v })}
-                            />
-                          </FieldControl>
-                          <FieldControl label="配对 ID 字段">
-                            <EditableComboInput
-                              value={selectBinding?.id_path || p.path || p.key || ""}
-                              options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
-                              placeholder="默认当前字段路径，可改为隐藏 ID 字段"
-                              onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
-                            />
-                          </FieldControl>
-                          <FieldControl label="多选">
-                            <Checkbox checked={!!selectBinding?.multi || p.type === "list-enum"}
-                              onChange={(e) => upsertSelectBinding(step, p, { multi: e.target.checked })}>
-                              列表多选
-                            </Checkbox>
-                          </FieldControl>
-                        </div>
-                      )}
-                      {isEnumOption && (
-                        <FieldControl label="枚举候选">
-                          <EditableTextArea
-                            rows={3}
-                            value={enumOptionsTextForParam(step, p)}
-                            placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
-                            onSave={(v) => {
-                              const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
-                              upsertSelectBinding(
-                                step,
-                                p,
-                                {
-                                  source_url: "",
-                                  value_key: "",
-                                  label_key: "",
-                                  options,
-                                  count: options.length,
-                                  option_map: optionMap,
-                                  enum_source: enumSourceForKind(p.source_kind),
-                                  enum_confirmed: mappingComplete,
-                                },
-                                enumOptionEdits(step, p, options, optionMap),
-                              );
-                            }}
-                          />
-                        </FieldControl>
-                      )}
-                    </Space>
-                  </div>
-                </Collapse.Panel>
-              )}
-              {hasRuntimePanel && (
-                <Collapse.Panel key="runtime" header={<Space><BranchesOutlined />运行期来源</Space>}>
-                  <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
-                    {p.source_kind === "previous_response" || linked ? (
-                      <Space wrap>
-                        <Typography.Text strong style={{ fontSize: 12 }}>上游响应</Typography.Text>
-                        <NativeSelect value={currentBind.source_step_id || ""} width={300}
-                          options={sourceStepOptions}
-                          onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
-                        <ComboInput value={currentBind.source_path || ""} width={300}
-                          options={sourceRespOptions}
-                          disabled={!currentBind.source_step_id}
-                          placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源接口"}
-                          onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
-                        <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
-                      </Space>
-                    ) : p.source_kind === "page_context" ? (
-                      <FieldControl label="调用上下文键">
-                        <EditableText value={(p.source as any)?.context_key || p.key || ""} width={320}
-                          placeholder="如 department_id；由调用方运行环境注入"
-                          onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { context_key: v })} />
-                      </FieldControl>
-                    ) : p.source_kind === "request_header" ? (
-                      <FieldControl label="请求头名称">
-                        <EditableText value={(p.source as any)?.header || ""} width={320}
-                          placeholder="如 Authorization / X-Tenant-Id"
-                          onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { header: v })} />
-                      </FieldControl>
-                    ) : p.source_kind === "current_user" ? (
-                      <Typography.Text type="secondary">运行期从当前登录身份注入，不依赖前置接口。</Typography.Text>
-                    ) : p.source_kind === "system_time" ? (
-                      <Typography.Text type="secondary">运行期按字段类型生成当前系统时间，不使用录制样例。</Typography.Text>
-                    ) : p.source_kind === "system_generated" ? (
-                      <FieldControl label="生成策略">
-                        <NativeSelect value={(p.source as any)?.strategy || "uuid"} width={260}
-                          options={[
-                            { label: "UUID", value: "uuid" },
-                            { label: "随机字符串", value: "random_string" },
-                            { label: "随机数字", value: "random_number" },
-                          ]}
-                          onChange={(v) => updateRuntimeSourceDetail(step.step_id, p, { strategy: v })} />
-                      </FieldControl>
-                    ) : p.source_kind === "selected_option_field" ? (
-                      <Typography.Text type="secondary">运行期从所选候选记录的 {(p.source as any)?.response_path || "关联字段"} 自动写入。</Typography.Text>
-                    ) : p.source_kind === "computed" ? (
-                      <Typography.Text type="secondary">
-                        运行期按规则 {(p.source as any)?.strategy || "未配置"}，根据 {(p.source as any)?.start_field || "开始字段"} 与 {(p.source as any)?.end_field || "结束字段"} 自动计算。
-                      </Typography.Text>
-                    ) : (
-                      <Typography.Text type="warning">请选择明确来源；未配置来源的运行期变量不会被当成可执行字段。</Typography.Text>
-                    )}
-                  </div>
-                </Collapse.Panel>
-              )}
-            </Collapse>
-          )}
-        </div>
-      </List.Item>
-    );
-  }
-  function renderAddFieldForStep(step: FlowStepData) {
-    const isActive = newParam.step_id === step.step_id;
-    return (
-      <Card size="small" styles={{ body: { padding: 10 } }}>
-        <Space wrap>
-          <Typography.Text strong>新增字段</Typography.Text>
-          <Input placeholder="字段路径" value={isActive ? newParam.path : ""} style={{ width: 180 }}
-            onChange={(e) => setNewParam((s) => ({ ...s, step_id: step.step_id, path: e.target.value }))} />
-          <Input placeholder="参数名" value={isActive ? newParam.key : ""} style={{ width: 160 }}
-            onChange={(e) => setNewParam((s) => ({ ...s, step_id: step.step_id, key: e.target.value }))} />
-          <NativeSelect value={isActive ? newParam.type : "string"} width={130} options={PARAM_TYPE_OPTIONS}
-            onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, type: v }))} />
-          <NativeSelect value={isActive ? newParam.category : "user_param"} width={140} options={CATEGORY_OPTIONS}
-            onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, category: v }))} />
-          <NativeSelect value={isActive ? newParam.source_kind : "unknown"} width={140} options={SOURCE_KIND_OPTIONS}
-            onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, source_kind: v }))} />
-          <Button type="primary" onClick={() => {
-            const draft = isActive ? newParam : { ...newParam, step_id: step.step_id };
-            const path = draft.path.trim();
-            const key = draft.key.trim();
-            if (!path || !key) { message.warning("请填写字段路径和参数名"); return; }
-            const isEnum = draft.type === "enum" || draft.type === "list-enum";
-            const sourceKind = draft.source_kind || "unknown";
-            const param: FlowParam = {
-              path, key, label: key, value: "", type: draft.type, required: false,
-              category: draft.category, source_kind: sourceKind,
-              enum_options: isEnum ? [] : undefined,
-              exposed_to_user: draft.category === "user_param", editable: true,
-              reason: "人工新增字段",
-            };
-            const source = sourceDescriptor(sourceKind, param);
-            if (!send({ type: "flow_update", edits: [{
-              op: "add", step_id: step.step_id, param: {
-                ...param,
-                source,
-                need_human_confirm: sourceNeedsConfiguration(sourceKind, source),
-              },
-            }] })) return;
-            setNewParam({
-              step_id: step.step_id, path: "", key: "", type: "string", category: "user_param", source_kind: "unknown",
-            });
-          }}>添加字段</Button>
-        </Space>
-      </Card>
-    );
-  }
-  function renderStepResponseFields(step: FlowStepData) {
-    const leaves = leafPathValues(step.response_json);
-    if (!leaves.length) return null;
-    return (
-      <Card size="small" title="响应字段" style={{ marginTop: 10 }}>
-        <Space wrap size={4}>
-          {leaves.slice(0, 60).map((leaf, idx) => (
-            <Tooltip key={`${leaf.path}-${idx}`} title={leaf.value}>
-              <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
-            </Tooltip>
-          ))}
-          {leaves.length > 60 && <Tag>+{leaves.length - 60}</Tag>}
-        </Space>
-      </Card>
-    );
-  }
-  function renderStepFieldsInCapability(step: FlowStepData) {
-    return (
-      <Space direction="vertical" size={10} style={{ width: "100%" }}>
-        {renderAddFieldForStep(step)}
-        {(step.params || []).length ? (
-          <List
-            size="small"
-            // path/key are editable. Stable positional keys prevent row remounts between blur and click.
-            rowKey={(param) => param.field_id || `${step.step_id}:param:${(step.params || []).indexOf(param)}`}
-            dataSource={step.params || []}
-            renderItem={(p) => renderParamEditorInCapability(step, p)}
-          />
-        ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
-        )}
-        {renderStepResponseFields(step)}
-      </Space>
-    );
-  }
-  function renderCapabilityStepWithFields(cap: FlowCapabilityData, capIdx: number, stepId: string, stepIdx: number) {
-    const stepIds = capabilityActualStepIds(cap);
-    const st = stepById[stepId];
-    const requestRef = capabilityRequestRefForStep(cap, stepId);
-    if (!st) {
-      return (
-        <Collapse.Panel key={stepId} header={<Typography.Text type="danger">接口不存在：{stepId}</Typography.Text>}>
-          <Button danger size="small" onClick={() => removeStepFromCapability(capIdx, stepId)}>从能力移除</Button>
-        </Collapse.Panel>
-      );
-    }
-    return (
-      <Collapse.Panel
-        key={stepId}
-        header={
-          <Space wrap id={`step-${domAnchorPart(stepId)}`}>
-            <Tag color="purple">接口 {stepIdx + 1}</Tag>
-            <Tag color={(st.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{st.method}</Tag>
-            <Typography.Text strong>{st.name || fallbackStepName(st.method, st.path)}</Typography.Text>
-            <PathText value={st.path || stripHost(st.url)} maxWidth={420} />
-            <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
-            <Tag>{st.params?.length || 0} 字段</Tag>
-          </Space>
-        }
-        extra={
-          <Space onClick={(e) => e.stopPropagation()}>
-            <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0}
-              onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, -1)} /></Tooltip>
-            <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1}
-              onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, 1)} /></Tooltip>
-            <Button size="small" danger onClick={() => removeStepFromCapability(capIdx, stepId)}>移除</Button>
-          </Space>
-        }
-      >
-        {renderStepFieldsInCapability(st)}
-      </Collapse.Panel>
-    );
-  }
-  function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
-    const capabilityUiKey = capabilityPanelKey(cap, capIdx);
-    const actualStepIds = capabilityActualStepIds(cap);
-    const optimisticOrder = optimisticCapabilityStepOrder[capabilityUiKey] || [];
-    const stepIds = [
-      ...optimisticOrder.filter((stepId) => actualStepIds.includes(stepId)),
-      ...actualStepIds.filter((stepId) => !optimisticOrder.includes(stepId)),
-    ];
-    const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id));
-    const addOptions = capabilityStepSelectOptions(cap);
-    const fieldCount = stepIds.reduce((n, sid) => n + (stepById[sid]?.params?.length || 0), 0);
-    return (
-      <Space direction="vertical" size={10} style={{ width: "100%" }}>
-        <Space wrap align="center">
-          <Typography.Text strong>添加接口</Typography.Text>
-          <NativeSelect
-            value={capabilityAddValue[capabilityUiKey] || ""}
-            width={460}
-            options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
-            onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capabilityUiKey]: v }))}
-          />
-          <NativeSelect
-            value={capabilityAddUsage[capabilityUiKey] || ""}
-            width={140}
-            options={[{ label: "选择用途", value: "" }, ...CAPABILITY_USAGE_OPTIONS]}
-            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capabilityUiKey]: v as CapabilityUsage | "" }))}
-          />
-          <Button
-            size="small"
-            type="primary"
-            disabled={!capabilityAddValue[capabilityUiKey] || !capabilityAddUsage[capabilityUiKey]}
-            onClick={() => {
-              if (!addStepToCapability(capIdx, capabilityAddValue[capabilityUiKey], capabilityAddUsage[capabilityUiKey])) return;
-              setCapabilityAddValue((s) => ({ ...s, [capabilityUiKey]: "" }));
-              setCapabilityAddUsage((s) => ({ ...s, [capabilityUiKey]: "" }));
-            }}
-          >
-            添加接口
-          </Button>
-          <Tag>{stepIds.length} 执行接口 / {auxiliaryRefs.length} 辅助接口 / {fieldCount} 字段</Tag>
-        </Space>
-        {!stepIds.length && !auxiliaryRefs.length ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未绑定接口" />
-        ) : stepIds.length ? (
-          <Collapse
-            size="small"
-            activeKey={expandedCapabilitySteps[capabilityUiKey] || []}
-            onChange={(keys) => setExpandedCapabilitySteps((current) => ({
-              ...current,
-              [capabilityUiKey]: (Array.isArray(keys) ? keys : [keys]).map(String),
-            }))}
-          >
-            {stepIds.map((stepId, stepIdx) => renderCapabilityStepWithFields(cap, capIdx, stepId, stepIdx))}
-          </Collapse>
-        ) : null}
-        {auxiliaryRefs.length > 0 && (
-          <List
-            size="small"
-            header={<Typography.Text strong>辅助接口</Typography.Text>}
-            rowKey={(ref) => [
-              capabilityUiKey,
-              ref.usage || "auxiliary",
-              ref.step_id || ref.request_id || auxiliaryRefs.indexOf(ref),
-            ].join(":")}
-            dataSource={auxiliaryRefs}
-            renderItem={(ref) => {
-              const st = stepById[String(ref.step_id || "")];
-              return (
-                <List.Item actions={[<Button key="remove" size="small" danger onClick={() => removeStepFromCapability(capIdx, String(ref.step_id || ""))}>移除</Button>]}>
-                  <Space wrap>
-                    <Tag color="cyan">{capabilityUsageLabel(ref.usage)}</Tag>
-                    <Typography.Text>{st?.name || ref.path || ref.step_id}</Typography.Text>
-                    {st && <PathText value={st.path || stripHost(st.url)} maxWidth={420} />}
-                  </Space>
-                </List.Item>
-              );
-            }}
-          />
-        )}
-      </Space>
-    );
-  }
-  function renderCapabilityDependencyEditor(cap: FlowCapabilityData) {
-    if (!flowSpec) return null;
-    const stepIds = new Set(capabilityActualStepIds(cap));
-    const scopedSteps = (flowSpec.steps || []).filter((s) => stepIds.has(s.step_id));
-    const scopedStepOptions = scopedSteps.map((s) => ({
-      label: `${s.name || s.path} · ${s.method} ${s.path}`,
-      value: s.step_id,
-    }));
-    const scopedLinks = (flowSpec.links || []).filter((l) => stepIds.has(l.source_step_id) && stepIds.has(l.target_step_id));
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" title={<Space><PlusOutlined />新增依赖</Space>}>
-          <Row gutter={[8, 8]} align="middle">
-            <Col span={6}><NativeSelect value={newLink.source_step_id || ""} width="100%"
-              options={[{ label: "选择来源接口", value: "" }, ...scopedStepOptions]}
-              onChange={(v) => setNewLink((s) => ({ ...s, source_step_id: v, source_path: "" }))} /></Col>
-            <Col span={6}><ComboInput value={newLink.source_path || ""} width="100%"
-              options={[{ label: newLink.source_step_id ? "选择来源响应字段" : "先选择来源接口", value: "" }, ...sourcePathOptions(newLink.source_step_id)]}
-              disabled={!newLink.source_step_id}
-              placeholder={newLink.source_step_id ? "选择或输入来源响应字段" : "先选择来源接口"}
-              onChange={(v) => setNewLink((s) => ({ ...s, source_path: v }))} /></Col>
-            <Col span={5}><NativeSelect value={newLink.target_step_id || ""} width="100%"
-              options={[{ label: "选择目标接口", value: "" }, ...scopedStepOptions]}
-              onChange={(v) => setNewLink((s) => ({ ...s, target_step_id: v, target_path: "" }))} /></Col>
-            <Col span={5}><ComboInput value={newLink.target_path || ""} width="100%"
-              options={[{ label: newLink.target_step_id ? "选择目标字段" : "先选择目标接口", value: "" }, ...targetPathOptions(newLink.target_step_id)]}
-              disabled={!newLink.target_step_id}
-              placeholder={newLink.target_step_id ? "选择或输入目标字段" : "先选择目标接口"}
-              onChange={(v) => setNewLink((s) => ({ ...s, target_path: v }))} /></Col>
-            <Col span={2}><Button type="primary" block onClick={addLink}>添加</Button></Col>
-          </Row>
-        </Card>
-        {!scopedLinks.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个能力没有接口依赖" /> : (
-          <List
-            size="small"
-            dataSource={scopedLinks}
-            renderItem={(link) => {
-              const sourceStep = stepById[link.source_step_id];
-              const targetStep = stepById[link.target_step_id];
-              return (
-                <List.Item
-                  id={`link-${domAnchorPart(link.link_id)}`}
-                  actions={[
-                    <Checkbox key="cf" checked={!!link.confirmed}
-                      onChange={(e) => send({ type: "flow_update", edits: [{ op: "update", link_id: link.link_id, field: "confirmed", value: e.target.checked }] })}>已确认</Checkbox>,
-                    <Button key="rm" size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", link_id: link.link_id, reset_target: true }] })}>删除</Button>,
-                  ]}
-                >
-                  <Space wrap>
-                    <Tag color="cyan">依赖</Tag>
-                    <Typography.Text>{sourceStep?.name || sourceStep?.path || link.source_step_id}</Typography.Text>
-                    <Typography.Text code>{link.source_path}</Typography.Text>
-                    <Typography.Text>→</Typography.Text>
-                    <Typography.Text>{targetStep?.name || targetStep?.path || link.target_step_id}</Typography.Text>
-                    <Typography.Text code>{link.target_path}</Typography.Text>
-                    {link.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{link.reason}</Typography.Text>}
-                  </Space>
-                </List.Item>
-              );
-            }}
-          />
-        )}
-      </Space>
-    );
-  }
-  function schemaRowsView(schema?: Record<string, any>, emptyText = "无") {
-    const rows = schemaFieldRows(schema);
-    if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} />;
-    return (
-      <List
-        size="small"
-        dataSource={rows}
-        renderItem={(row) => (
-          <List.Item>
-            <Space wrap>
-              <Typography.Text code>{row.name}</Typography.Text>
-              <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
-              <Tag>Wire：{row.wireType}</Tag>
-              <Tag color={row.required ? "red" : undefined}>{row.required ? "必填" : "非必填"}</Tag>
-              {row.description && <Typography.Text type="secondary">{row.description}</Typography.Text>}
-            </Space>
-          </List.Item>
-        )}
-      />
-    );
-  }
-  function renderCapabilityObserver(cap: FlowCapabilityData, inputSchema: Record<string, any>, outputSchema: Record<string, any>) {
-    if (!flowSpec) return null;
-    const stepIds = capabilityActualStepIds(cap);
-    const steps = stepIds.map((stepId) => stepById[stepId]).filter(Boolean);
-    const scopedLinks = (flowSpec.links || []).filter((link) =>
-      stepIds.includes(link.source_step_id) && stepIds.includes(link.target_step_id));
-    const evidenceIds = new Set<string>();
-    scopedLinks.forEach((link) => {
-      const value = String(link.meta?.verification_id || "");
-      if (value) evidenceIds.add(value);
-    });
-    steps.forEach((step) => {
-      const value = String(step.fact_check?.verification_id || "");
-      if (value) evidenceIds.add(value);
-      (step.selects || []).forEach((binding) => {
-        if (binding.verification_id) evidenceIds.add(String(binding.verification_id));
-      });
-    });
-    const verificationRecords = (flowSpec.meta?.verification_log || []).filter((record) =>
-      evidenceIds.has(String(record.verification_id || "")));
-    const targetIds = new Set([String(cap.capability_id || ""), String(cap.name || ""), ...stepIds]);
-    const unverified = (flowSpec.meta?.unverified || []).filter((item) =>
-      targetIds.has(String(item.target_id || "")) || stepIds.some((stepId) => String(item.target_id || "").includes(stepId)));
-    return (
-      <Collapse size="small" defaultActiveKey={["interfaces", "io"]}>
-        <Collapse.Panel key="interfaces" header={`接口与字段 ${steps.length} 接口`}>
-          {!steps.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有公开执行接口" /> : (
-            <List
-              size="small"
-              dataSource={steps}
-              rowKey={(step) => step.step_id}
-              renderItem={(step) => (
-                <List.Item>
-                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                    <Space wrap>
-                      <Tag color={(step.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                      <Typography.Text strong>{step.name || fallbackStepName(step.method, step.path)}</Typography.Text>
-                      <PathText value={step.path || stripHost(step.url)} maxWidth={520} />
-                      {step.fact_check?.verification_id
-                        ? <Tag color="success">写后读回已验证</Tag>
-                        : (step.method || "GET").toUpperCase() !== "GET" && <Tag color="warning">写后读回未验证</Tag>}
-                    </Space>
-                    {!!step.params?.length && (
-                      <Space wrap size={4}>
-                        {step.params.map((field) => (
-                          <Tag key={field.field_id || `${step.step_id}:${field.path}`}>
-                            {field.label || field.key || field.path} · {field.type || "string"}
-                            {field.required ? " · 必填" : ""}
-                          </Tag>
-                        ))}
-                      </Space>
-                    )}
-                  </Space>
-                </List.Item>
-              )}
-            />
-          )}
-        </Collapse.Panel>
-        <Collapse.Panel key="dependencies" header={`依赖 ${scopedLinks.length}`}>
-          {!scopedLinks.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有接口依赖" /> : (
-            <List size="small" dataSource={scopedLinks} rowKey={(link) => link.link_id}
-              renderItem={(link) => (
-                <List.Item>
-                  <Space wrap>
-                    <Typography.Text>{stepById[link.source_step_id]?.name || link.source_step_id}</Typography.Text>
-                    <Typography.Text code>{link.source_path}</Typography.Text>
-                    <Typography.Text>→</Typography.Text>
-                    <Typography.Text>{stepById[link.target_step_id]?.name || link.target_step_id}</Typography.Text>
-                    <Typography.Text code>{link.target_path}</Typography.Text>
-                    {link.meta?.verification_id
-                      ? <Tag color="success">verification_id: {String(link.meta.verification_id)}</Tag>
-                      : <Tag color="warning">unverified</Tag>}
-                  </Space>
-                </List.Item>
-              )} />
-          )}
-        </Collapse.Panel>
-        <Collapse.Panel key="io" header="调用参数 / 返回结果">
-          {renderCapabilityIOBusinessView(0, inputSchema, outputSchema, false)}
-        </Collapse.Panel>
-        <Collapse.Panel key="verification" header={`验证记录 ${verificationRecords.length}`}>
-          {!verificationRecords.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无验证记录" /> : (
-            <List size="small" dataSource={verificationRecords}
-              rowKey={(record) => String(record.verification_id || JSON.stringify(record))}
-              renderItem={(record) => <List.Item><Space wrap>
-                <Tag color="success">{String(record.kind || "verified")}</Tag>
-                <Typography.Text code>{String(record.verification_id || "")}</Typography.Text>
-                {record.created_at && <Typography.Text type="secondary">{String(record.created_at)}</Typography.Text>}
-              </Space></List.Item>} />
-          )}
-          {!!unverified.length && <List size="small" header={<Tag color="warning">unverified {unverified.length}</Tag>}
-            dataSource={unverified} rowKey={(item) => `${item.target_kind}:${item.target_id}`}
-            renderItem={(item) => <List.Item><Space wrap>
-              <Tag color="warning">{String(item.target_kind || "target")}</Tag>
-              <Typography.Text code>{String(item.target_id || "")}</Typography.Text>
-              <Typography.Text type="secondary">{String(item.reason || "")}</Typography.Text>
-            </Space></List.Item>} />}
-        </Collapse.Panel>
-      </Collapse>
-    );
-  }
-  function renderCapabilityIOBusinessView(
-    capIdx: number,
-    inputSchema: Record<string, any>,
-    outputSchema: Record<string, any>,
-    editable = true,
-  ) {
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
-          <Card size="small" title="调用参数">
-            {schemaRowsView(inputSchema, "无调用参数")}
-          </Card>
-          <Card size="small" title="返回结果">
-            {schemaRowsView(outputSchema, "返回最后一个接口的原始响应")}
-          </Card>
-        </div>
-        {editable && <Collapse ghost size="small">
-          <Collapse.Panel key="schema" header="编辑输入/输出 Schema">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
-              <FieldControl label="输入 JSON Schema">
-                <EditableTextArea rows={7} value={JSON.stringify(inputSchema, null, 2)}
-                  onSave={(v) => {
-                    try { updateCapabilityField(capIdx, "input_schema", JSON.parse(v || "{}")); }
-                    catch (e: any) { message.error(e?.message || "输入 Schema 不是合法 JSON"); }
-                  }} />
-              </FieldControl>
-              <FieldControl label="输出 JSON Schema">
-                <EditableTextArea rows={7} value={JSON.stringify(outputSchema, null, 2)}
-                  onSave={(v) => {
-                    try { updateCapabilityField(capIdx, "output_schema", JSON.parse(v || "{}")); }
-                    catch (e: any) { message.error(e?.message || "输出 Schema 不是合法 JSON"); }
-                  }} />
-              </FieldControl>
-            </div>
-          </Collapse.Panel>
-        </Collapse>}
-      </Space>
-    );
-  }
-  function renderCapabilityComposerPanel() {
-    if (!flowSpec) return null;
-    const capabilities = flowSpec.capabilities || [];
-    const capabilityRelations = flowSpec.capability_relations || [];
-    const kindOptions = CAPABILITY_KIND_OPTIONS;
-    return (
-      <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
-        <Typography.Text type={maintenanceMode ? "warning" : "secondary"}>
-          {maintenanceMode
-            ? "维护模式已开启：仅在自动分析判断错误时修正，所有改动仍走既有 FlowSpec 操作。"
-            : "只读观察器：能力、接口、依赖、输入输出与验证证据由录制和验证阶段自动生成。"}
-        </Typography.Text>
-        {(analysisScreenshots.length > 0 || !!flowSpec.meta?.capability_generation) && (
-          <Space wrap>
-            <input
-              ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
-              onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
-            />
-            {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
-            {flowSpec.meta?.capability_generation && <>
-              <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
-                {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
-              </Tag>
-              {flowSpec.meta?.recording_agent_session?.mode &&
-                <Tag color="blue">Pi {flowSpec.meta.recording_agent_session.mode === "repair" ? "修复" : "规划"}</Tag>}
-              {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
-                <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
-            </>}
-          </Space>
-        )}
-        {analysisScreenshots.length > 0 && (
-          <Space wrap size={8}>
-            {analysisScreenshots.map((item) => (
-              <div key={item.id} style={{ position: "relative", width: 112, height: 72, border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", background: "#fafafa" }}>
-                <img src={item.preview_url} alt={item.name} title={item.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                <Button type="primary" danger size="small" shape="circle" icon={<DeleteOutlined />} aria-label={"\u5220\u9664\u622a\u56fe"} onClick={() => removeAnalysisScreenshot(item.id)} style={{ position: "absolute", right: 3, top: 3, transform: "scale(.82)" }} />
-              </div>
-            ))}
-          </Space>
-        )}
-        {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待自动分析生成能力" /> : (
-          <Collapse
-            size="small"
-            activeKey={expandedCapabilityKeys}
-            onChange={(keys) => setExpandedCapabilityKeys((Array.isArray(keys) ? keys : [keys]).map(String))}
-          >
-            {capabilities.map((cap, idx) => {
-              const capabilityUiKey = capabilityPanelKey(cap, idx);
-              const stepIds = capabilityActualStepIds(cap);
-              const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
-              const capParams = capSteps.flatMap((st) => st.params || []);
-              const auxiliaryStepIds = new Set((cap.request_refs || [])
-                .filter((ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id))
-                .map((ref) => ref.step_id));
-              const derivedInputSchema = {
-                type: "object",
-                properties: Object.fromEntries(capParams
-                  .filter(paramExposedToCaller)
-                  .map((p) => [p.key || p.path, jsonSchemaForParam(p)])),
-                required: capParams
-                  .filter(paramRequiredFromCaller)
-                  .map((p) => p.key || p.path),
-              };
-              const inputSchema = Object.keys(cap.input_schema?.properties || {}).length
-                ? (cap.input_schema || derivedInputSchema)
-                : derivedInputSchema;
-              const lastResponse = [...capSteps].reverse().find((st) => st.response_json != null)?.response_json;
-              const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
-              return (
-                <Collapse.Panel
-                  key={capabilityUiKey}
-                  header={
-                    <Space wrap id={`capability-${domAnchorPart(cap.capability_id || cap.name || "missing-id")}`}>
-                      <Tag color={cap.confirmed ? "success" : "default"}>{cap.confirmed ? "已采纳" : "模型建议"}</Tag>
-                      <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
-                      <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
-                      <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
-                      {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
-                    </Space>
-                  }
-                  extra={maintenanceMode ? (
-                    <Space onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0}
-                        onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, -1)} /></Tooltip>
-                      <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1}
-                        onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, 1)} /></Tooltip>
-                      <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>采纳当前定义</Checkbox>
-                      <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
-                        onMouseDown={(e) => e.preventDefault()} onClick={() => removeCapability(idx)} /></Tooltip>
-                    </Space>
-                  ) : <Tag color="default">只读</Tag>}
-                >
-                  {maintenanceMode ? <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-                      <FieldControl label="能力名">
-                        <EditableText value={cap.name || ""} width="100%" onSave={(v) => updateCapabilityField(idx, "name", v)} />
-                      </FieldControl>
-                      <FieldControl label="标题">
-                        <EditableText value={cap.title || ""} width="100%" onSave={(v) => updateCapabilityField(idx, "title", v)} />
-                      </FieldControl>
-                      <FieldControl label="类型">
-                        <NativeSelect value={cap.kind || "submit"} width="100%" options={kindOptions} onChange={(v) => updateCapabilityField(idx, "kind", v)} />
-                      </FieldControl>
-                    </div>
-                    <FieldControl label="说明">
-                      <EditableTextArea rows={3} value={cap.intent || ""} onSave={(v) => updateCapabilityField(idx, "intent", v)} />
-                    </FieldControl>
-                    <Collapse
-                      ghost
-                      size="small"
-                      activeKey={expandedCapabilitySections[capabilityUiKey] || ["interfaces"]}
-                      onChange={(keys) => setExpandedCapabilitySections((current) => ({
-                        ...current,
-                        [capabilityUiKey]: (Array.isArray(keys) ? keys : [keys]).map(String),
-                      }))}
-                    >
-                      <Collapse.Panel
-                        key="interfaces"
-                        header={`接口与字段 ${stepIds.length + auxiliaryStepIds.size} 接口 / ${capParams.length} 字段`}
-                      >
-                        {renderCapabilityInterfacesWithFields(cap, idx)}
-                      </Collapse.Panel>
-                      <Collapse.Panel key="deps" header={`依赖 ${(flowSpec.links || []).filter((l) => stepIds.includes(l.source_step_id) && stepIds.includes(l.target_step_id)).length}`}>
-                        {renderCapabilityDependencyEditor(cap)}
-                      </Collapse.Panel>
-                      <Collapse.Panel key="io" header="调用参数 / 返回结果">
-                        {renderCapabilityIOBusinessView(idx, inputSchema, derivedOutputSchema)}
-                      </Collapse.Panel>
-                    </Collapse>
-                  </Space> : renderCapabilityObserver(cap, inputSchema, derivedOutputSchema)}
-                </Collapse.Panel>
-              );
-            })}
-          </Collapse>
-        )}
-        {capabilityRelations.length > 0 && (
-          <Collapse size="small" bordered={false}
-            activeKey={expandedCapabilityRelationKeys}
-            onChange={(keys) => setExpandedCapabilityRelationKeys((Array.isArray(keys) ? keys : [keys]).map(String))}>
-            <Collapse.Panel key="capability-relations" header={`能力关系 ${capabilityRelations.length}`}>
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                {capabilityRelations.map((relation) => {
-                  const relationType = relation.mode || relation.type || "external_transform";
-                  const owner = relation.transform_owner === "skill" ? "Skill 内部" : "调用方";
-                  return (
-                    <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${relationType}`}
-                      id={`capability-relation-${domAnchorPart(relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${relationType}`)}`}
-                      style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) auto minmax(160px, 1fr)", gap: 8, alignItems: "center" }}>
-                      <Space wrap size={4}>
-                        <Tag color="blue">{relation.from_capability || "未指定来源能力"}</Tag>
-                        {relation.from_output && <Typography.Text code>{relation.from_output}</Typography.Text>}
-                      </Space>
-                      <Space direction="vertical" size={0} align="center">
-                        <Tag color={relation.confirmed ? "success" : "warning"}>{relationType}</Tag>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{owner}负责</Typography.Text>
-                      </Space>
-                      <Space wrap size={4}>
-                        <Tag color="geekblue">{relation.to_capability || "未指定目标能力"}</Tag>
-                        {relation.to_input && <Typography.Text code>{relation.to_input}</Typography.Text>}
-                        {relation.requires_user_confirmation && <Tag color="orange">需用户确认</Tag>}
-                      </Space>
-                      {relation.reason && (
-                        <Typography.Text type="secondary" style={{ gridColumn: "1 / -1", fontSize: 12 }}>
-                          {relation.reason}
-                        </Typography.Text>
-                      )}
-                    </div>
-                  );
-                })}
-              </Space>
-            </Collapse.Panel>
-          </Collapse>
-        )}
-      </Space>
-    );
-  }
-  function renderDescriptionPanel() {
-    if (!flowSpec) return null;
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Space wrap align="center">
-          <Typography.Text strong>最终整体说明</Typography.Text>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            面向调用方描述整体能力、输入输出和执行边界。
-          </Typography.Text>
-          <Button icon={<FileTextOutlined />} type="primary" loading={orchestrateBusy}
-            disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || orchestrateBusy || autoFixBusy}
-            onClick={orchestrateFlow}>
-            {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
-          </Button>
-        </Space>
-        <FieldControl label="最终标题">
-          <Input value={titleDraft}
-            onChange={(e) => setTitleDraft(e.target.value)}
-            onBlur={(e) => {
-              if (e.target.value.trim() !== (flowSpec?.title || "")) {
-                const cur = flowSpecRef.current;
-                if (cur) {
-                  const next = { ...cur, title: e.target.value.trim() };
-                  flowSpecRef.current = next;
-                  setFlowSpec(next);
-                }
-                updateFlowField("title", e.target.value.trim());
-              }
-            }} />
-        </FieldControl>
-        <Input.TextArea rows={12} value={descDraft}
-          onChange={(e) => setDescDraft(e.target.value)}
-          onBlur={(e) => {
-            if (e.target.value !== (flowSpec?.business_description || "")) {
-              const cur = flowSpecRef.current;
-              if (cur) {
-                const next = { ...cur, business_description: e.target.value };
-                flowSpecRef.current = next;
-                setFlowSpec(next);
-              }
-              updateFlowField("business_description", e.target.value);
-            }
-          }}
-          placeholder="生成或手写最终整体说明：包含这个 Skill 能做什么、调用方需要传什么、Skill 会执行哪些查询/提交、最终返回什么。" />
-      </Space>
-    );
-  }
-  function renderJsonPanel() {
-    return (
-      <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        <Alert type="info" showIcon message="服务端权威 FlowSpec 的脱敏只读投影；请在步骤、字段、能力和依赖面板中编辑。" />
-        <Input.TextArea rows={14} readOnly value={flowSpec ? JSON.stringify(flowSpec, null, 2) : ""}
-          style={{ fontFamily: "monospace", fontSize: 12 }} />
-      </Space>
-    );
-  }
-
-  function answerAgentQuestion(questionId: string, answer: string) {
-    const normalized = answer.trim();
-    if (!normalized) return;
-    const question = agentQuestions.find((item) => item.question_id === questionId);
-    if (!question?.issue_id) {
-      message.error("人工问题缺少问题标识，请等待录制助手重新同步");
-      return;
-    }
-    sendRaw({
-      type: "agent_answer",
-      question_id: questionId,
-      issue_id: question.issue_id,
-      answer: normalized,
-    });
-    setAgentQuestions((items) => items.map((item) =>
-      item.question_id === questionId ? { ...item, answered: true, answer: normalized } : item));
-    setAgentAnswerDrafts((drafts) => ({ ...drafts, [questionId]: "" }));
-  }
-
-  function showRecordingAssistant() {
-    assistantOpenRef.current = true;
-    setAgentInsights(agentInsightsRef.current);
-    setAgentStatus(agentStatusRef.current);
-    setVerifyProgress(verifyProgressRef.current);
-    setAssistantOpen(true);
-  }
-
-  function renderRecordingAssistant() {
-    const insightColor: Record<string, string> = {
-      goal: "blue", role: "purple", param_source: "cyan", param_required: "geekblue",
-      field_name: "magenta", link: "gold",
-    };
-    return (
-      <Card size="small" title={<Space><RobotOutlined />录制助手</Space>} style={{ height: "100%" }}>
-        <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          <Alert
-            showIcon
-            type={agentStatus.state === "error" ? "error" : agentStatus.state === "ready" ? "success" : "info"}
-            message={agentStatus.text}
-          />
-          {!!verifyProgress.length && (() => {
-            const latest = verifyProgress[verifyProgress.length - 1];
-            return (
-              <Alert type={latest.stage === "completed" ? "success" : "info"} showIcon
-                message={latest.detail}
-                description={`阶段 ${latest.stage} · 已确认依赖 ${latest.confirmed_links || 0} · verify ${latest.verify_coverage || 0}/${latest.write_count || 0}${latest.pending ? ` · 待办 ${latest.pending}` : ""}`} />
-            );
-          })()}
-          {agentQuestions.filter((item) => !item.answered).map((question) => (
-            <Card key={question.question_id} size="small" style={{ background: "#fafafa" }}>
-              <Typography.Paragraph style={{ marginBottom: 8 }}>{question.text}</Typography.Paragraph>
-              {!!question.options?.length && (
-                <Space wrap style={{ marginBottom: 8 }}>
-                  {question.options.map((option) => (
-                    <Button key={option} size="small" onClick={() => answerAgentQuestion(question.question_id, option)}>{option}</Button>
-                  ))}
-                </Space>
-              )}
-              {!question.options?.length && (
-                <Space.Compact style={{ width: "100%" }}>
-                  <Input value={agentAnswerDrafts[question.question_id] || ""}
-                    onChange={(event) => setAgentAnswerDrafts((drafts) => ({ ...drafts, [question.question_id]: event.target.value }))}
-                    onPressEnter={() => answerAgentQuestion(question.question_id, agentAnswerDrafts[question.question_id] || "")}
-                    placeholder="输入回答" />
-                  <Button type="primary" onClick={() => answerAgentQuestion(question.question_id, agentAnswerDrafts[question.question_id] || "")}>回答</Button>
-                </Space.Compact>
-              )}
-            </Card>
-          ))}
-          {agentInsights.length ? (
-            <List size="small" dataSource={agentInsights.slice(-20)} renderItem={(item) => (
-              <List.Item style={{ alignItems: "flex-start" }}>
-                <Space align="start">
-                  <Tag color={insightColor[item.kind] || "default"}>{item.kind}</Tag>
-                  <Typography.Text style={{ fontSize: 12 }}>{item.text}</Typography.Text>
-                </Space>
-              </List.Item>
-            )} />
-          ) : null}
-        </Space>
-      </Card>
-    );
-  }
+        />
+      ) : <Empty description={status === "recording" ? "捕获到业务事实后显示分析结论" : "暂无分析结论"} />}
+    </Space>
+  );
 
   return (
-    <ConfigProvider getPopupContainer={popupContainer}>
-    <Card size="small">
+    <div style={{ width: "100%", minWidth: 0, padding: "12px 18px 18px", boxSizing: "border-box" }}>
       <Steps
-        current={workspaceStage}
-        responsive={false}
-        onChange={setWorkspaceStage}
-        items={[
-          { title: "录制准备" },
-          { title: "页面录制" },
-          { title: "能力结果" },
-        ]}
-        style={{ maxWidth: 760, margin: "4px auto 20px" }}
+        current={visibleStage}
+        onChange={(stage) => {
+          if (stage === 0 || (stage === 1 && snapshot) || (stage === 2 && draft && TERMINAL_STATUSES.has(status))) {
+            setVisibleStage(stage);
+          }
+        }}
+        items={[{ title: "录制准备" }, { title: "页面录制" }, { title: "能力结果" }]}
+        style={{ maxWidth: 980, margin: "0 auto 18px" }}
       />
-
-      {workspaceStage === 0 && (
-        <>
-          <Form.Item label="业务页地址" required style={{ marginBottom: 12 }}>
-            <Input value={startUrl} disabled={phase !== "idle"} onChange={(e) => setStartUrl(e.target.value)}
-              placeholder="https://oa.example.com/reimburse/new" onPressEnter={start} />
-          </Form.Item>
-          <Form.Item label="录制目标" required tooltip="建议填写；允许留空，录制助手会在必要时询问" style={{ marginBottom: 12 }}>
-            <div style={{ position: "relative" }}>
-              <Input.TextArea rows={3} value={goalText} disabled={phase !== "idle"} onChange={(event) => setGoalText(event.target.value)}
-                placeholder="例如：创建一条申请，并确认列表中能查询到刚创建的记录"
-                style={{ paddingRight: 130, paddingBottom: 44 }} />
-              {phase === "idle" ? (
-                <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}
-                  style={{ position: "absolute", right: 8, bottom: 8 }}>开始录制</Button>
-              ) : (
-                <Button type="primary" onClick={() => setWorkspaceStage(1)}
-                  style={{ position: "absolute", right: 8, bottom: 8 }}>返回页面录制</Button>
-              )}
-            </div>
-          </Form.Item>
-          {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={err} />}
-        </>
-      )}
-
-      {workspaceStage === 1 && phase === "idle" && <Empty description="请先在录制准备中开始录制" />}
-
-      {(phase === "recording" || phase === "publishing") && (
-        <div style={{ display: workspaceStage === 1 ? "block" : "none" }}>
-          <div style={{
-            position: "sticky",
-            top: 0,
-            zIndex: 20,
-            background: "#fff",
-            border: "1px solid #f0f0f0",
-            borderRadius: 6,
-            padding: "8px 10px",
-            marginBottom: 8,
-            boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", gap: 8, overflow: "hidden" }}>
-              <Tag color={terminating ? "warning" : connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
-                {terminating ? "终止中" : connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
-              </Tag>
-              <Button size="small" disabled={terminating || phase === "publishing" || connectionState !== "connected"} onClick={resetFromHere}>从这里开始录</Button>
-              <Button size="small" danger type="primary" loading={terminating} disabled={connectionState !== "connected"} onClick={terminateAll}>一键终止</Button>
-              <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
-                <Tooltip title="每个录制会话自动生成唯一 UUID 动作名，避免与历史资产重复">
-                  <Input value={action} readOnly style={{ width: 280, fontFamily: "monospace" }} />
-                </Tooltip>
-              </Form.Item>
-              <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                <Input value={title} onChange={(e) => {
-                  titleRef.current = e.target.value;
-                  setTitle(e.target.value);
-                }} style={{ width: 150 }} />
-              </Form.Item>
-              <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={terminating || connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
-                {flowSpec ? "重新抓取并分析请求" : "停止并分析请求"}
-              </Button>
-              <Button icon={<RobotOutlined />} style={{ flex: "0 0 auto" }} onClick={showRecordingAssistant}>
-                录制助手{agentQuestions.some((item) => !item.answered) ? ` (${agentQuestions.filter((item) => !item.answered).length})` : ""}
-              </Button>
-            </div>
-          </div>
-          <div>
-          <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
-            <canvas ref={frameCanvasRef} draggable={false} role="img" aria-label="录制画面"
-              onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
-              onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
-              style={{
-                width: "100%", height: "auto",
-                display: hasFrame ? "block" : "none", margin: 0, cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
-                touchAction: "none", userSelect: "none",
-              }} />
-            {!hasFrame && <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
-            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onBeforeInput={onKbBeforeInput} onPaste={onKbPaste}
-              onCompositionStart={onKbCompositionStart} onCompositionUpdate={onKbCompositionUpdate} onCompositionEnd={onKbCompositionEnd}
-              autoComplete="off" aria-label="录制画面键盘输入" tabIndex={-1}
-              style={{ position: "absolute", left: 0, top: 0, width: 2, height: 2, opacity: 0.01, border: 0, padding: 0, pointerEvents: "none" }} />
-          </div>
-          </div>
-        </div>
-      )}
-
-      {workspaceStage === 2 && (flowSpec ? renderFlowWorkbench() : <Empty description="完成请求分析后将在这里生成能力" />)}
-
-      <Drawer title="录制助手" open={assistantOpen} onClose={() => {
-        assistantOpenRef.current = false;
-        setAssistantOpen(false);
-      }} width={420}
-        styles={{ body: { padding: 12 } }}>
-        {assistantOpen && renderRecordingAssistant()}
+      {visibleStage === 0 ? renderSetup() : visibleStage === 1 ? renderRecording() : renderResult()}
+      <Drawer
+        title="录制助手"
+        placement="right"
+        width={440}
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        destroyOnClose={false}
+      >
+        {assistantBody}
       </Drawer>
-    </Card>
-    </ConfigProvider>
+    </div>
   );
 }
