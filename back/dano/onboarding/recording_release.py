@@ -1,9 +1,9 @@
-"""Deterministic release policy for recorded callable capabilities.
+"""Deterministic, atomic release policy for recorded capabilities.
 
-The recorder keeps the complete FlowSpec as a draft.  This module derives a
-separate callable view containing only capabilities whose executable contract
-is backed by machine evidence.  Model review may add blockers later, but it
-cannot change this decision.
+The recorder keeps the complete FlowSpec as a draft.  A recording is released
+only when every planned capability has a machine-backed executable contract;
+the publisher must never silently turn one recording into a smaller Skill.
+Model review may add blockers later, but it cannot change this decision.
 """
 from __future__ import annotations
 
@@ -359,15 +359,15 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
 
 
 def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
-    """Evaluate and derive the callable subset without mutating the draft."""
+    """Evaluate the complete capability plan without mutating the draft."""
     # All release checks must inspect the exact canonical contract consumed by
     # request compilation.  Looking at the pre-sync draft here could reject a
     # field as unconfirmed even though bound recorder evidence had already
     # normalized that same field for execution.
     source = prepare_flow_spec_for_publish(spec)
     decisions = tuple(_evaluate_capability(source, cap) for cap in source.capabilities)
-    passed_ids = {item.capability_id for item in decisions if item.passed}
-    if not passed_ids:
+    failed = [item for item in decisions if not item.passed]
+    if not decisions or failed:
         return ReleaseDecision(
             status="verification_incomplete",
             callable_spec=None,
@@ -378,35 +378,19 @@ def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
             ) or ("没有通过机器发布闸门的可调用能力",),
         )
     callable_spec = source.model_copy(deep=True)
-    callable_spec.capabilities = [
-        cap for cap in callable_spec.capabilities if cap.capability_id in passed_ids
-    ]
-    retained = {cap.capability_id for cap in callable_spec.capabilities} | {
-        cap.name for cap in callable_spec.capabilities
-    }
-    callable_spec.capability_relations = [
-        relation for relation in callable_spec.capability_relations
-        if relation.from_capability in retained and relation.to_capability in retained
-    ]
-    failed = [item for item in decisions if not item.passed]
     callable_spec.meta = {
         **(callable_spec.meta or {}),
         "recording_release": {
             "protocol": "dano.recording_release.v1",
-            "status": "partial" if failed else "ready",
-            "released_capabilities": sorted(
-                item.name for item in decisions if item.passed
-            ),
-            "draft_only_capabilities": sorted(item.name for item in failed),
+            "status": "ready",
+            "released_capabilities": sorted(item.name for item in decisions),
+            "draft_only_capabilities": [],
         },
     }
     callable_spec = _trim_callable_spec(callable_spec)
     return ReleaseDecision(
-        status="partial" if failed else "ready",
+        status="ready",
         callable_spec=callable_spec,
         capabilities=decisions,
-        blocking_reasons=tuple(
-            f"{item.name or item.capability_id}: {reason}"
-            for item in failed for reason in item.reasons
-        ),
+        blocking_reasons=(),
     )

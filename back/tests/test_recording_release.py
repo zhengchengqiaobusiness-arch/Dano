@@ -195,15 +195,15 @@ def test_release_evaluates_the_canonical_required_contract(monkeypatch):
     assert released_reason.source["required_state"] == "required"
 
 
-def test_release_keeps_verified_query_callable_and_write_in_draft_only():
+def test_release_blocks_the_recording_when_any_planned_capability_is_not_callable():
     draft = _mixed_spec()
     before = draft.model_dump(mode="json")
 
     decision = evaluate_recording_release(draft)
 
-    assert decision.status == "partial"
-    assert decision.machine_passed is True
-    assert [cap.name for cap in decision.callable_spec.capabilities] == ["query_items"]
+    assert decision.status == "verification_incomplete"
+    assert decision.machine_passed is False
+    assert decision.callable_spec is None
     assert {item.name: item.passed for item in decision.capabilities} == {
         "query_items": True,
         "submit_item": False,

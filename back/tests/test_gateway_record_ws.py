@@ -73,41 +73,28 @@ def test_publish_failure_report_exposes_machine_gate_reasons() -> None:
     )
 
 
-def test_partial_publish_report_names_released_and_draft_only_capabilities() -> None:
+def test_publish_report_names_the_complete_released_capability_plan() -> None:
     decision = ReleaseDecision(
-        status="partial",
-        callable_spec=FlowSpec(capabilities=[FlowCapability(name="query_items")]),
-        capabilities=(
-            SimpleNamespace(name="query_items", passed=True),
-            SimpleNamespace(name="submit_item", passed=False),
-        ),
-        blocking_reasons=("submit_item: 缺少写后回读验证",),
-    )
-
-    report = gateway._recording_partial_release_report(decision)
-
-    assert report == {
-        "status": "partial",
-        "released_capabilities": ["query_items"],
-        "draft_only_capabilities": ["submit_item"],
-        "blocking_reasons": ["submit_item: 缺少写后回读验证"],
-    }
-
-
-def test_partial_release_title_only_names_the_released_capabilities() -> None:
-    decision = ReleaseDecision(
-        status="partial",
+        status="ready",
         callable_spec=FlowSpec(capabilities=[
-            FlowCapability(name="query_items", title="查询记录"),
+            FlowCapability(name="query_items"),
+            FlowCapability(name="submit_item"),
         ]),
         capabilities=(
             SimpleNamespace(name="query_items", passed=True),
-            SimpleNamespace(name="submit_item", passed=False),
+            SimpleNamespace(name="submit_item", passed=True),
         ),
-        blocking_reasons=("submit_item: 缺少写后回读验证",),
+        blocking_reasons=(),
     )
 
-    assert gateway._recording_release_title("查询并提交记录", decision) == "查询记录"
+    report = gateway._recording_release_report(decision)
+
+    assert report == {
+        "status": "ready",
+        "released_capabilities": ["query_items", "submit_item"],
+        "draft_only_capabilities": [],
+        "blocking_reasons": [],
+    }
 
 
 def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:

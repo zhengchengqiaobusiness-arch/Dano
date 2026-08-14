@@ -83,7 +83,14 @@ def test_recording_workspace_waits_for_terminal_analysis_before_showing_results(
 
     result_start = source.index('else if (m.type === "result")')
     result_end = source.index('else if (m.type === "error")', result_start)
-    assert "setWorkspaceStage(2)" in source[result_start:result_end]
+    result_handler = source[result_start:result_end]
+    assert "resultCapabilities.length > 0" in result_handler
+    assert "setWorkspaceStage(2)" in result_handler
+
+    error_start = source.index('else if (m.type === "error")', result_end)
+    error_end = source.index("ws.onclose =", error_start)
+    error_handler = source[error_start:error_end]
+    assert 'm.operation === "plan" || m.operation === "publish"' not in error_handler
 
 
 def test_empty_automatic_capability_plan_returns_a_terminal_result() -> None:

@@ -621,8 +621,8 @@ def _recording_release_failure_report(release_decision) -> dict[str, object]:  #
     }
 
 
-def _recording_partial_release_report(release_decision) -> dict[str, object]:  # noqa: ANN001
-    """Describe the exact callable subset frozen by a partial release."""
+def _recording_release_report(release_decision) -> dict[str, object]:  # noqa: ANN001
+    """Describe the complete capability plan frozen by an atomic release."""
     return {
         "status": str(release_decision.status or ""),
         "released_capabilities": [
@@ -636,16 +636,6 @@ def _recording_partial_release_report(release_decision) -> dict[str, object]:  #
             if str(reason).strip()
         ],
     }
-
-
-def _recording_release_title(requested_title: str, release_decision) -> str:  # noqa: ANN001
-    """Do not advertise draft-only abilities in a partially released Skill."""
-    released = list(getattr(release_decision.callable_spec, "capabilities", None) or [])
-    if len(released) == len(release_decision.capabilities):
-        return requested_title
-    return "、".join(str(item.title or item.name) for item in released) or requested_title
-
-
 def _checkpoint_accepted_recording_pi_submission(
     resume_state: dict,
     flow_spec,
@@ -3051,7 +3041,7 @@ async def record_ws(ws: WebSocket) -> None:
                 if _tok_headers:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
-                release_title = _recording_release_title(str(msg.get("title") or ""), release_decision)
+                release_title = str(msg.get("title") or "")
                 try:
                     rep = await run_request_onboarding(
                         tenant=init["tenant"], subsystem=sub, action=publish_action,
@@ -3112,7 +3102,7 @@ async def record_ws(ws: WebSocket) -> None:
                             "recording_mode": recording_mode,
                             "workflow_steps": len(apir.get("steps") or []) or None,
                             "pi_session": pi_session.descriptor}
-                response["report"]["capability_release"] = _recording_partial_release_report(
+                response["report"]["capability_release"] = _recording_release_report(
                     release_decision
                 )
                 _remember_costly(msg, response)
