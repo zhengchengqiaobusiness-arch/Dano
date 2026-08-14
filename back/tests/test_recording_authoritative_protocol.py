@@ -148,6 +148,27 @@ def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() 
         )
 
 
+def test_client_projection_and_patch_use_only_public_source_taxonomy() -> None:
+    spec = _authoritative_spec()
+    client = flow_spec_to_client(spec)
+    assert client["steps"][0]["params"][0]["source_kind"] == "caller_input"
+
+    updated = apply_client_flow_patch(
+        spec,
+        [{
+            "op": "update",
+            "step_id": "submit",
+            "param_path": "reason",
+            "field": "source_kind",
+            "value": "constant",
+        }],
+        expected_fingerprint=flow_spec_fingerprint(spec),
+    )
+    assert updated.steps[0].params[0].source_kind == "constant"
+    assert updated.steps[0].params[0].exposed_to_user is False
+    assert flow_spec_to_client(updated)["steps"][0]["params"][0]["source_kind"] == "constant"
+
+
 @pytest.mark.parametrize("field", [
     "headers", "body_source", "response_json", "identity", "params", "source_meta",
 ])

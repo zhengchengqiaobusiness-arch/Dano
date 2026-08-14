@@ -21,7 +21,7 @@ from dano.execution.page.flow_spec import (
 )
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.recording_field_identity import bind_field_evidence
-from dano.execution.page.recording_live import merge_live_agent_state
+from dano.execution.page.recording_live import LiveNotebook
 from dano.execution.page.sessions import save_session
 from dano.onboarding.recording_pipeline import CanonicalRecordingRuntime
 from dano.onboarding.recording_runtime import ProductionRecordingServices, Publisher
@@ -124,6 +124,7 @@ class RecordingGatewaySession:
     _live_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _live_pending_reason: str = field(default="", init=False)
     _last_live_count: int = field(default=0, init=False)
+    _live_notebook: LiveNotebook | None = field(default=None, init=False, repr=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
 
@@ -304,8 +305,8 @@ class RecordingGatewaySession:
             tenant=self.config.tenant,
             subsystem=self.config.subsystem,
         )
-        if use_live_notebook and self._pi is not None and self._pi.flow_spec is not None:
-            spec = merge_live_agent_state(self._pi.current_flow_spec(), spec)
+        if use_live_notebook and self._live_notebook is not None:
+            spec = self._live_notebook.apply_to(spec)
         return spec
 
     async def _freeze_capture(self) -> None:
@@ -317,6 +318,7 @@ class RecordingGatewaySession:
         if self._live_task is not None and not self._live_task.done():
             self._live_task.cancel()
             await asyncio.gather(self._live_task, return_exceptions=True)
+        self._capture_live_notebook()
 
     async def _ensure_pi(self, fresh: bool) -> Any:
         if fresh and self._pi is not None:
@@ -414,13 +416,10 @@ class RecordingGatewaySession:
                 })
                 if self.capture is None:
                     return
+                self._capture_live_notebook()
                 self._last_live_count = len(self.capture.captured_all_requests())
                 if self.workflow is not None:
-                    insights = [
-                        dict(item)
-                        for item in (pi.current_flow_spec().meta or {}).get("agent_insights") or []
-                        if isinstance(item, dict)
-                    ]
+                    insights = self._live_notebook.insights if self._live_notebook else []
                     await self.workflow.update_recording(
                         request_count=self._last_live_count,
                         insights=insights[-100:],
@@ -431,6 +430,11 @@ class RecordingGatewaySession:
                 # Live analysis is advisory.  The canonical finish pipeline
                 # still receives the complete deterministic recording facts.
                 return
+
+    def _capture_live_notebook(self) -> None:
+        if self._pi is None or self._pi.flow_spec is None:
+            return
+        self._live_notebook = LiveNotebook.from_shadow(self._pi.current_flow_spec())
 
     async def _on_snapshot(self, snapshot: WorkflowSnapshot) -> None:
         await self._emit_snapshot(snapshot)

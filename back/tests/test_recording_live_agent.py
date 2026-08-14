@@ -24,6 +24,7 @@ from dano.execution.page.flow_spec import (
     validate_flow_spec,
 )
 from dano.execution.page.recording_live import (
+    LiveNotebook,
     apply_recording_agent_edit,
     live_request_role_overrides,
     merge_live_agent_state,
@@ -194,7 +195,7 @@ def _agent_ops() -> list[dict]:
         {
             "op": "set_request_role",
             "request_id": "req-submit",
-            "role": "submit_anchor",
+            "role": "business_write",
             "reason": "紧随保存点击且携带表单值",
             "evidence_refs": ["request:req-submit", "event:save-click"],
         },
@@ -202,7 +203,7 @@ def _agent_ops() -> list[dict]:
             "op": "set_param_source",
             "step_id": "submit",
             "path": "jobId",
-            "source_kind": "chained",
+            "source_kind": "response_binding",
             "origin_request_id": "req-detail",
             "origin_path": "response.data.jobId",
             "reason": "详情响应的内部 jobId 被更新请求复用",
@@ -223,7 +224,7 @@ def _agent_ops() -> list[dict]:
 def test_live_agent_ops_write_evidenced_drafts_without_self_verifying():
     updated = apply_flow_edits(_flow(), _agent_ops())
     assert updated.goal["intent"] == "更新指定记录"
-    assert updated.request_facts.analysis["req-submit"].role == "submit_anchor"
+    assert updated.request_facts.analysis["req-submit"].role == "business_write"
     param = updated.steps[1].params[0]
     # chained compiles into the executable previous_response contract and keeps
     # the agent taxonomy in evidence.
@@ -231,7 +232,7 @@ def test_live_agent_ops_write_evidenced_drafts_without_self_verifying():
     assert param.source["step_id"] == "detail"
     assert param.source["response_path"] == "data.jobId"
     assert param.source["origin_request_id"] == "req-detail"
-    assert any(item.get("source_kind") == "chained" for item in param.evidence)
+    assert any(item.get("source_kind") == "response_binding" for item in param.evidence)
     assert len(updated.links) == 1
     assert updated.links[0].meta == {
         "verified": False,
@@ -264,7 +265,7 @@ def test_request_role_normalizes_model_evidence_alias_and_param_wire_path():
         {
             "op": "set_request_role",
             "request_id": "req-submit",
-            "role": "submit_anchor",
+            "role": "business_write",
             "reason": "紧随保存操作",
             "evidence": "request:req-submit",
         },
@@ -272,7 +273,7 @@ def test_request_role_normalizes_model_evidence_alias_and_param_wire_path():
             "op": "set_param_source",
             "step_id": "submit",
             "wire_path": "jobId",
-            "source_kind": "chained",
+            "source_kind": "response_binding",
             "origin_request_id": "req-detail",
             "origin_path": "response.data.jobId",
             "reason": "详情响应值被提交请求复用",
@@ -289,7 +290,8 @@ def test_live_field_semantics_resolve_request_id_and_cover_source_required_and_n
             "op": "set_param_source",
             "step_id": "req-submit",
             "path": "jobId",
-            "source_kind": "page_context",
+            "source_kind": "context",
+            "context_key": "jobId",
             "reason": "页面上下文自动提供",
         },
         {
@@ -480,7 +482,7 @@ def test_recording_plan_keeps_one_search_capability_when_page_navigation_is_cont
             "ops": [{
                 "op": "set_request_role",
                 "request_id": "req-page",
-                "role": "read_context",
+                "role": "context",
                 "reason": "页面跳转只负责展示同一次搜索结果",
                 "evidence_refs": ["req-page"],
             }],
@@ -523,7 +525,8 @@ def test_live_field_semantics_resolve_request_id_and_qualified_body_path():
         "op": "set_param_source",
         "step_id": "req-submit",
         "wire_path": "body.jobId",
-        "source_kind": "page_context",
+        "source_kind": "context",
+        "context_key": "jobId",
         "reason": "页面上下文自动提供",
     }])
 
@@ -558,7 +561,7 @@ def test_cited_unbound_page_control_grounds_all_field_axes_and_public_short_code
             "op": "set_param_source",
             "request_id": "req-detail",
             "wire_path": "query.referenceCode",
-            "source_kind": "user_input",
+            "source_kind": "caller_input",
             "reason": "操作人填写了业务单号",
             "evidence_refs": ["evt-reference-code"],
         },
@@ -624,7 +627,7 @@ def test_cited_control_with_a_different_value_does_not_ground_public_source():
         "op": "set_param_source",
         "request_id": "req-detail",
         "wire_path": "query.referenceCode",
-        "source_kind": "user_input",
+        "source_kind": "caller_input",
         "reason": "错误地引用了另一个页面控件",
         "evidence_refs": ["evt-other-field"],
     }])
@@ -643,7 +646,7 @@ def test_source_reclassification_preserves_the_independent_required_axis():
         "op": "set_param_source",
         "step_id": "req-submit",
         "path": "jobId",
-        "source_kind": "user_input",
+        "source_kind": "caller_input",
         "reason": "调用方填写",
     }])
 
@@ -658,7 +661,8 @@ def test_live_field_semantics_reject_wrong_transport_namespace():
             "op": "set_param_source",
             "step_id": "req-submit",
             "wire_path": "query.jobId",
-            "source_kind": "page_context",
+            "source_kind": "context",
+            "context_key": "jobId",
             "reason": "错误地声明为查询参数",
         }])
 
@@ -669,7 +673,8 @@ def test_live_field_semantics_reject_unknown_target_instead_of_reporting_success
             "op": "set_param_source",
             "step_id": "req-missing",
             "path": "jobId",
-            "source_kind": "page_context",
+            "source_kind": "context",
+            "context_key": "jobId",
             "reason": "页面上下文自动提供",
         }])
 
@@ -691,7 +696,8 @@ def test_agent_page_context_survives_sync_and_dependency_paths_deduplicate():
             "op": "set_param_source",
             "step_id": "detail",
             "path": "query.pageNo",
-            "source_kind": "page_context",
+            "source_kind": "context",
+            "context_key": "pageNo",
             "reason": "录制默认分页，页面未发生页码编辑",
         },
         {
@@ -713,7 +719,7 @@ def test_agent_page_context_survives_sync_and_dependency_paths_deduplicate():
 
 @pytest.mark.parametrize("operation", [
     {"op": "set_goal", "goal": {"intent": "x"}},
-    {"op": "set_request_role", "request_id": "req-submit", "role": "submit_anchor", "reason": "x"},
+    {"op": "set_request_role", "request_id": "req-submit", "role": "business_write", "reason": "x"},
     {"op": "set_param_source", "step_id": "submit", "path": "jobId", "source_kind": "other", "reason": "x"},
     {
         "op": "propose_dependency", "source_request_id": "req-detail", "source_path": "data.jobId",
@@ -772,12 +778,12 @@ def test_param_source_constant_compiles_to_system_const_and_requires_recorded_va
 def test_param_source_session_header_rejected_on_body_paths():
     spec = _flow()
     spec.steps[1].params.append(ParamField(path="billType", key="billType", value="oa_duty_leave"))
-    with pytest.raises(ValueError, match="only applies to header params"):
+    with pytest.raises(ValueError, match="requires session_key"):
         apply_flow_edits(spec, [{
             "op": "set_param_source",
             "step_id": "submit",
             "path": "billType",
-            "source_kind": "session_header",
+            "source_kind": "session",
             "reason": "固定值，误归为会话头",
         }])
 
@@ -789,7 +795,8 @@ def test_param_source_page_context_pagination_is_caller_override_with_recorded_d
         "op": "set_param_source",
         "step_id": "detail",
         "path": "query.pageNo",
-        "source_kind": "page_context",
+        "source_kind": "context",
+        "context_key": "pageNo",
         "reason": "录制默认分页，未被操作人修改",
     }])
     param = updated.steps[0].params[0]
@@ -828,11 +835,11 @@ def test_param_source_computed_requires_executable_strategy():
     spec = apply_flow_edits(spec, [
         {
             "op": "set_param_source", "step_id": "submit", "path": "startTime",
-            "source_kind": "user_input", "reason": "调用方提供开始时间",
+            "source_kind": "caller_input", "reason": "调用方提供开始时间",
         },
         {
             "op": "set_param_source", "step_id": "submit", "path": "endTime",
-            "source_kind": "user_input", "reason": "调用方提供结束时间",
+            "source_kind": "caller_input", "reason": "调用方提供结束时间",
         },
     ])
 
@@ -894,11 +901,11 @@ def test_param_source_computed_accepts_public_wire_paths_from_another_capability
     spec = apply_flow_edits(spec, [
         {
             "op": "set_param_source", "step_id": "submit", "path": "body.startTime",
-            "source_kind": "user_input", "reason": "调用方提供开始时间",
+            "source_kind": "caller_input", "reason": "调用方提供开始时间",
         },
         {
             "op": "set_param_source", "step_id": "submit", "path": "body.endTime",
-            "source_kind": "user_input", "reason": "调用方提供结束时间",
+            "source_kind": "caller_input", "reason": "调用方提供结束时间",
         },
     ])
 
@@ -945,11 +952,11 @@ async def test_computed_body_field_renders_and_executes_from_caller_dates():
     spec = apply_flow_edits(spec, [
         {
             "op": "set_param_source", "step_id": "detail", "path": "startTime",
-            "source_kind": "user_input", "reason": "调用方提供开始时间",
+            "source_kind": "caller_input", "reason": "调用方提供开始时间",
         },
         {
             "op": "set_param_source", "step_id": "detail", "path": "endTime",
-            "source_kind": "user_input", "reason": "调用方提供结束时间",
+            "source_kind": "caller_input", "reason": "调用方提供结束时间",
         },
     ])
     updated = apply_flow_edits(spec, [{
@@ -982,7 +989,7 @@ def test_param_source_chained_requires_known_origin_and_creates_draft_link():
             "op": "set_param_source",
             "step_id": "submit",
             "path": "jobId",
-            "source_kind": "chained",
+            "source_kind": "response_binding",
             "origin_request_id": "req-nowhere",
             "origin_path": "data.jobId",
             "reason": "臆造的上游",
@@ -992,7 +999,7 @@ def test_param_source_chained_requires_known_origin_and_creates_draft_link():
         "op": "set_param_source",
         "step_id": "submit",
         "path": "jobId",
-        "source_kind": "chained",
+        "source_kind": "response_binding",
         "origin_request_id": "req-detail",
         "origin_path": "response.data.jobId",
         "reason": "详情响应值被提交复用",
@@ -1784,10 +1791,35 @@ def test_finalize_merge_replays_early_request_id_ops_on_canonical_steps():
     assert live.links == []
     merged = merge_live_agent_state(live, _flow())
     assert merged.goal["intent"] == "更新指定记录"
-    assert merged.request_facts.analysis["req-submit"].role == "submit_anchor"
+    assert merged.request_facts.analysis["req-submit"].role == "business_write"
     assert len(merged.links) == 1
     assert merged.links[0].source_step_id == "detail"
     assert merged.links[0].target_step_id == "submit"
+
+
+def test_live_notebook_carries_only_replayable_hypotheses_into_finalized_facts():
+    shadow = _flow()
+    shadow.meta = {
+        "recording_agent_ops": [
+            _agent_ops()[0],
+            {"op": "confirm_dependency", "link_id": "unsafe-live-verdict"},
+        ],
+        "agent_insights": [{"kind": "goal", "summary": "更新指定记录"}],
+        "verification_log": [{"kind": "dependency_execute", "passed": True}],
+        "current_version": 99,
+    }
+
+    notebook = LiveNotebook.from_shadow(shadow)
+
+    assert [item["op"] for item in notebook.meta["recording_agent_ops"]] == ["set_goal"]
+    assert "verification_log" not in notebook.meta
+    assert "current_version" not in notebook.meta
+
+    finalized = _flow()
+    finalized.meta = {"verification_log": [{"kind": "final", "passed": False}]}
+    merged = notebook.apply_to(finalized)
+    assert merged.goal["intent"] == "更新指定记录"
+    assert merged.meta["verification_log"] == [{"kind": "final", "passed": False}]
 
 
 @pytest.mark.parametrize(("submitted", "canonical"), [
@@ -1851,7 +1883,8 @@ def test_finalize_merge_materializes_deferred_request_id_field_semantics():
             "op": "set_param_source",
             "step_id": "req-submit",
             "path": "jobId",
-            "source_kind": "page_context",
+            "source_kind": "context",
+            "context_key": "jobId",
             "reason": "录制页面上下文自动提供",
         },
         {
@@ -1900,7 +1933,7 @@ def test_finalize_merge_retargets_deferred_field_op_to_unique_equivalent_request
         "op": "set_param_source",
         "request_id": "req-observed",
         "wire_path": "query.status",
-        "source_kind": "user_input",
+        "source_kind": "caller_input",
         "reason": "查询筛选控件由操作人提供",
     }])
     finalized = FlowSpec(
@@ -1937,7 +1970,7 @@ def test_retrying_identical_deferred_field_op_remains_retryable_not_duplicate():
         "op": "set_param_source",
         "request_id": "req-submit",
         "wire_path": "body.reason",
-        "source_kind": "user_input",
+        "source_kind": "caller_input",
         "reason": "输入控件由操作人填写",
     }
 
@@ -1955,7 +1988,8 @@ def test_repeating_an_applied_agent_conclusion_is_idempotent_success():
         "op": "set_param_source",
         "request_id": "req-submit",
         "wire_path": "body.jobId",
-        "source_kind": "page_context",
+        "source_kind": "context",
+        "context_key": "jobId",
         "reason": "页面上下文自动提供",
     }
 
@@ -1984,7 +2018,7 @@ async def test_deferred_live_field_conclusion_is_staged_without_requiring_resubm
             "op": "set_param_source",
             "request_id": "req-submit",
             "wire_path": "body.reason",
-            "source_kind": "user_input",
+            "source_kind": "caller_input",
             "reason": "输入控件由操作人填写",
         }],
     })
@@ -2006,7 +2040,8 @@ def test_finalize_merge_turns_still_unresolved_deferred_field_op_into_rejection(
         "op": "set_param_source",
         "request_id": "req-lost",
         "wire_path": "body.jobId",
-        "source_kind": "page_context",
+        "source_kind": "context",
+        "context_key": "jobId",
         "reason": "页面上下文",
     }])
 
@@ -2051,7 +2086,8 @@ async def test_live_field_op_survives_rejected_semantic_proposal_and_reports_eac
                 "op": "set_param_source",
                 "step_id": "req-submit",
                 "path": "jobId",
-                "source_kind": "page_context",
+                "source_kind": "context",
+                "context_key": "jobId",
                 "reason": "页面上下文自动提供",
             },
         ],

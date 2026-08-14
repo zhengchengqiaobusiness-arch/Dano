@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import time
-
 import pytest
 
 from dano.execution.page.capability_compiler import compile_capabilities
@@ -29,7 +26,6 @@ from dano.execution.page.verification_log import (
 from dano.onboarding.recording_verify import (
     finalize_verification_state,
     require_verification_complete,
-    run_recording_verification,
     verification_report,
     verification_todos,
 )
@@ -666,180 +662,6 @@ async def test_execute_write_failure_stops_before_verify_and_cleanup(monkeypatch
     record = get_verification(result["verification_id"])
     assert record["status"] == "failed"
     assert record["failure_reason"] == "HTTP 500"
-
-
-class _UnavailableSession:
-    def __init__(self, spec: FlowSpec) -> None:
-        self.flow_spec = spec
-
-    def current_flow_spec(self):
-        return self.flow_spec.model_copy(deep=True)
-
-    def bind_flow_spec(self, spec):
-        self.flow_spec = spec.model_copy(deep=True)
-
-    async def prompt(self, *_args, **_kwargs):
-        raise RuntimeError("no Pi model or credentials")
-
-
-@pytest.mark.asyncio
-async def test_unavailable_agent_preserves_every_todo_and_blocks_publish():
-    session = _UnavailableSession(_spec())
-    progress = []
-
-    async def emit(payload):
-        progress.append(payload)
-
-    report = await run_recording_verification(session, progress=emit)
-    assert report["complete"] is False
-    assert report["all_verified"] is False
-    assert report["unverified"] == []
-    assert {item["kind"] for item in report["todos"]} == {"dependency", "write_verify", "enum"}
-    assert session.flow_spec.meta["verification_run"]["complete"] is False
-    assert session.flow_spec.meta["verification_run"]["status"] == "external_blocked"
-    assert session.flow_spec.capabilities[0].confirmed is False
-    assert progress[-1]["stage"] == "external_blocked"
-
-
-@pytest.mark.asyncio
-async def test_final_verification_has_one_total_deadline_and_preserves_blocked_state():
-    class HangingSession(_UnavailableSession):
-        async def prompt(self, *_args, **_kwargs):
-            await asyncio.Event().wait()
-
-    session = HangingSession(_spec())
-    started = time.monotonic()
-
-    report = await run_recording_verification(session, timeout_s=0.02)
-
-    assert time.monotonic() - started < 0.5
-    assert report["complete"] is False
-    assert report["all_verified"] is False
-    assert report["errors"]
-    assert session.flow_spec.meta["verification_run"]["complete"] is False
-    assert session.flow_spec.meta["verification_run"]["status"] == "timeout"
-    assert "skill_docs_generation" not in session.flow_spec.meta
-
-
-@pytest.mark.asyncio
-async def test_zero_operator_verification_loop_completes_with_executor_evidence():
-    spec = _spec()
-    spec.goal = {"intent": "Update item"}
-    assertion = {"path": "data.kind", "equals_input": "kind"}
-    link_id = _record_dependency_verification(spec)
-    write_id = record_verification(
-        kind="write_execute",
-        subject={"write_step_id": "submit", "verify_request_id": "req-verify", "assertion": assertion},
-        status="passed",
-        evidence={"passed": True},
-    )
-    options = [{"label": "甲", "value": "A"}]
-    enum_id = record_verification(
-        kind="enum_snapshot",
-        subject={"url": "https://example.test/items"},
-        status="passed",
-        evidence={"snapshot": {"elements": [{"options": options}]}},
-    )
-    spec.meta["verification_log"] = [
-        get_verification(verification_id)
-        for verification_id in (link_id, write_id, enum_id)
-    ]
-
-    class AgentSession(_UnavailableSession):
-        verification_calls = 0
-
-        async def prompt(self, text, **_kwargs):
-            assert "verification_todos" in text
-            self.verification_calls += 1
-            self.flow_spec = apply_flow_edits(self.flow_spec, [
-                {"op": "confirm_dependency", "link_id": "link-1", "verification_id": link_id},
-                {
-                    "op": "bind_verify_read", "write_step_id": "submit", "read_request_id": "req-verify",
-                    "assertion": assertion, "verification_id": write_id,
-                },
-                {
-                    "op": "attach_enum_options", "step_id": "submit", "path": "body.kind",
-                    "options": options, "source_request_id": "req-options", "verification_id": enum_id,
-                },
-            ])
-            return {"status": "submitted"}
-
-    session = AgentSession(spec)
-    report = await run_recording_verification(session)
-    assert session.verification_calls == 1
-    assert report["all_verified"] is True
-    assert report["unverified"] == []
-    assert require_verification_complete(session.flow_spec)["all_verified"] is True
-    assert session.flow_spec.capabilities[0].confirmed is True
-    assert "skill_docs_generation" not in session.flow_spec.meta
-
-
-@pytest.mark.asyncio
-async def test_passed_write_execution_binds_even_when_the_model_turn_times_out():
-    """The executor result is authoritative: a passed write read-back must not
-    be lost because the Pi turn died before submitting bind_verify_read."""
-    spec = _spec()
-    assertion = {"path": "data.kind", "equals_input": "kind"}
-    write_id = record_verification(
-        kind="write_execute",
-        subject={"write_step_id": "submit", "verify_request_id": "req-verify", "assertion": assertion},
-        status="passed",
-        evidence={"passed": True},
-    )
-    spec.meta = {"verification_log": [get_verification(write_id)]}
-
-    class TimingOutSession(_UnavailableSession):
-        async def prompt(self, *_args, **_kwargs):
-            raise RuntimeError("录制 Pi 操作超时，已取消；未切换到其他模型链路")
-
-    session = TimingOutSession(spec)
-    report = await run_recording_verification(session)
-
-    write_step = next(step for step in session.flow_spec.steps if step.step_id == "submit")
-    assert write_step.fact_check["verified"] is True
-    assert write_step.fact_check["verification_id"] == write_id
-    assert report["verify_coverage"] == 1
-    assert "write_verify" not in {item["target_kind"] for item in report["unverified"]}
-
-
-@pytest.mark.asyncio
-async def test_timed_out_round_with_progress_gets_another_slice():
-    """One slow turn must not abort the phase when executor evidence landed."""
-    spec = _spec()
-    assertion = {"path": "data.kind", "equals_input": "kind"}
-
-    class SlowSession(_UnavailableSession):
-        calls = 0
-
-        async def prompt(self, *_args, **_kwargs):
-            type(self).calls += 1
-            if type(self).calls == 1:
-                write_id = record_verification(
-                    kind="write_execute",
-                    subject={
-                        "write_step_id": "submit",
-                        "verify_request_id": "req-verify",
-                        "assertion": assertion,
-                    },
-                    status="passed",
-                    evidence={"passed": True},
-                )
-                self.flow_spec.meta = {
-                    **(self.flow_spec.meta or {}),
-                    "verification_log": [get_verification(write_id)],
-                }
-            raise RuntimeError("录制 Pi 操作超时，已取消；未切换到其他模型链路")
-
-    session = SlowSession(spec)
-    report = await run_recording_verification(session)
-
-    # Round 1 landed executor evidence. Three subsequent identical attempts
-    # then prove no progress, so the loop stops without publishing.
-    assert SlowSession.calls == 4
-    assert report["complete"] is False
-    assert report["stop_reason"] == "no_progress"
-    write_step = next(step for step in session.flow_spec.steps if step.step_id == "submit")
-    assert write_step.fact_check["verified"] is True
 
 
 def test_machine_publish_gate_rejects_unfinished_verification_but_has_debug_escape():

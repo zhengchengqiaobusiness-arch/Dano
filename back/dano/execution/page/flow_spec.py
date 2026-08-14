@@ -4998,7 +4998,7 @@ def _param_source_agent_classified(param: ParamField) -> bool:
         and item.get("actor") == "agent"
         and item.get("kind") == "param_source"
         and item.get("source_kind") in {
-            "user_input", "constant", "session_header", "page_context", "chained", "computed",
+            "caller_input", "constant", "session", "context", "response_binding", "computed",
         }
         for item in (param.evidence or [])
     )
@@ -16771,6 +16771,53 @@ def _client_response_projection(value: Any) -> tuple[Any, dict[str, Any]]:
     }
 
 
+_PUBLIC_SOURCE_BY_INTERNAL = {
+    "user_input": "caller_input",
+    "api_option": "caller_input",
+    "page_enum": "caller_input",
+    "static_enum": "caller_input",
+    "manual_enum": "caller_input",
+    "form_option": "caller_input",
+    "constant": "constant",
+    "request_header": "session",
+    "current_user": "session",
+    "storage": "session",
+    "cookie": "session",
+    "page_context": "context",
+    "previous_response": "response_binding",
+    "dynamic_structure": "response_binding",
+    "computed": "computed",
+    "system_time": "computed",
+    "system_generated": "computed",
+}
+
+_PUBLIC_ROLE_BY_INTERNAL = {
+    "auth": "auth",
+    "noise": "support",
+    "telemetry": "support",
+    "unsupported_upload": "support",
+    "unsupported_graphql": "support",
+    "read_option": "option",
+    "option_source": "option",
+    "explicit_read_option": "option",
+    "read_context": "context",
+    "business_get": "business_read",
+    "business_write": "business_write",
+    "submit_anchor": "business_write",
+}
+
+
+def _public_source_kind(param: dict[str, Any]) -> str:
+    internal = str(param.get("source_kind") or "")
+    if internal in _PUBLIC_SOURCE_BY_INTERNAL:
+        return _PUBLIC_SOURCE_BY_INTERNAL[internal]
+    return "caller_input" if param.get("exposed_to_user") else "constant"
+
+
+def _public_request_role(role: Any) -> str:
+    return _PUBLIC_ROLE_BY_INTERNAL.get(str(role or ""), "support")
+
+
 def flow_spec_to_client(spec: FlowSpec) -> dict:
     """Return the bounded, redacted projection used by the recording workbench.
 
@@ -16784,6 +16831,9 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(spec)}
     data["meta"].pop("request_graph", None)
     request_facts = data.get("request_facts") or {}
+    for analysis in (request_facts.get("analysis") or {}).values():
+        if isinstance(analysis, dict):
+            analysis["role"] = _public_request_role(analysis.get("role"))
     for evidence_key in ("field_evidence", "option_sources", "page_events"):
         if request_facts.get(evidence_key):
             request_facts[evidence_key] = _client_redact_sensitive(request_facts[evidence_key])
@@ -16797,9 +16847,18 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
             req["response_json"] = _client_redact_sensitive(projected)
             req["response_projection"] = projection
     for st in data.get("steps") or []:
+        st["semantic_role"] = _public_request_role(st.get("semantic_role"))
+        if isinstance(st.get("source_meta"), dict) and st["source_meta"].get("role"):
+            st["source_meta"]["role"] = _public_request_role(st["source_meta"].get("role"))
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
         st["body_source"] = ""
         st["backup_body_source"] = ""
+        for param in st.get("params") or []:
+            if not isinstance(param, dict):
+                continue
+            param["source_kind"] = _public_source_kind(param)
+            if isinstance(param.get("source"), dict):
+                param["source"] = {**param["source"], "kind": param["source_kind"]}
         if st.get("response_json") is not None:
             projected, projection = _client_response_projection(st.get("response_json"))
             st["response_json"] = _client_redact_sensitive(projected)
@@ -19820,6 +19879,79 @@ def _client_select_patch(spec: FlowSpec, edit: dict[str, Any]) -> dict[str, Any]
     }
 
 
+_CLIENT_SOURCE_KINDS = frozenset({
+    "caller_input", "constant", "session", "context", "response_binding", "computed",
+})
+
+
+def _client_source_patch(spec: FlowSpec, edit: dict[str, Any]) -> list[dict[str, Any]]:
+    step = _find_step(spec, str(edit.get("step_id") or ""))
+    param = _find_param(
+        step,
+        str(edit.get("param_path") or ""),
+        field_id=str(edit.get("field_id") or ""),
+        param_key=str(edit.get("param_key") or ""),
+        param_label=str(edit.get("param_label") or ""),
+    )
+    public_kind = str(edit.get("value") or "")
+    if public_kind not in _CLIENT_SOURCE_KINDS:
+        raise ValueError(f"unsupported parameter source: {public_kind}")
+    current_kind = str(param.source_kind or "")
+    current_public = _PUBLIC_SOURCE_BY_INTERNAL.get(current_kind, "")
+    source = dict(param.source or {})
+
+    if public_kind == "caller_input":
+        internal_kind = current_kind if current_public == public_kind else "user_input"
+        source = {**source, "kind": internal_kind, "path": param.path}
+        category, exposed = "user_param", True
+    elif public_kind == "constant":
+        internal_kind = "constant"
+        source = {"kind": "constant", "path": param.path}
+        category, exposed = "system_const", False
+    elif public_kind == "session":
+        if current_public == public_kind:
+            internal_kind = current_kind
+        elif param.path.startswith("headers."):
+            internal_kind = "request_header"
+            source = {"kind": "request_header", "header": param.path.split(".", 1)[1]}
+        else:
+            internal_kind = "current_user"
+            source = {"kind": "identity", "path": param.path}
+        category, exposed = "runtime_var", False
+    elif public_kind == "context":
+        internal_kind = "page_context"
+        context_key = str(source.get("context_key") or param.key or "").strip()
+        if not context_key:
+            raise ValueError(f"context source requires an explicit key: {param.path}")
+        source = {**source, "kind": "page_context", "context_key": context_key, "path": param.path}
+        category, exposed = "runtime_var", False
+    elif public_kind == "response_binding":
+        if current_public != public_kind:
+            raise ValueError(
+                f"response_binding must be configured from a recorded dependency: {param.path}"
+            )
+        internal_kind = current_kind
+        category, exposed = "runtime_var", False
+    else:
+        if current_public != public_kind:
+            raise ValueError(f"computed source requires an existing executable formula: {param.path}")
+        internal_kind = current_kind
+        category, exposed = "runtime_var", False
+
+    base = {
+        "op": "update",
+        "actor": "user",
+        "step_id": step.step_id,
+        "param_path": param.path,
+    }
+    return [
+        {**base, "field": "source_kind", "value": internal_kind},
+        {**base, "field": "source", "value": source},
+        {**base, "field": "category", "value": category},
+        {**base, "field": "exposed_to_user", "value": exposed},
+    ]
+
+
 def apply_client_flow_patch(
     spec: FlowSpec,
     edits: list[dict[str, Any]],
@@ -19867,6 +19999,12 @@ def apply_client_flow_patch(
                 raise ValueError(f"server-owned step field: {field}")
         if op == "upsert_select":
             safe_edits.append(_client_select_patch(spec, edit))
+        elif (
+            op == "update"
+            and edit.get("param_path")
+            and str(edit.get("field") or "") == "source_kind"
+        ):
+            safe_edits.extend(_client_source_patch(spec, edit))
         else:
             safe_edits.append(edit)
     return apply_flow_edits(spec, safe_edits)

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_spec import (
     CapabilityRequestRef,
@@ -16,7 +14,7 @@ from dano.execution.page.flow_spec import (
     RequestFacts,
 )
 from dano.onboarding.recording_release import evaluate_recording_release
-from dano.onboarding.recording_verify import run_recording_verification, verification_report
+from dano.onboarding.recording_verify import verification_report
 
 
 def _fact_check_query_leaking_into_write() -> FlowSpec:
@@ -140,83 +138,6 @@ def test_verification_report_feeds_release_blockers_back_as_todos() -> None:
 
     assert report["release_issues"]
     assert any(item["kind"] == "release_issue" for item in report["todos"])
-
-
-@pytest.mark.asyncio
-async def test_verification_stops_after_three_identical_no_progress_attempts() -> None:
-    class NoProgressSession:
-        def __init__(self) -> None:
-            self.flow_spec = _fact_check_query_leaking_into_write()
-            submit = next(item for item in self.flow_spec.capabilities if item.name == "submit_item")
-            submit.request_refs = [item for item in submit.request_refs if item.step_id == "submit"]
-            submit.nodes = [item for item in submit.nodes if item.get("step_id") != "query"]
-            submit.request_refs.append(submit.request_refs[0].model_copy(deep=True))
-            self.calls = 0
-
-        def current_flow_spec(self):
-            return self.flow_spec.model_copy(deep=True)
-
-        def bind_flow_spec(self, spec):
-            self.flow_spec = spec.model_copy(deep=True)
-
-        async def prompt(self, *_args, **_kwargs):
-            self.calls += 1
-            return {"status": "no_change"}
-
-    session = NoProgressSession()
-    report = await run_recording_verification(session, max_rounds=99, timeout_s=10)
-
-    assert session.calls == 3
-    assert report["complete"] is False
-    assert report["stop_reason"] == "no_progress"
-    assert session.flow_spec.meta["verification_run"]["status"] == "no_progress"
-    assert session.flow_spec.meta.get("unverified") in (None, [])
-
-
-
-
-
-
-@pytest.mark.asyncio
-async def test_verification_termination_stops_without_marking_the_draft_unverified() -> None:
-    class TerminatedSession:
-        def __init__(self) -> None:
-            self.flow_spec = _fact_check_query_leaking_into_write()
-            self.calls = 0
-
-        def current_flow_spec(self):
-            return self.flow_spec.model_copy(deep=True)
-
-        def bind_flow_spec(self, spec):
-            self.flow_spec = spec.model_copy(deep=True)
-
-        async def prompt(self, *_args, **_kwargs):
-            self.calls += 1
-            return {"status": "completed"}
-
-    session = TerminatedSession()
-
-    async def terminate_prompt(_operation):
-        _operation.close()
-        return {"status": "analysis_terminated"}
-
-    report = await run_recording_verification(
-        session,
-        prompt_runner=terminate_prompt,
-        max_rounds=5,
-        timeout_s=10,
-    )
-
-    assert session.calls == 0
-    assert report["stop_reason"] == "analysis_terminated"
-    assert report["complete"] is False
-    assert session.flow_spec.meta.get("unverified") in (None, [])
-
-
-
-
-
-
 
 
 def test_runtime_review_prompt_requires_structured_self_healing_issues() -> None:

@@ -237,7 +237,7 @@ def test_later_plain_analysis_removes_a_stale_weak_text_option_binding() -> None
     )
     optimized = apply_flow_edits(spec, [{
         "op": "set_param_source", "step_id": "submit",
-        "wire_path": "body.useInfo", "source_kind": "user_input",
+        "wire_path": "body.useInfo", "source_kind": "caller_input",
         "reason": "录制文本域由操作人填写", "evidence_refs": ["event-use-info"],
     }, {
         "op": "set_param_type", "step_id": "submit",

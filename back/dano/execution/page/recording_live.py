@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import json
 import re
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from dano.execution.page.recording_field_identity import (
@@ -36,28 +38,104 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
 })
 
 _PARAM_SOURCE_KINDS = frozenset({
-    "user_input", "constant", "session_header", "page_context", "chained", "computed",
+    "caller_input", "constant", "session", "context", "response_binding", "computed",
 })
 _PARAM_BUSINESS_TYPES = frozenset({
     "string", "email", "url", "number", "integer", "boolean", "date",
     "datetime", "time", "array", "object", "enum", "list-enum",
 })
 _CANONICAL_REQUEST_ROLES = frozenset({
-    "business_get", "business_write", "submit_anchor", "read_context", "read_option",
-    "auth", "noise", "telemetry", "unsupported_upload", "unsupported_graphql",
+    "auth", "support", "option", "context", "business_read", "business_write",
 })
 _REQUEST_ROLE_FAMILIES = (
-    ("telemetry", frozenset({"telemetry", "metric", "metrics", "trace", "analytics", "beacon"})),
-    ("noise", frozenset({"noise", "static", "asset", "heartbeat", "ping"})),
+    ("support", frozenset({
+        "support", "telemetry", "metric", "metrics", "trace", "analytics", "beacon",
+        "noise", "static", "asset", "heartbeat", "ping", "upload", "graphql",
+    })),
     ("auth", frozenset({"auth", "authentication", "authorization", "token", "login"})),
-    ("read_option", frozenset({"option", "options", "dictionary", "dict", "enum", "candidate", "candidates"})),
-    ("read_context", frozenset({"preflight", "context", "navigation", "page", "load", "entry", "fact", "check"})),
+    ("option", frozenset({"option", "options", "dictionary", "dict", "enum", "candidate", "candidates"})),
+    ("context", frozenset({"preflight", "context", "navigation", "page", "load", "entry", "fact", "check"})),
     ("business_write", frozenset({
         "write", "submit", "mutation", "create", "update", "delete", "save",
         "approve", "reject", "withdraw", "commit",
     })),
-    ("business_get", frozenset({"get", "read", "query", "search", "list", "status", "inspect", "preview"})),
+    ("business_read", frozenset({"get", "read", "query", "search", "list", "status", "inspect", "preview"})),
 )
+
+_INTERNAL_REQUEST_ROLE = {
+    "auth": "auth",
+    "support": "read_context",
+    "option": "read_option",
+    "context": "read_context",
+    "business_read": "business_get",
+    "business_write": "business_write",
+}
+
+_LIVE_NOTEBOOK_OPS = frozenset({
+    "set_goal",
+    "set_request_role",
+    "set_param_source",
+    "set_param_type",
+    "set_param_required",
+    "set_param_enum",
+    "rename_field",
+    "propose_dependency",
+    "add_pitfall",
+})
+
+
+@dataclass(frozen=True)
+class LiveNotebook:
+    """Evidence-bound live hypotheses, isolated from the formal FlowSpec.
+
+    The Pi shadow spec is an implementation detail of the live tool session.
+    Only accepted, replayable candidate operations and their evidence leave
+    that shadow.  Final materialization replays these candidates against the
+    frozen facts, so a live model conclusion can accelerate the pipeline but
+    cannot itself publish, verify, or mutate the authoritative draft.
+    """
+
+    meta: dict
+
+    @classmethod
+    def from_shadow(cls, shadow) -> "LiveNotebook":  # noqa: ANN001
+        raw_meta = dict(getattr(shadow, "meta", None) or {})
+        operations = [
+            deepcopy(operation)
+            for operation in raw_meta.get("recording_agent_ops") or []
+            if isinstance(operation, dict)
+            and str(operation.get("op") or "") in _LIVE_NOTEBOOK_OPS
+        ]
+        capability_model = raw_meta.get("capability_model")
+        meta = {
+            "recording_agent_ops": operations,
+            "agent_insights": [
+                deepcopy(item)
+                for item in raw_meta.get("agent_insights") or []
+                if isinstance(item, dict)
+            ][-100:],
+        }
+        if isinstance(capability_model, dict):
+            meta["capability_model"] = deepcopy(capability_model)
+        if raw_meta.get("agent_answers"):
+            meta["agent_answers"] = deepcopy(raw_meta["agent_answers"])
+        return cls(meta=meta)
+
+    @property
+    def insights(self) -> list[dict]:
+        return [
+            deepcopy(item)
+            for item in self.meta.get("agent_insights") or []
+            if isinstance(item, dict)
+        ]
+
+    def apply_to(self, finalized_spec):  # noqa: ANN001, ANN202
+        """Revalidate every hypothesis against one finalized fact snapshot."""
+
+        return merge_live_agent_state(
+            SimpleNamespace(meta=deepcopy(self.meta)),
+            finalized_spec,
+        )
 _SECRET_QUERY_HINTS = ("authorization", "cookie", "token", "secret", "password", "session", "credential")
 _INLINE_SECRET_RE = re.compile(
     r"(?i)\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
@@ -306,7 +384,7 @@ def _canonical_request_role(spec, request_id: str, role: str) -> str:  # noqa: A
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
             return "business_write"
         if method in {"GET", "HEAD", "OPTIONS"}:
-            return "business_get"
+            return "business_read"
     raise ValueError(
         f"unsupported request role {role!r}; use one of {sorted(_CANONICAL_REQUEST_ROLES)}"
     )
@@ -702,7 +780,7 @@ def _ground_param_in_cited_page_controls(
     spec, step, param, evidence_refs: list[str], *, source_kind: str,
 ) -> None:  # noqa: ANN001
     """Persist the raw page facts that prove an accepted source conclusion."""
-    if source_kind != "user_input" or not evidence_refs:
+    if source_kind != "caller_input" or not evidence_refs:
         return
     _require_grounded_refs(spec, "set_param_source", evidence_refs)
     candidates = _field_evidence_candidates(
@@ -937,7 +1015,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
     # required marker captured moments earlier.
     required_state = str((param.source or {}).get("required_state") or "")
 
-    if source_kind == "user_input":
+    if source_kind == "caller_input":
         param.source_kind = "user_input"
         param.source = {"kind": "user_input", "reason": reason, "actor": "agent"}
         param.category = "user_param"
@@ -954,25 +1032,37 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.category = "system_const"
         param.exposed_to_user = False
 
-    elif source_kind == "session_header":
-        if not param.path.startswith("headers."):
-            raise ValueError(
-                f"session_header only applies to header params; {param.path} is not a header. "
-                "Use constant for fixed body/query values, chained for upstream-derived values"
-            )
-        param.source_kind = "request_header"
-        param.source = {
-            "kind": "request_header",
-            "header": param.path.split(".", 1)[1],
-            "reason": reason,
-            "actor": "agent",
-        }
+    elif source_kind == "session":
+        session_key = str(edit.get("session_key") or "").strip()
+        if param.path.startswith("headers."):
+            param.source_kind = "request_header"
+            param.source = {
+                "kind": "request_header",
+                "header": param.path.split(".", 1)[1],
+                "reason": reason,
+                "actor": "agent",
+            }
+        else:
+            if not session_key:
+                raise ValueError(
+                    f"session classification for {param.path} requires session_key "
+                    "unless the target is a headers.* field"
+                )
+            param.source_kind = "current_user"
+            param.source = {
+                "kind": "identity",
+                "path": session_key,
+                "reason": reason,
+                "actor": "agent",
+            }
         param.category = "runtime_var"
         param.exposed_to_user = False
         param.default_value = None
 
-    elif source_kind == "page_context":
-        context_key = str(edit.get("context_key") or "") or param.path.split(".")[-1].split("[")[0]
+    elif source_kind == "context":
+        context_key = str(edit.get("context_key") or "").strip()
+        if not context_key:
+            raise ValueError(f"context classification for {param.path} requires context_key")
         pagination = bool(re.search(
             r"(?:^|[._-])(page(?:no|num|number|size)?|current|limit|offset)(?:$|[._-])",
             f"{param.path}.{param.key}",
@@ -997,19 +1087,20 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             if param.default_value in (None, ""):
                 param.default_value = param.value
 
-    elif source_kind == "chained":
+    elif source_kind == "response_binding":
         if not origin_request_id or not origin_path:
             raise ValueError(
-                f"chained classification for {param.path} requires origin_request_id and origin_path"
+                f"response_binding classification for {param.path} requires "
+                "origin_request_id and origin_path"
             )
         source_step = _request_step(spec, origin_request_id)
         if source_step is None:
             if _known_request_id(spec, origin_request_id):
                 raise _DeferredCompile(
-                    "chained origin request is captured but not materialized as a step yet"
+                    "response_binding origin request is captured but not materialized as a step yet"
                 )
             raise ValueError(
-                f"chained origin request {origin_request_id} is not part of the recorded facts"
+                f"response_binding origin request {origin_request_id} is not part of the recorded facts"
             )
         signature = (source_step.step_id, origin_path, step.step_id, param.path)
         link = next((
@@ -1208,7 +1299,8 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
 
     elif kind == "set_request_role":
         request_id = str(edit.get("request_id") or "")
-        role = str(edit.get("role") or "")
+        public_role = str(edit.get("role") or "")
+        role = _INTERNAL_REQUEST_ROLE.get(public_role, "")
         reason = str(edit.get("reason") or "").strip()
         raw_refs = edit.get("evidence_refs")
         if raw_refs in (None, "", []):
@@ -1224,7 +1316,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             for value in raw_refs or []
             if value not in (None, "", {})
         ]
-        if not request_id or not role or not reason or not evidence_refs:
+        if not request_id or not public_role or not role or not reason or not evidence_refs:
             raise ValueError("set_request_role requires request_id, role, reason and evidence_refs")
         current = (spec.request_facts.analysis or {}).get(request_id)
         analysis = current.model_copy(deep=True) if current is not None else RequestAnalysis(request_id=request_id)
@@ -1243,7 +1335,12 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if step is not None:
             step.semantic_role = role
             step.source_meta = {**(step.source_meta or {}), "role": role, "actor": "agent", "evidence_refs": evidence_refs}
-        _append_insight(spec, kind="role", text=f"{request_id} 判定为 {role}：{reason}", refs=[request_id, *evidence_refs])
+        _append_insight(
+            spec,
+            kind="role",
+            text=f"{request_id} 判定为 {public_role}：{reason}",
+            refs=[request_id, *evidence_refs],
+        )
 
     elif kind == "set_param_source":
         step_id = str(edit.get("step_id") or edit.get("request_id") or "")
@@ -2118,8 +2215,8 @@ def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
         if not request_id or not role or not reason:
             continue
         overrides[request_id] = {
-            "role": role,
-            "keep": role not in {"noise", "auth", "telemetry"},
+            "role": _INTERNAL_REQUEST_ROLE[role],
+            "keep": role in {"business_read", "business_write"},
             "reason": reason,
             "confidence": max(0.8, float(operation.get("confidence") or 0)),
             "actor": "agent",

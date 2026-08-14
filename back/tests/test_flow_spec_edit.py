@@ -1797,7 +1797,7 @@ def test_request_facts_are_first_class_and_client_omits_legacy_graph():
     client = flow_spec_to_client(spec)
 
     assert [item["request_id"] for item in client["request_facts"]["requests"]] == ["req-options"]
-    assert client["request_facts"]["analysis"]["req-options"]["role"] == "read_option"
+    assert client["request_facts"]["analysis"]["req-options"]["role"] == "option"
     assert client["request_facts"]["requests"][0]["headers"]["Authorization"] == "***"
     assert client["request_facts"]["requests"][0]["post_data"] == ""
     assert client["request_facts"]["requests"][0]["response_json"]["token"] == "***"
