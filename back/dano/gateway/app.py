@@ -2197,30 +2197,47 @@ async def record_ws(ws: WebSocket) -> None:
                             finalize_since_seq,
                             bind_spec=pending_flow_spec,
                         ))
-                    verification_result = await _verify_finalized_recording()
                     _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
                         "action": session_action,
                         "operation": "finalize",
                         "operation_id": msg.get("operation_id"),
-                        "verification": verification_result,
                         **_recording_flow_projection(pending_flow_spec),
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
                     from dano.execution.page.flow_spec import flow_spec_fingerprint
-                    from dano.onboarding.recording_verify import recorded_goal_slug
 
-                    deferred_messages.insert(0, {
-                        "type": "publish_request",
-                        "operation_id": f"auto-publish-{flow_spec_fingerprint(pending_flow_spec)[:16]}",
-                        "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
-                        "action": recorded_goal_slug(pending_flow_spec),
-                        "title": str((pending_flow_spec.goal or {}).get("intent") or pending_flow_spec.title or ""),
-                        "goal": pending_flow_spec.goal,
-                        "_auto_publish": True,
-                    })
+                    if pending_flow_spec.capabilities:
+                        from dano.onboarding.recording_verify import recorded_goal_slug
+
+                        deferred_messages.insert(0, {
+                            "type": "publish_request",
+                            "operation_id": (
+                                "auto-publish-"
+                                f"{flow_spec_fingerprint(pending_flow_spec)[:16]}"
+                            ),
+                            "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
+                            "action": recorded_goal_slug(pending_flow_spec),
+                            "title": str(
+                                (pending_flow_spec.goal or {}).get("intent")
+                                or pending_flow_spec.title
+                                or ""
+                            ),
+                            "goal": pending_flow_spec.goal,
+                            "_auto_publish": True,
+                        })
+                    else:
+                        deferred_messages.insert(0, {
+                            "type": "orchestrate_flow",
+                            "operation_id": f"auto-plan-{uuid.uuid4().hex}",
+                            "action": session_action,
+                            "recording_id": recording_id,
+                            "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
+                            "analysis_screenshots": [],
+                            "_auto_publish_after_plan": True,
+                        })
                 except Exception as _fs_err:  # noqa: BLE001
                     log.warning("flow_spec.emit_failed", error=str(_fs_err))
                     await sender.send_json({"type": "result", "action": session_action,
@@ -2502,6 +2519,33 @@ async def record_ws(ws: WebSocket) -> None:
                         screenshot_count=len(analysis_screenshots),
                     )
                     await sender.send_json(response)
+                    if bool(msg.get("_auto_publish_after_plan")):
+                        if pending_flow_spec.capabilities:
+                            from dano.execution.page.flow_spec import flow_spec_fingerprint
+                            from dano.onboarding.recording_verify import recorded_goal_slug
+
+                            deferred_messages.insert(0, {
+                                "type": "publish_request",
+                                "operation_id": (
+                                    "auto-publish-"
+                                    f"{flow_spec_fingerprint(pending_flow_spec)[:16]}"
+                                ),
+                                "expected_fingerprint": flow_spec_fingerprint(pending_flow_spec),
+                                "action": recorded_goal_slug(pending_flow_spec),
+                                "title": str(
+                                    (pending_flow_spec.goal or {}).get("intent")
+                                    or pending_flow_spec.title
+                                    or ""
+                                ),
+                                "goal": pending_flow_spec.goal,
+                                "_auto_publish": True,
+                            })
+                        else:
+                            log.warning(
+                                "recording.auto_publish_skipped",
+                                action=session_action,
+                                reason="capability plan completed without capabilities",
+                            )
                 except WebSocketDisconnect:
                     # The plan was already applied and checkpointed. A client
                     # closing before the acknowledgement is a transport event,

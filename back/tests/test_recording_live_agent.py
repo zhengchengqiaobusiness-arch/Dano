@@ -2041,3 +2041,5 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     assert "finalize" in prompts[0][0]
     assert "submit_recording_plan" in prompts[0][0]
     assert "plan.ops" in prompts[0][0]
+    assert "plan.semantic_plan.capabilities" in prompts[0][0]
+    assert "request_refs" in prompts[0][0]

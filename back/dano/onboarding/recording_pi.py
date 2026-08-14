@@ -553,7 +553,12 @@ class RecordingPiSession:
             "页面字典枚举用 set_param_enum 提交完整 label/value 映射；三者都会回查 field_evidence/字典，"
             "禁止只写 field_semantics 绕过证据闸门，evidence_refs 至少要有一条引用真实 request_id/event_id/step_id。"
             "提交后检查 op_results，skipped/rolled_back 均表示未落地，必须按 reason 修正。"
-            + ("这是 finalize 边界，必须把可落地结论写入当前 FlowSpec。" if finalizing else "一次只问一个真正无法自答的问题。"),
+            + (
+                "这是 finalize 边界，必须在同一次 submit_recording_plan 中提交完整的 "
+                "plan.semantic_plan.capabilities；必须覆盖目标中的全部业务能力，每个能力都要有"
+                "真实 anchor_step_id 和非空 request_refs，不能只提交 plan.ops。"
+                if finalizing else "一次只问一个真正无法自答的问题。"
+            ),
             timeout_s=None,
         )
 

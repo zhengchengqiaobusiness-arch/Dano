@@ -765,13 +765,25 @@ async def test_verification_ops_flow_through_the_agent_repair_submission_path():
     assert session.current_flow_spec().links[0].meta["verified"] is True
 
 
-def test_gateway_finalize_queues_verified_automatic_publish():
+def test_gateway_finalize_queues_automatic_plan_before_publish():
     import inspect
 
     from dano.gateway.app import record_ws
 
     source = inspect.getsource(record_ws)
     finalize = source[source.index('elif t == "finalize":'):source.index('elif t == "flow_update":')]
-    assert "await _verify_finalized_recording()" in finalize
-    assert '"type": "publish_request"' in finalize
-    assert '"_auto_publish": True' in finalize
+    assert '"type": "orchestrate_flow"' in finalize
+    assert '"_auto_publish_after_plan": True' in finalize
+    assert "if pending_flow_spec.capabilities:" in finalize
+
+
+def test_gateway_automatic_plan_only_queues_publish_after_capabilities_exist():
+    import inspect
+
+    from dano.gateway.app import record_ws
+
+    source = inspect.getsource(record_ws)
+    plan = source[source.index('elif t == "orchestrate_flow":'):source.index('elif t == "auto_fix_flow":')]
+    assert 'msg.get("_auto_publish_after_plan")' in plan
+    assert "pending_flow_spec.capabilities" in plan
+    assert '"type": "publish_request"' in plan
