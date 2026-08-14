@@ -1370,6 +1370,51 @@ async def test_screencast_coalesces_burst_but_flushes_final_dynamic_frame() -> N
     assert [frame["seq"] for frame in frames] == [1, 2]
 
 
+async def test_screencast_backpressures_dynamic_pages_before_encoding_more_frames() -> None:
+    class FakeCdp:
+        def __init__(self) -> None:
+            self.handlers: dict[str, object] = {}
+            self.ack_count = 0
+
+        async def send(self, method: str, _params: dict | None = None) -> None:
+            if method != "Page.screencastFrameAck":
+                return
+            self.ack_count += 1
+            if self.ack_count < 100:
+                asyncio.get_running_loop().call_soon(
+                    self.handlers["Page.screencastFrame"],
+                    {"sessionId": self.ack_count + 1, "data": "dynamic", "metadata": {}},
+                )
+
+        def on(self, event: str, callback) -> None:  # noqa: ANN001
+            self.handlers[event] = callback
+
+    class FakeContext:
+        def __init__(self, cdp: FakeCdp) -> None:
+            self.cdp = cdp
+
+        async def new_cdp_session(self, _page):  # noqa: ANN001
+            return self.cdp
+
+    cdp = FakeCdp()
+    sess = RecordSession()
+    sess.page = _InputPage()
+    sess._context = FakeContext(cdp)
+
+    await sess.start_screencast(lambda _frame: asyncio.sleep(0))
+    await cdp.handlers["Page.screencastFrame"]({
+        "sessionId": 1, "data": "initial", "metadata": {},
+    })
+    await asyncio.sleep(0.03)
+
+    # Chromium emits the next JPEG only after the previous frame is ACKed.
+    # ACKing before the FPS gate lets complex animated pages encode unbounded
+    # full-size frames even though nearly all are discarded afterwards.
+    assert cdp.ack_count <= 1
+    sess._cdp = None
+    await asyncio.sleep(0.1)
+
+
 def test_same_endpoint_responses_attach_by_request_identity_index() -> None:
     sess = RecordSession()
     first = sess._record_all("GET", "https://example.test/api/items?id=1")

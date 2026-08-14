@@ -2043,6 +2043,14 @@ class RecordSession:
                     pending_frame = None
                     if params is None:
                         return
+                    # Chromium does not encode the next screencast JPEG until
+                    # this frame is acknowledged. Apply the FPS gate before
+                    # ACK so complex animated/navigation pages cannot spend
+                    # CPU encoding frames that this recorder will discard.
+                    await cdp.send(
+                        "Page.screencastFrameAck",
+                        {"sessionId": params["sessionId"]},
+                    )
                     await _forward_frame(params)
                     if pending_frame is None:
                         return
@@ -2058,12 +2066,10 @@ class RecordSession:
         async def _emit(params: dict) -> None:
             nonlocal pending_frame, frame_flush_task
             try:
-                await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
                 if self._on_frame is not None and cdp is self._cdp:   # 只发**活动页**的帧(切页后旧帧丢弃)
-                    # Coalesce to the newest pending frame, but schedule it for
-                    # the end of the FPS window instead of dropping it. Dropping
-                    # the last paint made lazy-loaded content appear permanently
-                    # missing whenever the page became still immediately after it.
+                    # Schedule the newest frame for the end of the FPS window.
+                    # Its ACK is deliberately delayed with the forward so CDP
+                    # applies backpressure before encoding another full JPEG.
                     pending_frame = params
                     if frame_flush_task is None or frame_flush_task.done():
                         frame_flush_task = asyncio.create_task(_flush_latest_frame())
