@@ -1388,6 +1388,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }, [startUrl, goalText]);
   const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
   const [recordingStopped, setRecordingStopped] = useState(false);
+  const [terminating, setTerminating] = useState(false);
+  const terminatingRef = useRef(false);
   const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
   const [hasFrame, setHasFrame] = useState(false);
   const hasFrameRef = useRef(false);
@@ -1975,6 +1977,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     piRecordingIdRef.current = null;
     setReconnectedSessionNeedsCapture(false);
     setRecordingStopped(false);
+    terminatingRef.current = false;
+    setTerminating(false);
     setConnectionState("connecting");
     setPhase("recording");
     setWorkspaceStage(1);
@@ -2090,6 +2094,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "stopped") {
         setRecordingStopped(true);
         message.success("录制已结束，连接和当前分析结果继续保留");
+      }
+      else if (m.type === "terminated") {
+        intentionalCloseRef.current = true;
+        ws.close(1000, "terminated_by_user");
+        wsRef.current = null;
+        finishTermination();
       }
       else if (m.type === "frame") {
         queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
@@ -2304,6 +2314,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setDescBusy(false);
       failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
+      if (terminatingRef.current) {
+        finishTermination();
+        return;
+      }
       if (intentionalCloseRef.current && !componentMountedRef.current) {
         setConnectionState("idle");
         clearFlowOperation();
@@ -2578,12 +2592,45 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
     }
   }
-  function stopAll() {
-    if (send({ type: "stop" })) {
-      setRecordingStopped(true);
-    } else {
-      message.warning("连接尚未恢复，暂时无法结束录制");
+  function finishTermination() {
+    terminatingRef.current = false;
+    setTerminating(false);
+    finalizeOperationRef.current = null;
+    publishOperationRef.current = null;
+    clearFlowOperation();
+    clearPiRecordingId(piRecordingScopeRef.current);
+    piRecordingIdRef.current = null;
+    agentInsightsRef.current = [];
+    agentStatusRef.current = { state: "waiting", text: "录制和分析已终止" };
+    verifyProgressRef.current = [];
+    hasRequestsRef.current = false;
+    setErr("");
+    setResult(null);
+    setHasRequests(false);
+    setAgentQuestions([]);
+    setAgentInsights([]);
+    setAgentStatus(agentStatusRef.current);
+    setVerifyProgress([]);
+    setAgentAnswerDrafts({});
+    assistantOpenRef.current = false;
+    setAssistantOpen(false);
+    resetEditorState();
+    setRecordingStopped(true);
+    setConnectionState("idle");
+    setPhase("idle");
+    setWorkspaceStage(0);
+    clearFrame();
+  }
+  function terminateAll() {
+    terminatingRef.current = true;
+    setTerminating(true);
+    if (sendRaw({ type: "terminate" })) {
+      message.info("正在终止当前录制和分析…");
+      return;
     }
+    terminatingRef.current = false;
+    setTerminating(false);
+    message.warning("连接尚未恢复，暂时无法终止");
   }
 
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
@@ -5042,11 +5089,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
           }}>
             <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", gap: 8, overflow: "hidden" }}>
-              <Tag color={connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
-                {connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
+              <Tag color={terminating ? "warning" : connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
+                {terminating ? "终止中" : connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
               </Tag>
-              <Button size="small" disabled={phase === "publishing" || connectionState !== "connected"} onClick={resetFromHere}>从这里开始录</Button>
-              <Button size="small" onClick={stopAll} disabled={phase === "publishing" || recordingStopped}>结束录制</Button>
+              <Button size="small" disabled={terminating || phase === "publishing" || connectionState !== "connected"} onClick={resetFromHere}>从这里开始录</Button>
+              <Button size="small" danger type="primary" loading={terminating} disabled={connectionState !== "connected"} onClick={terminateAll}>一键终止</Button>
               <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
                 <Tooltip title="每个录制会话自动生成唯一 UUID 动作名，避免与历史资产重复">
                   <Input value={action} readOnly style={{ width: 280, fontFamily: "monospace" }} />
@@ -5058,7 +5105,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   setTitle(e.target.value);
                 }} style={{ width: 150 }} />
               </Form.Item>
-              <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
+              <Button type="primary" style={{ flex: "0 0 auto" }} loading={phase === "publishing"} disabled={terminating || connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !hasRequests)} onClick={finalize}>
                 {flowSpec ? "重新抓取并分析请求" : "停止并分析请求"}
               </Button>
               <Button icon={<RobotOutlined />} style={{ flex: "0 0 auto" }} onClick={showRecordingAssistant}>

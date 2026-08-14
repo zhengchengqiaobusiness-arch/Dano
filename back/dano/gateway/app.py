@@ -628,6 +628,14 @@ def _recording_partial_release_report(release_decision) -> dict[str, object]:  #
     }
 
 
+def _recording_release_title(requested_title: str, release_decision) -> str:  # noqa: ANN001
+    """Do not advertise draft-only abilities in a partially released Skill."""
+    released = list(getattr(release_decision.callable_spec, "capabilities", None) or [])
+    if len(released) == len(release_decision.capabilities):
+        return requested_title
+    return "、".join(str(item.title or item.name) for item in released) or requested_title
+
+
 def _checkpoint_accepted_recording_pi_submission(
     resume_state: dict,
     flow_spec,
@@ -866,6 +874,10 @@ async def _recording_operation_keepalive(
     finally:
         keepalive.cancel()
         await asyncio.gather(keepalive, return_exceptions=True)
+
+
+class _RecordingTerminated(Exception):
+    """The operator explicitly ended the recording and any active operation."""
 
 
 async def _await_operation_while_draining_recording_input(
@@ -1941,6 +1953,10 @@ async def record_ws(ws: WebSocket) -> None:
             _checkpoint_resume(storage_state=await sess.storage_state())
             await _send_live_message({"type": "stopped", "connection_retained": True})
 
+        async def _terminate_recording() -> None:
+            await _send_live_message({"type": "terminated"})
+            raise _RecordingTerminated
+
         async def _handle_live_recording_message(message: dict) -> bool:
             message_type = message.get("type")
             if message_type == "input":
@@ -1952,6 +1968,8 @@ async def record_ws(ws: WebSocket) -> None:
             if message_type == "stop":
                 await _pause_recording_capture()
                 return True
+            if message_type == "terminate":
+                await _terminate_recording()
             if message_type == "agent_answer":
                 _resolve_agent_answer(message)
                 return True
@@ -2155,8 +2173,10 @@ async def record_ws(ws: WebSocket) -> None:
                     all_caps, page_events, field_evidence,
                     page_enum_options=page_enum_options,
                 )
+                from dano.execution.page.recording_live import _redact_url
+
                 log.info("record.finalize", captured=len(all_caps), steps=len(steps),
-                         captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140])
+                         captured_urls=[((c.get("method") or ""), _redact_url(str(c.get("url") or ""))[:140])
                                         for c in all_caps][:25])
                 if not all_caps:
                     # 一条请求都没抓到 → 多半是没点提交或刚重连过会话；现场仍保留，允许用户重试。
@@ -3018,10 +3038,11 @@ async def record_ws(ws: WebSocket) -> None:
                 if _tok_headers:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
+                release_title = _recording_release_title(str(msg.get("title") or ""), release_decision)
                 try:
                     rep = await run_request_onboarding(
                         tenant=init["tenant"], subsystem=sub, action=publish_action,
-                        title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
+                        title=release_title, api_request=apir, sample_inputs=sample_in,
                         required=required,
                         goal=msg.get("goal") or pending_flow_spec.goal,
                         deploy=init.get("deploy"), storage_state=login_state,
@@ -3090,12 +3111,19 @@ async def record_ws(ws: WebSocket) -> None:
                     operation_id=msg.get("operation_id"),
                     ok=bool(rep.get("ok")),
                 )
+            elif t == "terminate":
+                await _terminate_recording()
             elif t == "stop":
                 # Ending capture is not ending the workbench session. Keep the
                 # websocket, browser, draft and Pi context alive for later edits,
                 # screenshot analysis, optimization and publishing.
                 await _pause_recording_capture()
                 continue
+    except _RecordingTerminated:
+        if connection_key is not None:
+            _RECORDING_RESUME_STATES.pop(connection_key, None)
+        close_reason = "terminated_by_user"
+        log.info("recording.terminated", action=session_action)
     except asyncio.CancelledError:
         log.info(
             "recording.websocket_cancelled",

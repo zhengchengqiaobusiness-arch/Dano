@@ -41,7 +41,7 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
     assert "success_marker: null" not in source
 
     publish_start = source.index("function performPublishRequest()")
-    publish_end = source.index("function stopAll()", publish_start)
+    publish_end = source.index("function finishTermination()", publish_start)
     publish_source = source[publish_start:publish_end]
     for ghost_key in ("param_map", "selects:", "identity:", "step_idxs", "use_flow_spec"):
         assert ghost_key not in publish_source

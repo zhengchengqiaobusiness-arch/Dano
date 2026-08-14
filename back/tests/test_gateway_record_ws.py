@@ -94,6 +94,22 @@ def test_partial_publish_report_names_released_and_draft_only_capabilities() -> 
     }
 
 
+def test_partial_release_title_only_names_the_released_capabilities() -> None:
+    decision = ReleaseDecision(
+        status="partial",
+        callable_spec=FlowSpec(capabilities=[
+            FlowCapability(name="query_items", title="查询记录"),
+        ]),
+        capabilities=(
+            SimpleNamespace(name="query_items", passed=True),
+            SimpleNamespace(name="submit_item", passed=False),
+        ),
+        blocking_reasons=("submit_item: 缺少写后回读验证",),
+    )
+
+    assert gateway._recording_release_title("查询并提交记录", decision) == "查询记录"
+
+
 def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
     raw = b"\x89PNG\r\n\x1a\n" + b"screenshot-content"
     screenshots = gateway._normalize_analysis_screenshots([{
@@ -707,6 +723,48 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
 
 
 @pytest.mark.asyncio
+async def test_record_ws_termination_removes_resume_state(monkeypatch) -> None:  # noqa: ANN001
+    import dano.execution.page.recorder as recorder_module
+
+    sessions = []
+
+    class FakeRecordSession:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            self.stopped = False
+            sessions.append(self)
+
+        async def start(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def start_screencast(self, _on_frame) -> None:  # noqa: ANN001
+            return None
+
+        async def storage_state(self) -> dict:
+            return {}
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
+    gateway._RECORDING_RESUME_STATES.clear()
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    recording_id = f"recording_{'f' * 32}"
+    ws = _FakeWebSocket([{
+        "type": "start",
+        "start_url": "https://example.test",
+        "tenant": "tenant-a",
+        "pi_recording_id": recording_id,
+    }, {"type": "terminate"}])
+
+    await gateway.record_ws(ws)
+
+    assert {"type": "terminated"} in ws.messages
+    assert ws.close_reason == "terminated_by_user"
+    assert gateway._RECORDING_RESUME_STATES == {}
+    assert sessions[0].stopped is True
+
+
+@pytest.mark.asyncio
 async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverable(monkeypatch) -> None:  # noqa: ANN001
     import dano.execution.page.recorder as recorder_module
 
@@ -1070,6 +1128,13 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
     assert "_project_recorded_page_enum_options(" in source
 
 
+def test_finalize_log_redacts_secret_query_values() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    finalize = source[source.index('elif t == "finalize":'):source.index('elif t == "flow_update":')]
+
+    assert "_redact_url" in finalize
+
+
 def test_finalize_freezes_capture_before_waiting_for_live_analysis() -> None:
     source = inspect.getsource(gateway.record_ws)
     finalize = source[source.index('elif t == "finalize":'):]
@@ -1162,6 +1227,34 @@ async def test_long_operation_drains_page_input_without_cancelling_on_disconnect
     assert result == "completed"
     assert deferred[0] == {"type": "flow_update", "operation_id": "edit-1"}
     assert isinstance(deferred[1], gateway.WebSocketDisconnect)
+
+
+@pytest.mark.asyncio
+async def test_explicit_termination_cancels_a_long_recording_operation() -> None:
+    incoming: asyncio.Queue = asyncio.Queue()
+    operation_cancelled = asyncio.Event()
+
+    async def operation() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            operation_cancelled.set()
+
+    async def handle_live(message: dict) -> bool:
+        if message.get("type") == "terminate":
+            raise gateway._RecordingTerminated
+        return False
+
+    waiting = asyncio.create_task(
+        gateway._await_operation_while_draining_recording_input(
+            operation(), incoming, handle_live,
+        )
+    )
+    await incoming.put({"type": "terminate"})
+
+    with pytest.raises(gateway._RecordingTerminated):
+        await asyncio.wait_for(waiting, timeout=0.5)
+    await asyncio.wait_for(operation_cancelled.wait(), timeout=0.5)
 
 
 @pytest.mark.asyncio
