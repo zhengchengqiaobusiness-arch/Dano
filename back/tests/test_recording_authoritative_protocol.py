@@ -165,7 +165,7 @@ def test_frontend_and_gateway_use_only_canonical_snapshot_protocol() -> None:
     gateway_source = inspect.getsource(gateway.record_ws)
     frontend = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    assert "RecordingGatewaySession" in gateway_source
+    assert "RecordingSessionRegistry" in gateway_source
     assert 'incoming.type === "snapshot"' in frontend
     assert 'type: "finish"' in frontend
     assert 'type: "patch_draft"' in frontend

@@ -134,6 +134,7 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
             self.capture = None
             self.workflow = None
             self._pi = None
+            self.detached = False
             instances.append(self)
 
         async def start(self) -> None:
@@ -152,6 +153,12 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
         async def close(self) -> None:
             self.closed = True
 
+        async def attach(self, send) -> None:  # noqa: ANN001
+            self.send = send
+
+        def detach(self, send) -> None:  # noqa: ANN001
+            self.detached = True
+
     monkeypatch.setattr(recording_gateway, "RecordingGatewaySession", FakeSession)
     socket = _FakeWebSocket([
         {
@@ -164,6 +171,7 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
         {"type": "finish", "title": "目标能力"},
     ])
 
+    gateway._recording_session_registry = None
     await gateway.record_ws(socket)
 
     assert socket.accepted is True
@@ -172,8 +180,11 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
         {"type": "input", "event": {"kind": "key", "key": "Enter"}},
         {"type": "finish", "title": "目标能力"},
     ]
-    assert instances[0].closed is True
+    assert instances[0].closed is False
+    assert instances[0].detached is True
     assert socket.sent[0]["type"] == "snapshot"
+    await gateway._recording_session_registry.close()
+    gateway._recording_session_registry = None
 
 
 def test_gateway_registers_one_recording_route_and_no_legacy_branches() -> None:
@@ -181,8 +192,9 @@ def test_gateway_registers_one_recording_route_and_no_legacy_branches() -> None:
     app_source = inspect.getsource(gateway)
 
     assert app_source.count('@app.websocket("/onboarding/page/record")') == 1
-    assert "RecordingGatewaySession" in source
+    assert "RecordingSessionRegistry" in source
     assert "await session.dispatch(message)" in source
+    assert "await session.close()" not in source
     assert "_retired_record_ws" not in app_source
     for retired in (
         "orchestrate_flow", "auto_fix_flow", "publish_request", "finalize",

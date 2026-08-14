@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from dano.execution.page.flow_spec import (
@@ -36,6 +37,10 @@ from dano.onboarding.recording_workflow import (
 
 SendMessage = Callable[[dict[str, Any]], Awaitable[None]]
 PiFactory = Callable[[bool], Awaitable[Any]]
+
+
+def _workflow_snapshot_path(action: str) -> Path:
+    return Path(__file__).resolve().parents[2] / ".dano-recording-workflows" / f"{action}.json"
 
 
 def _project_page_enums(recorded: dict[str, Any], samples: dict[str, Any]) -> dict[str, Any]:
@@ -110,7 +115,7 @@ class RecordingGatewaySession:
     """Own capture, live notebook and the one authoritative workflow task."""
 
     config: RecordingSessionConfig
-    send: SendMessage
+    send: SendMessage | None
     pi_factory: PiFactory
     publisher: Publisher
     capture: RecordSession | None = field(default=None, init=False)
@@ -121,6 +126,16 @@ class RecordingGatewaySession:
     _last_live_count: int = field(default=0, init=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
+
+    async def attach(self, send: SendMessage) -> None:
+        """Attach one transport without taking ownership of the backend task."""
+
+        self.send = send
+        await self._emit_snapshot()
+
+    def detach(self, send: SendMessage) -> None:
+        if self.send is send:
+            self.send = None
 
     async def start(self) -> None:
         if self.capture is not None:
@@ -147,6 +162,8 @@ class RecordingGatewaySession:
             ),
             SelfHealingPipeline(runtime),
             listener=self._on_snapshot,
+            cancel_listener=self._cancel_analysis,
+            snapshot_path=_workflow_snapshot_path(self.config.action),
         )
         await self.capture.start(
             self.config.start_url,
@@ -165,7 +182,7 @@ class RecordingGatewaySession:
         if command == "input":
             result = await self.capture.dispatch_input(message.get("event") or {})
             if isinstance(result, dict) and not result.get("ok", True):
-                await self.send({
+                await self._send({
                     "type": "input_error",
                     "detail": str(result.get("error") or "浏览器输入事件执行失败"),
                     "recoverable": bool(result.get("recoverable", True)),
@@ -203,11 +220,13 @@ class RecordingGatewaySession:
             await self.workflow.cancel()
             return
         if command == "ping":
-            await self.send({"type": "pong", "at": message.get("at")})
+            await self._emit_snapshot()
             return
         raise ValueError(f"unsupported recording command: {command}")
 
     async def close(self) -> None:
+        """Destroy the backend-owned run during application shutdown only."""
+
         if self._closed:
             return
         self._closed = True
@@ -228,6 +247,15 @@ class RecordingGatewaySession:
         if self.capture is not None:
             await self.capture.stop()
             self.capture = None
+
+    async def _cancel_analysis(self) -> None:
+        self._live_pending_reason = ""
+        if self._live_task is not None and not self._live_task.done():
+            self._live_task.cancel()
+            await asyncio.gather(self._live_task, return_exceptions=True)
+        if self._pi is not None:
+            await self._pi.close()
+            self._pi = None
 
     async def _materialize(
         self,
@@ -287,6 +315,7 @@ class RecordingGatewaySession:
         await self.capture.flush_recording()
         self.capture.pause_recording()
         if self._live_task is not None and not self._live_task.done():
+            self._live_task.cancel()
             await asyncio.gather(self._live_task, return_exceptions=True)
 
     async def _ensure_pi(self, fresh: bool) -> Any:
@@ -349,7 +378,6 @@ class RecordingGatewaySession:
         }
 
     def _on_request(self, request: dict[str, Any]) -> None:
-        self._send_background({"type": "request", "request": request})
         try:
             from dano.execution.page.request_capture import classify_request_role
 
@@ -365,7 +393,7 @@ class RecordingGatewaySession:
             self._schedule_live("request_batch")
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
-        await self.send({"type": "frame", **frame})
+        await self._send({"type": "frame", **frame})
 
     def _schedule_live(self, reason: str) -> None:
         if self._capture_frozen or self._closed:
@@ -417,8 +445,79 @@ class RecordingGatewaySession:
             payload["draft"] = flow_spec_to_client(spec)
             payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
             payload["check_report"] = validate_flow_spec(spec)
-        await self.send({"type": "snapshot", "snapshot": payload})
+        await self._send({"type": "snapshot", "snapshot": payload})
+        if current.question is not None:
+            await self._send({
+                "type": "question",
+                "question": current.question.model_dump(mode="json"),
+                "revision": current.revision,
+            })
+
+    async def _send(self, payload: dict[str, Any]) -> None:
+        sender = self.send
+        if sender is None:
+            return
+        try:
+            await sender(payload)
+        except Exception:  # noqa: BLE001 - transport loss must not stop the workflow
+            if self.send is sender:
+                self.send = None
 
     def _send_background(self, payload: dict[str, Any]) -> None:
-        task = asyncio.create_task(self.send(payload))
+        task = asyncio.create_task(self._send(payload))
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+
+
+@dataclass
+class RecordingSessionRegistry:
+    """Keep one backend-owned recording session per action across socket reconnects."""
+
+    _sessions: dict[str, RecordingGatewaySession] = field(default_factory=dict)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def attach_or_create(
+        self,
+        *,
+        config: RecordingSessionConfig,
+        send: SendMessage,
+        pi_factory: PiFactory,
+        publisher: Publisher,
+    ) -> tuple[RecordingGatewaySession, bool]:
+        async with self._lock:
+            session = self._sessions.get(config.action)
+            created = session is None
+            if session is None:
+                session = RecordingGatewaySession(
+                    config=config,
+                    send=send,
+                    pi_factory=pi_factory,
+                    publisher=publisher,
+                )
+                self._sessions[config.action] = session
+            elif (
+                session.config.tenant != config.tenant
+                or session.config.subsystem != config.subsystem
+            ):
+                raise ValueError("录制 action 不属于当前租户或业务系统")
+        if created:
+            try:
+                await session.start()
+            except Exception:
+                async with self._lock:
+                    self._sessions.pop(config.action, None)
+                await session.close()
+                raise
+        else:
+            await session.attach(send)
+        return session, created
+
+    def detach(self, action: str, send: SendMessage) -> None:
+        session = self._sessions.get(action)
+        if session is not None:
+            session.detach(send)
+
+    async def close(self) -> None:
+        async with self._lock:
+            sessions = tuple(self._sessions.values())
+            self._sessions.clear()
+        await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)

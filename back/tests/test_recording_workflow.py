@@ -187,8 +187,39 @@ async def test_recording_workflow_republish_excludes_live_notebook() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recording_workflow_same_draft_republish_is_idempotent() -> None:
+    pipeline = _ImmediatePipeline()
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="run-1", action="action-1", status=WorkflowStatus.EDITABLE,
+            capture_frozen=True, draft={"flow_id": "edited"},
+        ),
+        pipeline,
+    )
+
+    await workflow.republish()
+    await workflow.wait()
+    await workflow.republish()
+    await asyncio.sleep(0)
+
+    assert len(pipeline.seeds) == 1
+
+
+@pytest.mark.asyncio
+async def test_recording_workflow_persists_each_authoritative_snapshot(tmp_path) -> None:
+    path = tmp_path / "action.json"
+    workflow = RecordingWorkflow(_snapshot(), _ImmediatePipeline(), snapshot_path=path)
+
+    result = await workflow.start()
+
+    assert path.exists()
+    assert WorkflowSnapshot.model_validate_json(path.read_text(encoding="utf-8")) == result
+
+
+@pytest.mark.asyncio
 async def test_recording_workflow_cancel_preserves_draft_and_stops_task() -> None:
     started = asyncio.Event()
+    cancelled = asyncio.Event()
 
     class WaitingPipeline:
         async def run(self, seed, context):  # noqa: ANN001
@@ -201,6 +232,7 @@ async def test_recording_workflow_cancel_preserves_draft_and_stops_task() -> Non
             capture_frozen=True, draft={"flow_id": "draft"},
         ),
         WaitingPipeline(),
+        cancel_listener=lambda: cancelled.set(),
     )
     await workflow.republish()
     await started.wait()
@@ -208,6 +240,7 @@ async def test_recording_workflow_cancel_preserves_draft_and_stops_task() -> Non
 
     assert result.status == WorkflowStatus.CANCELLED
     assert result.draft == {"flow_id": "draft"}
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

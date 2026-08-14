@@ -64,6 +64,7 @@ _lifecycle_reconciler = LifecycleRegistrationReconciler(
     InMemoryLifecycleOutboxStore(),
 )
 _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
+_recording_session_registry = None
 
 
 _RECENT_RECORDING_ACTIONS: dict[str, None] = {}
@@ -235,11 +236,6 @@ class _WebSocketSendQueue:
 
 
 @asynccontextmanager
-
-
-
-
-@asynccontextmanager
 async def lifespan(app: FastAPI):
     from dano.infra.db import close_pool, init_pool, run_migrations
     from dano.infra.logging import configure_logging
@@ -273,6 +269,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.review_board_unavailable", error=str(e))
     yield
+    if _recording_session_registry is not None:
+        await _recording_session_registry.close()
     await close_pool()
 
 
@@ -855,14 +853,16 @@ async def _publish_canonical_recording(
 async def record_ws(ws: WebSocket) -> None:
     """Thin transport for the canonical recording workflow."""
     from dano.onboarding.recording_gateway import (
-        RecordingGatewaySession,
+        RecordingSessionRegistry,
         RecordingSessionConfig,
     )
     from dano.onboarding.recording_pi import RecordingPiSession
 
     await ws.accept()
     sender = _WebSocketSendQueue(ws)
+    send_message = sender.send_json
     session = None
+    action = ""
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
@@ -917,7 +917,10 @@ async def record_ws(ws: WebSocket) -> None:
                 release_candidate=candidate,
             )
 
-        session = RecordingGatewaySession(
+        global _recording_session_registry
+        if _recording_session_registry is None:
+            _recording_session_registry = RecordingSessionRegistry()
+        session, _created = await _recording_session_registry.attach_or_create(
             config=RecordingSessionConfig(
                 tenant=tenant,
                 subsystem=subsystem,
@@ -929,12 +932,11 @@ async def record_ws(ws: WebSocket) -> None:
                 token=str(init.get("token") or ""),
                 storage_state=init.get("storage_state") or None,
             ),
-            send=sender.send_json,
+            send=send_message,
             pi_factory=pi_factory,
             publisher=publisher,
         )
         holder["session"] = session
-        await session.start()
         while True:
             message = await ws.receive_json()
             try:
@@ -950,8 +952,8 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
-        if session is not None:
-            await session.close()
+        if session is not None and _recording_session_registry is not None:
+            _recording_session_registry.detach(action, send_message)
         await sender.close()
         try:
             await ws.close()

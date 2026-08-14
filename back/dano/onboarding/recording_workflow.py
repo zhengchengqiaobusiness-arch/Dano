@@ -12,6 +12,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -298,6 +299,7 @@ def _stable_payload(value: dict[str, Any]) -> str:
 
 
 SnapshotListener = Callable[[WorkflowSnapshot], Awaitable[None] | None]
+CancelListener = Callable[[], Awaitable[None] | None]
 
 
 @dataclass
@@ -312,9 +314,12 @@ class RecordingWorkflow:
     snapshot: WorkflowSnapshot
     pipeline: WorkflowPipeline
     listener: SnapshotListener | None = None
+    cancel_listener: CancelListener | None = None
+    snapshot_path: Path | None = None
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
+    _last_republish_fingerprint: str = field(default="", init=False, repr=False)
 
     async def start(self) -> WorkflowSnapshot:
         if self.snapshot.status == WorkflowStatus.IDLE:
@@ -378,6 +383,10 @@ class RecordingWorkflow:
             raise ValueError(f"cannot republish recording in state {self.snapshot.status}")
         if self.snapshot.draft is None:
             raise ValueError("cannot republish without a draft")
+        fingerprint = _stable_payload(self.snapshot.draft)
+        if fingerprint == self._last_republish_fingerprint:
+            return self.snapshot
+        self._last_republish_fingerprint = fingerprint
         await self._launch(PipelineSeed(
             kind="edited_spec",
             draft=self.snapshot.draft,
@@ -425,6 +434,10 @@ class RecordingWorkflow:
 
     async def cancel(self) -> WorkflowSnapshot:
         self._cancelled = True
+        if self.cancel_listener is not None:
+            cancelled = self.cancel_listener()
+            if isinstance(cancelled, Awaitable):
+                await cancelled
         if self._answer is not None and not self._answer.done():
             self._answer.cancel()
         if self._task is not None and not self._task.done():
@@ -491,6 +504,8 @@ class RecordingWorkflow:
                     label=("发布完成" if outcome.status == WorkflowStatus.PUBLISHED else "处理已结束"),
                 ),
             )
+            if seed.kind == "edited_spec" and self.snapshot.draft is not None:
+                self._last_republish_fingerprint = _stable_payload(self.snapshot.draft)
         except (asyncio.CancelledError, WorkflowCancelled):
             return
         except Exception as exc:  # noqa: BLE001 - the authoritative draft must survive
@@ -539,7 +554,22 @@ class RecordingWorkflow:
         **changes: Any,
     ) -> None:
         self.snapshot = transition_snapshot(self.snapshot, status, progress=progress, **changes)
+        self._persist_snapshot()
         if self.listener is not None:
             emitted = self.listener(self.snapshot)
             if isinstance(emitted, Awaitable):
                 await emitted
+
+    def _persist_snapshot(self) -> None:
+        """Persist the latest authority without coupling task lifetime to a socket."""
+
+        if self.snapshot_path is None:
+            return
+        path = Path(self.snapshot_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pending = path.with_suffix(path.suffix + ".tmp")
+        pending.write_text(
+            self.snapshot.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        pending.replace(path)
