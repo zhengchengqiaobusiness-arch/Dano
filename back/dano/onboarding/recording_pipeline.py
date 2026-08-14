@@ -58,6 +58,7 @@ class CanonicalRecordingRuntime:
                 seed.use_live_notebook,
                 context,
             )
+            context.remember_draft(draft)
         elif seed.kind == "edited_spec":
             if seed.draft is None:
                 raise ValueError("edited_spec requires a draft")
@@ -70,11 +71,13 @@ class CanonicalRecordingRuntime:
 
         context.ensure_active()
         await context.progress(WorkflowStep.ANALYZING, "正在规划完整业务能力", 0)
-        return await self.services.plan_capabilities(
+        planned = await self.services.plan_capabilities(
             draft,
             seed.use_live_notebook,
             context,
         )
+        context.remember_draft(planned)
+        return planned
 
     async def check(self, draft: Draft, context: PipelineContext) -> PipelineCheck:
         context.ensure_active()

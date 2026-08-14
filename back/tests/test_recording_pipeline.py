@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from dano.onboarding.recording_pipeline import (
@@ -243,3 +245,35 @@ async def test_final_review_repairs_are_bounded_independently() -> None:
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.error == "最终审核修复达到 2 次上限"
     assert repairs == 2
+
+
+@pytest.mark.asyncio
+async def test_operation_timeout_preserves_materialized_draft_and_is_not_mislabeled() -> None:
+    async def materialize(_use_live, _context):  # noqa: ANN001
+        return {"capabilities": ["query", "submit"]}
+
+    async def plan(draft, _use_live, _context):  # noqa: ANN001
+        await asyncio.sleep(0.05)
+        raise AssertionError("operation timeout must stop capability planning")
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("later pipeline stages must not run")
+
+    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
+        materialize_recording=materialize,
+        plan_capabilities=plan,
+        verify=unused,
+        review=unused,
+        repair=unused,
+        publish=unused,
+    ))
+
+    outcome = await SelfHealingPipeline(
+        runtime,
+        operation_timeout_s=0.01,
+        overall_timeout_s=1,
+    ).run(PipelineSeed(kind="recording"), _context())
+
+    assert outcome.status == WorkflowStatus.FAILED
+    assert outcome.draft == {"capabilities": ["query", "submit"]}
+    assert outcome.error == "录制处理步骤超过 0 秒时间预算"

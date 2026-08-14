@@ -52,6 +52,27 @@ def test_recording_workflow_reaches_publish_through_authoritative_snapshots() ->
     assert current.release == {"skill_id": "skill-1"}
 
 
+@pytest.mark.asyncio
+async def test_processing_and_terminal_snapshots_preserve_captured_request_count() -> None:
+    class FailingPipeline:
+        async def run(self, seed, context):  # noqa: ANN001
+            await context.progress(WorkflowStep.VERIFYING, "正在验证", 1)
+            return PipelineOutcome(
+                status=WorkflowStatus.FAILED,
+                draft={"capabilities": []},
+                error="处理超时",
+            )
+
+    workflow = RecordingWorkflow(_snapshot(), FailingPipeline())
+    await workflow.start()
+    await workflow.update_recording(request_count=91)
+    await workflow.finish()
+    result = await workflow.wait()
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.progress.request_count == 91
+
+
 def test_recording_workflow_waits_for_operator_and_resumes_same_run() -> None:
     current = transition_snapshot(_snapshot(), WorkflowStatus.RECORDING)
     current = transition_snapshot(current, WorkflowStatus.PROCESSING)

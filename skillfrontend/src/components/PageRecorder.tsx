@@ -569,7 +569,8 @@ export default function PageRecorder({
         }
       }
     };
-    socket.onerror = () => message.error("无法连接录制服务");
+    // onclose owns reconnects; a transient transport error is not a workflow failure.
+    socket.onerror = () => undefined;
     socket.onclose = () => {
       if (wsRef.current === socket) wsRef.current = null;
       setConnected(false);

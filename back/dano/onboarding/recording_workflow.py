@@ -178,10 +178,14 @@ class PipelineContext:
     progress: Callable[[WorkflowStep, str, int], Awaitable[None]]
     ask_operator: Callable[[WorkflowQuestion], Awaitable[str]]
     cancelled: Callable[[], bool]
+    latest_draft: dict[str, Any] | None = None
 
     def ensure_active(self) -> None:
         if self.cancelled():
             raise WorkflowCancelled
+
+    def remember_draft(self, draft: dict[str, Any]) -> None:
+        self.latest_draft = draft
 
 
 class WorkflowPipeline(Protocol):
@@ -226,12 +230,21 @@ class SelfHealingPipeline:
     overall_timeout_s: float = 900.0
 
     async def run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
+        if seed.draft is not None:
+            context.remember_draft(seed.draft)
         try:
             async with asyncio.timeout(self.overall_timeout_s):
                 return await self._run(seed, context)
+        except _OperationTimeout:
+            return PipelineOutcome(
+                status=WorkflowStatus.FAILED,
+                draft=context.latest_draft,
+                error=f"录制处理步骤超过 {int(self.operation_timeout_s)} 秒时间预算",
+            )
         except TimeoutError:
             return PipelineOutcome(
                 status=WorkflowStatus.FAILED,
+                draft=context.latest_draft,
                 error=f"录制处理超过 {int(self.overall_timeout_s)} 秒总时间预算",
             )
 
@@ -239,6 +252,7 @@ class SelfHealingPipeline:
         context.ensure_active()
         await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
+        context.remember_draft(draft)
         unchanged = 0
         review_retries = 0
         previous = _stable_payload(draft)
@@ -248,6 +262,7 @@ class SelfHealingPipeline:
             await context.progress(WorkflowStep.VERIFYING, "正在检查和验证能力", round_number)
             checked = await self._bounded(self.runtime.check(draft, context))
             draft = checked.draft
+            context.remember_draft(draft)
             if not checked.issues:
                 await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
                 release = await self._bounded(self.runtime.publish(draft, context))
@@ -300,6 +315,7 @@ class SelfHealingPipeline:
             current = _stable_payload(repaired)
             unchanged = unchanged + 1 if current == previous else 0
             draft = repaired
+            context.remember_draft(draft)
             previous = current
             if unchanged >= self.max_unchanged_rounds:
                 return PipelineOutcome(
@@ -310,6 +326,7 @@ class SelfHealingPipeline:
                 )
 
         final = await self._bounded(self.runtime.check(draft, context))
+        context.remember_draft(final.draft)
         return PipelineOutcome(
             status=WorkflowStatus.EDITABLE,
             draft=final.draft,
@@ -318,8 +335,15 @@ class SelfHealingPipeline:
         )
 
     async def _bounded(self, operation: Awaitable[Any]) -> Any:
-        async with asyncio.timeout(self.operation_timeout_s):
-            return await operation
+        try:
+            async with asyncio.timeout(self.operation_timeout_s):
+                return await operation
+        except TimeoutError as exc:
+            raise _OperationTimeout from exc
+
+
+class _OperationTimeout(Exception):
+    """Distinguish a bounded stage timeout from the whole-run deadline."""
 
 
 def _stable_payload(value: dict[str, Any]) -> str:
@@ -442,7 +466,7 @@ class RecordingWorkflow:
             release=None,
             issues=[],
             error="",
-            progress=WorkflowProgress(step=WorkflowStep.READY, label="修改已保存"),
+            progress=self._next_progress(WorkflowStep.READY, "修改已保存"),
         )
         return self.snapshot
 
@@ -476,7 +500,7 @@ class RecordingWorkflow:
         }:
             await self._set(
                 WorkflowStatus.CANCELLED,
-                progress=WorkflowProgress(step=WorkflowStep.READY, label="当前分析已终止，草稿已保留"),
+                progress=self._next_progress(WorkflowStep.READY, "当前分析已终止，草稿已保留"),
                 error="",
             )
         return self.snapshot
@@ -494,7 +518,7 @@ class RecordingWorkflow:
         self._cancelled = False
         await self._set(
             WorkflowStatus.PROCESSING,
-            progress=WorkflowProgress(step=WorkflowStep.FREEZING, label="正在冻结录制事实"),
+            progress=self._next_progress(WorkflowStep.FREEZING, "正在冻结录制事实"),
             issues=[],
             release=None,
             error="",
@@ -529,6 +553,7 @@ class RecordingWorkflow:
                         else WorkflowStep.READY
                     ),
                     label=("发布完成" if outcome.status == WorkflowStatus.PUBLISHED else "处理已结束"),
+                    request_count=self.snapshot.progress.request_count,
                 ),
             )
         except (asyncio.CancelledError, WorkflowCancelled):
@@ -538,7 +563,7 @@ class RecordingWorkflow:
                 await self._set(
                     WorkflowStatus.FAILED,
                     error=str(exc),
-                    progress=WorkflowProgress(step=WorkflowStep.READY, label="处理失败，草稿已保留"),
+                    progress=self._next_progress(WorkflowStep.READY, "处理失败，草稿已保留"),
                 )
         finally:
             self._answer = None
@@ -548,7 +573,7 @@ class RecordingWorkflow:
             raise WorkflowCancelled
         await self._set(
             WorkflowStatus.PROCESSING,
-            progress=WorkflowProgress(step=step, label=label, round=round_number),
+            progress=self._next_progress(step, label, round_number),
         )
 
     async def _ask_operator(self, question: WorkflowQuestion) -> str:
@@ -559,7 +584,7 @@ class RecordingWorkflow:
         await self._set(
             WorkflowStatus.WAITING_OPERATOR,
             question=question,
-            progress=WorkflowProgress(step=WorkflowStep.RESOLVING, label="等待操作人确认"),
+            progress=self._next_progress(WorkflowStep.RESOLVING, "等待操作人确认"),
         )
         try:
             answer = await self._answer
@@ -567,9 +592,22 @@ class RecordingWorkflow:
             raise WorkflowCancelled from exc
         await self._set(
             WorkflowStatus.PROCESSING,
-            progress=WorkflowProgress(step=WorkflowStep.RESOLVING, label="已收到回答，继续处理"),
+            progress=self._next_progress(WorkflowStep.RESOLVING, "已收到回答，继续处理"),
         )
         return answer
+
+    def _next_progress(
+        self,
+        step: WorkflowStep,
+        label: str,
+        round_number: int = 0,
+    ) -> WorkflowProgress:
+        return WorkflowProgress(
+            step=step,
+            label=label,
+            round=round_number,
+            request_count=self.snapshot.progress.request_count,
+        )
 
     async def _set(
         self,

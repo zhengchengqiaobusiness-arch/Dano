@@ -94,6 +94,13 @@ def test_frontend_does_not_drive_capability_results_from_frames_or_request_count
     assert "setVisibleStage(2)" not in message_handler
 
 
+def test_transient_recording_socket_errors_do_not_override_authoritative_snapshot() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    error_handler = source[source.index("socket.onerror"):source.index("socket.onclose")]
+
+    assert "message.error" not in error_handler
+
+
 def test_capability_edits_are_deltas_not_client_owned_flow_replacements() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
     patcher = source[source.index("function flushDraftEdits()"):source.index("function scheduleFrameDecode")]
