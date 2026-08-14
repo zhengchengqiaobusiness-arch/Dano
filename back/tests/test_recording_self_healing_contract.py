@@ -258,9 +258,15 @@ def test_operator_timeout_is_a_resumable_waiting_state() -> None:
     assert "按最佳假设继续" not in runtime_prompt
 
 
-@pytest.mark.xfail(strict=True, reason="parallel custom Pi operation branches still exist")
 def test_specialized_pi_mutations_use_only_plan_or_repair_entrypoints() -> None:
     source = inspect.getsource(gateway.record_ws)
+    frontend = (
+        Path(__file__).resolve().parents[2]
+        / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
+    ).read_text(encoding="utf-8")
 
     assert 'elif t == "step_naming":' not in source
     assert 'elif t == "business_description":' not in source
+    assert 'type: "step_naming"' not in frontend
+    assert 'type: "business_description"' not in frontend
+    assert 'onClick={orchestrateFlow}' in frontend

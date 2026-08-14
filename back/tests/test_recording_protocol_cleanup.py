@@ -136,7 +136,7 @@ def test_recording_publish_keeps_the_unique_recording_action() -> None:
     finalize_start = source.index('elif t == "finalize":')
     finalize_end = source.index('elif t == "flow_update":', finalize_start)
     publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index('elif t == "stop":', publish_start)
+    publish_end = source.index("except asyncio.CancelledError:", publish_start)
 
     finalize_source = source[finalize_start:finalize_end]
     publish_source = source[publish_start:publish_end]
@@ -144,6 +144,50 @@ def test_recording_publish_keeps_the_unique_recording_action() -> None:
     assert "publish_action = session_action" in publish_source
     assert "recorded_goal_slug" not in finalize_source
     assert "recorded_goal_slug" not in publish_source
+
+
+def test_live_control_messages_have_one_dispatch_implementation() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert "if await _handle_live_recording_message(msg):" in source
+    for message_type in ("input", "ping", "stop", "terminate", "agent_answer"):
+        assert source.count(f'message_type == "{message_type}"') == 1
+        assert f't == "{message_type}"' not in source
+
+
+def test_expensive_recording_operations_have_one_canonical_path() -> None:
+    backend = inspect.getsource(gateway.record_ws)
+    frontend = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    for message_type in ("orchestrate_flow", "auto_fix_flow", "publish_request"):
+        assert backend.count(f'elif t == "{message_type}":') == 1
+    for retired in ("step_naming", "business_description"):
+        assert f'elif t == "{retired}":' not in backend
+        assert f'type: "{retired}"' not in frontend
+
+    repair_start = backend.index('elif t == "auto_fix_flow":')
+    repair_end = backend.index('elif t == "console_log_upload":', repair_start)
+    repair_source = backend[repair_start:repair_end]
+    assert "_verify_finalized_recording(" in repair_source
+    assert "pi_session.prompt(" not in repair_source
+
+    publish_start = backend.index('elif t == "publish_request":')
+    publish_end = backend.index("except asyncio.CancelledError:", publish_start)
+    publish_source = backend[publish_start:publish_end]
+    assert publish_source.count("run_request_onboarding(") == 1
+    assert '"type": "publish_request"' in backend
+    assert 'type: "publish_request"' in frontend
+
+
+def test_business_description_button_uses_the_unified_plan_operation() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    label_at = source.index('"生成整体说明"')
+    button_start = source.rfind("<Button", 0, label_at)
+    button_source = source[button_start:label_at]
+
+    assert "onClick={orchestrateFlow}" in button_source
+    assert "loading={orchestrateBusy}" in button_source
+    assert "descBusy" not in source
 
 
 def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:

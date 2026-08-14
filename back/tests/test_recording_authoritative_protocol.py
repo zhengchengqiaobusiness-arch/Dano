@@ -331,7 +331,8 @@ def test_frontend_has_one_normal_finish_path_and_an_emergency_terminate() -> Non
 
     gateway_source = inspect.getsource(gateway.record_ws)
     assert 'message_type == "terminate"' in gateway_source
-    assert 'elif t == "terminate":' in gateway_source
+    assert 'elif t == "terminate":' not in gateway_source
+    assert "if await _handle_live_recording_message(msg):" in gateway_source
     assert 'except _RecordingTerminated:' not in gateway_source
 
 
@@ -346,7 +347,7 @@ def test_publish_request_is_logged_before_expensive_review() -> None:
 def test_publish_response_uses_defined_verification_result() -> None:
     source = inspect.getsource(gateway.record_ws)
     publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index('elif t == "stop":', publish_start)
+    publish_end = source.index("except asyncio.CancelledError:", publish_start)
     publish_source = source[publish_start:publish_end]
 
     assert '"verification": verification_result' in publish_source

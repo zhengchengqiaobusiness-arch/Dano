@@ -1454,7 +1454,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
 
-  const [descBusy, setDescBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
   const [lastOperationReport, setLastOperationReport] = useState<FlowOperationReport | null>(null);
@@ -2100,7 +2099,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         finalizeOperationRef.current = null;
         publishOperationRef.current = null;
         clearFlowOperation();
-        setDescBusy(false);
         verifyProgressRef.current = [];
         setVerifyProgress([]);
         setAgentQuestions((items) => items.filter((item) => item.answered));
@@ -2225,14 +2223,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // Do not keep rendering clarifications from an older failed publish;
         // fixed or explicitly ignored warnings must disappear with that old
         // result as soon as the authoritative update is acknowledged.
-        if (!hasNewerLocalMutation && ["flow_update", "plan", "repair", "step_naming", "business_description"].includes(String(m.operation || ""))) {
+        if (!hasNewerLocalMutation && ["flow_update", "plan", "repair"].includes(String(m.operation || ""))) {
           setResult(null);
-        }
-        if (m.operation === "step_naming") {
-          message.success("步骤名称已刷新");
-        } else if (m.operation === "business_description") {
-          setDescBusy(false);
-          message.success("业务说明已生成");
         }
         if (m.operation_report) {
           const report = m.operation_report as FlowOperationReport;
@@ -2286,7 +2278,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // Operation failures belong to the workbench, not the transport. Keep
         // the socket healthy so a rejected Pi proposal cannot poison reconnect.
         if (!m.operation) connectionErrorRef.current = detail;
-        setDescBusy(false); clearFlowOperation();
+        clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
         if (m.operation === "publish") {
@@ -2336,7 +2328,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       lastPointerClickRef.current = null;
       finalizeOperationRef.current = null;
       publishOperationRef.current = null;
-      setDescBusy(false);
       failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
       if (terminatingRef.current) {
@@ -4894,9 +4885,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             面向调用方描述整体能力、输入输出和执行边界。
           </Typography.Text>
-          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy}
+          <Button icon={<FileTextOutlined />} type="primary" loading={orchestrateBusy}
             disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || orchestrateBusy || autoFixBusy}
-            onClick={() => { if (send({ type: "business_description" })) setDescBusy(true); }}>
+            onClick={orchestrateFlow}>
             {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
           </Button>
         </Space>

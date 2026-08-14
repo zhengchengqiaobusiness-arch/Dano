@@ -2404,11 +2404,9 @@ async def record_ws(ws: WebSocket) -> None:
                 raise incoming
             msg = incoming
             t = msg.get("type")
-            if t == "input":
-                await _dispatch_recording_input(msg.get("event") or {})
-            elif t == "agent_answer":
-                _resolve_agent_answer(msg)
-            elif t == "reset":
+            if await _handle_live_recording_message(msg):
+                continue
+            if t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
                 from dano.execution.page.flow_spec import FlowSpec, ensure_flow_version
@@ -3032,6 +3030,12 @@ async def record_ws(ws: WebSocket) -> None:
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
                 operation_id = str(msg.get("operation_id") or "")
+                log.info(
+                    "recording.operation_started",
+                    action=session_action,
+                    operation="repair",
+                    operation_id=operation_id,
+                )
                 identity_conflict = _recording_operation_identity_conflict(
                     msg,
                     session_action=session_action,
@@ -3074,19 +3078,13 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import flow_operation_report
 
                     before_operation = pending_flow_spec.model_copy(deep=True)
-                    pi_session = await _ensure_recording_pi(fresh=True)
-                    pi_session.bind_flow_spec(pending_flow_spec)
-                    repair_result = await _responsive_prompt(pi_session.prompt(
-                        "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
-                        "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
-                        f" recording_id={recording_id}"
-                    ), operation_type="repair", operation_id=operation_id, resume_message=msg)
-                    if _analysis_was_terminated(repair_result):
+                    repair_report = await _verify_finalized_recording(
+                        force=True,
+                        operation_id=operation_id,
+                        resume_message=msg,
+                    )
+                    if repair_report.get("stop_reason") == "analysis_terminated":
                         continue
-                    if pi_session.last_submission_kind != "repair":
-                        raise RuntimeError("Pi 未提交 recording repair")
-                    pending_flow_spec = pi_session.current_flow_spec()
-                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
                         "operation": "repair",
@@ -3095,74 +3093,28 @@ async def record_ws(ws: WebSocket) -> None:
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation="repair",
                         ),
-                        "pi_session": pi_session.descriptor,
+                        "verification": repair_report,
+                        **({"pi_session": recording_pi.descriptor} if recording_pi is not None else {}),
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
+                    log.info(
+                        "recording.operation_completed",
+                        action=session_action,
+                        operation="repair",
+                        operation_id=operation_id,
+                        all_verified=bool(repair_report.get("all_verified")),
+                    )
                 except Exception as e:  # noqa: BLE001
-                    await sender.send_json({
+                    error_response = {
                         "type": "error",
                         "operation": "repair",
                         "operation_id": operation_id,
                         "detail": f"auto_fix_flow failed: {e}",
-                    })
-            # Step D2：沿用同一个 Pi Session 补充步骤业务名称。
-            elif t == "step_naming":
-                if pending_flow_spec is None:
-                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
-                    continue
-                try:
-
-                    pi_session = await _ensure_recording_pi(fresh=True)
-                    pi_session.bind_flow_spec(pending_flow_spec)
-                    naming_result = await _responsive_prompt(pi_session.prompt(
-                        "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
-                        "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}"
-                    ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
-                    if _analysis_was_terminated(naming_result):
-                        continue
-                    if pi_session.last_submission_kind != "plan":
-                        raise RuntimeError("Pi 未提交 step naming plan")
-                    pending_flow_spec = pi_session.current_flow_spec()
-                    _checkpoint_resume()
-                    await sender.send_json({
-                        "type": "flow_spec",
-                        "operation": "step_naming",
                         **_recording_flow_projection(pending_flow_spec),
-                        "pi_session": pi_session.descriptor,
-                    })
-                except Exception as e:  # noqa: BLE001
-                    await sender.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
-            # Step D3：沿用同一个 Pi Session 生成整体业务说明。
-            elif t == "business_description":
-                if pending_flow_spec is None:
-                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
-                    continue
-                try:
-
-                    pi_session = await _ensure_recording_pi(fresh=True)
-                    pi_session.bind_flow_spec(pending_flow_spec)
-                    description_result = await _responsive_prompt(pi_session.prompt(
-                        "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
-                        " business_understanding.summary；不得改写人工业务文本。必须先调用"
-                        " get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}"
-                    ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
-                    if _analysis_was_terminated(description_result):
-                        continue
-                    if pi_session.last_submission_kind != "plan":
-                        raise RuntimeError("Pi 未提交 business description plan")
-                    pending_flow_spec = pi_session.current_flow_spec()
-                    _checkpoint_resume()
-                    await sender.send_json({
-                        "type": "flow_spec",
-                        "operation": "business_description",
-                        **_recording_flow_projection(pending_flow_spec),
-                        "pi_session": pi_session.descriptor,
-                    })
-                except Exception as e:  # noqa: BLE001
-                    await sender.send_json({"type": "error", "detail": f"business_description failed: {e}"})
+                    }
+                    _remember_costly(msg, error_response)
+                    await sender.send_json(error_response)
             # Step D5: 前端上报 console 错误
             elif t == "console_log_upload":
                 entries = msg.get("entries") or []
@@ -3185,8 +3137,6 @@ async def record_ws(ws: WebSocket) -> None:
                                  total=summary["total"],
                                  errors=summary["errors"],
                                  warnings=summary["warnings"])
-            elif t == "ping":
-                await _send_live_message({"type": "pong", "at": msg.get("at")})
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
@@ -3501,15 +3451,6 @@ async def record_ws(ws: WebSocket) -> None:
                     operation_id=msg.get("operation_id"),
                     ok=bool(rep.get("ok")),
                 )
-            elif t == "terminate":
-                await _terminate_analysis(msg)
-                continue
-            elif t == "stop":
-                # Ending capture is not ending the workbench session. Keep the
-                # websocket, browser, draft and Pi context alive for later edits,
-                # screenshot analysis, optimization and publishing.
-                await _pause_recording_capture()
-                continue
     except asyncio.CancelledError:
         log.info(
             "recording.websocket_cancelled",

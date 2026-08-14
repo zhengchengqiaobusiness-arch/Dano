@@ -504,8 +504,8 @@ def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
         "wire_type", "category", "source_kind", "required",
     ),
     [
-        ("/oa/seal-apply/page", "query.pageNo", "pageNo", "1", "number", "number", "user_param", "user_input", False),
-        ("/oa/seal-apply/page", "query.pageSize", "pageSize", "10", "number", "number", "user_param", "user_input", False),
+        ("/oa/seal-apply/page", "query.pageNo", "pageNo", "1", "number", "number", "user_param", "page_context", False),
+        ("/oa/seal-apply/page", "query.pageSize", "pageSize", "10", "number", "number", "user_param", "page_context", False),
         (
             "/oa/seal-apply/page", "query.processStatus", "流程状态", None,
             "enum", "string", "user_param", "page_enum", False,

@@ -199,7 +199,7 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
 def test_auto_fix_flow_checks_identity_around_costly_replay() -> None:
     source = inspect.getsource(gateway.record_ws)
     branch_start = source.index('elif t == "auto_fix_flow":')
-    branch_end = source.index('elif t == "step_naming":', branch_start)
+    branch_end = source.index('elif t == "console_log_upload":', branch_start)
     branch = source[branch_start:branch_end]
 
     identity_check = branch.index("check_fingerprint=False")
@@ -208,6 +208,8 @@ def test_auto_fix_flow_checks_identity_around_costly_replay() -> None:
     assert identity_check < replay_check < fingerprint_check
     assert '"operation": "repair"' in branch
     assert '"operation_id": operation_id' in branch
+    assert "_verify_finalized_recording(" in branch
+    assert "pi_session.prompt(" not in branch
 
 
 def test_recording_operation_identity_rejects_other_action_or_recording() -> None:
@@ -296,7 +298,9 @@ def test_independent_recording_operations_use_fresh_pi_context() -> None:
     source = inspect.getsource(gateway.record_ws)
 
     assert "async def _ensure_recording_pi(*, fresh: bool = False):" in source
-    assert source.count("_ensure_recording_pi(fresh=True)") == 5
+    # Only the canonical semantic plan and final release review start a fresh
+    # context.  Naming, description and auto-fix no longer own Pi branches.
+    assert source.count("_ensure_recording_pi(fresh=True)") == 2
     assert "resume_history=bool(resumed_flow_spec is not None and not fresh)" in source
 
 
@@ -1101,7 +1105,7 @@ def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
 def test_publish_review_does_not_reject_downstream_skill_docs_or_field_names() -> None:
     source = inspect.getsource(gateway.record_ws)
     publish_start = source.index('elif t == "publish_request":')
-    publish_end = source.index('elif t == "stop":', publish_start)
+    publish_end = source.index("except asyncio.CancelledError:", publish_start)
     publish_source = source[publish_start:publish_end]
 
     assert "Skill 文档由发布后的导出链路生成，不属于本轮 FlowSpec 审核对象" in publish_source

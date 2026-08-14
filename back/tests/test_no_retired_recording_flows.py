@@ -14,6 +14,10 @@ from pathlib import Path
 
 BACK_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = BACK_ROOT / "dano"
+REPO_ROOT = BACK_ROOT.parent
+GATEWAY_PATH = SOURCE_ROOT / "gateway" / "app.py"
+FRONTEND_PATH = REPO_ROOT / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
+EXPORT_ROOT = SOURCE_ROOT / "export"
 
 RETIRED_MODULES = {
     "dano.export.live_skill",
@@ -49,3 +53,39 @@ def test_retired_recording_export_modules_do_not_exist_or_reenter_runtime() -> N
         if hits:
             offenders[str(path.relative_to(BACK_ROOT))] = hits
     assert not offenders, f"runtime imports retired recording exporters: {offenders}"
+
+
+def test_retired_recording_messages_cannot_reenter_frontend_or_gateway() -> None:
+    gateway_source = GATEWAY_PATH.read_text(encoding="utf-8-sig")
+    frontend_source = FRONTEND_PATH.read_text(encoding="utf-8")
+
+    for retired in ("step_naming", "business_description"):
+        assert f'elif t == "{retired}":' not in gateway_source
+        assert f'type: "{retired}"' not in frontend_source
+
+
+def test_exporter_cannot_generate_or_mutate_recording_capabilities() -> None:
+    forbidden_calls = (
+        "compile_capabilities(",
+        "to_flow_spec(",
+        "apply_flow_edits(",
+        "submit_recording_plan(",
+        "submit_recording_repair(",
+    )
+    offenders: dict[str, list[str]] = {}
+    for path in EXPORT_ROOT.rglob("*.py"):
+        source = path.read_text(encoding="utf-8-sig")
+        hits = [call for call in forbidden_calls if call in source]
+        if hits:
+            offenders[str(path.relative_to(BACK_ROOT))] = hits
+
+    assert not offenders, f"exporter re-entered recording capability generation: {offenders}"
+
+
+def test_all_skill_export_triggers_use_the_canonical_exporter() -> None:
+    source = GATEWAY_PATH.read_text(encoding="utf-8-sig")
+
+    assert source.count("from dano.export.agent_skills import write_exports") == 2
+    assert source.count("written = await write_exports(") == 2
+    for retired in RETIRED_MODULES:
+        assert retired not in source
