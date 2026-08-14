@@ -201,13 +201,25 @@ def test_frontend_termination_preserves_draft_stage_and_canvas() -> None:
         assert forbidden not in handler
 
 
-@pytest.mark.xfail(strict=True, reason="operator timeout still falls through instead of pausing")
 def test_operator_timeout_is_a_resumable_waiting_state() -> None:
     source = inspect.getsource(gateway.record_ws)
     ask = source[source.index("async def _ask_operator"):source.index("async def _run_live_analysis")]
+    frontend = (
+        Path(__file__).resolve().parents[2]
+        / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
+    ).read_text(encoding="utf-8")
+    runtime_prompt = (
+        Path(__file__).resolve().parents[2]
+        / "back" / "agent" / "run_recording_pi.mjs"
+    ).read_text(encoding="utf-8")
 
     assert '"status": "waiting_for_operator"' in ask
     assert "pending_operator_question" in ask
+    assert "asyncio.wait({future}, timeout=60)" in ask
+    assert 'message.get("issue_id")' in source
+    assert "issue_id: String(m.issue_id" in frontend
+    assert "issue_id: question.issue_id" in frontend
+    assert "按最佳假设继续" not in runtime_prompt
 
 
 @pytest.mark.xfail(strict=True, reason="parallel custom Pi operation branches still exist")

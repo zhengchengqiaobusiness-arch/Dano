@@ -13,6 +13,7 @@ import asyncio
 import base64
 import binascii
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 from pathlib import Path
@@ -1653,6 +1654,23 @@ async def record_ws(ws: WebSocket) -> None:
                 "resumed_server_draft": True,
             })
         await sender.send_json(started_message)
+        pending_operator_question = resume_state.get("pending_operator_question")
+        if (
+            isinstance(pending_operator_question, dict)
+            and pending_operator_question.get("status") in {"waiting", "waiting_for_operator"}
+        ):
+            pending_operator_question["status"] = "waiting_for_operator"
+            resume_state["pending_operator_question"] = pending_operator_question
+            await sender.send_json({
+                "type": "agent_question",
+                **{
+                    key: pending_operator_question.get(key)
+                    for key in (
+                        "question_id", "issue_id", "operation_id", "text",
+                        "options", "context_ref", "status",
+                    )
+                },
+            })
         await sess.start_screencast(on_frame)
 
         pending_flow_spec = (
@@ -1662,6 +1680,10 @@ async def record_ws(ws: WebSocket) -> None:
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         costly_operation_results = dict(resume_state.get("operations") or {})
         recording_mode = "real_submit"
+        operator_operation_context: ContextVar[dict] = ContextVar(
+            "recording_operator_operation",
+            default={},
+        )
 
         def _owns_resume_state() -> bool:
             return bool(
@@ -1762,40 +1784,170 @@ async def record_ws(ws: WebSocket) -> None:
             emitted_agent_insights = max(emitted_agent_insights, len(insights))
             return len(new_insights)
 
+        def _append_operator_answer(*, pending: dict, answer: str) -> None:
+            answer_record = {
+                "question_id": pending.get("question_id"),
+                "issue_id": pending.get("issue_id"),
+                "operation_id": pending.get("operation_id"),
+                "flow_fingerprint": pending.get("flow_fingerprint"),
+                "answer": answer,
+                "context_ref": pending.get("context_ref"),
+            }
+
+            def append_to(spec) -> None:  # noqa: ANN001
+                if spec is None:
+                    return
+                spec.meta = dict(spec.meta or {})
+                answers = list(spec.meta.get("agent_answers") or [])
+                answers.append(dict(answer_record))
+                spec.meta["agent_answers"] = answers[-100:]
+
+            append_to(pending_flow_spec)
+            if recording_pi is not None and recording_pi.flow_spec is not pending_flow_spec:
+                append_to(recording_pi.flow_spec)
+
         def _resolve_agent_answer(message: dict) -> bool:
             question_id = str(message.get("question_id") or "")
-            future = agent_question_futures.get(question_id)
-            if future is None or future.done():
+            pending = resume_state.get("pending_operator_question")
+            if not isinstance(pending, dict) or question_id != str(pending.get("question_id") or ""):
+                return False
+            issue_id = str(message.get("issue_id") or "")
+            if not issue_id or issue_id != str(pending.get("issue_id") or ""):
                 return False
             answer = str(message.get("answer") or "").strip()
-            future.set_result({"answered": bool(answer), "answer": answer, "question_id": question_id})
+            if not answer:
+                return False
+            future = agent_question_futures.get(question_id)
+            result = {
+                "answered": True,
+                "answer": answer,
+                "question_id": question_id,
+                "issue_id": str(pending.get("issue_id") or ""),
+                "operation_id": str(pending.get("operation_id") or ""),
+            }
+            if future is not None and not future.done():
+                future.set_result(result)
+                return True
+
+            # A transport reconnect cancels the old coroutine, but not the
+            # operator checkpoint. Bind the answer to its issue and enqueue the
+            # exact accepted operation again against the current draft.
+            _append_operator_answer(pending=pending, answer=answer)
+            resume_state.pop("pending_operator_question", None)
+            resume_message = pending.get("resume_message")
+            if isinstance(resume_message, dict) and resume_message.get("type"):
+                resumed = dict(resume_message)
+                if pending_flow_spec is not None:
+                    from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+                    resumed["expected_fingerprint"] = flow_spec_fingerprint(pending_flow_spec)
+                resumed["operator_resume"] = True
+                deferred_messages.insert(0, resumed)
+            elif schedule_live_analysis is not None:
+                schedule_live_analysis("operator_answer")
+            _checkpoint_resume()
             return True
 
         async def _ask_operator(*, text: str, options: list[str], context_ref: str = "") -> dict:
-            question_id = f"question_{uuid.uuid4().hex}"
+            normalized_text = str(text).strip()
+            normalized_options = [str(value).strip() for value in options if str(value).strip()]
+            existing = resume_state.get("pending_operator_question")
+            if (
+                isinstance(existing, dict)
+                and existing.get("status") in {"waiting", "waiting_for_operator"}
+            ):
+                question_id = str(existing.get("question_id") or "")
+                issue_id = str(existing.get("issue_id") or "")
+                pending_operator_question = existing
+            else:
+                operation = dict(operator_operation_context.get() or {})
+                question_id = f"question_{uuid.uuid4().hex}"
+                context_value = str(context_ref or "").strip()
+                issue_id = context_value or (
+                    "operator_" + hashlib.sha256(
+                        json.dumps(
+                            {"text": normalized_text, "options": normalized_options},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ).hexdigest()[:20]
+                )
+                from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+                resume_message = operation.get("resume_message")
+                if isinstance(resume_message, dict):
+                    resume_message = {
+                        key: value for key, value in resume_message.items()
+                        if key != "analysis_screenshots"
+                    }
+                pending_operator_question = {
+                    "question_id": question_id,
+                    "issue_id": issue_id,
+                    "operation_id": str(operation.get("operation_id") or ""),
+                    "operation_type": str(operation.get("operation_type") or "live_analysis"),
+                    "flow_fingerprint": (
+                        flow_spec_fingerprint(pending_flow_spec)
+                        if pending_flow_spec is not None else ""
+                    ),
+                    "text": normalized_text,
+                    "options": normalized_options,
+                    "context_ref": str(context_ref or ""),
+                    "resume_message": resume_message,
+                    "status": "waiting",
+                }
+                resume_state["pending_operator_question"] = pending_operator_question
+                _checkpoint_resume()
             future = asyncio.get_running_loop().create_future()
             agent_question_futures[question_id] = future
             await _send_live_message({
                 "type": "agent_question",
-                "question_id": question_id,
-                "text": str(text),
-                "options": [str(value) for value in options],
-                "context_ref": str(context_ref or ""),
+                **{
+                    key: pending_operator_question.get(key)
+                    for key in (
+                        "question_id", "issue_id", "operation_id", "text",
+                        "options", "context_ref", "status",
+                    )
+                },
             })
             try:
-                result = await asyncio.wait_for(future, timeout=60)
-                if pending_flow_spec is not None:
-                    pending_flow_spec.meta = dict(pending_flow_spec.meta or {})
-                    answers = list(pending_flow_spec.meta.get("agent_answers") or [])
-                    answers.append({"question_id": question_id, "answer": result.get("answer"), "context_ref": context_ref})
-                    pending_flow_spec.meta["agent_answers"] = answers[-100:]
+                done, _pending = await asyncio.wait({future}, timeout=60)
+                if not done:
+                    pending_operator_question["status"] = "waiting_for_operator"
+                    resume_state["pending_operator_question"] = pending_operator_question
+                    _checkpoint_resume()
+                    await _send_live_message({
+                        "type": "agent_status",
+                        "state": "waiting",
+                        "status": "waiting_for_operator",
+                        "question_id": question_id,
+                        "issue_id": issue_id,
+                        "operation_id": pending_operator_question.get("operation_id"),
+                        "text": "分析已暂停，等待操作人确认后将继续同一操作",
+                    })
+                result = await future
+                _append_operator_answer(
+                    pending=pending_operator_question,
+                    answer=str(result.get("answer") or ""),
+                )
+                resume_state.pop("pending_operator_question", None)
+                _checkpoint_resume()
+                await _send_live_message({
+                    "type": "agent_status",
+                    "state": "analyzing",
+                    "text": "已收到操作人回答，正在继续原分析操作",
+                })
                 return result
-            except asyncio.TimeoutError:
-                return {"answered": False, "question_id": question_id, "reason": "timeout"}
             finally:
                 agent_question_futures.pop(question_id, None)
 
-        async def _run_live_analysis(reason: str, since_seq: int, *, bind_spec=None) -> None:  # noqa: ANN001
+        async def _run_live_analysis(
+            reason: str,
+            since_seq: int,
+            *,
+            bind_spec=None,
+            operation_id: str = "",
+            resume_message: dict | None = None,
+        ) -> None:  # noqa: ANN001
             nonlocal pending_flow_spec, live_agent_disabled, last_live_scheduled_count
             if live_agent_disabled:
                 return
@@ -1817,7 +1969,15 @@ async def record_ws(ws: WebSocket) -> None:
                     pi_session.bind_flow_spec(bind_spec)
                 elif pi_session.flow_spec is None and pending_flow_spec is not None:
                     pi_session.bind_flow_spec(pending_flow_spec)
-                await pi_session.notify_live_batch({"reason": reason, "since_seq": since_seq})
+                context_token = operator_operation_context.set({
+                    "operation_type": "finalize" if reason == "finalize" else "live_analysis",
+                    "operation_id": operation_id or f"live-analysis-{reason}-{since_seq}",
+                    "resume_message": resume_message,
+                })
+                try:
+                    await pi_session.notify_live_batch({"reason": reason, "since_seq": since_seq})
+                finally:
+                    operator_operation_context.reset(context_token)
                 cursor_reader = getattr(pi_session, "recording_delta_cursor", None)
                 consumed_cursor = int(cursor_reader() or 0) if callable(cursor_reader) else captured_count
                 last_live_scheduled_count = max(last_live_scheduled_count, consumed_cursor)
@@ -1975,15 +2135,34 @@ async def record_ws(ws: WebSocket) -> None:
                 return True
             return False
 
-        async def _responsive_prompt(prompt) -> object:  # noqa: ANN001
-            result, _deferred = await _await_operation_while_draining_recording_input(
-                prompt, incoming_messages, _handle_live_recording_message, deferred_messages,
-            )
-            return result
+        async def _responsive_prompt(
+            prompt,
+            *,
+            operation_type: str = "",
+            operation_id: str = "",
+            resume_message: dict | None = None,
+        ) -> object:  # noqa: ANN001
+            context_token = operator_operation_context.set({
+                "operation_type": operation_type,
+                "operation_id": operation_id,
+                "resume_message": dict(resume_message) if isinstance(resume_message, dict) else None,
+            })
+            try:
+                result, _deferred = await _await_operation_while_draining_recording_input(
+                    prompt, incoming_messages, _handle_live_recording_message, deferred_messages,
+                )
+                return result
+            finally:
+                operator_operation_context.reset(context_token)
 
         deferred_messages: list[object] = []
 
-        async def _verify_finalized_recording(*, force: bool = False) -> dict:
+        async def _verify_finalized_recording(
+            *,
+            force: bool = False,
+            operation_id: str = "",
+            resume_message: dict | None = None,
+        ) -> dict:
             nonlocal pending_flow_spec
             from dano.onboarding.recording_verify import (
                 finalize_verification_state,
@@ -2033,10 +2212,18 @@ async def record_ws(ws: WebSocket) -> None:
                 try:
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(current)
+                    async def run_verification_prompt(prompt) -> object:  # noqa: ANN001
+                        return await _responsive_prompt(
+                            prompt,
+                            operation_type="verification",
+                            operation_id=operation_id,
+                            resume_message=resume_message,
+                        )
+
                     report = await run_recording_verification(
                         pi_session,
                         progress=emit_progress,
-                        prompt_runner=_responsive_prompt,
+                        prompt_runner=run_verification_prompt,
                         max_rounds=5,
                     )
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -2230,6 +2417,8 @@ async def record_ws(ws: WebSocket) -> None:
                             "finalize",
                             finalize_since_seq,
                             bind_spec=pending_flow_spec,
+                            operation_id=str(msg.get("operation_id") or ""),
+                            resume_message=msg,
                         ))
                     _checkpoint_resume()
                     response = {
@@ -2462,7 +2651,7 @@ async def record_ws(ws: WebSocket) -> None:
                             # model terminal event must not leave the accepted
                             # operation running forever.
                             timeout_s=None,
-                        ))
+                        ), operation_type="plan", operation_id=operation_id, resume_message=msg)
                     delivered_image_count = _verified_pi_image_count(
                         pi_result, len(analysis_screenshots),
                     )
@@ -2754,7 +2943,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
                         "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
                         f" recording_id={recording_id}"
-                    ))
+                    ), operation_type="repair", operation_id=operation_id, resume_message=msg)
                     if pi_session.last_submission_kind != "repair":
                         raise RuntimeError("Pi 未提交 recording repair")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -2791,7 +2980,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
                         "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
                         f" recording_id={recording_id}"
-                    ))
+                    ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 step naming plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -2818,7 +3007,7 @@ async def record_ws(ws: WebSocket) -> None:
                         " business_understanding.summary；不得改写人工业务文本。必须先调用"
                         " get_recording_state，最后调用 submit_recording_plan。"
                         f" recording_id={recording_id}"
-                    ))
+                    ), operation_type="plan", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 business description plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -2912,6 +3101,8 @@ async def record_ws(ws: WebSocket) -> None:
                     ):
                         verification_result = await _verify_finalized_recording(
                             force=bool(msg.get("reverify")),
+                            operation_id=str(msg.get("operation_id") or ""),
+                            resume_message=msg,
                         )
                         current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
@@ -3016,7 +3207,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "每条拒绝理由必须写明具体能力、接口、字段及冲突证据。"
                         "提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}",
-                    ))
+                    ), operation_type="publish_review", operation_id=str(msg.get("operation_id") or ""), resume_message=msg)
                     pi_session.require_publish_review(
                         flow_version=review_version,
                         flow_fingerprint=str(release_candidate["flow_fingerprint"]),
@@ -3047,7 +3238,11 @@ async def record_ws(ws: WebSocket) -> None:
                         ]
                         pending_flow_spec.meta.pop("verification_run", None)
                         _checkpoint_resume()
-                        repair_report = await _verify_finalized_recording(force=True)
+                        repair_report = await _verify_finalized_recording(
+                            force=True,
+                            operation_id=str(msg.get("operation_id") or ""),
+                            resume_message=msg,
+                        )
                         if repair_report.get("all_verified"):
                             deferred_messages.insert(0, {
                                 **msg,
@@ -3194,7 +3389,7 @@ async def record_ws(ws: WebSocket) -> None:
     finally:
         for future in agent_question_futures.values():
             if not future.done():
-                future.set_result({"answered": False, "reason": "recording_closed"})
+                future.cancel()
         if live_analysis_tasks:
             for task in live_analysis_tasks:
                 task.cancel()

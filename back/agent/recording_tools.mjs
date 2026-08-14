@@ -740,7 +740,7 @@ export const recordingTools = [
   proxyTool({
     name: "ask_operator",
     label: "询问录制操作人",
-    description: "仅在录制现场确有业务歧义且无法由事实自答时询问一个问题；严禁询问 recording_id、flow_version、run_id 等后端内部字段；60 秒无回答会返回 answered=false，不得阻塞后续判断。",
+    description: "仅在同等级证据冲突、required 无法自动确认、业务含义多解、必须由操作人选择策略/授权，或外部登录/验证码/权限操作时询问一个聚合问题。发布或验证待办必须把 issue_id 填入 context_ref；严禁询问后端内部 ID 或可由页面、HAR、响应、字典、编译器、依赖图确定的事实。60 秒无回答后操作进入 waiting_for_operator 并保持等待，不得猜测或重复追问。",
     parameters: Type.Object({
       ...RecordingIdentity,
       text: Type.String({ minLength: 1 }),

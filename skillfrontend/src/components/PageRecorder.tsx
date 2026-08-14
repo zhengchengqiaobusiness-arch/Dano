@@ -42,7 +42,8 @@ function Button(props: ButtonProps) {
 
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 interface AgentQuestion {
-  question_id: string; text: string; options?: string[]; context_ref?: string;
+  question_id: string; issue_id: string; operation_id?: string;
+  text: string; options?: string[]; context_ref?: string;
   answered?: boolean; answer?: string;
 }
 interface AgentInsight { kind: "role" | "param_source" | "link" | "goal"; text: string; refs?: string[] }
@@ -2116,6 +2117,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "agent_question") {
         const question: AgentQuestion = {
           question_id: String(m.question_id || ""),
+          issue_id: String(m.issue_id || ""),
+          operation_id: String(m.operation_id || ""),
           text: String(m.text || ""),
           options: Array.isArray(m.options) ? m.options.map(String) : [],
           context_ref: String(m.context_ref || ""),
@@ -4957,7 +4960,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function answerAgentQuestion(questionId: string, answer: string) {
     const normalized = answer.trim();
     if (!normalized) return;
-    sendRaw({ type: "agent_answer", question_id: questionId, answer: normalized });
+    const question = agentQuestions.find((item) => item.question_id === questionId);
+    if (!question?.issue_id) {
+      message.error("人工问题缺少问题标识，请等待录制助手重新同步");
+      return;
+    }
+    sendRaw({
+      type: "agent_answer",
+      question_id: questionId,
+      issue_id: question.issue_id,
+      answer: normalized,
+    });
     setAgentQuestions((items) => items.map((item) =>
       item.question_id === questionId ? { ...item, answered: true, answer: normalized } : item));
     setAgentAnswerDrafts((drafts) => ({ ...drafts, [questionId]: "" }));

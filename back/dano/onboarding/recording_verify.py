@@ -605,6 +605,8 @@ async def run_recording_verification(
             " value_binding.kind=caller_map_by_label，不能退化成固定动态键。"
             "release_issue 必须只按 resolver 和 suggested_operations 处理：machine_repair 使用现有修复操作，"
             "collect_evidence 使用回放、依赖、页面或字典工具补证；operator 只能调用 ask_operator，"
+            "并把待办 issue_id 原样填入 context_ref；收到回答后只能用 suggested_operations 允许的"
+            " FlowSpec 操作落地并重新验证，不得把自然语言直接写进字段；"
             "external_blocked 不得猜测。禁止解析 message 中文文本决定修复。"
             "本轮不要提交 mark_unverified，也不得通过降低闸门标准绕过问题。todos="
             + json.dumps(report["todos"], ensure_ascii=False, separators=(",", ":"))
