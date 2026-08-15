@@ -2346,7 +2346,7 @@ def _goal_capability_names(spec, contract: dict) -> list[str]:  # noqa: ANN001
 
 
 def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
-    """Materialize public abilities from the base Flow and accepted Pi boundaries."""
+    """Materialize only abilities whose recorded anchor is unambiguous."""
     from dano.execution.page.flow_spec import (
         _capability_operation_kind,
         _public_capability_anchor_step_ids,
@@ -2371,6 +2371,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     remaining_anchors = list(anchor_ids)
     used_names: set[str] = set()
     capabilities: list[dict] = []
+    unresolved_items: list[dict] = []
     action_labels = {
         "query_status": "查询", "inspect": "查看", "preview": "预览",
         "export": "导出", "create": "创建", "update": "更新",
@@ -2389,13 +2390,28 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         if not remaining_anchors:
             break
         hinted_kind = _live_capability_kind_hint(proposed_name)
-        match_position = next((
+        matching_positions = [
             position
             for position, anchor_id in enumerate(remaining_anchors)
             if _capability_operation_kind(steps[anchor_id]) == hinted_kind
-        ), None) if hinted_kind else None
-        if match_position is None:
+        ] if hinted_kind else []
+        if len(matching_positions) == 1:
+            match_position = matching_positions[0]
+        elif not proposed_name:
+            # With no operator-owned slot name, every public anchor already is
+            # the deterministic boundary.  Preserve its recorded order.
             match_position = 0
+        elif not hinted_kind and len(remaining_anchors) == 1:
+            match_position = 0
+        else:
+            unresolved_items.append({
+                "kind": "capability_anchor",
+                "target": proposed_name,
+                "reason": (
+                    "recording evidence does not identify exactly one matching public anchor"
+                ),
+            })
+            continue
         anchor_id = remaining_anchors.pop(match_position)
         step = steps[anchor_id]
         kind = _capability_operation_kind(step)
@@ -2419,47 +2435,58 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             "summary": str(goal.get("intent") or "").strip(),
         },
         "capabilities": capabilities,
-        "unresolved_items": [],
+        "unresolved_items": unresolved_items,
     }
 
 
 def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa: ANN001
-    """Preserve Pi orchestration while enforcing the operator-owned boundary."""
+    """Apply goal count/names without replacing Pi-owned request anchors."""
     contract = _recording_goal_contract(spec)
     if not contract:
         return semantic_plan
-    deterministic = _semantic_plan_from_live_boundaries(spec)
-    targets = deterministic.get("capabilities") or []
+    expected_count = int(contract.get("expected_count") or 0)
+    target_names = _goal_capability_names(spec, contract)
     candidates = [
         deepcopy(item)
         for item in (semantic_plan.get("capabilities") or [])
         if isinstance(item, dict)
     ]
     selected: list[dict] = []
-    for target in targets:
-        target_kind = str(target.get("kind") or "")
-        match_position = next((
+    used_names: set[str] = set()
+    for index in range(expected_count):
+        if not candidates:
+            break
+        target_name = target_names[index] if index < len(target_names) else ""
+        target_kind = _live_capability_kind_hint(target_name)
+        matching_positions = [
             position
             for position, candidate in enumerate(candidates)
-            if (
+            if target_kind and (
                 str(candidate.get("kind") or "") == target_kind
                 or _live_capability_kind_hint(str(candidate.get("name") or "")) == target_kind
             )
-        ), None)
-        if match_position is None:
-            selected.append(deepcopy(target))
-            continue
+        ]
+        match_position = matching_positions[0] if matching_positions else 0
         candidate = candidates.pop(match_position)
-        candidate["name"] = target["name"]
-        candidate["title"] = target["title"]
-        candidate["intent"] = target["intent"]
-        candidate["kind"] = target_kind
+        if target_name:
+            candidate["name"] = _unique_live_capability_name(
+                target_name,
+                str(candidate.get("kind") or "capability"),
+                used_names,
+            )
+            candidate["title"] = target_name
+            candidate["intent"] = target_name
+        else:
+            candidate["name"] = _unique_live_capability_name(
+                str(candidate.get("name") or ""),
+                str(candidate.get("kind") or "capability"),
+                used_names,
+            )
         selected.append(candidate)
     return {
         **deepcopy(semantic_plan),
         "business_understanding": deepcopy(
             semantic_plan.get("business_understanding")
-            or deterministic.get("business_understanding")
             or {}
         ),
         "capabilities": selected,

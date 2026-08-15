@@ -2085,6 +2085,124 @@ def test_finalize_merge_obeys_explicit_recording_goal_capability_count():
     ]
 
 
+def test_goal_boundary_does_not_synthesise_a_capability_missing_from_live_plan():
+    live = FlowSpec(
+        flow_id="goal-missing-live-capability",
+        meta={
+            "recording_goal_text": (
+                "目的：查询并提交记录\n"
+                "预期产出能力数量：2\n"
+                "能力1：查询记录\n"
+                "能力2：提交记录"
+            ),
+            "capability_model": {
+                "status": "ready",
+                "semantic_plan": {
+                    "business_understanding": {"business_name": "记录"},
+                    "capabilities": [{
+                        "name": "submit_record",
+                        "title": "提交记录",
+                        "intent": "提交记录",
+                        "kind": "submit",
+                        "anchor_step_id": "req-submit",
+                        "request_refs": [{"step_id": "req-submit", "usage": "execute"}],
+                    }],
+                    "unresolved_items": [],
+                },
+            },
+        },
+    )
+    finalized = FlowSpec(
+        flow_id="goal-missing-live-capability-final",
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={"request_id": "req-query", "request_index": 1},
+                response_json={"data": {"list": []}},
+            ),
+            FlowStep(
+                step_id="submit-step", method="POST", path="/records/submit",
+                source_meta={"request_id": "req-submit", "request_index": 2},
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-query", request_index=1,
+                method="GET", path="/records/page",
+                response_json={"data": {"list": []}},
+            ),
+            RequestFact(
+                request_id="req-submit", request_index=2,
+                method="POST", path="/records/submit",
+            ),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.kind for capability in merged.capabilities] == ["submit"]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
+    assert any(
+        item.get("op") == "enforce_recording_goal"
+        for item in merged.meta["unresolved_live_agent_ops"]
+    )
+
+
+def test_goal_kind_without_a_unique_anchor_is_not_bound_to_the_first_request():
+    live = FlowSpec(
+        flow_id="goal-no-matching-anchor",
+        meta={
+            "recording_goal_text": (
+                "目的：审批记录\n"
+                "预期产出能力数量：1\n"
+                "能力1：审批记录"
+            ),
+        },
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/records/page"),
+            RequestFact(request_id="req-submit", method="POST", path="/records/submit"),
+        ]),
+    )
+    live = apply_flow_edits(live, [
+        {
+            "op": "set_request_role",
+            "request_id": "req-query",
+            "role": "business_read",
+            "reason": "录制中读取业务记录",
+            "evidence_refs": ["request:req-query"],
+        },
+        {
+            "op": "set_request_role",
+            "request_id": "req-submit",
+            "role": "business_write",
+            "reason": "录制中提交业务记录",
+            "evidence_refs": ["request:req-submit"],
+        },
+    ])
+    finalized = FlowSpec(
+        flow_id="goal-no-matching-anchor-final",
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={"request_id": "req-query", "request_index": 1},
+                response_json={"data": {"list": []}},
+            ),
+            FlowStep(
+                step_id="submit-step", method="POST", path="/records/submit",
+                source_meta={"request_id": "req-submit", "request_index": 2},
+            ),
+        ],
+        request_facts=live.request_facts,
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert merged.capabilities == []
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
+
+
 def test_live_notebook_carries_only_replayable_hypotheses_into_finalized_facts():
     shadow = _flow()
     shadow.meta = {
