@@ -19,6 +19,7 @@ from dano.execution.page.recording_field_identity import (
 from dano.execution.page.value_tracing import (
     discover_response_key_maps,
     discover_workflow_value_links,
+    is_strong_runtime_value,
 )
 from dano.execution.page.wire_format import date_span_days
 from dano.infra.token_store import mask_headers
@@ -876,15 +877,7 @@ def _ground_param_in_cited_page_controls(
                 "fill", "input", "change", "select", "check", "click",
             }
         )
-        editable = bool(
-            item.get("editable") is True
-            or (
-                item.get("disabled") is not True
-                and item.get("read_only") is not True
-                and item.get("control_disabled") is not True
-                and item.get("control_read_only") is not True
-            )
-        )
+        editable = _page_control_is_editable(item)
         if not interacted or not editable:
             continue
         controls.append({
@@ -912,6 +905,44 @@ def _ground_param_in_cited_page_controls(
         *list(param.evidence or []),
         *(item for item in controls if item["evidence_id"] not in existing_ids),
     ]
+
+
+def _page_control_is_editable(item: dict) -> bool:
+    """Interpret readonly inner inputs without locking custom selectors."""
+    if item.get("disabled") is True or item.get("control_disabled") is True:
+        return False
+    control_kind = str(item.get("control_kind") or "unknown").lower()
+    if control_kind in {"select", "combobox"}:
+        return True
+    return bool(
+        item.get("editable") is True
+        or (
+            item.get("read_only") is not True
+            and item.get("control_read_only") is not True
+        )
+    )
+
+
+def _reject_source_that_contradicts_cited_page_action(
+    spec, step, param, evidence_refs: list[str], *, source_kind: str,
+) -> None:  # noqa: ANN001
+    """Prevent a weaker model source guess from replacing a real user action."""
+    if source_kind == "caller_input" or not evidence_refs:
+        return
+    for item in _field_evidence_candidates(spec, step, param, evidence_refs=evidence_refs):
+        if not _evidence_matches_refs(item, evidence_refs):
+            continue
+        interacted = bool(
+            item.get("recorded_user_input")
+            or str(item.get("op") or "").lower() in {
+                "fill", "input", "change", "select", "check", "click",
+            }
+        )
+        if interacted and _page_control_is_editable(item):
+            raise ValueError(
+                f"{source_kind} classification contradicts cited editable page control; "
+                "classify the field as caller_input"
+            )
 
 
 def _recorded_enum_contract(  # noqa: ANN001
@@ -1088,8 +1119,43 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
     required_state = str((param.source or {}).get("required_state") or "")
 
     if source_kind == "caller_input":
-        param.source_kind = "user_input"
-        param.source = {"kind": "user_input", "reason": reason, "actor": "agent"}
+        # ``caller_input`` says who supplies the value; it must not erase the
+        # stronger captured contract that says how the caller chooses it.
+        # Keeping the option source preserves enum label/value mapping while
+        # still exposing the field to the public capability.
+        option_source_kinds = {
+            "api_option", "page_enum", "static_enum", "manual_enum",
+            "form_option", "selected_option_field",
+        }
+        recorded_option = (
+            _recorded_enum_contract(
+                spec,
+                step,
+                param,
+                dictionary_source=str(
+                    (param.source or {}).get("dictionary_source")
+                    or (param.source or {}).get("category_value")
+                    or ""
+                ),
+            )
+            if param.source_kind in option_source_kinds
+            else None
+        )
+        explicitly_confirmed_option = bool(
+            param.source_kind in {"static_enum", "manual_enum"}
+            and (param.source or {}).get("enum_confirmed") is True
+            and param.enum_options
+        )
+        if recorded_option is not None or explicitly_confirmed_option:
+            param.source = {
+                **(param.source or {}),
+                "kind": param.source_kind,
+                "reason": reason,
+                "actor": "agent",
+            }
+        else:
+            param.source_kind = "user_input"
+            param.source = {"kind": "user_input", "reason": reason, "actor": "agent"}
         param.category = "user_param"
         param.exposed_to_user = True
 
@@ -1495,6 +1561,25 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_source target is locked: {step_id}:{path}")
+            evidence_refs = _evidence_refs(edit)
+            _reject_source_that_contradicts_cited_page_action(
+                spec,
+                step,
+                param,
+                evidence_refs,
+                source_kind=source_kind,
+            )
+            if (
+                source_kind == "response_binding"
+                and str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
+            ):
+                # response_key_map is a richer contract: the response supplies
+                # runtime keys while the caller supplies values by stable
+                # labels. A later plain response binding must not erase it.
+                result["reason"] = "richer dynamic structure binding already applied"
+                if record:
+                    _record_agent_op(spec, stored)
+                return result
             try:
                 _compile_param_source(spec, step, param, edit, source_kind=source_kind, reason=reason)
             except _DeferredCompile as pending:
@@ -1505,7 +1590,6 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     _record_agent_op(spec, stored)
                 return result
             param.reason = reason
-            evidence_refs = _evidence_refs(edit)
             _ground_param_in_cited_page_controls(
                 spec,
                 step,
@@ -2272,6 +2356,304 @@ def _retarget_unique_equivalent_field_operation(spec, operation: dict) -> dict: 
     return updated
 
 
+def _request_fact_order(fact) -> tuple[float, str]:  # noqa: ANN001
+    for value in (fact.sequence, fact.request_index):
+        try:
+            return float(value), str(fact.request_id or "")
+        except (TypeError, ValueError):
+            continue
+    match = re.search(r"(\d+)$", str(fact.request_id or ""))
+    return (float(match.group(1)) if match else -1.0), str(fact.request_id or "")
+
+
+def _retarget_dependency_to_closest_equivalent_source(spec, operation: dict) -> dict:  # noqa: ANN001
+    """Use the closest preceding equivalent response for a dependency.
+
+    Repeated detail/preflight calls are normal.  Live analysis may reference an
+    early instance before the final submit is captured; finalize must bind the
+    same endpoint/response contract from the submit's nearest preceding call.
+    """
+    op = str(operation.get("op") or "")
+    if op == "set_param_source" and str(operation.get("source_kind") or "") == "response_binding":
+        source_key = "origin_request_id"
+        source_path = str(operation.get("origin_path") or "").removeprefix("response.")
+        target_id = str(operation.get("request_id") or "")
+    elif op == "propose_dependency":
+        source_key = "source_request_id"
+        source_path = str(
+            operation.get("source_collection_path")
+            or operation.get("source_path")
+            or ""
+        ).removeprefix("response.")
+        target_id = str(operation.get("target_request_id") or "")
+    else:
+        return operation
+    source_id = str(operation.get(source_key) or "")
+    if not source_id or not source_path or not target_id:
+        return operation
+    facts = {str(item.request_id or ""): item for item in spec.request_facts.requests}
+    source_fact = facts.get(source_id)
+    target_fact = facts.get(target_id)
+    if source_fact is None or target_fact is None:
+        return operation
+    source_endpoint = (
+        str(source_fact.method or "GET").upper(),
+        str(source_fact.path or source_fact.url or "").split("?", 1)[0],
+    )
+    target_order = _request_fact_order(target_fact)
+    candidates = []
+    for candidate in spec.request_facts.requests:
+        candidate_id = str(candidate.request_id or "")
+        candidate_endpoint = (
+            str(candidate.method or "GET").upper(),
+            str(candidate.path or candidate.url or "").split("?", 1)[0],
+        )
+        if candidate_endpoint != source_endpoint or _request_fact_order(candidate) >= target_order:
+            continue
+        if any(
+            left and right and left != right
+            for left, right in (
+                (str(source_fact.page_id or ""), str(candidate.page_id or "")),
+                (str(source_fact.frame_id or ""), str(candidate.frame_id or "")),
+            )
+        ):
+            continue
+        if not _response_values_at_path(candidate.response_json, source_path):
+            continue
+        if _request_step(spec, candidate_id) is None:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return operation
+    closest = max(candidates, key=_request_fact_order)
+    if str(closest.request_id or "") == source_id:
+        return operation
+    updated = deepcopy(operation)
+    updated[source_key] = str(closest.request_id or "")
+    updated.pop("_deferred", None)
+    return updated
+
+
+def _param_for_canonical_path(step, wire_path: str):  # noqa: ANN001, ANN202
+    wanted = str(wire_path or "").removeprefix("request.")
+    matches = [
+        param for param in step.params
+        if canonical_wire_path(step, param.path) == wanted
+        or str(param.path or "") == wanted
+        or str(param.path or "") == wanted.removeprefix("body.")
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _same_recorded_action(left, right) -> bool:  # noqa: ANN001
+    left_tx = str(getattr(left, "trigger_transaction_id", "") or "")
+    right_tx = str(getattr(right, "trigger_transaction_id", "") or "")
+    if left_tx and right_tx:
+        return left_tx == right_tx
+    left_action = str(getattr(left, "trigger_action_id", "") or "")
+    right_action = str(getattr(right, "trigger_action_id", "") or "")
+    return bool(left_action and left_action == right_action)
+
+
+def _dependency_endpoint_affinity(source_step, target_param) -> int:  # noqa: ANN001
+    """Measure whether an endpoint is a direct producer for the target field.
+
+    Exact values can also appear in incidental status/detail responses.  Route
+    semantics distinguish a dedicated ``process-definition`` lookup from an
+    unrelated response that merely repeats ``processDefinitionId``.
+    """
+    def tokens(value: object) -> set[str]:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+        return {
+            item.casefold()
+            for item in re.findall(r"[A-Za-z0-9]+", text)
+            if len(item) > 1 and item.casefold() not in {
+                "admin", "api", "get", "post", "put", "patch", "delete",
+                "query", "body", "data", "response", "request",
+            }
+        }
+
+    raw_endpoint = str(source_step.path or source_step.url or "")
+    endpoint_tokens = tokens(urlparse(raw_endpoint).path or raw_endpoint.split("?", 1)[0])
+    target_tokens = set().union(*(
+        tokens(value)
+        for value in (target_param.key, target_param.label, target_param.path)
+    ))
+    return len(endpoint_tokens & target_tokens)
+
+
+def _same_request_endpoint(left_step, right_step) -> bool:  # noqa: ANN001
+    def endpoint(step) -> tuple[str, str]:  # noqa: ANN001
+        raw = str(step.path or step.url or "")
+        path = urlparse(raw).path or raw.split("?", 1)[0]
+        return str(step.method or "GET").upper(), path.rstrip("/") or "/"
+
+    return endpoint(left_step) == endpoint(right_step)
+
+
+def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
+    """Keep factual runtime data-flow and discard literal-value collisions.
+
+    Live Pi sees requests before final step identities and may correctly notice
+    a value reuse against an early repeated preflight request.  Conversely, a
+    stable literal such as a workflow key can occur in both a response and a
+    later request without being a runtime dependency.  Finalize has the frozen
+    facts, so it is the one place that can resolve both cases deterministically.
+    """
+    from dano.execution.page.flow_spec import (
+        FlowLink,
+        _apply_link_sources,
+        _dependency_match_score,
+        _param_has_editable_control_evidence,
+    )
+
+    facts = {
+        str(item.request_id or ""): item
+        for item in spec.request_facts.requests
+        if str(item.request_id or "")
+    }
+    steps = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+
+    # A weak literal collision must not turn a recorded system constant into a
+    # hidden upstream dependency.  Same-action chains are retained because the
+    # observer then supplies independent causal evidence.
+    retained = []
+    discarded = []
+    for link in spec.links:
+        source_request_id = str((link.evidence or {}).get("source_request_id") or "")
+        target_request_id = str((link.evidence or {}).get("target_request_id") or "")
+        source_fact = facts.get(source_request_id)
+        target_fact = facts.get(target_request_id)
+        target_step = steps.get(target_request_id)
+        target_param = (
+            _param_for_canonical_path(target_step, link.target_path)
+            if target_step is not None else None
+        )
+        captured = (link.evidence or {}).get("captured_value_match")
+        captured_value = captured.get("value_sample") if isinstance(captured, dict) else None
+        weak_constant_collision = bool(
+            str(getattr(link, "kind", "value") or "value") == "value"
+            and target_param is not None
+            and target_param.source_kind == "constant"
+            and captured_value not in (None, "")
+            and not is_strong_runtime_value(captured_value, str(link.source_path or ""))
+            and source_fact is not None
+            and target_fact is not None
+            and not _same_recorded_action(source_fact, target_fact)
+        )
+        if weak_constant_collision:
+            discarded.append({
+                "source_request_id": source_request_id,
+                "source_path": str(link.source_path or ""),
+                "target_request_id": target_request_id,
+                "target_path": str(link.target_path or ""),
+                "reason": "相同业务字面量缺少同一操作因果证据，保留为系统常量",
+            })
+            continue
+        retained.append(link)
+    spec.links = retained
+
+    candidates_by_target: dict[tuple[str, str], list[dict]] = {}
+    captured_requests = _captured_requests(spec)
+    for candidate in discover_workflow_value_links(captured_requests):
+        source_request_id = str(candidate.get("source_request_id") or "")
+        target_request_id = str(candidate.get("target_request_id") or "")
+        source_step = steps.get(source_request_id)
+        target_step = steps.get(target_request_id)
+        source_fact = facts.get(source_request_id)
+        target_fact = facts.get(target_request_id)
+        if not all((source_step, target_step, source_fact, target_fact)):
+            continue
+        # A repeated request often echoes one of its own inputs.  Treating an
+        # earlier occurrence as a prerequisite would execute the same endpoint
+        # twice and can create artificial dependency chains.
+        if _same_request_endpoint(source_step, target_step):
+            continue
+        value_sample = candidate.get("value_sample")
+        if not is_strong_runtime_value(value_sample, str(candidate.get("source_path") or "")):
+            continue
+        target_path = str(candidate.get("target_path") or "")
+        target_param = _param_for_canonical_path(target_step, target_path)
+        if target_param is None or _param_has_editable_control_evidence(target_param):
+            continue
+        semantic_score = _dependency_match_score(
+            target_param,
+            str(candidate.get("source_path") or "").removeprefix("response."),
+        )
+        if semantic_score < 30 and not _same_recorded_action(source_fact, target_fact):
+            continue
+        candidate = {
+            **candidate,
+            "_same_action": _same_recorded_action(source_fact, target_fact),
+            "_endpoint_affinity": _dependency_endpoint_affinity(source_step, target_param),
+            "_semantic_score": semantic_score,
+        }
+        candidates_by_target.setdefault((target_request_id, target_path), []).append(candidate)
+
+    added = []
+    for (target_request_id, target_path), candidates in candidates_by_target.items():
+        target_step = steps[target_request_id]
+        target_param = _param_for_canonical_path(target_step, target_path)
+        if target_param is None:
+            continue
+        if any(
+            link.target_step_id == target_step.step_id
+            and _param_for_canonical_path(target_step, link.target_path) is target_param
+            for link in spec.links
+        ):
+            continue
+        closest = max(
+            candidates,
+            key=lambda item: (
+                bool(item.get("_same_action")),
+                int(item.get("_endpoint_affinity") or 0),
+                int(item.get("_semantic_score") or 0),
+                _request_fact_order(facts[str(item.get("source_request_id") or "")]),
+            ),
+        )
+        source_request_id = str(closest.get("source_request_id") or "")
+        source_step = steps[source_request_id]
+        source_path = str(closest.get("source_path") or "").removeprefix("response.")
+        link = FlowLink(
+            source_step_id=source_step.step_id,
+            source_path=source_path,
+            target_step_id=target_step.step_id,
+            target_path=target_path,
+            kind="value",
+            confirmed=True,
+            confidence=0.98,
+            reason="冻结录制事实证明上游响应强标识值进入后续请求字段",
+            evidence={
+                "actor": "capture",
+                "source_request_id": source_request_id,
+                "target_request_id": target_request_id,
+                "captured_value_match": deepcopy(closest),
+            },
+            meta={"actor": "capture", "captured_value_match": True, "verified": False},
+        )
+        spec.links.append(link)
+        added.append({
+            "source_request_id": source_request_id,
+            "source_path": source_path,
+            "target_request_id": target_request_id,
+            "target_path": target_path,
+        })
+
+    if discarded or added:
+        spec.meta = {
+            **(spec.meta or {}),
+            "captured_dependency_reconciliation": {
+                "discarded_literal_collisions": discarded,
+                "added_strong_links": added,
+            },
+        }
+    _apply_link_sources(spec.steps, spec.links)
+
+
 def _live_capability_kind_hint(name: str) -> str:
     """Read an operation hint from a Pi-authored public capability name."""
     value = str(name or "").casefold()
@@ -2691,23 +3073,55 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     if goal_contract:
         merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
     unresolved: list[dict] = []
+    discarded_hypotheses: list[dict] = []
     for operation in live_meta.get("recording_agent_ops") or []:
         if not isinstance(operation, dict):
             continue
         try:
             operation = _retarget_unique_equivalent_field_operation(merged, operation)
+            operation = _retarget_dependency_to_closest_equivalent_source(merged, operation)
             candidate = merged.model_copy(deep=True)
             result = apply_recording_agent_edit(candidate, operation, record=True)
             if result.get("deferred"):
                 raise ValueError("field operation remained unresolved after final materialization")
             merged = candidate
         except (TypeError, ValueError) as exc:
-            unresolved.append({
+            rejected = {
                 "op": str(operation.get("op") or ""),
                 "status": "rejected",
                 "requested_target": deepcopy(operation.get("field_ref") or {}),
                 "reason": str(exc),
-            })
+            }
+            # A Pi hypothesis that conflicts with authoritative page/control
+            # evidence is expected model exploration, not an unresolved system
+            # defect.  Preserve it for diagnostics while keeping the grounded
+            # canonical contract and the publish path clean. Missing targets,
+            # compilation errors and other structural failures remain visible
+            # in ``unresolved_live_agent_ops``.
+            if (
+                str(operation.get("op") or "") in {
+                    "set_param_source", "set_param_type", "set_param_required",
+                    "set_param_enum", "rename_field",
+                }
+                and any(marker in str(exc) for marker in (
+                    "contradicts cited editable page control",
+                    "contradicts field_evidence",
+                    "has no matching select field_evidence and dictionary source",
+                ))
+            ):
+                discarded_hypotheses.append(rejected)
+            else:
+                unresolved.append(rejected)
+    _reconcile_captured_value_dependencies(merged)
+    from dano.execution.page.flow_spec import _apply_grounded_indexed_range_names
+
+    range_candidate, range_changes = _apply_grounded_indexed_range_names(merged)
+    if range_changes:
+        merged = range_candidate
+        merged.meta = {
+            **(merged.meta or {}),
+            "indexed_range_changes": range_changes,
+        }
     live_capability_model = live_meta.get("capability_model")
     live_semantic_plan = (
         live_capability_model.get("semantic_plan")
@@ -2876,8 +3290,15 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 ),
             })
 
+    merged.meta = {**(merged.meta or {})}
     if unresolved:
-        merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}
+        merged.meta["unresolved_live_agent_ops"] = unresolved
+    else:
+        merged.meta.pop("unresolved_live_agent_ops", None)
+    if discarded_hypotheses:
+        merged.meta["discarded_live_agent_hypotheses"] = discarded_hypotheses
+    else:
+        merged.meta.pop("discarded_live_agent_hypotheses", None)
     from dano.execution.page.flow_spec import append_flow_version
 
     return append_flow_version(

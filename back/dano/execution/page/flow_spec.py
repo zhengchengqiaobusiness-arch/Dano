@@ -971,6 +971,16 @@ def _select_source_reason(kind: str, *, id_field: bool = False) -> str:
     return "该字段来自选择型字段"
 
 
+_MISSING_WIRE_PLACEHOLDERS = {
+    "undefined", "null", "none", "nan", "[object object]",
+}
+
+
+def _is_missing_wire_placeholder(value: Any) -> bool:
+    """Return whether a captured textual value represents no wire value."""
+    return isinstance(value, str) and value.strip().casefold() in _MISSING_WIRE_PLACEHOLDERS
+
+
 def _param_source_guess(
     *,
     field: dict,
@@ -1097,7 +1107,7 @@ def _param_source_guess(
     early_control_kind = str(field.get("control_kind") or "unknown").lower()
     if (
         early_control_kind in {"select", "combobox"}
-        and not bool(field.get("control_disabled") or field.get("control_read_only"))
+        and not bool(field.get("control_disabled"))
     ):
         return {
             "category": "user_param",
@@ -1128,7 +1138,13 @@ def _param_source_guess(
 
     control_kind = str(field.get("control_kind") or "unknown").lower()
     has_control = bool(field.get("field_aliases")) or control_kind != "unknown"
-    control_locked = bool(field.get("control_disabled") or field.get("control_read_only"))
+    # Custom select/combobox widgets commonly render a readonly inner input
+    # while the surrounding control remains fully interactive.  ``disabled``
+    # locks the widget; ``read_only`` only locks text entry and must not hide a
+    # real user selection from the public capability contract.
+    control_locked = bool(field.get("control_disabled")) if control_kind in {
+        "select", "combobox",
+    } else bool(field.get("control_disabled") or field.get("control_read_only"))
     if has_control and control_kind in {"select", "combobox"} and not control_locked:
         return {
             "category": "user_param",
@@ -1814,6 +1830,24 @@ def _build_step_from_capture(
             request_headers=req.get("headers") or {},
             query_is_option_source=query_is_option_source,
         )
+        missing_wire_placeholder = _is_missing_wire_placeholder(f.get("value"))
+        if missing_wire_placeholder:
+            # Values such as ``undefined`` are evidence that the page failed to
+            # supply a value, not reusable constants or caller defaults.  Keep
+            # the wire field executable by exposing it as a required input.
+            source_guess = {
+                "category": "user_param",
+                "source_kind": "user_input",
+                "source": {
+                    "kind": "missing_recorded_value",
+                    "path": path,
+                    "required_state": "required",
+                },
+                "editable": True,
+                "exposed_to_user": True,
+                "reason": "录制请求中的值为空占位符，调用时必须由调用方提供真实值",
+                "need_human_confirm": False,
+            }
         recorded_option_control = bool(
             ptype in _ENUM_PARAM_TYPES
             and str(f.get("control_kind") or "").lower()
@@ -1855,7 +1889,11 @@ def _build_step_from_capture(
                 "interacted": bool(f.get("recorded_user_input")),
                 "disabled": bool(f.get("control_disabled")),
                 "read_only": bool(f.get("control_read_only")),
-                "editable": not bool(f.get("control_disabled") or f.get("control_read_only")),
+                "editable": not bool(f.get("control_disabled")) if str(
+                    f.get("control_kind") or ""
+                ).lower() in {"select", "combobox"} else not bool(
+                    f.get("control_disabled") or f.get("control_read_only")
+                ),
                 "request_path": path,
                 **dict(f.get("constraints") or {}),
             })
@@ -1892,11 +1930,14 @@ def _build_step_from_capture(
             path=path,
             key=nm,
             label=display_label,
-            value=str(f.get("value") or ""),
+            value="" if missing_wire_placeholder else str(f.get("value") or ""),
             type=ptype,
             wire_type=wire_type,
             required=(
-                str(f.get("required_state") or "unknown") == "required"
+                (
+                    missing_wire_placeholder
+                    or str(f.get("required_state") or "unknown") == "required"
+                )
                 and caller_owned
                 and not _looks_pagination_field(nm, path)
             ),
@@ -1912,10 +1953,11 @@ def _build_step_from_capture(
                 **source_guess["source"],
                 **({
                     "required_state": (
-                        "optional" if _looks_pagination_field(nm, path)
+                        "required" if missing_wire_placeholder
+                        else "optional" if _looks_pagination_field(nm, path)
                         else str(f.get("required_state") or "unknown")
                     ),
-                } if f.get("required_state_grounded") or (
+                } if missing_wire_placeholder or f.get("required_state_grounded") or (
                     f.get("control_evidence_available")
                     and source_guess["category"] == "user_param"
                     and source_guess["exposed_to_user"]
@@ -1930,7 +1972,9 @@ def _build_step_from_capture(
             # A submitted request value is a replay sample, not a reusable
             # caller default. Defaults require explicit page/control evidence.
             default_value=(
-                f.get("visible_default")
+                None
+                if missing_wire_placeholder
+                else f.get("visible_default")
                 if f.get("visible_default") is not None
                 else f.get("raw_value", f.get("value"))
                 if (
@@ -15300,7 +15344,12 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
             continue
         groups: dict[str, dict[int, ParamField]] = {}
         for param in step.params or []:
-            match = re.fullmatch(r"(.+)\[(\d+)\]", str(param.key or ""))
+            # Public names may already be grounded independently (for example
+            # the first half is named ``开始日期`` while the second half still
+            # carries ``createTime[1]``).  The executable wire path is the
+            # stable identity of the pair, so grouping by ``key`` loses exactly
+            # the partially-grounded ranges this pass is meant to complete.
+            match = re.fullmatch(r"(.+)\[(\d+)\]", str(param.path or ""))
             if not match:
                 continue
             groups.setdefault(match.group(1), {})[int(match.group(2))] = param
@@ -15320,7 +15369,45 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
             end_value = _date_like_epoch_seconds(end.value)
             if start_value is not None and end_value is not None and start_value > end_value:
                 continue
-            proposed = ("查询开始时间", "查询结束时间")
+            def grounded_public_name(param: ParamField, index: int) -> str:
+                name = str(param.key or param.label or "").strip()
+                raw_names = {
+                    f"{base}[{index}]",
+                    str(param.path or "").split(".")[-1],
+                }
+                return "" if not name or name in raw_names else name
+
+            start_name = grounded_public_name(start, 0)
+            end_name = grounded_public_name(end, 1)
+
+            def paired_name(name: str, *, to_end: bool) -> str:
+                replacements = (
+                    (("开始", "结束"), ("起始", "结束"), ("起", "止"))
+                    if to_end else
+                    (("结束", "开始"), ("截止", "开始"), ("止", "起"))
+                )
+                for source, target in replacements:
+                    if source in name:
+                        return name.replace(source, target, 1)
+                english = (
+                    ((r"\bstart\b", "end"), (r"\bbegin\b", "end"), (r"\bfrom\b", "to"))
+                    if to_end else
+                    ((r"\bend\b", "start"), (r"\bto\b", "from"))
+                )
+                for pattern, replacement in english:
+                    changed = re.sub(pattern, replacement, name, count=1, flags=re.I)
+                    if changed != name:
+                        return changed
+                return ""
+
+            if not start_name and end_name:
+                start_name = paired_name(end_name, to_end=False)
+            if not end_name and start_name:
+                end_name = paired_name(start_name, to_end=True)
+            proposed = (
+                start_name or "查询开始时间",
+                end_name or "查询结束时间",
+            )
             if any(
                 other is not start and other is not end and other.key in proposed
                 for other in step.params

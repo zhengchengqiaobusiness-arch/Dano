@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import time
 
@@ -823,6 +824,39 @@ def test_cited_unbound_page_control_grounds_all_field_axes_and_public_short_code
     report_text = json.dumps(validate_flow_spec(updated), ensure_ascii=False)
     assert "capability_internal_field_exposed" not in report_text
 
+
+def test_model_cannot_replace_an_interacted_readonly_inner_select_with_constant():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.type", key="type", value="2",
+        category="user_param", source_kind="form_option",
+        exposed_to_user=True,
+    )]
+    spec.request_facts.field_evidence.append({
+        "event_id": "evt-type-select",
+        "evidence_id": "evt-type-select",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "label": "请假类型",
+        "value": "2",
+        "op": "select",
+        "control_kind": "select",
+        "disabled": False,
+        # Element/Ant style selects render a readonly inner input even though
+        # the outer widget is user-editable.
+        "read_only": True,
+        "binding_status": "bound",
+    })
+
+    with pytest.raises(ValueError, match="contradicts cited editable page control"):
+        apply_flow_edits(spec, [{
+            "op": "set_param_source",
+            "request_id": "req-detail",
+            "wire_path": "query.type",
+            "source_kind": "constant",
+            "reason": "录制值为 2，模型误判为常量",
+            "evidence_refs": ["evt-type-select"],
+        }])
 
 def test_cited_control_with_a_different_value_does_not_ground_public_source():
     spec = _flow()
@@ -1892,6 +1926,19 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
         if "Activity_recorded" in param.path
     )
 
+    updated = apply_flow_edits(updated, [{
+        "op": "set_param_source",
+        "request_id": "req-submit",
+        "wire_path": "body.startUserSelectAssignees",
+        "source_kind": "response_binding",
+        "origin_request_id": "req-detail",
+        "origin_path": "response.data.activityNodes",
+        "reason": "较弱的后续结论只看到了节点响应",
+    }])
+    public = next(param for param in updated.steps[1].params if param.key == "approvers")
+    assert public.source["kind"] == "dynamic_structure_input"
+    assert public.exposed_to_user is True
+
     # Existing drafts created before response_key_map reasons were persisted
     # remain valid only while their matching dynamic contract still exists.
     legacy = updated.model_copy(deep=True)
@@ -2702,6 +2749,272 @@ def test_finalize_merge_retargets_deferred_field_op_to_unique_equivalent_request
 
     assert merged.steps[0].params[0].source_kind == "user_input"
     assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+
+
+def test_finalize_merge_uses_closest_equivalent_dependency_source():
+    facts = RequestFacts(requests=[
+        RequestFact(
+            request_id="req-detail-old", request_index=1, sequence=1,
+            method="GET", path="/workflow/detail", page_id="page-1",
+            response_json={"data": {"processId": "P-1"}},
+        ),
+        RequestFact(
+            request_id="req-detail-new", request_index=9, sequence=9,
+            method="GET", path="/workflow/detail", page_id="page-1",
+            response_json={"data": {"processId": "P-1"}},
+        ),
+        RequestFact(
+            request_id="req-submit", request_index=10, sequence=10,
+            method="POST", path="/workflow/submit", page_id="page-1",
+        ),
+    ])
+    steps = [
+        FlowStep(
+            step_id="detail-old", method="GET", path="/workflow/detail",
+            source_meta={"request_id": "req-detail-old"},
+            response_json={"data": {"processId": "P-1"}},
+        ),
+        FlowStep(
+            step_id="detail-new", method="GET", path="/workflow/detail",
+            source_meta={"request_id": "req-detail-new"},
+            response_json={"data": {"processId": "P-1"}},
+        ),
+        FlowStep(
+            step_id="submit", method="POST", path="/workflow/submit",
+            source_meta={"request_id": "req-submit"},
+            params=[ParamField(path="body.processId", key="processId", value="P-1")],
+        ),
+    ]
+    live = FlowSpec(steps=[steps[0].model_copy(deep=True), steps[2].model_copy(deep=True)], request_facts=facts)
+    live = apply_flow_edits(live, [{
+        "op": "propose_dependency",
+        "kind": "value",
+        "source_request_id": "req-detail-old",
+        "source_path": "response.data.processId",
+        "target_request_id": "req-submit",
+        "target_path": "body.processId",
+        "reason": "详情响应提供提交所需流程编号",
+        "evidence": {"captured": True},
+    }])
+    finalized = FlowSpec(steps=steps, request_facts=facts)
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert len(merged.links) == 1
+    assert merged.links[0].source_step_id == "detail-new"
+
+
+def test_finalize_rejects_weak_literal_collision_and_restores_strong_id_chain():
+    process_id = "workflow:15:80988d17-962a-11f1-937a-0a4095592b97"
+    facts = RequestFacts(requests=[
+        RequestFact(
+            request_id="req-definition", request_index=1, sequence=1,
+            method="GET", path="/workflow/definition", trigger_action_id="open",
+            response_json={"data": {"id": process_id, "key": "workflow_key"}},
+        ),
+        RequestFact(
+            request_id="req-create", request_index=2, sequence=2,
+            method="POST", path="/records/create", trigger_action_id="save",
+            post_data=json.dumps({"processDefKey": "workflow_key"}),
+        ),
+        RequestFact(
+            request_id="req-progress", request_index=3, sequence=3,
+            method="GET", path="/workflow/progress", trigger_action_id="progress",
+            response_json={"data": {"processDefinitionId": process_id}},
+        ),
+        RequestFact(
+            request_id="req-detail", request_index=4, sequence=4,
+            method="GET", path="/workflow/detail", trigger_action_id="submit",
+            url=f"/workflow/detail?processDefinitionId={process_id}",
+            query={"processDefinitionId": [process_id]},
+        ),
+    ])
+    steps = [
+        FlowStep(
+            step_id="definition", method="GET", path="/workflow/definition",
+            source_meta={"request_id": "req-definition"},
+            response_json={"data": {"id": process_id, "key": "workflow_key"}},
+        ),
+        FlowStep(
+            step_id="create", method="POST", path="/records/create",
+            source_meta={"request_id": "req-create"},
+            params=[ParamField(
+                path="processDefKey", key="processDefKey", value="workflow_key",
+                category="system_const", source_kind="constant",
+                source={"kind": "heuristic"}, exposed_to_user=False,
+            )],
+        ),
+        FlowStep(
+            step_id="progress", method="GET", path="/workflow/progress",
+            source_meta={"request_id": "req-progress"},
+            response_json={"data": {"processDefinitionId": process_id}},
+        ),
+        FlowStep(
+            step_id="detail", method="GET", path="/workflow/detail",
+            source_meta={"request_id": "req-detail"},
+            params=[ParamField(
+                path="query.processDefinitionId", key="processDefinitionId",
+                value=process_id, category="system_const", source_kind="constant",
+                source={"kind": "heuristic"}, exposed_to_user=False,
+            )],
+        ),
+    ]
+    live = FlowSpec(steps=deepcopy(steps), request_facts=facts)
+    live = apply_flow_edits(live, [{
+        "op": "propose_dependency",
+        "kind": "value",
+        "source_request_id": "req-definition",
+        "source_path": "response.data.key",
+        "target_request_id": "req-create",
+        "target_path": "body.processDefKey",
+        "reason": "相同 key 被误判为运行期依赖",
+        "evidence": {"captured": True},
+    }])
+
+    merged = merge_live_agent_state(
+        live,
+        FlowSpec(steps=deepcopy(steps), request_facts=facts),
+    )
+
+    assert len(merged.links) == 1
+    link = merged.links[0]
+    assert link.source_step_id == "definition"
+    assert link.source_path == "data.id"
+    assert link.target_step_id == "detail"
+    assert link.target_path == "query.processDefinitionId"
+    assert link.confirmed is True
+    create_param = merged.steps[1].params[0]
+    detail_param = merged.steps[3].params[0]
+    assert create_param.source_kind == "constant"
+    assert detail_param.source_kind == "previous_response"
+
+
+def test_caller_input_keeps_captured_option_source_contract():
+    spec = _flow()
+    spec.steps[0].params = [ParamField(
+        path="query.type", key="type", value="2",
+        category="user_param", source_kind="form_option",
+        source={"kind": "form_option", "enum_source": "dom"},
+        exposed_to_user=True,
+    )]
+    spec.request_facts.field_evidence = [{
+        "event_id": "event-type",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "binding_status": "bound",
+        "control_kind": "select",
+        "label": "类型",
+        "field_aliases": ["type"],
+    }]
+    spec.request_facts.option_sources = [{
+        "kind": "page_enum_options",
+        "options": {
+            "类型": {
+                "field_key": "类型",
+                "field_aliases": ["type"],
+                "mapping_complete": True,
+                "options": [{"label": "业务类型", "value": "2"}],
+            },
+        },
+    }]
+
+    outcome = apply_recording_agent_edit(spec, {
+        "op": "set_param_source",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "source_kind": "caller_input",
+        "reason": "调用方选择页面捕获的业务选项",
+    })
+
+    assert outcome["status"] == "applied"
+    param = spec.steps[0].params[0]
+    assert param.source_kind == "form_option"
+    assert param.source["enum_source"] == "dom"
+    assert param.exposed_to_user is True
+
+
+def test_finalize_preserves_grounded_range_start_and_names_missing_end():
+    finalized = FlowSpec(steps=[FlowStep(
+        step_id="query",
+        method="GET",
+        path="/records/page",
+        params=[
+            ParamField(
+                path="query.createTime[0]", key="开始日期", label="开始日期",
+                value="2026-08-07 00:00:00", type="date", wire_type="string",
+                category="user_param", source_kind="user_input",
+                exposed_to_user=True,
+            ),
+            ParamField(
+                path="query.createTime[1]", key="createTime[1]", label="createTime[1]",
+                value="2026-08-08 23:59:59", type="datetime", wire_type="string",
+                category="user_param", source_kind="user_input",
+                exposed_to_user=True,
+            ),
+        ],
+    )])
+
+    merged = merge_live_agent_state(FlowSpec(), finalized)
+
+    assert [param.key for param in merged.steps[0].params] == ["开始日期", "结束日期"]
+    changes = (merged.meta or {}).get("indexed_range_changes") or []
+    assert [item["role"] for item in changes] == ["range_start", "range_end"]
+
+
+def test_finalize_discards_model_source_hypothesis_rejected_by_page_fact():
+    finalized = _flow()
+    finalized.steps[0].params = [ParamField(
+        path="query.type", key="请假类型", value="2", type="enum",
+        wire_type="string", category="user_param", source_kind="page_enum",
+        source={"kind": "page_enum", "dictionary_source": "dom"},
+        enum_options=[
+            {"label": "病假", "value": "1"},
+            {"label": "事假", "value": "2"},
+        ],
+        enum_value_map={"病假": "1", "事假": "2"},
+        exposed_to_user=True,
+        evidence=[{
+            "source": "recorder_dom",
+            "control_kind": "select",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+            "options": [
+                {"label": "病假", "value": "1"},
+                {"label": "事假", "value": "2"},
+            ],
+        }],
+    )]
+    finalized.request_facts.field_evidence.append({
+        "event_id": "evt-type-select",
+        "evidence_id": "evt-type-select",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "label": "请假类型",
+        "value": "2",
+        "op": "select",
+        "control_kind": "select",
+        "disabled": False,
+        "read_only": True,
+        "binding_status": "bound",
+    })
+    live = FlowSpec(meta={"recording_agent_ops": [{
+        "op": "set_param_source",
+        "request_id": "req-detail",
+        "wire_path": "query.type",
+        "source_kind": "constant",
+        "reason": "模型把本次选择值误判成固定常量",
+        "evidence_refs": ["evt-type-select"],
+    }]})
+
+    merged = merge_live_agent_state(live, finalized)
+
+    param = merged.steps[0].params[0]
+    assert param.source_kind == "page_enum"
+    assert not (merged.meta or {}).get("unresolved_live_agent_ops")
+    discarded = (merged.meta or {}).get("discarded_live_agent_hypotheses") or []
+    assert len(discarded) == 1
+    assert discarded[0]["op"] == "set_param_source"
 
 
 def test_retrying_identical_deferred_field_op_remains_retryable_not_duplicate():

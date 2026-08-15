@@ -59,6 +59,16 @@ def _is_strong_value(raw: object, path: str) -> bool:
     return opaque_shape
 
 
+def is_strong_runtime_value(raw: object, path: str = "") -> bool:
+    """Return whether an exact captured value is safe to treat as runtime data.
+
+    This deliberately excludes ordinary business literals such as workflow
+    keys, statuses and labels.  Equality with one of those values is not proof
+    that a later request depends on the earlier response.
+    """
+    return _is_strong_value(raw, path or "response.value")
+
+
 def _is_workflow_route_value(raw: object, source_path: str, target_path: str) -> bool:
     """Allow short stable workflow IDs only when both path names say ID/key."""
     if raw is None or isinstance(raw, bool):

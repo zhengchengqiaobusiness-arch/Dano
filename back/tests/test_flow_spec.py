@@ -111,6 +111,60 @@ def _dom_enum(label, alias, selected_label, selected_value, options, *, page_id=
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_missing_query_placeholder_becomes_required_caller_input(self):
+        request = _post(
+            "https://example.test/items/delete?id=undefined",
+            None,
+            method="DELETE",
+            resp={"code": 400},
+        )
+        request.update({"request_id": "req-delete", "index": 1, "sequence": 1})
+
+        spec = to_flow_spec([request])
+
+        self.assertEqual(len(spec.steps), 1)
+        param = next(item for item in spec.steps[0].params if item.path == "query.id")
+        self.assertEqual(param.value, "")
+        self.assertIsNone(param.default_value)
+        self.assertEqual(param.source_kind, "user_input")
+        self.assertTrue(param.exposed_to_user)
+        self.assertTrue(param.required)
+        self.assertEqual(param.source["required_state"], "required")
+
+    def test_readonly_inner_input_does_not_lock_a_select_control(self):
+        request = _get("https://example.test/items/page?type=2", {"data": []})
+        request.update({"request_id": "req-query", "index": 1, "sequence": 1})
+        evidence = [{
+            "event_id": "evt-type",
+            "evidence_id": "evt-type",
+            "request_id": "req-query",
+            "wire_path": "query.type",
+            "binding_status": "bound",
+            "field_aliases": ["type"],
+            "label": "类型",
+            "value": "2",
+            "op": "select",
+            "control_kind": "select",
+            "control_disabled": False,
+            "control_read_only": True,
+        }]
+
+        spec = to_flow_spec(
+            [request],
+            field_evidence=evidence,
+            request_role_overrides={
+                "req-query": {
+                    "role": "business_get", "keep": True,
+                    "reason": "用户执行的业务查询", "confidence": 0.95,
+                },
+            },
+        )
+
+        param = next(item for item in spec.steps[0].params if item.path == "query.type")
+        self.assertEqual(param.source_kind, "form_option")
+        self.assertTrue(param.exposed_to_user)
+        self.assertTrue(param.editable)
+
     def test_agent_approved_business_get_materializes_even_when_capture_only_has_fill_evidence(self):
         unrelated_login = _get(
             "https://www.example.test/user/login.aspx",
