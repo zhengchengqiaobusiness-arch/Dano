@@ -189,7 +189,8 @@ class ProductionRecordingServices:
             pi,
             prompt=(
             "为当前录制生成完整且可执行的业务能力契约。先读取录制状态，基于页面、HAR、"
-            "字段证据、字典和上下游响应确定能力成员、字段七维属性和依赖编排；"
+            "字段证据、字典和上下游响应确定能力成员、字段名称、路径、默认值、类型、来源、"
+            "必填性和依赖编排；"
             "禁止使用固定页面、字段或接口假设。最后必须调用 submit_recording_plan，"
             "一次提交完整能力集合，不得部分发布。"
             f" recording_id={self.recording_id} use_live_notebook={str(use_live_notebook).lower()}"
@@ -266,6 +267,13 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
+        goal_contract = (spec.meta or {}).get("recording_goal_contract") or {}
+        expected_count = int(goal_contract.get("expected_count") or 0)
+        if expected_count and len(spec.capabilities) != expected_count:
+            raise RuntimeError(
+                "录制目标要求产出 "
+                f"{expected_count} 个能力，当前仅形成 {len(spec.capabilities)} 个可执行能力"
+            )
         if context.machine_verification:
             decision = evaluate_recording_release(spec)
             if decision.callable_spec is None:

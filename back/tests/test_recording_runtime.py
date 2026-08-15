@@ -318,3 +318,24 @@ async def test_direct_export_freezes_candidate_without_release_verification() ->
         "status": "skipped_by_operator",
     }
     assert pi.bound is published["spec"]
+
+
+@pytest.mark.asyncio
+async def test_direct_export_rejects_a_draft_that_misses_the_recording_goal_count() -> None:
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    services = ProductionRecordingServices(
+        recording_id="recording_1",
+        materializer=unused,
+        pi_provider=unused,
+        publisher=unused,
+    )
+    context = _context()
+    context.machine_verification = False
+    draft = FlowSpec(meta={
+        "recording_goal_contract": {"expected_count": 2, "materialized_count": 0},
+    })
+
+    with pytest.raises(RuntimeError, match="要求产出 2 个能力"):
+        await services.publish(draft.model_dump(mode="json"), context)

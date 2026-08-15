@@ -2285,6 +2285,66 @@ def _unique_live_capability_name(value: str, kind: str, used: set[str]) -> str:
     return name
 
 
+_GOAL_CAPABILITY_COUNT_RE = re.compile(
+    r"(?:预期|预计|需要)?\s*产出(?:的)?\s*能力(?:数量|数)?\s*[:：=]?\s*(\d+)",
+    re.IGNORECASE,
+)
+_GOAL_CAPABILITY_LINE_RE = re.compile(
+    r"^\s*(?:能力|capability)\s*(\d+)\s*[:：-]\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _recording_goal_contract(spec) -> dict:  # noqa: ANN001
+    """Parse the operator's editable target into an executable boundary.
+
+    Only an explicit count activates the strong boundary.  This keeps legacy
+    free-form targets readable while making the setup template deterministic.
+    """
+    raw = str((spec.meta or {}).get("recording_goal_text") or "").strip()
+    count_match = _GOAL_CAPABILITY_COUNT_RE.search(raw)
+    if count_match is None:
+        return {}
+    expected_count = int(count_match.group(1))
+    if expected_count <= 0:
+        return {}
+    named = sorted(
+        (
+            (int(match.group(1)), str(match.group(2) or "").strip())
+            for match in _GOAL_CAPABILITY_LINE_RE.finditer(raw)
+            if str(match.group(2) or "").strip()
+        ),
+        key=lambda item: item[0],
+    )
+    capabilities = [
+        {"ordinal": ordinal, "name": name}
+        for ordinal, name in named[:expected_count]
+    ]
+    return {
+        "source": "recording_goal_text",
+        "expected_count": expected_count,
+        "capabilities": capabilities,
+    }
+
+
+def _goal_capability_names(spec, contract: dict) -> list[str]:  # noqa: ANN001
+    """Return ordered target names, filling only from the accepted live goal."""
+    expected_count = int(contract.get("expected_count") or 0)
+    names = [
+        str(item.get("name") or "").strip()
+        for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    goal = spec.goal if isinstance(spec.goal, dict) else {}
+    for value in goal.get("capabilities") or []:
+        name = str(value or "").strip()
+        if name and name not in names:
+            names.append(name)
+        if expected_count and len(names) >= expected_count:
+            break
+    return names[:expected_count] if expected_count else names
+
+
 def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     """Materialize public abilities from the base Flow and accepted Pi boundaries."""
     from dano.execution.page.flow_spec import (
@@ -2297,12 +2357,18 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         return {}
     steps = {step.step_id: step for step in spec.steps}
     goal = spec.goal if isinstance(spec.goal, dict) else {}
-    proposed_names = [
-        str(value).strip()
-        for value in (goal.get("capabilities") or [])
-        if str(value).strip()
-    ]
-    remaining = list(enumerate(proposed_names))
+    contract = _recording_goal_contract(spec)
+    proposed_names = (
+        _goal_capability_names(spec, contract)
+        if contract else [
+            str(value).strip()
+            for value in (goal.get("capabilities") or [])
+            if str(value).strip()
+        ]
+    )
+    expected_count = int(contract.get("expected_count") or 0)
+    target_slots = proposed_names or ([""] * expected_count if expected_count else [])
+    remaining_anchors = list(anchor_ids)
     used_names: set[str] = set()
     capabilities: list[dict] = []
     action_labels = {
@@ -2312,22 +2378,33 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         "reject": "驳回", "withdraw": "撤回", "delete": "删除",
     }
     business = str(spec.title or "业务").strip() or "业务"
-    for anchor_id in anchor_ids:
-        step = steps[anchor_id]
-        kind = _capability_operation_kind(step)
+    contract_names = {
+        str(item.get("name") or "").strip()
+        for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    if not target_slots:
+        target_slots = [""] * len(remaining_anchors)
+    for proposed_name in target_slots:
+        if not remaining_anchors:
+            break
+        hinted_kind = _live_capability_kind_hint(proposed_name)
         match_position = next((
             position
-            for position, (_index, name) in enumerate(remaining)
-            if _live_capability_kind_hint(name) == kind
-        ), None)
-        if match_position is None and remaining:
+            for position, anchor_id in enumerate(remaining_anchors)
+            if _capability_operation_kind(steps[anchor_id]) == hinted_kind
+        ), None) if hinted_kind else None
+        if match_position is None:
             match_position = 0
-        proposed_name = (
-            remaining.pop(match_position)[1]
-            if match_position is not None else ""
-        )
+        anchor_id = remaining_anchors.pop(match_position)
+        step = steps[anchor_id]
+        kind = _capability_operation_kind(step)
         name = _unique_live_capability_name(proposed_name, kind, used_names)
-        title = f"{action_labels.get(kind, '执行')}{business}"
+        title = (
+            proposed_name
+            if proposed_name in contract_names
+            else f"{action_labels.get(kind, '执行')}{business}"
+        )
         capabilities.append({
             "name": name,
             "title": title,
@@ -2346,6 +2423,49 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     }
 
 
+def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa: ANN001
+    """Preserve Pi orchestration while enforcing the operator-owned boundary."""
+    contract = _recording_goal_contract(spec)
+    if not contract:
+        return semantic_plan
+    deterministic = _semantic_plan_from_live_boundaries(spec)
+    targets = deterministic.get("capabilities") or []
+    candidates = [
+        deepcopy(item)
+        for item in (semantic_plan.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    selected: list[dict] = []
+    for target in targets:
+        target_kind = str(target.get("kind") or "")
+        match_position = next((
+            position
+            for position, candidate in enumerate(candidates)
+            if (
+                str(candidate.get("kind") or "") == target_kind
+                or _live_capability_kind_hint(str(candidate.get("name") or "")) == target_kind
+            )
+        ), None)
+        if match_position is None:
+            selected.append(deepcopy(target))
+            continue
+        candidate = candidates.pop(match_position)
+        candidate["name"] = target["name"]
+        candidate["title"] = target["title"]
+        candidate["intent"] = target["intent"]
+        candidate["kind"] = target_kind
+        selected.append(candidate)
+    return {
+        **deepcopy(semantic_plan),
+        "business_understanding": deepcopy(
+            semantic_plan.get("business_understanding")
+            or deterministic.get("business_understanding")
+            or {}
+        ),
+        "capabilities": selected,
+    }
+
+
 def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     """Replay accepted live agent ops onto the canonical finalized FlowSpec."""
     merged = finalized_spec.model_copy(deep=True)
@@ -2357,9 +2477,15 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         merged.meta = {**finalized_meta, "current_version": live_version}
         if live_meta.get("versions"):
             merged.meta["versions"] = deepcopy(live_meta["versions"])
-    for key in ("verification_log", "agent_answers", "live_pending_questions"):
+    for key in (
+        "verification_log", "agent_answers", "live_pending_questions",
+        "recording_goal_text",
+    ):
         if live_meta.get(key):
             merged.meta = {**(merged.meta or {}), key: deepcopy(live_meta[key])}
+    goal_contract = _recording_goal_contract(merged)
+    if goal_contract:
+        merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
     unresolved: list[dict] = []
     for operation in live_meta.get("recording_agent_ops") or []:
         if not isinstance(operation, dict):
@@ -2394,6 +2520,13 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 "status": "ready",
                 "source": "live_goal_request_roles",
                 "semantic_plan": live_semantic_plan,
+            }
+    if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
+        live_semantic_plan = _constrain_semantic_plan_to_goal(merged, live_semantic_plan)
+        if isinstance(live_capability_model, dict):
+            live_capability_model = {
+                **live_capability_model,
+                "semantic_plan": deepcopy(live_semantic_plan),
             }
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         materialized_plan = deepcopy(live_semantic_plan)
@@ -2454,6 +2587,26 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 })
             else:
                 merged = compilation.spec
+
+    if goal_contract:
+        actual_count = len(merged.capabilities)
+        expected_count = int(goal_contract.get("expected_count") or 0)
+        goal_contract = {
+            **goal_contract,
+            "materialized_count": actual_count,
+            "satisfied": actual_count == expected_count,
+        }
+        merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
+        if actual_count != expected_count:
+            unresolved.append({
+                "op": "enforce_recording_goal",
+                "status": "rejected",
+                "requested_target": {"expected_count": expected_count},
+                "reason": (
+                    f"recording goal expects {expected_count} capabilities, "
+                    f"but {actual_count} executable anchors were materialized"
+                ),
+            })
 
     if unresolved:
         merged.meta = {**(merged.meta or {}), "unresolved_live_agent_ops": unresolved}

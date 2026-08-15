@@ -1990,6 +1990,101 @@ def test_finalize_merge_materializes_capabilities_from_live_goal_and_request_rol
     ] == ["query-step", "submit-step", "withdraw-step", "delete-step"]
 
 
+def test_finalize_merge_obeys_explicit_recording_goal_capability_count():
+    live = FlowSpec(
+        flow_id="goal-boundaries",
+        meta={
+            "recording_goal_text": (
+                "目的：查询并提交记录\n"
+                "预期产出能力数量：2\n"
+                "能力1：查询记录\n"
+                "能力2：提交记录"
+            ),
+        },
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/records/page"),
+            RequestFact(request_id="req-submit", method="POST", path="/records/submit"),
+            RequestFact(request_id="req-delete", method="DELETE", path="/records/delete"),
+        ]),
+    )
+    live = apply_flow_edits(live, [
+        {
+            "op": "set_goal",
+            "goal": {
+                "intent": "查询、提交和删除记录",
+                "capabilities": ["query_records", "submit_record", "delete_record"],
+                "success_criteria": ["完成目标操作"],
+                "evidence": [{"source": "goal_text"}],
+            },
+        },
+        *[
+            {
+                "op": "set_request_role",
+                "request_id": request_id,
+                "role": role,
+                "reason": "录制动作对应公开业务操作",
+                "evidence_refs": [f"request:{request_id}"],
+            }
+            for request_id, role in (
+                ("req-query", "business_read"),
+                ("req-submit", "business_write"),
+                ("req-delete", "business_write"),
+            )
+        ],
+    ])
+    live.meta["capability_model"] = {
+        "status": "ready",
+        "semantic_plan": {
+            "business_understanding": {"business_name": "记录"},
+            "capabilities": [
+                {
+                    "name": name,
+                    "title": name,
+                    "intent": name,
+                    "kind": kind,
+                    "anchor_step_id": request_id,
+                    "request_refs": [{"step_id": request_id, "usage": "execute"}],
+                }
+                for name, kind, request_id in (
+                    ("query_records", "query_status", "req-query"),
+                    ("submit_record", "submit", "req-submit"),
+                    ("delete_record", "delete", "req-delete"),
+                )
+            ],
+            "unresolved_items": [],
+        },
+    }
+    finalized = FlowSpec(
+        flow_id="goal-boundaries-final",
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={"request_id": "req-query", "request_index": 1},
+                response_json={"data": {"list": []}},
+            ),
+            FlowStep(
+                step_id="submit-step", method="POST", path="/records/submit",
+                source_meta={"request_id": "req-submit", "request_index": 2},
+            ),
+            FlowStep(
+                step_id="delete-step", method="DELETE", path="/records/delete",
+                source_meta={"request_id": "req-delete", "request_index": 3},
+            ),
+        ],
+        request_facts=live.request_facts,
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert len(merged.capabilities) == 2
+    assert [capability.kind for capability in merged.capabilities] == ["query_status", "submit"]
+    assert [capability.title for capability in merged.capabilities] == ["查询记录", "提交记录"]
+    assert [item["name"] for item in merged.meta["recording_goal_contract"]["capabilities"]] == [
+        "查询记录", "提交记录",
+    ]
+
+
 def test_live_notebook_carries_only_replayable_hypotheses_into_finalized_facts():
     shadow = _flow()
     shadow.meta = {
