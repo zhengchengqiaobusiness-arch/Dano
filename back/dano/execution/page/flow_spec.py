@@ -2833,8 +2833,9 @@ def _response_has_scalar_business_value(payload: Any) -> bool:
 
 
 _QUERY_ACTION_RE = re.compile(
-    r"(?:查询|搜索|筛选|检索|查看|详情|预览|刷新|列表|导出|"
-    r"\bquery\b|\bsearch\b|\bfilter\b|\bview\b|\bdetail\b|\bpreview\b|\brefresh\b|\blist\b|\bexport\b)",
+    r"(?:查询|搜索|筛选|检索|查看|详情|进度|预览|刷新|列表|导出|"
+    r"\bquery\b|\bsearch\b|\bfilter\b|\bview\b|\bdetail\b|\bprogress\b|"
+    r"\bpreview\b|\brefresh\b|\blist\b|\bexport\b)",
     re.I,
 )
 _INTERNAL_WORKFLOW_READ_RE = re.compile(
@@ -6847,6 +6848,27 @@ def to_flow_spec(
         request_roles.append(dict(override) if isinstance(override, dict) else (
             recorded or classify_network_request(request, captured_requests, samples)
         ))
+    # A visible user command is stronger public-boundary evidence than a
+    # generic ``read_context`` classification. Preserve those reads as
+    # callable business operations; background context and option traffic are
+    # unchanged because they have no matching command anchor.
+    for index, (request, role) in enumerate(zip(captured_requests, request_roles)):
+        if (
+            str((role or {}).get("role") or "") == "read_context"
+            and _has_query_action_evidence(
+                request.get("trigger_op"),
+                " ".join(filter(None, (
+                    str(request.get("trigger_action_id") or ""),
+                    str(request.get("trigger_locator") or ""),
+                ))),
+            )
+        ):
+            request_roles[index] = {
+                **dict(role or {}),
+                "role": "business_get",
+                "keep": True,
+                "confidence": max(float((role or {}).get("confidence") or 0.0), 0.9),
+            }
     # Bind DOM facts once, before any field projection.  All later naming,
     # required and enum logic consumes this same explicit identity result.
     observer_events_present = any(
@@ -11011,12 +11033,12 @@ def _capability_operation_kind(step: FlowStep) -> str:
     ):
         if re.search(r"(?:^|[/_.\s-])(?:export|download|excel)(?:$|[/_.\s-])|导出|下载", signature):
             return "export"
-        if is_query_action:
-            return "query_status"
-        if re.search(r"(?:detail|inspect|view)|详情|查看", signature):
+        if re.search(r"(?:detail|inspect|view|progress)|详情|查看|进度", signature):
             return "inspect"
         if re.search(r"(?:preview)|预览", signature):
             return "preview"
+        if is_query_action:
+            return "query_status"
         return "query_status"
     # Specific business verbs must win over generic edit/update markers.
     if re.search(r"(?:cancel-by-start-user|withdraw|revoke)|撤回|撤销", signature):

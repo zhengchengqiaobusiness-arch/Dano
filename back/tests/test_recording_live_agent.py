@@ -76,6 +76,18 @@ def test_live_notebook_preserves_pending_questions_for_final_analysis() -> None:
     assert merged.meta["live_pending_questions"][0]["context_ref"] == "field:1"
 
 
+def test_live_notebook_preserves_operator_recording_goal_for_final_boundary() -> None:
+    goal_text = (
+        "目的：查询并编辑记录\n"
+        "预期产出能力数量：2\n"
+        "能力1：查询记录\n"
+        "能力2：编辑记录"
+    )
+    notebook = LiveNotebook.from_shadow(FlowSpec(meta={"recording_goal_text": goal_text}))
+
+    assert notebook.meta["recording_goal_text"] == goal_text
+
+
 @pytest.mark.asyncio
 async def test_recording_state_projection_does_not_block_browser_event_loop(monkeypatch):
     session = RecordingPiSession(
@@ -2201,6 +2213,156 @@ def test_goal_kind_without_a_unique_anchor_is_not_bound_to_the_first_request():
 
     assert merged.capabilities == []
     assert merged.meta["recording_goal_contract"]["satisfied"] is False
+
+
+def test_goal_slots_with_same_http_kind_use_live_semantic_evidence() -> None:
+    live = FlowSpec(
+        meta={
+            "recording_goal_text": (
+                "目的：新建和编辑申请\n"
+                "预期产出能力数量：2\n"
+                "能力1：新建申请\n"
+                "能力2：编辑申请"
+            ),
+            "recording_agent_ops": [
+                {
+                    "op": "set_request_role",
+                    "request_id": "req-create",
+                    "role": "business_write",
+                    "reason": "新建申请表单完成后提交的写请求",
+                    "evidence_refs": ["request:req-create"],
+                },
+                {
+                    "op": "set_request_role",
+                    "request_id": "req-edit",
+                    "role": "business_write",
+                    "reason": "编辑申请表单完成后提交的写请求",
+                    "evidence_refs": ["request:req-edit"],
+                },
+            ],
+        },
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-create", request_index=1, method="POST", path="/records/submit"),
+            RequestFact(request_id="req-edit", request_index=2, method="POST", path="/records/submit"),
+        ]),
+    )
+    finalized = FlowSpec(
+        title="申请",
+        steps=[
+                FlowStep(
+                    step_id="create-step", method="POST", path="/records/submit",
+                    source_meta={
+                        "request_id": "req-create", "request_index": 1,
+                        "trigger_op": "click", "trigger_transaction_id": "txn-create",
+                    },
+                ),
+                FlowStep(
+                    step_id="edit-step", method="POST", path="/records/submit",
+                    source_meta={
+                        "request_id": "req-edit", "request_index": 2,
+                        "trigger_op": "click", "trigger_transaction_id": "txn-edit",
+                    },
+                ),
+        ],
+        request_facts=live.request_facts,
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == ["新建申请", "编辑申请"]
+    assert [
+        next(ref.step_id for ref in capability.request_refs if ref.usage == "execute")
+        for capability in merged.capabilities
+    ] == ["create-step", "edit-step"]
+
+
+def test_goal_slots_use_record_identity_when_pi_has_not_named_duplicate_submit_actions() -> None:
+    live = FlowSpec(meta={
+        "recording_goal_text": (
+            "目的：提交和编辑申请\n"
+            "预期产出能力数量：2\n"
+            "能力1：提交申请\n"
+            "能力2：编辑申请"
+        ),
+    })
+    finalized = FlowSpec(
+        title="申请",
+        steps=[
+            FlowStep(
+                step_id="edit-step", method="POST", path="/records/submit",
+                params=[ParamField(path="id", key="id", value="record-42")],
+                source_meta={
+                    "request_id": "req-edit", "request_index": 1,
+                    "trigger_op": "click", "trigger_transaction_id": "txn-edit",
+                },
+            ),
+            FlowStep(
+                step_id="create-step", method="POST", path="/records/submit",
+                source_meta={
+                    "request_id": "req-create", "request_index": 2,
+                    "trigger_op": "click", "trigger_transaction_id": "txn-create",
+                },
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-edit", request_index=1, method="POST", path="/records/submit"),
+            RequestFact(request_id="req-create", request_index=2, method="POST", path="/records/submit"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == ["提交申请", "编辑申请"]
+    assert [
+        next(ref.step_id for ref in capability.request_refs if ref.usage == "execute")
+        for capability in merged.capabilities
+    ] == ["create-step", "edit-step"]
+
+
+def test_goal_slots_distinguish_detail_and_progress_by_recorded_action_text() -> None:
+    live = FlowSpec(meta={
+        "recording_goal_text": (
+            "目的：查看详情和进度\n"
+            "预期产出能力数量：2\n"
+            "能力1：查看申请详情\n"
+            "能力2：查看审批进度"
+        ),
+    })
+    finalized = FlowSpec(
+        title="申请",
+        steps=[
+            FlowStep(
+                step_id="progress-step", method="GET", path="/records/status",
+                response_json={"data": {"nodes": []}},
+                source_meta={
+                    "request_id": "req-progress", "request_index": 1,
+                    "role": "business_get", "trigger_op": "click",
+                    "trigger_locator": "text=进度", "trigger_transaction_id": "txn-progress",
+                },
+            ),
+            FlowStep(
+                step_id="detail-step", method="GET", path="/records/42",
+                response_json={"data": {"id": 42}},
+                source_meta={
+                    "request_id": "req-detail", "request_index": 2,
+                    "role": "business_get", "trigger_op": "click",
+                    "trigger_locator": "text=详情", "trigger_transaction_id": "txn-detail",
+                },
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-progress", request_index=1, method="GET", path="/records/status"),
+            RequestFact(request_id="req-detail", request_index=2, method="GET", path="/records/42"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == ["查看申请详情", "查看审批进度"]
+    assert [
+        next(ref.step_id for ref in capability.request_refs if ref.usage == "execute")
+        for capability in merged.capabilities
+    ] == ["detail-step", "progress-step"]
 
 
 def test_live_notebook_carries_only_replayable_hypotheses_into_finalized_facts():

@@ -980,6 +980,28 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
             for sid in by_kind["submit"].step_ids] == ["/daily-report/submit"]
 
 
+def test_to_flow_spec_keeps_direct_user_triggered_business_read_even_if_role_is_context():
+    detail = {
+        **_get(1, "/requests/42", {"data": {"id": 42, "status": "pending"}}),
+        "trigger_op": "click",
+        "trigger_locator": "text=查看进度",
+        "trigger_transaction_id": "txn-view-progress",
+        "causality_confidence": "high",
+        "_request_role": {
+            "role": "read_context",
+            "keep": True,
+            "confidence": 0.91,
+            "reason": "用户点击查看进度后读取业务记录",
+        },
+    }
+
+    spec = to_flow_spec([detail])
+
+    assert len(spec.steps) == 1
+    assert spec.steps[0].path == "/requests/42"
+    assert spec.steps[0].source_meta["role"] == "business_get"
+
+
 def test_unique_real_value_dependency_is_confirmed_but_ambiguous_value_is_not():
     unique = to_flow_spec([
         _get(1, "/process/definition/get", {"data": {"taskId": "TASK-UNIQUE-001"}}),

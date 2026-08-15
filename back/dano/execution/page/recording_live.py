@@ -129,6 +129,8 @@ class LiveNotebook:
                 for item in raw_meta["live_pending_questions"]
                 if isinstance(item, dict)
             ][-50:]
+        if raw_meta.get("recording_goal_text"):
+            meta["recording_goal_text"] = str(raw_meta["recording_goal_text"])
         return cls(meta=meta)
 
     @property
@@ -2261,7 +2263,7 @@ def _live_capability_kind_hint(name: str) -> str:
         ("reject", ("reject", "驳回")),
         ("approve", ("approve", "approval", "同意", "审批")),
         ("export", ("export", "download", "导出", "下载")),
-        ("inspect", ("inspect", "detail", "view", "详情", "查看")),
+        ("inspect", ("inspect", "detail", "view", "progress", "详情", "查看", "进度")),
         ("preview", ("preview", "预览")),
         ("query_status", ("query", "search", "list", "status", "查询", "搜索", "列表")),
         ("update", ("update", "edit", "modify", "更新", "编辑")),
@@ -2350,6 +2352,8 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     from dano.execution.page.flow_spec import (
         _capability_operation_kind,
         _public_capability_anchor_step_ids,
+        _query_operation_key,
+        _read_status_steps,
     )
 
     anchor_ids = _public_capability_anchor_step_ids(spec)
@@ -2386,6 +2390,85 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     }
     if not target_slots:
         target_slots = [""] * len(remaining_anchors)
+
+    def semantic_evidence(step) -> str:  # noqa: ANN001
+        meta = step.source_meta or {}
+        request_id = str(meta.get("request_id") or "")
+        parts = [
+            str(meta.get("trigger_locator") or ""),
+            str(meta.get("trigger_action_id") or ""),
+            str(step.name or ""),
+        ]
+        for operation in (spec.meta or {}).get("recording_agent_ops") or []:
+            if (
+                isinstance(operation, dict)
+                and operation.get("op") == "set_request_role"
+                and str(operation.get("request_id") or "") == request_id
+            ):
+                parts.append(str(operation.get("reason") or ""))
+        return " ".join(part for part in parts if part).casefold()
+
+    def semantic_terms(value: str) -> set[str]:
+        """Return stable words and CJK pairs without depending on one UI."""
+        text = str(value or "").casefold()
+        terms = set(re.findall(r"[a-z0-9]{2,}", text))
+        for sequence in re.findall(r"[\u4e00-\u9fff]+", text):
+            terms.update(
+                sequence[index:index + 2]
+                for index in range(max(0, len(sequence) - 1))
+            )
+        return terms
+
+    def has_stable_record_identity(step) -> bool:  # noqa: ANN001
+        """Distinguish an edit of an existing record from a new submission."""
+        identity_keys = {
+            "id", "recordid", "requestid", "applicationid",
+            "businessid", "entityid", "itemid",
+        }
+        for param in step.params or []:
+            terminal = re.split(r"[.\[\]]+", str(param.path or param.key or ""))[-1]
+            normalized = re.sub(r"[^a-z0-9]+", "", terminal.casefold())
+            if normalized not in identity_keys:
+                continue
+            value = param.value
+            if value is not None and str(value).strip().casefold() not in {"", "null", "undefined"}:
+                return True
+        return False
+
+    def semantic_match_position(target: str) -> int | None:
+        if not target:
+            return 0
+        normalized_target = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", target.casefold())
+        hinted_kind = _live_capability_kind_hint(target)
+        scored: list[tuple[int, int]] = []
+        for position, anchor_id in enumerate(remaining_anchors):
+            step = steps[anchor_id]
+            evidence = semantic_evidence(step)
+            normalized_evidence = re.sub(
+                r"[^a-z0-9\u4e00-\u9fff]+", "", evidence,
+            )
+            score = 0
+            if normalized_target and normalized_target in normalized_evidence:
+                score += 100
+            shared_terms = semantic_terms(target) & semantic_terms(evidence)
+            score += min(24, len(shared_terms) * 4)
+            if hinted_kind and _live_capability_kind_hint(evidence) == hinted_kind:
+                score += 30
+            if hinted_kind and _capability_operation_kind(step) == hinted_kind:
+                score += 10
+            if hinted_kind == "update" and has_stable_record_identity(step):
+                score += 40
+            elif (
+                hinted_kind in {"create", "submit"}
+                and _capability_operation_kind(step) == "submit"
+                and not has_stable_record_identity(step)
+            ):
+                score += 8
+            scored.append((score, position))
+        best_score = max((score for score, _ in scored), default=0)
+        best_positions = [position for score, position in scored if score == best_score]
+        return best_positions[0] if best_score > 0 and len(best_positions) == 1 else None
+
     for proposed_name in target_slots:
         if not remaining_anchors:
             break
@@ -2395,12 +2478,11 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             for position, anchor_id in enumerate(remaining_anchors)
             if _capability_operation_kind(steps[anchor_id]) == hinted_kind
         ] if hinted_kind else []
-        if len(matching_positions) == 1:
+        semantic_position = semantic_match_position(proposed_name)
+        if semantic_position is not None:
+            match_position = semantic_position
+        elif len(matching_positions) == 1:
             match_position = matching_positions[0]
-        elif not proposed_name:
-            # With no operator-owned slot name, every public anchor already is
-            # the deterministic boundary.  Preserve its recorded order.
-            match_position = 0
         elif not hinted_kind and len(remaining_anchors) == 1:
             match_position = 0
         else:
@@ -2415,6 +2497,14 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         anchor_id = remaining_anchors.pop(match_position)
         step = steps[anchor_id]
         kind = _capability_operation_kind(step)
+        request_steps = [step]
+        read_steps = _read_status_steps(spec)
+        if step in read_steps:
+            operation_key = _query_operation_key(step)
+            request_steps = [
+                candidate for candidate in read_steps
+                if _query_operation_key(candidate) == operation_key
+            ] or [step]
         name = _unique_live_capability_name(proposed_name, kind, used_names)
         title = (
             proposed_name
@@ -2427,7 +2517,10 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             "intent": title,
             "kind": kind,
             "anchor_step_id": anchor_id,
-            "request_refs": [{"step_id": anchor_id, "usage": "execute"}],
+            "request_refs": [
+                {"step_id": request_step.step_id, "usage": "execute"}
+                for request_step in request_steps
+            ],
         })
     return {
         "business_understanding": {
