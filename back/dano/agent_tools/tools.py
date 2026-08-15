@@ -1365,6 +1365,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
     from dano.execution.page.replay import (
         _validate_assertion_contract,
         execute_write_with_verify,
+        verify_existing_write,
     )
 
     _strict_recording_params(
@@ -1413,6 +1414,40 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
                 )
             evidence = dict(existing_record.get("evidence") or {})
             verification_id = str(existing_record.get("verification_id") or "")
+            previous_write = evidence.get("write") if isinstance(evidence.get("write"), dict) else {}
+            write_succeeded = bool(
+                previous_write.get("ok")
+                and previous_write.get("application_ok") is not False
+                and previous_write.get("verification_status") == "passed"
+            )
+            if existing_record.get("status") != "passed" and write_succeeded:
+                requests = _find_captured_requests(session, request_ids)
+                storage_state = None
+                recorder = getattr(session, "_live_recorder", None)
+                if recorder is not None and callable(getattr(recorder, "storage_state", None)):
+                    storage_state = await recorder.storage_state()
+                result = await verify_existing_write(
+                    requests[1],
+                    previous_write=previous_write,
+                    write_step_id=step.step_id,
+                    write_request_id=write_request_id,
+                    inputs=inputs,
+                    assertion=params["assertion"],
+                    auth_headers=await _recording_auth_headers(session, requests),
+                    storage_state=storage_state,
+                )
+                await session.add_verifications(result["verification_ids"])
+                await session.finish_write_verification(
+                    step.step_id,
+                    status="succeeded",
+                    verification_id=str(result.get("verification_id") or ""),
+                )
+                return {
+                    **result,
+                    "duplicate": False,
+                    "write_executed": False,
+                    "readback_retried": True,
+                }
             return {
                 "ok": existing_record.get("status") == "passed",
                 "write": deepcopy(evidence.get("write")),
@@ -1424,6 +1459,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
                 "verify_verification_id": verification_id,
                 "duplicate": True,
                 "write_executed": False,
+                "readback_retried": False,
             }
 
         try:
@@ -1457,7 +1493,12 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
             status="failed_before_write" if failed_before_write else "succeeded",
             verification_id=str(result.get("verification_id") or ""),
         )
-        return {**result, "duplicate": False, "write_executed": True}
+        return {
+            **result,
+            "duplicate": False,
+            "write_executed": True,
+            "readback_retried": False,
+        }
 
 
 async def browser_recording_navigate(run_id: str, params: dict) -> dict:

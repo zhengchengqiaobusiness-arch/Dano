@@ -611,6 +611,124 @@ async def test_write_verification_executes_each_step_only_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_write_can_retry_readback_without_repeating_write(monkeypatch):
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="system",
+        recording_id="recording_" + "9" * 32,
+    )
+    spec = _spec()
+    spec.steps[0].source_meta = {"request_id": "req-write"}
+    session.bind_flow_spec(spec)
+    write_calls = 0
+    readback_calls = 0
+
+    async def fake_execute(*_args, **kwargs):
+        nonlocal write_calls
+        write_calls += 1
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={
+                "write_step_id": kwargs["write_step_id"],
+                "write_request_id": "req-write",
+                "verify_request_id": "req-filtered",
+                "assertion": kwargs["assertion"],
+            },
+            status="failed",
+            evidence={
+                "passed": False,
+                "write": {
+                    "ok": True,
+                    "application_ok": True,
+                    "verification_status": "passed",
+                    "response": {"data": "created-id"},
+                },
+                "verify": {"response": {"data": {"list": []}}},
+                "assertion": {"passed": False},
+            },
+        )
+        return {
+            "ok": False,
+            "write": {
+                "ok": True,
+                "application_ok": True,
+                "verification_status": "passed",
+                "response": {"data": "created-id"},
+            },
+            "verify": {"response": {"data": {"list": []}}},
+            "assertion": {"passed": False},
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_verify_existing(*_args, **kwargs):
+        nonlocal readback_calls
+        readback_calls += 1
+        verification_id = record_verification(
+            kind="write_execute",
+            subject={
+                "write_step_id": kwargs["write_step_id"],
+                "write_request_id": "req-write",
+                "verify_request_id": "req-unfiltered",
+                "assertion": kwargs["assertion"],
+            },
+            status="passed",
+            evidence={
+                "passed": True,
+                "write": kwargs["previous_write"],
+                "verify": {"response": {"data": {"list": [{"id": "created-id"}]}}},
+                "assertion": {"passed": True},
+            },
+        )
+        return {
+            "ok": True,
+            "write": kwargs["previous_write"],
+            "verify": {"response": {"data": {"list": [{"id": "created-id"}]}}},
+            "assertion": {"passed": True},
+            "verification_id": verification_id,
+            "verification_ids": [verification_id],
+        }
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", fake_execute)
+    monkeypatch.setattr(
+        "dano.execution.page.replay.verify_existing_write",
+        fake_verify_existing,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_session", lambda *_args: session)
+    monkeypatch.setattr(
+        agent_tools_module,
+        "_find_captured_requests",
+        lambda *_args: [
+            {"request_id": "req-write", "method": "POST"},
+            {"request_id": "req-unfiltered", "method": "GET"},
+        ],
+    )
+    monkeypatch.setattr(agent_tools_module, "_recording_auth_headers", fake_auth)
+
+    first = await execute_recording_write_with_verify("run-recording", {
+        "write_step_id": "submit",
+        "verify_request_id": "req-filtered",
+        "assertion": {"path": "data.list", "verify_records_min_count": 1},
+    })
+    second = await execute_recording_write_with_verify("run-recording", {
+        "write_step_id": "submit",
+        "verify_request_id": "req-unfiltered",
+        "assertion": {"path": "data.list.0.id", "operator": "equals", "value": "created-id"},
+    })
+
+    assert first["ok"] is False
+    assert second["ok"] is True
+    assert second["write_executed"] is False
+    assert second["readback_retried"] is True
+    assert write_calls == 1
+    assert readback_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_write_verification_defaults_to_captured_request_body(monkeypatch):
     session = RecordingPiSession(
         tenant="tenant",

@@ -744,39 +744,15 @@ async def execute_write_with_verify(
     if settle_ms:
         await asyncio.sleep(max(0, min(int(settle_ms), 5000)) / 1000)
     cleanup = None
-    verify = None
-    check = None
-    verify_read_id = ""
-    verification_status = "inconclusive"
-    failure_reason = ""
     try:
-        verify = await replay_request(
+        verify, check, verify_read_id, verification_status, failure_reason = await _verify_readback(
             verify_request,
+            write_step_id=write_step_id,
+            assertion=assertion,
+            inputs=inputs,
             auth_headers=auth_headers,
             base_url=base_url,
             storage_state=storage_state,
-        )
-        if verify.get("verification_status") != "passed":
-            verification_status = str(verify.get("verification_status") or "inconclusive")
-            failure_reason = str(verify.get("failure_reason") or "verify request failed")
-            check = {"passed": False, "reason": failure_reason}
-        else:
-            try:
-                check = evaluate_assertion(verify.get("response"), assertion, inputs)
-            except ValueError as exc:
-                check = {"passed": False, "reason": str(exc)}
-            verification_status = "passed" if check["passed"] else "failed"
-            failure_reason = "" if check["passed"] else str(check.get("reason") or "read-back assertion failed")
-        verify_read_id = record_verification(
-            kind="verify_read",
-            subject={
-                "write_step_id": str(write_step_id),
-                "verify_request_id": str(verify_request.get("request_id") or ""),
-                "assertion": deepcopy(assertion),
-            },
-            status=verification_status,
-            evidence={"passed": bool(verify.get("ok") and check["passed"]), "verify": verify, "assertion": check},
-            failure_reason=failure_reason,
         )
     finally:
         if cleanup_request is not None:
@@ -807,5 +783,109 @@ async def execute_write_with_verify(
             *([cleanup["verification_id"]] if cleanup else []),
             verification_id,
         ],
+        "verify_verification_id": verify_read_id,
+    }
+
+
+async def _verify_readback(
+    verify_request: dict,
+    *,
+    write_step_id: str,
+    assertion: dict,
+    inputs: dict,
+    auth_headers: dict,
+    base_url: str = "",
+    storage_state: dict | None = None,
+) -> tuple[dict, dict, str, str, str]:
+    """Run and record the read side of a write verification."""
+    verify = await replay_request(
+        verify_request,
+        auth_headers=auth_headers,
+        base_url=base_url,
+        storage_state=storage_state,
+    )
+    if verify.get("verification_status") != "passed":
+        status = str(verify.get("verification_status") or "inconclusive")
+        failure_reason = str(verify.get("failure_reason") or "verify request failed")
+        check = {"passed": False, "reason": failure_reason}
+    else:
+        try:
+            check = evaluate_assertion(verify.get("response"), assertion, inputs)
+        except ValueError as exc:
+            check = {"passed": False, "reason": str(exc)}
+        status = "passed" if check["passed"] else "failed"
+        failure_reason = "" if check["passed"] else str(
+            check.get("reason") or "read-back assertion failed"
+        )
+    verification_id = record_verification(
+        kind="verify_read",
+        subject={
+            "write_step_id": str(write_step_id),
+            "verify_request_id": str(verify_request.get("request_id") or ""),
+            "assertion": deepcopy(assertion),
+        },
+        status=status,
+        evidence={
+            "passed": bool(verify.get("ok") and check["passed"]),
+            "verify": verify,
+            "assertion": check,
+        },
+        failure_reason=failure_reason,
+    )
+    return verify, check, verification_id, status, failure_reason
+
+
+async def verify_existing_write(
+    verify_request: dict,
+    *,
+    previous_write: dict,
+    write_step_id: str,
+    write_request_id: str,
+    inputs: dict,
+    assertion: dict,
+    auth_headers: dict,
+    base_url: str = "",
+    storage_state: dict | None = None,
+) -> dict:
+    """Retry only the read-back for a write that already succeeded."""
+    _validate_assertion_contract(assertion)
+    verify, check, verify_read_id, status, failure_reason = await _verify_readback(
+        verify_request,
+        write_step_id=write_step_id,
+        assertion=assertion,
+        inputs=inputs,
+        auth_headers=auth_headers,
+        base_url=base_url,
+        storage_state=storage_state,
+    )
+    subject = {
+        "write_step_id": str(write_step_id),
+        "write_request_id": str(write_request_id),
+        "verify_request_id": str(verify_request.get("request_id") or ""),
+        "cleanup_request_id": "",
+        "assertion": deepcopy(assertion),
+    }
+    verification_id = record_verification(
+        kind="write_execute",
+        subject=subject,
+        status=status,
+        evidence={
+            "passed": status == "passed",
+            "write": deepcopy(previous_write),
+            "verify": verify,
+            "assertion": check,
+            "cleanup": None,
+            "write_reused": True,
+        },
+        failure_reason=failure_reason,
+    )
+    return {
+        "ok": status == "passed",
+        "write": deepcopy(previous_write),
+        "verify": verify,
+        "assertion": check,
+        "cleanup": None,
+        "verification_id": verification_id,
+        "verification_ids": [verify["verification_id"], verify_read_id, verification_id],
         "verify_verification_id": verify_read_id,
     }
