@@ -7216,11 +7216,12 @@ def to_flow_spec(
         and _request_role_key(request) not in post_write_read_keys
         and (
             _request_role_key(request) in explicitly_approved_business_keys
-            # Any causally anchored visible command is an independent public
-            # operation candidate.  Restricting this to search-like labels
-            # silently discarded edit/detail/progress reads when applications
-            # reused the same GET endpoint for several buttons.
-            or _request_has_command_anchor(request)
+            # A visible click alone is not enough to publish a read as an
+            # independent capability: opening a create/edit form commonly
+            # loads workflow definitions, approval nodes and other support
+            # data.  Query-like commands remain public below; support reads
+            # are materialized only when the dependency closure proves that
+            # a selected write consumes them.
             or _has_query_action_evidence(
                 request.get("trigger_op"),
                 " ".join(filter(None, (
