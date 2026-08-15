@@ -6391,6 +6391,11 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 public.editable = True
                 public.exposed_to_user = True
                 public.need_human_confirm = False
+                # response_key_map exposes a stable label-to-value object.
+                # Keep the canonical sample in that public form as well; the
+                # executor alone translates labels to the latest response keys.
+                if isinstance(public.value, dict):
+                    target.sample_inputs[input_field] = copy.deepcopy(public.value)
             continue
         if link_kind == "structure":
             # A structure link controls request keys only. It is not a value
@@ -8469,6 +8474,8 @@ def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str,
             str(param.key or param.path): param.value
             for param in (step.params or [])
             if param.value not in (None, "")
+            and param.source_kind != "dynamic_structure"
+            and str((param.source or {}).get("kind") or "") != "dynamic_structure_leaf"
         }
     return changes
 
@@ -15003,7 +15010,12 @@ def _clean_path_prefix(path: str, prefix: str) -> str:
 def _step_samples(step: FlowStep) -> dict:
     samples = dict(step.sample_inputs or {})
     for p in step.params:
-        if p.key and p.value not in (None, ""):
+        if (
+            p.key
+            and p.value not in (None, "")
+            and p.source_kind != "dynamic_structure"
+            and str((p.source or {}).get("kind") or "") != "dynamic_structure_leaf"
+        ):
             samples[p.key] = p.value
     return samples
 

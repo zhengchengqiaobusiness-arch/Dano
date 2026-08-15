@@ -1816,6 +1816,17 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     "actor": "agent",
                     "reason": "上游返回稳定业务标签和运行期键，页面选择值按标签映射后组装动态容器",
                 })
+                # The public contract and the canonical sample must describe
+                # the same stable label map.  Keeping recorded Activity_* keys
+                # in sample_inputs makes dry-run validate an obsolete BPMN
+                # version even though the public parameter is already correct.
+                target_step.sample_inputs[input_field] = deepcopy(public_sample)
+                for stale_param in target_step.params:
+                    if (
+                        stale_param is not public_param
+                        and str(stale_param.path or "") in dynamic_leaf_paths
+                    ):
+                        target_step.sample_inputs.pop(str(stale_param.key or stale_param.path), None)
                 dynamic_contract = {
                     "source_collection_path": source_collection_path,
                     "source_key_path": source_key_path,

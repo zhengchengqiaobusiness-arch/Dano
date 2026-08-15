@@ -2331,7 +2331,15 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             name = param_map[path]                                  # 不递归进元素 → 不再拆 participants[0].userId…
             params.append(name)
             types[name] = "list-enum" if isinstance(node, list) else "object"
-            samples[name] = node                                   # 默认值=录制时整份结构(agent 没传则用录制选中项)
+            # A later semantic compiler may replace a recorded, versioned
+            # object (for example dynamic workflow node IDs) with a stable
+            # caller contract.  Honour that canonical typed sample instead of
+            # silently restoring the raw recorded object here.
+            samples[name] = (
+                copy.deepcopy(typed[name])
+                if typed and name in typed and typed[name] not in (None, "")
+                else node
+            )
             return "{{" + name + "}}"
         if isinstance(node, dict):
             return {k: walk(v, f"{path}.{k}" if path else k) for k, v in node.items()}

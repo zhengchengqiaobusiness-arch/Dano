@@ -1675,6 +1675,10 @@ async def test_response_key_map_exposes_stable_label_map_and_uses_latest_node_id
     api_request, errors = flow_spec_to_api_request(updated)
     assert errors == []
     assert api_request is not None
+    assert api_request["steps"][1]["sample_inputs"]["approvers"] == {
+        "领导审批": [160, 161],
+        "HR审批": [159],
+    }
     api_request["steps"][0]["response_json"] = {
         "data": {"activityNodes": [
             {"id": "Event_runtime_start", "name": "发起人"},
