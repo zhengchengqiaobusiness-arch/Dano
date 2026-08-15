@@ -123,6 +123,39 @@ async def test_default_off_machine_verification_exports_live_skill_without_final
 
 
 @pytest.mark.asyncio
+async def test_default_off_does_not_publish_an_empty_live_capability_contract() -> None:
+    published = False
+
+    async def materialize(_use_live, _context):  # noqa: ANN001
+        return {"steps": [{"step_id": "submit"}], "capabilities": []}
+
+    async def forbidden(*_args):  # noqa: ANN002
+        raise AssertionError("empty direct export must not run another pipeline stage")
+
+    async def publish(*_args):  # noqa: ANN002
+        nonlocal published
+        published = True
+        return {"capability_count": 0}
+
+    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
+        materialize_recording=materialize,
+        plan_capabilities=forbidden,
+        verify=forbidden,
+        repair=forbidden,
+        publish=publish,
+    ))
+
+    outcome = await SelfHealingPipeline(runtime).run(
+        PipelineSeed(kind="recording", use_live_notebook=True),
+        _context(),
+    )
+
+    assert outcome.status == WorkflowStatus.FAILED
+    assert "实时分析未生成能力" in outcome.error
+    assert published is False
+
+
+@pytest.mark.asyncio
 async def test_republish_uses_edited_draft_without_live_notebook() -> None:
     calls: list[tuple[str, bool]] = []
 

@@ -273,6 +273,12 @@ class SelfHealingPipeline:
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
         if not seed.machine_verification:
+            if not list(draft.get("capabilities") or []):
+                return PipelineOutcome(
+                    status=WorkflowStatus.FAILED,
+                    draft=draft,
+                    error="实时分析未生成能力，已停止发布并保留完整录制草稿",
+                )
             await context.progress(
                 WorkflowStep.PUBLISHING,
                 "机器验证已关闭，正在直接导出当前 Skill",

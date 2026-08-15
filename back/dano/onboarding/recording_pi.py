@@ -670,6 +670,7 @@ class RecordingPiSession:
         base_flow_version: int,
     ) -> dict[str, Any]:
         from dano.execution.page.flow_spec import (
+            _public_capability_anchor_step_ids,
             apply_recording_agent_submission,
             recording_agent_validation,
         )
@@ -691,6 +692,27 @@ class RecordingPiSession:
             if int(base_flow_version) != actual_version:
                 raise RecordingPiError(
                     f"录制版本冲突: base={base_flow_version}, current={actual_version}; 请重新读取状态"
+                )
+            semantic_plan = (
+                submission.get("semantic_plan")
+                if isinstance(submission.get("semantic_plan"), dict)
+                else submission.get("plan") if isinstance(submission.get("plan"), dict)
+                else {}
+            )
+            submitted_capabilities = (
+                semantic_plan.get("capabilities")
+                if isinstance(semantic_plan.get("capabilities"), list)
+                else []
+            )
+            if (
+                mode == "plan"
+                and self._live_recorder is not None
+                and _public_capability_anchor_step_ids(current)
+                and not submitted_capabilities
+            ):
+                raise RecordingPiError(
+                    "semantic_plan.capabilities 必须覆盖当前已识别的全部业务能力；"
+                    "实时分析不能只提交字段操作"
                 )
             updated = await asyncio.to_thread(
                 asyncio.run,
@@ -715,17 +737,6 @@ class RecordingPiSession:
             # Repairs remain strict because their sole purpose is to resolve
             # those outstanding findings.
             submission_complete = bool(validation.get("submission_complete", True))
-            semantic_plan = (
-                submission.get("semantic_plan")
-                if isinstance(submission.get("semantic_plan"), dict)
-                else submission.get("plan") if isinstance(submission.get("plan"), dict)
-                else {}
-            )
-            submitted_capabilities = (
-                semantic_plan.get("capabilities")
-                if isinstance(semantic_plan.get("capabilities"), list)
-                else []
-            )
             if mode == "plan" and (
                 submitted_capabilities or validation.get("capability_plan_complete")
             ):

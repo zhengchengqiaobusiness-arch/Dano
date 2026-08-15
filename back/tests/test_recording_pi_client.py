@@ -626,6 +626,50 @@ async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_change
 
 
 @pytest.mark.asyncio
+async def test_live_plan_rejects_ops_only_submission_when_business_anchors_exist(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/submit",
+            semantic_role="business_write",
+            source_meta={"role": "business_write"},
+        )],
+        meta={"current_version": 4},
+    )
+    applied = False
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        nonlocal applied
+        applied = True
+        return before.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+    )
+    client.bind_flow_spec(before)
+    client.bind_live_recording(SimpleNamespace(captured_all_requests=lambda: []))
+
+    with pytest.raises(recording_pi.RecordingPiError, match="semantic_plan.capabilities"):
+        await client.apply_submission(
+            {"ops": [{"op": "set_goal", "intent": "提交记录"}]},
+            mode="plan",
+            base_flow_version=4,
+        )
+
+    assert applied is False
+
+
+@pytest.mark.asyncio
 async def test_partially_rejected_plan_is_checkpointed_but_not_marked_complete(
     monkeypatch,
     tmp_path,
