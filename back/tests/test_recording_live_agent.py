@@ -1870,6 +1870,126 @@ def test_finalize_merge_replays_early_request_id_ops_on_canonical_steps():
     assert merged.links[0].target_step_id == "submit"
 
 
+def test_finalize_merge_materializes_capabilities_from_live_goal_and_request_roles():
+    live = FlowSpec(
+        flow_id="live-boundaries",
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/records/page"),
+            RequestFact(request_id="req-submit", method="POST", path="/records/submit"),
+            RequestFact(request_id="req-withdraw", method="DELETE", path="/records/withdraw"),
+            RequestFact(request_id="req-delete", method="DELETE", path="/records/delete"),
+        ]),
+    )
+    live = apply_flow_edits(live, [
+        {
+            "op": "set_goal",
+            "goal": {
+                "intent": "查询、提交、撤回和删除记录",
+                "capabilities": [
+                    "query_records", "submit_record", "withdraw_record", "delete_record",
+                ],
+                "required_inputs": [],
+                "success_criteria": ["能够查询、提交、撤回和删除"],
+                "evidence": [{"source": "recording"}],
+            },
+        },
+        {
+            "op": "set_request_role",
+            "request_id": "req-query",
+            "role": "business_read",
+            "reason": "页面查询动作返回业务记录",
+            "evidence_refs": ["request:req-query"],
+        },
+        {
+            "op": "set_request_role",
+            "request_id": "req-submit",
+            "role": "business_write",
+            "reason": "页面提交动作写入业务记录",
+            "evidence_refs": ["request:req-submit"],
+        },
+        {
+            "op": "set_request_role",
+            "request_id": "req-withdraw",
+            "role": "business_write",
+            "reason": "页面撤回动作修改业务记录",
+            "evidence_refs": ["request:req-withdraw"],
+        },
+        {
+            "op": "set_request_role",
+            "request_id": "req-delete",
+            "role": "business_write",
+            "reason": "页面删除动作移除业务记录",
+            "evidence_refs": ["request:req-delete"],
+        },
+    ])
+    finalized = FlowSpec(
+        flow_id="materialized-boundaries",
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step",
+                method="GET",
+                path="/records/page",
+                source_meta={"request_id": "req-query", "request_index": 1},
+                response_json={"data": {"list": []}},
+            ),
+            FlowStep(
+                step_id="submit-step",
+                method="POST",
+                path="/records/submit",
+                source_meta={"request_id": "req-submit", "request_index": 2},
+            ),
+            FlowStep(
+                step_id="withdraw-step",
+                method="DELETE",
+                path="/records/withdraw",
+                source_meta={"request_id": "req-withdraw", "request_index": 3},
+            ),
+            FlowStep(
+                step_id="delete-step",
+                method="DELETE",
+                path="/records/delete",
+                source_meta={"request_id": "req-delete", "request_index": 4},
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(
+                request_id="req-query", request_index=1,
+                method="GET", path="/records/page",
+                response_json={"data": {"list": []}},
+            ),
+            RequestFact(
+                request_id="req-submit", request_index=2,
+                method="POST", path="/records/submit",
+            ),
+            RequestFact(
+                request_id="req-withdraw", request_index=3,
+                method="DELETE", path="/records/withdraw",
+            ),
+            RequestFact(
+                request_id="req-delete", request_index=4,
+                method="DELETE", path="/records/delete",
+            ),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.name for capability in merged.capabilities] == [
+        "query_records", "submit_record", "withdraw_record", "delete_record",
+    ]
+    assert [capability.kind for capability in merged.capabilities] == [
+        "query_status", "submit", "withdraw", "delete",
+    ]
+    assert [
+        next(
+            ref.step_id for ref in capability.request_refs
+            if ref.usage == "execute"
+        )
+        for capability in merged.capabilities
+    ] == ["query-step", "submit-step", "withdraw-step", "delete-step"]
+
+
 def test_live_notebook_carries_only_replayable_hypotheses_into_finalized_facts():
     shadow = _flow()
     shadow.meta = {

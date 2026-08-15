@@ -626,7 +626,7 @@ async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_change
 
 
 @pytest.mark.asyncio
-async def test_live_plan_rejects_ops_only_submission_when_business_anchors_exist(
+async def test_live_plan_accepts_ops_only_submission_when_business_anchors_exist(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -659,14 +659,13 @@ async def test_live_plan_rejects_ops_only_submission_when_business_anchors_exist
     client.bind_flow_spec(before)
     client.bind_live_recording(SimpleNamespace(captured_all_requests=lambda: []))
 
-    with pytest.raises(recording_pi.RecordingPiError, match="semantic_plan.capabilities"):
-        await client.apply_submission(
-            {"ops": [{"op": "set_goal", "intent": "提交记录"}]},
-            mode="plan",
-            base_flow_version=4,
-        )
+    await client.apply_submission(
+        {"ops": [{"op": "set_goal", "intent": "提交记录"}]},
+        mode="plan",
+        base_flow_version=4,
+    )
 
-    assert applied is False
+    assert applied is True
 
 
 @pytest.mark.asyncio

@@ -2252,6 +2252,100 @@ def _retarget_unique_equivalent_field_operation(spec, operation: dict) -> dict: 
     return updated
 
 
+def _live_capability_kind_hint(name: str) -> str:
+    """Read an operation hint from a Pi-authored public capability name."""
+    value = str(name or "").casefold()
+    hints = (
+        ("withdraw", ("withdraw", "revoke", "cancel", "撤回", "撤销")),
+        ("delete", ("delete", "remove", "删除")),
+        ("reject", ("reject", "驳回")),
+        ("approve", ("approve", "approval", "同意", "审批")),
+        ("export", ("export", "download", "导出", "下载")),
+        ("inspect", ("inspect", "detail", "view", "详情", "查看")),
+        ("preview", ("preview", "预览")),
+        ("query_status", ("query", "search", "list", "status", "查询", "搜索", "列表")),
+        ("update", ("update", "edit", "modify", "更新", "编辑")),
+        ("create", ("create", "insert", "add", "新增", "创建")),
+        ("save_draft", ("draft", "暂存", "草稿")),
+        ("submit", ("submit", "commit", "apply", "提交", "申请")),
+    )
+    return next((kind for kind, tokens in hints if any(token in value for token in tokens)), "")
+
+
+def _unique_live_capability_name(value: str, kind: str, used: set[str]) -> str:
+    base = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_").lower()
+    base = base[:64] or kind
+    name = base
+    suffix = 2
+    while name in used:
+        ending = f"_{suffix}"
+        name = f"{base[:64 - len(ending)]}{ending}"
+        suffix += 1
+    used.add(name)
+    return name
+
+
+def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
+    """Materialize public abilities from the base Flow and accepted Pi boundaries."""
+    from dano.execution.page.flow_spec import (
+        _capability_operation_kind,
+        _public_capability_anchor_step_ids,
+    )
+
+    anchor_ids = _public_capability_anchor_step_ids(spec)
+    if not anchor_ids:
+        return {}
+    steps = {step.step_id: step for step in spec.steps}
+    goal = spec.goal if isinstance(spec.goal, dict) else {}
+    proposed_names = [
+        str(value).strip()
+        for value in (goal.get("capabilities") or [])
+        if str(value).strip()
+    ]
+    remaining = list(enumerate(proposed_names))
+    used_names: set[str] = set()
+    capabilities: list[dict] = []
+    action_labels = {
+        "query_status": "查询", "inspect": "查看", "preview": "预览",
+        "export": "导出", "create": "创建", "update": "更新",
+        "save_draft": "暂存", "submit": "提交", "approve": "审批",
+        "reject": "驳回", "withdraw": "撤回", "delete": "删除",
+    }
+    business = str(spec.title or "业务").strip() or "业务"
+    for anchor_id in anchor_ids:
+        step = steps[anchor_id]
+        kind = _capability_operation_kind(step)
+        match_position = next((
+            position
+            for position, (_index, name) in enumerate(remaining)
+            if _live_capability_kind_hint(name) == kind
+        ), None)
+        if match_position is None and remaining:
+            match_position = 0
+        proposed_name = (
+            remaining.pop(match_position)[1]
+            if match_position is not None else ""
+        )
+        name = _unique_live_capability_name(proposed_name, kind, used_names)
+        title = f"{action_labels.get(kind, '执行')}{business}"
+        capabilities.append({
+            "name": name,
+            "title": title,
+            "intent": title,
+            "kind": kind,
+            "anchor_step_id": anchor_id,
+            "request_refs": [{"step_id": anchor_id, "usage": "execute"}],
+        })
+    return {
+        "business_understanding": {
+            "business_name": business,
+            "summary": str(goal.get("intent") or "").strip(),
+        },
+        "capabilities": capabilities,
+        "unresolved_items": [],
+    }
+
+
 def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     """Replay accepted live agent ops onto the canonical finalized FlowSpec."""
     merged = finalized_spec.model_copy(deep=True)
@@ -2289,6 +2383,18 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         live_capability_model.get("semantic_plan")
         if isinstance(live_capability_model, dict) else None
     )
+    if not (
+        isinstance(live_semantic_plan, dict)
+        and live_semantic_plan.get("capabilities")
+    ):
+        live_semantic_plan = _semantic_plan_from_live_boundaries(merged)
+        if live_semantic_plan.get("capabilities"):
+            live_capability_model = {
+                **(live_capability_model if isinstance(live_capability_model, dict) else {}),
+                "status": "ready",
+                "source": "live_goal_request_roles",
+                "semantic_plan": live_semantic_plan,
+            }
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         materialized_plan = deepcopy(live_semantic_plan)
         step_ids = {step.step_id for step in merged.steps}

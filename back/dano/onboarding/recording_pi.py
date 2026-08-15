@@ -540,10 +540,9 @@ class RecordingPiSession:
             "set_param_type、set_param_required、set_param_enum、rename_field、propose_dependency、add_pitfall 等必要增量；"
             "步骤尚未物化时字段操作可把 request_id 填入 step_id；依赖只能先提案，禁止标 verified。"
             "必须调用 submit_recording_plan，并把上述操作放入 plan.ops；实时阶段不需要读取验证报告。"
-            "同时必须在 semantic_plan.capabilities 提交基于截至当前全部事实的完整能力边界，"
-            "每个已识别的 business_read/business_write 执行锚点只能属于一个能力；"
-            "该数组是全量替换而不是本批增量，后续实时轮次必须保留仍然成立的已有能力。"
-            "能力成员要覆盖执行锚点及其 response_binding/动态结构上游，不能只提交最后一个写接口。"
+            "在 set_goal 的 goal.capabilities 中维护截至当前识别出的公开能力名称；"
+            "实时阶段无需重复提交 semantic_plan.capabilities，停止录制后会依据最终物化的"
+            "business_read/business_write 步骤、依赖和这些名称生成能力。"
             "请求角色只允许 auth/support/option/context/business_read/business_write。"
             "参数来源七分类 caller_input/constant/session/context/response_binding/computed/generated："
             "caller_input 必须有 fill/select 等可编辑控件证据；录制值固定的业务常量归 constant；"
@@ -670,7 +669,6 @@ class RecordingPiSession:
         base_flow_version: int,
     ) -> dict[str, Any]:
         from dano.execution.page.flow_spec import (
-            _public_capability_anchor_step_ids,
             apply_recording_agent_submission,
             recording_agent_validation,
         )
@@ -704,16 +702,6 @@ class RecordingPiSession:
                 if isinstance(semantic_plan.get("capabilities"), list)
                 else []
             )
-            if (
-                mode == "plan"
-                and self._live_recorder is not None
-                and _public_capability_anchor_step_ids(current)
-                and not submitted_capabilities
-            ):
-                raise RecordingPiError(
-                    "semantic_plan.capabilities 必须覆盖当前已识别的全部业务能力；"
-                    "实时分析不能只提交字段操作"
-                )
             updated = await asyncio.to_thread(
                 asyncio.run,
                 apply_recording_agent_submission(

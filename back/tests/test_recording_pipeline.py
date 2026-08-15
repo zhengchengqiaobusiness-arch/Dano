@@ -123,14 +123,14 @@ async def test_default_off_machine_verification_exports_live_skill_without_final
 
 
 @pytest.mark.asyncio
-async def test_default_off_does_not_publish_an_empty_live_capability_contract() -> None:
+async def test_default_off_does_not_add_an_empty_capability_gate() -> None:
     published = False
 
     async def materialize(_use_live, _context):  # noqa: ANN001
         return {"steps": [{"step_id": "submit"}], "capabilities": []}
 
     async def forbidden(*_args):  # noqa: ANN002
-        raise AssertionError("empty direct export must not run another pipeline stage")
+        raise AssertionError("direct export must not run another pipeline stage")
 
     async def publish(*_args):  # noqa: ANN002
         nonlocal published
@@ -150,9 +150,9 @@ async def test_default_off_does_not_publish_an_empty_live_capability_contract() 
         _context(),
     )
 
-    assert outcome.status == WorkflowStatus.FAILED
-    assert "实时分析未生成能力" in outcome.error
-    assert published is False
+    assert outcome.status == WorkflowStatus.PUBLISHED
+    assert outcome.release == {"capability_count": 0}
+    assert published is True
 
 
 @pytest.mark.asyncio
