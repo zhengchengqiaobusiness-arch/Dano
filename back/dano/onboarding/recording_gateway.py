@@ -327,6 +327,14 @@ class RecordingGatewaySession:
             # real-time batch.  Direct export is allowed to use those live
             # conclusions, but must never start a separate final Pi plan.
             await asyncio.gather(self._live_task, return_exceptions=True)
+        # The normal live queue is coalesced while Pi is busy.  A recording can
+        # therefore stop with a short final tail that never reached the batch
+        # threshold.  Drain that same queue once more; do not start a separate
+        # final planning path.
+        if len(self.capture.captured_all_requests()) > self._last_live_count:
+            self._live_pending_reason = self._live_pending_reason or "final_request_tail"
+            self._live_task = asyncio.create_task(self._drain_live())
+            await asyncio.gather(self._live_task, return_exceptions=True)
         self._capture_frozen = True
         self._capture_live_notebook()
         if self._pi is not None:
@@ -464,8 +472,16 @@ class RecordingGatewaySession:
         try:
             from dano.execution.page.request_capture import classify_request_role
 
-            if classify_request_role(request).get("semanticRole") == "workflow_submit":
-                self._schedule_live("submit_candidate")
+            resource_type = str(request.get("resource_type") or "").strip().lower()
+            if resource_type in {
+                "document", "script", "stylesheet", "image", "font", "media", "manifest",
+            }:
+                return
+            role = str(classify_request_role(request).get("semanticRole") or "")
+            if role:
+                self._schedule_live(
+                    "submit_candidate" if role == "workflow_submit" else "business_request"
+                )
         except Exception:  # noqa: BLE001 - capture must not fail on advisory analysis
             return
 

@@ -277,11 +277,42 @@ def test_write_request_notification_does_not_duplicate_authoritative_ledger():
         "POST", "https://x/api/submit", pd='{"a":1}',
         headers={"X": "1"}, content_type="application/json",
     )
-    s._notify_write_request("POST", "https://x/api/submit", '{"a":1}', "application/json")
+    s._notify_request("POST", "https://x/api/submit", '{"a":1}', "application/json")
 
     assert len(s.captured_all_requests()) == 1
     assert notifications == [{
         "method": "POST", "url": "https://x/api/submit", "has_body": True, "json": True,
+        "resource_type": "", "request_id": "", "request_index": None,
+    }]
+
+
+def test_read_api_request_notifies_live_analysis_without_copying_the_ledger():
+    notifications: list[dict] = []
+    session = RecordSession(on_request=notifications.append)
+
+    class Request:
+        method = "GET"
+        url = "https://x/api/records?page=1"
+        post_data = None
+        headers = {"accept": "application/json"}
+        resource_type = "xhr"
+        frame = None
+
+        @staticmethod
+        def is_navigation_request() -> bool:
+            return False
+
+    session._on_request(Request())
+
+    assert len(session.captured_all_requests()) == 1
+    assert notifications == [{
+        "method": "GET",
+        "url": "https://x/api/records?page=1",
+        "has_body": False,
+        "json": False,
+        "resource_type": "xhr",
+        "request_id": "req_0",
+        "request_index": 0,
     }]
 
 

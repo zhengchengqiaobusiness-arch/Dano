@@ -155,6 +155,9 @@ async def test_freeze_waits_for_current_live_analysis_and_keeps_its_notebook() -
         def pause_recording(self) -> None:
             self.paused = True
 
+        def captured_all_requests(self) -> list[dict]:
+            return []
+
     class Pi:
         def __init__(self) -> None:
             self.flow_spec = FlowSpec()
@@ -261,6 +264,95 @@ async def test_freeze_drains_a_queued_live_batch_before_direct_export() -> None:
     assert session._live_notebook.insights == [
         {"kind": "role", "text": "已识别业务请求"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_freeze_drains_the_final_unanalysed_request_tail() -> None:
+    class Capture:
+        async def flush_recording(self) -> None:
+            return None
+
+        def pause_recording(self) -> None:
+            return None
+
+        def captured_all_requests(self) -> list[dict]:
+            return [
+                {"request_id": "req-1"},
+                {"request_id": "req-2"},
+                {"request_id": "req-3"},
+            ]
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+            self.since: list[int] = []
+
+        async def notify_live_batch(self, delta: dict) -> None:
+            self.since.append(int(delta["since_seq"]))
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "e" * 32,
+            action="action_tail",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    pi = Pi()
+    session.capture = Capture()  # type: ignore[assignment]
+    session._pi = pi
+    session._last_live_count = 2
+
+    await session._freeze_capture()
+
+    assert pi.since == [2]
+    assert session._last_live_count == 3
+
+
+def test_non_static_read_request_schedules_live_analysis() -> None:
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "f" * 32,
+            action="action_read",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    scheduled: list[str] = []
+    session._schedule_live = scheduled.append  # type: ignore[method-assign]
+
+    session._on_request({
+        "method": "GET",
+        "url": "https://example.invalid/api/records",
+        "resource_type": "xhr",
+    })
+    session._on_request({
+        "method": "GET",
+        "url": "https://example.invalid/assets/app.js",
+        "resource_type": "script",
+    })
+
+    assert scheduled == ["business_request"]
 
 
 @pytest.mark.asyncio

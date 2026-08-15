@@ -1473,13 +1473,30 @@ class RecordSession:
         rec.update({k: v for k, v in (payload or {}).items() if v is not None})
         self.diagnostics.append(rec)
 
-    def _notify_write_request(self, m: str, url: str, pd: str | None, ct: str) -> None:
-        """Notify the UI after the authoritative all_requests row is recorded."""
+    def _notify_request(
+        self,
+        m: str,
+        url: str,
+        pd: str | None,
+        ct: str,
+        *,
+        resource_type: str = "",
+        request_id: str = "",
+        request_index: int | None = None,
+    ) -> None:
+        """Notify live analysis after the authoritative ledger row is recorded."""
         if self._on_request_cb is not None:
             is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
             try:
-                self._on_request_cb({"method": m, "url": url, "has_body": bool(pd),
-                                     "json": bool(pd) and is_json})
+                self._on_request_cb({
+                    "method": m,
+                    "url": url,
+                    "has_body": bool(pd),
+                    "json": bool(pd) and is_json,
+                    "resource_type": resource_type,
+                    "request_id": request_id,
+                    "request_index": request_index,
+                })
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1512,8 +1529,15 @@ class RecordSession:
                 **self._request_scope(request),
             )
             self._request_fact_index[id(request)] = request_index
-            if m in ("POST", "PUT", "PATCH", "DELETE"):
-                self._notify_write_request(m, url, pd, hd.get("content-type", ""))
+            self._notify_request(
+                m,
+                url,
+                pd,
+                hd.get("content-type", ""),
+                resource_type=resource_type,
+                request_id=f"req_{request_index}",
+                request_index=request_index,
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -1572,6 +1596,15 @@ class RecordSession:
                 **self._request_scope(request),
             )
             self._request_fact_index[id(request)] = request_index
+            self._notify_request(
+                m,
+                url,
+                pd,
+                ct,
+                resource_type=resource_type,
+                request_id=f"req_{request_index}",
+                request_index=request_index,
+            )
             # H7 修复:multipart/form-data 上传(文件/附件)必须真发,否则文件丢失但 UI 显示成功
             # multipart body 不在 request.post_data,而在 post_data_buffer,pd 必为 None,自然走 continue_,但要
             # 在此显式再判一次 content_type 兜底(部分框架 multipart 也会塞进 post_data)
@@ -1581,7 +1614,6 @@ class RecordSession:
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
             if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url, pd):
-                self._notify_write_request(m, url, pd, ct)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
                 return
