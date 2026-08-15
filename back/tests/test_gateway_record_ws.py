@@ -200,6 +200,62 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
     gateway._recording_session_registry = None
 
 
+@pytest.mark.asyncio
+async def test_closed_websocket_receive_race_is_treated_as_disconnect(monkeypatch) -> None:
+    import dano.onboarding.recording_gateway as recording_gateway
+
+    class FakeSession:
+        def __init__(self, *, config, send, pi_factory, publisher) -> None:  # noqa: ANN001
+            self.config = config
+            self.capture = None
+            self.workflow = None
+            self._pi = None
+
+        async def start(self) -> None:
+            return None
+
+        async def attach(self, _send) -> None:  # noqa: ANN001
+            return None
+
+        def detach(self, _send) -> None:  # noqa: ANN001
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class ClosedSocket(_FakeWebSocket):
+        async def receive_json(self) -> dict[str, Any]:
+            if not self.accepted:
+                raise AssertionError("socket was not accepted")
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise RuntimeError(
+                    'WebSocket is not connected. Need to call "accept" first.'
+                ) from exc
+
+    failures: list[str] = []
+    monkeypatch.setattr(recording_gateway, "RecordingGatewaySession", FakeSession)
+    monkeypatch.setattr(
+        gateway.log,
+        "exception",
+        lambda _event, **kwargs: failures.append(str(kwargs.get("error") or "")),
+    )
+    socket = ClosedSocket([{
+        "type": "start",
+        "start_url": "https://example.test/page",
+        "tenant": "tenant-a",
+        "goal_text": "完成目标操作",
+    }])
+
+    gateway._recording_session_registry = None
+    await gateway.record_ws(socket)
+
+    assert failures == []
+    await gateway._recording_session_registry.close()
+    gateway._recording_session_registry = None
+
+
 def test_gateway_registers_one_recording_route_and_no_legacy_branches() -> None:
     source = inspect.getsource(gateway.record_ws)
     app_source = inspect.getsource(gateway)

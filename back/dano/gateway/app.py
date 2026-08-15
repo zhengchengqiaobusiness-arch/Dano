@@ -943,7 +943,12 @@ async def record_ws(ws: WebSocket) -> None:
         )
         holder["session"] = session
         while True:
-            message = await ws.receive_json()
+            try:
+                message = await ws.receive_json()
+            except RuntimeError as exc:
+                if str(exc) != "WebSocket is not connected. Need to call \"accept\" first.":
+                    raise
+                raise WebSocketDisconnect(code=1006) from exc
             try:
                 await session.dispatch(message)
             except ValueError as exc:
