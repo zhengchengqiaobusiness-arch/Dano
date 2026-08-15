@@ -152,6 +152,7 @@ def test_client_projection_and_patch_use_only_public_source_taxonomy() -> None:
     spec = _authoritative_spec()
     client = flow_spec_to_client(spec)
     assert client["steps"][0]["params"][0]["source_kind"] == "caller_input"
+    assert "category" not in client["steps"][0]["params"][0]
 
     updated = apply_client_flow_patch(
         spec,
@@ -167,6 +168,27 @@ def test_client_projection_and_patch_use_only_public_source_taxonomy() -> None:
     assert updated.steps[0].params[0].source_kind == "constant"
     assert updated.steps[0].params[0].exposed_to_user is False
     assert flow_spec_to_client(updated)["steps"][0]["params"][0]["source_kind"] == "constant"
+
+    with pytest.raises(ValueError, match="derived parameter field"):
+        apply_client_flow_patch(
+            spec,
+            [{
+                "op": "update", "step_id": "submit", "param_path": "reason",
+                "field": "category", "value": "runtime_var",
+            }],
+            expected_fingerprint=flow_spec_fingerprint(spec),
+        )
+
+
+def test_frontend_removes_redundant_field_category_axis_and_has_goal_template() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "DEFAULT_RECORDING_GOAL_TEMPLATE" in source
+    assert "预期产出能力数量" in source
+    assert "expectedCapabilityCount" in source
+    assert "CATEGORY_OPTIONS" not in source
+    assert 'aria-label="字段分类"' not in source
+    assert "<span>分类</span>" not in source
 
 
 @pytest.mark.parametrize("field", [

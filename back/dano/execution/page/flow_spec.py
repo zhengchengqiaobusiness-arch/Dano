@@ -10480,7 +10480,6 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                         "path": p.path,
                         "key": p.key,
                         "type": p.type,
-                        "category": p.category,
                         "source_kind": p.source_kind,
                     }
                     for p in (st.params or [])[:80]
@@ -16875,6 +16874,10 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
             if not isinstance(param, dict):
                 continue
             param["source_kind"] = _public_source_kind(param)
+            # ``category`` is an internal compatibility value derived from
+            # source_kind.  Exposing both axes lets clients create impossible
+            # combinations, so the workbench owns only the executable source.
+            param.pop("category", None)
             if isinstance(param.get("source"), dict):
                 param["source"] = {**param["source"], "kind": param["source_kind"]}
         if st.get("response_json") is not None:
@@ -20006,6 +20009,12 @@ def apply_client_flow_patch(
         op = str(edit.get("op") or "")
         if op == "update_flow" and str(edit.get("field") or "") == "meta":
             raise ValueError("server-owned flow field: meta")
+        if (
+            op == "update"
+            and edit.get("param_path")
+            and str(edit.get("field") or "") == "category"
+        ):
+            raise ValueError("derived parameter field: category")
         if op in {"add_capability", "upsert_capability"}:
             raw_capability = edit.get("capability")
             if isinstance(raw_capability, dict) and (
@@ -20112,7 +20121,6 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
                         "label": p.label,
                         "value": p.value,
                         "type": p.type,
-                        "category": p.category,
                         "source_kind": p.source_kind,
                         "exposed_to_user": p.exposed_to_user,
                         "reason": p.reason,

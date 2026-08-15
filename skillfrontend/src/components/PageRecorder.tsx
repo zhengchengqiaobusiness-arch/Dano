@@ -103,7 +103,6 @@ interface FlowParam {
   value?: unknown;
   default_value?: unknown;
   type?: string;
-  category?: string;
   source_kind?: string;
   required?: boolean;
   reason?: string;
@@ -171,12 +170,6 @@ const TYPE_OPTIONS = [
   "string", "number", "boolean", "date", "datetime", "enum", "list-enum", "object", "array",
 ].map((value) => ({ value, label: value }));
 
-const CATEGORY_OPTIONS = [
-  { value: "user_param", label: "用户参数" },
-  { value: "runtime_var", label: "运行期变量" },
-  { value: "system_const", label: "系统常量" },
-];
-
 const SOURCE_OPTIONS = [
   ["caller_input", "调用方输入"],
   ["constant", "固定值"],
@@ -186,6 +179,17 @@ const SOURCE_OPTIONS = [
   ["computed", "明确计算"],
   ["generated", "运行时生成"],
 ].map(([value, label]) => ({ value, label }));
+
+const DEFAULT_RECORDING_GOAL_TEMPLATE = `目的：将本次页面中真实完成的业务操作沉淀为可调用能力
+预期产出能力数量：1
+能力1：本次录制完成的业务操作`;
+
+function expectedCapabilityCount(value: string) {
+  const matched = value.match(/(?:预期|预计|需要)?\s*产出(?:的)?\s*能力(?:数量|数)?\s*[:：=]?\s*(\d+)/i);
+  if (!matched) return 0;
+  const count = Number(matched[1]);
+  return Number.isInteger(count) && count > 0 ? count : 0;
+}
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   idle: "等待开始",
@@ -238,11 +242,13 @@ function readSetupDraft() {
     const parsed = JSON.parse(sessionStorage.getItem("dano.recording.setup") || "{}");
     return {
       startUrl: typeof parsed.startUrl === "string" ? parsed.startUrl : "",
-      goalText: typeof parsed.goalText === "string" ? parsed.goalText : "",
+      goalText: typeof parsed.goalText === "string" && parsed.goalText.trim()
+        ? parsed.goalText
+        : DEFAULT_RECORDING_GOAL_TEMPLATE,
       machineVerification: parsed.machineVerification === true,
     };
   } catch {
-    return { startUrl: "", goalText: "", machineVerification: false };
+    return { startUrl: "", goalText: DEFAULT_RECORDING_GOAL_TEMPLATE, machineVerification: false };
   }
 }
 
@@ -628,6 +634,10 @@ export default function PageRecorder({
     }
     if (!startUrl.trim() || !goalText.trim()) {
       message.error("请填写业务页地址和录制目标");
+      return;
+    }
+    if (!expectedCapabilityCount(goalText)) {
+      message.error("录制目标需要写明预期产出能力数量");
       return;
     }
     if (wsRef.current) return;
@@ -1092,7 +1102,7 @@ export default function PageRecorder({
         key={`${step.step_id}:${param.field_id || param.path}`}
         style={{
           display: "grid",
-          gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.1fr 1.2fr 80px",
+          gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.2fr 80px",
           gap: 8,
           alignItems: "center",
           padding: "8px 0",
@@ -1119,12 +1129,6 @@ export default function PageRecorder({
           options={TYPE_OPTIONS}
           onChange={(value) => updateParam(step, param, "type", value)}
           aria-label="字段类型"
-        />
-        <Select
-          value={safeString(paramValue(step, param, "category") || "user_param")}
-          options={CATEGORY_OPTIONS}
-          onChange={(value) => updateParam(step, param, "category", value)}
-          aria-label="字段分类"
         />
         <Select
           value={safeString(paramValue(step, param, "source_kind") || "caller_input")}
@@ -1211,14 +1215,14 @@ export default function PageRecorder({
                     <div
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.1fr 1.2fr 80px",
+                        gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.2fr 80px",
                         gap: 8,
                         color: "#8c8c8c",
                         paddingBottom: 6,
                       }}
                     >
                       <span>名称</span><span>路径</span><span>默认值</span><span>类型</span>
-                      <span>分类</span><span>来源</span><span>必填性</span>
+                      <span>来源</span><span>必填性</span>
                     </div>
                     {(step.params || []).map((param) => renderParamEditor(step, param))}
                   </Card>
