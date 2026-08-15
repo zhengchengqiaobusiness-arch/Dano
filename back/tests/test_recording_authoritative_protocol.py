@@ -207,6 +207,20 @@ def test_result_stage_is_read_only_until_explicit_edit_and_folds_technical_detai
     assert "patchTimerRef" not in source
 
 
+def test_recording_page_does_not_resume_historical_session_without_start_click() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "readActiveRecording" not in source
+    assert "dano.recording.active" not in source
+
+
+def test_result_summary_contains_recording_goal_without_a_second_card() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "goalSummary" in source
+    assert '<Card size="small" style={{ marginTop: 12 }}>' not in source
+
+
 @pytest.mark.parametrize("field", [
     "headers", "body_source", "response_json", "identity", "params", "source_meta",
 ])

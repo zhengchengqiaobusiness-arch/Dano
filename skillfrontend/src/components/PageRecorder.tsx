@@ -282,19 +282,6 @@ function readSetupDraft() {
   }
 }
 
-function readActiveRecording() {
-  try {
-    const parsed = JSON.parse(sessionStorage.getItem("dano.recording.active") || "{}");
-    return {
-      action: typeof parsed.action === "string" ? parsed.action : "",
-      tenant: typeof parsed.tenant === "string" ? parsed.tenant : "",
-      subsystem: typeof parsed.subsystem === "string" ? parsed.subsystem : "",
-    };
-  } catch {
-    return { action: "", tenant: "", subsystem: "" };
-  }
-}
-
 function parseStorageState(value: string): Record<string, unknown> | undefined {
   if (!value.trim()) return undefined;
   try {
@@ -405,20 +392,6 @@ export default function PageRecorder({
       wsRef.current = null;
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
     };
-  }, []);
-
-  useEffect(() => {
-    const active = readActiveRecording();
-    if (
-      active.action
-      && active.tenant === tenant
-      && active.subsystem === subsystem
-      && startUrl.trim()
-      && goalText.trim()
-    ) {
-      actionRef.current = active.action;
-      openRecordingSocket(active.action);
-    }
   }, []);
 
   function send(payload: Record<string, unknown>) {
@@ -672,7 +645,6 @@ export default function PageRecorder({
     if (wsRef.current) return;
     const action = newActionName();
     actionRef.current = action;
-    sessionStorage.setItem("dano.recording.active", JSON.stringify({ action, tenant, subsystem }));
     setConnecting(true);
     snapshotRef.current = null;
     setSnapshot(null);
@@ -1467,6 +1439,25 @@ export default function PageRecorder({
   function renderResult() {
     const expectedCount = expectedCapabilityCount(goalText);
     const countMatches = !expectedCount || expectedCount === capabilities.length;
+    const goalSummary = (
+      <div style={{ borderTop: "1px solid rgba(0, 0, 0, 0.06)", marginTop: 8, paddingTop: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16, alignItems: "center" }}>
+          <div>
+            <Text strong>录制目标</Text>
+            <div style={{ whiteSpace: "pre-line", marginTop: 4 }}>{goalText}</div>
+          </div>
+          <Space wrap>
+            {expectedCount ? <Tag color="blue">目标 {expectedCount} 个能力</Tag> : null}
+            <Tag color={countMatches ? "success" : "warning"}>实际 {capabilities.length} 个能力</Tag>
+          </Space>
+        </div>
+        {!countMatches ? (
+          <Text type="warning">
+            能力数量与录制目标不一致：目标 {expectedCount} 个，实际 {capabilities.length} 个
+          </Text>
+        ) : null}
+      </div>
+    );
     const description = (
       <Space direction="vertical" size={4}>
         <Text>{snapshot?.progress.label || STATUS_LABELS[status]}</Text>
@@ -1488,6 +1479,7 @@ export default function PageRecorder({
             {String(snapshot.release.lifecycle_message || "资产已发布，生命周期登记待补偿")}
           </Text>
         ) : null}
+        {goalSummary}
       </Space>
     );
     return (
@@ -1498,26 +1490,6 @@ export default function PageRecorder({
           message={STATUS_LABELS[status]}
           description={description}
         />
-        <Card size="small" style={{ marginTop: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16, alignItems: "center" }}>
-            <div>
-              <Text strong>录制目标</Text>
-              <div style={{ whiteSpace: "pre-line", marginTop: 4 }}>{goalText}</div>
-            </div>
-            <Space wrap>
-              {expectedCount ? <Tag color="blue">目标 {expectedCount} 个能力</Tag> : null}
-              <Tag color={countMatches ? "success" : "warning"}>实际 {capabilities.length} 个能力</Tag>
-            </Space>
-          </div>
-          {!countMatches ? (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginTop: 10 }}
-              message={`能力数量与录制目标不一致：目标 ${expectedCount} 个，实际 ${capabilities.length} 个`}
-            />
-          ) : null}
-        </Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
             <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>
