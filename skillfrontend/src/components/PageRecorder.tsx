@@ -136,11 +136,23 @@ interface FlowCapability {
   dependencies?: Array<Record<string, unknown>>;
 }
 
+interface FlowLink {
+  source_step_id?: string;
+  source_path?: string;
+  target_step_id?: string;
+  target_path?: string;
+  confirmed?: boolean;
+  reason?: string;
+  source?: Record<string, unknown>;
+  target?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 interface FlowSpec {
   flow_id?: string;
   title?: string;
   steps?: FlowStep[];
-  links?: Array<Record<string, unknown>>;
+  links?: FlowLink[];
   capabilities?: FlowCapability[];
   request_facts?: {
     requests?: Array<Record<string, unknown>>;
@@ -179,6 +191,24 @@ const SOURCE_OPTIONS = [
   ["computed", "明确计算"],
   ["generated", "运行时生成"],
 ].map(([value, label]) => ({ value, label }));
+
+function sourceKindLabel(value?: string) {
+  return SOURCE_OPTIONS.find((option) => option.value === value)?.label || value || "来源待确认";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stepDisplayPath(step: FlowStep) {
+  return String(step.path || step.url || "").split("?")[0];
+}
+
+function paramDisplayName(param: FlowParam) {
+  return String(param.label || param.key || param.path || "未命名字段");
+}
 
 const DEFAULT_RECORDING_GOAL_TEMPLATE = `目的：将本次页面中真实完成的业务操作沉淀为可调用能力
 预期产出能力数量：1
@@ -320,6 +350,7 @@ export default function PageRecorder({
   const [pendingEdits, setPendingEdits] = useState<DraftEdit[]>([]);
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
   const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
+  const [editingResult, setEditingResult] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
@@ -339,7 +370,6 @@ export default function PageRecorder({
   const lastBackspaceRef = useRef(0);
   const pendingEditsRef = useRef<DraftEdit[]>([]);
   const patchInFlightRef = useRef<{ revision: number; edits: DraftEdit[] } | null>(null);
-  const patchTimerRef = useRef<number | null>(null);
   const republishRequestedRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -370,7 +400,6 @@ export default function PageRecorder({
       frameGenerationRef.current += 1;
       if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
       if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
-      if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       const socket = wsRef.current;
       wsRef.current = null;
@@ -391,20 +420,6 @@ export default function PageRecorder({
       openRecordingSocket(active.action);
     }
   }, []);
-
-  useEffect(() => {
-    if (!pendingEdits.length || patchInFlightRef.current || processing) return undefined;
-    if (!snapshot || !draft || !["editable", "published"].includes(status)) return undefined;
-    if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
-    patchTimerRef.current = window.setTimeout(() => {
-      patchTimerRef.current = null;
-      flushDraftEdits();
-    }, 350);
-    return () => {
-      if (patchTimerRef.current !== null) window.clearTimeout(patchTimerRef.current);
-      patchTimerRef.current = null;
-    };
-  }, [pendingEdits, processing, snapshot?.revision, status]);
 
   function send(payload: Record<string, unknown>) {
     const socket = wsRef.current;
@@ -468,7 +483,7 @@ export default function PageRecorder({
   function flushDraftEdits() {
     const current = snapshotRef.current;
     if (!current?.draft || patchInFlightRef.current) return false;
-    if (!["editable", "published"].includes(current.status)) return false;
+    if (!["editable", "published", "failed", "cancelled"].includes(current.status)) return false;
     const edits = pendingEditsRef.current;
     if (!edits.length) return false;
     pendingEditsRef.current = [];
@@ -546,6 +561,7 @@ export default function PageRecorder({
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
     if (next.status === "waiting_operator") setAssistantOpen(true);
+    if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
       finishRequestedRef.current = false;
       setFinishRequested(false);
@@ -668,6 +684,7 @@ export default function PageRecorder({
     setPendingEdits([]);
     setLocalValues({});
     setLocalCapabilityStepIds({});
+    setEditingResult(false);
     setHasFrame(false);
     setTitle("");
     renderedFrameRef.current = 0;
@@ -884,6 +901,16 @@ export default function PageRecorder({
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
     });
+  }
+
+  function cancelResultEditing() {
+    if (patchInFlightRef.current) return;
+    pendingEditsRef.current = [];
+    setPendingEdits([]);
+    setLocalValues({});
+    setLocalCapabilityStepIds({});
+    republishRequestedRef.current = false;
+    setEditingResult(false);
   }
 
   function normalizedPoint(clientX: number, clientY: number) {
@@ -1127,11 +1154,7 @@ export default function PageRecorder({
           onChange={(event) => updateParam(step, param, "label", event.target.value)}
           aria-label="字段名称"
         />
-        <Input
-          value={safeString(paramValue(step, param, "path"))}
-          onChange={(event) => updateParam(step, param, "path", event.target.value)}
-          aria-label="字段路径"
-        />
+        <Text code ellipsis={{ tooltip: safeString(param.path) }}>{safeString(param.path)}</Text>
         <Input
           value={safeString(paramValue(step, param, "value") ?? param.default_value)}
           onChange={(event) => updateParam(step, param, "value", event.target.value)}
@@ -1157,109 +1180,284 @@ export default function PageRecorder({
     );
   }
 
+  function capabilityAllSteps(capability: FlowCapability, index: number) {
+    const ids = Array.from(new Set([
+      ...capabilityExecuteStepIds(capability, index),
+      ...(capability.request_refs || []).map((ref) => String(ref.step_id || "")),
+    ].filter(Boolean)));
+    const stepById = new Map(steps.map((step) => [step.step_id, step]));
+    return ids.map((stepId) => stepById.get(stepId)).filter(Boolean) as FlowStep[];
+  }
+
+  function capabilityParams(capabilitySteps: FlowStep[]) {
+    const unique = new Map<string, { step: FlowStep; param: FlowParam }>();
+    capabilitySteps.forEach((step) => (step.params || []).forEach((param) => {
+      const key = String(param.field_id || `${step.step_id}:${param.path}`);
+      if (!unique.has(key)) unique.set(key, { step, param });
+    }));
+    return Array.from(unique.values());
+  }
+
+  function enumPreview(param: FlowParam) {
+    const values = (param.enum_options || []).slice(0, 4).map((option) => {
+      if (option && typeof option === "object") {
+        const record = option as Record<string, unknown>;
+        return String(record.label || record.name || record.value || "");
+      }
+      return String(option);
+    }).filter(Boolean);
+    return values.join("、");
+  }
+
+  function renderFieldSummary(
+    titleText: string,
+    entries: Array<{ step: FlowStep; param: FlowParam }>,
+    emptyText: string,
+  ) {
+    return (
+      <Card size="small" title={`${titleText} ${entries.length}`}>
+        {entries.length ? (
+          <List
+            size="small"
+            dataSource={entries}
+            renderItem={({ step, param }) => {
+              const fixedValue = param.value !== undefined ? param.value : param.default_value;
+              const preview = enumPreview(param);
+              return (
+                <List.Item>
+                  <div style={{ width: "100%", minWidth: 0 }}>
+                    <Space wrap size={[6, 4]}>
+                      <Text strong>{paramDisplayName(param)}</Text>
+                      <Tag>{param.type || "string"}</Tag>
+                      {param.required ? <Tag color="error">必填</Tag> : <Tag>可选</Tag>}
+                      {param.source_kind !== "caller_input" ? (
+                        <Tag color="cyan">{sourceKindLabel(param.source_kind)}</Tag>
+                      ) : null}
+                    </Space>
+                    {param.source_kind === "constant" && fixedValue !== undefined ? (
+                      <div><Text type="secondary">固定值：{safeString(fixedValue)}</Text></div>
+                    ) : null}
+                    {preview ? <div><Text type="secondary">可选值：{preview}</Text></div> : null}
+                    {param.reason ? <div><Text type="secondary">{param.reason}</Text></div> : null}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {step.name || step.step_id}
+                    </Text>
+                  </div>
+                </List.Item>
+              );
+            }}
+          />
+        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} />}
+      </Card>
+    );
+  }
+
+  function linkStepId(link: FlowLink, side: "source" | "target") {
+    const nested = asRecord(link[side]);
+    return String(link[`${side}_step_id`] || nested.step_id || "");
+  }
+
+  function linkPath(link: FlowLink, side: "source" | "target") {
+    const nested = asRecord(link[side]);
+    return String(link[`${side}_path`] || nested.path || "");
+  }
+
+  function renderCapabilityResult(capability: FlowCapability, index: number) {
+    const capabilitySteps = capabilityAllSteps(capability, index);
+    const executeIds = capabilityExecuteStepIds(capability, index);
+    const allStepIds = new Set(capabilitySteps.map((step) => step.step_id));
+    const params = capabilityParams(capabilitySteps);
+    const callerInputs = params.filter(({ param }) => (param.source_kind || "caller_input") === "caller_input");
+    const automaticInputs = params.filter(({ param }) => (param.source_kind || "caller_input") !== "caller_input");
+    const stepById = new Map(steps.map((step) => [step.step_id, step]));
+    const links: FlowLink[] = [
+      ...(draft?.links || []).filter((link) => (
+        allStepIds.has(linkStepId(link, "source")) && allStepIds.has(linkStepId(link, "target"))
+      )),
+      ...((capability.dependencies || []) as FlowLink[]),
+    ];
+    const evidence = params.filter(({ param }) => Boolean(param.reason));
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        {capability.intent ? <Text>{capability.intent}</Text> : null}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+          {renderFieldSummary("调用方提供", callerInputs, "调用方无需提供业务参数")}
+          {renderFieldSummary("系统自动处理", automaticInputs, "没有自动注入字段")}
+        </div>
+        <Card size="small" title={`执行编排 ${capabilitySteps.length}`}>
+          {capabilitySteps.length ? (
+            <List
+              size="small"
+              dataSource={capabilitySteps}
+              renderItem={(step, stepIndex) => {
+                const ref = (capability.request_refs || []).find((item) => item.step_id === step.step_id);
+                const usage = executeIds.includes(step.step_id) ? "execute" : ref?.usage;
+                return (
+                  <List.Item>
+                    <Space align="start" style={{ width: "100%" }}>
+                      <Tag color="blue">{stepIndex + 1}</Tag>
+                      <div style={{ minWidth: 0 }}>
+                        <Space wrap>
+                          <Tag color={step.method === "GET" ? "blue" : "green"}>{step.method || "HTTP"}</Tag>
+                          <Tag color={usage === "execute" ? "processing" : "purple"}>{capabilityUsageLabel(usage)}</Tag>
+                          <Text strong>{step.name || `步骤 ${stepIndex + 1}`}</Text>
+                        </Space>
+                        <div><Text code>{stepDisplayPath(step)}</Text></div>
+                      </div>
+                    </Space>
+                  </List.Item>
+                );
+              }}
+            />
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有执行接口" />}
+          {links.length ? (
+            <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 10 }}>
+              <Text strong>参数传递</Text>
+              <List
+                size="small"
+                dataSource={links}
+                renderItem={(link, linkIndex) => {
+                  const sourceId = linkStepId(link, "source");
+                  const targetId = linkStepId(link, "target");
+                  return (
+                    <List.Item key={`${sourceId}:${targetId}:${linkIndex}`}>
+                      <Space wrap>
+                        <Text>{stepById.get(sourceId)?.name || sourceId || "上游响应"}</Text>
+                        <Text code>{linkPath(link, "source") || "返回值"}</Text>
+                        <Text>→</Text>
+                        <Text>{stepById.get(targetId)?.name || targetId || "下游请求"}</Text>
+                        <Text code>{linkPath(link, "target") || "请求字段"}</Text>
+                        {link.confirmed ? <Tag color="success">已确认</Tag> : null}
+                      </Space>
+                    </List.Item>
+                  );
+                }}
+              />
+            </div>
+          ) : null}
+        </Card>
+        {(evidence.length || links.some((link) => link.reason)) ? (
+          <Collapse
+            ghost
+            items={[{
+              key: "evidence",
+              label: `识别依据 ${evidence.length + links.filter((link) => link.reason).length}`,
+              children: (
+                <List
+                  size="small"
+                  dataSource={[
+                    ...evidence.map(({ param }) => `${paramDisplayName(param)}：${param.reason}`),
+                    ...links.filter((link) => link.reason).map((link) => String(link.reason)),
+                  ]}
+                  renderItem={(item) => <List.Item><Text type="secondary">{item}</Text></List.Item>}
+                />
+              ),
+            }]}
+          />
+        ) : null}
+      </Space>
+    );
+  }
+
+  function renderCapabilityEditor(capability: FlowCapability, index: number) {
+    const stepIds = capabilityExecuteStepIds(capability, index);
+    const auxiliaryRefs = (capability.request_refs || []).filter(
+      (ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id),
+    );
+    const auxiliaryStepIds = new Set(auxiliaryRefs.map((ref) => String(ref.step_id)));
+    const stepById = new Map(steps.map((step) => [step.step_id, step]));
+    const capabilitySteps = stepIds.map((stepId) => stepById.get(stepId)).filter(Boolean) as FlowStep[];
+    const unusedSteps = steps.filter(
+      (step) => !stepIds.includes(step.step_id) && !auxiliaryStepIds.has(step.step_id),
+    );
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 10 }}>
+          <label>
+            <Text type="secondary">名称</Text>
+            <Input
+              value={capabilityValue(capability, "title")}
+              onChange={(event) => updateCapability(capability, "title", event.target.value)}
+            />
+          </label>
+          <label>
+            <Text type="secondary">用途</Text>
+            <Input
+              value={capabilityValue(capability, "intent")}
+              onChange={(event) => updateCapability(capability, "intent", event.target.value)}
+            />
+          </label>
+        </div>
+        <Space wrap>
+          <Text type="secondary">稳定标识</Text><Text code>{capability.name}</Text>
+          <Text type="secondary">接口 {stepIds.length + auxiliaryStepIds.size}</Text>
+          <Select
+            value={undefined}
+            placeholder="添加执行接口"
+            style={{ minWidth: 260 }}
+            options={unusedSteps.map((step) => ({
+              value: step.step_id,
+              label: `${step.method || "HTTP"} ${stepDisplayPath(step) || step.name || step.step_id}`,
+            }))}
+            onChange={(stepId) => addStepToCapability(index, stepId)}
+          />
+        </Space>
+        {capabilitySteps.map((step, stepIndex) => (
+          <Card
+            key={step.step_id}
+            size="small"
+            title={<Space><Tag color="blue">执行</Tag><Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag><Text>{step.name}</Text><Text code>{stepDisplayPath(step)}</Text></Space>}
+            extra={<Space>
+              <Button size="small" disabled={stepIndex === 0} onClick={() => moveStepInCapability(index, step.step_id, -1)}>上移</Button>
+              <Button size="small" disabled={stepIndex === capabilitySteps.length - 1} onClick={() => moveStepInCapability(index, step.step_id, 1)}>下移</Button>
+              <Button size="small" danger onClick={() => removeStepFromCapability(index, step.step_id)}>移除</Button>
+            </Space>}
+          >
+            <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.2fr 80px", gap: 8, color: "#8c8c8c", paddingBottom: 6 }}>
+              <span>名称</span><span>路径（只读）</span><span>默认值</span><span>类型</span><span>来源</span><span>必填性</span>
+            </div>
+            {(step.params || []).map((param) => renderParamEditor(step, param))}
+          </Card>
+        ))}
+        {auxiliaryRefs.map((ref) => {
+          const step = stepById.get(String(ref.step_id));
+          if (!step) return null;
+          return (
+            <Card key={`${ref.usage || "auxiliary"}:${step.step_id}`} size="small">
+              <Space wrap>
+                <Tag color="purple">{capabilityUsageLabel(ref.usage)}</Tag>
+                <Tag>{step.method}</Tag><Text>{step.name}</Text><Text code>{stepDisplayPath(step)}</Text>
+              </Space>
+            </Card>
+          );
+        })}
+      </Space>
+    );
+  }
+
   function renderCapabilities() {
     if (!capabilities.length) return <Empty description="没有生成能力" />;
     return (
       <Collapse
+        defaultActiveKey={capabilities.length
+          ? [String(capabilities[0].capability_id || capabilities[0].name || "0")]
+          : []}
         items={capabilities.map((capability, index) => {
-          const stepIds = capabilityExecuteStepIds(capability, index);
-          const auxiliaryRefs = (capability.request_refs || []).filter(
-            (ref) => ref.usage !== "execute" && ref.step_id && !stepIds.includes(ref.step_id),
-          );
-          const auxiliaryStepIds = new Set(auxiliaryRefs.map((ref) => String(ref.step_id)));
-          const stepById = new Map(steps.map((step) => [step.step_id, step]));
-          const capabilitySteps = stepIds.map((stepId) => stepById.get(stepId)).filter(Boolean) as FlowStep[];
-          const unusedSteps = steps.filter(
-            (step) => !stepIds.includes(step.step_id) && !auxiliaryStepIds.has(step.step_id),
-          );
           return {
             key: capability.capability_id || capability.name || String(index),
             label: (
               <Space wrap>
-                <Tag color={capability.confirmed ? "success" : "processing"}>{capability.confirmed ? "已确认" : "模型建议"}</Tag>
+                <Tag color={status === "published" || capability.confirmed ? "success" : "processing"}>
+                  {status === "published" ? "已发布" : capability.confirmed ? "已确认" : "分析结果"}
+                </Tag>
                 <Tag color="blue">{capability.kind || "capability"}</Tag>
                 <Text strong>{capability.title || capability.name || `能力 ${index + 1}`}</Text>
                 <Text code>{capability.name}</Text>
               </Space>
             ),
-            children: (
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 2fr", gap: 10 }}>
-                  <Input
-                    addonBefore="名称"
-                    value={capabilityValue(capability, "title")}
-                    onChange={(event) => updateCapability(capability, "title", event.target.value)}
-                  />
-                  <Input
-                    addonBefore="标识"
-                    value={capabilityValue(capability, "name")}
-                    onChange={(event) => updateCapability(capability, "name", event.target.value)}
-                  />
-                  <Input
-                    addonBefore="用途"
-                    value={capabilityValue(capability, "intent")}
-                    onChange={(event) => updateCapability(capability, "intent", event.target.value)}
-                  />
-                </div>
-                <Space wrap>
-                  <Text type="secondary">接口 {stepIds.length + auxiliaryStepIds.size}</Text>
-                  <Select
-                    value={undefined}
-                    placeholder="添加执行接口"
-                    style={{ minWidth: 260 }}
-                    options={unusedSteps.map((step) => ({
-                      value: step.step_id,
-                      label: `${step.method || "HTTP"} ${step.path || step.url || step.name || step.step_id}`,
-                    }))}
-                    onChange={(stepId) => addStepToCapability(index, stepId)}
-                  />
-                </Space>
-                {capabilitySteps.map((step, stepIndex) => (
-                  <Card
-                    key={step.step_id}
-                    size="small"
-                    title={<Space><Tag color="blue">{capabilityUsageLabel("execute")}</Tag><Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
-                    extra={<Space>
-                      <Button size="small" disabled={stepIndex === 0} onClick={() => moveStepInCapability(index, step.step_id, -1)}>上移</Button>
-                      <Button size="small" disabled={stepIndex === capabilitySteps.length - 1} onClick={() => moveStepInCapability(index, step.step_id, 1)}>下移</Button>
-                      <Button size="small" danger onClick={() => removeStepFromCapability(index, step.step_id)}>移除</Button>
-                    </Space>}
-                  >
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1.1fr 1.2fr 1fr 0.9fr 1.2fr 80px",
-                        gap: 8,
-                        color: "#8c8c8c",
-                        paddingBottom: 6,
-                      }}
-                    >
-                      <span>名称</span><span>路径</span><span>默认值</span><span>类型</span>
-                      <span>来源</span><span>必填性</span>
-                    </div>
-                    {(step.params || []).map((param) => renderParamEditor(step, param))}
-                  </Card>
-                ))}
-                {auxiliaryRefs.map((ref) => {
-                  const step = stepById.get(String(ref.step_id));
-                  if (!step) return null;
-                  return (
-                    <Card
-                      key={`${ref.usage || "auxiliary"}:${step.step_id}`}
-                      size="small"
-                      title={<Space><Tag color="purple">{capabilityUsageLabel(ref.usage)}</Tag><Tag>{step.method}</Tag><Text>{step.name}</Text><Text code>{step.path || step.url}</Text></Space>}
-                    >
-                      <Text type="secondary">该接口由能力编排引用，不作为主执行步骤重复执行。</Text>
-                    </Card>
-                  );
-                })}
-                {capability.dependencies?.length ? (
-                  <Card size="small" title={`依赖 ${capability.dependencies.length}`}>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(capability.dependencies, null, 2)}</pre>
-                  </Card>
-                ) : null}
-              </Space>
-            ),
+            children: editingResult
+              ? renderCapabilityEditor(capability, index)
+              : renderCapabilityResult(capability, index),
           };
         })}
       />
@@ -1267,6 +1465,8 @@ export default function PageRecorder({
   }
 
   function renderResult() {
+    const expectedCount = expectedCapabilityCount(goalText);
+    const countMatches = !expectedCount || expectedCount === capabilities.length;
     const description = (
       <Space direction="vertical" size={4}>
         <Text>{snapshot?.progress.label || STATUS_LABELS[status]}</Text>
@@ -1298,39 +1498,83 @@ export default function PageRecorder({
           message={STATUS_LABELS[status]}
           description={description}
         />
-        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, margin: "16px 0" }}>
-          {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
-          <Button
-            type="primary"
-            loading={processing}
-            disabled={!draft || processing}
-            onClick={republish}
-          >修改后再次发布</Button>
+        <Card size="small" style={{ marginTop: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16, alignItems: "center" }}>
+            <div>
+              <Text strong>录制目标</Text>
+              <div style={{ whiteSpace: "pre-line", marginTop: 4 }}>{goalText}</div>
+            </div>
+            <Space wrap>
+              {expectedCount ? <Tag color="blue">目标 {expectedCount} 个能力</Tag> : null}
+              <Tag color={countMatches ? "success" : "warning"}>实际 {capabilities.length} 个能力</Tag>
+            </Space>
+          </div>
+          {!countMatches ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginTop: 10 }}
+              message={`能力数量与录制目标不一致：目标 ${expectedCount} 个，实际 ${capabilities.length} 个`}
+            />
+          ) : null}
+        </Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
+          <Space>
+            <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>
+            {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
+            {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
+          </Space>
+          {editingResult ? (
+            <Space>
+              <Button disabled={Boolean(patchInFlightRef.current) || processing} onClick={cancelResultEditing}>取消修改</Button>
+              <Button
+                type="primary"
+                loading={processing || Boolean(patchInFlightRef.current)}
+                disabled={!draft || processing || (status === "published" && !pendingEdits.length)}
+                onClick={republish}
+              >修改后再次发布</Button>
+            </Space>
+          ) : (
+            <Button
+              type="primary"
+              disabled={!draft || processing}
+              onClick={() => setEditingResult(true)}
+            >修改结果</Button>
+          )}
         </div>
-        <Tabs
-          items={[
-            { key: "capabilities", label: `能力列表 ${capabilities.length}`, children: renderCapabilities() },
-            {
-              key: "requests",
-              label: `捕获接口 ${capturedRequests.length}`,
-              children: capturedRequests.length ? (
-                <List
-                  bordered
-                  dataSource={capturedRequests}
-                  renderItem={(item, index) => (
-                    <List.Item>
-                      <Space><Tag>{String(item.method || "")}</Tag><Text>{String(item.path || item.url || `请求 ${index + 1}`)}</Text></Space>
-                    </List.Item>
-                  )}
-                />
-              ) : <Empty description="没有捕获接口" />,
-            },
-            {
-              key: "json",
-              label: "高级 JSON",
-              children: <pre style={{ whiteSpace: "pre-wrap", overflow: "auto", maxHeight: "65vh" }}>{JSON.stringify(draft, null, 2)}</pre>,
-            },
-          ]}
+        {renderCapabilities()}
+        <Collapse
+          style={{ marginTop: 16 }}
+          items={[{
+            key: "technical",
+            label: "技术详情",
+            children: (
+              <Tabs
+                items={[
+                  {
+                    key: "requests",
+                    label: `捕获接口 ${capturedRequests.length}`,
+                    children: capturedRequests.length ? (
+                      <List
+                        bordered
+                        dataSource={capturedRequests}
+                        renderItem={(item, index) => (
+                          <List.Item>
+                            <Space><Tag>{String(item.method || "")}</Tag><Text>{String(item.path || item.url || `请求 ${index + 1}`)}</Text></Space>
+                          </List.Item>
+                        )}
+                      />
+                    ) : <Empty description="没有捕获接口" />,
+                  },
+                  {
+                    key: "json",
+                    label: "FlowSpec JSON",
+                    children: <pre style={{ whiteSpace: "pre-wrap", overflow: "auto", maxHeight: "65vh" }}>{JSON.stringify(draft, null, 2)}</pre>,
+                  },
+                ]}
+              />
+            ),
+          }]}
         />
       </Card>
     );

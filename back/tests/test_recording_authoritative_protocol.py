@@ -191,6 +191,22 @@ def test_frontend_removes_redundant_field_category_axis_and_has_goal_template() 
     assert "<span>分类</span>" not in source
 
 
+def test_result_stage_is_read_only_until_explicit_edit_and_folds_technical_details() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "editingResult" in source
+    assert "调用方提供" in source
+    assert "系统自动处理" in source
+    assert "执行编排" in source
+    assert "识别依据" in source
+    assert "技术详情" in source
+    assert "修改结果" in source
+    assert "取消修改" in source
+    assert 'aria-label="字段路径"' not in source
+    assert 'updateParam(step, param, "path"' not in source
+    assert "patchTimerRef" not in source
+
+
 @pytest.mark.parametrize("field", [
     "headers", "body_source", "response_json", "identity", "params", "source_meta",
 ])
