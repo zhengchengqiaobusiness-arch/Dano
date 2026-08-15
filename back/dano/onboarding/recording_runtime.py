@@ -10,7 +10,6 @@ from typing import Any
 from dano.execution.page.flow_spec import (
     FlowSpec,
     auto_fix_flow_spec,
-    flow_spec_fingerprint,
     prepare_flow_release_candidate,
 )
 from dano.onboarding.recording_pipeline import RecordingPipelineServices
@@ -254,14 +253,12 @@ class ProductionRecordingServices:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
         if not operator_answers:
-            deterministic = await auto_fix_flow_spec(
+            spec = await auto_fix_flow_spec(
                 spec,
                 repair_ops=[],
                 max_rounds=1,
                 expand_requests=False,
             )
-            if flow_spec_fingerprint(deterministic) != flow_spec_fingerprint(spec):
-                return deterministic.model_dump(mode="json")
 
         pi = await self.pi_provider(False)
         pi.bind_flow_spec(spec)

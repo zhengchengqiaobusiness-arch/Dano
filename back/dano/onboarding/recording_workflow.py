@@ -255,7 +255,7 @@ class SelfHealingPipeline:
         context.remember_draft(draft)
         unchanged = 0
         review_retries = 0
-        previous = _stable_payload(draft)
+        previous_issues: tuple[str, ...] | None = None
 
         for round_number in range(1, self.max_rounds + 1):
             context.ensure_active()
@@ -292,6 +292,17 @@ class SelfHealingPipeline:
                         error=f"最终审核修复达到 {self.max_review_retries} 次上限",
                     )
 
+            current_issues = _issue_signature(checked.issues)
+            unchanged = unchanged + 1 if current_issues == previous_issues else 0
+            previous_issues = current_issues
+            if unchanged >= self.max_unchanged_rounds:
+                return PipelineOutcome(
+                    status=WorkflowStatus.EDITABLE,
+                    draft=draft,
+                    issues=checked.issues,
+                    error="自动处理连续没有产生有效变化",
+                )
+
             answers: dict[str, str] = {}
             for issue in checked.issues:
                 if issue.resolver != "operator":
@@ -312,18 +323,8 @@ class SelfHealingPipeline:
                 answers,
                 context,
             ))
-            current = _stable_payload(repaired)
-            unchanged = unchanged + 1 if current == previous else 0
             draft = repaired
             context.remember_draft(draft)
-            previous = current
-            if unchanged >= self.max_unchanged_rounds:
-                return PipelineOutcome(
-                    status=WorkflowStatus.EDITABLE,
-                    draft=draft,
-                    issues=checked.issues,
-                    error="自动处理连续没有产生有效变化",
-                )
 
         final = await self._bounded(self.runtime.check(draft, context))
         context.remember_draft(final.draft)
@@ -346,8 +347,23 @@ class _OperationTimeout(Exception):
     """Distinguish a bounded stage timeout from the whole-run deadline."""
 
 
-def _stable_payload(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def _issue_signature(issues: tuple[WorkflowIssue, ...]) -> tuple[str, ...]:
+    """Track unresolved work, not incidental FlowSpec normalization churn."""
+
+    return tuple(sorted(
+        json.dumps(
+            {
+                "issue_id": issue.issue_id,
+                "code": issue.code,
+                "resolver": issue.resolver,
+                "target": issue.target,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for issue in issues
+    ))
 
 
 SnapshotListener = Callable[[WorkflowSnapshot], Awaitable[None] | None]

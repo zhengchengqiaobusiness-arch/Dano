@@ -186,3 +186,59 @@ async def test_repair_requires_repair_submission_instead_of_accepting_a_new_plan
     assert len(pi.prompts) == 2
     assert pi.last_submission_kind == "repair"
     assert pi.spec.title == ""
+
+
+@pytest.mark.asyncio
+async def test_deterministic_normalization_does_not_skip_pi_repair(monkeypatch) -> None:
+    class Pi:
+        last_submission_kind = ""
+        prompts: list[str] = []
+
+        def __init__(self) -> None:
+            self.spec = FlowSpec()
+
+        def bind_flow_spec(self, spec: FlowSpec) -> None:
+            self.spec = spec
+
+        async def prompt(self, prompt: str) -> None:
+            self.prompts.append(prompt)
+            self.last_submission_kind = "repair"
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.spec
+
+    async def normalize(spec, **_kwargs):  # noqa: ANN001
+        normalized = spec.model_copy(deep=True)
+        normalized.title = "deterministically-normalized"
+        return normalized
+
+    pi = Pi()
+
+    async def provide_pi(_fresh):  # noqa: ANN001
+        return pi
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    monkeypatch.setattr("dano.onboarding.recording_runtime.auto_fix_flow_spec", normalize)
+    services = ProductionRecordingServices(
+        recording_id="recording_1",
+        materializer=unused,
+        pi_provider=provide_pi,
+        publisher=unused,
+    )
+    issue = _todo_issue({
+        "kind": "dependency",
+        "target_id": "dep-1",
+        "suggested_tool": "perturb_replay",
+    })
+
+    repaired = await services.repair(
+        FlowSpec().model_dump(mode="json"),
+        (issue,),
+        {},
+        _context(),
+    )
+
+    assert len(pi.prompts) == 1
+    assert repaired["title"] == "deterministically-normalized"

@@ -378,6 +378,47 @@ async def test_self_healing_pipeline_stops_after_bounded_no_progress() -> None:
 
 
 @pytest.mark.asyncio
+async def test_self_healing_pipeline_does_not_count_draft_churn_as_progress() -> None:
+    issue = WorkflowIssue(
+        issue_id="dependency:stable",
+        code="dependency",
+        message="同一依赖仍未验证",
+        resolver="collect_evidence",
+        target={"dependency_id": "stable"},
+    )
+
+    class Runtime:
+        repairs = 0
+
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {"normalization_revision": 0}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            return PipelineCheck(draft=draft, issues=(issue,))
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            self.repairs += 1
+            return {"normalization_revision": self.repairs}
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            raise AssertionError("must not publish")
+
+    runtime = Runtime()
+    pipeline = SelfHealingPipeline(runtime, max_rounds=5, max_unchanged_rounds=2)
+    context = PipelineContext(
+        progress=lambda *args: _answer(None),
+        ask_operator=lambda question: _answer(""),
+        cancelled=lambda: False,
+    )
+
+    outcome = await pipeline.run(PipelineSeed(kind="edited_spec", draft={}), context)
+
+    assert outcome.status == WorkflowStatus.EDITABLE
+    assert outcome.error == "自动处理连续没有产生有效变化"
+    assert runtime.repairs == 2
+
+
+@pytest.mark.asyncio
 async def test_self_healing_pipeline_asks_only_operator_issues() -> None:
     issue = WorkflowIssue(
         issue_id="approval", code="ambiguous", message="请选择审批策略", resolver="operator",
