@@ -122,10 +122,10 @@ _ALLOWED_TRANSITIONS: dict[WorkflowStatus, frozenset[WorkflowStatus]] = {
         WorkflowStatus.EDITABLE, WorkflowStatus.PROCESSING, WorkflowStatus.FAILED,
     }),
     WorkflowStatus.CANCELLED: frozenset({
-        WorkflowStatus.PROCESSING, WorkflowStatus.FAILED,
+        WorkflowStatus.PROCESSING, WorkflowStatus.EDITABLE, WorkflowStatus.FAILED,
     }),
     WorkflowStatus.FAILED: frozenset({
-        WorkflowStatus.PROCESSING, WorkflowStatus.CANCELLED,
+        WorkflowStatus.PROCESSING, WorkflowStatus.EDITABLE, WorkflowStatus.CANCELLED,
     }),
 }
 
@@ -614,7 +614,12 @@ class RecordingWorkflow:
                 f"recording workflow revision conflict: expected {expected_revision}, "
                 f"current {self.snapshot.revision}"
             )
-        if self.snapshot.status not in {WorkflowStatus.EDITABLE, WorkflowStatus.PUBLISHED}:
+        if self.snapshot.status not in {
+            WorkflowStatus.EDITABLE,
+            WorkflowStatus.PUBLISHED,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.CANCELLED,
+        }:
             raise ValueError(f"cannot edit recording in state {self.snapshot.status}")
         await self._set(
             WorkflowStatus.EDITABLE,

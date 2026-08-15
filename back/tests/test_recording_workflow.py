@@ -377,6 +377,24 @@ async def test_failed_republish_preserves_draft_and_can_retry_new_revision() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [WorkflowStatus.FAILED, WorkflowStatus.CANCELLED])
+async def test_failed_or_cancelled_draft_can_be_edited_before_retry(status) -> None:  # noqa: ANN001
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="run-1", action="action-1", status=status,
+            capture_frozen=True, draft={"flow_id": "old"}, revision=3,
+        ),
+        _ImmediatePipeline(),
+    )
+
+    result = await workflow.patch_draft({"flow_id": "corrected"}, expected_revision=3)
+
+    assert result.status == WorkflowStatus.EDITABLE
+    assert result.draft == {"flow_id": "corrected"}
+    assert result.release is None
+
+
+@pytest.mark.asyncio
 async def test_recording_workflow_persists_each_authoritative_snapshot(tmp_path) -> None:
     path = tmp_path / "action.json"
     workflow = RecordingWorkflow(_snapshot(), _ImmediatePipeline(), snapshot_path=path)
