@@ -320,7 +320,10 @@ class RecordingGatewaySession:
         await self.capture.flush_recording()
         self.capture.pause_recording()
         if self._live_task is not None and not self._live_task.done():
-            self._live_task.cancel()
+            # Finishing a recording must not throw away a live analysis turn
+            # that has already consumed the latest request batch.  Marking the
+            # capture frozen prevents another turn; await the current one so
+            # its accepted operations reach the notebook used by direct export.
             await asyncio.gather(self._live_task, return_exceptions=True)
         self._capture_live_notebook()
         if self._pi is not None:
@@ -486,9 +489,24 @@ class RecordingGatewaySession:
                     )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # Live analysis is advisory.  The canonical finish pipeline
-                # still receives the complete deterministic recording facts.
+            except Exception as exc:  # noqa: BLE001 - keep capture responsive
+                self._capture_live_notebook()
+                if self.workflow is not None:
+                    insights = self._live_notebook.insights if self._live_notebook else []
+                    insights.append({
+                        "kind": "analysis_error",
+                        "text": f"本轮实时分析未完成，后续批次将继续：{exc}",
+                        "refs": [],
+                    })
+                    request_count = (
+                        len(self.capture.captured_all_requests())
+                        if self.capture is not None
+                        else self._last_live_count
+                    )
+                    await self.workflow.update_recording(
+                        request_count=request_count,
+                        insights=insights[-100:],
+                    )
                 return
 
     def _capture_live_notebook(self) -> None:

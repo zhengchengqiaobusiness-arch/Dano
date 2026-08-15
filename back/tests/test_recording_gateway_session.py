@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from dano.execution.page.flow_spec import FlowSpec
@@ -140,3 +142,62 @@ async def test_finish_command_forwards_machine_verification_switch() -> None:
 
     assert workflow.title == "业务操作"
     assert workflow.machine_verification is True
+
+
+@pytest.mark.asyncio
+async def test_freeze_waits_for_current_live_analysis_and_keeps_its_notebook() -> None:
+    class Capture:
+        paused = False
+
+        async def flush_recording(self) -> None:
+            return None
+
+        def pause_recording(self) -> None:
+            self.paused = True
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "c" * 32,
+            action="action_1",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    capture = Capture()
+    pi = Pi()
+    session.capture = capture  # type: ignore[assignment]
+    session._pi = pi
+
+    async def live_turn() -> None:
+        await asyncio.sleep(0.01)
+        pi.flow_spec.meta = {
+            "agent_insights": [{"kind": "param_source", "text": "已识别字段来源"}],
+        }
+
+    session._live_task = asyncio.create_task(live_turn())
+    await session._freeze_capture()
+
+    assert capture.paused is True
+    assert session._live_task.done()
+    assert session._live_task.cancelled() is False
+    assert session._live_notebook is not None
+    assert session._live_notebook.insights == [
+        {"kind": "param_source", "text": "已识别字段来源"},
+    ]

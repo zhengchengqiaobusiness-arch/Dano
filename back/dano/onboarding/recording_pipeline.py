@@ -58,6 +58,12 @@ class CanonicalRecordingRuntime:
                 context,
             )
             context.remember_draft(draft)
+            # With machine verification disabled, the live notebook is the
+            # authoritative semantic plan.  Do not start a second/final Pi
+            # planning pass: direct export must use exactly what real-time
+            # capture and analysis already materialized.
+            if not seed.machine_verification:
+                return draft
         elif seed.kind == "edited_spec":
             if seed.draft is None:
                 raise ValueError("edited_spec requires a draft")

@@ -83,16 +83,15 @@ async def test_first_publication_consumes_live_notebook_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_off_machine_verification_exports_planned_skill_directly() -> None:
+async def test_default_off_machine_verification_exports_live_skill_without_final_plan() -> None:
     events: list[str] = []
 
     async def materialize(_use_live, _context):  # noqa: ANN001
         events.append("materialize")
-        return {"capabilities": []}
+        return {"capabilities": ["query", "submit"]}
 
-    async def plan(draft, _use_live, _context):  # noqa: ANN001
-        events.append("plan")
-        return {**draft, "capabilities": ["query", "submit"]}
+    async def plan(*_args):  # noqa: ANN002
+        raise AssertionError("default-off mode must not run final Pi planning")
 
     async def verify(*_args):  # noqa: ANN002
         raise AssertionError("default-off mode must not compile or verify")
@@ -120,7 +119,7 @@ async def test_default_off_machine_verification_exports_planned_skill_directly()
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert outcome.release == {"capability_count": 2}
-    assert events == ["materialize", "plan", "publish"]
+    assert events == ["materialize", "publish"]
 
 
 @pytest.mark.asyncio
@@ -287,7 +286,10 @@ async def test_operation_timeout_preserves_materialized_draft_and_is_not_mislabe
         runtime,
         operation_timeout_s=0.01,
         overall_timeout_s=1,
-    ).run(PipelineSeed(kind="recording"), _context())
+    ).run(
+        PipelineSeed(kind="recording", machine_verification=True),
+        _context(),
+    )
 
     assert outcome.status == WorkflowStatus.FAILED
     assert outcome.draft == {"capabilities": ["query", "submit"]}
