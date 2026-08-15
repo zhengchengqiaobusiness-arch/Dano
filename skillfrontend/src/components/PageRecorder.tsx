@@ -59,6 +59,17 @@ interface WorkflowQuestion {
   context_ref?: string;
 }
 
+interface WorkflowActivity {
+  sequence: number;
+  step: string;
+  round?: number;
+  status: "pending" | "running" | "resolved" | "blocked" | "waiting_operator" | string;
+  label: string;
+  issue_id?: string;
+  code?: string;
+  target?: Record<string, string>;
+}
+
 interface WorkflowSnapshot {
   run_id: string;
   action: string;
@@ -77,6 +88,7 @@ interface WorkflowSnapshot {
   check_report?: Record<string, unknown>;
   issues?: WorkflowIssue[];
   insights?: Array<Record<string, unknown>>;
+  activity?: WorkflowActivity[];
   question?: WorkflowQuestion | null;
   release?: Record<string, unknown> | null;
   error?: string;
@@ -182,6 +194,14 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
   published: "发布完成",
   cancelled: "分析已终止",
   failed: "处理失败",
+};
+
+const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
+  pending: { label: "待处理" },
+  running: { label: "处理中", color: "processing" },
+  resolved: { label: "已解决", color: "success" },
+  blocked: { label: "未解决", color: "error" },
+  waiting_operator: { label: "需要确认", color: "warning" },
 };
 
 function pageStage(status: WorkflowStatus) {
@@ -1288,21 +1308,46 @@ export default function PageRecorder({
           </Space>
         </Card>
       ) : null}
+      {(snapshot?.activity || []).length ? (
+        <Card size="small" title="处理进展" styles={{ body: { padding: 0 } }}>
+          <List
+            size="small"
+            dataSource={snapshot?.activity || []}
+            renderItem={(item) => {
+              const display = ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
+              return (
+                <List.Item>
+                  <Space align="start" style={{ width: "100%" }}>
+                    <Tag color={display.color}>{display.label}</Tag>
+                    <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+                      <Text>{item.label}</Text>
+                      {item.round ? <Text type="secondary">第 {item.round} 轮</Text> : null}
+                    </Space>
+                  </Space>
+                </List.Item>
+              );
+            }}
+          />
+        </Card>
+      ) : null}
       {(snapshot?.insights || []).length ? (
-        <List
-          size="small"
-          bordered
-          dataSource={snapshot?.insights || []}
-          renderItem={(item) => (
-            <List.Item>
-              <Space align="start">
-                <Tag>{String(item.kind || "分析")}</Tag>
-                <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
-              </Space>
-            </List.Item>
-          )}
-        />
-      ) : <Empty description={status === "recording" ? "捕获到业务事实后显示分析结论" : "暂无分析结论"} />}
+        <Card size="small" title="实时分析候选" styles={{ body: { padding: 0 } }}>
+          <List
+            size="small"
+            dataSource={snapshot?.insights || []}
+            renderItem={(item) => (
+              <List.Item>
+                <Space align="start">
+                  <Tag>{String(item.kind || "分析")}</Tag>
+                  <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : (snapshot?.activity || []).length || snapshot?.question
+        ? null
+        : <Empty description={status === "recording" ? "捕获到业务事实后显示分析结论" : "暂无分析结论"} />}
     </Space>
   );
 

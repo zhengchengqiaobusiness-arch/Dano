@@ -238,6 +238,16 @@ def test_operator_question_and_cancel_share_the_authoritative_workflow() -> None
     assert 'send({ type: "cancel" })' in source
 
 
+def test_frontend_renders_authoritative_self_healing_activity() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "activity?: WorkflowActivity[]" in source
+    assert 'title="处理进展"' in source
+    assert "snapshot?.activity || []" in source
+    for status in ("pending", "running", "resolved", "blocked", "waiting_operator"):
+        assert f"{status}:" in source
+
+
 def test_snapshot_protocol_has_no_legacy_public_states_or_commands() -> None:
     fields = set(WorkflowSnapshot.model_fields)
 
