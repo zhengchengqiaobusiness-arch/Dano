@@ -30,6 +30,11 @@ PiProvider = Callable[[bool], Awaitable[Any]]
 Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
 _PROTOCOL_ATTEMPTS = 3
+_SUBMISSION_TOOLS = {
+    "plan": "submit_recording_plan",
+    "repair": "submit_recording_repair",
+    "review": "submit_recording_review",
+}
 
 
 async def _submit_with_protocol_recovery(
@@ -61,11 +66,22 @@ async def _submit_with_protocol_recovery(
         if before is not None and callable(bind_flow_spec):
             bind_flow_spec(before)
         if attempt < _PROTOCOL_ATTEMPTS:
+            expected_tools = [
+                _SUBMISSION_TOOLS[kind]
+                for kind in sorted(accepted_kinds)
+                if kind in _SUBMISSION_TOOLS
+            ]
+            tool_instruction = (
+                f"只调用 {expected_tools[0]} 提交当前结果；不得改用其他提交工具。"
+                if len(expected_tools) == 1
+                else "只调用以下允许的提交工具之一：" + "、".join(expected_tools) + "。"
+            )
             next_prompt = (
-                "上一次工具提交未通过公开 schema。继续当前任务，不要询问业务用户。"
+                "上一次工具提交未完成当前阶段。继续当前任务，不要询问业务用户。"
+                f"上一次失败原因：{last_error}。"
                 "先读取最新 recording state，只使用工具 schema 声明的字段；"
                 "不要增加 evidence、risk_level 或其他未声明字段，也不要提交空 request_refs。"
-                "重新提交同一个完整结果。"
+                + tool_instruction
             )
     raise RuntimeError(f"Pi 连续 {_PROTOCOL_ATTEMPTS} 次未提交有效结构") from last_error
 

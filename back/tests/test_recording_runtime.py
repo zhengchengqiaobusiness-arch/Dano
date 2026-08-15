@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from dano.execution.page.flow_spec import FlowSpec, FlowStep, RequestFact, RequestFacts
+from dano.execution.page.flow_spec import recording_agent_validation
 from dano.onboarding.recording_runtime import (
     ProductionRecordingServices,
     _submit_with_protocol_recovery,
@@ -65,6 +66,14 @@ def test_verification_todo_becomes_structured_generic_issue() -> None:
     assert issue.allowed_operations == ["execute_write_with_verify"]
 
 
+def test_validation_distinguishes_structure_verification_and_release_readiness() -> None:
+    validation = recording_agent_validation(FlowSpec())
+
+    assert validation["structural_valid"] is validation["report"]["passed"]
+    assert validation["verification_complete"] is validation["report"]["recording_verification"]["all_verified"]
+    assert validation["release_ready"] is False
+
+
 @pytest.mark.asyncio
 async def test_pi_protocol_error_is_retried_inside_the_same_operation() -> None:
     class Pi:
@@ -87,6 +96,33 @@ async def test_pi_protocol_error_is_retried_inside_the_same_operation() -> None:
 
     assert len(pi.prompts) == 2
     assert "只使用工具 schema 声明的字段" in pi.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_repair_protocol_recovery_requires_repair_tool_and_reports_last_error() -> None:
+    class Pi:
+        last_submission_kind = ""
+        prompts: list[str] = []
+
+        async def prompt(self, prompt: str) -> None:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                raise ValueError("plan.ops[0] 包含未知字段: evidence")
+            self.last_submission_kind = (
+                "repair" if "只调用 submit_recording_repair" in prompt else "plan"
+            )
+
+    pi = Pi()
+    await _submit_with_protocol_recovery(
+        pi,
+        prompt="修复能力",
+        accepted_kinds={"repair"},
+        context=_context(),
+    )
+
+    assert len(pi.prompts) == 2
+    assert "plan.ops[0] 包含未知字段: evidence" in pi.prompts[1]
+    assert "只调用 submit_recording_repair" in pi.prompts[1]
 
 
 @pytest.mark.asyncio

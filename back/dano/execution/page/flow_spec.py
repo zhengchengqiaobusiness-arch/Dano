@@ -20825,11 +20825,13 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     """Return the deterministic validation/repair evidence for Pi tools."""
     current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     report = validate_flow_spec(current)
+    structural_valid = bool(report.get("passed"))
     from dano.execution.page.recording_live import recording_agent_evidence_issues
     from dano.onboarding.recording_verify import verification_report
     evidence_issues = recording_agent_evidence_issues(current)
     report["agent_evidence"] = {"ok": not evidence_issues, "issues": evidence_issues}
-    report["recording_verification"] = verification_report(current)
+    verification = verification_report(current)
+    report["recording_verification"] = verification
     if evidence_issues:
         report["errors"] = [
             *(report.get("errors") or []),
@@ -20856,8 +20858,13 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         )
         and item.get("requested_target")
     ]
+    from dano.onboarding.recording_release import evaluate_recording_release
+    release_ready = evaluate_recording_release(current).callable_spec is not None
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
+        "structural_valid": structural_valid,
+        "verification_complete": bool(verification.get("all_verified")),
+        "release_ready": release_ready,
         "report": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
         "repair_context": compact_model_payload(
             _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
