@@ -529,7 +529,7 @@ class RecordingPiSession:
         goal_instruction = (
             "若 goal_text 非空，先用 set_goal 写入结构化 RecordedGoal，并在 goal.evidence 中引用 goal_text。"
             if self._live_goal_text
-            else "若目标存在多个合理业务解释且事实无法排除，可调用 ask_operator 一次；未回答时暂停等待，不得猜测。"
+            else "若目标存在多个合理业务解释且事实无法排除，可调用 ask_operator 一次；实时阶段返回 deferred_until_final_analysis 时只登记候选问题，继续提交 plan，不得猜测。"
         )
         return await self.prompt(
             "你正在伴随分析网页录制。先调用 get_recording_state，再调用 "

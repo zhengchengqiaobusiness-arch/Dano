@@ -51,6 +51,17 @@ class WorkflowProgress(BaseModel):
     request_count: int = Field(default=0, ge=0)
 
 
+class WorkflowActivity(BaseModel):
+    sequence: int = Field(default=0, ge=0)
+    step: WorkflowStep
+    round: int = Field(default=0, ge=0)
+    status: str
+    label: str
+    issue_id: str = ""
+    code: str = ""
+    target: dict[str, str] = Field(default_factory=dict)
+
+
 class WorkflowIssue(BaseModel):
     issue_id: str
     code: str
@@ -81,6 +92,7 @@ class WorkflowSnapshot(BaseModel):
     draft: dict[str, Any] | None = None
     issues: list[WorkflowIssue] = Field(default_factory=list)
     insights: list[dict[str, Any]] = Field(default_factory=list)
+    activity: list[WorkflowActivity] = Field(default_factory=list)
     question: WorkflowQuestion | None = None
     release: dict[str, Any] | None = None
     error: str = ""
@@ -178,6 +190,7 @@ class PipelineContext:
     progress: Callable[[WorkflowStep, str, int], Awaitable[None]]
     ask_operator: Callable[[WorkflowQuestion], Awaitable[str]]
     cancelled: Callable[[], bool]
+    activity: Callable[[WorkflowActivity], Awaitable[None]] | None = None
     latest_draft: dict[str, Any] | None = None
 
     def ensure_active(self) -> None:
@@ -186,6 +199,10 @@ class PipelineContext:
 
     def remember_draft(self, draft: dict[str, Any]) -> None:
         self.latest_draft = draft
+
+    async def record(self, activity: WorkflowActivity) -> None:
+        if self.activity is not None:
+            await self.activity(activity)
 
 
 class WorkflowPipeline(Protocol):
@@ -256,6 +273,7 @@ class SelfHealingPipeline:
         unchanged = 0
         review_retries = 0
         previous_issues: tuple[str, ...] | None = None
+        previous_issue_map: dict[str, WorkflowIssue] = {}
 
         for round_number in range(1, self.max_rounds + 1):
             context.ensure_active()
@@ -264,6 +282,14 @@ class SelfHealingPipeline:
             draft = checked.draft
             context.remember_draft(draft)
             if not checked.issues:
+                for issue in previous_issue_map.values():
+                    await context.record(_issue_activity(
+                        issue,
+                        step=WorkflowStep.VERIFYING,
+                        round_number=round_number,
+                        status="resolved",
+                        label=f"已解决：{issue.message}",
+                    ))
                 await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
                 release = await self._bounded(self.runtime.publish(draft, context))
                 return PipelineOutcome(
@@ -272,10 +298,39 @@ class SelfHealingPipeline:
                     release=release,
                 )
 
+            current_issue_map = {issue.issue_id: issue for issue in checked.issues}
+            for issue_id, issue in current_issue_map.items():
+                if issue_id not in previous_issue_map:
+                    await context.record(_issue_activity(
+                        issue,
+                        step=WorkflowStep.VERIFYING,
+                        round_number=round_number,
+                        status="pending",
+                        label=issue.message,
+                    ))
+            for issue_id, issue in previous_issue_map.items():
+                if issue_id not in current_issue_map:
+                    await context.record(_issue_activity(
+                        issue,
+                        step=WorkflowStep.VERIFYING,
+                        round_number=round_number,
+                        status="resolved",
+                        label=f"已解决：{issue.message}",
+                    ))
+            previous_issue_map = current_issue_map
+
             external = tuple(
                 issue for issue in checked.issues if issue.resolver == "external_blocked"
             )
             if external:
+                for issue in external:
+                    await context.record(_issue_activity(
+                        issue,
+                        step=WorkflowStep.RESOLVING,
+                        round_number=round_number,
+                        status="blocked",
+                        label=issue.message,
+                    ))
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
@@ -296,6 +351,14 @@ class SelfHealingPipeline:
             unchanged = unchanged + 1 if current_issues == previous_issues else 0
             previous_issues = current_issues
             if unchanged >= self.max_unchanged_rounds:
+                for issue in checked.issues:
+                    await context.record(_issue_activity(
+                        issue,
+                        step=WorkflowStep.RESOLVING,
+                        round_number=round_number,
+                        status="blocked",
+                        label=f"连续验证未取得进展：{issue.message}",
+                    ))
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
@@ -307,6 +370,13 @@ class SelfHealingPipeline:
             for issue in checked.issues:
                 if issue.resolver != "operator":
                     continue
+                await context.record(_issue_activity(
+                    issue,
+                    step=WorkflowStep.RESOLVING,
+                    round_number=round_number,
+                    status="waiting_operator",
+                    label=issue.message,
+                ))
                 answer = await context.ask_operator(WorkflowQuestion(
                     question_id=f"question:{issue.issue_id}",
                     issue_id=issue.issue_id,
@@ -317,6 +387,16 @@ class SelfHealingPipeline:
                 answers[issue.issue_id] = answer
 
             await context.progress(WorkflowStep.RESOLVING, "正在解决验证问题", round_number)
+            for issue in checked.issues:
+                if issue.resolver == "operator":
+                    continue
+                await context.record(_issue_activity(
+                    issue,
+                    step=WorkflowStep.RESOLVING,
+                    round_number=round_number,
+                    status="running",
+                    label=_issue_resolution_label(issue),
+                ))
             repaired = await self._bounded(self.runtime.repair(
                 draft,
                 checked.issues,
@@ -364,6 +444,33 @@ def _issue_signature(issues: tuple[WorkflowIssue, ...]) -> tuple[str, ...]:
         )
         for issue in issues
     ))
+
+
+def _issue_activity(
+    issue: WorkflowIssue,
+    *,
+    step: WorkflowStep,
+    round_number: int,
+    status: str,
+    label: str,
+) -> WorkflowActivity:
+    return WorkflowActivity(
+        step=step,
+        round=round_number,
+        status=status,
+        label=label,
+        issue_id=issue.issue_id,
+        code=issue.code,
+        target=issue.target,
+    )
+
+
+def _issue_resolution_label(issue: WorkflowIssue) -> str:
+    if issue.resolver == "collect_evidence":
+        return f"正在自动补充验证证据：{issue.message}"
+    if issue.resolver == "machine_repair":
+        return f"正在自动修复能力契约：{issue.message}"
+    return f"正在处理：{issue.message}"
 
 
 SnapshotListener = Callable[[WorkflowSnapshot], Awaitable[None] | None]
@@ -546,6 +653,7 @@ class RecordingWorkflow:
             progress=self._progress,
             ask_operator=self._ask_operator,
             cancelled=lambda: self._cancelled,
+            activity=self._record_activity,
         )
         try:
             outcome = await self.pipeline.run(seed, context)
@@ -611,6 +719,13 @@ class RecordingWorkflow:
             progress=self._next_progress(WorkflowStep.RESOLVING, "已收到回答，继续处理"),
         )
         return answer
+
+    async def _record_activity(self, activity: WorkflowActivity) -> None:
+        if self._cancelled:
+            raise WorkflowCancelled
+        entries = list(self.snapshot.activity)
+        entries.append(activity.model_copy(update={"sequence": (entries[-1].sequence + 1) if entries else 1}))
+        await self._set(self.snapshot.status, activity=entries[-100:])
 
     def _next_progress(
         self,

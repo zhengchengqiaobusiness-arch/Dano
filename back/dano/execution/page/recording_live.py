@@ -119,6 +119,12 @@ class LiveNotebook:
             meta["capability_model"] = deepcopy(capability_model)
         if raw_meta.get("agent_answers"):
             meta["agent_answers"] = deepcopy(raw_meta["agent_answers"])
+        if raw_meta.get("live_pending_questions"):
+            meta["live_pending_questions"] = [
+                deepcopy(item)
+                for item in raw_meta["live_pending_questions"]
+                if isinstance(item, dict)
+            ][-50:]
         return cls(meta=meta)
 
     @property
@@ -126,6 +132,14 @@ class LiveNotebook:
         return [
             deepcopy(item)
             for item in self.meta.get("agent_insights") or []
+            if isinstance(item, dict)
+        ]
+
+    @property
+    def pending_questions(self) -> list[dict]:
+        return [
+            deepcopy(item)
+            for item in self.meta.get("live_pending_questions") or []
             if isinstance(item, dict)
         ]
 
@@ -2099,7 +2113,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         merged.meta = {**finalized_meta, "current_version": live_version}
         if live_meta.get("versions"):
             merged.meta["versions"] = deepcopy(live_meta["versions"])
-    for key in ("verification_log", "agent_answers"):
+    for key in ("verification_log", "agent_answers", "live_pending_questions"):
         if live_meta.get(key):
             merged.meta = {**(merged.meta or {}), key: deepcopy(live_meta[key])}
     unresolved: list[dict] = []

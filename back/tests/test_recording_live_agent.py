@@ -59,6 +59,23 @@ async def test_cancelling_recording_prompt_also_cancels_the_sidecar_turn(monkeyp
     assert calls == ["prompt", "cancel"]
 
 
+def test_live_notebook_preserves_pending_questions_for_final_analysis() -> None:
+    shadow = FlowSpec(meta={
+        "live_pending_questions": [{
+            "question_id": "live-question-1",
+            "text": "字段含义存在冲突",
+            "options": ["A", "B"],
+            "context_ref": "field:1",
+        }],
+    })
+
+    notebook = LiveNotebook.from_shadow(shadow)
+    merged = notebook.apply_to(FlowSpec())
+
+    assert notebook.pending_questions[0]["question_id"] == "live-question-1"
+    assert merged.meta["live_pending_questions"][0]["context_ref"] == "field:1"
+
+
 @pytest.mark.asyncio
 async def test_recording_state_projection_does_not_block_browser_event_loop(monkeypatch):
     session = RecordingPiSession(

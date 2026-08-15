@@ -10282,6 +10282,11 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 for name, values in sorted(((spec.meta or {}).get("capability_removed_steps") or {}).items())
             },
         },
+        "live_notebook": {
+            "pending_questions": copy.deepcopy(
+                (spec.meta or {}).get("live_pending_questions") or []
+            )[-50:],
+        },
     }
 
 

@@ -243,7 +243,7 @@ def test_snapshot_protocol_has_no_legacy_public_states_or_commands() -> None:
 
     assert fields == {
         "run_id", "action", "title", "revision", "status", "progress",
-        "capture_frozen", "draft", "issues", "insights", "question", "release", "error",
+        "capture_frozen", "draft", "issues", "insights", "activity", "question", "release", "error",
     }
     assert CANONICAL_RECORDING_COMMANDS == {
         "start", "input", "finish", "patch_draft", "republish", "answer", "cancel", "ping",

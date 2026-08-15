@@ -12,6 +12,7 @@ from dano.onboarding.recording_workflow import (
     PipelineSeed,
     RecordingWorkflow,
     SelfHealingPipeline,
+    WorkflowActivity,
     WorkflowIssue,
     WorkflowProgress,
     WorkflowQuestion,
@@ -157,6 +158,53 @@ async def test_recording_workflow_finish_is_one_idempotent_task() -> None:
     result = await workflow.wait()
     assert result.status == WorkflowStatus.PUBLISHED
     assert pipeline.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_recording_workflow_persists_structured_resolution_activity() -> None:
+    issue = WorkflowIssue(
+        issue_id="dependency:1",
+        code="dependency",
+        message="验证上游响应是否能驱动后续请求",
+        resolver="collect_evidence",
+        target={"dependency_id": "dep-1"},
+        allowed_operations=["perturb_replay"],
+    )
+
+    class ActivityPipeline:
+        async def run(self, seed, context):  # noqa: ANN001
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.RESOLVING,
+                round=1,
+                status="running",
+                label="正在补充依赖验证证据",
+                issue_id=issue.issue_id,
+                code=issue.code,
+                target=issue.target,
+            ))
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.VERIFYING,
+                round=2,
+                status="resolved",
+                label="依赖验证已通过",
+                issue_id=issue.issue_id,
+                code=issue.code,
+                target=issue.target,
+            ))
+            return PipelineOutcome(
+                status=WorkflowStatus.PUBLISHED,
+                draft={"flow_id": "flow"},
+                release={"skill_id": "skill"},
+            )
+
+    workflow = RecordingWorkflow(_snapshot(), ActivityPipeline())
+    await workflow.start()
+    await workflow.finish()
+    result = await workflow.wait()
+
+    assert [item.status for item in result.activity] == ["running", "resolved"]
+    assert [item.sequence for item in result.activity] == [1, 2]
+    assert result.activity[-1].target == {"dependency_id": "dep-1"}
 
 
 @pytest.mark.asyncio
@@ -326,12 +374,14 @@ async def test_self_healing_pipeline_repairs_until_publish_without_external_requ
     runtime = Runtime()
     pipeline = SelfHealingPipeline(runtime)
     progress = []
+    activity = []
     context = PipelineContext(
         progress=lambda step, label, round_number: _append_progress(
             progress, step, label, round_number,
         ),
         ask_operator=lambda question: _answer(""),
         cancelled=lambda: False,
+        activity=lambda item: _append_activity(activity, item),
     )
     outcome = await pipeline.run(PipelineSeed(kind="recording", use_live_notebook=True), context)
 
@@ -339,6 +389,7 @@ async def test_self_healing_pipeline_repairs_until_publish_without_external_requ
     assert outcome.release == {"skill_id": "skill", "fixed": True}
     assert runtime.checks == 2
     assert any(item[0] == WorkflowStep.RESOLVING for item in progress)
+    assert [item.status for item in activity] == ["pending", "running", "resolved"]
 
 
 @pytest.mark.asyncio
@@ -462,6 +513,10 @@ async def test_self_healing_pipeline_asks_only_operator_issues() -> None:
 
 async def _append_progress(target, step, label, round_number):  # noqa: ANN001
     target.append((step, label, round_number))
+
+
+async def _append_activity(target, item):  # noqa: ANN001
+    target.append(item)
 
 
 async def _answer(value):  # noqa: ANN001

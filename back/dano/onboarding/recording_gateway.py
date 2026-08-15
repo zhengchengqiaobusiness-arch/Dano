@@ -319,6 +319,12 @@ class RecordingGatewaySession:
             self._live_task.cancel()
             await asyncio.gather(self._live_task, return_exceptions=True)
         self._capture_live_notebook()
+        if self._pi is not None:
+            self._pi.bind_live_recording(
+                self.capture,
+                goal_text=self.config.goal_text,
+                operator_asker=self._ask_operator,
+            )
 
     async def _ensure_pi(self, fresh: bool) -> Any:
         if fresh and self._pi is not None:
@@ -329,7 +335,9 @@ class RecordingGatewaySession:
             self._pi.bind_live_recording(
                 self.capture,
                 goal_text=self.config.goal_text,
-                operator_asker=self._ask_operator,
+                operator_asker=(
+                    self._ask_operator if self._capture_frozen else self._record_live_question
+                ),
             )
             if self.workflow is not None and self.workflow.snapshot.draft is not None:
                 self._pi.bind_flow_spec(FlowSpec.model_validate(self.workflow.snapshot.draft))
@@ -344,6 +352,54 @@ class RecordingGatewaySession:
                     reason="实时录制会话开始",
                 ))
         return self._pi
+
+    async def _record_live_question(
+        self,
+        *,
+        text: str,
+        options: list[str],
+        context_ref: str = "",
+    ) -> dict[str, Any]:
+        """Persist a live hypothesis without entering the final operator state."""
+
+        if self._pi is None or self._pi.flow_spec is None:
+            return {"answered": False, "reason": "deferred_until_final_analysis"}
+        spec = self._pi.current_flow_spec()
+        meta = dict(spec.meta or {})
+        question_id = "live-question:" + hashlib.sha256(
+            json.dumps(
+                {"text": text, "options": options, "context_ref": context_ref},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        questions = [
+            dict(item)
+            for item in meta.get("live_pending_questions") or []
+            if isinstance(item, dict) and str(item.get("question_id") or "") != question_id
+        ]
+        questions.append({
+            "question_id": question_id,
+            "text": str(text),
+            "options": [str(value) for value in options],
+            "context_ref": str(context_ref or ""),
+        })
+        insights = [
+            dict(item) for item in meta.get("agent_insights") or [] if isinstance(item, dict)
+        ]
+        insights.append({
+            "kind": "pending_question",
+            "text": f"待最终分析复核：{text}",
+            "refs": [str(context_ref)] if context_ref else [],
+        })
+        spec.meta = {
+            **meta,
+            "live_pending_questions": questions[-50:],
+            "agent_insights": insights[-100:],
+        }
+        self._pi.bind_flow_spec(spec)
+        self._capture_live_notebook()
+        return {"answered": False, "reason": "deferred_until_final_analysis"}
 
     async def _ask_operator(
         self,

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from dano.onboarding.recording_gateway import _project_page_enums
+import pytest
+
+from dano.execution.page.flow_spec import FlowSpec
+from dano.onboarding.recording_gateway import (
+    RecordingGatewaySession,
+    RecordingSessionConfig,
+    _project_page_enums,
+)
 
 
 def test_page_enum_projection_is_generic_and_merges_duplicate_observations() -> None:
@@ -48,3 +55,47 @@ def test_gateway_route_exposes_only_canonical_recording_commands() -> None:
         if getattr(route, "path", "") == "/onboarding/page/record"
     ]
     assert len(routes) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_operator_question_is_deferred_to_final_analysis() -> None:
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_flow_spec(self, spec: FlowSpec) -> None:
+            self.flow_spec = spec.model_copy(deep=True)
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "a" * 32,
+            action="action_1",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    session._pi = Pi()
+
+    result = await session._record_live_question(
+        text="两个页面标签证据冲突，请确认业务含义",
+        options=["含义 A", "含义 B"],
+        context_ref="field:1",
+    )
+
+    assert result == {
+        "answered": False,
+        "reason": "deferred_until_final_analysis",
+    }
+    [question] = session._pi.flow_spec.meta["live_pending_questions"]
+    assert question["text"] == "两个页面标签证据冲突，请确认业务含义"
+    assert question["context_ref"] == "field:1"
