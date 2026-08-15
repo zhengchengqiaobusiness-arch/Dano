@@ -679,6 +679,64 @@ async def test_partially_rejected_plan_is_checkpointed_but_not_marked_complete(
 
 
 @pytest.mark.asyncio
+async def test_partially_applied_repair_is_a_valid_outer_loop_submission(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A valid partial repair must advance the workflow instead of being
+    misreported as three malformed protocol submissions and rolled back.
+    """
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        title="original",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        meta={"current_version": 4},
+    )
+    candidate = before.model_copy(deep=True)
+    candidate.title = "accepted-partial-repair"
+    candidate.meta = {
+        **candidate.meta,
+        "current_version": 5,
+        "recording_agent_session": {
+            "op_results": [
+                {"index": 0, "op": "confirm_dependency", "status": "applied"},
+                {
+                    "index": 1,
+                    "op": "bind_verify_read",
+                    "status": "rejected",
+                    "reason": "assertion mismatch",
+                },
+            ],
+        },
+    }
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        return candidate.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+    )
+    client.bind_flow_spec(before)
+
+    result = await client.apply_submission(
+        {"ops": []},
+        mode="repair",
+        base_flow_version=4,
+    )
+
+    assert result["all_applied"] is False
+    assert result["must_retry"] == [1]
+    assert result["submission_complete"] is False
+    assert client.current_flow_spec().title == "accepted-partial-repair"
+    assert client.last_submission_kind == "repair"
+
+
+@pytest.mark.asyncio
 async def test_grounded_capability_plan_is_complete_when_only_optional_edits_are_rejected(
     monkeypatch,
     tmp_path,

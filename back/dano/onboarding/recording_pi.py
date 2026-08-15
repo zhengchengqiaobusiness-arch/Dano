@@ -727,7 +727,11 @@ class RecordingPiSession:
             if mode == "repair":
                 submission_complete = bool(validation.get("all_applied", True))
             validation["submission_complete"] = submission_complete
-            self.last_submission_kind = mode if submission_complete else ""
+            # A partial repair is protocol-valid: preserve applied operations
+            # so the outer verify/repair loop can retry only rejected ones.
+            self.last_submission_kind = (
+                mode if mode == "repair" or submission_complete else ""
+            )
             return validation
 
     async def accept_unchanged_plan(
