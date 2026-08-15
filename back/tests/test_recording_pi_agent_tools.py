@@ -26,7 +26,7 @@ from dano.agent_tools.tools import (
     submit_recording_review,
     verify_recording_dependency,
 )
-from dano.shared.enums import AssetType
+from dano.shared.enums import AssetType, ValidationStatus
 from dano.execution.page import flow_spec as flow_module
 from dano.execution.page.flow_spec import (
     FlowCapability,
@@ -182,6 +182,65 @@ async def test_recording_machine_validated_publish_does_not_require_review_runs(
     })
 
     assert result["published"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_recording_export_skips_validation_and_keeps_release_binding(monkeypatch) -> None:
+    spec = _spec()
+    draft_id = uuid4()
+    draft = SimpleNamespace(
+        asset_draft_id=draft_id,
+        asset_type=AssetType.PAGE_SCRIPT,
+        body={"api_request": {"_release_snapshot": {
+            "flow_fingerprint": flow_spec_fingerprint(spec),
+            "flow_spec": spec.model_dump(mode="json"),
+        }}},
+        tenant="tenant-pi",
+        subsystem="reimburse",
+        asset_key="recorded_submit",
+        content_hash="hash",
+    )
+    created = []
+
+    class DraftStore:
+        async def verify_publishable(self, *_args):
+            raise AssertionError("direct export must skip machine validation")
+
+        async def get_draft(self, _draft_id):
+            return draft
+
+        async def verify_reviewed(self, *_args):
+            raise AssertionError("direct recording export must not require model review")
+
+    class Repository:
+        async def create(self, envelope):  # noqa: ANN001
+            created.append(envelope)
+            return SimpleNamespace(asset_id=uuid4(), version=1)
+
+        async def set_status(self, _asset_id, _status):
+            return None
+
+    session = SimpleNamespace(current_flow_spec=lambda: spec)
+    monkeypatch.setattr(agent_tools_module, "_ds", DraftStore())
+    monkeypatch.setattr(agent_tools_module, "_repo", Repository())
+    monkeypatch.setattr(agent_tools_module, "validate_asset_body", lambda *_args: None)
+    monkeypatch.setattr(
+        "dano.onboarding.recording_pi.active_recording_session",
+        lambda run_id: session if run_id == "run-direct-export" else None,
+    )
+
+    result = await publish_asset("run-direct-export", {
+        "asset_draft_id": str(draft_id),
+        "validation_run_ids": [],
+        "review_run_ids": [],
+        "recording_release_candidate": True,
+        "recording_machine_validated": False,
+        "recording_direct_export": True,
+    })
+
+    assert result["published"] is True
+    assert created[0].validation_status == ValidationStatus.DRAFT
+    assert created[0].confidence == 0.7
 
 
 def test_flow_fingerprint_ignores_output_schema_property_insertion_order() -> None:
@@ -1652,6 +1711,53 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
         assert result["request_role"]["semanticRole"] == "destructive"
     if param_name.startswith("请输入"):
         assert any("占位" in warning for warning in result.get("warnings") or [])
+
+
+def test_page_onboard_direct_export_skips_compile_and_machine_validation(monkeypatch):
+    from dano.agent_tools import tools as tool_module
+
+    calls: list[str] = []
+
+    async def _save(_run_id, _params):
+        calls.append("save")
+        return {"asset_draft_id": str(uuid4())}
+
+    async def _publish(_run_id, params):
+        calls.append("publish")
+        assert params["recording_direct_export"] is True
+        assert params["recording_machine_validated"] is False
+        assert params["validation_run_ids"] == []
+        return {"published": True, "asset_id": str(uuid4()), "version": 1}
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("direct export must not compile, verify, review, or repair")
+
+    recording_session = object()
+    monkeypatch.setattr(
+        "dano.onboarding.recording_pi.active_recording_session",
+        lambda run_id: recording_session if run_id == "run-direct-page-export" else None,
+    )
+    monkeypatch.setattr(tool_module, "save_draft", _save)
+    monkeypatch.setattr(tool_module, "publish_asset", _publish)
+    monkeypatch.setattr(tool_module, "self_check_recording", _forbidden)
+    monkeypatch.setattr(tool_module, "request_review", _forbidden)
+
+    result = asyncio.run(run_request_onboarding(
+        tenant="tenant-pi",
+        subsystem="reimburse",
+        action="recorded_submit",
+        api_request=_recording_api_request(),
+        sample_inputs={"reason": "demo"},
+        required=["reason"],
+        run_id="run-direct-page-export",
+        recording_pi_required=True,
+        recording_machine_validated=False,
+        direct_recording_export=True,
+    ))
+
+    assert result["ok"] is True
+    assert result["status"] == "published"
+    assert calls == ["save", "publish"]
 
 
 def test_page_onboard_surfaces_nested_workflow_self_check_failure(monkeypatch):

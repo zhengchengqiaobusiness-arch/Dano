@@ -174,6 +174,7 @@ class PipelineSeed:
     kind: str
     draft: dict[str, Any] | None = None
     use_live_notebook: bool = False
+    machine_verification: bool = False
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ class PipelineContext:
     cancelled: Callable[[], bool]
     activity: Callable[[WorkflowActivity], Awaitable[None]] | None = None
     latest_draft: dict[str, Any] | None = None
+    machine_verification: bool = False
 
     def ensure_active(self) -> None:
         if self.cancelled():
@@ -265,10 +267,23 @@ class SelfHealingPipeline:
             )
 
     async def _run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
+        context.machine_verification = seed.machine_verification
         context.ensure_active()
         await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
+        if not seed.machine_verification:
+            await context.progress(
+                WorkflowStep.PUBLISHING,
+                "机器验证已关闭，正在直接导出当前 Skill",
+                0,
+            )
+            release = await self._bounded(self.runtime.publish(draft, context))
+            return PipelineOutcome(
+                status=WorkflowStatus.PUBLISHED,
+                draft=draft,
+                release=release,
+            )
         unchanged = 0
         previous_issues: tuple[str, ...] | None = None
         previous_issue_map: dict[str, WorkflowIssue] = {}
@@ -508,12 +523,16 @@ class RecordingWorkflow:
             )
         return self.snapshot
 
-    async def finish(self) -> WorkflowSnapshot:
+    async def finish(self, *, machine_verification: bool = False) -> WorkflowSnapshot:
         if self._active():
             return self.snapshot
         if self.snapshot.status != WorkflowStatus.RECORDING:
             return self.snapshot
-        await self._launch(PipelineSeed(kind="recording", use_live_notebook=True))
+        await self._launch(PipelineSeed(
+            kind="recording",
+            use_live_notebook=True,
+            machine_verification=machine_verification,
+        ))
         return self.snapshot
 
     async def update_recording(
@@ -550,7 +569,7 @@ class RecordingWorkflow:
             raise ValueError("operator questions require an active analysis")
         return await self._ask_operator(question)
 
-    async def republish(self) -> WorkflowSnapshot:
+    async def republish(self, *, machine_verification: bool = False) -> WorkflowSnapshot:
         if self._active():
             return self.snapshot
         # A published draft can only be republished after patch_draft moves it
@@ -570,6 +589,7 @@ class RecordingWorkflow:
             kind="edited_spec",
             draft=self.snapshot.draft,
             use_live_notebook=False,
+            machine_verification=machine_verification,
         ))
         return self.snapshot
 

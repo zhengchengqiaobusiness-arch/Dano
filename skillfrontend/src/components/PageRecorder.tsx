@@ -11,6 +11,7 @@ import {
   Select,
   Space,
   Steps,
+  Switch,
   Tabs,
   Tag,
   Typography,
@@ -237,9 +238,10 @@ function readSetupDraft() {
     return {
       startUrl: typeof parsed.startUrl === "string" ? parsed.startUrl : "",
       goalText: typeof parsed.goalText === "string" ? parsed.goalText : "",
+      machineVerification: parsed.machineVerification === true,
     };
   } catch {
-    return { startUrl: "", goalText: "" };
+    return { startUrl: "", goalText: "", machineVerification: false };
   }
 }
 
@@ -287,6 +289,7 @@ export default function PageRecorder({
   const setup = useMemo(readSetupDraft, []);
   const [startUrl, setStartUrl] = useState(setup.startUrl);
   const [goalText, setGoalText] = useState(setup.goalText);
+  const [machineVerification, setMachineVerification] = useState(setup.machineVerification);
   const [title, setTitle] = useState("");
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
@@ -324,6 +327,7 @@ export default function PageRecorder({
   const reconnectAttemptRef = useRef(0);
   const closingRef = useRef(false);
   const finishRequestedRef = useRef(false);
+  const machineVerificationRef = useRef(setup.machineVerification);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -334,8 +338,12 @@ export default function PageRecorder({
   const visibleStage = pageStage(status);
 
   useEffect(() => {
-    sessionStorage.setItem("dano.recording.setup", JSON.stringify({ startUrl, goalText }));
-  }, [startUrl, goalText]);
+    sessionStorage.setItem("dano.recording.setup", JSON.stringify({
+      startUrl,
+      goalText,
+      machineVerification,
+    }));
+  }, [startUrl, goalText, machineVerification]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -531,7 +539,10 @@ export default function PageRecorder({
         window.setTimeout(flushDraftEdits, 0);
       } else if (republishRequestedRef.current) {
         republishRequestedRef.current = false;
-        send({ type: "republish", title: next.title || title });
+        send({ type: "republish",
+          title: next.title || title,
+          machine_verification: machineVerificationRef.current,
+        });
       }
     }
   }
@@ -558,7 +569,11 @@ export default function PageRecorder({
       // A disconnected finish command is safe to repeat: the authoritative
       // workflow deduplicates it and returns the current snapshot.
       if (finishRequestedRef.current) {
-        socket.send(JSON.stringify({ type: "finish", title: title.trim() }));
+        socket.send(JSON.stringify({
+          type: "finish",
+          title: title.trim(),
+          machine_verification: machineVerificationRef.current,
+        }));
       }
     };
     socket.onmessage = (event) => {
@@ -642,7 +657,10 @@ export default function PageRecorder({
     if (finishRequestedRef.current || status !== "recording") return;
     finishRequestedRef.current = true;
     setFinishRequested(true);
-    if (!send({ type: "finish", title: title.trim() })) {
+    if (!send({ type: "finish",
+      title: title.trim(),
+      machine_verification: machineVerificationRef.current,
+    })) {
       finishRequestedRef.current = false;
       setFinishRequested(false);
     }
@@ -836,7 +854,10 @@ export default function PageRecorder({
       flushDraftEdits();
       return;
     }
-    send({ type: "republish", title: title.trim() });
+    send({ type: "republish",
+      title: title.trim(),
+      machine_verification: machineVerificationRef.current,
+    });
   }
 
   function normalizedPoint(clientX: number, clientY: number) {
@@ -990,6 +1011,18 @@ export default function PageRecorder({
             <Input value={snapshot?.action || actionRef.current} readOnly style={{ minWidth: 230, flex: 1 }} />
             <Text strong style={{ whiteSpace: "nowrap" }}>标题：</Text>
             <Input value={title} onChange={(event) => setTitle(event.target.value)} style={{ minWidth: 150, flex: 0.6 }} />
+            <Space size={6} style={{ whiteSpace: "nowrap" }}>
+              <Switch
+                size="small"
+                checked={machineVerification}
+                disabled={status !== "recording"}
+                onChange={(checked) => {
+                  machineVerificationRef.current = checked;
+                  setMachineVerification(checked);
+                }}
+              />
+              <Text>编译并进行机器验证</Text>
+            </Space>
             {status === "recording" ? (
               <Button type="primary" loading={finishRequested} onClick={finishRecording}>停止并分析请求</Button>
             ) : processing ? (

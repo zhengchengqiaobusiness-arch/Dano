@@ -266,13 +266,30 @@ async def test_recording_workflow_republish_excludes_live_notebook() -> None:
         draft={"flow_id": "edited"},
     )
     workflow = RecordingWorkflow(snapshot, pipeline)
-    await workflow.republish()
+    await workflow.republish(machine_verification=True)
     await workflow.wait()
 
     assert pipeline.seeds == [PipelineSeed(
         kind="edited_spec",
         draft={"flow_id": "edited"},
         use_live_notebook=False,
+        machine_verification=True,
+    )]
+
+
+@pytest.mark.asyncio
+async def test_recording_workflow_finish_defaults_machine_verification_off() -> None:
+    pipeline = _ImmediatePipeline()
+    workflow = RecordingWorkflow(_snapshot(), pipeline)
+    await workflow.start()
+
+    await workflow.finish()
+    await workflow.wait()
+
+    assert pipeline.seeds == [PipelineSeed(
+        kind="recording",
+        use_live_notebook=True,
+        machine_verification=False,
     )]
 
 
@@ -404,7 +421,11 @@ async def test_self_healing_pipeline_repairs_until_publish_without_external_requ
         cancelled=lambda: False,
         activity=lambda item: _append_activity(activity, item),
     )
-    outcome = await pipeline.run(PipelineSeed(kind="recording", use_live_notebook=True), context)
+    outcome = await pipeline.run(PipelineSeed(
+        kind="recording",
+        use_live_notebook=True,
+        machine_verification=True,
+    ), context)
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert outcome.release == {"skill_id": "skill", "fixed": True}
@@ -442,7 +463,11 @@ async def test_self_healing_pipeline_stops_after_bounded_no_progress() -> None:
         ask_operator=lambda question: _answer(""),
         cancelled=lambda: False,
     )
-    outcome = await pipeline.run(PipelineSeed(kind="edited_spec", draft={}), context)
+    outcome = await pipeline.run(PipelineSeed(
+        kind="edited_spec",
+        draft={},
+        machine_verification=True,
+    ), context)
 
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.error == "自动处理连续没有产生有效变化"
@@ -483,7 +508,11 @@ async def test_self_healing_pipeline_does_not_count_draft_churn_as_progress() ->
         cancelled=lambda: False,
     )
 
-    outcome = await pipeline.run(PipelineSeed(kind="edited_spec", draft={}), context)
+    outcome = await pipeline.run(PipelineSeed(
+        kind="edited_spec",
+        draft={},
+        machine_verification=True,
+    ), context)
 
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.error == "自动处理连续没有产生有效变化"
@@ -529,7 +558,10 @@ async def test_self_healing_pipeline_asks_only_operator_issues() -> None:
         ask_operator=ask,
         cancelled=lambda: False,
     )
-    outcome = await pipeline.run(PipelineSeed(kind="recording"), context)
+    outcome = await pipeline.run(PipelineSeed(
+        kind="recording",
+        machine_verification=True,
+    ), context)
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert runtime.answer == "直属领导"

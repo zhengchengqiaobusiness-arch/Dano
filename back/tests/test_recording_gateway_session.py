@@ -99,3 +99,44 @@ async def test_live_operator_question_is_deferred_to_final_analysis() -> None:
     [question] = session._pi.flow_spec.meta["live_pending_questions"]
     assert question["text"] == "两个页面标签证据冲突，请确认业务含义"
     assert question["context_ref"] == "field:1"
+
+
+@pytest.mark.asyncio
+async def test_finish_command_forwards_machine_verification_switch() -> None:
+    class Workflow:
+        title = ""
+        machine_verification: bool | None = None
+
+        async def set_title(self, title: str) -> None:
+            self.title = title
+
+        async def finish(self, *, machine_verification: bool = False) -> None:
+            self.machine_verification = machine_verification
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "b" * 32,
+            action="action_1",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    session.capture = object()  # type: ignore[assignment]
+    workflow = Workflow()
+    session.workflow = workflow  # type: ignore[assignment]
+
+    await session.dispatch({
+        "type": "finish",
+        "title": "业务操作",
+        "machine_verification": True,
+    })
+
+    assert workflow.title == "业务操作"
+    assert workflow.machine_verification is True

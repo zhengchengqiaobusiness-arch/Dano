@@ -69,13 +69,58 @@ async def test_first_publication_consumes_live_notebook_once() -> None:
         publish=publish,
     ))
     outcome = await SelfHealingPipeline(runtime).run(
-        PipelineSeed(kind="recording", use_live_notebook=True),
+        PipelineSeed(
+            kind="recording",
+            use_live_notebook=True,
+            machine_verification=True,
+        ),
         _context(),
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert outcome.release == {"capability_count": 2}
     assert calls == [("materialize", True), ("plan", True)]
+
+
+@pytest.mark.asyncio
+async def test_default_off_machine_verification_exports_planned_skill_directly() -> None:
+    events: list[str] = []
+
+    async def materialize(_use_live, _context):  # noqa: ANN001
+        events.append("materialize")
+        return {"capabilities": []}
+
+    async def plan(draft, _use_live, _context):  # noqa: ANN001
+        events.append("plan")
+        return {**draft, "capabilities": ["query", "submit"]}
+
+    async def verify(*_args):  # noqa: ANN002
+        raise AssertionError("default-off mode must not compile or verify")
+
+    async def repair(*_args):  # noqa: ANN002
+        raise AssertionError("default-off mode must not enter repair")
+
+    async def publish(draft, context):  # noqa: ANN001
+        events.append("publish")
+        assert context.machine_verification is False
+        return {"capability_count": len(draft["capabilities"])}
+
+    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
+        materialize_recording=materialize,
+        plan_capabilities=plan,
+        verify=verify,
+        repair=repair,
+        publish=publish,
+    ))
+
+    outcome = await SelfHealingPipeline(runtime).run(
+        PipelineSeed(kind="recording", use_live_notebook=True),
+        _context(),
+    )
+
+    assert outcome.status == WorkflowStatus.PUBLISHED
+    assert outcome.release == {"capability_count": 2}
+    assert events == ["materialize", "plan", "publish"]
 
 
 @pytest.mark.asyncio
@@ -110,6 +155,7 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
             kind="edited_spec",
             draft={"capabilities": ["query"]},
             use_live_notebook=False,
+            machine_verification=True,
         ),
         _context(),
     )
@@ -156,7 +202,11 @@ async def test_verification_blocker_returns_to_same_repair_loop_before_atomic_pu
         publish=publish,
     ))
     outcome = await SelfHealingPipeline(runtime).run(
-        PipelineSeed(kind="recording", use_live_notebook=True),
+        PipelineSeed(
+            kind="recording",
+            use_live_notebook=True,
+            machine_verification=True,
+        ),
         _context(),
     )
 
@@ -200,7 +250,11 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
         publish=publish,
     ))
     outcome = await SelfHealingPipeline(runtime).run(
-        PipelineSeed(kind="recording", use_live_notebook=True),
+        PipelineSeed(
+            kind="recording",
+            use_live_notebook=True,
+            machine_verification=True,
+        ),
         _context(),
     )
 

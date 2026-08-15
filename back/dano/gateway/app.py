@@ -787,9 +787,16 @@ async def _publish_canonical_recording(
     from dano.infra.token_store import headers_from_api_request, save_token
     from dano.onboarding.page_onboard import run_request_onboarding
 
-    check_report = validate_flow_spec(release_flow_spec)
-    if not check_report.get("passed"):
-        raise ValueError("FlowSpec 发布前校验未通过：" + "；".join(check_report.get("errors") or []))
+    machine_verification_enabled = bool(
+        (release_candidate.get("machine_verification") or {}).get("enabled", True)
+    )
+    if machine_verification_enabled:
+        check_report = validate_flow_spec(release_flow_spec)
+        if not check_report.get("passed"):
+            raise ValueError(
+                "FlowSpec 发布前校验未通过："
+                + "；".join(check_report.get("errors") or [])
+            )
     api_request, build_errors = flow_spec_to_api_request(release_flow_spec)
     if build_errors or not api_request:
         raise ValueError("FlowSpec 无法转换成可执行请求：" + "；".join(build_errors or []))
@@ -821,6 +828,8 @@ async def _publish_canonical_recording(
         allow_repair=False,
         run_id=run_id,
         recording_pi_required=True,
+        recording_machine_validated=machine_verification_enabled,
+        direct_recording_export=not machine_verification_enabled,
     )
     if not report.get("ok"):
         raise RuntimeError(str(report.get("reason") or "录制发布失败"))

@@ -278,3 +278,43 @@ async def test_deterministic_normalization_does_not_skip_pi_repair(monkeypatch) 
 
     assert len(pi.prompts) == 1
     assert repaired["title"] == "deterministically-normalized"
+
+
+@pytest.mark.asyncio
+async def test_direct_export_freezes_candidate_without_release_verification() -> None:
+    class Pi:
+        bound: FlowSpec | None = None
+
+        def bind_flow_spec(self, spec: FlowSpec) -> None:
+            self.bound = spec
+
+    pi = Pi()
+    published: dict = {}
+
+    async def provide_pi(_fresh):  # noqa: ANN001
+        return pi
+
+    async def publisher(spec, candidate, _context):  # noqa: ANN001
+        published.update({"spec": spec, "candidate": candidate})
+        return {"skill_id": "direct-skill"}
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    services = ProductionRecordingServices(
+        recording_id="recording_1",
+        materializer=unused,
+        pi_provider=provide_pi,
+        publisher=publisher,
+    )
+    context = _context()
+    context.machine_verification = False
+
+    release = await services.publish(FlowSpec().model_dump(mode="json"), context)
+
+    assert release == {"skill_id": "direct-skill"}
+    assert published["candidate"]["machine_verification"] == {
+        "enabled": False,
+        "status": "skipped_by_operator",
+    }
+    assert pi.bound is published["spec"]

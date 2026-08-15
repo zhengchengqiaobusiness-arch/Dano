@@ -137,6 +137,8 @@ async def run_request_onboarding(
     goal: dict | None = None, storage_state: dict | None = None,
     allow_repair: bool = True,
     recording_pi_required: bool = False,
+    recording_machine_validated: bool | None = None,
+    direct_recording_export: bool = False,
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求落成 Skill → 确定性自检 → 发布。
 
@@ -190,7 +192,52 @@ async def run_request_onboarding(
         # 请求角色只作为审计与风险元数据。DELETE、撤回、驳回等也可能是
         # 管理员刚刚真实执行的业务操作，不能仅凭方法或路径关键词在录入阶段拒发。
         from dano.execution.page.request_capture import classify_request_role
-        log.info("ingest.request_role", **classify_request_role(api_request))   # node 4 语义角色
+        role = classify_request_role(api_request)
+        log.info("ingest.request_role", **role)   # node 4 语义角色
+        if direct_recording_export:
+            require_same_recording_session()
+            if goal:
+                api_request = {**api_request, "goal": goal}
+            body, _params, _required, _optional = _build_page_body(
+                api_request,
+                action,
+                title,
+                required,
+            )
+            draft = await T.save_draft(run_id, {
+                "system_instance_id": sid,
+                "asset_type": "page_script",
+                "asset_key": action,
+                "body": body,
+            })
+            require_same_recording_session()
+            published = await T.publish_asset(run_id, {
+                "asset_draft_id": draft["asset_draft_id"],
+                "validation_run_ids": [],
+                "review_run_ids": [],
+                "recording_release_candidate": True,
+                "recording_machine_validated": False,
+                "recording_direct_export": True,
+            })
+            return {
+                "ok": bool(published.get("published")),
+                "stage": "publish",
+                "status": (
+                    IngestionStatus.PUBLISHED.value
+                    if published.get("published")
+                    else IngestionStatus.REJECTED.value
+                ),
+                "action": action,
+                "request_role": role,
+                "goal": goal or {},
+                "goal_issues": [],
+                "asset_id": published.get("asset_id"),
+                "skill_id": f"{sid}.{action}",
+                "asset_version": published.get("version"),
+                "reason": str(published.get("reason") or ""),
+                "warnings": ["已按页面设置跳过编译和机器验证"],
+                "review_notes": [],
+            }
         # 业务 Goal:用户确认的优先;没传则 LLM 就绪时**自动提炼**(随资产存档,Goal 无条件化)。Goal 完整性门:
         #   用户确认的 goal 不过 → 阻断(需澄清);自动提炼的不过 → 仅作建议(不因 LLM 抖动阻断发布)。
         from dano.execution.page.request_capture import goal_needs_confirmation, validate_goal
@@ -370,10 +417,16 @@ async def run_request_onboarding(
                         "reason": "审核未通过(格式 / 业务逻辑 / 风险合规)"}
         # 发布硬闸门:verify_publishable(self_check 等证据)+ verify_reviewed(capture 仍按既定放行,审核闸门在上方编排层把守)
         require_same_recording_session()
+        machine_validated = (
+            bool(recording_pi_required)
+            if recording_machine_validated is None
+            else bool(recording_machine_validated)
+        )
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
                                              "review_run_ids": review_run_ids,
-                                             "recording_machine_validated": bool(recording_pi_required)})
+                                             "recording_release_candidate": bool(recording_pi_required),
+                                             "recording_machine_validated": machine_validated})
         # 安全网:**可选**参数里若有"内部机器标识"(必填的已在字段语义门拦下)→ 仅告警(agent 不传时用录制原值)。
         bad = [p for p in opt_fields if looks_internal_param_name(p)]
         warnings = ([f"可选参数 `{p}` 像内部标识(非人类名),建议命名;agent 不传它时用录制原值"

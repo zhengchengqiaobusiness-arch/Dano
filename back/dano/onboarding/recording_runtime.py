@@ -266,10 +266,23 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
-        decision = evaluate_recording_release(spec)
-        if decision.callable_spec is None:
-            raise RuntimeError("发布边界前能力契约已变化")
-        release_spec, candidate = prepare_flow_release_candidate(decision.callable_spec)
+        if context.machine_verification:
+            decision = evaluate_recording_release(spec)
+            if decision.callable_spec is None:
+                raise RuntimeError("发布边界前能力契约已变化")
+            publishable_spec = decision.callable_spec
+        else:
+            publishable_spec = spec
+        verification = {
+            "enabled": context.machine_verification,
+            "status": "passed" if context.machine_verification else "skipped_by_operator",
+        }
+        publishable_spec.meta = {
+            **(publishable_spec.meta or {}),
+            "machine_verification": verification,
+        }
+        release_spec, candidate = prepare_flow_release_candidate(publishable_spec)
+        candidate["machine_verification"] = verification
         # Publishing is deterministic after the repair/verification loop has
         # no remaining issues.  Bind the exact frozen candidate to the active
         # session for the database boundary fingerprint check; no model call is

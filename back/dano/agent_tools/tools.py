@@ -993,11 +993,16 @@ async def publish_asset(run_id: str, params: dict) -> dict:
     draft_id = UUID(params["asset_draft_id"])
     vrids = [UUID(v) for v in params.get("validation_run_ids", [])]
     rrids = [UUID(v) for v in params.get("review_run_ids", [])]
-    ok, reason = await _ds.verify_publishable(draft_id, vrids)
-    if not ok:
-        return {"published": False, "reason": reason}
+    direct_recording_export = params.get("recording_direct_export") is True
+    if not direct_recording_export:
+        ok, reason = await _ds.verify_publishable(draft_id, vrids)
+        if not ok:
+            return {"published": False, "reason": reason}
     draft = await _ds.get_draft(draft_id)
-    if params.get("recording_machine_validated") is True:
+    if (
+        params.get("recording_release_candidate") is True
+        or params.get("recording_machine_validated") is True
+    ):
         from dano.onboarding.recording_pi import active_recording_session
 
         session = active_recording_session(run_id)
@@ -1013,7 +1018,13 @@ async def publish_asset(run_id: str, params: dict) -> dict:
     env = await _repo.create(AssetEnvelope(
         asset_type=draft.asset_type, scope=Scope(tenant=draft.tenant, subsystem=draft.subsystem),
         asset_key=draft.asset_key, version=0, source_fingerprint=draft.content_hash,
-        validation_status=ValidationStatus.VERIFIED, confidence=0.95, body=draft.body))
+        validation_status=(
+            ValidationStatus.DRAFT
+            if direct_recording_export
+            else ValidationStatus.VERIFIED
+        ),
+        confidence=(0.7 if direct_recording_export else 0.95),
+        body=draft.body))
     await _repo.set_status(env.asset_id, ValidationStatus.PUBLISHED)
     log.info("publish_asset.ok", asset_id=str(env.asset_id), action=draft.asset_key)
     return {"published": True, "asset_id": str(env.asset_id), "version": env.version}

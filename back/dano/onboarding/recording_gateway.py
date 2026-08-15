@@ -191,11 +191,15 @@ class RecordingGatewaySession:
             return
         if command == "finish":
             await self.workflow.set_title(str(message.get("title") or ""))
-            await self.workflow.finish()
+            await self.workflow.finish(
+                machine_verification=message.get("machine_verification") is True,
+            )
             return
         if command == "republish":
             await self.workflow.set_title(str(message.get("title") or self.workflow.snapshot.title))
-            await self.workflow.republish()
+            await self.workflow.republish(
+                machine_verification=message.get("machine_verification") is True,
+            )
             return
         if command == "patch_draft":
             if self.workflow.snapshot.draft is None:
