@@ -21,7 +21,6 @@ from dano.onboarding.recording_release import (
 )
 from dano.onboarding.recording_verify import (
     finalize_verification_state,
-    verification_report,
 )
 from dano.onboarding.recording_workflow import (
     PipelineContext,
@@ -47,6 +46,10 @@ async def _submit_with_protocol_recovery(
     next_prompt = prompt
     last_error: Exception | None = None
     for attempt in range(1, _PROTOCOL_ATTEMPTS + 1):
+        current_flow_spec = getattr(pi, "current_flow_spec", None)
+        bind_flow_spec = getattr(pi, "bind_flow_spec", None)
+        current = current_flow_spec() if callable(current_flow_spec) else None
+        before = current.model_copy(deep=True) if isinstance(current, FlowSpec) else current
         try:
             await pi.prompt(next_prompt)
             context.ensure_active()
@@ -57,6 +60,8 @@ async def _submit_with_protocol_recovery(
             )
         except Exception as exc:  # noqa: BLE001 - retry only within this bounded operation
             last_error = exc
+        if before is not None and callable(bind_flow_spec):
+            bind_flow_spec(before)
         if attempt < _PROTOCOL_ATTEMPTS:
             next_prompt = (
                 "上一次工具提交未通过公开 schema。继续当前任务，不要询问业务用户。"
@@ -175,16 +180,15 @@ class ProductionRecordingServices:
     ) -> tuple[dict[str, Any], tuple[WorkflowIssue, ...]]:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
-        report = verification_report(spec)
-        if report["todos"]:
-            return draft, tuple(_todo_issue(todo) for todo in report["todos"])
-
         spec, report = finalize_verification_state(
             spec,
             rounds=0,
             max_rounds=0,
-            stop_reason="completed",
         )
+        if report["todos"]:
+            return spec.model_dump(mode="json"), tuple(
+                _todo_issue(todo) for todo in report["todos"]
+            )
         decision = evaluate_recording_release(spec)
         issues = tuple(
             _workflow_issue(issue)
@@ -273,7 +277,7 @@ class ProductionRecordingServices:
             + " operator_answers="
             + json.dumps(operator_answers, ensure_ascii=False, separators=(",", ":"))
             ),
-            accepted_kinds={"repair", "plan"},
+            accepted_kinds={"repair"},
             context=context,
         )
         return pi.current_flow_spec().model_dump(mode="json")

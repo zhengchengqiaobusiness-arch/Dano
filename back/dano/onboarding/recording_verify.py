@@ -6,6 +6,7 @@ import hashlib
 from copy import deepcopy
 from typing import Any
 
+from dano.execution.page.recording_field_identity import canonical_wire_path
 from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
 
 
@@ -67,13 +68,17 @@ def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dic
             candidate.get("target_path") or candidate.get("target_container_path") or ""
         )
         source_path = reported_source_path.removeprefix("response.")
-        target_path = reported_target_path.removeprefix("request.")
+        target_step = next((step for step in spec.steps if step.step_id == target_step_id), None)
+        target_path = canonical_wire_path(
+            target_step,
+            reported_target_path.removeprefix("request."),
+        )
         dependency_kind = str(candidate.get("kind") or "value")
         if any(
             link.source_step_id == source_step_id
             and str(link.source_path or "").removeprefix("response.") == source_path
             and link.target_step_id == target_step_id
-            and str(link.target_path or "").removeprefix("request.") == target_path
+            and canonical_wire_path(target_step, str(link.target_path or "")) == target_path
             and str(link.kind or "value") == dependency_kind
             for link in spec.links
         ):
@@ -263,11 +268,16 @@ def _release_issue_todos(
         issue_id = str(issue.get("issue_id") or "")
         if issue_id:
             unique_issues[issue_id] = issue
+    active_issues = [
+        issue
+        for issue in unique_issues.values()
+        if not (existing and str(issue.get("resolver") or "") == "operator")
+    ]
     todos = [
         {
             "kind": "release_issue",
-            "target_id": issue_id,
-            "issue_id": issue_id,
+            "target_id": str(issue.get("issue_id") or ""),
+            "issue_id": str(issue.get("issue_id") or ""),
             "check_code": str(issue.get("check_code") or ""),
             "capability_id": str(issue.get("capability_id") or ""),
             "step_id": str(issue.get("step_id") or ""),
@@ -287,10 +297,10 @@ def _release_issue_todos(
                 else "report_external_blocker"
             ),
         }
-        for issue_id, issue in unique_issues.items()
+        for issue in active_issues
         if str(issue.get("check_code") or "") not in covered_codes
     ]
-    return list(unique_issues.values()), todos
+    return active_issues, todos
 
 
 def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001

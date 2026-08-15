@@ -1005,6 +1005,20 @@ def test_pi_plan_rejects_observed_legacy_model_variant(monkeypatch):
     assert int((session.spec.meta or {}).get("current_version") or 0) == 1
 
 
+def test_typed_recording_plan_accepts_declared_session_key() -> None:
+    agent_tools_module._validate_typed_recording_operations([
+        {
+            "op": "set_param_source",
+            "step_id": "submit",
+            "wire_path": "body.operatorId",
+            "source_kind": "session",
+            "session_key": "current_user.id",
+            "reason": "登录用户身份由会话提供",
+            "evidence_refs": ["req-login"],
+        }
+    ], label="plan.ops")
+
+
 
 def test_pi_plan_allows_backend_to_refresh_derived_request_usage(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-derived-usage")

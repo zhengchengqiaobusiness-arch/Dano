@@ -1534,7 +1534,7 @@ _TYPED_RECORDING_OPERATION_KEYS = {
     "set_request_role": {"op", "request_id", "role", "reason", "evidence_refs", "confidence"},
     "set_param_source": {
         "op", "request_id", "step_id", "wire_path", "source_kind", "origin_request_id",
-        "origin_path", "context_key", "strategy", "start_field", "end_field", "output_key",
+        "origin_path", "context_key", "session_key", "strategy", "start_field", "end_field", "output_key",
         "reason", "evidence_refs",
     },
     "set_param_type": {

@@ -4,6 +4,7 @@ import pytest
 
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_spec import (
+    CapabilityRequestRef,
     FlowCapability,
     FlowLink,
     FlowSpec,
@@ -145,6 +146,75 @@ def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     assert candidate["target_path"] == "body.jobId"
     assert candidate["suggested_tool"] == "submit_recording_repair"
     assert candidate["completion_ops"] == ["propose_dependency", "verify_dependency", "confirm_dependency"]
+
+
+def test_transport_qualified_candidate_matches_existing_stored_body_dependency():
+    spec = _spec_with_unproposed_value_link()
+    spec.links = [FlowLink(
+        link_id="job-link",
+        source_step_id="detail",
+        source_path="data.jobId",
+        target_step_id="submit",
+        target_path="jobId",
+        kind="value",
+        confirmed=True,
+        evidence={"source_request_id": "req-detail", "target_request_id": "req-submit"},
+        meta={"verified": True},
+    )]
+
+    assert not any(
+        item["kind"] == "dependency_candidate"
+        for item in verification_todos(spec)
+    )
+
+
+def test_operator_release_questions_wait_until_machine_verification_finishes():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/submit",
+            body_source='{"title":"demo"}',
+            source_meta={"request_id": "req-submit"},
+            params=[ParamField(
+                path="title",
+                key="title",
+                value="demo",
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
+                source={"kind": "user_input"},
+            )],
+        )],
+        capabilities=[FlowCapability(
+            capability_id="submit-capability",
+            name="submit_item",
+            title="提交项目",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+            request_refs=[CapabilityRequestRef(
+                request_id="req-submit",
+                step_id="submit",
+                usage="execute",
+                method="POST",
+                path="/submit",
+            )],
+            confirmed=True,
+        )],
+        request_facts=RequestFacts(requests=[RequestFact(
+            request_id="req-submit",
+            method="POST",
+            path="/submit",
+            post_data='{"title":"demo"}',
+        )]),
+    )
+
+    report = verification_report(spec)
+
+    assert any(item["kind"] == "write_verify" for item in report["todos"])
+    assert not any(item.get("resolver") == "operator" for item in report["todos"])
+    assert not any(item.get("resolver") == "operator" for item in report["release_issues"])
 
 
 def test_enum_param_without_select_binding_is_still_a_verification_todo():
