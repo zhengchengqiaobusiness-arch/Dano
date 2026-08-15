@@ -75,6 +75,35 @@ async def test_processing_and_terminal_snapshots_preserve_captured_request_count
 
 
 @pytest.mark.asyncio
+async def test_live_insight_checkpoint_does_not_regress_processing_progress() -> None:
+    class Pipeline:
+        async def run(self, seed, context):  # noqa: ANN001
+            return PipelineOutcome(status=WorkflowStatus.EDITABLE, draft={})
+
+    current = transition_snapshot(
+        transition_snapshot(_snapshot(), WorkflowStatus.RECORDING),
+        WorkflowStatus.PROCESSING,
+        progress=WorkflowProgress(
+            step=WorkflowStep.MATERIALIZING,
+            label="正在生成能力草稿",
+            request_count=105,
+        ),
+    )
+    workflow = RecordingWorkflow(current, Pipeline())
+
+    result = await workflow.update_live_insights([
+        {"kind": "param_source", "text": "已识别字段来源"},
+    ])
+
+    assert result.status == WorkflowStatus.PROCESSING
+    assert result.progress.step == WorkflowStep.MATERIALIZING
+    assert result.progress.request_count == 105
+    assert result.insights == [
+        {"kind": "param_source", "text": "已识别字段来源"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_unexpected_publish_failure_preserves_latest_authoritative_draft() -> None:
     class FailingPublishPipeline:
         async def run(self, seed, context):  # noqa: ANN001

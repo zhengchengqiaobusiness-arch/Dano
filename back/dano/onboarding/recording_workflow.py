@@ -557,6 +557,14 @@ class RecordingWorkflow:
         )
         return self.snapshot
 
+    async def update_live_insights(self, insights: list[dict[str, Any]]) -> WorkflowSnapshot:
+        """Checkpoint bounded Pi conclusions without changing workflow progress."""
+
+        if self.snapshot.status == WorkflowStatus.IDLE:
+            return self.snapshot
+        await self._set(self.snapshot.status, insights=insights[-100:])
+        return self.snapshot
+
     async def set_title(self, title: str) -> WorkflowSnapshot:
         if title == self.snapshot.title:
             return self.snapshot

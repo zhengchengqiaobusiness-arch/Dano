@@ -359,6 +359,14 @@ class RecordingPiSession:
         self._live_goal_text = str(goal_text or "")
         self._operator_asker = operator_asker
 
+    def bind_submission_listener(
+        self,
+        listener: Callable[[Any, str], None] | None,
+    ) -> None:
+        """Publish accepted live-plan checkpoints without waiting for the Pi turn."""
+
+        self._on_submission_accepted = listener
+
     async def get_recording_delta(self, since_seq: int = 0, *, limit: int = 25) -> dict[str, Any]:
         from dano.execution.page.recording_live import recording_delta
 

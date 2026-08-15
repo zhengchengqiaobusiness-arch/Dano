@@ -501,7 +501,9 @@ export default function PageRecorder({
       if (canvas.height !== height) canvas.height = height;
       context.drawImage(image, 0, 0, width, height);
       renderedFrameRef.current = frame.seq;
-      setFrameMeta({ width, height });
+      setFrameMeta((current) => current.width === width && current.height === height
+        ? current
+        : { width, height });
       setHasFrame(true);
     }).catch(() => undefined).finally(() => {
       if (generation !== frameGenerationRef.current) return;

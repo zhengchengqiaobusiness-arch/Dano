@@ -261,3 +261,68 @@ async def test_freeze_drains_a_queued_live_batch_before_direct_export() -> None:
     assert session._live_notebook.insights == [
         {"kind": "role", "text": "已识别业务请求"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_live_plan_submission_is_checkpointed_before_the_pi_turn_finishes() -> None:
+    class Capture:
+        def captured_all_requests(self) -> list[dict]:
+            return [{"request_id": "req-1"}, {"request_id": "req-2"}]
+
+    class Workflow:
+        class Snapshot:
+            draft = None
+
+        snapshot = Snapshot()
+        updates: list[list[dict]] = []
+
+        async def update_live_insights(self, insights: list[dict]) -> None:
+            self.updates.append(insights)
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+            self.submission_listener = None
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        def bind_submission_listener(self, listener) -> None:  # noqa: ANN001
+            self.submission_listener = listener
+
+    pi = Pi()
+
+    async def pi_factory(_fresh: bool):
+        return pi
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "e" * 32,
+            action="action_live_checkpoint",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=pi_factory,
+        publisher=unused,
+    )
+    session.capture = Capture()  # type: ignore[assignment]
+    workflow = Workflow()
+    session.workflow = workflow  # type: ignore[assignment]
+
+    await session._ensure_pi(False)
+    assert pi.submission_listener is not None
+
+    accepted = FlowSpec(meta={
+        "agent_insights": [{"kind": "role", "text": "已识别业务请求"}],
+    })
+    pi.submission_listener(accepted, "plan")
+    await asyncio.sleep(0)
+
+    assert workflow.updates == [[{"kind": "role", "text": "已识别业务请求"}]]
+    assert session._live_notebook is not None
+    assert session._live_notebook.insights == workflow.updates[0]

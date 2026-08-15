@@ -349,6 +349,9 @@ class RecordingGatewaySession:
                     self._ask_operator if self._capture_frozen else self._record_live_question
                 ),
             )
+            bind_submission_listener = getattr(self._pi, "bind_submission_listener", None)
+            if callable(bind_submission_listener):
+                bind_submission_listener(self._on_live_submission_accepted)
             if self.workflow is not None and self.workflow.snapshot.draft is not None:
                 self._pi.bind_flow_spec(FlowSpec.model_validate(self.workflow.snapshot.draft))
             elif self._pi.flow_spec is None:
@@ -362,6 +365,18 @@ class RecordingGatewaySession:
                     reason="实时录制会话开始",
                 ))
         return self._pi
+
+    def _on_live_submission_accepted(self, spec: FlowSpec, mode: str) -> None:
+        """Expose accepted live conclusions immediately, before the Pi turn completes."""
+
+        if mode != "plan" or self._capture_frozen or self._closed:
+            return
+        notebook = LiveNotebook.from_shadow(spec)
+        self._live_notebook = notebook
+        if self.workflow is None:
+            return
+        task = asyncio.create_task(self.workflow.update_live_insights(notebook.insights))
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
 
     async def _record_live_question(
         self,
