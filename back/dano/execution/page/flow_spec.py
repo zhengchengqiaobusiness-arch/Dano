@@ -15041,14 +15041,37 @@ def _step_wire_formats(step: FlowStep) -> dict[str, str]:
     }
 
 
+def _executable_identity_source(value: Any) -> bool:
+    """Return whether the existing request runtime can resolve this source.
+
+    FlowSpec also keeps advisory identity guesses (for example a body field
+    named ``user_id`` whose concrete session location was not captured).  An
+    advisory body path is useful evidence for Pi, but it is not a runtime
+    source and must not be emitted into the executable request.
+    """
+    kind, separator, location = str(value or "").partition(":")
+    return bool(
+        separator
+        and location
+        and kind in {"cookie", "localStorage", "requestHeader"}
+    )
+
+
 def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
     """Compile session-owned body fields through the existing identity runtime."""
-    values = [item.model_dump(exclude_none=True) for item in step.identity]
+    values = [
+        item.model_dump(exclude_none=True)
+        for item in step.identity
+        if _executable_identity_source(item.source)
+    ]
     for param in step.params:
         if param.category != "runtime_var":
             continue
         source = dict(param.source or {})
-        if param.source_kind == "current_user" and source.get("path"):
+        if (
+            param.source_kind == "current_user"
+            and _executable_identity_source(source.get("path"))
+        ):
             values.append({
                 "path": _strip_body_prefix(param.path),
                 "source": str(source["path"]),
