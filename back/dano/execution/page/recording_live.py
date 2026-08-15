@@ -2207,8 +2207,26 @@ def _retarget_unique_equivalent_field_operation(spec, operation: dict) -> dict: 
         return operation
     request_id = str(operation.get("request_id") or "")
     wire_path = str(operation.get("wire_path") or operation.get("path") or "")
-    if not request_id or not wire_path or _request_step(spec, request_id) is not None:
+    if not request_id or not wire_path:
         return operation
+    current_step = _request_step(spec, request_id)
+    if current_step is not None:
+        try:
+            resolve_field_ref(
+                spec,
+                FieldRef(step_id=current_step.step_id, wire_path=wire_path),
+            )
+        except ValueError:
+            pass
+        else:
+            updated = deepcopy(operation)
+            updated["step_id"] = current_step.step_id
+            updated["field_ref"] = {
+                "step_id": current_step.step_id,
+                "wire_path": wire_path,
+            }
+            updated.pop("_deferred", None)
+            return updated
     source_fact = next(
         (item for item in spec.request_facts.requests if item.request_id == request_id),
         None,
@@ -2261,9 +2279,11 @@ def _live_capability_kind_hint(name: str) -> str:
         ("withdraw", ("withdraw", "revoke", "cancel", "撤回", "撤销")),
         ("delete", ("delete", "remove", "删除")),
         ("reject", ("reject", "驳回")),
-        ("approve", ("approve", "approval", "同意", "审批")),
         ("export", ("export", "download", "导出", "下载")),
+        # Read intent must win before the noun ``approval``.  For example,
+        # "view approval progress" is an inspection, not an approve command.
         ("inspect", ("inspect", "detail", "view", "progress", "详情", "查看", "进度")),
+        ("approve", ("approve", "approval", "同意", "审批")),
         ("preview", ("preview", "预览")),
         ("query_status", ("query", "search", "list", "status", "查询", "搜索", "列表")),
         ("update", ("update", "edit", "modify", "更新", "编辑")),
@@ -2383,11 +2403,10 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         "reject": "驳回", "withdraw": "撤回", "delete": "删除",
     }
     business = str(spec.title or "业务").strip() or "业务"
-    contract_names = {
-        str(item.get("name") or "").strip()
-        for item in (contract.get("capabilities") or [])
-        if isinstance(item, dict) and str(item.get("name") or "").strip()
-    }
+    # The strong target may have come from ``spec.goal.capabilities`` even
+    # when the editable goal text only supplied a count.  Those accepted
+    # target slots are equally authoritative for public titles.
+    contract_names = {str(name).strip() for name in target_slots if str(name).strip()}
     if not target_slots:
         target_slots = [""] * len(remaining_anchors)
 
@@ -2440,6 +2459,29 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             return 0
         normalized_target = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", target.casefold())
         hinted_kind = _live_capability_kind_hint(target)
+        candidate_steps = [steps[anchor_id] for anchor_id in remaining_anchors]
+        write_positions = [
+            position for position, step in enumerate(candidate_steps)
+            if str(step.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}
+            and _capability_operation_kind(step) in {
+                "create", "update", "save_draft", "submit",
+            }
+        ]
+        stable_write_positions = [
+            position for position in write_positions
+            if has_stable_record_identity(candidate_steps[position])
+        ]
+        new_write_positions = [
+            position for position in write_positions
+            if not has_stable_record_identity(candidate_steps[position])
+        ]
+        # A stable record identity separates editing an existing record from
+        # creating/submitting a new one even when both commands share the same
+        # HTTP endpoint and visible button text.
+        if hinted_kind == "update" and len(stable_write_positions) == 1:
+            return stable_write_positions[0]
+        if hinted_kind in {"create", "submit"} and len(new_write_positions) == 1:
+            return new_write_positions[0]
         scored: list[tuple[int, int]] = []
         for position, anchor_id in enumerate(remaining_anchors):
             step = steps[anchor_id]
@@ -2496,7 +2538,22 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             continue
         anchor_id = remaining_anchors.pop(match_position)
         step = steps[anchor_id]
-        kind = _capability_operation_kind(step)
+        observed_kind = _capability_operation_kind(step)
+        method = str(step.method or "GET").upper()
+        read_kinds = {"query_status", "inspect", "preview", "export"}
+        write_kinds = {
+            "create", "update", "save_draft", "submit", "approve",
+            "reject", "withdraw", "delete",
+        }
+        kind = (
+            hinted_kind
+            if (
+                hinted_kind in read_kinds and method in {"GET", "HEAD"}
+            ) or (
+                hinted_kind in write_kinds and method not in {"GET", "HEAD", "OPTIONS"}
+            )
+            else observed_kind
+        )
         request_steps = [step]
         read_steps = _read_status_steps(spec)
         if step in read_steps:
@@ -2516,6 +2573,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             "title": title,
             "intent": title,
             "kind": kind,
+            "kind_source": "recording_goal" if proposed_name else "recording_fact",
             "anchor_step_id": anchor_id,
             "request_refs": [
                 {"step_id": request_step.step_id, "usage": "execute"}
@@ -2533,7 +2591,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
 
 
 def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa: ANN001
-    """Apply goal count/names without replacing Pi-owned request anchors."""
+    """Apply goal count/names without inventing or positionally relabeling anchors."""
     contract = _recording_goal_contract(spec)
     if not contract:
         return semantic_plan
@@ -2546,11 +2604,27 @@ def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa
     ]
     selected: list[dict] = []
     used_names: set[str] = set()
+
+    def normalized_identity(value: object) -> str:
+        return re.sub(
+            r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").casefold(),
+        )
+
     for index in range(expected_count):
         if not candidates:
             break
         target_name = target_names[index] if index < len(target_names) else ""
         target_kind = _live_capability_kind_hint(target_name)
+        target_identity = normalized_identity(target_name)
+        exact_positions = [
+            position
+            for position, candidate in enumerate(candidates)
+            if target_identity and target_identity in {
+                normalized_identity(candidate.get("name")),
+                normalized_identity(candidate.get("title")),
+                normalized_identity(candidate.get("intent")),
+            }
+        ]
         matching_positions = [
             position
             for position, candidate in enumerate(candidates)
@@ -2559,7 +2633,17 @@ def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa
                 or _live_capability_kind_hint(str(candidate.get("name") or "")) == target_kind
             )
         ]
-        match_position = matching_positions[0] if matching_positions else 0
+        if len(exact_positions) == 1:
+            match_position = exact_positions[0]
+        elif len(matching_positions) == 1:
+            match_position = matching_positions[0]
+        elif not target_name and candidates:
+            match_position = 0
+        else:
+            # Missing evidence must stay missing. Taking the first remaining
+            # candidate here used to rename submit as detail, withdraw as
+            # progress, and delete as edit after one unresolved goal slot.
+            continue
         candidate = candidates.pop(match_position)
         if target_name:
             candidate["name"] = _unique_live_capability_name(
@@ -2629,18 +2713,82 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         live_capability_model.get("semantic_plan")
         if isinstance(live_capability_model, dict) else None
     )
-    if not (
+    boundary_semantic_plan = _semantic_plan_from_live_boundaries(merged)
+    # Under a strong recording goal the finalized request boundaries are the
+    # authoritative capability skeleton.  Pi's live plan is valuable semantic
+    # evidence, but it may have been produced before the last requests arrived
+    # or before final step IDs existed, so it must not replace that skeleton.
+    if goal_contract and boundary_semantic_plan.get("capabilities"):
+        derived_capabilities = [
+            deepcopy(item)
+            for item in boundary_semantic_plan.get("capabilities") or []
+            if isinstance(item, dict)
+        ]
+        derived_anchors = {
+            str(item.get("anchor_step_id") or "") for item in derived_capabilities
+        }
+        expected_count = int(goal_contract.get("expected_count") or 0)
+        if len(derived_capabilities) < expected_count:
+            live_request_id_by_step_id = {
+                step.step_id: str((step.source_meta or {}).get("request_id") or "")
+                for step in live_spec.steps
+            }
+            merged_step_id_by_request_id = {
+                str((step.source_meta or {}).get("request_id") or ""): step.step_id
+                for step in merged.steps
+                if str((step.source_meta or {}).get("request_id") or "")
+            }
+            for item in (
+                live_semantic_plan.get("capabilities") or []
+                if isinstance(live_semantic_plan, dict) else []
+            ):
+                if not isinstance(item, dict):
+                    continue
+                raw_anchor = str(item.get("anchor_step_id") or "")
+                request_id = live_request_id_by_step_id.get(raw_anchor, raw_anchor)
+                anchor = merged_step_id_by_request_id.get(request_id, raw_anchor)
+                if not anchor or anchor in derived_anchors:
+                    continue
+                supplement = deepcopy(item)
+                supplement["anchor_step_id"] = anchor
+                for request_ref in supplement.get("request_refs") or []:
+                    if not isinstance(request_ref, dict):
+                        continue
+                    identifier = str(request_ref.get("step_id") or "")
+                    ref_request_id = live_request_id_by_step_id.get(identifier, identifier)
+                    request_ref["step_id"] = merged_step_id_by_request_id.get(
+                        ref_request_id, identifier,
+                    )
+                derived_capabilities.append(supplement)
+                derived_anchors.add(anchor)
+        live_semantic_plan = {
+            **deepcopy(boundary_semantic_plan),
+            "business_understanding": deepcopy(
+                (live_semantic_plan or {}).get("business_understanding")
+                or boundary_semantic_plan.get("business_understanding")
+                or {}
+            ),
+            "capabilities": derived_capabilities,
+            "unresolved_items": [
+                *deepcopy(boundary_semantic_plan.get("unresolved_items") or []),
+                *deepcopy(
+                    (live_semantic_plan or {}).get("unresolved_items") or []
+                    if isinstance(live_semantic_plan, dict) else []
+                ),
+            ],
+        }
+    elif not (
         isinstance(live_semantic_plan, dict)
         and live_semantic_plan.get("capabilities")
     ):
-        live_semantic_plan = _semantic_plan_from_live_boundaries(merged)
-        if live_semantic_plan.get("capabilities"):
-            live_capability_model = {
-                **(live_capability_model if isinstance(live_capability_model, dict) else {}),
-                "status": "ready",
-                "source": "live_goal_request_roles",
-                "semantic_plan": live_semantic_plan,
-            }
+        live_semantic_plan = boundary_semantic_plan
+    if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
+        live_capability_model = {
+            **(live_capability_model if isinstance(live_capability_model, dict) else {}),
+            "status": "ready",
+            "source": "live_goal_request_roles",
+            "semantic_plan": live_semantic_plan,
+        }
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         live_semantic_plan = _constrain_semantic_plan_to_goal(merged, live_semantic_plan)
         if isinstance(live_capability_model, dict):

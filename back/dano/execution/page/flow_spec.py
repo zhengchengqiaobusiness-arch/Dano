@@ -3130,11 +3130,15 @@ def _request_has_command_anchor(request: dict) -> bool:
     )
 
 
-def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...]]:
+def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...], str]:
     # Same endpoint may serve several workflows. Distinct routing values are
     # different facts and must never collapse into the latest request.
     context = tuple(sorted(_workflow_context_values_for_request(req)))
-    return ((req.get("method") or "GET").upper(), _request_path(req), context)
+    # A visible command is a public-operation boundary. The same endpoint is
+    # routinely reused by edit/detail/progress actions; collapsing those facts
+    # makes later capability planning irrecoverably lose two of the actions.
+    command = _request_transaction_id(req) if _request_has_command_anchor(req) else ""
+    return ((req.get("method") or "GET").upper(), _request_path(req), context, command)
 
 
 _TRANSPORT_FILTER_KEYS = frozenset({
@@ -3191,7 +3195,7 @@ def _preread_candidate_score(req: dict) -> tuple[int, int, int, float]:
 
 def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
     """同一路径反复触发时保留业务条件最完整的一次，序号仅作为同分兜底。"""
-    best_by_path: dict[tuple[str, str, tuple[str, ...]], dict] = {}
+    best_by_path: dict[tuple[str, str, tuple[str, ...], str], dict] = {}
     for req in preread_cands:
         key = _preread_dedupe_key(req)
         current = best_by_path.get(key)
@@ -7168,6 +7172,11 @@ def to_flow_spec(
         and _request_role_key(request) not in post_write_read_keys
         and (
             _request_role_key(request) in explicitly_approved_business_keys
+            # Any causally anchored visible command is an independent public
+            # operation candidate.  Restricting this to search-like labels
+            # silently discarded edit/detail/progress reads when applications
+            # reused the same GET endpoint for several buttons.
+            or _request_has_command_anchor(request)
             or _has_query_action_evidence(
                 request.get("trigger_op"),
                 " ".join(filter(None, (
@@ -9827,9 +9836,12 @@ def _query_operation_key(step: FlowStep) -> str:
     business = _capability_business_key(step)
     operation_kind = _capability_operation_kind(step)
     meta = step.source_meta or {}
+    action_ref = str(
+        meta.get("trigger_transaction_id") or meta.get("trigger_action_id") or ""
+    ).strip()
     locator = re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold())
     anchored = bool(
-        locator
+        (action_ref or locator)
         and str(meta.get("trigger_op") or "").lower() in {"click", "submit"}
         and str(meta.get("causality_confidence") or "high").lower() in {"high", "medium"}
     )
@@ -9839,12 +9851,12 @@ def _query_operation_key(step: FlowStep) -> str:
             if operation_kind != "query_status"
             else business
         )
-    action_key = hashlib.sha1(locator.encode("utf-8")).hexdigest()[:10]
-    return "__".join(part for part in (
-        business,
-        operation_kind if operation_kind != "query_status" else "",
-        f"action_{action_key}",
-    ) if part)
+    page_scope = str(
+        meta.get("page_id") or meta.get("page_url") or meta.get("document_url") or ""
+    )
+    action_identity = "|".join((page_scope, action_ref, locator))
+    action_key = hashlib.sha1(action_identity.encode("utf-8")).hexdigest()[:10]
+    return f"action_{action_key}"
 
 
 def _write_operation_key(step: FlowStep) -> str:
@@ -10849,13 +10861,18 @@ def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
     submit_closure = {
         step.step_id for step in _submit_capability_steps(spec)
     } if write_steps else set()
+    read_groups: dict[str, list[FlowStep]] = {}
     for step in _read_status_steps(spec):
         meta = step.source_meta or {}
         independently_triggered = _has_query_action_evidence(
             meta.get("trigger_op"), meta.get("trigger_locator"),
         )
         if step.step_id not in submit_closure or independently_triggered:
-            anchors.append(step.step_id)
+            read_groups.setdefault(_query_operation_key(step), []).append(step)
+    # One visible command is one public read ability even when it fans out to
+    # record, workflow, user and statistics endpoints. Its full request group
+    # is attached later by _semantic_plan_from_live_boundaries.
+    anchors.extend(steps[0].step_id for steps in read_groups.values() if steps)
     order = {step.step_id: index for index, step in enumerate(spec.steps)}
     return sorted(dict.fromkeys(anchors), key=lambda step_id: order.get(step_id, 10**9))
 

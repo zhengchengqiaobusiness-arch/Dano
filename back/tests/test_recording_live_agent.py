@@ -8,6 +8,8 @@ import pytest
 
 from dano.execution.page.flow_spec import (
     _auto_confirm_ready_capabilities,
+    _dedupe_preread_candidates,
+    _query_operation_key,
     FlowCapability,
     FlowSpec,
     FlowLink,
@@ -24,6 +26,7 @@ from dano.execution.page.flow_spec import (
     validate_flow_spec,
 )
 from dano.execution.page.recording_live import (
+    _constrain_semantic_plan_to_goal,
     LiveNotebook,
     apply_recording_agent_edit,
     live_request_role_overrides,
@@ -31,6 +34,175 @@ from dano.execution.page.recording_live import (
     recording_delta,
 )
 from dano.onboarding.recording_pi import RecordingPiSession
+
+
+def test_preread_dedupe_preserves_same_endpoint_for_distinct_user_commands() -> None:
+    requests = [
+        {
+            "request_id": "req-edit",
+            "method": "GET",
+            "url": "https://example.test/api/records/get?id=42",
+            "query": {"id": "42"},
+            "trigger_op": "click",
+            "trigger_transaction_id": "txn-edit",
+            "trigger_locator": "text=编辑",
+            "sequence": 1,
+        },
+        {
+            "request_id": "req-detail",
+            "method": "GET",
+            "url": "https://example.test/api/records/get?id=42",
+            "query": {"id": "42"},
+            "trigger_op": "click",
+            "trigger_transaction_id": "txn-detail",
+            "trigger_locator": "text=详情",
+            "sequence": 2,
+        },
+        {
+            "request_id": "req-progress",
+            "method": "GET",
+            "url": "https://example.test/api/records/get?id=42",
+            "query": {"id": "42"},
+            "trigger_op": "click",
+            "trigger_transaction_id": "txn-progress",
+            "trigger_locator": "text=进度",
+            "sequence": 3,
+        },
+    ]
+
+    assert [
+        item["request_id"] for item in _dedupe_preread_candidates(requests)
+    ] == ["req-edit", "req-detail", "req-progress"]
+
+
+def test_query_operation_groups_all_reads_from_one_visible_command() -> None:
+    shared_meta = {
+        "trigger_op": "click",
+        "trigger_transaction_id": "txn-progress",
+        "trigger_locator": "text=进度",
+        "causality_confidence": "high",
+    }
+    steps = [
+        FlowStep(
+            step_id="record", method="GET", path="/api/records/get?id=42",
+            source_meta=shared_meta,
+        ),
+        FlowStep(
+            step_id="tasks", method="GET", path="/api/workflow/tasks?recordId=42",
+            source_meta=shared_meta,
+        ),
+        FlowStep(
+            step_id="users", method="GET", path="/api/users/simple-list",
+            source_meta=shared_meta,
+        ),
+    ]
+
+    assert len({_query_operation_key(step) for step in steps}) == 1
+
+
+def test_goal_constraint_never_relabels_an_unrelated_capability_by_position() -> None:
+    spec = FlowSpec(meta={
+        "recording_goal_text": (
+            "目的：查看详情并提交记录\n"
+            "预期产出能力数量：2\n"
+            "能力1：查看记录详情\n"
+            "能力2：提交记录"
+        ),
+    })
+    plan = {
+        "business_understanding": {"business_name": "记录"},
+        "capabilities": [{
+            "name": "submit_record",
+            "title": "提交记录",
+            "intent": "提交记录",
+            "kind": "submit",
+            "anchor_step_id": "submit-step",
+            "request_refs": [{"step_id": "submit-step", "usage": "execute"}],
+        }],
+    }
+
+    constrained = _constrain_semantic_plan_to_goal(spec, plan)
+
+    assert len(constrained["capabilities"]) == 1
+    assert constrained["capabilities"][0]["title"] == "提交记录"
+    assert constrained["capabilities"][0]["anchor_step_id"] == "submit-step"
+
+
+def test_finalize_rebuilds_strong_goal_capabilities_instead_of_reusing_stale_plan() -> None:
+    goal_text = (
+        "目的：提交、查看和编辑申请\n"
+        "预期产出能力数量：3\n"
+        "能力1：提交申请\n"
+        "能力2：查看申请详情\n"
+        "能力3：编辑申请"
+    )
+    live = FlowSpec(meta={
+        "recording_goal_text": goal_text,
+        "capability_model": {
+            "semantic_plan": {
+                "capabilities": [{
+                    "name": "wrong_detail",
+                    "title": "查看申请详情",
+                    "intent": "查看申请详情",
+                    "kind": "submit",
+                    "anchor_step_id": "old-edit",
+                    "request_refs": [{"step_id": "old-edit", "usage": "execute"}],
+                }],
+            },
+        },
+    })
+    finalized = FlowSpec(
+        title="申请",
+        goal={"capabilities": ["提交申请", "查看申请详情", "编辑申请"]},
+        meta={"recording_goal_text": goal_text},
+        steps=[
+            FlowStep(
+                step_id="edit", method="POST", path="/records/submit",
+                params=[ParamField(path="id", key="id", value="record-42")],
+                source_meta={
+                    "request_id": "req-edit", "request_index": 1,
+                    "role": "business_write", "trigger_op": "click",
+                    "trigger_locator": "text=提交",
+                    "trigger_transaction_id": "txn-edit",
+                },
+            ),
+            FlowStep(
+                step_id="detail", method="GET", path="/records/get?id=record-42",
+                source_meta={
+                    "request_id": "req-detail", "request_index": 2,
+                    "role": "business_get", "trigger_op": "click",
+                    "trigger_locator": "text=详情",
+                    "trigger_transaction_id": "txn-detail",
+                },
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/records/submit",
+                source_meta={
+                    "request_id": "req-submit", "request_index": 3,
+                    "role": "business_write", "trigger_op": "click",
+                    "trigger_locator": "text=提交",
+                    "trigger_transaction_id": "txn-submit",
+                },
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-edit", request_index=1, method="POST", path="/records/submit"),
+            RequestFact(request_id="req-detail", request_index=2, method="GET", path="/records/get"),
+            RequestFact(request_id="req-submit", request_index=3, method="POST", path="/records/submit"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [(cap.title, cap.kind) for cap in merged.capabilities] == [
+        ("提交申请", "submit"),
+        ("查看申请详情", "inspect"),
+        ("编辑申请", "update"),
+    ]
+    assert [
+        next(ref.step_id for ref in cap.request_refs if ref.usage == "execute")
+        for cap in merged.capabilities
+    ] == ["submit", "detail", "edit"]
 
 
 @pytest.mark.asyncio
@@ -2097,7 +2269,7 @@ def test_finalize_merge_obeys_explicit_recording_goal_capability_count():
     ]
 
 
-def test_goal_boundary_does_not_synthesise_a_capability_missing_from_live_plan():
+def test_goal_boundary_recovers_recorded_capability_missing_from_stale_live_plan():
     live = FlowSpec(
         flow_id="goal-missing-live-capability",
         meta={
@@ -2153,11 +2325,13 @@ def test_goal_boundary_does_not_synthesise_a_capability_missing_from_live_plan()
 
     merged = merge_live_agent_state(live, finalized)
 
-    assert [capability.kind for capability in merged.capabilities] == ["submit"]
-    assert merged.meta["recording_goal_contract"]["satisfied"] is False
-    assert any(
+    assert [capability.kind for capability in merged.capabilities] == [
+        "query_status", "submit",
+    ]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+    assert not any(
         item.get("op") == "enforce_recording_goal"
-        for item in merged.meta["unresolved_live_agent_ops"]
+        for item in merged.meta.get("unresolved_live_agent_ops", [])
     )
 
 
