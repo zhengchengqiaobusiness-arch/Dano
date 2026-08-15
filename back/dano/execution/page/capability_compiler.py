@@ -1,4 +1,4 @@
-"""Compile public capabilities from anchors and executor-verified request facts."""
+"""Compile public capabilities from anchors and grounded request facts."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -78,7 +78,7 @@ def _request_ref(
         path=str((fact.path or fact.url if fact is not None else step.path or step.url if step else "") or ""),
         sequence=(fact.sequence if fact is not None else (step.source_meta or {}).get("sequence") if step else None),
         confidence=1.0,
-        reason="成员由已验证请求图确定性编译",
+        reason="成员由机器验证或录制值匹配的请求图确定性编译",
         usage=usage,
         origin="compiler",
         confirmed=True,
@@ -95,20 +95,29 @@ def _trusted_verification_ids(spec: FlowSpec) -> set[str]:
     }
 
 
-def _verified_links(spec: FlowSpec):  # noqa: ANN202
+def _executable_links(spec: FlowSpec):  # noqa: ANN202
     trusted = _trusted_verification_ids(spec)
     for link in spec.links or []:
         meta = dict(link.meta or {})
         verification_id = str(meta.get("verification_id") or (link.evidence or {}).get("verification_id") or "")
         active = meta.get("active", True) is not False and getattr(link, "active", True) is not False
-        if active and link.confirmed and meta.get("verified") is True and verification_id in trusted:
+        machine_verified = (
+            link.confirmed
+            and meta.get("verified") is True
+            and verification_id in trusted
+        )
+        capture_grounded = (
+            meta.get("captured_value_match") is True
+            or meta.get("captured_structure_match") is True
+        )
+        if active and (machine_verified or capture_grounded):
             yield link
 
 
-def _verified_dependency_order(spec: FlowSpec, anchor_step_id: str) -> tuple[list[str], list[str]]:
+def _grounded_dependency_order(spec: FlowSpec, anchor_step_id: str) -> tuple[list[str], list[str]]:
     position = {step.step_id: index for index, step in enumerate(spec.steps)}
     upstream: dict[str, list[str]] = {}
-    for link in _verified_links(spec):
+    for link in _executable_links(spec):
         upstream.setdefault(link.target_step_id, []).append(link.source_step_id)
     for target in upstream:
         upstream[target] = sorted(set(upstream[target]), key=lambda step_id: position.get(step_id, 10**9))
@@ -122,7 +131,7 @@ def _verified_dependency_order(spec: FlowSpec, anchor_step_id: str) -> tuple[lis
         if step_id in visited:
             return
         if step_id in visiting:
-            errors.append(f"verified dependency cycle reaches anchor {anchor_step_id}: {step_id}")
+            errors.append(f"grounded dependency cycle reaches anchor {anchor_step_id}: {step_id}")
             return
         visiting.add(step_id)
         for source_step_id in upstream.get(step_id, []):
@@ -189,7 +198,7 @@ def _option_source_request_ids(
             add_source(param.source or {})
             add_source((param.source or {}).get("option_source"))
     member_ids = {step.step_id for step in member_steps}
-    for link in _verified_links(spec):
+    for link in _executable_links(spec):
         if link.target_step_id in member_ids:
             add_source((link.value_binding or {}).get("option_source"))
     return ids
@@ -332,7 +341,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         kind = "submit_batch" if grounded_batch else grounded_kind
 
         if is_write:
-            step_ids, dependency_errors = _verified_dependency_order(current, anchor_step_id)
+            step_ids, dependency_errors = _grounded_dependency_order(current, anchor_step_id)
             errors.extend(f"{prefix}: {message}" for message in dependency_errors)
         else:
             step_ids = [anchor_step_id]
@@ -383,7 +392,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             confirmed=False,
             confidence=1.0,
             evidence=[{
-                "source": "verified_request_graph",
+                "source": "grounded_request_graph",
                 "anchor_step_id": anchor_step_id,
                 "ignored_model_request_refs": len(item.get("request_refs") or []),
             }],

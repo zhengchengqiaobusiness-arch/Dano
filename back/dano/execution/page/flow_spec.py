@@ -4999,6 +4999,7 @@ def _param_source_agent_classified(param: ParamField) -> bool:
         and item.get("kind") == "param_source"
         and item.get("source_kind") in {
             "caller_input", "constant", "session", "context", "response_binding", "computed",
+            "generated",
         }
         for item in (param.evidence or [])
     )
@@ -16804,8 +16805,8 @@ _PUBLIC_SOURCE_BY_INTERNAL = {
     "previous_response": "response_binding",
     "dynamic_structure": "response_binding",
     "computed": "computed",
-    "system_time": "computed",
-    "system_generated": "computed",
+    "system_time": "generated",
+    "system_generated": "generated",
 }
 
 _PUBLIC_ROLE_BY_INTERNAL = {
@@ -19898,6 +19899,7 @@ def _client_select_patch(spec: FlowSpec, edit: dict[str, Any]) -> dict[str, Any]
 
 _CLIENT_SOURCE_KINDS = frozenset({
     "caller_input", "constant", "session", "context", "response_binding", "computed",
+    "generated",
 })
 
 
@@ -19949,9 +19951,14 @@ def _client_source_patch(spec: FlowSpec, edit: dict[str, Any]) -> list[dict[str,
             )
         internal_kind = current_kind
         category, exposed = "runtime_var", False
-    else:
+    elif public_kind == "computed":
         if current_public != public_kind:
             raise ValueError(f"computed source requires an existing executable formula: {param.path}")
+        internal_kind = current_kind
+        category, exposed = "runtime_var", False
+    else:
+        if current_public != public_kind:
+            raise ValueError(f"generated source requires an existing executable strategy: {param.path}")
         internal_kind = current_kind
         category, exposed = "runtime_var", False
 

@@ -16,7 +16,10 @@ from dano.execution.page.recording_field_identity import (
     resolve_field_ref,
     stored_container_path,
 )
-from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
+from dano.execution.page.value_tracing import (
+    discover_response_key_maps,
+    discover_workflow_value_links,
+)
 from dano.execution.page.wire_format import date_span_days
 from dano.infra.token_store import mask_headers
 
@@ -39,6 +42,7 @@ LIVE_RECORDING_AGENT_OPS = frozenset({
 
 _PARAM_SOURCE_KINDS = frozenset({
     "caller_input", "constant", "session", "context", "response_binding", "computed",
+    "generated",
 })
 _PARAM_BUSINESS_TYPES = frozenset({
     "string", "email", "url", "number", "integer", "boolean", "date",
@@ -311,7 +315,7 @@ def recording_delta(
         or str(request.get("role") or "") in {"business_get", "business_write", "submit_anchor"}
     ]
     candidates = [
-        item for item in discover_value_links(graph_requests)
+        item for item in discover_workflow_value_links(graph_requests)
         if item.get("source_request_id") in fresh_ids or item.get("target_request_id") in fresh_ids
     ]
     structure_candidates = [
@@ -583,6 +587,58 @@ def _evidence_matches_refs(item: dict, evidence_refs: list[str]) -> bool:
         for ref in evidence_refs
         for identifier in identifiers
     )
+
+
+def _captured_requests(spec) -> list[dict]:  # noqa: ANN001
+    """Return the immutable request facts in value-tracing wire format."""
+    requests = [
+        fact.model_dump(mode="json")
+        for fact in spec.request_facts.requests
+    ]
+    by_id = {
+        str(request.get("request_id") or ""): request
+        for request in requests
+        if request.get("request_id")
+    }
+    # Older imported drafts may have response/body samples only on the
+    # materialized step.  Fill missing fact fields without overwriting the
+    # actual captured request.
+    for step in spec.steps:
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        request = by_id.get(request_id)
+        if request is None:
+            continue
+        if request.get("response_json") is None and step.response_json is not None:
+            request["response_json"] = deepcopy(step.response_json)
+        if request.get("post_data") in (None, "") and step.body_source not in (None, ""):
+            request["post_data"] = deepcopy(step.body_source)
+        request["url"] = request.get("url") or step.url or step.path
+        request["path"] = request.get("path") or step.path
+        request["method"] = request.get("method") or step.method
+    return requests
+
+
+def _captured_value_match(
+    spec,
+    *,
+    source_request_id: str,
+    source_path: str,
+    target_step,
+    target_path: str,
+) -> dict | None:  # noqa: ANN001
+    """Find one exact recorded response-to-request value reuse."""
+    target_request_id = str((target_step.source_meta or {}).get("request_id") or "")
+    source_wire_path = f"response.{str(source_path or '').removeprefix('response.')}"
+    target_wire_path = canonical_wire_path(target_step, target_path)
+    for candidate in discover_workflow_value_links(_captured_requests(spec)):
+        if (
+            str(candidate.get("source_request_id") or "") == source_request_id
+            and str(candidate.get("source_path") or "") == source_wire_path
+            and str(candidate.get("target_request_id") or "") == target_request_id
+            and str(candidate.get("target_path") or "") == target_wire_path
+        ):
+            return deepcopy(candidate)
+    return None
 
 
 def _field_evidence_candidates(
@@ -1116,6 +1172,13 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             raise ValueError(
                 f"response_binding origin request {origin_request_id} is not part of the recorded facts"
             )
+        captured_match = _captured_value_match(
+            spec,
+            source_request_id=origin_request_id,
+            source_path=origin_path,
+            target_step=step,
+            target_path=param.path,
+        )
         signature = (source_step.step_id, origin_path, step.step_id, param.path)
         link = next((
             item for item in spec.links
@@ -1140,9 +1203,23 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                 "actor": "agent",
                 "source_request_id": origin_request_id,
                 "target_request_id": str((step.source_meta or {}).get("request_id") or ""),
+                **({"captured_value_match": captured_match} if captured_match else {}),
             }
-            link.meta = {"verified": False, "actor": "agent"}
+            link.meta = {
+                "verified": False,
+                "actor": "agent",
+                **({"captured_value_match": True} if captured_match else {}),
+            }
             spec.links.append(link)
+        elif captured_match:
+            link.evidence = {
+                **(link.evidence or {}),
+                "captured_value_match": captured_match,
+            }
+            link.meta = {
+                **(link.meta or {}),
+                "captured_value_match": True,
+            }
         param.source_kind = "previous_response"
         param.source = {
             "kind": "previous_response",
@@ -1152,6 +1229,50 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             "origin_request_id": origin_request_id,
             "reason": reason,
             "actor": "agent",
+        }
+        param.category = "runtime_var"
+        param.exposed_to_user = False
+
+    elif source_kind == "generated":
+        raw_source = edit.get("source") if isinstance(edit.get("source"), dict) else {}
+        strategy = str(edit.get("strategy") or raw_source.get("strategy") or "").strip()
+        generated_strategies = {"uuid", "random_string", "random_number"}
+        time_strategies = {"now_ms", "now_s", "now_iso", "now_date"}
+        if strategy not in generated_strategies | time_strategies:
+            raise ValueError(
+                f"generated classification for {param.path} requires strategy in "
+                f"{sorted(generated_strategies | time_strategies)}"
+            )
+        sample = param.value if param.value not in (None, "") else param.default_value
+        sample_text = str(sample or "").strip()
+        compatible = {
+            "uuid": bool(re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+                r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+                sample_text,
+            )),
+            "random_string": isinstance(sample, str) and bool(sample_text),
+            "random_number": isinstance(sample, (int, float)) and not isinstance(sample, bool),
+            "now_ms": bool(re.fullmatch(r"\d{13}", sample_text)),
+            "now_s": bool(re.fullmatch(r"\d{10}", sample_text)),
+            "now_iso": bool(re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+                sample_text,
+            )),
+            "now_date": bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", sample_text)),
+        }[strategy]
+        if not compatible:
+            raise ValueError(
+                f"generated classification for {param.path} strategy={strategy} "
+                "contradicts the recorded sample"
+            )
+        param.source_kind = "system_time" if strategy in time_strategies else "system_generated"
+        param.source = {
+            "kind": param.source_kind,
+            "strategy": strategy,
+            "reason": reason,
+            "actor": "agent",
+            "sample_verified": True,
         }
         param.category = "runtime_var"
         param.exposed_to_user = False
@@ -1835,6 +1956,17 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                     "value_binding": value_binding,
                 }
         if source_step is not None and target_step is not None:
+            captured_value_match = (
+                _captured_value_match(
+                    spec,
+                    source_request_id=source_request_id,
+                    source_path=source_path,
+                    target_step=target_step,
+                    target_path=target_path,
+                )
+                if link_kind == "value"
+                else None
+            )
             signature = (source_step.step_id, source_path, target_step.step_id, target_path)
             existing = next((
                 link for link in spec.links
@@ -1869,8 +2001,15 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 "actor": "agent",
                 "source_request_id": source_request_id,
                 "target_request_id": target_request_id,
+                **({"captured_value_match": captured_value_match} if captured_value_match else {}),
             }
-            link.meta = {**(link.meta or {}), "actor": "agent"}
+            captured_structure_match = link_kind in {"structure", "response_key_map"}
+            link.meta = {
+                **(link.meta or {}),
+                "actor": "agent",
+                **({"captured_value_match": True} if captured_value_match else {}),
+                **({"captured_structure_match": True} if captured_structure_match else {}),
+            }
             if link_kind in {"structure", "response_key_map"}:
                 link.meta.pop("kind", None)
             if existing is None:

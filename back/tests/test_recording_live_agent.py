@@ -182,8 +182,24 @@ def _flow() -> FlowSpec:
         ],
         request_facts=RequestFacts(
             requests=[
-                RequestFact(request_id="req-detail", request_index=1, sequence=1, method="GET", path="/items/detail"),
-                RequestFact(request_id="req-submit", request_index=2, sequence=2, method="POST", path="/items/update"),
+                RequestFact(
+                    request_id="req-detail",
+                    request_index=1,
+                    sequence=1,
+                    method="GET",
+                    path="/items/detail",
+                    url="https://example.test/items/detail",
+                    response_json={"data": {"jobId": "JOB-998877"}},
+                ),
+                RequestFact(
+                    request_id="req-submit",
+                    request_index=2,
+                    sequence=2,
+                    method="POST",
+                    path="/items/update",
+                    url="https://example.test/items/update",
+                    post_data={"jobId": "JOB-998877"},
+                ),
             ],
             field_evidence=[{
                 "event_id": "evt-job",
@@ -254,6 +270,7 @@ def test_live_agent_ops_write_evidenced_drafts_without_self_verifying():
     assert updated.links[0].meta == {
         "verified": False,
         "actor": "agent",
+        "captured_value_match": True,
         "unverified_reason": "依赖提案已更新，需要重新执行 dependency_execute 验证",
     }
     assert updated.links[0].confirmed is False
@@ -803,6 +820,41 @@ def test_param_source_session_header_rejected_on_body_paths():
             "source_kind": "session",
             "reason": "固定值，误归为会话头",
         }])
+
+
+@pytest.mark.parametrize(("strategy", "value", "internal_kind"), [
+    ("uuid", "29cba714-c6ce-4747-baec-e2c5d37d6868", "system_generated"),
+    ("random_string", "591f22581bf8300bf467392c04dde9a7", "system_generated"),
+    ("random_number", 591225, "system_generated"),
+    ("now_ms", 1782891442000, "system_time"),
+    ("now_s", 1782891442, "system_time"),
+    ("now_iso", "2026-08-15T09:30:00+00:00", "system_time"),
+    ("now_date", "2026-08-15", "system_time"),
+])
+def test_generated_param_source_compiles_to_runtime_injection(
+    strategy, value, internal_kind,  # noqa: ANN001
+):
+    spec = _flow()
+    spec.steps[1].params.append(ParamField(
+        path="body.runtimeValue",
+        key="runtimeValue",
+        value=value,
+    ))
+
+    updated = apply_flow_edits(spec, [{
+        "op": "set_param_source",
+        "step_id": "submit",
+        "wire_path": "body.runtimeValue",
+        "source_kind": "generated",
+        "strategy": strategy,
+        "reason": "录制证据表明该值由页面运行时生成",
+    }])
+
+    param = next(item for item in updated.steps[1].params if item.key == "runtimeValue")
+    assert param.source_kind == internal_kind
+    assert param.source["strategy"] == strategy
+    assert param.category == "runtime_var"
+    assert param.exposed_to_user is False
 
 
 def test_param_source_page_context_pagination_is_caller_override_with_recorded_default():
@@ -2453,4 +2505,4 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     assert "request_batch" in prompts[0][0]
     assert "submit_recording_plan" in prompts[0][0]
     assert "plan.ops" in prompts[0][0]
-    assert "caller_input/constant/session/context/response_binding/computed" in prompts[0][0]
+    assert "caller_input/constant/session/context/response_binding/computed/generated" in prompts[0][0]

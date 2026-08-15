@@ -123,7 +123,7 @@ def test_skill_export_is_only_called_at_the_publish_boundary_for_current_skill()
 def test_pi_runtime_prompt_uses_the_same_public_semantic_contract_as_tools() -> None:
     source = _PI_RUNTIME.read_text(encoding="utf-8")
 
-    assert "caller_input/constant/session/context/response_binding/computed" in source
+    assert "caller_input/constant/session/context/response_binding/computed/generated" in source
     assert "auth/support/option/context/business_read/business_write" in source
     assert "kind=response_key_map" in source
     for retired in (

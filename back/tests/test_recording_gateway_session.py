@@ -201,3 +201,63 @@ async def test_freeze_waits_for_current_live_analysis_and_keeps_its_notebook() -
     assert session._live_notebook.insights == [
         {"kind": "param_source", "text": "已识别字段来源"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_freeze_drains_a_queued_live_batch_before_direct_export() -> None:
+    class Capture:
+        async def flush_recording(self) -> None:
+            return None
+
+        def pause_recording(self) -> None:
+            return None
+
+        def captured_all_requests(self) -> list[dict]:
+            return [{"request_id": "req-1"}]
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+            self.reasons: list[str] = []
+
+        async def notify_live_batch(self, delta: dict) -> None:
+            self.reasons.append(str(delta["reason"]))
+            self.flow_spec.meta = {
+                "agent_insights": [{"kind": "role", "text": "已识别业务请求"}],
+            }
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "d" * 32,
+            action="action_queued",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    pi = Pi()
+    session.capture = Capture()  # type: ignore[assignment]
+    session._pi = pi
+    session._live_pending_reason = "submit_candidate"
+
+    await session._freeze_capture()
+
+    assert session._capture_frozen is True
+    assert pi.reasons == ["submit_candidate"]
+    assert session._live_pending_reason == ""
+    assert session._live_notebook is not None
+    assert session._live_notebook.insights == [
+        {"kind": "role", "text": "已识别业务请求"},
+    ]

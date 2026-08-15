@@ -184,6 +184,7 @@ const SOURCE_OPTIONS = [
   ["context", "调用上下文"],
   ["response_binding", "上游响应"],
   ["computed", "明确计算"],
+  ["generated", "运行时生成"],
 ].map(([value, label]) => ({ value, label }));
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
@@ -663,6 +664,8 @@ export default function PageRecorder({
     })) {
       finishRequestedRef.current = false;
       setFinishRequested(false);
+    } else {
+      setAssistantOpen(true);
     }
   }
 

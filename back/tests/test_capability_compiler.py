@@ -213,6 +213,28 @@ def test_compiler_ignores_model_membership_and_builds_verified_graph_roles():
     assert page.source["default_value"] == 1
 
 
+def test_compiler_includes_dependencies_grounded_by_the_same_recording():
+    spec = _verified_graph()
+    spec.meta["verification_log"] = []
+    for link in spec.links:
+        link.confirmed = False
+        link.meta = {
+            "verified": False,
+            (
+                "captured_structure_match"
+                if link.kind == "response_key_map"
+                else "captured_value_match"
+            ): True,
+        }
+
+    compilation = compile_capabilities(spec, _semantic_plan())
+
+    assert compilation.errors == []
+    submit = next(cap for cap in compilation.spec.capabilities if cap.name == "submit_leave")
+    assert submit.step_ids == ["definition", "approval", "submit"]
+    assert submit.evidence[0]["source"] == "grounded_request_graph"
+
+
 def test_orchestration_keeps_safely_compiled_capabilities_when_one_boundary_is_invalid():
     plan = _semantic_plan()
     plan["capabilities"].append({

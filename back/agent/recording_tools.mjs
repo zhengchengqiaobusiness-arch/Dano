@@ -478,12 +478,13 @@ const LiveRecordingOperation = Type.Union([
       Type.Literal("caller_input"), Type.Literal("constant"),
       Type.Literal("session"), Type.Literal("context"),
       Type.Literal("response_binding"), Type.Literal("computed"),
+      Type.Literal("generated"),
     ]),
     origin_request_id: Type.Optional(Type.String({ description: "Required for response_binding: upstream request that produced the value" })),
     origin_path: Type.Optional(Type.String({ description: "Required for response_binding: response path of the upstream value" })),
     context_key: Type.Optional(Type.String({ description: "Required for context: explicit runtime context key" })),
     session_key: Type.Optional(Type.String({ description: "Required for non-header session values: key/path in the authenticated session" })),
-    strategy: Type.Optional(Type.String({ description: "Required for computed; only date_span_days_json is executable" })),
+    strategy: Type.Optional(Type.String({ description: "Required for computed or generated. computed supports date_span_days_json; generated supports uuid/random_string/random_number/now_ms/now_s/now_iso/now_date" })),
     start_field: Type.Optional(Type.String({ description: "Required for computed: user param name for the range start" })),
     end_field: Type.Optional(Type.String({ description: "Required for computed: user param name for the range end" })),
     output_key: Type.Optional(Type.String({ description: "Computed JSON key; when omitted it is inferred from the recorded one-key JSON sample" })),
@@ -833,7 +834,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和已验证依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 六分类为 caller_input、constant、session、context、response_binding、computed，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；实时任务中的 capabilities 必须是截至当前事实的完整能力边界而非本批增量，后续轮次必须保留仍成立的已有能力。capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和录制值匹配或机器验证的依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 七分类为 caller_input、constant、session、context、response_binding、computed、generated，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

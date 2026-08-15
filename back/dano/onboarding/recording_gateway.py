@@ -316,15 +316,18 @@ class RecordingGatewaySession:
     async def _freeze_capture(self) -> None:
         if self._capture_frozen or self.capture is None:
             return
-        self._capture_frozen = True
         await self.capture.flush_recording()
         self.capture.pause_recording()
+        if self._live_pending_reason and (
+            self._live_task is None or self._live_task.done()
+        ):
+            self._live_task = asyncio.create_task(self._drain_live())
         if self._live_task is not None and not self._live_task.done():
-            # Finishing a recording must not throw away a live analysis turn
-            # that has already consumed the latest request batch.  Marking the
-            # capture frozen prevents another turn; await the current one so
-            # its accepted operations reach the notebook used by direct export.
+            # Pause new browser facts first, then drain every already queued
+            # real-time batch.  Direct export is allowed to use those live
+            # conclusions, but must never start a separate final Pi plan.
             await asyncio.gather(self._live_task, return_exceptions=True)
+        self._capture_frozen = True
         self._capture_live_notebook()
         if self._pi is not None:
             self._pi.bind_live_recording(
