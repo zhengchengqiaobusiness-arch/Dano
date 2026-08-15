@@ -34,7 +34,6 @@ const expectedTools = [
   "submit_recording_plan",
   "get_validation_report",
   "submit_recording_repair",
-  "submit_recording_review",
 ];
 
 function assert(condition, message) {
@@ -60,7 +59,7 @@ function verifySubmissionAttemptLimit() {
     assert(guardRecordingToolAttempt("submit_recording_repair") === 2, "second submission attempt missing");
     let rejected = false;
     try {
-      guardRecordingToolAttempt("submit_recording_review");
+      guardRecordingToolAttempt("submit_recording_plan");
     } catch (error) {
       rejected = /attempt limit exceeded/.test(String(error?.message || error));
     }
@@ -76,12 +75,12 @@ async function verifySuccessfulSubmissionEndsTurn() {
   beginRecordingToolTurn({ onSubmissionAccepted: (name) => accepted.push(name) });
   try {
     let backendCalls = 0;
-    const first = runRecordingSubmissionAttempt("submit_recording_review", async () => {
+    const first = runRecordingSubmissionAttempt("submit_recording_repair", async () => {
       backendCalls += 1;
       await Promise.resolve();
       return { ok: true };
     });
-    const duplicate = runRecordingSubmissionAttempt("submit_recording_review", async () => {
+    const duplicate = runRecordingSubmissionAttempt("submit_recording_repair", async () => {
       backendCalls += 1;
       return { ok: true };
     });
@@ -89,9 +88,9 @@ async function verifySuccessfulSubmissionEndsTurn() {
     assert(firstResult.duplicate === false, "first successful submission was marked duplicate");
     assert(duplicateResult.duplicate === true, "parallel duplicate submission was not suppressed");
     assert(backendCalls === 1, "parallel duplicate reached the backend");
-    assert(guardRecordingToolAttempt("submit_recording_review") === -1, "accepted submission must bypass attempt limit");
-    assert(acceptRecordingToolSubmission("submit_recording_review") === false, "duplicate success must not fire twice");
-    assert(JSON.stringify(accepted) === JSON.stringify(["submit_recording_review"]), "terminal submission callback mismatch");
+    assert(guardRecordingToolAttempt("submit_recording_repair") === -1, "accepted submission must bypass attempt limit");
+    assert(acceptRecordingToolSubmission("submit_recording_repair") === false, "duplicate success must not fire twice");
+    assert(JSON.stringify(accepted) === JSON.stringify(["submit_recording_repair"]), "terminal submission callback mismatch");
   } finally {
     endRecordingToolTurn();
   }
@@ -107,7 +106,7 @@ async function verifyRejectedThenAcceptedSubmissionIsTerminal() {
   try {
     let rejected = false;
     try {
-      await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+      await runRecordingSubmissionAttempt("submit_recording_repair", async () => {
         backendCalls += 1;
         throw new Error("schema rejected");
       });
@@ -115,11 +114,11 @@ async function verifyRejectedThenAcceptedSubmissionIsTerminal() {
       rejected = /schema rejected/.test(String(error?.message || error));
     }
     assert(rejected, "first rejected review was not surfaced");
-    const accepted = await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+    const accepted = await runRecordingSubmissionAttempt("submit_recording_repair", async () => {
       backendCalls += 1;
       return { ok: true };
     });
-    const afterAccepted = await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+    const afterAccepted = await runRecordingSubmissionAttempt("submit_recording_repair", async () => {
       backendCalls += 1;
       return { ok: true };
     });
@@ -184,26 +183,9 @@ function verifyFreshReadPrerequisites() {
   }
 }
 
-function verifyReviewToolSchema() {
-  const reviewTool = recordingTools.find((tool) => tool.name === "submit_recording_review");
-  assert(reviewTool?.executionMode === "sequential", "terminal review tool must execute sequentially");
+function verifySubmissionToolsAreSequential() {
   for (const tool of recordingTools.filter((item) => item.name.startsWith("submit_recording_"))) {
     assert(tool.executionMode === "sequential", `${tool.name} must execute sequentially`);
-  }
-  const reviewSchema = reviewTool?.parameters?.properties?.review;
-  assert(reviewSchema?.additionalProperties === false, "review schema must reject unknown top-level fields");
-  assert(
-    Object.hasOwn(reviewSchema?.properties || {}, "blocking_reasons"),
-    "review must allow model-added blocking reasons",
-  );
-  for (const role of ["acceptance", "security", "compliance"]) {
-    const roleSchema = reviewSchema?.properties?.[role];
-    assert(roleSchema?.additionalProperties === false, `review.${role} must reject unknown fields`);
-    assert(
-      JSON.stringify(Object.keys(roleSchema?.properties || {}).sort())
-        === JSON.stringify(["passed", "reasons"]),
-        `review.${role} schema fields mismatch`,
-    );
   }
 }
 
@@ -566,7 +548,7 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   await verifyIncompleteSubmissionCanBeCorrectedInTheSameTurn();
-  verifyReviewToolSchema();
+  verifySubmissionToolsAreSequential();
 verifyWriteAssertionSchema();
   verifyStringifiedWriteAssertionCompatibility();
 verifyPerturbReplaySchema();

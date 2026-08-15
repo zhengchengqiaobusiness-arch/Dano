@@ -9,7 +9,6 @@ const RUN_ID = process.env.DANO_AGENT_RUN_ID;
 const SUBMISSION_TOOLS = new Set([
   "submit_recording_plan",
   "submit_recording_repair",
-  "submit_recording_review",
 ]);
 let activeTurnBudget = null;
 
@@ -98,12 +97,6 @@ export function requireRecordingSubmissionPrerequisite(name, params, turn = acti
     requireVersion("get_recording_state", turn.freshStateVersion);
   } else if (name === "submit_recording_repair") {
     requireVersion("get_validation_report", turn.freshValidationVersion);
-  } else if (name === "submit_recording_review") {
-    requireVersion("get_recording_state", turn.freshStateVersion);
-    requireVersion("get_validation_report", turn.freshValidationVersion);
-    if (turn.freshStateVersion !== turn.freshValidationVersion) {
-      throw new Error("submit_recording_review requires state and validation from the same flow version");
-    }
   }
 }
 export async function runRecordingSubmissionAttempt(name, operation) {
@@ -869,53 +862,6 @@ export const recordingTools = [
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
         operations: Type.Array(LiveRecordingOperation),
-      },
-      { additionalProperties: false },
-    ),
-  }),
-  proxyTool({
-    name: "submit_recording_review",
-    label: "提交发布审核",
-    description:
-      "提交当前录制版本的验收、安全、合规审核候选。拒绝时必须提供结构化 issues，后端据此继续自愈或人工接管；后端发布闸门拥有最终决定权。",
-    parameters: Type.Object(
-      {
-        ...RecordingIdentity,
-        base_flow_version: Type.Integer({ minimum: 0 }),
-        review: Type.Object(
-          {
-            acceptance: Type.Object({
-              passed: Type.Boolean(),
-              reasons: Type.Optional(Type.Array(Type.String())),
-            }, { additionalProperties: false }),
-            security: Type.Object({
-              passed: Type.Boolean(),
-              reasons: Type.Optional(Type.Array(Type.String())),
-            }, { additionalProperties: false }),
-            compliance: Type.Object({
-              passed: Type.Boolean(),
-              reasons: Type.Optional(Type.Array(Type.String())),
-            }, { additionalProperties: false }),
-            blocking_reasons: Type.Optional(Type.Array(Type.String())),
-            issues: Type.Optional(Type.Array(Type.Object({
-              check_code: Type.Literal("final_review_rejected"),
-              resolver: Type.Union([
-                Type.Literal("machine_repair"),
-                Type.Literal("collect_evidence"),
-                Type.Literal("operator"),
-                Type.Literal("external_blocked"),
-              ]),
-              capability_id: Type.Optional(Type.String()),
-              step_id: Type.Optional(Type.String()),
-              field_id: Type.Optional(Type.String()),
-              wire_path: Type.Optional(Type.String()),
-              evidence_refs: Type.Optional(Type.Array(Type.String())),
-              suggested_operations: Type.Optional(Type.Array(Type.String())),
-              message: Type.String(),
-            }, { additionalProperties: false }))),
-          },
-          { additionalProperties: false },
-        ),
       },
       { additionalProperties: false },
     ),

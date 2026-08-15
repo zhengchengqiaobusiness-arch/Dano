@@ -140,13 +140,16 @@ def test_verification_report_feeds_release_blockers_back_as_todos() -> None:
     assert any(item["kind"] == "release_issue" for item in report["todos"])
 
 
-def test_runtime_review_prompt_requires_structured_self_healing_issues() -> None:
+def test_recording_runtime_has_no_terminal_model_review_entrypoint() -> None:
     runtime_prompt = (
         Path(__file__).resolve().parents[2]
         / "back" / "agent" / "run_recording_pi.mjs"
     ).read_text(encoding="utf-8")
-    review_prompt = runtime_prompt.split("审核任务必须", 1)[1].split("不得泄漏", 1)[0]
+    recording_tools = (
+        Path(__file__).resolve().parents[2]
+        / "back" / "agent" / "recording_tools.mjs"
+    ).read_text(encoding="utf-8")
 
-    assert "issues" in review_prompt
-    assert "final_review_rejected" in review_prompt
-    assert "拒绝时" in review_prompt and "必须" in review_prompt
+    assert "submit_recording_review" not in runtime_prompt
+    assert "submit_recording_review" not in recording_tools
+    assert "final_review_rejected" not in runtime_prompt

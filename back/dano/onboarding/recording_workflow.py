@@ -242,7 +242,6 @@ class SelfHealingPipeline:
     runtime: PipelineRuntime
     max_rounds: int = 5
     max_unchanged_rounds: int = 2
-    max_review_retries: int = 2
     operation_timeout_s: float = 1800.0
     overall_timeout_s: float = 10800.0
 
@@ -271,7 +270,6 @@ class SelfHealingPipeline:
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
         unchanged = 0
-        review_retries = 0
         previous_issues: tuple[str, ...] | None = None
         previous_issue_map: dict[str, WorkflowIssue] = {}
 
@@ -336,16 +334,6 @@ class SelfHealingPipeline:
                     draft=draft,
                     issues=external,
                 )
-
-            if any(issue.code == "final_review_rejected" for issue in checked.issues):
-                review_retries += 1
-                if review_retries > self.max_review_retries:
-                    return PipelineOutcome(
-                        status=WorkflowStatus.EDITABLE,
-                        draft=draft,
-                        issues=checked.issues,
-                        error=f"最终审核修复达到 {self.max_review_retries} 次上限",
-                    )
 
             current_issues = _issue_signature(checked.issues)
             unchanged = unchanged + 1 if current_issues == previous_issues else 0

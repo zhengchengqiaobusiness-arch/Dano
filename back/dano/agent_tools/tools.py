@@ -958,6 +958,36 @@ async def request_review(run_id: str, params: dict) -> dict:
     }
 
 
+def _recording_release_snapshot_matches(session, draft) -> tuple[bool, str]:  # noqa: ANN001
+    """Bind a recording publish to the exact machine-validated frozen graph."""
+    from dano.execution.page.flow_spec import FlowSpec, flow_spec_fingerprint
+
+    if draft is None:
+        return False, "录制发布草案不存在"
+    current_spec = session.current_flow_spec()
+    current_fingerprint = flow_spec_fingerprint(current_spec)
+    release = dict((current_spec.meta or {}).get("release_candidate") or {})
+    release_fingerprint = str(release.get("flow_fingerprint") or "")
+    if not release_fingerprint or release_fingerprint != current_fingerprint:
+        return False, "录制发布候选未冻结或已变化"
+    api_request = draft.body.get("api_request") if isinstance(draft.body, dict) else None
+    snapshot = api_request.get("_release_snapshot") if isinstance(api_request, dict) else None
+    if not isinstance(snapshot, dict):
+        return False, "录制发布草案缺少冻结 release snapshot"
+    if str(snapshot.get("flow_fingerprint") or "") != release_fingerprint:
+        return False, "录制发布草案与当前冻结候选不一致"
+    snapshot_flow = snapshot.get("flow_spec")
+    if not isinstance(snapshot_flow, dict):
+        return False, "录制发布草案缺少冻结 FlowSpec"
+    try:
+        snapshot_fingerprint = flow_spec_fingerprint(FlowSpec.model_validate(snapshot_flow))
+    except Exception:  # noqa: BLE001 - persisted data is an untrusted boundary
+        return False, "录制发布草案的冻结 FlowSpec 无效"
+    if snapshot_fingerprint != release_fingerprint:
+        return False, "录制发布草案的冻结 FlowSpec 与当前候选不一致"
+    return True, "ok"
+
+
 # ── 发布硬关卡:后端重读证据校验,通过才入库发布 ──
 async def publish_asset(run_id: str, params: dict) -> dict:
     draft_id = UUID(params["asset_draft_id"])
@@ -966,10 +996,19 @@ async def publish_asset(run_id: str, params: dict) -> dict:
     ok, reason = await _ds.verify_publishable(draft_id, vrids)
     if not ok:
         return {"published": False, "reason": reason}
-    ok_r, reason_r = await _ds.verify_reviewed(draft_id, rrids)   # 三模型评审硬闸门
+    draft = await _ds.get_draft(draft_id)
+    if params.get("recording_machine_validated") is True:
+        from dano.onboarding.recording_pi import active_recording_session
+
+        session = active_recording_session(run_id)
+        if session is None:
+            return {"published": False, "reason": "录制机器核验会话不存在或已经关闭"}
+        ok_r, reason_r = _recording_release_snapshot_matches(session, draft)
+    else:
+        # Non-recording assets retain the existing review policy unchanged.
+        ok_r, reason_r = await _ds.verify_reviewed(draft_id, rrids)
     if not ok_r:
         return {"published": False, "reason": reason_r}
-    draft = await _ds.get_draft(draft_id)
     validate_asset_body(draft.asset_type, draft.body)     # 再次结构校验
     env = await _repo.create(AssetEnvelope(
         asset_type=draft.asset_type, scope=Scope(tenant=draft.tenant, subsystem=draft.subsystem),
@@ -1966,7 +2005,6 @@ TOOLS = {
     "submit_recording_plan": submit_recording_plan,
     "get_validation_report": get_validation_report,
     "submit_recording_repair": submit_recording_repair,
-    "submit_recording_review": submit_recording_review,
     "request_review": request_review,
     "publish_asset": publish_asset,
     "self_check_recording": self_check_recording,

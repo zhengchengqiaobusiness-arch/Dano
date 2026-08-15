@@ -39,7 +39,6 @@ class RecordingPipelineServices:
     materialize_recording: PrepareRecording
     plan_capabilities: PlanCapabilities
     verify: CheckDraft
-    review: CheckDraft
     repair: RepairDraft
     publish: PublishDraft
 
@@ -85,13 +84,7 @@ class CanonicalRecordingRuntime:
         context.ensure_active()
         await context.progress(WorkflowStep.VERIFYING, "正在验证接口、字段和依赖", 0)
         verified, verification_issues = await self.services.verify(draft, context)
-        if verification_issues:
-            return PipelineCheck(draft=verified, issues=verification_issues)
-
-        context.ensure_active()
-        await context.progress(WorkflowStep.REVIEWING, "正在执行最终发布审核", 0)
-        reviewed, review_issues = await self.services.review(verified, context)
-        return PipelineCheck(draft=reviewed, issues=review_issues)
+        return PipelineCheck(draft=verified, issues=verification_issues)
 
     async def repair(
         self,

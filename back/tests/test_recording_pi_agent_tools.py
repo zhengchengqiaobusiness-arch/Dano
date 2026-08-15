@@ -11,6 +11,7 @@ import pytest
 import dano.agent_tools.tools as agent_tools_module
 
 from dano.agent_tools.tools import (
+    _recording_release_snapshot_matches,
     ToolError,
     ask_recording_operator,
     execute_recording_write_with_verify,
@@ -19,6 +20,7 @@ from dano.agent_tools.tools import (
     get_recording_state,
     get_validation_report,
     request_review,
+    publish_asset,
     submit_recording_plan,
     submit_recording_repair,
     submit_recording_review,
@@ -106,6 +108,80 @@ def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None
 
     assert frozen.capabilities[0].request_refs[0].model_dump().get("pinned") is True
     assert flow_spec_fingerprint(spec) == flow_spec_fingerprint(frozen)
+
+
+def test_recording_publish_snapshot_must_match_frozen_machine_candidate() -> None:
+    spec = _spec()
+    assert _recording_release_snapshot_matches(
+        SimpleNamespace(current_flow_spec=lambda: spec),
+        None,
+    ) == (False, "录制发布草案不存在")
+    snapshot = spec.model_dump(mode="json")
+    draft = SimpleNamespace(body={"api_request": {"_release_snapshot": {
+        "flow_fingerprint": flow_spec_fingerprint(spec),
+        "flow_spec": snapshot,
+    }}})
+    session = SimpleNamespace(current_flow_spec=lambda: spec)
+
+    assert _recording_release_snapshot_matches(session, draft) == (True, "ok")
+
+    draft.body["api_request"]["_release_snapshot"]["flow_fingerprint"] = "changed"
+    passed, reason = _recording_release_snapshot_matches(session, draft)
+    assert passed is False
+    assert "不一致" in reason
+
+
+@pytest.mark.asyncio
+async def test_recording_machine_validated_publish_does_not_require_review_runs(monkeypatch) -> None:
+    spec = _spec()
+    draft_id = uuid4()
+    draft = SimpleNamespace(
+        asset_draft_id=draft_id,
+        asset_type=AssetType.PAGE_SCRIPT,
+        body={"api_request": {"_release_snapshot": {
+            "flow_fingerprint": flow_spec_fingerprint(spec),
+            "flow_spec": spec.model_dump(mode="json"),
+        }}},
+        tenant="tenant-pi",
+        subsystem="reimburse",
+        asset_key="recorded_submit",
+        content_hash="hash",
+    )
+
+    class DraftStore:
+        async def verify_publishable(self, _draft_id, _validation_ids):
+            return True, "ok"
+
+        async def get_draft(self, _draft_id):
+            return draft
+
+        async def verify_reviewed(self, *_args):
+            raise AssertionError("recording machine publish must not require review evidence")
+
+    class Repository:
+        async def create(self, _envelope):
+            return SimpleNamespace(asset_id=uuid4(), version=1)
+
+        async def set_status(self, _asset_id, _status):
+            return None
+
+    session = SimpleNamespace(current_flow_spec=lambda: spec)
+    monkeypatch.setattr(agent_tools_module, "_ds", DraftStore())
+    monkeypatch.setattr(agent_tools_module, "_repo", Repository())
+    monkeypatch.setattr(agent_tools_module, "validate_asset_body", lambda *_args: None)
+    monkeypatch.setattr(
+        "dano.onboarding.recording_pi.active_recording_session",
+        lambda run_id: session if run_id == "run-machine-publish" else None,
+    )
+
+    result = await publish_asset("run-machine-publish", {
+        "asset_draft_id": str(draft_id),
+        "validation_run_ids": [str(uuid4())],
+        "review_run_ids": [],
+        "recording_machine_validated": True,
+    })
+
+    assert result["published"] is True
 
 
 def test_flow_fingerprint_ignores_output_schema_property_insertion_order() -> None:
@@ -1405,17 +1481,13 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
             "validation_run_ids": [str(uuid4())],
         }
 
-    async def _review(_run_id, _params):
-        calls.append("pi_review")
-        return {
-            "all_passed": True,
-            "verdicts": [],
-            "review_run_ids": [str(uuid4()), str(uuid4()), str(uuid4())],
-            "source": "pi_agent_session",
-        }
+    async def _review(*_args, **_kwargs):
+        raise AssertionError("recording publish must not run a final model review")
 
-    async def _publish(_run_id, _params):
+    async def _publish(_run_id, params):
         calls.append("publish")
+        assert params["recording_machine_validated"] is True
+        assert params["review_run_ids"] == []
         return {"published": True, "asset_id": str(uuid4()), "version": 1}
 
     async def _forbidden_auto_goal(*_args, **_kwargs):
@@ -1455,7 +1527,7 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
         recording_pi_required=True,
     ))
     assert result["ok"] is True
-    assert calls == ["save", "self_check", "pi_review", "publish"]
+    assert calls == ["save", "self_check", "publish"]
     if method == "DELETE":
         assert result["stage"] == "publish"
         assert result["status"] != "rejected"

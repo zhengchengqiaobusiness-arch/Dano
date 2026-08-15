@@ -65,7 +65,6 @@ async def test_first_publication_consumes_live_notebook_once() -> None:
         materialize_recording=materialize,
         plan_capabilities=plan,
         verify=clean,
-        review=clean,
         repair=repair,
         publish=publish,
     ))
@@ -103,7 +102,6 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
         materialize_recording=materialize,
         plan_capabilities=plan,
         verify=clean,
-        review=clean,
         repair=repair,
         publish=publish,
     ))
@@ -121,10 +119,10 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_review_blocker_returns_to_same_repair_loop_before_atomic_publish() -> None:
-    review_issue = WorkflowIssue(
-        issue_id="review-1",
-        code="final_review_rejected",
+async def test_verification_blocker_returns_to_same_repair_loop_before_atomic_publish() -> None:
+    verification_issue = WorkflowIssue(
+        issue_id="verify-1",
+        code="dependency_execute",
         message="能力关系缺少验证",
         resolver="machine_repair",
     )
@@ -139,15 +137,11 @@ async def test_review_blocker_returns_to_same_repair_loop_before_atomic_publish(
 
     async def verify(draft, _context):  # noqa: ANN001
         events.append("verify")
-        return draft, ()
-
-    async def review(draft, _context):  # noqa: ANN001
-        events.append("review")
-        return draft, (() if draft["review_fixed"] else (review_issue,))
+        return draft, (() if draft["review_fixed"] else (verification_issue,))
 
     async def repair(draft, issues, _answers, _context):  # noqa: ANN001
         events.append("repair")
-        assert issues == (review_issue,)
+        assert issues == (verification_issue,)
         return {**draft, "review_fixed": True}
 
     async def publish(_draft, _context):  # noqa: ANN001
@@ -158,7 +152,6 @@ async def test_review_blocker_returns_to_same_repair_loop_before_atomic_publish(
         materialize_recording=materialize,
         plan_capabilities=plan,
         verify=verify,
-        review=review,
         repair=repair,
         publish=publish,
     ))
@@ -168,7 +161,7 @@ async def test_review_blocker_returns_to_same_repair_loop_before_atomic_publish(
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
-    assert events == ["plan", "verify", "review", "repair", "verify", "review", "publish"]
+    assert events == ["plan", "verify", "repair", "verify", "publish"]
 
 
 @pytest.mark.asyncio
@@ -191,9 +184,6 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
     async def verify(draft, _context):  # noqa: ANN001
         return draft, (issue,)
 
-    async def review(draft, _context):  # noqa: ANN001
-        return draft, ()
-
     async def repair(draft, _issues, _answers, _context):  # noqa: ANN001
         return draft
 
@@ -206,7 +196,6 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
         materialize_recording=materialize,
         plan_capabilities=plan,
         verify=verify,
-        review=review,
         repair=repair,
         publish=publish,
     ))
@@ -218,40 +207,6 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.issues == (issue,)
     assert published is False
-
-
-@pytest.mark.asyncio
-async def test_final_review_repairs_are_bounded_independently() -> None:
-    issue = WorkflowIssue(
-        issue_id="review", code="final_review_rejected", message="审核拒绝",
-        resolver="machine_repair",
-    )
-    repairs = 0
-
-    class Runtime:
-        async def prepare(self, seed, context):  # noqa: ANN001
-            return {"draft": True}
-
-        async def check(self, draft, context):  # noqa: ANN001
-            return type("Check", (), {"draft": draft, "issues": (issue,)})()
-
-        async def repair(self, draft, issues, answers, context):  # noqa: ANN001
-            nonlocal repairs
-            repairs += 1
-            return {**draft, "attempt": repairs}
-
-        async def publish(self, draft, context):  # noqa: ANN001
-            raise AssertionError("rejected review must not publish")
-
-    outcome = await SelfHealingPipeline(
-        Runtime(),
-        max_rounds=5,
-        max_review_retries=2,
-    ).run(PipelineSeed(kind="recording"), _context())
-
-    assert outcome.status == WorkflowStatus.EDITABLE
-    assert outcome.error == "最终审核修复达到 2 次上限"
-    assert repairs == 2
 
 
 @pytest.mark.asyncio
@@ -270,7 +225,6 @@ async def test_operation_timeout_preserves_materialized_draft_and_is_not_mislabe
         materialize_recording=materialize,
         plan_capabilities=plan,
         verify=unused,
-        review=unused,
         repair=unused,
         publish=unused,
     ))

@@ -16,7 +16,6 @@ from dano.onboarding.recording_pipeline import RecordingPipelineServices
 from dano.onboarding.recording_release import (
     ReleaseIssue,
     evaluate_recording_release,
-    review_release_issues,
 )
 from dano.onboarding.recording_verify import (
     finalize_verification_state,
@@ -135,7 +134,6 @@ class ProductionRecordingServices:
             materialize_recording=self.materialize_recording,
             plan_capabilities=self.plan_capabilities,
             verify=self.verify,
-            review=self.review,
             repair=self.repair,
             publish=self.publish,
         )
@@ -196,53 +194,6 @@ class ProductionRecordingServices:
         )
         return spec.model_dump(mode="json"), issues
 
-    async def review(
-        self,
-        draft: dict[str, Any],
-        context: PipelineContext,
-    ) -> tuple[dict[str, Any], tuple[WorkflowIssue, ...]]:
-        context.ensure_active()
-        spec = FlowSpec.model_validate(draft)
-        decision = evaluate_recording_release(spec)
-        if decision.callable_spec is None:
-            issues = tuple(
-                _workflow_issue(issue)
-                for capability in decision.capabilities
-                for issue in capability.issues
-            )
-            return draft, issues
-
-        release_spec, candidate = prepare_flow_release_candidate(decision.callable_spec)
-        pi = await self.pi_provider(True)
-        pi.bind_flow_spec(release_spec)
-        version = int((release_spec.meta or {}).get("current_version") or 0)
-        last_error: Exception | None = None
-        for attempt in range(1, _PROTOCOL_ATTEMPTS + 1):
-            try:
-                await pi.prompt(
-                "审核当前完整发布候选。必须读取录制状态和验证报告，并调用 "
-                "submit_recording_review 提交 acceptance、security、compliance 三角色结论。"
-                "拒绝时必须给出结构化 issues，包含 resolver、定位字段和允许的修复操作；"
-                "不得解析或依赖中文错误文本。"
-                f" recording_id={self.recording_id} flow_version={version}"
-                if attempt == 1 else
-                "上次审核提交未通过公开 schema。继续当前审核，不要询问用户。"
-                "读取最新状态并仅按 submit_recording_review 的 schema 重新提交三角色结论。"
-                )
-                context.ensure_active()
-                pi.require_publish_review(
-                    flow_version=version,
-                    flow_fingerprint=str(candidate["flow_fingerprint"]),
-                    machine_decision=decision,
-                )
-                return release_spec.model_dump(mode="json"), ()
-            except Exception as exc:  # noqa: BLE001 - distinguish review rejection below
-                last_error = exc
-                issues = review_release_issues(dict(getattr(pi, "last_review", None) or {}))
-                if issues:
-                    return draft, tuple(_workflow_issue(issue) for issue in issues)
-        raise RuntimeError("Pi 连续未提交有效发布审核") from last_error
-
     async def repair(
         self,
         draft: dict[str, Any],
@@ -290,4 +241,10 @@ class ProductionRecordingServices:
         if decision.callable_spec is None:
             raise RuntimeError("发布边界前能力契约已变化")
         release_spec, candidate = prepare_flow_release_candidate(decision.callable_spec)
+        # Publishing is deterministic after the repair/verification loop has
+        # no remaining issues.  Bind the exact frozen candidate to the active
+        # session for the database boundary fingerprint check; no model call is
+        # made here.
+        pi = await self.pi_provider(False)
+        pi.bind_flow_spec(release_spec)
         return await self.publisher(release_spec, candidate, context)

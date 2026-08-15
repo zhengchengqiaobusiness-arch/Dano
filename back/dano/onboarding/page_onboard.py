@@ -138,12 +138,11 @@ async def run_request_onboarding(
     allow_repair: bool = True,
     recording_pi_required: bool = False,
 ) -> dict:
-    """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
+    """抓请求路径:把录制抓到的提交请求落成 Skill → 确定性自检 → 发布。
 
     self_check 不真发(写安全);运行期 invoke 时才带登录态真发。
-    写抓请求页面**须过三模型评审**(发布层硬闸门,见 verify_reviewed):评审 client(_review_board)由网关启动注入;
-    审核出 findings → 可选 LLM 自动修复循环。录制工作台发布传 allow_repair=False，
-    保证发布产物与用户确认版本一致；问题会原样返回工作台处理。
+    录制主流程已经完成机器修复/补证循环，冻结候选通过后直接发布；普通非录制
+    调用仍保留既有三模型评审与修复规则。
     """
     from dano.agent_tools import tools as T
     from dano.shared.enums import IngestionStatus
@@ -265,6 +264,12 @@ async def run_request_onboarding(
         # 直接 return 可执行指引,**不静默跳过后在 publish 阶段以"缺角色"晦涩失败**(主路径网关启动会注入)。
         from dano.config import get_settings as _get_settings
         require_same_recording_session()
+        if recording_pi_required:
+            # Preserve locatable, non-blocking deterministic advice without
+            # invoking the retired final model review.
+            from dano.execution.page.repair_ops import collect_repair_findings
+
+            recording_advisory_findings = list(collect_repair_findings(api_request))
         if recording_session is None and T._review_board is None and _get_settings().review_enabled:
             log.warning("ingest.gate.review_unavailable", review_enabled=True)
             return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
@@ -272,7 +277,7 @@ async def run_request_onboarding(
                     "reason": "评审已启用(review_enabled=true)但未配置审核模型 —— 写操作 skill 过不了发布层三模型评审闸门。"
                               "请配置审核模型(网关启动自动注入;离线直调需先 set_review_board),或运维临时设 "
                               "review_enabled=false 降级发布。"}
-        if recording_session is not None or T._review_board is not None:
+        if not recording_pi_required and (recording_session is not None or T._review_board is not None):
             from dano.execution.page.repair_ops import collect_repair_findings
             from dano.onboarding.repair import generate_fix_ops, review_findings, run_repair_loop
             # 注:dry/self_check(录制 by-design 安全模式)的误判否决已在 request_review 内确定性剔除(改 DB 证据),
@@ -367,7 +372,8 @@ async def run_request_onboarding(
         require_same_recording_session()
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
-                                             "review_run_ids": review_run_ids})
+                                             "review_run_ids": review_run_ids,
+                                             "recording_machine_validated": bool(recording_pi_required)})
         # 安全网:**可选**参数里若有"内部机器标识"(必填的已在字段语义门拦下)→ 仅告警(agent 不传时用录制原值)。
         bad = [p for p in opt_fields if looks_internal_param_name(p)]
         warnings = ([f"可选参数 `{p}` 像内部标识(非人类名),建议命名;agent 不传它时用录制原值"
