@@ -113,6 +113,23 @@ def _sync_goal_required_inputs(goal: dict | None, api_request: dict) -> dict | N
     return out
 
 
+def _self_check_violations(result: dict | None) -> list[str]:
+    """Read deterministic violations from both single and multi-step dry runs."""
+    found: list[str] = []
+
+    def visit(value) -> None:  # noqa: ANN001
+        if not isinstance(value, dict):
+            return
+        found.extend(str(item) for item in value.get("self_check") or [] if item)
+        visit(value.get("step_result"))
+        visit(value.get("final"))
+        for item in value.get("step_results") or []:
+            visit(item)
+
+    visit(result)
+    return list(dict.fromkeys(found))
+
+
 async def run_request_onboarding(
     *, tenant: str, subsystem: str, action: str, title: str = "",
     api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
@@ -223,7 +240,7 @@ async def run_request_onboarding(
         require_same_recording_session()
         log.info("ingest.self_check", passed=rp.get("passed"), mode=rp.get("mode"))
         if not rp["passed"]:
-            sc = (rp.get("structured_output") or {}).get("self_check") or []
+            sc = _self_check_violations(rp.get("structured_output"))
             live = rp.get("live") or {}
             if sc:                                            # 结构自检未过 → 需澄清
                 log.warning("ingest.gate.self_check_failed", violations=sc)

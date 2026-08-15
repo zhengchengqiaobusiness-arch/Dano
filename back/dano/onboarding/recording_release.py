@@ -579,9 +579,23 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
     dry_run = dry_run_flow_spec(scoped)
     checks["dry_run"] = bool(dry_run.get("ok"))
     if not dry_run.get("ok"):
+        dry_run_details = [
+            str(value)
+            for key in ("build_errors", "self_check", "construct_errors")
+            for value in (dry_run.get(key) or [])
+            if value
+        ]
+        dry_run_details.extend(
+            f"必填参数 `{value}` 没有录制样例或调用值"
+            for value in (dry_run.get("missing_params") or [])
+            if value
+        )
+        fact_check = dry_run.get("fact_check") or {}
+        if fact_check.get("passed") is False and fact_check.get("reason"):
+            dry_run_details.append(str(fact_check["reason"]))
         issues.append(ReleaseIssue(
             check_code="dry_run_failed",
-            message="dry run 未通过",
+            message="；".join(dict.fromkeys(dry_run_details)) or "dry run 未通过",
             resolver="machine_repair",
             capability_id=selected.capability_id,
             suggested_operations=("submit_recording_repair",),

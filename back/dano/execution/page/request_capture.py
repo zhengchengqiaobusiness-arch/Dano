@@ -2895,6 +2895,18 @@ def _check_step_links(workflow: dict) -> list[str]:
             if not isinstance(source_step, int) or source_step < 0 or source_step >= i:
                 out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的 source_step={source_step} 必须指向更早步骤")
                 continue
+            if str(lk.get("mode") or "") == "response_key_map":
+                source = steps[source_step].get("response_json")
+                source_collection = _get_by_path(
+                    source,
+                    lk.get("source_collection_path") or source_path,
+                )
+                runtime_errors = _apply_structure_overrides(
+                    copy.deepcopy(nested),
+                    [{**lk, "source_collection": source_collection}],
+                )
+                out.extend(f"步骤{i + 1}:{error}" for error in runtime_errors)
+                continue
             source_values = _get_many_by_path(steps[source_step].get("response_json"), source_path)
             if not source_values:
                 out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的来源路径 `{source_path}` 在上游响应样例里找不到")

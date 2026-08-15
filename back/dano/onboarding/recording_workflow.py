@@ -686,6 +686,11 @@ class RecordingWorkflow:
             if not self._cancelled:
                 await self._set(
                     WorkflowStatus.FAILED,
+                    draft=(
+                        context.latest_draft
+                        if context.latest_draft is not None
+                        else self.snapshot.draft
+                    ),
                     error=str(exc),
                     progress=self._next_progress(WorkflowStep.READY, "处理失败，草稿已保留"),
                 )

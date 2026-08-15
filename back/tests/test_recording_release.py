@@ -260,6 +260,31 @@ def test_capability_validation_failure_is_a_machine_release_failure():
     assert item.checks["capability_validation"] is False
 
 
+def test_release_preserves_actionable_dry_run_violations(monkeypatch):
+    spec = _mixed_spec()
+    query = next(cap for cap in spec.capabilities if cap.name == "query_items")
+    spec.capabilities = [query]
+    monkeypatch.setattr(
+        "dano.onboarding.recording_release.dry_run_flow_spec",
+        lambda _spec: {
+            "ok": False,
+            "self_check": ["第2步:动态结构审批节点与调用方输入不一致"],
+            "construct_errors": [],
+            "missing_params": [],
+            "build_errors": [],
+        },
+    )
+
+    decision = evaluate_recording_release(spec)
+
+    issue = next(
+        item
+        for item in decision.capabilities[0].issues
+        if item.check_code == "dry_run_failed"
+    )
+    assert issue.message == "第2步:动态结构审批节点与调用方输入不一致"
+
+
 def test_three_true_model_verdicts_cannot_override_machine_failure():
     session = RecordingPiSession(
         tenant="tenant-a",

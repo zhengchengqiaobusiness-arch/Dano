@@ -2130,6 +2130,47 @@ async def test_execute_api_workflow_rekeys_dynamic_request_structure_from_upstre
     assert any("键数量不一致" in issue for issue in rejected["step_result"]["self_check"])
 
 
+def test_self_check_uses_runtime_response_key_map_contract() -> None:
+    """Canonical dry validation must reject the same dynamic shape as runtime."""
+    workflow = {"steps": [
+        {
+            "method": "GET",
+            "url": "http://x/get-approval-detail",
+            "query_template": {},
+            "params": [],
+            "response_json": {"data": {"activityNodes": [
+                {"id": "Activity_leader", "name": "领导审批"},
+                {"id": "Activity_hr", "name": "人事审批"},
+            ]}},
+        },
+        {
+            "method": "POST",
+            "url": "http://x/submit",
+            "body_template": {"assignees": "{{审批人}}"},
+            "params": ["审批人"],
+            "sample_inputs": {"审批人": {"领导审批": 160}},
+            "structure_links": [{
+                "mode": "response_key_map",
+                "source_step": 0,
+                "source_path": "data.activityNodes",
+                "source_collection_path": "data.activityNodes",
+                "source_key_path": "id",
+                "source_label_path": "name",
+                "target_path": "assignees",
+                "value_binding": {
+                    "kind": "caller_map_by_label",
+                    "input_field": "审批人",
+                },
+            }],
+        },
+    ]}
+
+    problems = self_check(workflow)
+
+    assert any("动态结构审批节点与调用方输入不一致" in item for item in problems)
+    assert any("输入缺少=['人事审批']" in item for item in problems)
+
+
 def test_self_check_flags_missing_link_source_path_when_response_sample_exists():
     """link 的 source_path 若在上游响应样例里不存在,发布前就要拦住。"""
     workflow = {"steps": [

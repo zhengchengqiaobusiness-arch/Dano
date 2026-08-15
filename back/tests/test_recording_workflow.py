@@ -74,6 +74,27 @@ async def test_processing_and_terminal_snapshots_preserve_captured_request_count
     assert result.progress.request_count == 91
 
 
+@pytest.mark.asyncio
+async def test_unexpected_publish_failure_preserves_latest_authoritative_draft() -> None:
+    class FailingPublishPipeline:
+        async def run(self, seed, context):  # noqa: ANN001
+            context.remember_draft({
+                "steps": [{"step_id": "query"}, {"step_id": "submit"}],
+                "capabilities": [{"name": "query_records"}, {"name": "submit_record"}],
+            })
+            raise RuntimeError("publish adapter rejected the candidate")
+
+    workflow = RecordingWorkflow(_snapshot(), FailingPublishPipeline())
+    await workflow.start()
+    await workflow.finish()
+    result = await workflow.wait()
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.error == "publish adapter rejected the candidate"
+    assert len(result.draft["steps"]) == 2
+    assert len(result.draft["capabilities"]) == 2
+
+
 def test_recording_workflow_waits_for_operator_and_resumes_same_run() -> None:
     current = transition_snapshot(_snapshot(), WorkflowStatus.RECORDING)
     current = transition_snapshot(current, WorkflowStatus.PROCESSING)

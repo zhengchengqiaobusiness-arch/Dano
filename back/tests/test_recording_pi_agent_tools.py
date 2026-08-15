@@ -1464,6 +1464,67 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
         assert any("占位" in warning for warning in result.get("warnings") or [])
 
 
+def test_page_onboard_surfaces_nested_workflow_self_check_failure(monkeypatch):
+    from dano.agent_tools import tools as tool_module
+
+    session = object()
+
+    async def _save(_run_id, _params):
+        return {"asset_draft_id": str(uuid4())}
+
+    async def _self_check(_run_id, _params):
+        violation = "第3步:参数 `审批人` 进不了最终请求体"
+        return {
+            "passed": False,
+            "mode": "self_check",
+            "structured_output": {
+                "ok": False,
+                "failed_step": 2,
+                "step_result": {"ok": False, "self_check": [violation]},
+                "step_results": [
+                    {"ok": True, "self_check": []},
+                    {"ok": True, "self_check": []},
+                    {"ok": False, "self_check": [violation]},
+                ],
+            },
+            "validation_run_ids": [str(uuid4())],
+        }
+
+    monkeypatch.setattr(
+        "dano.onboarding.recording_pi.active_recording_session",
+        lambda run_id: session if run_id == "run-nested-self-check" else None,
+    )
+    monkeypatch.setattr(tool_module, "save_draft", _save)
+    monkeypatch.setattr(tool_module, "self_check_recording", _self_check)
+
+    result = asyncio.run(run_request_onboarding(
+        tenant="tenant-pi",
+        subsystem="reimburse",
+        action="recorded_submit",
+        api_request={
+            "steps": [{
+                "method": "POST",
+                "url": "https://example.invalid/api/submit",
+                "path": "/api/submit",
+                "body_template": {"审批人": "{{审批人}}"},
+                "params": ["审批人"],
+                "field_types": {"审批人": "string"},
+            }],
+            "params": ["审批人"],
+            "success_rule": {"field": "code", "ok_values": [0]},
+        },
+        sample_inputs={"审批人": "demo"},
+        required=["审批人"],
+        run_id="run-nested-self-check",
+        recording_pi_required=True,
+    ))
+
+    assert result["ok"] is False
+    assert result["stage"] == "validate"
+    assert result["clarifications"] == ["第3步:参数 `审批人` 进不了最终请求体"]
+    assert "参数没全填上" not in result["reason"]
+
+
 def _recording_api_request() -> dict:
     return {
         "method": "POST",
