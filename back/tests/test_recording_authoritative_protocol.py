@@ -251,6 +251,15 @@ def test_frontend_has_one_finish_and_one_republish_entrypoint() -> None:
     assert 'loading={finishRequested}' in source
 
 
+def test_frontend_describes_direct_publish_without_claiming_machine_verification() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "releaseUsedMachineVerification" in source
+    assert "能力已通过机器验证并发布" in source
+    assert "能力已按实时分析结果直接发布" in source
+    assert "能力已验证并发布；" not in source
+
+
 def test_operator_question_and_cancel_share_the_authoritative_workflow() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 

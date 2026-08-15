@@ -280,6 +280,17 @@ function safeString(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+function releaseUsedMachineVerification(release?: Record<string, unknown> | null) {
+  const candidate = release?.release;
+  if (!candidate || typeof candidate !== "object") return false;
+  const verification = (candidate as Record<string, unknown>).machine_verification;
+  return Boolean(
+    verification
+    && typeof verification === "object"
+    && (verification as Record<string, unknown>).enabled === true,
+  );
+}
+
 function issueType(status: WorkflowStatus): "success" | "warning" | "error" | "info" {
   if (status === "published") return "success";
   if (status === "failed") return "error";
@@ -1266,7 +1277,11 @@ export default function PageRecorder({
           </Text>
         ))}
         {status === "published" && snapshot?.release ? (
-          <Text type="success">能力已验证并发布；Skill 导出仅包含本次动作的发布结果。</Text>
+          <Text type="success">
+            {releaseUsedMachineVerification(snapshot.release)
+              ? "能力已通过机器验证并发布；Skill 导出仅包含本次动作的发布结果。"
+              : "能力已按实时分析结果直接发布；Skill 导出仅包含本次动作的发布结果。"}
+          </Text>
         ) : null}
         {status === "published" && snapshot?.release?.lifecycle_pending ? (
           <Text type="warning">
