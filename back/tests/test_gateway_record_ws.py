@@ -67,6 +67,15 @@ def test_recording_action_is_safe_and_process_unique() -> None:
     assert all(re.fullmatch(r"action_[0-9a-f]{32}", value) for value in values)
 
 
+def test_recording_subsystem_uses_configured_value_or_url_authority() -> None:
+    assert gateway._recording_subsystem(
+        "tenant-a", "configured-system", "https://ignored.example/page",
+    ) == "configured-system"
+    assert gateway._recording_subsystem(
+        "tenant-a", "", "http://admin.dianshixinxi.com:90/oa/duty/leave",
+    ) == "admin-dianshixinxi-com-90"
+
+
 @pytest.mark.asyncio
 async def test_pi_candidate_is_closed_when_start_fails() -> None:
     class Candidate:
@@ -189,6 +198,7 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
 
     assert socket.accepted is True
     assert len(instances) == 1
+    assert instances[0].config.subsystem == "example-test"
     assert instances[0].dispatched == [
         {"type": "input", "event": {"kind": "key", "key": "Enter"}},
         {"type": "finish", "title": "目标能力"},

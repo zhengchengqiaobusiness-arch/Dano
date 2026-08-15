@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Literal
+from urllib.parse import urlsplit
 import uuid
 
 import structlog
@@ -57,6 +58,30 @@ async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
 
 def _effective_subsystem(tenant: str, configured: object = "") -> str:
     return str(configured or default_subsystem(tenant))
+
+
+def _recording_subsystem(tenant: str, configured: object, start_url: str) -> str:
+    """Resolve a stable system identity without exposing a redundant UI field."""
+    subsystem = _effective_subsystem(tenant, configured)
+    if subsystem:
+        return subsystem
+    parsed = urlsplit(str(start_url or ""))
+    host = str(parsed.hostname or "")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("业务网址端口格式无效") from exc
+    authority = f"{host}-{port}" if port is not None else host
+    slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", authority.casefold())).strip("-")
+    if not slug:
+        raise ValueError("无法从业务网址识别系统标识")
+    return slug
+
+
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
 _lifecycle_reconciler = LifecycleRegistrationReconciler(
@@ -885,7 +910,11 @@ async def record_ws(ws: WebSocket) -> None:
             })
             return
         tenant = str(init.get("tenant") or "")
-        subsystem = _effective_subsystem(tenant, init.get("subsystem"))
+        subsystem = _recording_subsystem(
+            tenant,
+            init.get("subsystem"),
+            str(init["start_url"]),
+        )
         requested_action = str(init.get("resume_action") or "")
         action = (
             requested_action
