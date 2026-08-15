@@ -365,13 +365,7 @@ class SelfHealingPipeline:
                     status="waiting_operator",
                     label=issue.message,
                 ))
-                answer = await context.ask_operator(WorkflowQuestion(
-                    question_id=f"question:{issue.issue_id}",
-                    issue_id=issue.issue_id,
-                    text=issue.message,
-                    options=[],
-                    context_ref=issue.issue_id,
-                ))
+                answer = await context.ask_operator(_operator_question(issue))
                 answers[issue.issue_id] = answer
 
             await context.progress(WorkflowStep.RESOLVING, "正在解决验证问题", round_number)
@@ -459,6 +453,29 @@ def _issue_resolution_label(issue: WorkflowIssue) -> str:
     if issue.resolver == "machine_repair":
         return f"正在自动修复能力契约：{issue.message}"
     return f"正在处理：{issue.message}"
+
+
+def _operator_question(issue: WorkflowIssue) -> WorkflowQuestion:
+    if issue.code == "required_axis_unconfirmed":
+        field = str(
+            issue.target.get("field_label")
+            or issue.target.get("wire_path")
+            or "该字段"
+        ).removeprefix("body.").removeprefix("query.")
+        return WorkflowQuestion(
+            question_id=f"question:{issue.issue_id}",
+            issue_id=issue.issue_id,
+            text=f"请确认“{field}”在调用这个能力时是否必须提供。",
+            options=["必填", "选填"],
+            context_ref=issue.issue_id,
+        )
+    return WorkflowQuestion(
+        question_id=f"question:{issue.issue_id}",
+        issue_id=issue.issue_id,
+        text=f"请确认以下业务规则：{issue.message}",
+        options=[],
+        context_ref=issue.issue_id,
+    )
 
 
 SnapshotListener = Callable[[WorkflowSnapshot], Awaitable[None] | None]

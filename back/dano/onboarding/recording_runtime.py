@@ -86,7 +86,19 @@ async def _submit_with_protocol_recovery(
     raise RuntimeError(f"Pi 连续 {_PROTOCOL_ATTEMPTS} 次未提交有效结构") from last_error
 
 
-def _workflow_issue(issue: ReleaseIssue) -> WorkflowIssue:
+def _workflow_issue(issue: ReleaseIssue, spec: FlowSpec | None = None) -> WorkflowIssue:
+    field_label = ""
+    if spec is not None and (issue.step_id or issue.field_id or issue.wire_path):
+        step = next((item for item in spec.steps if item.step_id == issue.step_id), None)
+        param = next((
+            item for item in (step.params if step is not None else [])
+            if (
+                (issue.field_id and str(item.field_id or "") == issue.field_id)
+                or (issue.wire_path and str(item.path or "") == issue.wire_path)
+            )
+        ), None)
+        if param is not None:
+            field_label = str(param.label or param.key or param.path or "")
     return WorkflowIssue(
         issue_id=issue.issue_id,
         code=issue.check_code,
@@ -99,6 +111,7 @@ def _workflow_issue(issue: ReleaseIssue) -> WorkflowIssue:
                 "step_id": issue.step_id,
                 "field_id": issue.field_id,
                 "wire_path": issue.wire_path,
+                "field_label": field_label,
             }.items()
             if value
         },
@@ -204,7 +217,7 @@ class ProductionRecordingServices:
             )
         decision = evaluate_recording_release(spec)
         issues = tuple(
-            _workflow_issue(issue)
+            _workflow_issue(issue, spec)
             for capability in decision.capabilities
             for issue in capability.issues
         )

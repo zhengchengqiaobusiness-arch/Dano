@@ -493,7 +493,11 @@ async def test_self_healing_pipeline_does_not_count_draft_churn_as_progress() ->
 @pytest.mark.asyncio
 async def test_self_healing_pipeline_asks_only_operator_issues() -> None:
     issue = WorkflowIssue(
-        issue_id="approval", code="ambiguous", message="请选择审批策略", resolver="operator",
+        issue_id="approval",
+        code="required_axis_unconfirmed",
+        message="写能力字段 `step:body.approverIds` 的 required 轴未确认",
+        resolver="operator",
+        target={"field_label": "审批人", "wire_path": "body.approverIds"},
     )
 
     class Runtime:
@@ -530,6 +534,8 @@ async def test_self_healing_pipeline_asks_only_operator_issues() -> None:
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert runtime.answer == "直属领导"
     assert [question.issue_id for question in questions] == ["approval"]
+    assert questions[0].text == "请确认“审批人”在调用这个能力时是否必须提供。"
+    assert questions[0].options == ["必填", "选填"]
 
 
 async def _append_progress(target, step, label, round_number):  # noqa: ANN001
