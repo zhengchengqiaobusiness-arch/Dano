@@ -15041,6 +15041,31 @@ def _step_wire_formats(step: FlowStep) -> dict[str, str]:
     }
 
 
+def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
+    """Compile session-owned body fields through the existing identity runtime."""
+    values = [item.model_dump(exclude_none=True) for item in step.identity]
+    for param in step.params:
+        if param.category != "runtime_var":
+            continue
+        source = dict(param.source or {})
+        if param.source_kind == "current_user" and source.get("path"):
+            values.append({
+                "path": _strip_body_prefix(param.path),
+                "source": str(source["path"]),
+                "value": param.value,
+            })
+        elif param.source_kind == "request_header" and source.get("header"):
+            values.append({
+                "path": _strip_body_prefix(param.path),
+                "source": f"requestHeader:{source['header']}",
+                "value": param.value,
+            })
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in values:
+        deduped[(str(item.get("path") or ""), str(item.get("source") or ""))] = item
+    return list(deduped.values())
+
+
 def _runtime_param_publish_error(param: ParamField) -> str | None:
     """Source inference/configuration is advisory and never a publish error.
 
@@ -15121,9 +15146,13 @@ def _flow_step_query_template(
                     runtime_field = {"name": runtime_name, **dict(p.source or {})}
                     strategy = str(runtime_field.get("strategy") or "")
                 else:
-                    strategy = ("now_date" if p.type == "date" else "now_iso") if p.source_kind == "system_time" and p.type in {"string", "date", "datetime"} else (
-                        "now_ms" if p.source_kind == "system_time" else str((p.source or {}).get("strategy") or "uuid")
-                    )
+                    strategy = str((p.source or {}).get("strategy") or "")
+                    if not strategy:
+                        strategy = (
+                            ("now_date" if p.type == "date" else "now_iso")
+                            if p.source_kind == "system_time" and p.type in {"string", "date", "datetime"}
+                            else "now_ms" if p.source_kind == "system_time" else "uuid"
+                        )
                     runtime_field = {"name": runtime_name, "kind": strategy}
                 query_template[query_key] = "{{" + runtime_name + "}}"
                 runtime_field["kind"] = strategy
@@ -15428,14 +15457,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
         req,
         param_map,
         selects=selects,
-        identity=[
-            *[i.model_dump(exclude_none=True) for i in step.identity],
-            *[
-                {"path": p.path, "source": f"requestHeader:{p.source.get('header')}", "value": p.value}
-                for p in step.params
-                if p.category == "runtime_var" and p.source_kind == "request_header" and p.source.get("header")
-            ],
-        ],
+        identity=_step_runtime_identity(step),
         typed=_step_samples(step),
     )
     if apir is None:
@@ -15480,11 +15502,16 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     for p in step.params:
         if p.category != "runtime_var" or p.source_kind not in {"system_time", "system_generated"}:
             continue
-        kind = "now_ms"
-        if p.source_kind == "system_generated":
-            kind = str((p.source or {}).get("strategy") or "uuid")
-        elif p.type in {"string", "date", "datetime"}:
-            kind = "now_date" if p.type == "date" else "now_iso"
+        kind = str((p.source or {}).get("strategy") or "")
+        if not kind:
+            if p.source_kind == "system_generated":
+                kind = "uuid"
+            else:
+                kind = (
+                    "now_date" if p.type == "date"
+                    else "now_iso" if p.type in {"string", "datetime"}
+                    else "now_ms"
+                )
         explicit_system_values.append({"path": _strip_body_prefix(p.path), "kind": kind})
     if explicit_system_values:
         deduped_system_values: dict[tuple[str, str], dict[str, Any]] = {}

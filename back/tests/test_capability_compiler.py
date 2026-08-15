@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.recording_live import apply_recording_agent_edit
 from dano.execution.page.flow_spec import (
     FlowCapability,
     FlowLink,
@@ -233,6 +234,129 @@ def test_compiler_includes_dependencies_grounded_by_the_same_recording():
     submit = next(cap for cap in compilation.spec.capabilities if cap.name == "submit_leave")
     assert submit.step_ids == ["definition", "approval", "submit"]
     assert submit.evidence[0]["source"] == "grounded_request_graph"
+
+
+def test_live_sources_compile_into_one_executable_multi_api_contract():
+    """A live conclusion must change execution, not only the workbench label."""
+    spec = FlowSpec.model_validate({
+        "steps": [
+            {
+                "step_id": "save_chat",
+                "method": "POST",
+                "path": "/chat/save",
+                "body_source": '{"user_id":"user-1","name":"hello"}',
+                "params": [
+                    {"path": "user_id", "key": "user_id", "value": "user-1"},
+                    {"path": "name", "key": "name", "value": "hello"},
+                ],
+                "response_json": {"data": {"conversation_id": "29cba714-c6ce-4747-baec-e2c5d37d6868"}},
+                "source_meta": {"request_id": "req-save", "sequence": 1},
+            },
+            {
+                "step_id": "get_appid",
+                "method": "GET",
+                "path": "/auth/getappid",
+                "params": [
+                    {"path": "query.appId", "key": "appId", "value": "29cba714-c6ce-4747-baec-e2c5d37d6868"},
+                    {"path": "query.appName", "key": "appName", "value": "generated-name"},
+                    {"path": "query.timeStamp", "key": "timeStamp", "value": 1782891442000},
+                ],
+                "response_json": {"data": "app-code-1"},
+                "source_meta": {"request_id": "req-appid", "sequence": 2},
+            },
+            {
+                "step_id": "chat",
+                "method": "POST",
+                "path": "/chat/run",
+                "body_source": (
+                    '{"sys_query":"hello","wybs":"51e561cb-49e9-4f96-817a-2d0a7e2a4360",'
+                    '"token":"token-1","appCode":"app-code-1",'
+                    '"conversation_id":"29cba714-c6ce-4747-baec-e2c5d37d6868"}'
+                ),
+                "params": [
+                    {"path": "sys_query", "key": "sys_query", "value": "hello"},
+                    {"path": "wybs", "key": "wybs", "value": "51e561cb-49e9-4f96-817a-2d0a7e2a4360"},
+                    {"path": "token", "key": "token", "value": "token-1"},
+                    {"path": "appCode", "key": "appCode", "value": "app-code-1"},
+                    {"path": "conversation_id", "key": "conversation_id", "value": "29cba714-c6ce-4747-baec-e2c5d37d6868"},
+                ],
+                "response_json": {"ok": True},
+                "source_meta": {"request_id": "req-chat", "sequence": 3, "role": "business_write"},
+            },
+        ],
+        "request_facts": {
+            "requests": [
+                {
+                    "request_id": "req-save", "sequence": 1, "method": "POST", "path": "/chat/save",
+                    "post_data": '{"user_id":"user-1","name":"hello"}',
+                    "response_json": {"data": {"conversation_id": "29cba714-c6ce-4747-baec-e2c5d37d6868"}},
+                },
+                {
+                    "request_id": "req-appid", "sequence": 2, "method": "GET", "path": "/auth/getappid",
+                    "response_json": {"data": "app-code-1"},
+                },
+                {
+                    "request_id": "req-chat", "sequence": 3, "method": "POST", "path": "/chat/run",
+                    "post_data": (
+                        '{"sys_query":"hello","wybs":"51e561cb-49e9-4f96-817a-2d0a7e2a4360",'
+                        '"token":"token-1","appCode":"app-code-1",'
+                        '"conversation_id":"29cba714-c6ce-4747-baec-e2c5d37d6868"}'
+                    ),
+                    "response_json": {"ok": True},
+                },
+            ],
+        },
+    })
+
+    edits = [
+        {"op": "set_param_source", "step_id": "save_chat", "path": "user_id", "source_kind": "session", "session_key": "localStorage:user.user_id", "reason": "登录态用户"},
+        {"op": "set_param_source", "step_id": "save_chat", "path": "name", "source_kind": "caller_input", "reason": "调用方输入"},
+        {"op": "set_param_source", "step_id": "get_appid", "path": "query.appId", "source_kind": "generated", "strategy": "uuid", "reason": "运行时生成"},
+        {"op": "set_param_source", "step_id": "get_appid", "path": "query.appName", "source_kind": "generated", "strategy": "random_string", "reason": "运行时生成"},
+        {"op": "set_param_source", "step_id": "get_appid", "path": "query.timeStamp", "source_kind": "generated", "strategy": "now_ms", "reason": "运行时时间"},
+        {"op": "set_param_source", "step_id": "chat", "path": "sys_query", "source_kind": "caller_input", "reason": "调用方输入"},
+        {"op": "set_param_source", "step_id": "chat", "path": "wybs", "source_kind": "generated", "strategy": "uuid", "reason": "运行时生成"},
+        {"op": "set_param_source", "step_id": "chat", "path": "token", "source_kind": "session", "session_key": "localStorage:auth.token", "reason": "登录令牌"},
+        {"op": "set_param_source", "step_id": "chat", "path": "appCode", "source_kind": "response_binding", "origin_request_id": "req-appid", "origin_path": "data", "reason": "上游接口返回"},
+        {"op": "set_param_source", "step_id": "chat", "path": "conversation_id", "source_kind": "response_binding", "origin_request_id": "req-save", "origin_path": "data.conversation_id", "reason": "上游接口返回"},
+    ]
+    for edit in edits:
+        apply_recording_agent_edit(spec, edit)
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "run_chat",
+        "title": "运行对话",
+        "intent": "创建会话、取得应用码并发起对话",
+        "kind": "submit",
+        "anchor_step_id": "chat",
+    }]}).spec
+    api_request, errors = flow_spec_to_api_request(compiled)
+
+    assert errors == []
+    assert api_request is not None
+    assert api_request["params"] == ["name", "sys_query"]
+    assert [step["step_id"] for step in api_request["steps"]] == [
+        "save_chat", "get_appid", "chat",
+    ]
+    save_step, appid_step, chat_step = api_request["steps"]
+    assert save_step["identity"] == [{
+        "path": "user_id",
+        "source": "localStorage:user.user_id",
+        "evidence": [
+            "request://body.user_id",
+            "identity://localStorage:user.user_id",
+        ],
+        "tokens": ["user_id"],
+    }]
+    assert {item["kind"] for item in appid_step["runtime_fields"]} == {
+        "uuid", "random_string", "now_ms",
+    }
+    assert {item["kind"] for item in chat_step["system_values"]} == {"uuid"}
+    assert chat_step["identity"][0]["source"] == "localStorage:auth.token"
+    assert {(item["source_step"], item["source_path"], item["target_path"]) for item in chat_step["links"]} == {
+        (0, "data.conversation_id", "conversation_id"),
+        (1, "data", "appCode"),
+    }
 
 
 def test_orchestration_keeps_safely_compiled_capabilities_when_one_boundary_is_invalid():
