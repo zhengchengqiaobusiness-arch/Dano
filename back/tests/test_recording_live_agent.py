@@ -206,6 +206,62 @@ def test_finalize_rebuilds_strong_goal_capabilities_instead_of_reusing_stale_pla
     ] == ["submit", "detail", "edit"]
 
 
+def test_entity_hydration_read_can_also_anchor_requested_detail_capability() -> None:
+    goal_text = (
+        "目的：查看并编辑申请\n"
+        "预期产出能力数量：2\n"
+        "能力1：查看申请详情\n"
+        "能力2：编辑申请"
+    )
+    live = FlowSpec(meta={"recording_goal_text": goal_text})
+    finalized = FlowSpec(
+        title="申请",
+        goal={"capabilities": ["查看申请详情", "编辑申请"]},
+        meta={"recording_goal_text": goal_text},
+        steps=[
+            FlowStep(
+                step_id="detail", method="GET", path="/records/get?id=record-42",
+                params=[ParamField(path="query.id", key="id", value="record-42")],
+                response_json={"data": {"id": "record-42", "reason": "leave"}},
+                source_meta={
+                    "request_id": "req-detail", "request_index": 1,
+                    "role": "business_get", "trigger_op": "click",
+                    "trigger_locator": "text=编辑", "trigger_transaction_id": "txn-edit-open",
+                    "record_hydration_for_write_ids": ["edit"],
+                },
+            ),
+            FlowStep(
+                step_id="edit", method="POST", path="/records/update",
+                params=[
+                    ParamField(path="body.id", key="id", value="record-42"),
+                    ParamField(
+                        path="body.reason", key="reason", value="updated",
+                        source_kind="user_input", exposed_to_user=True,
+                    ),
+                ],
+                source_meta={
+                    "request_id": "req-edit", "request_index": 2,
+                    "role": "business_write", "trigger_op": "click",
+                    "trigger_locator": "text=提交", "trigger_transaction_id": "txn-edit-submit",
+                },
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-detail", request_index=1, method="GET", path="/records/get"),
+            RequestFact(request_id="req-edit", request_index=2, method="POST", path="/records/update"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [cap.title for cap in merged.capabilities] == ["查看申请详情", "编辑申请"]
+    assert merged.capabilities[0].kind == "inspect"
+    assert [
+        next(ref.step_id for ref in cap.request_refs if ref.usage == "execute")
+        for cap in merged.capabilities
+    ] == ["detail", "edit"]
+
+
 @pytest.mark.asyncio
 async def test_cancelling_recording_prompt_also_cancels_the_sidecar_turn(monkeypatch):
     session = RecordingPiSession(

@@ -10751,6 +10751,16 @@ def _business_query_evidence_score(step: FlowStep) -> int:
     if isinstance(response, list):
         score += 4
     if isinstance(response, dict):
+        payload = response.get("data", response)
+        if (
+            isinstance(payload, dict)
+            and _response_identity_match_count(step) > 0
+        ):
+            # A GET keyed by a stable record identity that returns the same
+            # entity is independently callable business evidence.  Opening an
+            # edit form may be how it was captured, but that does not make the
+            # read endpoint merely an internal write preflight.
+            score += 2
         for candidate in ("data.list", "data.records", "data.rows", "data.items", "list", "records", "rows", "items"):
             value = _flow_path_lookup(response, candidate)
             if isinstance(value, list):
@@ -12161,9 +12171,13 @@ def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
         independently_triggered = _has_query_action_evidence(
             meta.get("trigger_op"), meta.get("trigger_locator"),
         )
-        if meta.get("record_hydration_for_write_ids") and not independently_triggered:
-            continue
         independently_grounded = _business_query_evidence_score(step) >= 5
+        if (
+            meta.get("record_hydration_for_write_ids")
+            and not independently_triggered
+            and not independently_grounded
+        ):
+            continue
         if step.step_id not in submit_closure or independently_triggered or independently_grounded:
             read_groups.setdefault(_query_operation_key(step), []).append(step)
     # One visible command is one public read ability even when it fans out to
