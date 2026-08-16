@@ -12,6 +12,10 @@ from dano.onboarding.recording_workflow import CANONICAL_RECORDING_COMMANDS
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PAGE_RECORDER = _REPO_ROOT / "skillfrontend" / "src" / "components" / "PageRecorder.tsx"
 _PI_RUNTIME = _REPO_ROOT / "back" / "agent" / "run_recording_pi.mjs"
+_RECORDING_SKILL = (
+    _REPO_ROOT / "back" / "agent" / "recording-pi" / "skills"
+    / "analyze-recording-evidence" / "SKILL.md"
+)
 
 
 def test_recording_gateway_contains_one_public_route_and_one_dispatch_owner() -> None:
@@ -121,13 +125,21 @@ def test_skill_export_is_only_called_at_the_publish_boundary_for_current_skill()
 
 
 def test_pi_runtime_prompt_uses_the_same_public_semantic_contract_as_tools() -> None:
-    source = _PI_RUNTIME.read_text(encoding="utf-8")
+    runtime = _PI_RUNTIME.read_text(encoding="utf-8")
+    source = _RECORDING_SKILL.read_text(encoding="utf-8")
 
-    assert "caller_input/constant/session/context/response_binding/computed/generated" in source
-    assert "auth/support/option/context/business_read/business_write" in source
-    assert "kind=response_key_map" in source
+    for value in (
+        "`caller_input`", "`constant`", "`session`", "`context`",
+        "`response_binding`", "`computed`", "`generated`",
+        "`auth`", "`support`", "`option`", "`business_read`", "`business_write`",
+        "`response_key_map`",
+    ):
+        assert value in source
+    assert "additionalSkillPaths: [RECORDING_ANALYSIS_SKILL_PATH]" in runtime
+    assert "expandPromptTemplates: usesRecordingSkill" in runtime
     for retired in (
         "user_input/constant/session_header/page_context/chained/computed",
         "kind=structure",
     ):
+        assert retired not in runtime
         assert retired not in source

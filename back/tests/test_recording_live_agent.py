@@ -3476,15 +3476,38 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
 
     prompts = []
 
-    async def fake_prompt(text, *, timeout_s=0):
-        prompts.append((text, timeout_s))
+    async def fake_prompt(
+        text,
+        *,
+        timeout_s=0,
+        prompt_mode="workflow",
+        analysis_phase="",
+    ):
+        prompts.append({
+            "text": text,
+            "timeout_s": timeout_s,
+            "prompt_mode": prompt_mode,
+            "analysis_phase": analysis_phase,
+        })
         return {"status": "submitted"}
 
     session.prompt = fake_prompt
-    result = await session.notify_live_batch({"reason": "request_batch", "since_seq": 2})
-    assert result["status"] == "submitted"
-    assert "get_recording_delta(since_seq=2)" in prompts[0][0]
-    assert "request_batch" in prompts[0][0]
-    assert "submit_recording_plan" in prompts[0][0]
-    assert "plan.ops" in prompts[0][0]
-    assert "caller_input/constant/session/context/response_binding/computed/generated" in prompts[0][0]
+    for reason, phase in (
+        ("recording_started", "base_state_analysis"),
+        ("business_request", "request_batch"),
+        ("request_batch", "request_batch"),
+        ("submit_candidate", "request_batch"),
+        ("final_request_tail", "final_request_tail"),
+    ):
+        result = await session.notify_live_batch({"reason": reason, "since_seq": 2})
+        assert result["status"] == "submitted"
+        prompt = prompts[-1]
+        assert prompt["prompt_mode"] == "recording_analysis"
+        assert prompt["analysis_phase"] == phase
+        assert f"analysis_phase={phase}" in prompt["text"]
+        assert "since_seq=2" in prompt["text"]
+        assert "submit_recording_plan" in prompt["text"]
+        assert "完整能力集合" in prompt["text"]
+
+    assert all(item["timeout_s"] is None for item in prompts)
+    assert all("caller_input/constant/session" not in item["text"] for item in prompts)

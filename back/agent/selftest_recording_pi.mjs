@@ -296,8 +296,8 @@ function verifyPlanToolCompatibility() {
     "set_request_role schema must expose evidence_refs",
   );
   assert(
-    operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 6,
-    "set_param_source schema must expose the six executable source categories",
+    operationSchema("set_param_source")?.properties?.source_kind?.anyOf?.length === 7,
+    "set_param_source schema must expose the seven executable source categories",
   );
   assert(
     operationSchema("set_param_source")?.properties?.evidence_refs?.type === "array",

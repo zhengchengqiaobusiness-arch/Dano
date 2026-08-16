@@ -32,7 +32,8 @@ def test_recording_pi_operations_use_the_session_deadline_by_default() -> None:
     assert "httpIdleTimeoutMs: 0" in runtime_source
     assert "DANO_RECORDING_PI_PROVIDER_TIMEOUT_MS" not in runtime_source
     assert 'DANO_PI_MAX_TOKENS", 32768' in runtime_source
-    assert "set_param_source、set_param_type、set_param_required" in runtime_source
+    assert "additionalSkillPaths: [RECORDING_ANALYSIS_SKILL_PATH]" in runtime_source
+    assert "expandPromptTemplates: usesRecordingSkill" in runtime_source
 
 
 class _FakeServer:
@@ -166,6 +167,8 @@ async def test_analysis_image_count_remains_visible_during_prompt() -> None:
     async def fake_command(command_type: str, **payload):  # noqa: ANN003, ANN202
         assert command_type == "prompt"
         observed_counts.append(client.analysis_image_count)
+        assert payload["prompt_mode"] == "recording_analysis"
+        assert payload["analysis_phase"] == "request_batch"
         return {"image_count": len(payload.get("images") or [])}
 
     client._command = fake_command
@@ -173,7 +176,11 @@ async def test_analysis_image_count_remains_visible_during_prompt() -> None:
         {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
     ])
 
-    result = await client.prompt("执行截图规划")
+    result = await client.prompt(
+        "执行截图分析",
+        prompt_mode="recording_analysis",
+        analysis_phase="request_batch",
+    )
 
     assert result["image_count"] == 1
     assert observed_counts == [1]
