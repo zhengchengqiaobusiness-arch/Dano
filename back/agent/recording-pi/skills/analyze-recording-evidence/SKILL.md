@@ -45,6 +45,13 @@ through the current recording tools; never construct or publish a FlowSpec direc
    use the same route family. Preserve the distinct recorded page actions and transactions. When
    one read action emits several requests, keep every supporting request in that capability and
    choose the request carrying the final business entity/result as its sole execute anchor.
+8. A record read captured while opening an edit form may also anchor a separately requested inspect
+   capability when a stable record selector is echoed by the returned entity. Keep the later write
+   as the update execute anchor; never use the hydration read as the update execute anchor.
+9. Workflow definitions, form configuration, and pre-start approval previews must not be presented
+   as instance progress. A progress capability needs an observed view/progress action plus an
+   instance or record selector and a response carrying that instance's current nodes, actors,
+   statuses, or results. Otherwise keep the goal slot unresolved.
 
 ## Classify requests from evidence
 
@@ -150,7 +157,8 @@ structure evidence. Field-name equality alone is insufficient.
    `fact_check` only for observed supporting members.
 5. Submit all currently grounded capabilities on every turn. This array is a full replacement,
    not the current batch delta.
-6. Call `submit_recording_plan`, then inspect `op_results` and `must_retry`:
+6. Pass `plan` as a structured object, never as JSON-encoded text. Call
+   `submit_recording_plan`, then inspect `op_results` and `must_retry`:
    - `applied`: retain the conclusion.
    - `deferred`: retain it and do not resubmit while it awaits materialization.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.

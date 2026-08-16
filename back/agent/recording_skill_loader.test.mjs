@@ -182,6 +182,9 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /until `has_more=false`/);
   assert.match(skill, /completing the turn without an accepted `submit_recording_plan` result/i);
   assert.match(skill, /Different concrete goal slots must not share one execute anchor/i);
+  assert.match(skill, /captured while opening an edit form may also anchor a separately requested inspect\s+capability/i);
+  assert.match(skill, /must not be presented\s+as instance progress/i);
+  assert.match(skill, /Pass `plan` as a structured object/i);
   assert.match(skill, /record identity and several exact same-path values/i);
   assert.match(skill, /expose one\s+caller choice per required label/i);
   assert.match(runtime, /recording_submission_retry/);
