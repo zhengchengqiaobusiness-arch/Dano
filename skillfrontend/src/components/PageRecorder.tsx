@@ -1070,6 +1070,11 @@ export default function PageRecorder({
               autoSize={{ minRows: 3, maxRows: 5 }}
               style={{ marginTop: 8 }}
             />
+            <div style={{ marginTop: 6 }}>
+              <Text type="secondary">
+                如需固定能力数量，可写“预期产出能力数量：3”，并逐项说明每个能力。
+              </Text>
+            </div>
           </label>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <Button type="primary" loading={connecting} onClick={startRecording}>开始录制</Button>
