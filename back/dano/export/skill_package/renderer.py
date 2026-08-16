@@ -798,7 +798,19 @@ def _response_key_map(link, source, body, values):
     collection = get_path(source, link.get("source_collection_path") or link.get("source_path"))
     binding = link.get("value_binding") or {}
     input_field = str(binding.get("input_field") or "")
-    caller_map = values.get(input_field)
+    input_fields_by_label = {
+        str(label): str(field)
+        for label, field in dict(binding.get("input_fields_by_label") or {}).items()
+        if str(label) and str(field)
+    }
+    caller_map = (
+        {
+            label: values[field]
+            for label, field in input_fields_by_label.items()
+            if field in values
+        }
+        if input_fields_by_label else values.get(input_field)
+    )
     if not isinstance(collection, list) or not collection:
         raise RuntimeError(f"dynamic structure source unavailable: {link.get('link_id')}")
     if binding.get("kind") != "caller_map_by_label" or not isinstance(caller_map, dict):

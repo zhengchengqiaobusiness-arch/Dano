@@ -2870,8 +2870,13 @@ def test_exact_response_keys_materialize_a_dynamic_write_dependency() -> None:
         param for param in submit.params
         if param.path == "startUserSelectAssignees"
     )
-    assert public.source["kind"] == "dynamic_structure_input"
+    assert public.source["kind"] == "dynamic_structure_leaf"
+    assert public.exposed_to_user is False
     assert public.value == {"领导审批": [170], "人事审批": [165]}
+    assert link.value_binding["input_fields_by_label"] == {
+        "领导审批": "领导审批",
+        "人事审批": "人事审批",
+    }
     assert all(
         not param.exposed_to_user
         for param in submit.params
@@ -2889,7 +2894,10 @@ def test_exact_response_keys_materialize_a_dynamic_write_dependency() -> None:
     capability = next(cap for cap in compiled.capabilities if cap.name == "submit_application")
     assert capability.step_ids == [approval.step_id, submit.step_id]
     assert {field.key for field in capability.inputs} == {
-        "reason", "startUserSelectAssignees",
+        "reason", "领导审批", "人事审批",
+    }
+    assert set(capability.input_schema["properties"]) == {
+        "reason", "领导审批", "人事审批",
     }
 
 
@@ -2972,7 +2980,7 @@ def test_publish_upgrades_a_persisted_dynamic_request_draft() -> None:
     assert capability.step_ids == ["approval", "submit"]
     assert [link.kind for link in prepared.links] == ["response_key_map"]
     assert set(capability.input_schema["properties"]) == {
-        "reason", "startUserSelectAssignees",
+        "reason", "领导审批", "人事审批",
     }
 
 

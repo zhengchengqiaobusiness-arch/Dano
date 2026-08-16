@@ -2685,7 +2685,20 @@ def _apply_structure_overrides(body, overrides: list[dict]) -> list[str]:  # noq
             key_path = str(item.get("source_key_path") or "")
             label_path = str(item.get("source_label_path") or "")
             binding = dict(item.get("value_binding") or {})
-            container = _path_lookup(body, target_path)
+            input_fields_by_label = {
+                str(label): str(field)
+                for label, field in dict(binding.get("input_fields_by_label") or {}).items()
+                if str(label) and str(field)
+            }
+            input_values = dict(item.get("input_values") or {})
+            container = (
+                {
+                    label: input_values[field]
+                    for label, field in input_fields_by_label.items()
+                    if field in input_values
+                }
+                if input_fields_by_label else _path_lookup(body, target_path)
+            )
             if not isinstance(collection, list) or not collection:
                 errors.append("动态结构来源集合为空或不是数组")
                 continue
@@ -2876,13 +2889,24 @@ def _check_step_links(workflow: dict) -> list[str]:
         for structure_link in st.get("structure_links") or []:
             if str(structure_link.get("mode") or "") != "response_key_map":
                 continue
-            input_field = str((structure_link.get("value_binding") or {}).get("input_field") or "")
+            binding = structure_link.get("value_binding") or {}
+            input_field = str(binding.get("input_field") or "")
             sample = (st.get("sample_inputs") or {}).get(input_field)
             if input_field and isinstance(sample, dict):
                 # response_key_map consumes an object input. A scalar probe
                 # would make the self-check reject the same shape that the
                 # runtime interpreter accepts and deterministically rebuilds.
                 probes[input_field] = copy.deepcopy(sample)
+            for label, field in dict(binding.get("input_fields_by_label") or {}).items():
+                field = str(field)
+                if not field:
+                    continue
+                label_sample = (st.get("sample_inputs") or {}).get(field, _PATH_MISSING)
+                probes[field] = (
+                    copy.deepcopy(label_sample)
+                    if label_sample is not _PATH_MISSING
+                    else f"{_PROBE_PREFIX}{label}__"
+                )
         nested = substitute(templ, probes, {}) if has_body else None
         query = _render_query_template(query_templ, probes, {}) if has_query else {}
         for lk in st.get("links") or []:
@@ -2912,13 +2936,16 @@ def _check_step_links(workflow: dict) -> list[str]:
             source_step = lk.get("source_step")
             source_path = lk.get("source_tokens") or lk.get("source_path", "")
             container = _path_lookup(nested, tp) if has_body and tp else _PATH_MISSING
-            if container is _PATH_MISSING or not isinstance(container, dict):
+            response_key_map = str(lk.get("mode") or "") == "response_key_map"
+            if container is _PATH_MISSING or (
+                not response_key_map and not isinstance(container, dict)
+            ):
                 out.append(f"步骤{i + 1}:结构依赖目标 `{disp}` 不是可重建的对象容器")
                 continue
             if not isinstance(source_step, int) or source_step < 0 or source_step >= i:
                 out.append(f"步骤{i + 1}:结构依赖 `{disp}` 的 source_step={source_step} 必须指向更早步骤")
                 continue
-            if str(lk.get("mode") or "") == "response_key_map":
+            if response_key_map:
                 source = steps[source_step].get("response_json")
                 source_collection = _get_by_path(
                     source,
@@ -2926,7 +2953,11 @@ def _check_step_links(workflow: dict) -> list[str]:
                 )
                 runtime_errors = _apply_structure_overrides(
                     copy.deepcopy(nested),
-                    [{**lk, "source_collection": source_collection}],
+                    [{
+                        **lk,
+                        "source_collection": source_collection,
+                        "input_values": probes,
+                    }],
                 )
                 out.extend(f"步骤{i + 1}:{error}" for error in runtime_errors)
                 continue
@@ -2968,6 +2999,15 @@ def self_check(api_request: dict) -> list[str]:
     has_query = isinstance(query_templ, dict)
     has_url_template = bool(url_templ)
     params = list(api_request.get("params") or [])
+    dynamic_map_inputs = {
+        str(field)
+        for link in api_request.get("structure_links") or []
+        if str(link.get("mode") or "") == "response_key_map"
+        for field in dict(
+            (link.get("value_binding") or {}).get("input_fields_by_label") or {}
+        ).values()
+        if str(field)
+    }
     problems: list[str] = []
     if not has_body and not has_query and not has_url_template:
         for p in params:
@@ -2996,6 +3036,10 @@ def self_check(api_request: dict) -> list[str]:
     if "{{" in final_str:
         problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template/query_template 不一致(有参数没填上)")
     for p, probe in probes.items():
+        if str(p) in dynamic_map_inputs:
+            # The cross-step response-key-map interpreter consumes this input;
+            # _check_step_links below runs that same interpreter end to end.
+            continue
         cnt = final_str.count(probe)
         if cnt == 0:
             problems.append(f"参数 `{p}` 填入的值进不了最终请求体/查询/路径(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
@@ -3721,6 +3765,7 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
             if str(lk.get("mode") or "") == "response_key_map":
                 structure_overrides.append({
                     **lk,
+                    "input_values": fields,
                     "source_collection": _get_by_path(
                         source,
                         lk.get("source_collection_path") or lk.get("source_path", ""),

@@ -21,7 +21,7 @@ from dano.execution.page.flow_spec import (
     _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
-    sync_capability_scoped_views,
+    _sync_capability_io_schemas,
 )
 
 
@@ -475,7 +475,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         relation for relation in current.capability_relations or []
         if relation.from_capability in valid_refs and relation.to_capability in valid_refs
     ]
-    current = sync_capability_scoped_views(current)
+    current = _sync_capability_io_schemas(current)
     audit = {
         "protocol": "dano.capability_compilation.v1",
         "planned": len(plan_items),

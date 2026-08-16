@@ -2171,6 +2171,65 @@ def test_self_check_uses_runtime_response_key_map_contract() -> None:
     assert any("输入缺少=['人事审批']" in item for item in problems)
 
 
+async def test_response_key_map_accepts_one_public_input_per_required_label() -> None:
+    workflow = {"steps": [
+        {
+            "method": "GET",
+            "url": "http://x/get-approval-detail",
+            "query_template": {},
+            "params": [],
+            "response_json": {"data": {"activityNodes": [
+                {"id": "Activity_leader", "name": "领导审批"},
+                {"id": "Activity_hr", "name": "人事审批"},
+            ]}},
+        },
+        {
+            "method": "POST",
+            "url": "http://x/submit",
+            "body_template": {
+                "assignees": {
+                    "Recorded_leader": [160],
+                    "Recorded_hr": [161],
+                },
+            },
+            "params": ["领导审批", "人事审批"],
+            "sample_inputs": {"领导审批": 200, "人事审批": 201},
+            "structure_links": [{
+                "mode": "response_key_map",
+                "source_step": 0,
+                "source_path": "data.activityNodes",
+                "source_collection_path": "data.activityNodes",
+                "source_key_path": "id",
+                "source_label_path": "name",
+                "target_path": "assignees",
+                "value_binding": {
+                    "kind": "caller_map_by_label",
+                    "input_field": "assignees",
+                    "value_shape": "item_list",
+                    "required_labels": ["领导审批", "人事审批"],
+                    "input_fields_by_label": {
+                        "领导审批": "领导审批",
+                        "人事审批": "人事审批",
+                    },
+                },
+            }],
+        },
+    ]}
+
+    assert self_check(workflow) == []
+    result = await execute_api_workflow(
+        workflow,
+        {"领导审批": 200, "人事审批": 201},
+        send=False,
+    )
+
+    assert result["ok"] is True
+    assert result["final"]["body"]["assignees"] == {
+        "Activity_leader": [200],
+        "Activity_hr": [201],
+    }
+
+
 def test_self_check_flags_missing_link_source_path_when_response_sample_exists():
     """link 的 source_path 若在上游响应样例里不存在,发布前就要拦住。"""
     workflow = {"steps": [

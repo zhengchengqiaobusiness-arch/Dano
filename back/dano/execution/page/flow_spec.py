@@ -6468,9 +6468,32 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             # assignee values. Keep the stable label-to-value map as caller
             # input while execution translates labels to the latest keys.
             public = next((p for p in target.params if p.path == target_path), None)
-            input_field = str((lk.value_binding or {}).get("input_field") or "").strip()
+            binding = lk.value_binding or {}
+            input_field = str(binding.get("input_field") or "").strip()
             if public is not None and input_field:
-                option_source = (lk.value_binding or {}).get("option_source")
+                option_source = binding.get("option_source")
+                input_fields_by_label = {
+                    str(label): str(field)
+                    for label, field in dict(binding.get("input_fields_by_label") or {}).items()
+                    if str(label) and str(field)
+                }
+                if input_fields_by_label:
+                    public.category = "runtime_var"
+                    public.source_kind = "dynamic_structure"
+                    public.source = {
+                        "kind": "dynamic_structure_leaf",
+                        "required_state": "internal",
+                    }
+                    public.required = False
+                    public.editable = False
+                    public.exposed_to_user = False
+                    public.need_human_confirm = False
+                    samples = public.value if isinstance(public.value, dict) else {}
+                    target.sample_inputs.pop(input_field, None)
+                    for label, field in input_fields_by_label.items():
+                        if label in samples:
+                            target.sample_inputs[field] = copy.deepcopy(samples[label])
+                    continue
                 public.key = input_field
                 public.type = "object"
                 public.wire_type = "object"
@@ -7843,6 +7866,9 @@ def _materialize_captured_response_key_maps(
         value_binding = {
             "kind": "caller_map_by_label",
             "input_field": input_field,
+            "input_fields_by_label": {
+                label: label for label in matched_labels
+            },
             "value_shape": value_shape,
             "required_labels": matched_labels,
             "ignored_labels": [
@@ -7856,13 +7882,18 @@ def _materialize_captured_response_key_maps(
             source.step_id, source_collection_path,
             target.step_id, target_container_path,
         )
-        if any(
-            (
+        existing_link = next((
+            link for link in links
+            if (
                 link.source_step_id, link.source_path,
                 link.target_step_id, link.target_path,
             ) == signature
-            for link in links
-        ):
+        ), None)
+        if existing_link is not None:
+            existing_link.value_binding = {
+                **dict(existing_link.value_binding or {}),
+                **value_binding,
+            }
             continue
         links.append(FlowLink(
             source_step_id=source.step_id,
@@ -9367,6 +9398,85 @@ def _ground_recorded_identifier_relations(
     return spec
 
 
+def _expand_response_key_map_inputs(
+    spec: FlowSpec,
+    capability: FlowCapability,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose one caller field per stable response label, never the wire map."""
+    expanded = copy.deepcopy(schema or {"type": "object", "properties": {}, "required": []})
+    properties = expanded.setdefault("properties", {})
+    required = [str(name) for name in expanded.get("required") or []]
+    member_ids = set(capability.step_ids or [])
+    by_id = {step.step_id: step for step in spec.steps}
+    reserved = set(properties)
+    for link in spec.links or []:
+        if (
+            _flow_link_kind(link) != "response_key_map"
+            or link.source_step_id not in member_ids
+            or link.target_step_id not in member_ids
+        ):
+            continue
+        binding = dict(link.value_binding or {})
+        labels = [str(label) for label in binding.get("required_labels") or [] if str(label)]
+        input_field = str(binding.get("input_field") or "")
+        if not labels or not input_field:
+            continue
+        target = by_id.get(link.target_step_id)
+        public = next((
+            param for param in (target.params if target is not None else [])
+            if _strip_body_prefix(str(param.path or ""))
+            == _strip_body_prefix(str(link.target_container_path or link.target_path or ""))
+        ), None)
+        samples = public.value if public is not None and isinstance(public.value, dict) else {}
+        properties.pop(input_field, None)
+        reserved.discard(input_field)
+        required = [name for name in required if name != input_field]
+        field_map: dict[str, str] = {}
+        existing_map = dict(binding.get("input_fields_by_label") or {})
+        for label in labels:
+            preferred = str(existing_map.get(label) or label)
+            field_name = preferred
+            if field_name in reserved:
+                field_name = f"{input_field}.{label}"
+            suffix = 2
+            base_name = field_name
+            while field_name in reserved:
+                field_name = f"{base_name}_{suffix}"
+                suffix += 1
+            reserved.add(field_name)
+            field_map[label] = field_name
+            sample = samples.get(label)
+            field_schema = _schema_from_response_value(sample)
+            field_schema.update({
+                "label": label,
+                "description": f"为上游返回的“{label}”节点选择调用值",
+                "x-dano-capability-owned": True,
+                "x-dano-dynamic-key-map": {
+                    "link_id": link.link_id,
+                    "label": label,
+                    "target_path": link.target_container_path or link.target_path,
+                },
+            })
+            option_source = binding.get("option_source")
+            if isinstance(option_source, dict) and option_source:
+                field_schema["x-dano-option-source"] = copy.deepcopy(option_source)
+                field_schema["x-options-source"] = True
+            properties[field_name] = field_schema
+            required.append(field_name)
+        link.value_binding = {
+            **binding,
+            "input_fields_by_label": field_map,
+        }
+        if target is not None:
+            target.sample_inputs.pop(input_field, None)
+            for label, field_name in field_map.items():
+                if label in samples:
+                    target.sample_inputs[field_name] = copy.deepcopy(samples[label])
+    expanded["required"] = list(dict.fromkeys(required))
+    return expanded
+
+
 def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     """让 capability 的输入输出 schema 始终跟当前字段/响应保持一致。"""
     if not spec.capabilities:
@@ -9479,6 +9589,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         _disambiguate_capability_param_keys(cap_steps)
         params = [p for st in cap_steps for p in (st.params or [])]
         derived_input = _capability_input_schema(params, set(cap.step_ids or []))
+        derived_input = _expand_response_key_map_inputs(spec, cap, derived_input)
         if _capability_is_batch(spec, cap):
             derived_input = _batch_capability_input_schema(cap_steps)
         cap.input_schema = reconcile_schema(derived_input, cap.input_schema or {})

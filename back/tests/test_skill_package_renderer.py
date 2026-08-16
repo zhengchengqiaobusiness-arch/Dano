@@ -464,6 +464,10 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
                 "value_binding": {
                     "kind": "caller_map_by_label", "input_field": "approvers",
                     "value_shape": "item_list",
+                    "input_fields_by_label": {
+                        "领导审批": "领导审批",
+                        "HR审批": "HR审批",
+                    },
                 },
             }],
         }
@@ -471,7 +475,8 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
         result = module.execute_plan(plan, {
             "startTime": "2026-08-06T00:00:00+08:00",
             "endTime": "2026-08-07T00:00:00+08:00",
-            "approvers": {"领导审批": [200, 202], "HR审批": 201},
+            "领导审批": [200, 202],
+            "HR审批": 201,
         })
 
         assert result["ok"] is True
