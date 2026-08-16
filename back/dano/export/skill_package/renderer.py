@@ -129,7 +129,12 @@ def _safe_step(step: dict) -> dict:
     projected["selects"] = [
         {
             key: item.get(key)
-            for key in ("param", "path", "option_map", "multi", "element_template", "field_projections")
+            for key in (
+                "param", "path", "option_map", "multi", "element_template",
+                "field_projections", "source_url", "source_method", "source_body",
+                "source_content_type", "value_key", "label_key", "category_key",
+                "category_value", "id_path",
+            )
             if item.get(key) is not None
         }
         for item in step.get("selects") or [] if isinstance(item, dict)
@@ -365,16 +370,31 @@ def _options_md(plans: list[dict]) -> str:
     for plan in plans:
         for name, raw in ((plan.get("input_schema") or {}).get("properties") or {}).items():
             field = raw if isinstance(raw, dict) else {}
+            live_source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
             values = list(field.get("enum") or [])
             labels = dict(field.get("x-enum-value-map") or {})
-            if not values and not labels:
+            if not live_source and not values and not labels:
                 continue
             found = True
-            lines.extend([f"## `{plan['name']}.{name}`", "", "| Label | Value |", "|---|---|"])
+            lines.extend([f"## `{plan['name']}.{name}`", ""])
+            if isinstance(live_source, dict) and live_source:
+                method = str(live_source.get("source_method") or "GET").upper()
+                endpoint = str(live_source.get("source_url") or "")
+                value_key = str(live_source.get("value_key") or "")
+                label_key = str(live_source.get("label_key") or "")
+                lines.extend([
+                    f"- Live source: `{method} {endpoint}`",
+                    f"- Mapping: display `{label_key}` -> wire `{value_key}`",
+                    "- The script calls this source at runtime. Recorded options below are evidence only, not a fixed enum.",
+                    "",
+                ])
+            lines.extend(["| Label | Value |", "|---|---|"])
             if labels:
                 lines.extend(f"| {_safe_text(label)} | `{value}` |" for label, value in labels.items())
-            else:
+            elif values:
                 lines.extend(f"| `{value}` | `{value}` |" for value in values)
+            else:
+                lines.append("| (runtime lookup) | (runtime lookup) |")
             lines.append("")
     if not found:
         lines.append("No static enum options are declared. Do not invent candidates.")
@@ -664,19 +684,77 @@ def settle(seconds=0.25):
     time.sleep(max(0.0, min(float(seconds), 5.0)))
 
 
-def _apply_selects(step, values):
+def _live_option_rows(binding, values, cache):
+    source_url = str(binding.get("source_url") or "")
+    if not source_url:
+        return []
+    method = str(binding.get("source_method") or "GET").upper()
+    body = render(binding.get("source_body"), values) if binding.get("source_body") is not None else None
+    cache_key = json.dumps(
+        [method, source_url, body], ensure_ascii=False, sort_keys=True, default=str,
+    )
+    if cache_key not in cache:
+        result = http_json(
+            method, url=source_url, body=body,
+            content_type=binding.get("source_content_type") or "application/json",
+        )
+        if not result.get("ok"):
+            raise RuntimeError(f"option source request failed: {method} {source_url}")
+        cache[cache_key] = list_items(result.get("data"))
+    rows = [item for item in cache[cache_key] if isinstance(item, dict)]
+    category_key = str(binding.get("category_key") or "")
+    if category_key:
+        expected = str(binding.get("category_value") or "")
+        rows = [item for item in rows if str(get_path(item, category_key) or "") == expected]
+    return rows
+
+
+def _selected_option(binding, raw, rows):
+    value_key = str(binding.get("value_key") or "")
+    label_key = str(binding.get("label_key") or "")
+    if not rows or not value_key or not label_key:
+        option_map = binding.get("option_map") or {}
+        return option_map.get(str(raw), raw), None
+    matches = [
+        item for item in rows
+        if str(get_path(item, label_key)) == str(raw)
+        or str(get_path(item, value_key)) == str(raw)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"option {raw!r} is not uniquely present in live source for {binding.get('param') or binding.get('path')}"
+        )
+    return get_path(matches[0], value_key), matches[0]
+
+
+def _apply_selects(step, values, cache):
     current = dict(values)
+    projections = {}
     for binding in step.get("selects") or []:
         param = str(binding.get("param") or "")
         if not param or param not in current:
             continue
-        option_map = binding.get("option_map") or {}
+        rows = _live_option_rows(binding, current, cache)
         raw = current[param]
         if isinstance(raw, list):
-            current[param] = [option_map.get(str(value), value) for value in raw]
+            selected = [_selected_option(binding, value, rows) for value in raw]
+            current[param] = [value for value, _row in selected]
+            selected_rows = [row for _value, row in selected if row is not None]
         else:
-            current[param] = option_map.get(str(raw), raw)
-    return current
+            current[param], selected_row = _selected_option(binding, raw, rows)
+            selected_rows = [selected_row] if selected_row is not None else []
+        field_projections = binding.get("field_projections") or {}
+        if field_projections:
+            if len(selected_rows) != 1:
+                raise RuntimeError(f"option projections require one selected row for {param}")
+            for target_path, response_path in field_projections.items():
+                value = get_path(selected_rows[0], response_path)
+                if value is None:
+                    raise RuntimeError(
+                        f"live option field {response_path!r} is missing for {param}"
+                    )
+                projections[str(target_path)] = value
+    return current, projections
 
 
 def _system_values(step, body):
@@ -757,11 +835,22 @@ def _response_key_map(link, source, body, values):
 
 def execute_plan(plan, inputs):
     outputs = []
+    option_cache = {}
     for index, step in enumerate(plan.get("steps") or []):
-        values = _apply_selects(step, _runtime_values(step, inputs))
+        values, option_projections = _apply_selects(
+            step, _runtime_values(step, inputs), option_cache,
+        )
         body = render(step.get("body_template"), values) if step.get("body_template") is not None else None
         query = render(step.get("query_template"), values) if step.get("query_template") is not None else None
         url = render(step.get("url_template") or step.get("url") or step.get("path") or "", values)
+        for target, value in option_projections.items():
+            if target.startswith("query."):
+                query = deep_set(query or {}, target[6:], value)
+            elif target.startswith("path."):
+                values[target[5:]] = value
+                url = render(step.get("url_template") or step.get("url") or step.get("path") or "", values)
+            else:
+                body = deep_set(body or {}, target.removeprefix("body."), value)
         for link in plan.get("links") or []:
             if int(link.get("target_step", -1)) != index:
                 continue

@@ -484,6 +484,111 @@ def test_self_contained_client_omits_absent_optional_request_fields(tmp_path):
         sys.path.remove(str(scripts))
 
 
+def test_self_contained_client_resolves_live_api_options_once_and_projects_fields(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    from dano.execution.page import wire_format as wire_format_module
+
+    (scripts / "wire_format.py").write_text(
+        Path(wire_format_module.__file__).read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    config = json.dumps({"tenant": "tenant", "subsystem": "system", "base_url": "https://example.test"})
+    client_path = scripts / "client.py"
+    client_path.write_text(_CLIENT_TEMPLATE.replace("__CONFIG__", repr(config)), encoding="utf-8")
+    sys.path.insert(0, str(scripts))
+    try:
+        module_spec = importlib.util.spec_from_file_location("generated_live_option_client", client_path)
+        module = importlib.util.module_from_spec(module_spec)
+        assert module_spec.loader is not None
+        module_spec.loader.exec_module(module)
+        sent = []
+
+        def fake_http(method, path="", **kwargs):
+            sent.append({"method": method, "path": path, **kwargs})
+            if kwargs.get("url") == "https://example.test/applications/page":
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "data": {"data": {"list": [
+                        {"id": "entity-1", "billCode": "REQ-001", "processStatus": "running"},
+                        {"id": "entity-2", "billCode": "REQ-002", "processStatus": "draft"},
+                    ]}},
+                }
+            return {"ok": True, "status": 200, "data": {"code": 0}}
+
+        module.http_json = fake_http
+        source = {
+            "source_url": "https://example.test/applications/page",
+            "source_method": "GET",
+            "value_key": "id",
+            "label_key": "billCode",
+        }
+        result = module.execute_plan({
+            "steps": [{
+                "step_id": "update", "method": "POST", "path": "/applications/update",
+                "body_template": {"id": "{{application}}", "status": "captured"},
+                "selects": [{
+                    **source,
+                    "param": "application", "path": "id",
+                    "field_projections": {"status": "processStatus"},
+                }, {
+                    **source,
+                    "param": "applicationCopy", "path": "copyId",
+                }],
+            }],
+            "links": [],
+        }, {"application": "REQ-002", "applicationCopy": "REQ-001"})
+
+        assert result["ok"] is True
+        assert [item["method"] for item in sent] == ["GET", "POST"]
+        assert sent[1]["body"] == {
+            "id": "entity-2",
+            "status": "draft",
+        }
+    finally:
+        sys.path.remove(str(scripts))
+
+
+def test_skill_package_preserves_live_option_source_contract(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    query = skill.api_request["steps"][0]
+    query["selects"] = [{
+        "param": "status",
+        "path": "query.status",
+        "source_url": "https://example.invalid/status/options",
+        "source_method": "GET",
+        "value_key": "value",
+        "label_key": "label",
+        "option_map": {"进行中": "running"},
+    }]
+    capability = skill.api_request["capabilities"][0]
+    capability["input_schema"]["properties"]["status"] = {
+        "type": "string",
+        "format": "name-ref",
+        "x-dano-option-source": {
+            "source_url": "https://example.invalid/status/options",
+            "source_method": "GET",
+            "value_key": "value",
+            "label_key": "label",
+        },
+        "x-options-snapshot": [{"label": "进行中", "value": "running"}],
+        "x-enum-value-map": {"进行中": "running"},
+    }
+
+    package = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    contract = json.loads((package / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    plan = next(item for item in contract["capabilities"] if item["name"] == capability["name"])
+    live_source = plan["input_schema"]["properties"]["status"]["x-dano-option-source"]
+
+    assert live_source["source_url"] == "https://example.invalid/status/options"
+    script = (package / plan["script"]).read_text(encoding="utf-8")
+    assert '"source_url": "https://example.invalid/status/options"' in script
+    assert '"value_key": "value"' in script
+    options_md = (package / "references" / "OPTIONS.md").read_text(encoding="utf-8")
+    assert "Live source: `GET https://example.invalid/status/options`" in options_md
+    assert "not a fixed enum" in options_md
+
+
 def test_unrelated_system_package_runs_without_tenant_pack_or_code_changes(tmp_path):
     _AlternateBusinessApi.records = [{"recordKey": "R1", "label": "seed"}]
     server = ThreadingHTTPServer(("127.0.0.1", 0), _AlternateBusinessApi)

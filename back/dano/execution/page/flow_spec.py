@@ -8154,7 +8154,11 @@ def _capability_input_schema(
                     or ""
                 ),
             }
-        option_source = (p.source or {}).get("option_source")
+        option_source = (
+            p.source
+            if p.source_kind == "api_option"
+            else (p.source or {}).get("option_source")
+        )
         if isinstance(option_source, dict) and option_source:
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
         _apply_param_schema_default(props[key], p)
