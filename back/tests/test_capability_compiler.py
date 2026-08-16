@@ -529,6 +529,30 @@ def test_compiler_uses_recorded_operation_kind_instead_of_model_guess():
     assert "replaced by grounded kind 'create'" in result.warnings[0]
 
 
+def test_recording_goal_cannot_relabel_a_grounded_submit_as_update() -> None:
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/applications/submit-process",
+        source_meta={"role": "business_write"},
+    )])
+    plan = {
+        "capabilities": [{
+            "name": "update",
+            "title": "编辑申请",
+            "kind": "update",
+            "kind_source": "recording_goal",
+            "anchor_step_id": "submit",
+        }],
+    }
+
+    result = compile_capabilities(spec, plan)
+
+    assert result.errors == []
+    assert result.capabilities[0].kind == "submit"
+    assert "replaced by grounded kind 'submit'" in result.warnings[0]
+
+
 def test_strict_pi_plan_coverage_uses_the_declared_anchor_contract() -> None:
     coverage = flow_spec_module._semantic_plan_coverage(
         _verified_graph(),

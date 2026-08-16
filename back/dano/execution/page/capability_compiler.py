@@ -334,10 +334,8 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             errors.append(f"{prefix}: capability kind does not match the grounded business operation")
             continue
         grounded_batch = bool(is_write and _write_contract_is_batch(current, [anchor]))
-        goal_owned_kind = str(item.get("kind_source") or "") == "recording_goal"
         if (
             kind != grounded_kind
-            and not goal_owned_kind
             and not (kind == "submit_batch" and grounded_batch)
         ):
             warnings.append(
@@ -346,7 +344,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         kind = (
             "submit_batch"
             if grounded_batch
-            else kind if goal_owned_kind else grounded_kind
+            else grounded_kind
         )
 
         if is_write:
