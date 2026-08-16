@@ -104,6 +104,8 @@ interface FlowParam {
   default_value?: unknown;
   type?: string;
   source_kind?: string;
+  source?: Record<string, unknown>;
+  exposed_to_user?: boolean;
   required?: boolean;
   reason?: string;
   enum_options?: unknown[];
@@ -178,9 +180,19 @@ interface DraftEdit {
   [key: string]: unknown;
 }
 
-const TYPE_OPTIONS = [
-  "string", "number", "boolean", "date", "datetime", "enum", "list-enum", "object", "array",
-].map((value) => ({ value, label: value }));
+const TYPE_LABELS: Record<string, string> = {
+  string: "文本",
+  number: "数字",
+  boolean: "是/否",
+  date: "日期",
+  datetime: "日期时间",
+  enum: "单选",
+  "list-enum": "多选",
+  object: "对象",
+  array: "列表",
+};
+
+const TYPE_OPTIONS = Object.entries(TYPE_LABELS).map(([value, label]) => ({ value, label }));
 
 const SOURCE_OPTIONS = [
   ["caller_input", "调用方输入"],
@@ -193,7 +205,57 @@ const SOURCE_OPTIONS = [
 ].map(([value, label]) => ({ value, label }));
 
 function sourceKindLabel(value?: string) {
-  return SOURCE_OPTIONS.find((option) => option.value === value)?.label || value || "来源待确认";
+  const labels: Record<string, string> = {
+    caller_input: "调用方输入",
+    user_input: "调用方输入",
+    api_option: "实时接口取值",
+    page_enum: "页面固定选项",
+    static_enum: "固定选项",
+    manual_enum: "人工确认选项",
+    form_option: "页面选项",
+    constant: "固定值",
+    session: "登录会话",
+    current_user: "当前登录用户",
+    storage: "登录存储",
+    cookie: "登录 Cookie",
+    context: "调用上下文",
+    page_context: "页面上下文",
+    response_binding: "上游接口响应",
+    previous_response: "上游接口响应",
+    dynamic_structure: "上游接口动态结构",
+    selected_option_field: "所选记录自动带入",
+    computed: "运行时计算",
+    generated: "运行时生成",
+    system_generated: "运行时生成",
+    system_time: "系统时间",
+    unknown: "来源待确认",
+  };
+  return labels[value || ""] || value || "来源待确认";
+}
+
+const CALLER_SOURCE_KINDS = new Set([
+  "caller_input", "user_input", "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+]);
+
+function paramIsCallerInput(param: FlowParam) {
+  if (typeof param.exposed_to_user === "boolean") return param.exposed_to_user;
+  return CALLER_SOURCE_KINDS.has(param.source_kind || "caller_input");
+}
+
+function paramTypeLabel(param: FlowParam) {
+  if (param.source_kind === "api_option") return param.type === "list-enum" ? "实时接口多选" : "实时接口选项";
+  return TYPE_LABELS[param.type || "string"] || param.type || TYPE_LABELS.string;
+}
+
+function apiOptionSourceSummary(param: FlowParam) {
+  if (param.source_kind !== "api_option") return "";
+  const source = asRecord(param.source);
+  const sourceUrl = safeString(source.source_url);
+  if (!sourceUrl) return "实时调用取值接口，调用方选择显示值，Skill 自动提交接口值";
+  const method = safeString(source.source_method) || "GET";
+  const labelKey = safeString(source.label_key) || "显示值";
+  const valueKey = safeString(source.value_key) || "接口值";
+  return `取值接口：${method} ${sourceUrl}；调用方选择 ${labelKey}，Skill 自动提交 ${valueKey}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -1194,16 +1256,25 @@ export default function PageRecorder({
                   <div style={{ width: "100%", minWidth: 0 }}>
                     <Space wrap size={[6, 4]}>
                       <Text strong>{paramDisplayName(param)}</Text>
-                      <Tag>{param.type || "string"}</Tag>
+                      <Tag>{paramTypeLabel(param)}</Tag>
                       {param.required ? <Tag color="error">必填</Tag> : <Tag>可选</Tag>}
-                      {param.source_kind !== "caller_input" ? (
-                        <Tag color="cyan">{sourceKindLabel(param.source_kind)}</Tag>
-                      ) : null}
+                      <Tag color={paramIsCallerInput(param) ? "blue" : "cyan"}>
+                        {sourceKindLabel(param.source_kind)}
+                      </Tag>
                     </Space>
                     {param.source_kind === "constant" && fixedValue !== undefined ? (
                       <div><Text type="secondary">固定值：{safeString(fixedValue)}</Text></div>
                     ) : null}
-                    {preview ? <div><Text type="secondary">可选值：{preview}</Text></div> : null}
+                    {apiOptionSourceSummary(param) ? (
+                      <div><Text type="secondary">{apiOptionSourceSummary(param)}</Text></div>
+                    ) : null}
+                    {preview ? (
+                      <div>
+                        <Text type="secondary">
+                          {param.source_kind === "api_option" ? "录制时样例" : "可选值"}：{preview}
+                        </Text>
+                      </div>
+                    ) : null}
                     {param.reason ? <div><Text type="secondary">{param.reason}</Text></div> : null}
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {step.name || step.step_id}
@@ -1233,8 +1304,8 @@ export default function PageRecorder({
     const executeIds = capabilityExecuteStepIds(capability, index);
     const allStepIds = new Set(capabilitySteps.map((step) => step.step_id));
     const params = capabilityParams(capabilitySteps);
-    const callerInputs = params.filter(({ param }) => (param.source_kind || "caller_input") === "caller_input");
-    const automaticInputs = params.filter(({ param }) => (param.source_kind || "caller_input") !== "caller_input");
+    const callerInputs = params.filter(({ param }) => paramIsCallerInput(param));
+    const automaticInputs = params.filter(({ param }) => !paramIsCallerInput(param));
     const stepById = new Map(steps.map((step) => [step.step_id, step]));
     const links: FlowLink[] = [
       ...(draft?.links || []).filter((link) => (
