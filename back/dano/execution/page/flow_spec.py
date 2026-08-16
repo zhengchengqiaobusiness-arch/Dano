@@ -7561,6 +7561,49 @@ def to_flow_spec(
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
 
 
+def _latest_response_key_map_candidates(
+    captured_requests: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use the nearest captured source for each later dynamic request object."""
+    ordered = sorted(
+        enumerate(captured_requests or []),
+        key=lambda item: (
+            _request_sequence_value(
+                item[1].get("sequence", item[1].get("request_index"))
+            ) is None,
+            _request_sequence_value(
+                item[1].get("sequence", item[1].get("request_index"))
+            ) or item[0],
+            item[0],
+        ),
+    )
+    position_by_request_id = {
+        str(request.get("request_id") or ""): position
+        for position, (_original_index, request) in enumerate(ordered)
+        if str(request.get("request_id") or "")
+    }
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for candidate in discover_response_key_maps(captured_requests):
+        signature = (
+            str(candidate.get("target_request_id") or ""),
+            _strip_body_prefix(str(candidate.get("target_container_path") or "")),
+        )
+        grouped.setdefault(signature, []).append(candidate)
+
+    selected: list[dict[str, Any]] = []
+    for candidates in grouped.values():
+        nearest_position = max(
+            position_by_request_id.get(str(item.get("source_request_id") or ""), -1)
+            for item in candidates
+        )
+        selected.extend(
+            item for item in candidates
+            if position_by_request_id.get(str(item.get("source_request_id") or ""), -1)
+            == nearest_position
+        )
+    return selected
+
+
 def _materialize_captured_response_key_maps(
     steps: list[FlowStep],
     links: list[FlowLink],
@@ -7572,7 +7615,7 @@ def _materialize_captured_response_key_maps(
         for step in steps
         if str((step.source_meta or {}).get("request_id") or "")
     }
-    for candidate in discover_response_key_maps(captured_requests):
+    for candidate in _latest_response_key_map_candidates(captured_requests):
         source_request_id = str(candidate.get("source_request_id") or "")
         target_request_id = str(candidate.get("target_request_id") or "")
         source = by_request_id.get(source_request_id)
@@ -12122,15 +12165,68 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
         if ref.usage in {"execute", "preflight"} and ref.step_id
     }
     call_step_ids = set(cap.step_ids)
+
+    option_source_step_ids: set[str] = set()
+    option_source_request_ids: set[str] = set()
+    option_source_paths: set[str] = set()
+
+    def remember_option_source(source: dict[str, Any]) -> None:
+        if not isinstance(source, dict):
+            return
+        source_step_id = str(source.get("source_step_id") or "")
+        source_request_id = str(
+            source.get("source_request_id") or source.get("request_id") or ""
+        )
+        source_path = _request_path({"url": str(source.get("source_url") or "")})
+        if source_step_id:
+            option_source_step_ids.add(source_step_id)
+        if source_request_id:
+            option_source_request_ids.add(source_request_id)
+        if source_path:
+            option_source_paths.add(source_path)
+
+    for step_id in call_step_ids:
+        step = by_id.get(step_id)
+        if step is None:
+            continue
+        for binding in step.selects or []:
+            remember_option_source({
+                "source_request_id": binding.source_request_id,
+                "source_url": binding.source_url,
+            })
+        for param in step.params or []:
+            source = param.source or {}
+            if param.source_kind == "api_option":
+                remember_option_source(source)
+            remember_option_source(source.get("option_source") or {})
+    for link in spec.links or []:
+        if link.target_step_id in call_step_ids:
+            remember_option_source((link.value_binding or {}).get("option_source") or {})
+
+    def keep_auxiliary_ref(ref: CapabilityRequestRef) -> bool:
+        if ref.usage != "option_source" or ref.origin in {"manual", "user"}:
+            return True
+        return bool(
+            (ref.step_id and ref.step_id in option_source_step_ids)
+            or (ref.request_id and ref.request_id in option_source_request_ids)
+            or (
+                _request_path({"url": ref.path})
+                and _request_path({"url": ref.path}) in option_source_paths
+            )
+        )
+
     auxiliary_refs = [
         ref for ref in (cap.request_refs or [])
         if (
-            ref.usage not in {"execute", "preflight"}
-            or not ref.step_id
-            # Explicit planner/manual preflight facts need not be executable
-            # call nodes. Preserve those references while normalizing the one
-            # public execute anchor among actual call nodes.
-            or (ref.usage == "preflight" and ref.step_id not in call_step_ids)
+            (
+                ref.usage not in {"execute", "preflight"}
+                or not ref.step_id
+                # Explicit planner/manual preflight facts need not be executable
+                # call nodes. Preserve those references while normalizing the one
+                # public execute anchor among actual call nodes.
+                or (ref.usage == "preflight" and ref.step_id not in call_step_ids)
+            )
+            and keep_auxiliary_ref(ref)
         )
     ]
     existing_execute_ids = [
@@ -16986,6 +17082,27 @@ def _prune_invalid_fact_checks(spec: FlowSpec) -> None:
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True))
+    before_link_ids = {link.link_id for link in current.links}
+    _materialize_captured_response_key_maps(
+        current.steps,
+        current.links,
+        [fact.model_dump(exclude_none=True) for fact in current.request_facts.requests],
+    )
+    new_structure_links = [
+        link for link in current.links
+        if link.link_id not in before_link_ids
+        and link.kind == "response_key_map"
+    ]
+    if new_structure_links:
+        _sync_link_sources(current.steps, current.links)
+        for capability in current.capabilities:
+            member_ids = set(_capability_node_step_ids(capability))
+            for link in new_structure_links:
+                if link.target_step_id in member_ids:
+                    _add_step_id_to_capability(
+                        current, capability, link.source_step_id,
+                    )
+            _sync_capability_order(current, capability)
     _prune_invalid_fact_checks(current)
     _canonicalize_public_capability_identities(current)
     _normalize_capability_references(current)

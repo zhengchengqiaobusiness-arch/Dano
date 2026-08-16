@@ -2891,3 +2891,196 @@ def test_exact_response_keys_materialize_a_dynamic_write_dependency() -> None:
     assert {field.key for field in capability.inputs} == {
         "reason", "startUserSelectAssignees",
     }
+
+
+def test_publish_upgrades_a_persisted_dynamic_request_draft() -> None:
+    approval_response = {"data": {"activityNodes": [
+        {"id": "Node_leader", "name": "领导审批"},
+        {"id": "Node_hr", "name": "人事审批"},
+    ]}}
+    submit_body = {
+        "reason": "出差",
+        "startUserSelectAssignees": {
+            "Node_leader": [170],
+            "Node_hr": [165],
+        },
+    }
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="approval",
+                method="GET",
+                path="/approval-detail",
+                source_meta={"request_id": "req-approval", "role": "read_context"},
+                response_json=approval_response,
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                path="/applications/submit-process",
+                body_source=json.dumps(submit_body),
+                source_meta={"request_id": "req-submit", "role": "business_write"},
+                params=[
+                    ParamField(
+                        path="reason", key="reason", value="出差",
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="startUserSelectAssignees.Node_leader[0]",
+                        key="审批人1", value=170,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="startUserSelectAssignees.Node_hr[0]",
+                        key="审批人2", value=165,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_application",
+            title="提交申请",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[
+                {"id": "call_1", "type": "call", "step_id": "submit"},
+                {"id": "return_final", "type": "return", "from": "submit", "path": "response"},
+            ],
+            evidence=[{"source": "grounded_request_graph", "anchor_step_id": "submit"}],
+        )],
+        request_facts={"requests": [
+            {
+                "request_id": "req-approval", "sequence": 1,
+                "method": "GET", "path": "/approval-detail",
+                "response_json": approval_response,
+            },
+            {
+                "request_id": "req-submit", "sequence": 2,
+                "method": "POST", "path": "/applications/submit-process",
+                "post_data": submit_body,
+            },
+        ]},
+    )
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    capability = prepared.capabilities[0]
+    assert capability.step_ids == ["approval", "submit"]
+    assert [link.kind for link in prepared.links] == ["response_key_map"]
+    assert set(capability.input_schema["properties"]) == {
+        "reason", "startUserSelectAssignees",
+    }
+
+
+def test_publish_uses_only_the_latest_matching_dynamic_source() -> None:
+    old_response = {"data": {"activityNodes": [
+        {"id": "Node_leader", "name": "旧领导审批"},
+        {"id": "Node_hr", "name": "旧人事审批"},
+    ]}}
+    latest_response = {"data": {"activityNodes": [
+        {"id": "Node_leader", "name": "领导审批"},
+        {"id": "Node_hr", "name": "人事审批"},
+    ]}}
+    submit_body = {"assignees": {"Node_leader": [170], "Node_hr": [165]}}
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="approval-old", method="GET", path="/approval-detail",
+                source_meta={"request_id": "req-old"}, response_json=old_response,
+            ),
+            FlowStep(
+                step_id="approval-latest", method="GET", path="/approval-detail",
+                source_meta={"request_id": "req-latest"}, response_json=latest_response,
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/applications/submit-process",
+                body_source=json.dumps(submit_body),
+                source_meta={"request_id": "req-submit", "role": "business_write"},
+                params=[
+                    ParamField(
+                        path="assignees.Node_leader[0]", key="审批人1", value=170,
+                        category="user_param", source_kind="user_input",
+                    ),
+                    ParamField(
+                        path="assignees.Node_hr[0]", key="审批人2", value=165,
+                        category="user_param", source_kind="user_input",
+                    ),
+                ],
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_application", kind="submit",
+            nodes=[
+                {"id": "call", "type": "call", "step_id": "submit"},
+                {"id": "return", "type": "return", "from": "submit", "path": "response"},
+            ],
+            evidence=[{"source": "grounded_request_graph", "anchor_step_id": "submit"}],
+        )],
+        request_facts={"requests": [
+            {
+                "request_id": "req-old", "sequence": 1, "method": "GET",
+                "path": "/approval-detail", "response_json": old_response,
+            },
+            {
+                "request_id": "req-latest", "sequence": 2, "method": "GET",
+                "path": "/approval-detail", "response_json": latest_response,
+            },
+            {
+                "request_id": "req-submit", "sequence": 3, "method": "POST",
+                "path": "/applications/submit-process", "post_data": submit_body,
+            },
+        ]},
+    )
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    [link] = [item for item in prepared.links if item.kind == "response_key_map"]
+    assert link.source_step_id == "approval-latest"
+    assert prepared.capabilities[0].step_ids == ["approval-latest", "submit"]
+
+
+def test_publish_removes_stale_generated_option_source_membership() -> None:
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="detail", method="GET", path="/applications/get",
+            source_meta={"request_id": "req-detail", "role": "business_get"},
+        )],
+        capabilities=[FlowCapability(
+            name="inspect_application", kind="inspect",
+            nodes=[
+                {"id": "call", "type": "call", "step_id": "detail"},
+                {"id": "return", "type": "return", "from": "detail", "path": "response"},
+            ],
+            request_refs=[
+                {
+                    "request_id": "req-detail", "step_id": "detail",
+                    "method": "GET", "path": "/applications/get", "usage": "execute",
+                },
+                {
+                    "request_id": "req-submit", "method": "POST",
+                    "path": "/applications/submit-process", "usage": "option_source",
+                    "origin": "planner",
+                },
+            ],
+        )],
+        request_facts={"requests": [
+            {
+                "request_id": "req-detail", "sequence": 2, "method": "GET",
+                "path": "/applications/get",
+            },
+            {
+                "request_id": "req-submit", "sequence": 1, "method": "POST",
+                "path": "/applications/submit-process",
+            },
+        ]},
+    )
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    assert [(ref.request_id, ref.usage) for ref in prepared.capabilities[0].request_refs] == [
+        ("req-detail", "execute"),
+    ]
