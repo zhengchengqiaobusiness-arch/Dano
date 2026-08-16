@@ -136,6 +136,7 @@ interface FlowCapability {
   step_ids?: string[];
   nodes?: Array<Record<string, unknown>>;
   dependencies?: Array<Record<string, unknown>>;
+  input_schema?: Record<string, unknown>;
 }
 
 interface FlowLink {
@@ -1231,6 +1232,56 @@ export default function PageRecorder({
     return Array.from(unique.values());
   }
 
+  function capabilityPublicParams(capability: FlowCapability, capabilitySteps: FlowStep[]) {
+    const inputSchema = asRecord(capability.input_schema);
+    if (!Object.prototype.hasOwnProperty.call(inputSchema, "properties")) return null;
+    const properties = asRecord(inputSchema.properties);
+    const required = new Set(
+      Array.isArray(inputSchema.required) ? inputSchema.required.map((value) => String(value)) : [],
+    );
+    const anchor = capabilitySteps.at(-1) || {
+      step_id: String(capability.capability_id || capability.name || "capability"),
+      name: String(capability.title || capability.name || "能力输入"),
+    };
+    return Object.entries(properties).map(([key, rawSchema]) => {
+      const schema = asRecord(rawSchema);
+      const optionSource = asRecord(schema["x-dano-option-source"]);
+      const externalSource = asRecord(schema["x-dano-external-source"]);
+      const sourceCapability = safeString(schema["x-dano-source-capability"]);
+      const businessType = safeString(schema["x-dano-business-type"]);
+      const format = safeString(schema.format);
+      const snapshot = schema["x-options-snapshot"];
+      const enumValues = schema.enum;
+      let type = safeString(schema.type) || "string";
+      if (businessType === "single_enum") type = "enum";
+      else if (businessType === "multi_enum") type = "list-enum";
+      else if (format === "date") type = "date";
+      else if (format === "date-time") type = "datetime";
+      const hasOptionSource = Boolean(optionSource.source_url);
+      const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
+      const sourceKind = hasOptionSource
+        ? "api_option"
+        : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "user_input";
+      return {
+        step: anchor,
+        param: {
+          path: safeString(schema["x-flow-path"]) || key,
+          key,
+          label: safeString(schema.label || schema.title) || key,
+          type,
+          source_kind: sourceKind,
+          source: optionSource,
+          exposed_to_user: true,
+          required: required.has(key),
+          reason: safeString(schema.description),
+          enum_options: Array.isArray(snapshot)
+            ? snapshot
+            : Array.isArray(enumValues) ? enumValues : undefined,
+        } satisfies FlowParam,
+      };
+    });
+  }
+
   function enumPreview(param: FlowParam) {
     const values = (param.enum_options || []).slice(0, 4).map((option) => {
       if (option && typeof option === "object") {
@@ -1309,8 +1360,14 @@ export default function PageRecorder({
     const executeIds = capabilityExecuteStepIds(capability, index);
     const allStepIds = new Set(capabilitySteps.map((step) => step.step_id));
     const params = capabilityParams(capabilitySteps);
-    const callerInputs = params.filter(({ param }) => paramIsCallerInput(param));
-    const automaticInputs = params.filter(({ param }) => !paramIsCallerInput(param));
+    const publicParams = capabilityPublicParams(capability, capabilitySteps);
+    const callerInputs = publicParams ?? params.filter(({ param }) => paramIsCallerInput(param));
+    const publicKeys = new Set(callerInputs.flatMap(({ param }) => [param.key, param.path]));
+    const automaticInputs = params.filter(({ param }) => (
+      !paramIsCallerInput(param)
+      && !publicKeys.has(param.key)
+      && !publicKeys.has(param.path)
+    ));
     const stepById = new Map(steps.map((step) => [step.step_id, step]));
     const links: FlowLink[] = [
       ...(draft?.links || []).filter((link) => (
