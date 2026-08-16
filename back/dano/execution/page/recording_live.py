@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from dano.execution.page.recording_field_identity import (
@@ -101,6 +100,7 @@ class LiveNotebook:
     """
 
     meta: dict
+    step_request_ids: dict[str, str]
 
     @classmethod
     def from_shadow(cls, shadow) -> "LiveNotebook":  # noqa: ANN001
@@ -132,7 +132,15 @@ class LiveNotebook:
             ][-50:]
         if raw_meta.get("recording_goal_text"):
             meta["recording_goal_text"] = str(raw_meta["recording_goal_text"])
-        return cls(meta=meta)
+        step_request_ids = {
+            str(step.step_id): request_id
+            for step in (getattr(shadow, "steps", None) or [])
+            if str(step.step_id or "").strip()
+            if (request_id := str(
+                ((getattr(step, "source_meta", None) or {}).get("request_id") or "")
+            ).strip())
+        }
+        return cls(meta=meta, step_request_ids=step_request_ids)
 
     @property
     def insights(self) -> list[dict]:
@@ -153,10 +161,7 @@ class LiveNotebook:
     def apply_to(self, finalized_spec):  # noqa: ANN001, ANN202
         """Revalidate every hypothesis against one finalized fact snapshot."""
 
-        return merge_live_agent_state(
-            SimpleNamespace(meta=deepcopy(self.meta)),
-            finalized_spec,
-        )
+        return merge_live_agent_state(self, finalized_spec)
 _SECRET_QUERY_HINTS = ("authorization", "cookie", "token", "secret", "password", "session", "credential")
 _INLINE_SECRET_RE = re.compile(
     r"(?i)\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
@@ -3144,9 +3149,18 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         expected_count = int(goal_contract.get("expected_count") or 0)
         if len(derived_capabilities) < expected_count:
             live_request_id_by_step_id = {
-                step.step_id: str((step.source_meta or {}).get("request_id") or "")
-                for step in live_spec.steps
+                str(step_id): str(request_id)
+                for step_id, request_id in (
+                    getattr(live_spec, "step_request_ids", None) or {}
+                ).items()
+                if str(step_id) and str(request_id)
             }
+            for step in (getattr(live_spec, "steps", None) or []):
+                request_id = str((step.source_meta or {}).get("request_id") or "")
+                if request_id:
+                    live_request_id_by_step_id.setdefault(
+                        str(step.step_id), request_id,
+                    )
             merged_step_id_by_request_id = {
                 str((step.source_meta or {}).get("request_id") or ""): step.step_id
                 for step in merged.steps

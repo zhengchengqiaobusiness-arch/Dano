@@ -261,6 +261,69 @@ def test_live_notebook_preserves_operator_recording_goal_for_final_boundary() ->
     assert notebook.meta["recording_goal_text"] == goal_text
 
 
+def test_live_notebook_can_merge_an_underfilled_recording_goal() -> None:
+    goal_text = (
+        "目的：查询并提交记录\n"
+        "预期产出能力数量：2\n"
+        "能力1：查询记录\n"
+        "能力2：提交记录"
+    )
+    shadow = FlowSpec(
+        meta={
+            "recording_goal_text": goal_text,
+            "capability_model": {
+                "semantic_plan": {
+                    "capabilities": [{
+                        "name": "query_record",
+                        "title": "查询记录",
+                        "intent": "查询记录",
+                        "kind": "query_status",
+                        "anchor_step_id": "live-query",
+                        "request_refs": [{
+                            "step_id": "live-query",
+                            "usage": "execute",
+                        }],
+                    }],
+                },
+            },
+        },
+        steps=[FlowStep(
+            step_id="live-query",
+            method="GET",
+            path="/records/page",
+            source_meta={
+                "request_id": "req-query",
+                "role": "business_get",
+                "trigger_op": "click",
+                "trigger_locator": "text=查询",
+                "trigger_transaction_id": "txn-query",
+            },
+        )],
+    )
+    finalized = FlowSpec(
+        title="记录",
+        meta={"recording_goal_text": goal_text},
+        steps=[FlowStep(
+            step_id="final-query",
+            method="GET",
+            path="/records/page",
+            source_meta={
+                "request_id": "req-query",
+                "role": "business_get",
+                "trigger_op": "click",
+                "trigger_locator": "text=查询",
+                "trigger_transaction_id": "txn-query",
+            },
+        )],
+    )
+
+    notebook = LiveNotebook.from_shadow(shadow)
+    merged = notebook.apply_to(finalized)
+
+    assert notebook.step_request_ids == {"live-query": "req-query"}
+    assert [cap.title for cap in merged.capabilities] == ["查询记录"]
+
+
 @pytest.mark.asyncio
 async def test_recording_state_projection_does_not_block_browser_event_loop(monkeypatch):
     session = RecordingPiSession(
