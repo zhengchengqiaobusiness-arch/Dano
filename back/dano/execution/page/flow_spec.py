@@ -9884,23 +9884,23 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         return merged
 
     by_id = {s.step_id: s for s in spec.steps}
-    recorded_label_candidates: dict[str, set[str]] = {}
-    for step in spec.steps:
-        for param in step.params or []:
-            wire_name = str(param.path or "").replace("[]", "").split(".")[-1]
-            label = str(param.label or param.key or "").strip()
-            if (
-                wire_name
-                and label
-                and re.sub(r"[\W_]+", "", label.casefold(), flags=re.UNICODE)
-                != re.sub(r"[\W_]+", "", wire_name.casefold(), flags=re.UNICODE)
-            ):
-                recorded_label_candidates.setdefault(wire_name, set()).add(label)
-    recorded_field_labels = {
-        name: next(iter(labels))
-        for name, labels in recorded_label_candidates.items()
-        if len(labels) == 1
-    }
+
+    def entity_route_terms(step: FlowStep) -> set[str]:
+        operation_terms = {
+            "get", "list", "page", "query", "search", "detail", "create",
+            "save", "draft", "submit", "update", "edit", "delete", "cancel",
+            "withdraw", "approve", "reject", "process", "start",
+        }
+        return {
+            term for term in re.split(
+                r"[^a-z0-9一-鿿]+",
+                urlparse(str(step.path or step.url or "")).path.casefold(),
+            )
+            if len(term) > 1
+            and term not in _CAPABILITY_PATH_PREFIXES
+            and term not in operation_terms
+        }
+
     for cap in spec.capabilities:
         if cap.kind == "query_status":
             option_source_ids = _option_source_step_ids(spec)
@@ -9926,6 +9926,34 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
             continue
+        label_steps = list(cap_steps)
+        if cap.kind == "query_status":
+            query_route_terms = set().union(*(entity_route_terms(step) for step in cap_steps))
+            label_steps.extend(
+                step for step in spec.steps
+                if step not in label_steps
+                and _capability_operation_kind(step) in {
+                    "create", "save_draft", "submit", "update",
+                }
+                and query_route_terms.intersection(entity_route_terms(step))
+            )
+        recorded_label_candidates: dict[str, set[str]] = {}
+        for step in label_steps:
+            for param in step.params or []:
+                wire_name = str(param.path or "").replace("[]", "").split(".")[-1]
+                label = str(param.label or param.key or "").strip()
+                if (
+                    wire_name
+                    and label
+                    and re.sub(r"[\W_]+", "", label.casefold(), flags=re.UNICODE)
+                    != re.sub(r"[\W_]+", "", wire_name.casefold(), flags=re.UNICODE)
+                ):
+                    recorded_label_candidates.setdefault(wire_name, set()).add(label)
+        recorded_field_labels = {
+            name: next(iter(labels))
+            for name, labels in recorded_label_candidates.items()
+            if len(labels) == 1
+        }
         _disambiguate_capability_param_keys(cap_steps)
         params = [p for st in cap_steps for p in (st.params or [])]
         derived_input = _capability_input_schema(params, set(cap.step_ids or []))
@@ -10910,6 +10938,50 @@ def _primary_read_operation_step(steps: list[FlowStep]) -> FlowStep:
     if not steps:
         raise ValueError("read operation requires at least one step")
 
+    def command_result_semantic_score(step: FlowStep) -> int:
+        """Prefer the response shape named by the visible command."""
+        meta = step.source_meta or {}
+        command = " ".join((
+            str(meta.get("trigger_locator") or ""),
+            str(meta.get("trigger_op") or ""),
+        )).casefold()
+        families = (
+            (
+                r"(?:进度|流程|审批|节点|progress|workflow|process|approval|timeline)",
+                (
+                    "progress", "workflow", "process", "approval", "task",
+                    "node", "activity", "bpmn", "timeline", "comment",
+                    "finished", "unfinished", "rejected", "status",
+                    "进度", "流程", "审批", "任务", "节点", "意见", "状态",
+                ),
+            ),
+            (
+                r"(?:评论|意见|备注|comment|opinion|remark)",
+                ("comment", "opinion", "remark", "message", "评论", "意见", "备注"),
+            ),
+        )
+        terms = next((values for pattern, values in families if re.search(pattern, command)), ())
+        if not terms:
+            return 0
+        observed: list[str] = [str(step.path or step.url or "").casefold()]
+
+        def collect_keys(value: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    observed.append(str(key).casefold())
+                    collect_keys(child, depth + 1)
+            elif isinstance(value, list):
+                for child in value[:3]:
+                    collect_keys(child, depth + 1)
+
+        collect_keys(step.response_json)
+        return sum(
+            1 for term in terms
+            if any(term in value for value in observed)
+        )
+
     def page_path_overlap(step: FlowStep) -> int:
         meta = step.source_meta or {}
         page_url = str(
@@ -10936,7 +11008,7 @@ def _primary_read_operation_step(steps: list[FlowStep]) -> FlowStep:
             segments(page_url) & segments(str(step.path or step.url or ""))
         )
 
-    def score(step: FlowStep) -> tuple[int, int, int, int, int]:
+    def score(step: FlowStep) -> tuple[int, int, int, int, int, int]:
         response = step.response_json
         payload = response.get("data") if isinstance(response, dict) else response
         entity_payload = int(isinstance(payload, dict) and not any(
@@ -10945,6 +11017,7 @@ def _primary_read_operation_step(steps: list[FlowStep]) -> FlowStep:
         ))
         role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
         return (
+            command_result_semantic_score(step),
             _response_identity_match_count(step),
             page_path_overlap(step),
             entity_payload,

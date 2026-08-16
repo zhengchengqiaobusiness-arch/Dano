@@ -286,6 +286,45 @@ def test_capability_sync_writes_table_presentation_into_output_contract():
     assert fields["id"]["x-dano-display"] is False
 
 
+def test_query_output_labels_do_not_leak_from_an_unrelated_capability_field():
+    query = FlowStep(
+        step_id="query", method="GET", path="/applications/page",
+        params=[ParamField(
+            path="query.reason", key="reason", label="reason", value="annual",
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+        response_json={"data": {"list": [{"id": "record-1", "reason": "annual"}]}},
+        source_meta={"role": "business_get"},
+    )
+    withdraw = FlowStep(
+        step_id="withdraw", method="DELETE", path="/applications/withdraw",
+        params=[ParamField(
+            path="reason", key="撤回原因", label="撤回原因", value="changed",
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+        response_json={"code": 0},
+        source_meta={"role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[query, withdraw],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status", step_ids=["query"],
+                nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="withdraw_application", kind="withdraw", step_ids=["withdraw"],
+                nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+            ),
+        ],
+    )
+
+    _sync_capability_io_schemas(spec)
+    fields = spec.capabilities[0].output_schema["properties"]["records"]["items"]["properties"]
+
+    assert fields["reason"].get("title") != "撤回原因"
+
+
 def test_recorded_select_keeps_choice_type_without_inventing_options():
     request = _get(
         1,

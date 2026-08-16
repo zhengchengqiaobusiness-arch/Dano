@@ -3136,6 +3136,39 @@ def test_record_read_with_only_an_id_match_is_not_form_hydration() -> None:
     )
 
 
+def test_progress_command_uses_the_workflow_result_instead_of_a_sibling_entity_read() -> None:
+    common = {
+        "trigger_action_id": "action-progress",
+        "trigger_transaction_id": "txn-progress",
+        "trigger_op": "click",
+        "trigger_locator": "text=审批进度",
+        "trigger_page_context": {"url": "https://example.test/applications"},
+    }
+    entity = FlowStep(
+        step_id="entity", method="GET", path="/applications/get?id=record-1",
+        params=[ParamField(
+            path="query.id", key="id", value="record-1",
+            category="user_param", source_kind="user_input",
+        )],
+        response_json={"data": {
+            "id": "record-1", "reason": "annual", "processStatus": 1,
+        }},
+        source_meta={**common, "role": "business_get"},
+    )
+    progress = FlowStep(
+        step_id="progress", method="GET", path="/workflow/model?id=process-1",
+        response_json={"data": {
+            "processInstance": {"id": "process-1"},
+            "tasks": [{"id": "task-1"}],
+            "finishedTaskActivityIds": ["node-1"],
+            "unfinishedTaskActivityIds": ["node-2"],
+        }},
+        source_meta={**common, "role": "business_get"},
+    )
+
+    assert flow_spec_module._primary_read_operation_step([entity, progress]).step_id == "progress"
+
+
 def test_publish_uses_only_the_latest_matching_dynamic_source() -> None:
     old_response = {"data": {"activityNodes": [
         {"id": "Node_leader", "name": "旧领导审批"},
