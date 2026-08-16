@@ -4352,11 +4352,25 @@ def _response_shape_evidence_score(value: Any, *, depth: int = 0) -> int:
     return 1 if value is not None else 0
 
 
-def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
-    """Use a richer response from the same observed endpoint for schema only.
+def _response_list_paths(value: Any, *, path: str = "") -> set[str]:
+    paths: set[str] = set()
+    if isinstance(value, list):
+        paths.add(path or "$.")
+        for item in value[:3]:
+            paths.update(_response_list_paths(item, path=f"{path}[]"))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            paths.update(_response_list_paths(item, path=child))
+    return paths
 
-    Request URL/query ownership stays unchanged.  No field is synthesized and
-    no response from a different method/path may participate.
+
+def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
+    """Use a richer list response from the same observed endpoint for schema.
+
+    Repeated list queries may first return an empty collection and later expose
+    its item shape. Object responses are request-specific business facts and
+    must never be replaced by another action merely because the route matches.
     """
     for step in spec.steps:
         method = (step.method or "GET").upper()
@@ -4364,11 +4378,17 @@ def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
             continue
         path = _request_path({"url": step.path or step.url})
         current_score = _response_shape_evidence_score(step.response_json)
+        current_list_paths = _response_list_paths(step.response_json)
+        if not current_list_paths:
+            continue
         candidates = [
             fact for fact in (spec.request_facts.requests or [])
             if (fact.method or "GET").upper() == method
             and _request_path({"url": fact.path or fact.url}) == path
             and fact.response_json is not None
+            and current_list_paths.intersection(
+                _response_list_paths(fact.response_json)
+            )
         ]
         if not candidates:
             continue
