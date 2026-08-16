@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import pytest
-
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_spec import (
     CapabilityRequestRef,
@@ -16,8 +12,7 @@ from dano.execution.page.flow_spec import (
     prepare_flow_spec_for_publish,
     validate_flow_spec,
 )
-from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
-from dano.onboarding.recording_release import evaluate_recording_release, review_release_issues
+from dano.onboarding.recording_release import evaluate_recording_release
 
 
 def _mixed_spec() -> FlowSpec:
@@ -66,27 +61,6 @@ def _mixed_spec() -> FlowSpec:
         {"name": "submit_item", "title": "提交项目", "kind": "submit", "anchor_step_id": "submit"},
     ]}
     return compile_capabilities(source, plan).spec
-
-
-def test_final_review_rejection_keeps_structured_repair_target() -> None:
-    issues = review_release_issues({
-        "issues": [{
-            "check_code": "final_review_rejected",
-            "resolver": "machine_repair",
-            "capability_id": "submit-item",
-            "step_id": "submit",
-            "field_id": "field-reason",
-            "wire_path": "body.reason",
-            "evidence_refs": ["event-1"],
-            "suggested_operations": ["set_param_required"],
-            "message": "必填契约与页面证据冲突",
-        }],
-    })
-
-    assert len(issues) == 1
-    assert issues[0].check_code == "final_review_rejected"
-    assert issues[0].resolver == "machine_repair"
-    assert issues[0].wire_path == "body.reason"
 
 
 def test_publish_sync_keeps_capability_anchor_execute_when_step_is_shared_preflight():
@@ -283,34 +257,6 @@ def test_release_preserves_actionable_dry_run_violations(monkeypatch):
         if item.check_code == "dry_run_failed"
     )
     assert issue.message == "第2步:动态结构审批节点与调用方输入不一致"
-
-
-def test_three_true_model_verdicts_cannot_override_machine_failure():
-    session = RecordingPiSession(
-        tenant="tenant-a",
-        subsystem="A-OA",
-        recording_id="recording_11111111111111111111111111111111",
-    )
-    session.last_submission_kind = "review"
-    session.last_review = {
-        "base_flow_version": 1,
-        "all_passed": True,
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": [], "model_id": session.model_id}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    machine_failure = SimpleNamespace(
-        machine_passed=False,
-        blocking_reasons=("submit_item: write verification missing",),
-    )
-
-    with pytest.raises(RecordingPiError, match="模型审核不能覆盖"):
-        session.require_publish_review(
-            flow_version=1,
-            flow_fingerprint="ignored",
-            machine_decision=machine_failure,
-        )
 
 
 def test_release_evaluates_abilities_independently_from_global_generation_marker():

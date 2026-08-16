@@ -33,7 +33,6 @@ _PROTOCOL_ATTEMPTS = 3
 _SUBMISSION_TOOLS = {
     "plan": "submit_recording_plan",
     "repair": "submit_recording_repair",
-    "review": "submit_recording_review",
 }
 
 

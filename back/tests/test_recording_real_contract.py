@@ -23,7 +23,6 @@ from dano.execution.page.recording_live import (
 )
 from dano.execution.page.request_capture import execute_api_workflow
 from dano.execution.page.verification_log import find_verification, record_verification
-from dano.onboarding.recording_pi import RecordingPiError, RecordingPiSession
 from dano.onboarding.recording_release import evaluate_recording_release
 
 
@@ -588,34 +587,6 @@ def test_ambiguous_same_name_field_is_rejected_instead_of_leaf_matched():
     submit.params.append(ParamField(path="type", key="duplicate", value=2))
     with pytest.raises(FieldReferenceError, match="ambiguous"):
         resolve_field_ref(spec, FieldRef(request_id="req_116", wire_path="body.type"))
-
-
-def test_machine_failure_from_real_contract_cannot_be_overridden_by_three_true_reviews():
-    spec, submission = _apply_real_agent_submission()
-    compiled = compile_capabilities(spec, submission["semantic_plan"]).spec
-    submit = next(cap for cap in compiled.capabilities if cap.name == "submit_leave")
-    compiled.capabilities = [submit]
-    machine = evaluate_recording_release(compiled)
-    assert machine.machine_passed is False
-    session = RecordingPiSession(
-        tenant="tenant-a", subsystem="A-OA",
-        recording_id="recording_22222222222222222222222222222222",
-    )
-    session.last_submission_kind = "review"
-    session.last_review = {
-        "base_flow_version": 1,
-        "all_passed": True,
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": [], "model_id": session.model_id}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    with pytest.raises(RecordingPiError, match="模型审核不能覆盖"):
-        session.require_publish_review(
-            flow_version=1,
-            flow_fingerprint="ignored",
-            machine_decision=machine,
-        )
 
 
 def test_non_ruoyi_daily_report_contract_still_compiles_without_leave_assumptions():

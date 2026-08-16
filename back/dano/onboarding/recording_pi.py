@@ -173,7 +173,6 @@ class RecordingPiSession:
         self._operator_asker: Callable[..., Any] | None = None
         self.last_submission_kind = ""
         self.last_submission_warning = ""
-        self.last_review: dict[str, Any] = {}
         # Review provenance is server-owned.  The model may decide pass/fail,
         # but cannot claim a different identity in its tool payload.
         from dano.config import get_settings
@@ -343,10 +342,6 @@ class RecordingPiSession:
         self._analysis_images = []
         self.last_submission_kind = ""
         self.last_submission_warning = ""
-        # A review is evidence for one exact FlowSpec version. Any subsequent
-        # bind invalidates it, including a user edit that happens to reuse the
-        # same websocket and Pi conversation.
-        self.last_review = {}
 
 
     def bind_analysis_images(self, images: list[dict] | None) -> None:
@@ -721,9 +716,6 @@ class RecordingPiSession:
                 ),
             )
             self.flow_spec = updated
-            # A plan/repair changes the authoritative contract. Any review
-            # submitted earlier in the same or a previous Pi turn is stale.
-            self.last_review = {}
             if self._on_submission_accepted is not None:
                 # The gateway checkpoint is part of accepting the tool result,
                 # not a best-effort action after the Pi prompt response.
@@ -767,87 +759,12 @@ class RecordingPiSession:
                 )
             self.last_submission_kind = "plan"
             self.last_submission_warning = warning
-            self.last_review = {}
             return {
                 **recording_agent_validation(current),
                 "accepted": True,
                 "unchanged": True,
                 "warning": warning,
             }
-
-    async def submit_review(self, review: dict[str, Any], *, base_flow_version: int) -> dict[str, Any]:
-        async with self._state_lock:
-            current = self.current_flow_spec()
-            actual_version = int((current.meta or {}).get("current_version") or 0)
-            if int(base_flow_version) != actual_version:
-                raise RecordingPiError(
-                    f"录制版本冲突: base={base_flow_version}, current={actual_version}; 请重新读取状态"
-                )
-            candidate = dict(review or {})
-            if self.last_submission_kind == "review" and self.last_review:
-                if candidate == self.last_review:
-                    return {"accepted": True, "flow_version": actual_version, "replayed": True}
-                raise RecordingPiError("当前 FlowSpec 版本的发布审核已提交，拒绝被后续结论覆盖")
-            self.last_review = candidate
-            self.last_submission_kind = "review"
-            return {"accepted": True, "flow_version": actual_version, "replayed": False}
-
-    def require_publish_review(
-        self,
-        *,
-        flow_version: int,
-        flow_fingerprint: str,
-        machine_decision: Any | None = None,
-    ) -> dict[str, Any]:
-        """Validate review evidence against the exact bound release contract."""
-        from dano.execution.page.flow_spec import flow_spec_fingerprint
-
-        if machine_decision is not None and not bool(
-            getattr(machine_decision, "machine_passed", False)
-        ):
-            reasons = list(getattr(machine_decision, "blocking_reasons", ()) or ())
-            raise RecordingPiError(
-                "机器发布闸门未通过，模型审核不能覆盖: "
-                + "; ".join(map(str, reasons or ["verification_incomplete"]))
-            )
-
-        if self.last_submission_kind != "review" or not self.last_review:
-            raise RecordingPiError("Pi 未通过 submit_recording_review 提交发布审核")
-        current = self.current_flow_spec()
-        current_version = int((current.meta or {}).get("current_version") or 0)
-        if current_version != int(flow_version):
-            raise RecordingPiError("Pi 发布审核与当前 FlowSpec 版本不一致")
-        if flow_spec_fingerprint(current) != flow_fingerprint:
-            raise RecordingPiError("Pi 发布审核对应的 FlowSpec 内容已变化")
-        review = dict(self.last_review)
-        if int(review.get("base_flow_version") or -1) != current_version:
-            raise RecordingPiError("Pi 发布审核已过期")
-        verdicts = list(review.get("verdicts") or [])
-        expected_roles = {"acceptance", "security", "compliance"}
-        roles = [str(item.get("role") or "") for item in verdicts if isinstance(item, dict)]
-        if len(verdicts) != 3 or len(roles) != 3 or set(roles) != expected_roles:
-            raise RecordingPiError("Pi 发布审核缺少 acceptance/security/compliance 三角色结论")
-        if any(not isinstance(item.get("passed"), bool) for item in verdicts):
-            raise RecordingPiError("Pi 发布审核包含无效的 passed 结论")
-        blocking_reasons = review.get("blocking_reasons") or []
-        if (
-            not isinstance(blocking_reasons, list)
-            or any(not isinstance(reason, str) for reason in blocking_reasons)
-        ):
-            raise RecordingPiError("Pi 发布审核包含无效的 blocking_reasons")
-        if blocking_reasons:
-            raise RecordingPiError("Pi 发布审核仍有阻断项: " + "; ".join(blocking_reasons))
-        all_passed = all(bool(item["passed"]) for item in verdicts)
-        if review.get("all_passed") is not all_passed:
-            raise RecordingPiError("Pi 发布审核汇总结论与角色结论不一致")
-        if not all_passed:
-            reasons = [
-                reason
-                for item in verdicts if not item["passed"]
-                for reason in (item.get("reasons") or [])
-            ]
-            raise RecordingPiError("Pi 发布审核未通过: " + "; ".join(map(str, reasons or ["未知原因"])))
-        return review
 
     @property
     def descriptor(self) -> dict[str, str | bool | None]:

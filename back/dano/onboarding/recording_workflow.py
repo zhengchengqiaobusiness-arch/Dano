@@ -38,7 +38,6 @@ class WorkflowStep(StrEnum):
     RESOLVING = "resolving"
     COMPILING = "compiling"
     VERIFYING = "verifying"
-    REVIEWING = "reviewing"
     PUBLISHING = "publishing"
     EXPORTING = "exporting"
     COMPLETE = "complete"

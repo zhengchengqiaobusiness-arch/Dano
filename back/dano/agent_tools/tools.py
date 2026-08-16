@@ -784,19 +784,17 @@ async def request_review(run_id: str, params: dict) -> dict:
     draft = await _ds.get_draft(UUID(params["asset_draft_id"]))
     if draft is None:
         raise ToolError("草案不存在")
-    from dano.onboarding.recording_pi import active_recording_session
-    recording_session = active_recording_session(run_id)
     from dano.config import get_settings
-    if recording_session is None and not get_settings().review_enabled:  # 非录制运维降级
+    if not get_settings().review_enabled:
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "评审已临时关闭(降级)"}
-    if recording_session is None and draft.asset_type not in REVIEW_REQUIRED_TYPES:
+    if draft.asset_type not in REVIEW_REQUIRED_TYPES:
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": f"{draft.asset_type.value} 免三模型评审"}
-    if recording_session is None and draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
+    if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "工作流步骤连接器免单独评审(复合流程整体评审)"}
-    if recording_session is None and draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
+    if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "查询类页面免三模型评审"}
     # 录制抓请求页面:不再整体豁免 —— 结构由 self_check 硬卡,这里三模型只判**语义**(业务逻辑/越权/合规),
@@ -805,115 +803,6 @@ async def request_review(run_id: str, params: dict) -> dict:
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}
                 for v in vals]
-    if recording_session is not None:
-        review = dict(recording_session.last_review or {})
-        if not review:
-            raise ToolError("录制 run 缺少 Pi AgentSession 提交的三角色 review，禁止回退模型评审")
-        current_version = int((recording_session.current_flow_spec().meta or {}).get("current_version") or 0)
-        review_version = review.get("base_flow_version")
-        if (
-            isinstance(review_version, bool)
-            or not isinstance(review_version, int)
-            or review_version != current_version
-        ):
-            raise ToolError("录制 review 已过期，请 Pi 基于当前 FlowSpec 重新审核")
-        verdicts = list(review.get("verdicts") or [])
-        expected_roles = {
-            "acceptance", "security", "compliance",
-        }
-        if (
-            len(verdicts) != len(expected_roles)
-            or any(not isinstance(item, dict) for item in verdicts)
-            or {str(item.get("role") or "") for item in verdicts} != expected_roles
-        ):
-            raise ToolError("录制 review 未完整覆盖 acceptance/security/compliance")
-        blocking_reasons = review.get("blocking_reasons") or []
-        if blocking_reasons:
-            raise ToolError("录制 review 存在 blocking_reasons，禁止发布: " + "; ".join(blocking_reasons))
-        for verdict in verdicts:
-            if not isinstance(verdict.get("passed"), bool):
-                raise ToolError(f"录制 review.{verdict.get('role')}.passed 必须是布尔值")
-            reasons = verdict.get("reasons") or []
-            if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
-                raise ToolError(f"录制 review.{verdict.get('role')}.reasons 必须是字符串数组")
-            model_id = verdict.get("model_id")
-            if model_id is not None and (not isinstance(model_id, str) or not model_id.strip()):
-                raise ToolError(f"录制 review.{verdict.get('role')}.model_id 必须是非空字符串")
-
-        # The Pi reviews a frozen FlowSpec release before the database draft
-        # exists.  Bind that review to the exact release snapshot embedded in
-        # the eventual draft, then bind its first consumption to one concrete
-        # draft id/content hash.  Merely matching a flow version is not enough:
-        # a rebuilt or substituted draft must never inherit earlier evidence.
-        from dano.execution.page.flow_spec import FlowSpec, flow_spec_fingerprint
-
-        current_spec = recording_session.current_flow_spec()
-        current_fingerprint = flow_spec_fingerprint(current_spec)
-        release = dict((current_spec.meta or {}).get("release_candidate") or {})
-        review_fingerprint = str(review.get("flow_fingerprint") or "")
-        if not review_fingerprint or review_fingerprint != current_fingerprint:
-            raise ToolError("录制 review 未绑定当前 FlowSpec 发布指纹")
-        if str(release.get("flow_fingerprint") or "") != review_fingerprint:
-            raise ToolError("录制 review 与冻结发布候选不一致")
-        api_request = draft.body.get("api_request") if isinstance(draft.body, dict) else None
-        release_snapshot = (
-            api_request.get("_release_snapshot")
-            if isinstance(api_request, dict) else None
-        )
-        if not isinstance(release_snapshot, dict):
-            raise ToolError("录制发布草案缺少冻结 release snapshot")
-        if str(release_snapshot.get("flow_fingerprint") or "") != review_fingerprint:
-            raise ToolError("录制发布草案与 Pi review 指纹不一致")
-        snapshot_flow = release_snapshot.get("flow_spec")
-        if not isinstance(snapshot_flow, dict):
-            raise ToolError("录制发布草案缺少冻结 FlowSpec")
-        try:
-            snapshot_fingerprint = flow_spec_fingerprint(FlowSpec.model_validate(snapshot_flow))
-        except Exception as exc:  # noqa: BLE001 - invalid persisted release evidence
-            raise ToolError("录制发布草案的冻结 FlowSpec 无效") from exc
-        if snapshot_fingerprint != review_fingerprint:
-            raise ToolError("录制发布草案的冻结 FlowSpec 与 Pi review 不一致")
-        draft_id = str(draft.asset_draft_id)
-        draft_hash = str(getattr(draft, "content_hash", "") or "")
-        if not draft_hash:
-            raise ToolError("录制发布草案缺少 content hash")
-        bound_draft_id = str(review.get("draft_id") or "")
-        bound_draft_hash = str(review.get("draft_content_hash") or "")
-        if bound_draft_id and bound_draft_id != draft_id:
-            raise ToolError("Pi review 已绑定其他发布草案，禁止跨草案复用")
-        if bound_draft_hash and bound_draft_hash != draft_hash:
-            raise ToolError("Pi review 已绑定其他草案内容，禁止跨内容复用")
-        review = {
-            **review,
-            "draft_id": draft_id,
-            "draft_content_hash": draft_hash,
-        }
-        recording_session.last_review = dict(review)
-        review_run_ids, out = [], []
-        for verdict in verdicts:
-            rr = await _ds.record_review(
-                asset_draft_id=draft.asset_draft_id,
-                role=str(verdict["role"]),
-                model_id=str(verdict.get("model_id") or "pi-agent-session"),
-                passed=bool(verdict["passed"]),
-                reasons=list(verdict.get("reasons") or []),
-            )
-            review_run_ids.append(str(rr.review_run_id))
-            out.append({
-                "role": verdict["role"],
-                "model": verdict.get("model_id") or "pi-agent-session",
-                "passed": bool(verdict["passed"]),
-                "reasons": list(verdict.get("reasons") or []),
-            })
-        return {
-            "all_passed": all(item["passed"] for item in out),
-            "verdicts": out,
-            "review_run_ids": review_run_ids,
-            "review_unavailable": False,
-            "retryable": False,
-            "review_error": "",
-            "source": "pi_agent_session",
-        }
     board = _review_board
     if board is None:
         from dano.review.board import ReviewBoard
@@ -1134,7 +1023,6 @@ def _restore_recording_session(
     before_spec,  # noqa: ANN001
     *,
     last_submission_kind,
-    last_review: dict,
 ) -> None:
     """Restore a failed recording mutation through the session's public bind API."""
     bind = getattr(session, "bind_flow_spec", None)
@@ -1143,7 +1031,6 @@ def _restore_recording_session(
     bind(before_spec)
     if hasattr(session, "last_submission_kind"):
         session.last_submission_kind = last_submission_kind
-    session.last_review = deepcopy(last_review)
 
 
 async def _apply_recording_submission_atomic(
@@ -1156,7 +1043,6 @@ async def _apply_recording_submission_atomic(
     before_spec = session.current_flow_spec()
     before_facts = _recording_facts(before_spec)
     before_kind = getattr(session, "last_submission_kind", "")
-    before_review = deepcopy(getattr(session, "last_review", {}) or {})
     try:
         result = await session.apply_submission(
             submission,
@@ -1186,7 +1072,6 @@ async def _apply_recording_submission_atomic(
                 session,
                 before_spec,
                 last_submission_kind=before_kind,
-                last_review=before_review,
             )
         except Exception as rollback_exc:  # noqa: BLE001
             raise ToolError(f"录制 {mode} 失败且会话回滚失败: {rollback_exc}") from rollback_exc
@@ -1930,97 +1815,6 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
         mode="repair",
         base_flow_version=params["base_flow_version"],
     )
-
-
-async def submit_recording_review(run_id: str, params: dict) -> dict:
-    _strict_recording_params(
-        params,
-        required={"base_flow_version", "review"},
-        optional={"recording_id", "flow_version"},
-    )
-    session = _recording_session(run_id, params)
-    review = params.get("review")
-    if not isinstance(review, dict):
-        raise ToolError("review 必须是对象")
-    allowed_review_keys = {"acceptance", "security", "compliance", "blocking_reasons", "issues"}
-    if set(review) - allowed_review_keys:
-        raise ToolError("review 包含未知字段")
-    blocking_reasons = review.get("blocking_reasons") or []
-    if (
-        not isinstance(blocking_reasons, list)
-        or any(not isinstance(reason, str) for reason in blocking_reasons)
-    ):
-        raise ToolError("review.blocking_reasons 必须是字符串数组")
-    raw_issues = review.get("issues") or []
-    if not isinstance(raw_issues, list) or any(not isinstance(item, dict) for item in raw_issues):
-        raise ToolError("review.issues 必须是对象数组")
-    issue_keys = {
-        "check_code", "resolver", "capability_id", "step_id", "field_id", "wire_path",
-        "evidence_refs", "suggested_operations", "message",
-    }
-    resolvers = {"machine_repair", "collect_evidence", "operator", "external_blocked"}
-    normalized_issues: list[dict[str, object]] = []
-    for index, issue in enumerate(raw_issues):
-        if set(issue) - issue_keys:
-            raise ToolError(f"review.issues[{index}] 包含未知字段")
-        if issue.get("check_code") != "final_review_rejected":
-            raise ToolError(f"review.issues[{index}].check_code 必须是 final_review_rejected")
-        if issue.get("resolver") not in resolvers:
-            raise ToolError(f"review.issues[{index}].resolver 无效")
-        if not str(issue.get("message") or "").strip():
-            raise ToolError(f"review.issues[{index}].message 不能为空")
-        for key in ("evidence_refs", "suggested_operations"):
-            values = issue.get(key) or []
-            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                raise ToolError(f"review.issues[{index}].{key} 必须是字符串数组")
-        normalized_issues.append({key: issue[key] for key in issue_keys if key in issue})
-    verdicts: list[dict[str, object]] = []
-    server_model_id = str(getattr(session, "model_id", "pi-agent-session"))
-    for role in ("acceptance", "security", "compliance"):
-        raw = review.get(role)
-        if not isinstance(raw, dict) or set(raw) - {"passed", "reasons"}:
-            raise ToolError(f"review.{role} 仅允许 passed/reasons；model_id 由服务器记录")
-        passed = raw.get("passed")
-        reasons = raw.get("reasons") or []
-        if not isinstance(passed, bool):
-            raise ToolError(f"review.{role}.passed 必须是布尔值")
-        if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
-            raise ToolError(f"review.{role}.reasons 必须是字符串数组")
-        verdicts.append({
-            "role": role,
-            "passed": passed,
-            "reasons": reasons,
-            "model_id": server_model_id,
-        })
-    if (blocking_reasons or any(not bool(item["passed"]) for item in verdicts)) and not normalized_issues:
-        raise ToolError(
-            "审核拒绝必须提供 review.issues，包含可定位目标、resolver 和 suggested_operations，"
-            "以便系统继续自愈或向操作人提问"
-        )
-    normalized = {
-        "recording_id": str(params["recording_id"]),
-        "base_flow_version": params["base_flow_version"],
-        "verdicts": verdicts,
-        "blocking_reasons": blocking_reasons,
-        "issues": normalized_issues,
-        "all_passed": not blocking_reasons and all(bool(item["passed"]) for item in verdicts),
-    }
-    from dano.execution.page.flow_spec import flow_spec_fingerprint
-
-    current_spec = session.current_flow_spec()
-    fingerprint = flow_spec_fingerprint(current_spec)
-    release = dict((current_spec.meta or {}).get("release_candidate") or {})
-    if str(release.get("flow_fingerprint") or "") != fingerprint:
-        raise ToolError("当前 FlowSpec 尚未冻结为发布候选，不能提交发布审核")
-    normalized["flow_fingerprint"] = fingerprint
-    normalized["release_id"] = str(release.get("release_id") or "")
-    try:
-        return await session.submit_review(
-            normalized,
-            base_flow_version=params["base_flow_version"],
-        )
-    except (TypeError, ValueError, RuntimeError) as exc:
-        raise ToolError(str(exc)) from exc
 
 
 # 工具注册表(白名单)。验证类工具天然只走 sandbox/test。

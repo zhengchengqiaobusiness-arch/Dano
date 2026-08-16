@@ -348,13 +348,13 @@ async def test_recording_pi_accepted_submission_wins_over_late_limit(monkeypatch
             "type": "prompt_completed",
             "status": "submission_limit",
             "error": "late duplicate",
-            "accepted_submission": "submit_recording_review",
+            "accepted_submission": "submit_recording_plan",
         }
 
     monkeypatch.setattr(client, "_command", accepted_command)
-    result = await client.prompt("执行发布审核")
+    result = await client.prompt("提交能力计划")
     assert result["status"] == "submitted"
-    assert result["accepted_submission"] == "submit_recording_review"
+    assert result["accepted_submission"] == "submit_recording_plan"
     assert "error" not in result
     client._proc = None
 
@@ -524,87 +524,6 @@ async def test_recording_pi_prevents_concurrent_open_of_same_persisted_scope(mon
         await second.start()
     await second.close()
     await first.close()
-
-
-class _ReviewSpec:
-    def __init__(self, version: int, fingerprint: str) -> None:
-        self.meta = {"current_version": version}
-        self.fingerprint = fingerprint
-
-    def model_copy(self, *, deep: bool):  # noqa: ARG002, ANN201
-        return _ReviewSpec(self.meta["current_version"], self.fingerprint)
-
-
-@pytest.mark.asyncio
-async def test_submit_review_is_first_write_wins_and_exact_replay_is_idempotent() -> None:
-    client = recording_pi.RecordingPiSession(
-        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
-    )
-    client.flow_spec = _ReviewSpec(7, "release-fingerprint")
-    first_review = {
-        "base_flow_version": 7,
-        "all_passed": True,
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": []}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    first = await client.submit_review(first_review, base_flow_version=7)
-    replay = await client.submit_review(dict(first_review), base_flow_version=7)
-    assert first["replayed"] is False
-    assert replay["replayed"] is True
-
-    changed = dict(first_review)
-    changed["all_passed"] = False
-    with pytest.raises(recording_pi.RecordingPiError, match="拒绝被后续结论覆盖"):
-        await client.submit_review(changed, base_flow_version=7)
-    assert client.last_review == first_review
-
-
-def test_require_publish_review_hard_fails_missing_stale_and_rejected(monkeypatch) -> None:  # noqa: ANN001
-    from dano.execution.page import flow_spec
-
-    monkeypatch.setattr(flow_spec, "flow_spec_fingerprint", lambda spec: spec.fingerprint)
-    client = recording_pi.RecordingPiSession(
-        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
-    )
-    client.flow_spec = _ReviewSpec(7, "release-fingerprint")
-
-    with pytest.raises(recording_pi.RecordingPiError, match="未通过 submit_recording_review"):
-        client.require_publish_review(flow_version=7, flow_fingerprint="release-fingerprint")
-
-    client.last_submission_kind = "review"
-    client.last_review = {
-        "base_flow_version": 6,
-        "all_passed": True,
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": []}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    with pytest.raises(recording_pi.RecordingPiError, match="已过期"):
-        client.require_publish_review(flow_version=7, flow_fingerprint="release-fingerprint")
-
-    client.last_review["base_flow_version"] = 7
-    client.last_review["all_passed"] = False
-    client.last_review["verdicts"][1] = {
-        "role": "security", "passed": False, "reasons": ["存在越权风险"],
-    }
-    with pytest.raises(recording_pi.RecordingPiError, match="存在越权风险"):
-        client.require_publish_review(flow_version=7, flow_fingerprint="release-fingerprint")
-
-    client.last_review["all_passed"] = True
-    client.last_review["verdicts"][1] = {
-        "role": "security", "passed": True, "reasons": [],
-    }
-    client.last_review["blocking_reasons"] = ["仍有未解决的越权风险"]
-    with pytest.raises(recording_pi.RecordingPiError, match="仍有未解决的越权风险"):
-        client.require_publish_review(flow_version=7, flow_fingerprint="release-fingerprint")
-
-    client.last_review["blocking_reasons"] = []
-    assert client.require_publish_review(
-        flow_version=7, flow_fingerprint="release-fingerprint",
-    )["all_passed"] is True
 
 
 @pytest.mark.asyncio

@@ -19,11 +19,9 @@ from dano.agent_tools.tools import (
     get_recording_delta,
     get_recording_state,
     get_validation_report,
-    request_review,
     publish_asset,
     submit_recording_plan,
     submit_recording_repair,
-    submit_recording_review,
     verify_recording_dependency,
 )
 from dano.shared.enums import AssetType, ValidationStatus
@@ -558,7 +556,6 @@ class _Session:
     def __init__(self, recording_id: str = "rec-1") -> None:
         self.recording_id = recording_id
         self.spec = _spec()
-        self.last_review = {}
         self.last_submission_kind = ""
         self.analysis_image_count = 0
         self.received_submission = None
@@ -566,7 +563,6 @@ class _Session:
 
     def bind_flow_spec(self, spec):
         self.spec = spec.model_copy(deep=True)
-        self.last_review = {}
         self.last_submission_kind = ""
 
     def current_flow_spec(self):
@@ -591,7 +587,6 @@ class _Session:
             self.spec, submission=submission, mode=mode,
         )
         self.last_submission_kind = mode
-        self.last_review = {}
         return flow_module.recording_agent_validation(self.spec)
 
     async def accept_unchanged_plan(self, *, base_flow_version, warning):
@@ -606,15 +601,6 @@ class _Session:
             "unchanged": True,
             "warning": warning,
         }
-
-    async def submit_review(self, review, *, base_flow_version):
-        current = int((self.spec.meta or {}).get("current_version") or 0)
-        if base_flow_version != current:
-            raise RuntimeError("录制版本冲突")
-        self.last_review = dict(review)
-        self.last_submission_kind = "review"
-        return {"accepted": True, "flow_version": current}
-
 
 def _bind(monkeypatch, *, recording_id: str = "rec-1") -> _Session:
     session = _Session(recording_id)
@@ -1410,37 +1396,7 @@ def test_pi_repair_rejects_stale_version_and_non_whitelisted_operation(monkeypat
         }))
 
 
-def test_pi_review_is_strict_and_persisted_in_recording_state(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-review")
-    review = asyncio.run(submit_recording_review("run-review", {
-        "recording_id": "rec-review",
-        "base_flow_version": 1,
-        "review": {
-            role: {"passed": True, "reasons": []}
-            for role in ("acceptance", "security", "compliance")
-        },
-    }))
-    assert review["accepted"] is True
-    assert session.last_review["all_passed"] is True
-    assert {item["model_id"] for item in session.last_review["verdicts"]} == {"pi-agent-session"}
-    with pytest.raises(ToolError, match="model_id 由服务器记录"):
-        asyncio.run(submit_recording_review("run-review", {
-            "recording_id": "rec-review",
-            "base_flow_version": 1,
-            "review": {
-                role: {"passed": True, "reasons": [], "model_id": "forged-model"}
-                for role in ("acceptance", "security", "compliance")
-            },
-        }))
-    with pytest.raises(ToolError, match="review.security"):
-        asyncio.run(submit_recording_review("run-review", {
-            "recording_id": "rec-review",
-            "base_flow_version": 1,
-            "review": {"acceptance": {"passed": True, "reasons": []}},
-        }))
-
-
-def test_pi_tools_reject_unknown_params_bool_version_and_malformed_review(monkeypatch):
+def test_pi_tools_reject_unknown_params_and_bool_version(monkeypatch):
     _bind(monkeypatch, recording_id="rec-strict")
     with pytest.raises(ToolError, match="未知参数"):
         asyncio.run(get_recording_state("run-strict", {
@@ -1452,194 +1408,17 @@ def test_pi_tools_reject_unknown_params_bool_version_and_malformed_review(monkey
             "base_flow_version": True,
             "operations": [],
         }))
-    with pytest.raises(ToolError, match="blocking_reasons"):
-        asyncio.run(submit_recording_review("run-strict", {
-            "recording_id": "rec-strict",
-            "base_flow_version": 1,
-            "review": {
-                **{
-                    role: {"passed": True, "reasons": []}
-                    for role in ("acceptance", "security", "compliance")
-                },
-                "blocking_reasons": "not-a-list",
-            },
-        }))
-
-
-class _ReviewStore:
-    def __init__(self, spec: FlowSpec | None = None) -> None:
-        self.draft_id = uuid4()
-        self.content_hash = f"sha256:{uuid4().hex}"
-        self.recorded: list[dict] = []
-        self.spec = (spec or _spec()).model_copy(deep=True)
-
-    async def get_draft(self, draft_id):
-        if draft_id != self.draft_id:
-            return None
-        return SimpleNamespace(
-            asset_draft_id=draft_id,
-            asset_type=AssetType.PAGE_SCRIPT,
-            asset_key="recorded-submit",
-            content_hash=self.content_hash,
-            body={"api_request": {
-                "method": "POST",
-                "_release_snapshot": {
-                    "flow_fingerprint": flow_spec_fingerprint(self.spec),
-                    "flow_spec": self.spec.model_dump(exclude_none=True),
-                },
-            }},
-        )
-
-    async def list_validations(self, _draft_id):
-        return []
-
-    async def record_review(self, **kwargs):
-        self.recorded.append(dict(kwargs))
-        return SimpleNamespace(review_run_id=uuid4())
-
-
-def test_active_recording_review_uses_only_pi_three_roles_and_never_board(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-review-only")
-    session.last_review = {
-        "base_flow_version": 1,
-        "flow_fingerprint": flow_spec_fingerprint(session.spec),
-        "blocking_reasons": [],
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": [], "model_id": "pi-session"}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    store = _ReviewStore(session.spec)
-    monkeypatch.setattr("dano.agent_tools.tools._ds", store)
-
-    class _ForbiddenBoard:
-        async def review(self, **_kwargs):
-            raise AssertionError("active recording review must not call ReviewBoard")
-
-    monkeypatch.setattr("dano.agent_tools.tools._review_board", _ForbiddenBoard())
-    result = asyncio.run(request_review("run-review-only", {
-        "asset_draft_id": str(store.draft_id),
-    }))
-    assert result["source"] == "pi_agent_session"
-    assert result["all_passed"] is True
-    assert {item["role"] for item in store.recorded} == {
-        "acceptance", "security", "compliance",
-    }
-    assert session.last_review["draft_id"] == str(store.draft_id)
-    assert session.last_review["draft_content_hash"] == store.content_hash
-
-
-def test_pi_review_cannot_be_reused_for_another_draft(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-review-bound")
-    session.last_review = {
-        "base_flow_version": 1,
-        "flow_fingerprint": flow_spec_fingerprint(session.spec),
-        "blocking_reasons": [],
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": [], "model_id": "pi-session"}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }
-    store = _ReviewStore(session.spec)
-    monkeypatch.setattr("dano.agent_tools.tools._ds", store)
-    asyncio.run(request_review("run-review-bound", {
-        "asset_draft_id": str(store.draft_id),
-    }))
-    first_draft = store.draft_id
-    store.draft_id = uuid4()
-    store.content_hash = f"sha256:{uuid4().hex}"
-    with pytest.raises(ToolError, match="禁止跨草案复用"):
-        asyncio.run(request_review("run-review-bound", {
-            "asset_draft_id": str(store.draft_id),
-        }))
-    assert session.last_review["draft_id"] == str(first_draft)
-    assert len(store.recorded) == 3
-
-
-@pytest.mark.parametrize("review, error", [
-    ({}, "缺少 Pi AgentSession"),
-    ({
-        "base_flow_version": 0,
-        "verdicts": [
-            {"role": role, "passed": True, "reasons": []}
-            for role in ("acceptance", "security", "compliance")
-        ],
-    }, "已过期"),
-    ({
-        "base_flow_version": 1,
-        "verdicts": [
-            {"role": "acceptance", "passed": True, "reasons": []},
-            {"role": "acceptance", "passed": True, "reasons": []},
-            {"role": "security", "passed": True, "reasons": []},
-        ],
-    }, "未完整覆盖"),
-])
-def test_active_recording_review_missing_stale_or_duplicate_hard_fails(monkeypatch, review, error):
-    session = _bind(monkeypatch, recording_id="rec-review-bad")
-    session.last_review = review
-    store = _ReviewStore(session.spec)
-    monkeypatch.setattr("dano.agent_tools.tools._ds", store)
-    with pytest.raises(ToolError, match=error):
-        asyncio.run(request_review("run-review-bad", {
-            "asset_draft_id": str(store.draft_id),
-        }))
-    assert store.recorded == []
-
-
-def test_pi_review_rejection_requires_actionable_structured_issues(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-review-blocked")
-    with pytest.raises(ToolError, match="issues"):
-        asyncio.run(submit_recording_review("run-review-blocked", {
-            "recording_id": "rec-review-blocked",
-            "base_flow_version": 1,
-            "review": {
-                **{
-                    role: {"passed": True, "reasons": []}
-                    for role in ("acceptance", "security", "compliance")
-                },
-                "blocking_reasons": ["仍有越权风险"],
-            },
-        }))
-    assert session.last_review == {}
-
-    result = asyncio.run(submit_recording_review("run-review-blocked", {
-        "recording_id": "rec-review-blocked",
-        "base_flow_version": 1,
-        "review": {
-            "acceptance": {"passed": False, "reasons": ["字段证据尚未采集"]},
-            "security": {"passed": True, "reasons": []},
-            "compliance": {"passed": True, "reasons": []},
-            "blocking_reasons": ["字段证据尚未采集"],
-            "issues": [{
-                "check_code": "final_review_rejected",
-                "resolver": "collect_evidence",
-                "capability_id": "cap-submit",
-                "step_id": "submit",
-                "field_id": "field-reviewers",
-                "wire_path": "body.reviewers",
-                "evidence_refs": ["request-submit"],
-                "suggested_operations": ["replay_request"],
-                "message": "字段证据尚未采集",
-            }],
-        },
-    }))
-    assert result["accepted"] is True
-    assert session.last_review["issues"][0]["resolver"] == "collect_evidence"
-
-
 @pytest.mark.parametrize("mode", ["plan", "repair"])
 def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
     session = _bind(monkeypatch, recording_id=f"rec-atomic-{mode}")
     before_spec = session.spec.model_dump(mode="json")
-    session.last_submission_kind = "review"
-    session.last_review = {"sentinel": "preserve"}
+    session.last_submission_kind = "checkpoint"
 
     async def _corrupt(_submission, *, mode, base_flow_version):
         assert base_flow_version == 1
         session.spec.request_facts.option_sources.append({"tampered": mode})
         session.spec.title = "polluted"
         session.last_submission_kind = mode
-        session.last_review = {}
         return {"flow_version": 999}
 
     session.apply_submission = _corrupt
@@ -1663,8 +1442,7 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
     with pytest.raises(ToolError, match="不得修改原始 request facts"):
         asyncio.run(call(f"run-atomic-{mode}", params))
     assert session.spec.model_dump(mode="json") == before_spec
-    assert session.last_submission_kind == "review"
-    assert session.last_review == {"sentinel": "preserve"}
+    assert session.last_submission_kind == "checkpoint"
 
 
 @pytest.mark.parametrize("mode", ["plan", "repair"])
