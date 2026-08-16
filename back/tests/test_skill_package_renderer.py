@@ -692,6 +692,144 @@ def test_invalid_model_docs_fall_back_to_complete_deterministic_docs(tmp_path):
     assert (folder / "scripts" / "format_list.py").is_file()
 
 
+def test_package_skill_uses_business_trigger_and_native_question_forms(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    skill.title = "action_8c4e7b1a1b1e4c57ad658df62cd4f7e6"
+    create = next(
+        cap for cap in skill.api_request["capabilities"]
+        if cap["name"] == "create_item"
+    )
+    create["title"] = "提交请假申请"
+    create["input_schema"] = {
+        "type": "object",
+        "properties": {
+            "leaveType": {
+                "type": "string",
+                "title": "请假类型",
+                "x-dano-control": "text",
+                "x-enum-options": [
+                    {"value": "sick", "label": "病假"},
+                    {"value": "personal", "label": "事假"},
+                ],
+                "default": "personal",
+            },
+            "startTime": {
+                "type": "string",
+                "format": "date-time",
+                "title": "开始时间",
+                "default": "2026-08-15 09:00:00",
+            },
+            "reason": {
+                "type": "string",
+                "title": "请假原因",
+                "description": "请填写请假原因",
+                "default": "录制时用户填写的原因",
+            },
+            "approver": {
+                "type": "string",
+                "title": "审批人",
+                "x-dano-option-source": {
+                    "source_url": "/api/users",
+                    "source_method": "GET",
+                    "result_path": "data.records",
+                    "value_key": "id",
+                    "label_key": "name",
+                },
+            },
+            "runtimeTenant": {
+                "type": "string",
+                "x-dano-internal": True,
+                "default": "recorded-tenant",
+            },
+        },
+        "required": ["leaveType", "startTime", "reason", "approver"],
+    }
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+    forms_md = (folder / "references" / "INPUT_FORMS.md").read_text(encoding="utf-8")
+
+    assert "action_8c4e7b1a1b1e4c57ad658df62cd4f7e6" not in skill_md.split("---", 2)[1]
+    assert "提交请假申请" in skill_md.split("---", 2)[1]
+    assert "# action_" not in skill_md
+    assert "原生调用 `ask_user_question`" in forms_md
+    assert '"title": "提交请假申请"' in forms_md
+    assert '"id": "leaveType"' in forms_md
+    assert '"inputType": "select"' in forms_md
+    assert '"id": "sick"' in forms_md and '"label": "病假"' in forms_md
+    assert '"inputType": "date"' in forms_md
+    assert '"inputType": "textarea"' in forms_md
+    assert '"endpoint": "/api/users"' in forms_md
+    assert '"resultPath": "data.records"' in forms_md
+    assert "录制时用户填写的原因" not in forms_md
+    assert "2026-08-15 09:00:00" not in forms_md
+    assert "runtimeTenant" not in forms_md
+    assert "recorded-tenant" not in forms_md
+    assert "调用前必须替换" in forms_md
+    assert "单字段纠错" in forms_md
+    assert 'ask_user_question({"confirm": true, "formIds": ["<answered.formId>"]})' in forms_md
+
+
+def test_package_heading_uses_capabilities_instead_of_stale_business_status(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    skill.title = "请假申请不存在"
+    skill.api_request["capabilities"][0]["title"] = "查询请假申请"
+    skill.api_request["capabilities"][1]["title"] = "提交请假申请"
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "# 查询请假申请等2项业务能力" in skill_md
+    assert "# 请假申请不存在" not in skill_md
+
+
+def test_package_list_formatter_accepts_bom_prefixed_stdin(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(folder / "scripts" / "format_list.py"),
+            "--capability",
+            "query_items",
+        ],
+        cwd=folder / "scripts",
+        input="\ufeff" + json.dumps({"records": [{"name": "first"}]}, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "| name |" in completed.stdout
+    assert "| first |" in completed.stdout
+
+
+def test_package_skill_bundles_and_references_every_project_markdown(tmp_path):
+    skill = _recording_skill("https://example.invalid")
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    project_root = Path(__file__).resolve().parents[2]
+    source_docs = sorted(
+        path.relative_to(project_root / "doc").as_posix()
+        for path in (project_root / "doc").rglob("*.md")
+    )
+    bundled_root = folder / "references" / "generator-guides"
+    bundled_docs = sorted(
+        path.relative_to(bundled_root).as_posix()
+        for path in bundled_root.rglob("*.md")
+        if path.name != "INDEX.md"
+    )
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+
+    assert bundled_docs == source_docs
+    assert "references/generator-guides/INDEX.md" in skill_md
+    assert "skill-generator-ask-user-question-guide.md" in (
+        bundled_root / "INDEX.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_skill_package_never_expands_empty_capability_to_all_steps(tmp_path):
     skill = _recording_skill("https://example.invalid")
     skill.api_request["capabilities"][0]["step_ids"] = []

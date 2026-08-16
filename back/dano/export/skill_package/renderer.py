@@ -15,6 +15,12 @@ from uuid import uuid4
 
 import structlog
 
+from dano.export.agent_skills import (
+    _configured_reference_dir,
+    _load_reference_markdown,
+    _validate_reference_markdown,
+    _write_generation_guides,
+)
 from dano.export.skill_package.validator import (
     flow_spec_unverified_capability_names,
     flow_spec_verification_ids,
@@ -246,11 +252,247 @@ def _evidence_for_plan(plan: dict, spec) -> list[str]:  # noqa: ANN001
     return list(dict.fromkeys(value for value in ids if value))
 
 
+_LONG_TEXT_RE = re.compile(
+    r"(?:reason|remark|description|content|comment|note|memo|原因|理由|说明|描述|备注|内容)",
+    re.I,
+)
+
+def _business_identity(skill, plans: list[dict], spec) -> tuple[str, str]:  # noqa: ANN001
+    """Return a capability-derived trigger without trusting stale asset titles."""
+    titles = list(dict.fromkeys(
+        _safe_text(plan.get("title") or plan.get("name"))
+        for plan in plans
+        if _safe_text(plan.get("title") or plan.get("name"))
+    ))
+    heading = (
+        titles[0]
+        if len(titles) == 1
+        else (f"{titles[0]}等{len(titles)}项业务能力" if titles else "录制业务能力")
+    )
+    title_text = "、".join(titles) or heading
+    description = (
+        f"当用户要{title_text}时使用。根据已发布能力契约原生调用 ask_user_question "
+        "收集业务参数、校验并转换为接口线格式，确认写操作后执行；未列出的业务动作不要触发。"
+    )
+    return heading, description
+
+
+def _field_label(name: str, field: dict) -> str:
+    return _safe_text(
+        field.get("title") or field.get("label") or field.get("description") or name
+    )
+
+
+def _option_source(field: dict) -> dict | None:
+    source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+    if not isinstance(source, dict):
+        return None
+    endpoint = _safe_text(
+        source.get("endpoint") or source.get("source_url") or source.get("url")
+    )
+    result_path = source.get("resultPath") or source.get("result_path")
+    id_field = source.get("idField") or source.get("value_key") or source.get("id_path")
+    label_field = source.get("labelField") or source.get("label_key") or source.get("label_path")
+    if not all((endpoint, result_path, id_field, label_field)):
+        return None
+    data_source: dict[str, Any] = {
+        "type": "api",
+        "endpoint": endpoint,
+        "method": str(source.get("method") or source.get("source_method") or "GET").upper(),
+        "resultPath": result_path,
+        "idField": id_field,
+        "labelField": label_field,
+    }
+    params = source.get("params") or source.get("source_params") or source.get("source_body")
+    if isinstance(params, dict) and params:
+        data_source["params"] = params
+    children = source.get("childrenField") or source.get("children_key")
+    if children:
+        data_source["childrenField"] = children
+    return data_source
+
+
+def _field_options(field: dict) -> list[dict]:
+    raw_options = field.get("x-enum-options") or field.get("x-options-snapshot")
+    if isinstance(raw_options, list):
+        options: list[dict] = []
+        for raw in raw_options:
+            if isinstance(raw, dict):
+                value = raw.get("id", raw.get("value"))
+                label = raw.get("label", raw.get("name", value))
+            else:
+                value = raw
+                label = raw
+            if value is not None:
+                options.append({"id": value, "label": str(label)})
+        if options:
+            return options
+    values = list(field.get("enum") or [])
+    labels = dict(field.get("x-enum-value-map") or {})
+    options: list[dict] = []
+    if labels:
+        for label, value in labels.items():
+            options.append({"id": value, "label": str(label)})
+    else:
+        options.extend({"id": value, "label": str(value)} for value in values)
+    return options
+
+
+def _is_caller_field(field: dict) -> bool:
+    """Project only fields explicitly exposed by the capability contract."""
+    return not (
+        field.get("x-dano-derived-from-query") is True
+        or field.get("x-dano-internal") is True
+        or field.get("x-dano-display") is False
+        or field.get("x-dano-visibility") == "internal"
+    )
+
+
+def _field_control(name: str, field: dict) -> str:
+    configured = str(
+        field.get("x-dano-control") or field.get("x-ui-control") or field.get("inputType") or ""
+    ).strip()
+    has_choices = bool(_option_source(field) or _field_options(field))
+    if has_choices:
+        if configured in {"radio", "checkbox", "select", "treeSelect"}:
+            return configured
+        return "treeSelect" if field.get("x-dano-tree") else "select"
+    if configured in {"text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"}:
+        return configured
+    if field.get("format") in {"date", "date-time"}:
+        return "date"
+    if field.get("type") == "boolean":
+        return "radio"
+    if field.get("type") in {"array", "object"}:
+        return "textarea"
+    semantic = " ".join((name, _field_label(name, field), _safe_text(field.get("description"))))
+    if _LONG_TEXT_RE.search(semantic) or int(field.get("maxLength") or 0) > 200:
+        return "textarea"
+    return "text"
+
+
+def _runtime_default(name: str, field: dict, control: str) -> str:
+    label = _field_label(name, field)
+    if control in {"select", "treeSelect", "radio", "checkbox"}:
+        guidance = f"按当前用户语义从候选项选择“{label}”的稳定 id"
+    elif control == "date":
+        guidance = f"根据当前业务意图生成“{label}”，并符合 dateFormat"
+    elif field.get("type") in {"array", "object"}:
+        guidance = f"根据当前用户意图生成符合 schema 的 JSON {field.get('type')}"
+    elif field.get("type") in {"number", "integer"}:
+        guidance = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
+    else:
+        guidance = f"根据当前用户意图生成可编辑的“{label}”推荐值"
+    return f"<调用前必须替换：{guidance}；禁止使用录制样本值>"
+
+
+def _question_spec(name: str, field: dict, *, required: bool) -> dict:
+    control = _field_control(name, field)
+    question: dict[str, Any] = {
+        "id": name,
+        "question": _field_label(name, field),
+        "inputType": control,
+        "required": required,
+        "default": _runtime_default(name, field, control),
+    }
+    data_source = _option_source(field)
+    options = _field_options(field)
+    if data_source:
+        question["dataSource"] = data_source
+    elif options:
+        question["options"] = options
+    elif control == "radio" and field.get("type") == "boolean":
+        question["options"] = [
+            {"id": "true", "label": "是"},
+            {"id": "false", "label": "否"},
+        ]
+    if control in {"select", "treeSelect"}:
+        question["multiple"] = bool(field.get("type") == "array" or field.get("multiple"))
+    if control == "date":
+        question["dateFormat"] = str(
+            field.get("dateFormat")
+            or ("yyyy-MM-dd HH:mm" if field.get("format") == "date-time" else "yyyy-MM-dd")
+        )
+    return question
+
+
+def _input_forms_md(plans: list[dict]) -> str:
+    """Render executable ask_user_question contracts from caller-facing schemas."""
+    lines = [
+        "# Native input forms",
+        "",
+        "本文件只投影能力契约中的调用方字段，不改变能力、接口或编排。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
+        "",
+        "## Global rules",
+        "",
+        "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
+        "- 下列 `default` 是生成规则占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选生成的非空推荐值；不得把占位符本身传给工具，也不得使用录制时用户填写的样本值。",
+        "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
+        "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
+        "- 写操作整理完参数后，另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
+        "",
+    ]
+    for plan in plans:
+        schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = set(schema.get("required") or [])
+        caller_properties = {
+            str(name): raw
+            for name, raw in properties.items()
+            if isinstance(raw, dict) and _is_caller_field(raw)
+        }
+        questions = [
+            _question_spec(str(name), raw if isinstance(raw, dict) else {}, required=name in required)
+            for name, raw in caller_properties.items()
+        ]
+        lines.extend([
+            f"## {_safe_text(plan.get('title') or plan.get('name'))} (`{plan.get('name')}`)",
+            "",
+        ])
+        if not questions:
+            lines.extend(["该能力没有调用方字段，不调用 `ask_user_question`。", ""])
+            continue
+        request = {"title": _safe_text(plan.get("title") or plan.get("name")), "questions": questions}
+        lines.extend([
+            "原生分组表单请求：",
+            "",
+            "```json",
+            json.dumps(request, ensure_ascii=False, indent=2),
+            "```",
+            "",
+            "| 字段 | Label | 控件 | JSON 类型 | 必填 | 默认值规则 | 选项来源 |",
+            "|---|---|---|---|---|---|---|",
+        ])
+        for name, raw in caller_properties.items():
+            field = raw if isinstance(raw, dict) else {}
+            control = _field_control(str(name), field)
+            source = _option_source(field)
+            options = _field_options(field)
+            source_text = (
+                f"动态 `{source['method']} {source['endpoint']}` → "
+                f"`{source['resultPath']}` (`{source['labelField']}`/`{source['idField']}`)"
+                if source else ("静态契约候选" if options else "自由输入")
+            )
+            label_text = _field_label(str(name), field).replace("|", "\\|")
+            default_text = _runtime_default(str(name), field, control).replace("|", "\\|")
+            lines.append(
+                f"| `{name}` | {label_text} | `{control}` | "
+                f"`{field.get('type') or 'string'}` | {'是' if name in required else '否'} | "
+                f"{default_text} | {source_text} |"
+            )
+        lines.extend([
+            "",
+            "回答处理顺序：按 question id 取值 → 语义与类型转换 → schema 校验 → 仅纠正无效字段 → 写操作单独确认 → 执行下一步。",
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noqa: ANN001
-    description = _safe_text(skill.title or skill.action or skill.skill_id)
+    heading, description = _business_identity(skill, plans, spec)
     lines = [
         "---", f"name: {slug}", f"description: {json.dumps(description, ensure_ascii=False)}", "---", "",
-        f"# {description}", "",
+        f"# {heading}", "",
         "这是录制后发布的自包含 Skill。它保留既有 Skill 的能力选择、一次性收参、字段校验、写前确认、执行后验证和结果处理规则；业务请求由包内脚本直接调用目标系统。", "",
         "## Transport", "",
         "- 使用 `references/CONTRACT.json` 选择 capability，并调用其中声明的 `scripts/*.py`。",
@@ -263,11 +505,11 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
         "## Steps", "",
         "1. 根据用户目标选择一个明确的 capability；查询和写入是不同能力，禁止默认选择写能力。",
         "   Done when: 已选 capability 的业务对象和动作与用户目标完全一致。",
-        "2. 读取 `references/CONTRACT.json` 中该 capability 的 `input_schema`、脚本路径、`requires_confirmation` 和 `requires_verify`；需要人读说明时同时读取 `references/CAPABILITIES.md`，选择项读取 `references/OPTIONS.md`。",
+        "2. 先完整读取 `references/generator-guides/INDEX.md` 列出的全部项目规范，再读取 `references/CONTRACT.json` 中该 capability 的 `input_schema`、脚本路径、`requires_confirmation` 和 `requires_verify`；具体原生表单读取 `references/INPUT_FORMS.md`，选择项读取 `references/OPTIONS.md`。",
         "   Done when: 已确定全部调用方字段、必填字段、类型、枚举、默认值和内部字段，且没有使用录制样例补空值。",
-        "3. 一次性收集本次需要的调用方字段。使用一次 `ask_user_question`，顶层传 `title` 与 `questions[]`；每个 `questions[].id` 必须与 `input_schema.properties` 的字段名逐字一致。写能力收集全部必填字段；查询能力只收集必填字段和用户明确指定的可选筛选条件。",
+        "3. 按 `references/INPUT_FORMS.md` 原生调用 `ask_user_question`，一次性收集相关调用方字段；每个运行时 default 必须由当前用户意图生成，禁止使用录制样本值。写能力收集全部必填字段；查询能力只收集必填字段和用户明确指定的可选筛选条件。",
         "   Done when: 返回 `status=answered`，答案已按字段 id 映射，或返回 `cancelled` 并立即停止。",
-        "4. 按 schema 校验 required、type、format、enum、pattern 和边界；日期时间、数字、数组与对象按声明转换。内部字段、常量、上游响应和计算字段不得放进 `questions[]`，不得让用户猜内部 ID。",
+        "4. 按 schema 校验 required、type、format、enum、pattern 和边界；日期时间、数字、数组与对象按声明转换。无法无歧义转换时只原生调用一次单字段纠错表单。内部字段、常量、上游响应和计算字段不得放进 `questions[]`，不得让用户猜内部 ID。",
         "   Done when: 输入完整且逐字段满足契约；任何不确定值均未被猜测或静默替换。",
         "5. 若 `requires_confirmation=true`，使用 `ask_user_question({confirm: true, formIds: [<answered.formId>]})` 对完整输入只确认一次；只有返回 `status=confirmed` 才能继续，并在执行脚本时带 `--confirm`。",
         "   Done when: 写能力已有有效确认，或当前能力不需要确认。",
@@ -329,11 +571,6 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
         "", "## Limitations", "",
         "只支持 Capability summary 中列出的能力；未列出的业务动作必须明确说明不支持，不得选择相近能力代替。",
     ])
-    pitfalls = list(((spec.meta or {}).get("pitfalls") or [])) if spec is not None else []
-    if pitfalls:
-        for item in pitfalls[:20]:
-            text = item.get("text") if isinstance(item, dict) else item
-            lines.append(f"- {_safe_text(text)}")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -450,7 +687,7 @@ def main():
     parser.add_argument("--capability", required=True, choices=sorted(SCHEMAS))
     args = parser.parse_args()
     raw = args.json if args.json is not None else sys.stdin.read()
-    value = json.loads(raw)
+    value = json.loads(raw.lstrip("\ufeff"))
     rows = list_rows(value)
     if not rows:
         print("无数据")
@@ -1188,10 +1425,14 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     scripts.mkdir(parents=True, exist_ok=True)
     references = folder / "references"
     references.mkdir(parents=True, exist_ok=True)
+    generation_guides = _load_reference_markdown(_configured_reference_dir())
+    _validate_reference_markdown(generation_guides)
     _write_text(folder / "SKILL.md", skill_md)
     _write_text(folder / "reference.md", reference_md)
     _write_text(references / "CAPABILITIES.md", _capabilities_md(skill, plans))
+    _write_text(references / "INPUT_FORMS.md", _input_forms_md(plans))
     _write_text(references / "OPTIONS.md", _options_md(plans))
+    _write_generation_guides(folder, generation_guides)
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
