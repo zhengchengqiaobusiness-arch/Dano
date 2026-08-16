@@ -8047,7 +8047,27 @@ def _materialize_captured_response_key_maps(
         else:
             continue
 
-        input_field = target_container_path.rsplit(".", 1)[-1]
+        signature = (
+            source.step_id, source_collection_path,
+            target.step_id, target_container_path,
+        )
+        existing_link = next((
+            link for link in links
+            if (
+                link.source_step_id, link.source_path,
+                link.target_step_id, link.target_path,
+            ) == signature
+        ), None)
+        existing_binding = dict(
+            existing_link.value_binding or {}
+        ) if existing_link is not None else {}
+        # An agent-confirmed public alias is part of the caller contract.  The
+        # capture repair may enrich its labels and value shape, but must not
+        # replace that alias with the transport container name.
+        input_field = str(
+            existing_binding.get("input_field")
+            or target_container_path.rsplit(".", 1)[-1]
+        )
         dynamic_prefix = target_container_path + "."
         dynamic_paths = {
             str(param.path or "")
@@ -8144,17 +8164,6 @@ def _materialize_captured_response_key_maps(
             ],
             **({"option_source": option_source} if option_source else {}),
         }
-        signature = (
-            source.step_id, source_collection_path,
-            target.step_id, target_container_path,
-        )
-        existing_link = next((
-            link for link in links
-            if (
-                link.source_step_id, link.source_path,
-                link.target_step_id, link.target_path,
-            ) == signature
-        ), None)
         if existing_link is not None:
             existing_link.value_binding = {
                 **dict(existing_link.value_binding or {}),

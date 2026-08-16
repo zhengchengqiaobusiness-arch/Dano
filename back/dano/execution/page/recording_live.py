@@ -1067,6 +1067,14 @@ def dependency_link_signature(link) -> str:  # noqa: ANN001
     """Stable signature covered by an executor-owned dependency verification."""
     meta = dict(getattr(link, "meta", None) or {})
     link_kind = str(getattr(link, "kind", "") or "value")
+    value_binding = deepcopy(
+        getattr(link, "value_binding", None) or meta.get("value_binding") or {}
+    )
+    # Public field names are a deterministic presentation projection of the
+    # verified label map.  Schema synchronization may add or disambiguate
+    # them, but that does not change the response keys, labels, target
+    # container, or value-shape proved by dependency_execute.
+    value_binding.pop("input_fields_by_label", None)
     payload = {
         "kind": link_kind,
         "source_step_id": str(getattr(link, "source_step_id", "") or ""),
@@ -1077,7 +1085,7 @@ def dependency_link_signature(link) -> str:  # noqa: ANN001
         "source_key_path": str(getattr(link, "source_key_path", "") or meta.get("source_key_path") or ""),
         "source_label_path": str(getattr(link, "source_label_path", "") or meta.get("source_label_path") or ""),
         "target_container_path": str(getattr(link, "target_container_path", "") or meta.get("target_container_path") or ""),
-        "value_binding": getattr(link, "value_binding", None) or meta.get("value_binding") or {},
+        "value_binding": value_binding,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")

@@ -135,6 +135,34 @@ def _record_dependency_verification(spec: FlowSpec, link_id: str = "link-1", *, 
     )
 
 
+def test_dependency_signature_ignores_derived_public_field_names():
+    link = FlowLink(
+        source_step_id="detail",
+        source_path="data.activityNodes",
+        target_step_id="submit",
+        target_path="startUserSelectAssignees",
+        kind="response_key_map",
+        source_collection_path="data.activityNodes",
+        source_key_path="id",
+        source_label_path="name",
+        target_container_path="startUserSelectAssignees",
+        value_binding={
+            "kind": "caller_map_by_label",
+            "input_field": "approvers",
+            "required_labels": ["领导审批", "人力审批"],
+            "value_shape": "item_list",
+        },
+    )
+    before = dependency_link_signature(link)
+
+    link.value_binding["input_fields_by_label"] = {
+        "领导审批": "领导审批",
+        "人力审批": "人力审批",
+    }
+
+    assert dependency_link_signature(link) == before
+
+
 def test_high_confidence_value_link_becomes_dependency_candidate_todo():
     todos = verification_todos(_spec_with_unproposed_value_link())
 

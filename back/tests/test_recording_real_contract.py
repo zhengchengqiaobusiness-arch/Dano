@@ -442,7 +442,12 @@ def test_real_trace_compiles_only_verified_graph_and_releases_both_capabilities(
     assert computed.source["sample_verified"] is True
 
     submit_schema = api_capabilities["submit_leave"]["input_schema"]["properties"]
-    assert "approvers" in submit_schema
+    assert "approvers" not in submit_schema
+    assert {
+        name
+        for name, field in submit_schema.items()
+        if field.get("x-dano-dynamic-key-map")
+    } == {"领导审批", "人力审批"}
     assert not any(name.startswith("Activity_") for name in submit_schema)
     assert submit_schema["startTime"]["x-dano-wire-format"] == "epoch_ms"
     assert submit_schema["endTime"]["x-dano-wire-format"] == "epoch_ms"
@@ -490,7 +495,8 @@ def test_real_contract_rebuilds_changed_approval_nodes_with_offline_executor():
         "reason": "DANO_REAL_TRACE_SANITIZED",
         "startTime": "2026-08-05 16:00:00",
         "endTime": "2026-08-06 16:00:00",
-        "approvers": {"领导审批": 701, "人力审批": 702},
+        "领导审批": 701,
+        "人力审批": 702,
     }
     result = asyncio.run(execute_api_workflow(api_request, inputs, send=False))
     assert result["ok"] is True

@@ -2691,13 +2691,18 @@ def _apply_structure_overrides(body, overrides: list[dict]) -> list[str]:  # noq
                 if str(label) and str(field)
             }
             input_values = dict(item.get("input_values") or {})
+            split_container = {
+                label: input_values[field]
+                for label, field in input_fields_by_label.items()
+                if field in input_values
+            }
+            # New contracts expose one stable field per visible label.  Keep
+            # already-exported callers working when they still send the former
+            # label-to-value object as a single input.
             container = (
-                {
-                    label: input_values[field]
-                    for label, field in input_fields_by_label.items()
-                    if field in input_values
-                }
-                if input_fields_by_label else _path_lookup(body, target_path)
+                split_container
+                if split_container
+                else _path_lookup(body, target_path)
             )
             if not isinstance(collection, list) or not collection:
                 errors.append("动态结构来源集合为空或不是数组")
