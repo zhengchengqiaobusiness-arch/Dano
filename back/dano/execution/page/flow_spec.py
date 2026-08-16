@@ -10487,59 +10487,6 @@ def _title_without_step_suffix(title: str) -> str:
     return text.strip()
 
 
-def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for p in params:
-        if not _param_exposed_to_caller(p):
-            continue
-        name = (p.key or p.path or "").strip()
-        if not name or name in properties:
-            continue
-        typ = p.type or "string"
-        schema_type = {
-            "number": "number",
-            "integer": "integer",
-            "boolean": "boolean",
-            "array": "array",
-            "object": "object",
-            "enum": "string",
-            "list-enum": "array",
-        }.get(typ, "string")
-        prop: dict[str, Any] = {
-            "type": schema_type,
-            "title": p.label or name,
-            "x-flow-path": p.path,
-            "x-source-kind": p.source_kind,
-            "x-dano-business-type": _business_type_for_param(p),
-            "x-dano-wire-type": p.wire_type or _infer_type_from_value(p.value) or "string",
-        }
-        if p.description:
-            prop["description"] = p.description
-        _apply_param_schema_default(prop, p)
-        if p.type in {"enum", "list-enum"} and p.enum_options:
-            labels = []
-            for opt in p.enum_options:
-                pair = _enum_label_value(opt)
-                if pair:
-                    labels.append(pair[0])
-                elif isinstance(opt, str):
-                    labels.append(opt)
-            if labels:
-                if p.type == "list-enum":
-                    prop["items"] = {"type": "string", "enum": labels}
-                else:
-                    prop["enum"] = labels
-        properties[name] = prop
-        if _param_requires_caller_input(p):
-            required.append(name)
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-    }
-
-
 def _capability_output_name(mapping: dict[str, Any], index: int) -> str:
     for key in ("field", "name", "output", "target", "key"):
         value = str(mapping.get(key) or "").strip()
@@ -10623,10 +10570,6 @@ def _flow_capability_id(kind: str, seed: str = "") -> str:
 def _stable_capability_id(name: str, kind: str, step_ids: list[str]) -> str:
     raw = json.dumps([name, kind, list(step_ids)], ensure_ascii=False, separators=(",", ":"))
     return f"cap_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
-
-
-def _capability_step_ids(steps: list[FlowStep]) -> list[str]:
-    return [s.step_id for s in steps if s.step_id]
 
 
 def _capability_call_nodes(steps: list[FlowStep]) -> list[dict[str, Any]]:
@@ -11035,12 +10978,6 @@ def _set_capability_request_membership(
     cap.request_refs = [item for item in (cap.request_refs or []) if item.step_id != step.step_id]
     cap.request_refs.append(ref)
     return ref
-
-def _request_facts_by_roles(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
-    return [
-        item for item in _request_fact_items(spec)
-        if str(item.get("role") or "") in roles
-    ]
 
 _CAPABILITY_PATH_PREFIXES = frozenset({
     "api", "rest", "gateway", "openapi", "v1", "v2", "v3", "oa", "system", "admin", "admin-api",
@@ -11764,70 +11701,6 @@ def _semantic_fact_hash(spec: FlowSpec) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def _capability_from_agent(raw: dict[str, Any], step_ids: set[str], used_names: set[str]) -> FlowCapability | None:
-    if not isinstance(raw, dict):
-        return None
-    allowed_kinds = ALLOWED_CAPABILITY_KINDS
-    kind = str(raw.get("kind") or "submit").strip()
-    if kind not in allowed_kinds:
-        return None
-    raw_name = str(raw.get("name") or kind).strip()
-    name = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_name).strip("_").lower() or kind
-    if name in used_names:
-        seed = 2
-        base = name
-        while f"{base}_{seed}" in used_names:
-            seed += 1
-        name = f"{base}_{seed}"
-    selected_steps = [str(x) for x in (raw.get("step_ids") or []) if str(x) in step_ids]
-    raw_nodes = raw.get("nodes") if isinstance(raw.get("nodes"), list) else []
-    nodes: list[dict[str, Any]] = []
-    node_step_ids: list[str] = []
-    for node in raw_nodes:
-        if not isinstance(node, dict):
-            continue
-        node_type = str(node.get("type") or "").strip()
-        if node_type not in {"call", "map", "filter", "condition", "foreach", "select", "return"}:
-            continue
-        copied = dict(node)
-        sid = str(copied.get("step_id") or "")
-        if sid:
-            if sid not in step_ids:
-                continue
-            node_step_ids.append(sid)
-        copied.setdefault("id", f"{node_type}_{len(nodes) + 1}")
-        nodes.append(copied)
-    for sid in node_step_ids:
-        if sid not in selected_steps:
-            selected_steps.append(sid)
-    if not selected_steps:
-        return None
-    if not nodes:
-        nodes = [{"id": f"call_{i + 1}", "type": "call", "step_id": sid} for i, sid in enumerate(selected_steps)]
-        if selected_steps:
-            nodes.append({"id": "return_final", "type": "return", "from": selected_steps[-1], "path": "response"})
-    used_names.add(name)
-    return FlowCapability(
-        name=name,
-        capability_id=_stable_capability_id(name, kind, selected_steps),
-        title=str(raw.get("title") or name),
-        intent=str(raw.get("intent") or raw.get("description") or ""),
-        kind=kind,
-        step_ids=selected_steps,
-        nodes=nodes,
-        input_schema=raw.get("input_schema") if isinstance(raw.get("input_schema"), dict) else {},
-        output_schema=raw.get("output_schema") if isinstance(raw.get("output_schema"), dict) else {},
-        output_mapping=raw.get("output_mapping") if isinstance(raw.get("output_mapping"), list) else [],
-        preconditions=raw.get("preconditions") if isinstance(raw.get("preconditions"), list) else [],
-        confirmed=False,
-        confidence=max(0.0, min(1.0, float(raw.get("confidence") or 0.75))),
-        requires_human_confirm=bool(raw.get("requires_human_confirm", True)),
-        evidence=raw.get("evidence") if isinstance(raw.get("evidence"), list) else [],
-        caller_responsibilities=raw.get("caller_responsibilities") if isinstance(raw.get("caller_responsibilities"), list) else [],
-        skill_responsibilities=raw.get("skill_responsibilities") if isinstance(raw.get("skill_responsibilities"), list) else [],
-    )
-
-
 def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
     request_facts = _request_fact_items(spec)
     validation_findings: dict[str, Any] = {}
@@ -12044,32 +11917,6 @@ def _capability_kind_family(kind: str) -> str:
     # Only the legacy single/batch submit pair is interchangeable. Draft,
     # submit, withdraw and delete are separate caller-visible operations.
     return "write" if kind in {"submit", "submit_batch"} else str(kind or "")
-
-
-def _merge_capability_lists(
-    existing: list[FlowCapability],
-    generated: list[FlowCapability],
-    *,
-    spec: FlowSpec | None = None,
-    allow_new: bool = True,
-) -> list[FlowCapability]:
-    """把新生成能力合并到已有能力上，避免每次“生成编排”覆盖人工编辑。"""
-    removed_capabilities = _removed_capability_names(spec)
-    removed_families = {
-        _capability_kind_family(name)
-        for name in removed_capabilities
-        if name in ALLOWED_CAPABILITY_KINDS
-    } | {
-        str(x) for x in (((spec.meta or {}).get("removed_capability_kinds") or []) if spec is not None else [])
-    }
-    return _merge_capability_lists_impl(
-        existing,
-        generated,
-        spec=spec,
-        allow_new=allow_new,
-        removed_capabilities=removed_capabilities,
-        removed_families=removed_families,
-    )
 
 
 def _planned_capability_has_public_anchor(
@@ -13689,38 +13536,6 @@ def _prune_empty_capabilities(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
-def _drop_superseded_baseline_capabilities(spec: FlowSpec, baseline_ids: set[str]) -> FlowSpec:
-    """Remove generated baselines fully covered by Pi's semantic boundaries."""
-    remove_ids: set[str] = set()
-    for baseline in spec.capabilities or []:
-        if baseline.capability_id not in baseline_ids:
-            continue
-        baseline_steps = set(_capability_node_step_ids(baseline))
-        if not baseline_steps:
-            continue
-        alternatives = [
-            cap for cap in spec.capabilities or []
-            if cap.capability_id not in baseline_ids
-            and _capability_kind_family(cap.kind) == _capability_kind_family(baseline.kind)
-            and set(_capability_node_step_ids(cap))
-            and set(_capability_node_step_ids(cap)) & baseline_steps
-        ]
-        covered = {
-            step_id
-            for cap in alternatives
-            for step_id in _capability_node_step_ids(cap)
-            if step_id in baseline_steps
-        }
-        if alternatives and covered == baseline_steps:
-            remove_ids.add(baseline.capability_id)
-    if remove_ids:
-        spec.capabilities = [
-            cap for cap in spec.capabilities
-            if cap.capability_id not in remove_ids
-        ]
-    return spec
-
-
 def _planner_patch_edits(
     spec: FlowSpec,
     edits: list[dict[str, Any]],
@@ -14544,15 +14359,6 @@ def _eligible_business_write_fact(entry: dict[str, Any]) -> bool:
         entry.get("keep")
         and str(entry.get("role") or "") in {"business_write", "submit_anchor"}
         and str(entry.get("method") or "").upper() in _WRITE_METHODS
-        and str(entry.get("path") or entry.get("url") or "").strip()
-    )
-
-
-def _eligible_business_get_fact(entry: dict[str, Any]) -> bool:
-    return bool(
-        entry.get("keep")
-        and str(entry.get("role") or "") == "business_get"
-        and str(entry.get("method") or "GET").upper() in {"GET", "HEAD", "POST"}
         and str(entry.get("path") or entry.get("url") or "").strip()
     )
 
