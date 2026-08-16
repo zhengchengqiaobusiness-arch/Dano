@@ -271,9 +271,11 @@ function verifyServerOwnedRecordingContext() {
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
   const planSchema = planTool?.parameters?.properties?.plan;
+  const planVariants = planSchema?.anyOf || [];
+  const structuredPlanSchema = planVariants.find((variant) => variant?.type === "object");
   assert(
-    planSchema?.type === "object" && !planSchema?.anyOf,
-    "plan boundary must expose one structured object schema",
+    structuredPlanSchema && planVariants.some((variant) => variant?.type === "string"),
+    "plan boundary must accept structured plans and recover JSON-stringified plans",
   );
   assert(
     planTool?.description?.includes("plan.ops")
@@ -284,10 +286,10 @@ function verifyPlanToolCompatibility() {
     "plan tool does not expose the live semantic operation channel to Pi",
   );
   assert(
-    planSchema?.properties?.ops?.type === "array",
+    structuredPlanSchema?.properties?.ops?.type === "array",
     "plan tool schema does not declare the live semantic operation channel",
   );
-  const liveOps = planSchema?.properties?.ops?.items?.anyOf || [];
+  const liveOps = structuredPlanSchema?.properties?.ops?.items?.anyOf || [];
   const expandedOps = liveOps.flatMap((item) => item?.anyOf || [item]);
   const operationSchema = (name) => expandedOps.find((item) => item?.properties?.op?.const === name);
   const operationSchemas = (name) => expandedOps.filter((item) => item?.properties?.op?.const === name);
@@ -347,10 +349,10 @@ function verifyPlanToolCompatibility() {
   );
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
   assert(
-    planSchema?.additionalProperties === false,
+    structuredPlanSchema?.additionalProperties === false,
     "plan payload must reject undeclared planner aliases",
   );
-  const semanticSchema = planSchema?.properties?.semantic_plan;
+  const semanticSchema = structuredPlanSchema?.properties?.semantic_plan;
   assert(
     semanticSchema?.additionalProperties === false
       && JSON.stringify(Object.keys(semanticSchema?.properties || {}).sort())
@@ -367,7 +369,7 @@ function verifyPlanToolCompatibility() {
   const repairTool = recordingTools.find((tool) => tool.name === "submit_recording_repair");
   assert(
     JSON.stringify(repairTool?.parameters?.properties?.operations?.items)
-      === JSON.stringify(planSchema?.properties?.ops?.items),
+      === JSON.stringify(structuredPlanSchema?.properties?.ops?.items),
     "plan and repair must use the same typed operation union",
   );
   const plan = {
@@ -451,8 +453,8 @@ function verifyPlanToolCompatibility() {
     plan: JSON.stringify(plan),
   });
   assert(
-    stringified.submission_error === "invalid_non_object_plan",
-    "JSON-stringified plans must not bypass the structured tool schema",
+    JSON.stringify(stringified.plan) === JSON.stringify(sanitized.plan),
+    "JSON-stringified plans were not recovered to the canonical structured plan",
   );
 }
 

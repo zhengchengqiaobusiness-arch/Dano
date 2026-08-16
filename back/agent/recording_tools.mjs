@@ -347,6 +347,16 @@ export function sanitizeRecordingToolParams(name, params) {
   const sanitized = Object.fromEntries(
     allowed.filter((key) => key in params).map((key) => [key, params[key]]),
   );
+  if (typeof sanitized.plan === "string") {
+    try {
+      const decoded = JSON.parse(sanitized.plan);
+      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+        sanitized.plan = decoded;
+      }
+    } catch {
+      // Preserve malformed text for the deterministic invalid-plan fallback.
+    }
+  }
   let plan = (
     sanitized.plan
     && typeof sanitized.plan === "object"
@@ -849,7 +859,10 @@ export const recordingTools = [
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: Type.Optional(RecordingPlan),
+        plan: Type.Optional(Type.Union([
+          RecordingPlan,
+          Type.String({ minLength: 1 }),
+        ])),
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.
