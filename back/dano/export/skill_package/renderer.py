@@ -145,15 +145,15 @@ def _safe_step(step: dict) -> dict:
 def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
     if spec is None:
         return []
+    from dano.execution.page.flow_spec import executable_flow_links
+
     allowed = set(step_ids)
     positions = {step_id: index for index, step_id in enumerate(step_ids)}
     links: list[dict] = []
-    for link in spec.links:
+    for link in executable_flow_links(spec):
         verification_id = str((link.meta or {}).get("verification_id") or "")
         if (
-            (link.meta or {}).get("verified") is not True
-            or not verification_id
-            or link.source_step_id not in allowed
+            link.source_step_id not in allowed
             or link.target_step_id not in allowed
             or positions[link.source_step_id] >= positions[link.target_step_id]
         ):

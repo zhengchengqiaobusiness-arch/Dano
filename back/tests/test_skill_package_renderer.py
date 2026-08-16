@@ -19,7 +19,12 @@ from dano.execution.page.flow_spec import (
     ParamField,
     flow_spec_to_api_request,
 )
-from dano.export.skill_package.renderer import _CLIENT_TEMPLATE, package_slug, render_skill_package
+from dano.export.skill_package.renderer import (
+    _CLIENT_TEMPLATE,
+    _verified_links,
+    package_slug,
+    render_skill_package,
+)
 from dano.export.skill_package.validator import validate_skill_package
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel, Subsystem
@@ -27,6 +32,43 @@ from dano.shared.enums import RiskLevel, Subsystem
 
 _LINK_VERIFICATION = "550e8400-e29b-41d4-a716-446655440000"
 _WRITE_VERIFICATION = "550e8400-e29b-41d4-a716-446655440001"
+
+
+def test_export_includes_recording_grounded_dependencies_without_replay_ids() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="definition", method="GET", path="/definition"),
+            FlowStep(step_id="approval", method="GET", path="/approval"),
+            FlowStep(step_id="submit", method="POST", path="/submit"),
+        ],
+        links=[
+            FlowLink(
+                link_id="definition-to-approval",
+                source_step_id="definition", source_path="data.id",
+                target_step_id="approval", target_path="query.definitionId",
+                confirmed=True, meta={"captured_value_match": True},
+            ),
+            FlowLink(
+                link_id="approval-to-submit",
+                source_step_id="approval", source_path="data.nodes",
+                target_step_id="submit", target_path="assignees",
+                kind="response_key_map", confidence=0.99,
+                meta={"captured_structure_match": True},
+            ),
+            FlowLink(
+                link_id="unproven",
+                source_step_id="definition", source_path="data.name",
+                target_step_id="submit", target_path="reason",
+            ),
+        ],
+    )
+
+    exported = _verified_links(spec, ["definition", "approval", "submit"])
+
+    assert [link["link_id"] for link in exported] == [
+        "definition-to-approval", "approval-to-submit",
+    ]
+    assert exported[0]["verification_id"] == ""
 
 
 def test_package_slug_keeps_long_action_ids_distinct() -> None:
