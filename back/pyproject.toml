@@ -22,7 +22,9 @@ page = ["playwright>=1.48"]   # 录制 V2 浏览器依赖:装后 `python -m play
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+cache_dir = "../.runtime/pytest-cache"
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+cache-dir = "../.runtime/ruff-cache"

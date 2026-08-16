@@ -1,7 +1,6 @@
 // No-network executable self-test for the recording Pi runtime.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -542,7 +541,10 @@ function verifyRuntimeProtocol(tempDir) {
   });
 }
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-recording-pi-"));
+const agentDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const testTempDir = path.join(path.dirname(path.dirname(agentDir)), ".runtime", "node-tests");
+fs.mkdirSync(testTempDir, { recursive: true });
+const tempDir = fs.mkdtempSync(path.join(testTempDir, "dano-recording-pi-"));
 try {
   assert(JSON.stringify(recordingTools.map((tool) => tool.name)) === JSON.stringify(expectedTools), "recording tool allowlist mismatch");
   verifySubmissionAttemptLimit();

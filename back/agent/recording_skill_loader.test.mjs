@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -21,6 +20,12 @@ const SKILL_FILE = path.join(SKILL_DIR, "SKILL.md");
 const RUNTIME_FILE = path.join(AGENT_DIR, "run_recording_pi.mjs");
 const CLIENT_FILE = path.join(BACK_DIR, "dano", "onboarding", "recording_pi.py");
 const PIPELINE_TEST_FILE = path.join(BACK_DIR, "tests", "test_recording_pipeline.py");
+const TEST_TEMP_DIR = path.join(REPO_DIR, ".runtime", "node-tests");
+
+async function makeTempDir(prefix) {
+  await mkdir(TEST_TEMP_DIR, { recursive: true });
+  return mkdtemp(path.join(TEST_TEMP_DIR, prefix));
+}
 
 function settings() {
   return SettingsManager.inMemory({
@@ -55,7 +60,7 @@ test("loads exactly the project recording analysis Skill from the required path"
 });
 
 test("noSkills isolation excludes global, project-default, and retired Skills", async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), "dano-recording-skill-"));
+  const temp = await makeTempDir("dano-recording-skill-");
   try {
     const fakeGlobal = path.join(temp, "agent", "skills", "global-skill");
     const fakeProject = path.join(temp, "cwd", ".pi", "skills", "onboard-system");
@@ -150,7 +155,7 @@ test("recording analysis preserves images and retries the identical wrapped prom
 });
 
 test("missing and malformed Skills produce diagnostics and runtime rejects diagnostics", async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), "dano-recording-skill-invalid-"));
+  const temp = await makeTempDir("dano-recording-skill-invalid-");
   try {
     const missing = path.join(temp, "missing");
     const missingResult = (await loadOnly(missing, { cwd: temp })).result;

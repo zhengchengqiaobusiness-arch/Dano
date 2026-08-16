@@ -1,4 +1,7 @@
-# ── Python 缓存 / 字节码 ──11111111111
+# ── 可统一清理的临时运行数据 ──
+/.runtime/
+
+# ── Python 缓存 / 字节码（兼容未读取项目配置的外部工具）──
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -10,7 +13,8 @@ __pycache__/
 back/.env
 back/.secrets/
 *storage*.json
-back/.dano-sessions/      # 录制保存的页面登录态(storageState,含凭证)
+# 录制保存的页面登录态(storageState,含凭证)
+back/.dano-sessions/
 
 # ── pi agent 运行态(每 run 变动,临时)──
 back/.pi-agent/
@@ -26,14 +30,11 @@ skillfrontend/dist/
 
 # ── 其它本地/工具 ──
 
-back/_e2e_leave2.log
 oa.json
 get_token.py
 PAGE_SKILL_PLAN.md
 back/_e2e_leave2.log
-back/.dano-sessions/
 # Pi 录制 SessionManager JSONL（服务端持久会话，可能含上下文）
 back/.dano/
 /.claude
 .codex/environments/environment.toml
-/back/.dano-recording-workflows
