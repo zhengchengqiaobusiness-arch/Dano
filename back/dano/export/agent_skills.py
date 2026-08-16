@@ -1129,53 +1129,6 @@ def _numeric_fields(props: dict) -> list[str]:
                                 declared_type=(v or {}).get("type"))]
 
 
-def _ptype(k: str, props: dict, numeric: set[str]) -> str:
-    """SKILL.md 参数表的「类型」列:把 manifest 的 format 还原成对 agent 有意义的语义类型,
-    不再把选择型/日期都显示成 string(那会让 agent 不知道该传名字还是 ID、是否日期)。"""
-    p = props.get(k) or {}
-    fmt = p.get("format")
-    if fmt == "name-ref":
-        return "枚举·名字→ID"
-    if p.get("type") == "array" and ((p.get("items") or {}).get("format") == "name-ref"):
-        return "多选·名字列表→记录"                       # 列表多选(参会人):传名字数组
-    if fmt == "date-time":
-        return "datetime"
-    if fmt == "date":
-        return "date"
-    return "number" if k in numeric else (p.get("type") or "string")
-
-
-def _is_name_ref(p: dict) -> bool:
-    """名字→ID 选择型(单选 name-ref,或**多选** array<name-ref>):agent 传名字,Dano 运行期查内部信息。"""
-    p = p or {}
-    return p.get("format") == "name-ref" or (
-        p.get("type") == "array" and (p.get("items") or {}).get("format") == "name-ref")
-
-
-def _select_fields(props: dict) -> list[str]:
-    """名字→ID 的选择型字段(选领导/字典下拉/参会人多选):agent 传名字,Dano 运行期查内部 ID。"""
-    return [k for k, v in (props or {}).items() if _is_name_ref(v)]
-
-
-def _option_labels(prop: dict) -> list[str]:
-    prop = prop or {}
-    raw = prop.get("x-options") or prop.get("x-options-snapshot") or prop.get("enum") or []
-    if not raw and prop.get("x-enum-options"):
-        raw = prop.get("x-enum-options") or []
-    out: list[str] = []
-    seen: set[str] = set()
-    for opt in raw:
-        if isinstance(opt, dict):
-            label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
-        else:
-            label = str(opt or "").strip()
-        if not label or label in seen:
-            continue
-        seen.add(label)
-        out.append(label)
-    return out
-
-
 def _label(props: dict, k: str) -> str:
     """字段纯语义(SOP/复述用,简洁);无 label 退回 description、再退回 key。
     调用约定(传名字/勿传ID、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""

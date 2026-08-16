@@ -634,7 +634,6 @@ def test_manifest_preserves_select_and_datetime_semantics():
     enum → type=string + format=name-ref + 描述提示「传名字→ID」;datetime → format=date-time。
     (修真实导出里 领导/人力 显示成 string、日期丢类型的缺陷。)"""
     from dano.catalog.manifest import to_manifest
-    from dano.export.agent_skills import _ptype, _select_fields
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel
 
@@ -648,11 +647,6 @@ def test_manifest_preserves_select_and_datetime_semantics():
     assert "查内部 ID" in props["领导"]["description"] and "勿直接传 ID" in props["领导"]["description"]
     # 日期:带 date-time format
     assert props["startTime"]["format"] == "date-time"
-    # 导出层「类型」列还原成语义类型,不再显示 string
-    assert _ptype("领导", props, set()) == "枚举·名字→ID"
-    assert _ptype("startTime", props, set()) == "datetime"
-    assert _ptype("请假类型", props, {"请假类型"}) == "number"
-    assert _select_fields(props) == ["领导", "人力"]
     # 不再硬塞人名示例『张三』(对选值字段如请假类型是错的);label=纯语义,供 SOP/复述用(简洁、不带约定括号)
     assert "张三" not in props["领导"]["description"]
     assert props["领导"]["label"] == "领导" and "传名字" not in props["领导"]["label"]
