@@ -473,6 +473,7 @@ def executable_flow_links(spec: FlowSpec) -> list[FlowLink]:
         and item.get("status") == "passed"
         and item.get("verification_id")
     }
+    by_id = {step.step_id: step for step in spec.steps}
     executable: list[FlowLink] = []
     for link in spec.links or []:
         meta = dict(link.meta or {})
@@ -488,12 +489,29 @@ def executable_flow_links(spec: FlowSpec) -> list[FlowLink]:
             and verification_id in trusted_verification_ids
         )
         capture_grounded = bool(
-            meta.get("captured_value_match") is True
-            or meta.get("captured_structure_match") is True
-            or meta.get("captured_record_hydration") is True
+            not meta.get("unverified_reason")
+            and (
+                meta.get("captured_value_match") is True
+                or meta.get("captured_structure_match") is True
+                or meta.get("captured_record_hydration") is True
+            )
         )
-        if active and (machine_verified or capture_grounded):
-            executable.append(link)
+        if not (active and (machine_verified or capture_grounded)):
+            continue
+        if _link_is_auto_generated(link):
+            target = by_id.get(link.target_step_id)
+            target_param = (
+                _resolve_param_reference(target, link.target_path)
+                if target is not None else None
+            )
+            if (
+                not _auto_link_has_grounded_contract(spec.steps, link)
+                or not _auto_dependency_link_allowed(
+                    target_param, link.source_path, link,
+                )
+            ):
+                continue
+        executable.append(link)
     return executable
 
 
@@ -6549,12 +6567,30 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             # A structure link controls request keys only. It is not a value
             # dependency and must not replace the request container itself.
             continue
-        for p in target.params:
-            if p.path != target_path:
-                continue
+        target_param = _resolve_param_reference(target, target_path)
+        for p in [target_param] if target_param is not None else []:
+            captured_binding_overrides_agent_input = bool(
+                p.source_kind == "user_input"
+                and not _param_has_editable_control_evidence(p)
+                and lk.confirmed
+                and float(lk.confidence or 0.0) >= 0.95
+                and not (lk.meta or {}).get("unverified_reason")
+                and any(
+                    (lk.meta or {}).get(key) is True
+                    for key in (
+                        "captured_value_match",
+                        "captured_structure_match",
+                        "captured_record_hydration",
+                    )
+                )
+            )
             if p.locked or _param_axis_manually_edited(
                 p, "category", "source_kind", "source", "editable", "exposed_to_user",
-            ) or (_param_source_agent_classified(p) and p.source_kind != "chained"):
+            ) or (
+                _param_source_agent_classified(p)
+                and p.source_kind != "chained"
+                and not captured_binding_overrides_agent_input
+            ):
                 # 依赖连线和字段来源是独立可编辑的事实。人工已选择
                 # 分类/来源后，同步层不得再用旧连线覆盖用户结果。
                 continue
@@ -6613,10 +6649,7 @@ def _apply_user_link_source(steps: list[FlowStep], link: FlowLink) -> None:
     if source_step is None or target_step is None:
         return
     target_path = link.target_path
-    param = next((
-        item for item in target_step.params
-        if item.path == target_path
-    ), None)
+    param = _resolve_param_reference(target_step, target_path)
     if param is None:
         return
     param.source_kind = "previous_response"
@@ -6870,6 +6903,8 @@ def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> No
     by_id = {s.step_id: s for s in steps}
     kept: list[FlowLink] = []
     for lk in links:
+        if (lk.meta or {}).get("unverified_reason") and _link_is_auto_generated(lk):
+            continue
         if not _link_is_auto_generated(lk):
             kept.append(lk)
             continue
@@ -9926,6 +9961,34 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     if not spec.capabilities:
         return spec
 
+    _infer_computed_runtime_fields(spec)
+    # Capability compilation happens after live semantic edits. Apply only the
+    # dependencies safe for execution so a confirmed response chain wins over
+    # an unsupported caller-input guess. Keep non-executable selector evidence
+    # long enough to derive cross-capability relations below.
+    invalidated_link_ids = {
+        link.link_id for link in spec.links
+        if (link.meta or {}).get("unverified_reason")
+    }
+    if invalidated_link_ids:
+        spec.links = [
+            link for link in spec.links
+            if not (
+                link.link_id in invalidated_link_ids
+                and _link_is_auto_generated(link)
+            )
+        ]
+        for step in spec.steps:
+            for param in step.params:
+                if (
+                    param.source_kind == "previous_response"
+                    and str((param.source or {}).get("link_id") or "") in invalidated_link_ids
+                ):
+                    _reset_param_source(
+                        param,
+                        reason="上游依赖已重定向，字段已恢复为调用输入",
+                    )
+    _apply_link_sources(spec.steps, executable_flow_links(spec))
     _normalize_capability_references(spec)
     _normalize_actionable_placeholder_param_names(spec)
 

@@ -234,6 +234,26 @@ function sourceKindLabel(value?: string) {
   return labels[value || ""] || value || "来源待确认";
 }
 
+function paramSourceLabel(param: FlowParam) {
+  const source = asRecord(param.source);
+  if (param.source_kind === "constant") {
+    const kind = safeString(source.kind);
+    if (kind === "recorded_control_default") return "页面只读默认值";
+    if (kind === "empty_field") return "接口空值";
+    if (["option_query_filter", "query_constant", "recorded_command_state"].includes(kind)) {
+      return "接口固定条件";
+    }
+  }
+  return sourceKindLabel(param.source_kind);
+}
+
+function constantValueCaption(param: FlowParam) {
+  const kind = safeString(asRecord(param.source).kind);
+  if (kind === "recorded_control_default") return "录制页面默认值";
+  if (kind === "empty_field") return "接口空值";
+  return "固定值";
+}
+
 const CALLER_SOURCE_KINDS = new Set([
   "caller_input", "user_input", "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
 ]);
@@ -1308,11 +1328,11 @@ export default function PageRecorder({
                       <Tag>{paramTypeLabel(param)}</Tag>
                       {param.required ? <Tag color="error">必填</Tag> : <Tag>可选</Tag>}
                       <Tag color={paramIsCallerInput(param) ? "blue" : "cyan"}>
-                        {sourceKindLabel(param.source_kind)}
+                        {paramSourceLabel(param)}
                       </Tag>
                     </Space>
                     {param.source_kind === "constant" && fixedValue !== undefined ? (
-                      <div><Text type="secondary">固定值：{safeString(fixedValue)}</Text></div>
+                      <div><Text type="secondary">{constantValueCaption(param)}：{safeString(fixedValue)}</Text></div>
                     ) : null}
                     {apiOptionSourceSummary(param) ? (
                       <div><Text type="secondary">{apiOptionSourceSummary(param)}</Text></div>

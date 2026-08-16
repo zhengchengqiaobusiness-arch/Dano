@@ -187,6 +187,8 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /Pass `plan` as a structured object/i);
   assert.match(skill, /record identity and several exact same-path values/i);
   assert.match(skill, /expose one\s+caller choice per required label/i);
+  assert.match(skill, /confirmed captured response binding supplies a later request inside the same capability/i);
+  assert.match(skill, /exact current request identities/i);
   assert.match(runtime, /recording_submission_retry/);
   assert.match(runtime, /missing_submission/);
 });

@@ -2547,7 +2547,7 @@ def test_goal_boundary_keeps_strong_filtered_query_outside_write_preflight() -> 
     assert merged.meta["recording_goal_contract"]["satisfied"] is True
 
 
-def test_one_read_command_returns_entity_result_and_keeps_its_auxiliary_calls() -> None:
+def test_one_read_command_returns_entity_result_without_parallel_context() -> None:
     live = FlowSpec(meta={
         "recording_goal_text": (
             "目的：查看记录详情\n"
@@ -2588,9 +2588,8 @@ def test_one_read_command_returns_entity_result_and_keeps_its_auxiliary_calls() 
     assert next(
         ref.step_id for ref in capability.request_refs if ref.usage == "execute"
     ) == "entity"
-    assert capability.step_ids == ["comments", "entity"]
+    assert capability.step_ids == ["entity"]
     assert [(ref.step_id, ref.usage) for ref in capability.request_refs] == [
-        ("comments", "preflight"),
         ("entity", "execute"),
     ]
 

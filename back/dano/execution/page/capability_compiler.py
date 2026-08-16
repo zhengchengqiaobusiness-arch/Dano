@@ -17,7 +17,6 @@ from dano.execution.page.flow_spec import (
     _capability_operation_kind,
     _default_capability_nodes,
     executable_flow_links,
-    _grounded_read_operation_steps,
     _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
@@ -101,10 +100,19 @@ def _executable_links(spec: FlowSpec):  # noqa: ANN202
     yield from executable_flow_links(spec)
 
 
-def _grounded_dependency_order(spec: FlowSpec, anchor_step_id: str) -> tuple[list[str], list[str]]:
+def _grounded_dependency_order(
+    spec: FlowSpec,
+    anchor_step_id: str,
+    *,
+    include_collection_sources: bool = True,
+) -> tuple[list[str], list[str]]:
     position = {step.step_id: index for index, step in enumerate(spec.steps)}
     upstream: dict[str, list[str]] = {}
     for link in _executable_links(spec):
+        if not include_collection_sources and "[" in str(link.source_path or ""):
+            # A read capability must accept the selected record identity; it
+            # must not silently execute a list query and choose one row.
+            continue
         upstream.setdefault(link.target_step_id, []).append(link.source_step_id)
     for target in upstream:
         upstream[target] = sorted(set(upstream[target]), key=lambda step_id: position.get(step_id, 10**9))
@@ -394,13 +402,12 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             else kind if grounded_goal_update else grounded_kind
         )
 
-        if is_write:
-            step_ids, dependency_errors = _grounded_dependency_order(current, anchor_step_id)
-            errors.extend(f"{prefix}: {message}" for message in dependency_errors)
-        else:
-            step_ids = [
-                step.step_id for step in _grounded_read_operation_steps(current, anchor)
-            ]
+        step_ids, dependency_errors = _grounded_dependency_order(
+            current,
+            anchor_step_id,
+            include_collection_sources=is_write,
+        )
+        errors.extend(f"{prefix}: {message}" for message in dependency_errors)
         member_steps = [by_step[step_id] for step_id in step_ids]
         refs = [
             _request_ref(

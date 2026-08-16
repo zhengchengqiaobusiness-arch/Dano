@@ -200,6 +200,10 @@ def test_result_stage_is_read_only_until_explicit_edit_and_folds_technical_detai
     assert "editingResult" in source
     assert "调用方提供" in source
     assert "系统自动处理" in source
+    assert "页面只读默认值" in source
+    assert "接口固定条件" in source
+    assert "上游接口响应" in source
+    assert "运行时计算" in source
     assert "执行编排" in source
     assert "识别依据" in source
     assert "技术详情" in source

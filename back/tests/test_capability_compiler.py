@@ -237,6 +237,264 @@ def test_compiler_includes_dependencies_grounded_by_the_same_recording():
     assert submit.evidence[0]["source"] == "grounded_request_graph"
 
 
+def test_compiler_excludes_a_capture_link_invalidated_by_step_retargeting():
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="unrelated-preview", method="GET", path="/workflow/preview",
+                source_meta={"request_id": "req-later", "role": "read_context"},
+                response_json={"data": {"processInstance": {"id": "record-123456"}}},
+            ),
+            FlowStep(
+                step_id="record-detail", method="GET", path="/workflow/detail",
+                source_meta={"request_id": "req-detail", "role": "business_get"},
+                params=[ParamField(path="query.id", key="id", value="record-123456")],
+                response_json={"data": {"processInstance": {"id": "record-123456"}}},
+            ),
+            FlowStep(
+                step_id="withdraw", method="DELETE", path="/workflow/withdraw",
+                source_meta={"request_id": "req-withdraw", "role": "business_write"},
+                params=[ParamField(path="body.id", key="id", value="record-123456")],
+            ),
+        ],
+        links=[
+            FlowLink(
+                link_id="stale-preview-detail",
+                source_step_id="unrelated-preview",
+                source_path="data.processInstance.id",
+                target_step_id="record-detail",
+                target_path="query.id",
+                confirmed=False,
+                confidence=0.98,
+                meta={
+                    "captured_value_match": True,
+                    "verified": False,
+                    "unverified_reason": "依赖步骤已重定向，需要重新验证",
+                },
+            ),
+            FlowLink(
+                link_id="detail-withdraw",
+                source_step_id="record-detail",
+                source_path="data.processInstance.id",
+                target_step_id="withdraw",
+                target_path="body.id",
+                confirmed=True,
+                confidence=0.98,
+                meta={"captured_value_match": True},
+            ),
+        ],
+    )
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "withdraw_record",
+        "title": "撤回记录",
+        "kind": "withdraw",
+        "anchor_step_id": "withdraw",
+    }]}).spec
+
+    capability = compiled.capabilities[0]
+    assert capability.step_ids == ["record-detail", "withdraw"]
+    assert "unrelated-preview" not in {ref.step_id for ref in capability.request_refs}
+
+
+def test_confirmed_internal_response_binding_beats_ungrounded_caller_input():
+    identifier = "record-123456"
+    target = ParamField(
+        # Materialized JSON-body params use the canonical field path while the
+        # captured dependency retains its body-qualified wire path.
+        path="id", key="id", value=identifier,
+        category="user_param", source_kind="user_input", exposed_to_user=True,
+        source={"kind": "user_input", "actor": "agent"},
+        evidence=[{
+            "actor": "agent", "kind": "param_source", "source_kind": "caller_input",
+        }],
+    )
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="detail", method="GET", path="/records/detail",
+                source_meta={"request_id": "req-detail", "role": "business_get"},
+                response_json={"data": {"id": identifier}},
+            ),
+            FlowStep(
+                step_id="withdraw", method="DELETE", path="/records/withdraw",
+                source_meta={"request_id": "req-withdraw", "role": "business_write"},
+                params=[target],
+            ),
+        ],
+        links=[FlowLink(
+            link_id="detail-withdraw",
+            source_step_id="detail",
+            source_path="data.id",
+            target_step_id="withdraw",
+            target_path="body.id",
+            confirmed=True,
+            confidence=0.98,
+            evidence={"kind": "value_match", "captured_value_match": {"occurrences": 1}},
+            meta={"captured_value_match": True},
+        )],
+    )
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "withdraw_record",
+        "title": "撤回记录",
+        "kind": "withdraw",
+        "anchor_step_id": "withdraw",
+    }]}).spec
+
+    capability = compiled.capabilities[0]
+    bound = next(param for step in compiled.steps for param in step.params if param.path == "id")
+    assert capability.step_ids == ["detail", "withdraw"]
+    assert bound.source_kind == "previous_response"
+    assert bound.source["step_id"] == "detail"
+    assert "id" not in (capability.input_schema.get("properties") or {})
+    assert "id" not in {field.key for field in capability.inputs}
+
+
+def test_editable_control_remains_caller_input_despite_a_matching_response():
+    target = ParamField(
+        path="id", key="id", value="record-123456",
+        category="user_param", source_kind="user_input", exposed_to_user=True,
+        source={"kind": "user_input", "actor": "agent"},
+        evidence=[
+            {"actor": "agent", "kind": "param_source", "source_kind": "caller_input"},
+            {
+                "kind": "page_control", "interacted": True,
+                "editable": True, "disabled": False, "read_only": False,
+            },
+        ],
+    )
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="suggestion", method="GET", path="/records/suggestion",
+                response_json={"data": {"id": "record-123456"}},
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/records/submit",
+                params=[target], source_meta={"role": "business_write"},
+            ),
+        ],
+        links=[FlowLink(
+            link_id="suggestion-submit",
+            source_step_id="suggestion", source_path="data.id",
+            target_step_id="submit", target_path="body.id",
+            confirmed=True, confidence=0.98,
+            meta={"captured_value_match": True},
+        )],
+    )
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "submit_record", "title": "提交记录",
+        "kind": "submit", "anchor_step_id": "submit",
+    }]}).spec
+
+    param = next(param for step in compiled.steps for param in step.params if param.path == "id")
+    assert param.source_kind == "user_input"
+    assert param.exposed_to_user is True
+    assert "id" in (compiled.capabilities[0].input_schema.get("properties") or {})
+
+
+def test_read_capability_excludes_parallel_context_without_a_data_dependency():
+    action = {
+        "trigger_op": "click",
+        "trigger_action_id": "action-view",
+        "trigger_transaction_id": "action-view",
+        "page_id": "page-1",
+    }
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="workflow-definition", method="GET", path="/workflow/definition",
+            source_meta={**action, "request_id": "req-definition", "role": "read_context"},
+            response_json={"data": {"id": "definition-1"}},
+        ),
+        FlowStep(
+            step_id="record-detail", method="GET", path="/records/detail?id=record-1",
+            source_meta={**action, "request_id": "req-detail", "role": "business_get"},
+            response_json={"data": {"id": "record-1", "reason": "annual leave"}},
+        ),
+    ])
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "inspect_record",
+        "title": "查看记录详情",
+        "kind": "inspect",
+        "anchor_step_id": "record-detail",
+    }]}).spec
+
+    capability = compiled.capabilities[0]
+    assert capability.step_ids == ["record-detail"]
+    assert [(ref.step_id, ref.usage) for ref in capability.request_refs] == [
+        ("record-detail", "execute"),
+    ]
+
+
+def test_compiler_derives_preflight_json_from_caller_dates_before_result_display():
+    start = 1_780_000_000_000
+    end = start + 2 * 86_400_000
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="approval-preview", method="GET", path="/workflow/preview",
+                params=[ParamField(
+                    path="query.processVariablesStr", key="processVariablesStr",
+                    value='{"day":2}', category="system_const",
+                    source_kind="constant", exposed_to_user=False,
+                )],
+                response_json={"data": {"id": "approval-123456"}},
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/records/submit",
+                params=[
+                    ParamField(
+                        path="startTime", key="startTime", value=start,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="endTime", key="endTime", value=end,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(path="approvalId", key="approvalId", value="approval-123456"),
+                ],
+                source_meta={"role": "business_write"},
+            ),
+        ],
+        links=[FlowLink(
+            link_id="preview-submit",
+            source_step_id="approval-preview", source_path="data.id",
+            target_step_id="submit", target_path="body.approvalId",
+            confirmed=True, confidence=0.98,
+            meta={"captured_value_match": True},
+        )],
+    )
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "submit_record", "title": "提交记录",
+        "kind": "submit", "anchor_step_id": "submit",
+    }]}).spec
+
+    process_variables = next(
+        param for step in compiled.steps for param in step.params
+        if param.path == "query.processVariablesStr"
+    )
+    assert process_variables.source_kind == "computed"
+    assert process_variables.source == {
+        "kind": "computed",
+        "strategy": "date_span_days_json",
+        "start_field": "startTime",
+        "end_field": "endTime",
+        "path": "query.processVariablesStr",
+        "sample_verified": True,
+        "sample_days": 2,
+        "output_key": "day",
+    }
+    assert "processVariablesStr" not in (
+        compiled.capabilities[0].input_schema.get("properties") or {}
+    )
+
+
 def test_live_sources_compile_into_one_executable_multi_api_contract():
     """A live conclusion must change execution, not only the workbench label."""
     spec = FlowSpec.model_validate({

@@ -119,6 +119,12 @@ An observed literal is not automatically a default or constant. A hidden field i
 input. A token, user ID, tenant, timestamp, upstream ID, random value, or computed value must not
 be exposed merely because it appears in the request.
 
+When a confirmed captured response binding supplies a later request inside the same capability,
+keep that target internal and let the runtime pass the response value directly. Do not reclassify
+it as caller input or replace it with a cross-capability relation merely because another public
+read exposes the same value. If either endpoint was retargeted to a different captured request,
+discard the invalidated binding and rebuild it from the exact current request identities.
+
 Submit source conclusions with `set_param_source`. When a canonical step does not yet exist, use
 the observed `request_id` as allowed by the tool schema. If compilation rejects the conclusion,
 use the returned reason to correct the source; do not force the nearest category.
@@ -130,6 +136,8 @@ structure evidence. Field-name equality alone is insufficient.
 
 - For response-to-request values, use `propose_dependency` with the exact source request/response
   path and target request/wire path.
+- Do not propose a caller-owned cross-capability relation for a target already supplied by a
+  confirmed response binding within that capability.
 - For derived request structures, use the existing structure dependency only when the captured
   response and request bodies prove the mapping.
 - When response rows determine keys inside a later request object, use `response_key_map` with the
