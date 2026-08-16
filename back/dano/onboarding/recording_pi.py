@@ -309,6 +309,13 @@ class RecordingPiSession:
                         "录制 Pi 在同一任务中连续提交被拒，已停止本轮以避免无效 Token 消耗；"
                         "请基于最新状态重新发起操作"
                     )
+                if (
+                    prompt_mode == "recording_analysis"
+                    and event.get("status") == "missing_submission"
+                ):
+                    raise RecordingPiError(
+                        "录制 Pi 已重试但仍未提交完整能力计划；本轮分析结果未被采纳"
+                    )
                 return event
             except asyncio.TimeoutError as exc:
                 try:

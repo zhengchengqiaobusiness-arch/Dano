@@ -311,6 +311,31 @@ async def test_recording_pi_submission_limit_is_exposed_as_hard_failure(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_recording_analysis_without_a_plan_submission_is_rejected(monkeypatch) -> None:  # noqa: ANN001
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client._proc = object()
+
+    async def missing_command(command_type, **_kwargs):  # noqa: ANN001
+        assert command_type == "prompt"
+        return {
+            "type": "prompt_completed",
+            "status": "missing_submission",
+            "error": "recording analysis completed without submit_recording_plan",
+        }
+
+    monkeypatch.setattr(client, "_command", missing_command)
+    with pytest.raises(recording_pi.RecordingPiError, match="仍未提交完整能力计划"):
+        await client.prompt(
+            "执行最终录制分析",
+            prompt_mode="recording_analysis",
+            analysis_phase="final_request_tail",
+        )
+    client._proc = None
+
+
+@pytest.mark.asyncio
 async def test_recording_pi_accepted_submission_wins_over_late_limit(monkeypatch) -> None:  # noqa: ANN001
     client = recording_pi.RecordingPiSession(
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,

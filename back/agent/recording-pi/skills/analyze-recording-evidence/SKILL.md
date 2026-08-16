@@ -41,6 +41,10 @@ through the current recording tools; never construct or publish a FlowSpec direc
 6. Give every public capability exactly one observed business execute anchor. A read anchor must
    return the requested business result; a write anchor must create, update, submit, approve,
    reject, withdraw, or delete the requested business state.
+7. Different concrete goal slots must not share one execute anchor merely because their requests
+   use the same route family. Preserve the distinct recorded page actions and transactions. When
+   one read action emits several requests, keep every supporting request in that capability and
+   choose the request carrying the final business entity/result as its sole execute anchor.
 
 ## Classify requests from evidence
 
@@ -74,6 +78,14 @@ an editable field axis and must not be submitted.
 - Use `set_param_enum` only with a complete observed label/value mapping. Never invent options or
   confuse labels with values.
 - Cite the field fact and the control/dictionary fact for conclusions derived from page controls.
+- A non-pagination filter carried by an observed business search/list action remains an optional
+  caller input even when the response is an array of objects. A list-shaped business result is not
+  evidence that the request is an option endpoint. Conversely, fixed filters on a demonstrated
+  option/workflow-preparation request remain internal unless a field-local editable control proves
+  caller ownership.
+- Disabled or read-only display values are not caller inputs. Keep a captured stable control
+  default internal, or bind it to its observed runtime/API source; do not require the caller to
+  reproduce a value the page itself supplied.
 
 ## Assign executable sources
 
@@ -116,6 +128,13 @@ structure evidence. Field-name equality alone is insufficient.
 - When response rows determine keys inside a later request object, use `response_key_map` with the
   observed collection, key, label, and target-container paths. Keep
   `value_binding.kind=caller_map_by_label`; make the stable business input name the `input_field`.
+- When several stable response labels become separate keys in one later request object, expose one
+  caller choice per required label. The runtime must fetch the current keys and assemble the wire
+  object; never expose the dynamic internal keys or require the caller to construct that object.
+- For an edit/update action, an earlier record read may hydrate the later write only when the same
+  record identity and several exact same-path values are observed in both response and request.
+  Keep the record identity as the caller selector, bind unchanged fields from that response, and
+  leave genuinely edited fields caller-owned. One coincidental equal value is not hydration proof.
 - Prefer exact candidates in `heuristic_candidates.response_key_maps` only after checking them
   against captured source rows and target keys.
 - Never confirm a dependency or claim machine verification during recording analysis.
@@ -137,6 +156,9 @@ structure evidence. Field-name equality alone is insufficient.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.
 7. Do not claim success for skipped, rejected, or rolled-back operations. Do not replace a valid
    full plan with a partial correction.
+8. In `final_request_tail`, completing the turn without an accepted `submit_recording_plan` result
+   is a protocol failure. Drain all deltas, rebuild the complete current capability array, submit
+   it once, and inspect the returned result before producing any final text.
 
 ## Ask the operator only for irreducible business decisions
 

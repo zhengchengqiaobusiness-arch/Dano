@@ -418,6 +418,26 @@ async function runPrompt(command) {
         });
       }
     }
+    if (
+      usesRecordingSkill
+      && !acceptedSubmission
+      && !submissionLimitError
+      && !promptCancelled
+    ) {
+      const retryPrompt = `/skill:${RECORDING_ANALYSIS_SKILL_NAME} `
+        + "上一轮没有完成必需的 submit_recording_plan。重新调用 get_recording_state，"
+        + "按当前完整事实提交完整能力集合；不要输出分析文字，提交成功后再结束。";
+      emit({
+        type: "agent_event",
+        event: "recording_submission_retry",
+        request_id: command.request_id,
+        session_id: session.sessionId,
+        analysis_phase: analysisPhase,
+      });
+      work = session.prompt(retryPrompt, promptOptions);
+      promptInFlight = work;
+      await work;
+    }
   } catch (error) {
     if (/abort/i.test(String(error?.message || error))) promptCancelled = true;
     else throw error;
@@ -435,7 +455,19 @@ async function runPrompt(command) {
     // duplicate happened to reach the limiter before cancellation completed.
     status: acceptedSubmission
       ? "submitted"
-      : (submissionLimitError ? "submission_limit" : (promptCancelled ? "cancelled" : "completed")),
+      : (
+        submissionLimitError
+          ? "submission_limit"
+          : (promptCancelled ? "cancelled" : (usesRecordingSkill ? "missing_submission" : "completed"))
+      ),
+    ...(
+      usesRecordingSkill
+      && !acceptedSubmission
+      && !submissionLimitError
+      && !promptCancelled
+        ? { error: "recording analysis completed without submit_recording_plan" }
+        : {}
+    ),
     ...(!acceptedSubmission && submissionLimitError ? { error: submissionLimitError } : {}),
     ...(acceptedSubmission ? { accepted_submission: acceptedSubmission } : {}),
     image_count: images.length,

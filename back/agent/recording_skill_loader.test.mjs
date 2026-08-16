@@ -172,6 +172,7 @@ test("missing and malformed Skills produce diagnostics and runtime rejects diagn
 
 test("Skill contract preserves full capabilities, rejected operations, and the final tail", async () => {
   const skill = await readFile(SKILL_FILE, "utf8");
+  const runtime = await readFile(RUNTIME_FILE, "utf8");
 
   assert.match(skill, /full replacement/i);
   assert.match(skill, /Preserve every still-grounded earlier capability/i);
@@ -179,6 +180,12 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /`rejected` or `rolled_back`/i);
   assert.match(skill, /final_request_tail/);
   assert.match(skill, /until `has_more=false`/);
+  assert.match(skill, /completing the turn without an accepted `submit_recording_plan` result/i);
+  assert.match(skill, /Different concrete goal slots must not share one execute anchor/i);
+  assert.match(skill, /record identity and several exact same-path values/i);
+  assert.match(skill, /expose one\s+caller choice per required label/i);
+  assert.match(runtime, /recording_submission_retry/);
+  assert.match(runtime, /missing_submission/);
 });
 
 test("default-off machine verification retains the no-final-plan regression contract", async () => {
