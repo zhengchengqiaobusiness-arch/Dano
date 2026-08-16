@@ -1722,3 +1722,80 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 | `failure.presentation-stop` | 展示失败后停止 | [E15](#e15-e17-终止与取消) | non-retryable failure |
 | `failure.validation-stop` | 校验重试耗尽后停止 | [E16](#e15-e17-终止与取消) | non-retryable failure |
 | `failure.cancel-stop` | 取消后停止 | [E17](#e15-e17-终止与取消) | cancelled/terminal failure |
+
+---
+
+# Dano Skill 产出合同
+
+## 1. 范围
+
+本合同只约束已识别能力如何产出可用 Skill，不修改录制、能力识别、FlowSpec、接口编排或发布结论。`references/CONTRACT.json` 中的 capability、字段和依赖是唯一事实来源；Skill 不得新增、删除、合并或改写能力。
+
+## 2. 触发描述
+
+- `SKILL.md` 的 `description` 必须说明用户在什么业务意图下应触发该 Skill，并列出它真实支持的业务动作。
+- action UUID、skill_id、接口路径和录制标题不能充当业务描述。
+- 未列入能力合同的动作不得触发，也不得用相近能力替代。
+
+## 3. 参数收集
+
+需要用户补充字段时必须原生调用 `ask_user_question`，禁止在普通文本、Markdown 或 `<question>` 标签中模拟工具调用。
+
+- 同一能力的相关字段尽量合并为一次 `{title, questions[]}`。
+- 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required` 和非空 `default`。
+- `id` 必须与 capability 的调用方字段名逐字一致。
+- 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
+- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。
+- 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。
+
+## 4. 默认值
+
+生成到文档中的 default 只能描述运行时推荐规则，不能复制录制时用户填写的样本。
+
+真正调用 `ask_user_question` 前，执行者必须结合当前用户意图、当前日期、实时候选和字段合同生成合适的非空推荐值：
+
+- 文本和 textarea：从当前请求生成简洁、可编辑的业务内容。
+- 日期时间：从当前请求和当前时间推导，并转换到 `dateFormat`。
+- 枚举和动态选项：按当前语义选择有效候选的稳定 id；无证据时不猜内部值。
+- 数字：从当前语义提取，不得任意使用 0。
+- 数组和对象：生成满足 JSON schema 的合法 JSON，不得把字符串伪装成对象。
+
+规则占位符必须在工具调用前替换，不能原样显示给用户或传入业务接口。
+
+## 5. 类型转换与单字段纠错
+
+收到用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换到接口线格式：数字文本可转 number/integer，日期语义可转声明格式，候选 label 可按同一候选映射到稳定 id，textarea 中的数组/对象可解析为 JSON。
+
+如果语义正确且转换唯一，自动转换后继续。若数据类型错误、字段类型不匹配、候选不存在或语义不能无歧义转换，只对该错误字段原生调用一次单字段 `ask_user_question`：明确指出错误、期望格式和新的运行时推荐 default。不得重问已经有效的字段，不得静默猜值。
+
+`validation error`、`question_validation_failed` 或 `invalid_question_arguments` 必须修正请求结构后再调用；用户 `cancelled` 时立即停止。
+
+## 6. 写操作确认
+
+写操作整理并校验全部参数后，必须单独原生调用：
+
+```json
+{"confirm": true, "formIds": ["<answered.formId>"]}
+```
+
+确认调用只允许 `confirm` 与 `formIds`，不得同时携带 title、questions、options、multiple 或其他表单字段。只有返回 `confirmed` 才继续；返回 `cancelled` 立即停止。
+
+## 7. 执行和结果输出
+
+- 用户回答完成后才组装 capability input 并执行下一步；内部字段由合同声明的固定值、运行时上下文、计算或上游响应自动提供。
+- 写操作结果不明时不得自动重复提交。
+- 列表、候选或数组结果必须运行 `scripts/format_list.py` 格式化为 Markdown 表格；无数据输出“无数据”。
+- Markdown 表头、分隔行和数据行之间不插空行，单元格换行使用 `<br>`。
+- 非列表结果按 `output_schema` 展示；不得把内部 ID 或裸 data 猜成业务编号。
+
+## 8. 自包含要求
+
+每个导出的 Skill 必须包含：
+
+- `references/CONTRACT.json`：机器能力合同；
+- `references/CAPABILITIES.md`：能力和字段说明；
+- `references/INPUT_FORMS.md`：逐能力原生表单、控件、默认规则和动态数据源；
+- `references/generator-guides/`：生成时读取的全部项目 Markdown 规范及 INDEX；
+- `scripts/format_list.py`：稳定列表格式化脚本。
+
+执行时必须先读取 `references/generator-guides/INDEX.md` 列出的全部规范，再按所选 capability 的合同和表单执行。

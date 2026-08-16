@@ -201,8 +201,9 @@ def test_exported_skill_follows_native_question_contract_and_uses_semantic_scope
     assert "业务上确实必填" in markdown
     assert "多题按 `questions[].id`" in markdown
     assert "非空推荐 `default`" in markdown
-    assert "录制样例必须保留为推荐值" in markdown
-    assert "推荐默认值只用于 `ask_user_question` 展示" in markdown
+    assert "录制样本不得作为显示默认值" in markdown
+    assert "运行时推荐默认值只用于 `ask_user_question` 展示" in markdown
+    assert "只对错误字段原生调用一次单字段纠错表单" in markdown
     assert "`x-dano-apply-default: true`" in markdown
     assert "取消" in markdown and "停止" in markdown
     assert "校验失败" in markdown and "静默" in markdown
@@ -281,11 +282,12 @@ def test_exported_skill_renders_schema_defaults_in_tables_and_examples():
     write_fields = reference.split("## 撤回酒店申请", 1)[1]
 
     assert "推荐默认值" in reference
-    assert "录制推荐值，需用户确认" in reference
-    assert "| `pageNo` | pageNo | `text` | integer | 否 | `1`（安全默认值）" in query_fields
-    assert "| `pageSize` | pageSize | `text` | integer | 否 | `10`（安全默认值）" in query_fields
-    assert '"审批中"`（录制参考值，禁止自动作为查询条件）' in query_fields
-    assert '"行程变更"`（录制推荐值，需用户确认）' in write_fields
+    assert "默认值列是运行时生成规则，不包含录制样本" in reference
+    assert "查询可选条件仅在用户明确指定时加入" in query_fields
+    assert "禁止使用录制样本值" in query_fields
+    assert "根据当前用户意图生成可编辑" in write_fields
+    assert '"审批中"`（录制参考值' not in query_fields
+    assert '"行程变更"`（录制推荐值' not in write_fields
 
 
 def test_exported_skill_preserves_the_published_capability_contract(tmp_path):
@@ -595,7 +597,8 @@ def test_exported_skill_forbids_query_filter_defaults_and_nearest_capability_gue
     assert "录制推荐值不得作为查询筛选条件自动提交" in markdown
     assert "没有筛选条件时传空 input" in markdown
     assert "查询能力不得为可选筛选字段主动提问" in markdown
-    assert "录制参考值，禁止自动作为查询条件" in reference
+    assert "查询可选条件仅在用户明确指定时加入" in reference
+    assert "录制参考值，禁止自动作为查询条件" not in reference
     assert "实体目录/候选列表" in markdown
     assert "不得用最相近的能力代替" in markdown
 
@@ -642,15 +645,15 @@ def test_exported_skill_locks_question_ids_defaults_and_enum_candidates_to_schem
     assert "参数名逐字一致" in markdown
     assert "禁止翻译、改名或改成 snake_case" in markdown
     assert "所选能力参考小节是唯一表单来源" in markdown
-    assert "“推荐默认值”列的主值逐字复制为表单 `default`" in markdown
-    assert "括号内录制值只用于溯源" in markdown
+    assert "结合当前用户意图、当前日期和实时候选生成非空表单 `default`" in markdown
+    assert "禁止复制录制样本值" in markdown
     assert "禁止自行生成、替换、增删候选项" in markdown
     assert "枚举默认值必须等于候选的稳定 `id`" in markdown
     assert "禁止回落为候选第一项" in markdown
     assert '`options: [{"id": "1", "label": "标准间"}, {"id": "2", "label": "大床房"}]`' in reference
-    assert '`"1"`（录制推荐值，需用户确认；录制值 `"标准间"`；能力值 `"标准间"`）' in reference
+    assert '`"1"`（录制推荐值' not in reference
     assert '`options: [{"id": "普通", "label": "普通"}, {"id": "舒适", "label": "舒适"}, {"id": "豪华", "label": "豪华"}, {"id": "行政", "label": "行政"}]`' in reference
-    assert '`"豪华"`（录制推荐值，需用户确认）' in reference
+    assert '`"豪华"`（录制推荐值' not in reference
 
 
 def test_options_reference_only_claims_live_lookup_with_grounded_source():
@@ -1145,12 +1148,12 @@ def test_datetime_recommendations_match_question_control_format():
 
     reference = _capability_reference_md(manifest)
     assert "| `开始时间` | 开始时间 | `date` / `yyyy-MM-dd HH:mm`" in reference
-    assert '`"2026-07-01 16:00"`（录制推荐值，需用户确认；录制值 `"2026-07-01 16:00:00"`）' in reference
+    assert '`"2026-07-01 16:00"`（录制推荐值' not in reference
     assert "| `精确时间` | 精确时间 | `text` | datetime" in reference
-    assert '`"2026-07-01 16:00:30"`（录制推荐值，需用户确认）' in reference
+    assert '`"2026-07-01 16:00:30"`（录制推荐值' not in reference
     assert '"inputType": "date"' in reference
     assert '"dateFormat": "yyyy-MM-dd HH:mm"' in reference
-    assert '"default": "2026-07-01 16:00"' in reference
+    assert '"default": "<调用前必须替换为基于当前用户意图的“开始时间”非空推荐值' in reference
 
 
 def test_generated_runtime_converts_form_values_without_changing_contract(tmp_path):
@@ -1220,8 +1223,9 @@ def test_generated_runtime_converts_form_values_without_changing_contract(tmp_pa
     assert '"inputType": "select"' in reference
     assert '"id": "room-1"' in reference
     assert '"label": "标准间"' in reference
-    assert '"default": "room-1"' in reference
-    assert '"default": "[{\\"date\\":\\"2026-07-01\\"}]"' in reference
+    assert '"default": "room-1"' not in reference
+    assert '"default": "[{\\"date\\":\\"2026-07-01\\"}]"' not in reference
+    assert "禁止使用录制样本" in reference
 
 
 def test_windows_wrapper_preserves_json_and_formatter_accepts_bom(tmp_path):

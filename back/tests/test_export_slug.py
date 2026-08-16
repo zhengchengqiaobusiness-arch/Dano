@@ -286,6 +286,11 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     folder = _write_skill(tmp_path / "out", manifest, reference_docs=references)
 
     assert not (folder / "references" / "platform").exists()
+    assert (folder / "references" / "generator-guides" / "contract.md").is_file()
+    assert (folder / "references" / "generator-guides" / "nested" / "rules.MD").is_file()
+    assert "references/generator-guides/INDEX.md" in (
+        folder / "SKILL.md"
+    ).read_text(encoding="utf-8")
     skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
     assert "ask_user_question" in skill_md
     assert "多个表单" in skill_md
@@ -306,6 +311,8 @@ def test_export_uses_every_configured_markdown_as_generation_reference(tmp_path,
     bundle = _write_business_skill(
         tmp_path / "out", "A-OA", "reference", [manifest], reference_docs=references)
     assert not (bundle / "references" / "platform").exists()
+    assert (bundle / "references" / "generator-guides" / "contract.md").is_file()
+    assert (bundle / "references" / "generator-guides" / "nested" / "rules.MD").is_file()
     assert "ask_user_question" in (bundle / "SKILL.md").read_text(encoding="utf-8")
 
 def test_reference_validation_accepts_structured_validation_failure_contract(tmp_path):

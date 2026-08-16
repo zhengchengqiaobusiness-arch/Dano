@@ -122,6 +122,43 @@ def _validate_reference_markdown(reference_docs: list[tuple[Path, str]]) -> None
         raise ValueError(f"Skill 参考 Markdown 缺少必要的提问契约（{', '.join(missing)}）: {names}")
 
 
+def _write_generation_guides(
+    folder: Path,
+    reference_docs: list[tuple[Path, str]],
+) -> Path:
+    """Bundle every configured Markdown guide into one self-contained Skill.
+
+    The exporter already read and validated the configured guide set, but older
+    packages discarded it afterwards.  Copying the exact set makes the runtime
+    Skill follow the same contract that was used during generation and avoids a
+    hidden dependency on the source checkout.
+    """
+    root = folder / "references" / "generator-guides"
+    root.mkdir(parents=True, exist_ok=True)
+    entries: list[str] = []
+    for relative, content in reference_docs:
+        normalized = Path(relative.as_posix())
+        if normalized.is_absolute() or ".." in normalized.parts:
+            raise ValueError(f"Skill 参考 Markdown 路径非法: {relative}")
+        if normalized.as_posix().casefold() == "index.md":
+            raise ValueError("Skill 参考 Markdown 不得占用 generator-guides/INDEX.md")
+        target = root / normalized
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+        entries.append(normalized.as_posix())
+    index = [
+        "# Skill generation guides",
+        "",
+        "执行本 Skill 前，必须完整阅读并同时遵守下列全部规范；不得只选择其中一份，也不得以录制样例覆盖规范：",
+        "",
+        *(f"- [{name}]({name})" for name in entries),
+        "",
+    ]
+    index_path = root / "INDEX.md"
+    index_path.write_text("\n".join(index), encoding="utf-8", newline="\n")
+    return index_path
+
+
 def _stage_folder(out_dir: Path, slug: str) -> Path:
     """Build a complete export beside its target so failed writes never corrupt it."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +315,11 @@ def _validate_generated_skill(folder: Path, expected_name: str) -> None:
         raise ValueError("Skill 缺少 agents/openai.yaml")
     if "references/CAPABILITIES.md" in text and not (folder / "references" / "CAPABILITIES.md").is_file():
         raise ValueError("Skill 缺少 references/CAPABILITIES.md")
+    guide_index = folder / "references" / "generator-guides" / "INDEX.md"
+    if not guide_index.is_file():
+        raise ValueError("Skill 缺少 references/generator-guides/INDEX.md")
+    if "references/generator-guides/INDEX.md" not in text:
+        raise ValueError("SKILL.md 未引用项目内 Skill 生成规范")
 
 
 def _fields(m: SkillManifest) -> tuple[list[str], set[str], dict]:
@@ -965,28 +1007,6 @@ def _capability_example_input(contract: dict) -> dict:
     }
 
 
-def _schema_default_text(schema: dict) -> str:
-    """Keep recorded samples as recommendations while marking silent-safe defaults."""
-    schema = schema or {}
-    if schema.get("x-dano-require-current-value") is True:
-        return "必须来自当前查询或用户选择；禁止复用录制标识"
-    if "default" not in schema or schema.get("default") in (None, ""):
-        return "运行时按用户上下文给出非空推荐值"
-    label = "安全默认值" if schema.get("x-dano-apply-default") is True else "录制推荐值，需用户确认"
-    return f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`（{label}）"
-
-
-def _query_default_text(schema: dict) -> str:
-    if schema.get("x-dano-apply-default") is True:
-        return _schema_default_text(schema)
-    if "default" not in schema or schema.get("default") in (None, ""):
-        return "无；仅在用户明确指定该筛选条件时传入"
-    return (
-        f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`"
-        "（录制参考值，禁止自动作为查询条件）"
-    )
-
-
 def _capability_contract_section(m: SkillManifest) -> str:
     lines = [
         "## 能力小结",
@@ -1035,27 +1055,29 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "多个表单也必须先一次性汇总，不得在普通文本中提问，"
         "不得按表单、字段或分区拆成多轮追问。",
         "   每个问题必须使用所选能力参考小节给出的参数名作为 `id`、业务标签作为 `question`，并设置对应的 "
-        "`inputType`、`required`、非空推荐 `default` 及 `options`/`dataSource`。录制默认值只作推荐，"
-        "除非契约标记 `x-dano-apply-default: true`，否则必须等待用户回答。",
+        "`inputType`、`required`、非空推荐 `default` 及 `options`/`dataSource`。`default` 必须在调用前"
+        "根据当前用户意图生成；录制样本不得作为显示默认值。",
         "   字段标记 `x-dano-derived-from-query: true` 时，不得让用户猜测或自由填写标识："
         "必须先按 `x-dano-source-capability` 查询并定位用户所指的同一条记录，再把"
         "`x-dano-source-output` 的原值保存在内部调用参数中；该字段不得进入 `questions[]`，"
         "不得展示成需要用户确认或编辑的表单项，也不得使用同一记录的其他 `id`、单据号或录制样本。",
         "   所选能力参考小节是唯一表单来源，`questions[].id` 必须与参数名逐字一致，禁止翻译、改名或改成 snake_case。"
-        "用户值优先；否则把能力参考小节“推荐默认值”列的主值逐字复制为表单 `default`；"
-        "括号内录制值只用于溯源。候选项必须逐字来自能力参考小节或 `--list-options`，"
+        "用户值优先；否则必须结合当前用户意图、当前日期和实时候选生成非空表单 `default`；"
+        "禁止复制录制样本值。候选项必须逐字来自能力参考小节或 `--list-options`，"
         "禁止自行生成、替换、增删候选项；枚举默认值必须等于候选的稳定 `id`，禁止回落为候选第一项。"
         "只有业务上确实必填的字段设置 `required: true`；"
         "工具校验失败时修正参数后静默重试，不在普通文本中模拟提问。",
         "   每次回复最多调用一次表单工具；多题按 `questions[].id` 映射答案，只有只收集一个非确认字段时"
-        "才可使用顶层 `question`。录制样例必须保留为推荐值，但推荐默认值只用于 "
-        "`ask_user_question` 展示，不得静默执行。",
+        "才可使用顶层 `question`。运行时推荐默认值只用于 `ask_user_question` 展示，"
+        "不得把生成规则占位符原样传给工具或业务接口。",
     ]
     lines += [
         "4. `ask_user_question` 返回 `status=answered` 后，保存 `formId`，并按 `answer` 对象的 `id` "
         "映射回所选 capability 参数；name-ref 选择项按稳定 id 找回同一候选的 label 后提交，"
         "日期按 `dateFormat` 转换，数值转 JSON 数字，"
-        "数组/复合字段按 input_schema 组装。返回 `cancelled`（用户取消）时立即停止。",
+        "数组/复合字段按 input_schema 组装。能够无歧义转换时自动转换；无法转换或语义不合法时，"
+        "只对错误字段原生调用一次单字段纠错表单，不得重问其他有效字段。"
+        "返回 `cancelled`（用户取消）时立即停止。",
         (
             "5. 校验必填字段、类型和候选值。单条写操作按本次表单确认；"
             "批量写操作把完整记录集合放在同一表单中，整批只调用一次 "
@@ -1180,6 +1202,7 @@ def _question_control(schema: dict, field: str = "") -> str:
         or schema.get("x-options-snapshot")
         or schema.get("x-enum-options")
         or schema.get("x-options-source")
+        or schema.get("x-dano-option-source")
     )
     if selectable:
         return "treeSelect" if schema.get("x-dano-tree") or schema.get("childrenField") else "select"
@@ -1250,7 +1273,7 @@ def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
     options = _question_options(schema)
     if options:
         return f"`options: {json.dumps(options, ensure_ascii=False)}`"
-    if schema.get("x-options-source"):
+    if schema.get("x-options-source") or schema.get("x-dano-option-source"):
         return (
             f"先运行 `--list-options {field}`；把返回的 `options` 对象数组原样用于表单，"
             "用户选择后按所选 `id` 找回 `label`，name-ref 参数提交 `label`"
@@ -1261,7 +1284,13 @@ def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
 def _question_data_source(schema: dict) -> dict | None:
     """Return only a complete ask_user_question remote-option contract."""
     schema = schema or {}
-    source = schema.get("x-options-source-meta") if isinstance(schema.get("x-options-source-meta"), dict) else {}
+    source = (
+        schema.get("x-dano-option-source")
+        if isinstance(schema.get("x-dano-option-source"), dict)
+        else schema.get("x-options-source-meta")
+        if isinstance(schema.get("x-options-source-meta"), dict)
+        else {}
+    )
     endpoint = str(
         source.get("endpoint") or source.get("source_url") or source.get("url") or ""
     ).strip()
@@ -1269,7 +1298,7 @@ def _question_data_source(schema: dict) -> dict | None:
     value_key = source.get("value_key") or source.get("idField")
     label_key = source.get("label_key") or source.get("labelField")
     if (
-        schema.get("x-options-source")
+        (schema.get("x-options-source") or schema.get("x-dano-option-source"))
         and endpoint
         and result_path
         and value_key
@@ -1279,7 +1308,7 @@ def _question_data_source(schema: dict) -> dict | None:
         method = str(source.get("method") or source.get("source_method") or "GET").upper()
         if method in {"GET", "POST"}:
             data_source["method"] = method
-        params = dict(source.get("params") or {})
+        params = dict(source.get("params") or source.get("source_params") or source.get("source_body") or {})
         category_key = str(source.get("category_key") or "").strip()
         if category_key and source.get("category_value") not in (None, ""):
             params[category_key] = source.get("category_value")
@@ -1291,12 +1320,18 @@ def _question_data_source(schema: dict) -> dict | None:
         ):
             if source.get(source_key):
                 data_source[target_key] = source[source_key]
+        for source_key, target_key in (
+            ("resultPath", "resultPath"), ("idField", "idField"),
+            ("labelField", "labelField"), ("childrenField", "childrenField"),
+        ):
+            if source.get(source_key):
+                data_source[target_key] = source[source_key]
         return data_source
     return None
 
 
 def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
-    """Render a form-valid recommendation without changing the capability contract."""
+    """Describe a runtime recommendation without leaking a recorded sample."""
     if schema.get("x-dano-derived-from-query") is True:
         source = ".".join(filter(None, (
             str(schema.get("x-dano-source-capability") or ""),
@@ -1307,89 +1342,32 @@ def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
             "禁止使用录制样本或其他 ID"
         )
     if schema.get("x-dano-require-current-value") is True:
-        return _schema_default_text(schema)
-    if "default" not in schema or schema.get("default") in (None, ""):
-        return _query_default_text(schema) if query else _schema_default_text(schema)
-    recorded = schema.get("default")
-    form_value = recorded
-    note = ""
-    options: list[dict] = []
-    if control == "radio" and isinstance(recorded, bool):
-        form_value = "true" if recorded else "false"
-        note = "；提交前转换为 JSON 布尔值"
+        return "调用前读取当前记录原值；禁止复制录制样本或猜值"
+    label = str(schema.get("title") or schema.get("label") or schema.get("description") or "该字段")
+    if control in {"select", "treeSelect", "radio", "checkbox"}:
+        rule = f"按当前用户语义从实时候选中选择“{label}”的稳定 id"
+    elif control == "date":
+        rule = f"根据当前用户意图和当前时间生成“{label}”，并符合 dateFormat"
     elif schema.get("type") in {"array", "object"}:
-        form_value = json.dumps(recorded, ensure_ascii=False, separators=(",", ":"))
-        note = f"；提交前解析为 JSON {schema.get('type')}"
+        rule = f"根据当前用户意图生成满足 schema 的 JSON {schema.get('type')}"
+    elif schema.get("type") in {"number", "integer"}:
+        rule = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
     else:
-        options = _question_options(schema)
-    if options:
-        match = next(
-            (
-                option
-                for option in options
-                if recorded == option.get("id") or str(recorded) == str(option.get("label"))
-            ),
-            None,
-        )
-        if match is not None:
-            form_value = match["id"]
-            if form_value != recorded:
-                note = f"；能力值 `{json.dumps(recorded, ensure_ascii=False)}`"
-    if (
-        control == "date"
-        and schema.get("format") == "date-time"
-        and isinstance(recorded, str)
-        and re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:00", recorded)
-    ):
-        form_value = recorded[:-3]
-    if form_value == recorded:
-        return _query_default_text(schema) if query else _schema_default_text(schema)
-    if query:
-        return (
-            f"`{json.dumps(form_value, ensure_ascii=False)}`"
-            f"（表单推荐值；录制值 `{json.dumps(recorded, ensure_ascii=False)}`，"
-            f"禁止自动作为查询条件{note}）"
-        )
-    safe = "安全默认值" if schema.get("x-dano-apply-default") is True else "录制推荐值，需用户确认"
-    return (
-        f"`{json.dumps(form_value, ensure_ascii=False)}`"
-        f"（{safe}；录制值 `{json.dumps(recorded, ensure_ascii=False)}`{note}）"
-    )
+        rule = f"根据当前用户意图生成可编辑的“{label}”推荐值"
+    suffix = "；查询可选条件仅在用户明确指定时加入" if query else ""
+    return f"调用前动态生成：{rule}{suffix}；禁止使用录制样本值"
 
 
-def _question_form_default(schema: dict, control: str):  # noqa: ANN001
-    """Convert a recorded value to the exact value accepted by the form control."""
+def _question_form_default(field: str, schema: dict, control: str):  # noqa: ANN001
+    """Emit a runtime-only placeholder, never a recorded business value."""
     if schema.get("x-dano-derived-from-query") is True:
         source = ".".join(filter(None, (
             str(schema.get("x-dano-source-capability") or ""),
             str(schema.get("x-dano-source-output") or ""),
         )))
         return f"<调用前替换为 {source} 中用户所选记录的原值>"
-    if "default" not in schema or schema.get("default") in (None, ""):
-        return "<调用前替换为基于用户上下文的非空推荐值>"
-    recorded = schema.get("default")
-    if control == "radio" and isinstance(recorded, bool):
-        return "true" if recorded else "false"
-    if schema.get("type") in {"array", "object"} and control == "textarea":
-        return json.dumps(recorded, ensure_ascii=False, separators=(",", ":"))
-    options = _question_options(schema)
-    match = next(
-        (
-            option for option in options
-            if recorded == option.get("id") or str(recorded) == str(option.get("label"))
-        ),
-        None,
-    )
-    if match is not None:
-        return match["id"]
-    if (
-        control == "date"
-        and schema.get("format") == "date-time"
-        and isinstance(recorded, str)
-        and re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:00", recorded)
-    ):
-        return recorded[:-3]
-    return recorded
+    label = str(schema.get("title") or schema.get("label") or schema.get("description") or field)
+    return f"<调用前必须替换为基于当前用户意图的“{label}”非空推荐值；禁止使用录制样本>"
 
 
 def _question_request_template(name: str, contract: dict) -> dict:
@@ -1415,7 +1393,7 @@ def _question_request_template(name: str, contract: dict) -> dict:
             ),
             "inputType": control,
             "required": field in required,
-            "default": _question_form_default(prop, control),
+            "default": _question_form_default(str(field), prop, control),
         }
         data_source = _question_data_source(prop)
         options = _question_options(prop)
@@ -1423,7 +1401,7 @@ def _question_request_template(name: str, contract: dict) -> dict:
             question["dataSource"] = data_source
         elif options:
             question["options"] = options
-        elif prop.get("x-options-source"):
+        elif prop.get("x-options-source") or prop.get("x-dano-option-source"):
             question["options"] = [{
                 "id": "<调用前替换为 --list-options 返回的稳定 id>",
                 "label": "<调用前替换为同一候选的 label>",
@@ -1542,8 +1520,8 @@ def _capability_reference_md(m: SkillManifest) -> str:
     lines = [
         "# 能力参数参考",
         "",
-        "只读取当前选中能力的小节。字段名、类型、必填性和默认值均来自已发布能力契约；"
-        "本文件只把它们整理成可执行表单视图。",
+        "只读取当前选中能力的小节。字段名、类型、必填性和候选来自已发布能力契约；"
+        "默认值列是运行时生成规则，不包含录制样本。本文件只把能力整理成可执行表单视图。",
         "",
         "选择控件返回 option `id`；不得丢弃 id 或按 label 合并不同记录。"
         "若能力字段格式为 `name-ref`，按所选 id 找回同一候选的 label 后提交 label。",
@@ -1693,14 +1671,14 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
             "`dataSource`、`multiple`、`dateFormat`。"
         ),
         "   所选能力参考小节是唯一表单来源，`questions[].id` 必须与参数名逐字一致，禁止翻译、改名或改成 "
-        "snake_case。用户值优先；否则把能力参考小节“推荐默认值”列的主值逐字复制为表单 `default`；"
-        "括号内录制值只用于溯源。候选项必须逐字来自字段配置或 "
+        "snake_case。用户值优先；否则必须结合当前用户意图、当前日期和实时候选生成非空表单 `default`；"
+        "禁止复制录制样本值。候选项必须逐字来自字段配置或 "
         "`--list-options`，禁止自行生成、替换、增删候选项；枚举默认值必须等于候选的稳定 `id`，"
         "禁止回落为候选第一项。只有业务上确实必填的字段设置 `required: true`；"
         "工具校验失败时修正参数后静默重试。",
         "   每次回复最多调用一次表单工具；多题按 `questions[].id` 映射答案，只有只收集一个非确认字段时"
-        "才可使用顶层 `question`。录制样例必须保留为推荐值，但推荐默认值只用于 "
-        "`ask_user_question` 展示，不得静默执行。",
+        "才可使用顶层 `question`。运行时推荐默认值只用于 `ask_user_question` 展示，"
+        "不得把生成规则占位符原样传给工具或业务接口。",
     ]
     if contract.get("kind") in _READ_CAPABILITY_KINDS:
         L += [
@@ -1712,7 +1690,9 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         "4. `ask_user_question` 返回 `status=answered` 后，保存 `formId`，按 `answer` 对象的 `id` "
         "映射为能力参数；name-ref 选择项按稳定 id 找回同一候选的 label 后提交，日期按 `dateFormat` "
         "转换，数值转 JSON 数字，数组/复合字段按 "
-        "`input_schema` 组装并再次校验。返回 `cancelled`（用户取消）时立即停止。",
+        "`input_schema` 组装并再次校验。能够无歧义转换时自动转换；无法转换或语义不合法时，"
+        "只对错误字段原生调用一次单字段纠错表单，不得重问其他有效字段。"
+        "返回 `cancelled`（用户取消）时立即停止。",
     ]
     if write:
         L.append(
@@ -1891,6 +1871,7 @@ description: {json.dumps(desc, ensure_ascii=False)}
 {json.dumps(protocol_example, ensure_ascii=False)}
 ```
 
+- 执行或提问前，必须完整阅读 `references/generator-guides/INDEX.md` 列出的全部项目规范。
 - 能力字段和表单控件见 `references/CAPABILITIES.md`；完整机器契约见 `references/CONTRACT.json`；
   选择型字段存在时读取 `references/OPTIONS.md`。
 - 流程句柄、调用者身份与凭证由 Dano 运行期注入，不要向用户索取。
@@ -2924,6 +2905,7 @@ def _write_skill(out_dir: Path, m: SkillManifest,
             _capability_reference_md(m),
             encoding="utf-8",
         )
+        _write_generation_guides(folder, docs)
         opts_md = _options_md(m)
         if opts_md:
             (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
@@ -3042,13 +3024,16 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 ## 操作步骤(SOP)
 1. 根据用户目标从“操作清单”选择一个明确操作和 capability；未列出的动作不要调用相近能力代替。
-2. 读取 `references/CAPABILITIES.md` 对应操作小节。动态选项先用该行脚本执行
+2. 先完整阅读 `references/generator-guides/INDEX.md` 列出的全部项目规范，再读取
+   `references/CAPABILITIES.md` 对应操作小节。动态选项先用该行脚本执行
    `--capability <能力名> --list-options <字段名>`，不得猜候选。
 3. 需要补字段时原生调用一次 `ask_user_question`，用顶层 `title` 和同一 `questions[]`
-   一次性收集本次所需字段；字段 id、控件、默认值和候选必须逐项来自参考小节。用户值优先，
-   否则使用“推荐默认值”列的主值；查询能力不得主动询问或自动提交可选筛选项。
+   一次性收集本次所需字段；字段 id、控件、默认规则和候选必须逐项来自参考小节。用户值优先，
+   否则结合当前用户意图、当前日期和实时候选生成非空 default；禁止使用录制样本值。查询能力不得主动询问或自动提交可选筛选项。
 4. `status=answered` 后按 question id 组装所选 capability 的 input。选项保留稳定 id，
    name-ref 按 id 找回同一候选 label 后提交；日期、数字和 textarea JSON 按字段类型转换。
+   能够无歧义转换时自动转换；无法转换或语义不合法时，只对错误字段原生调用一次单字段纠错表单，
+   不得重问其他有效字段。
    写操作须在同一 Assistant Turn 用
    `ask_user_question({{confirm: true, formIds: [<answered.formId>]}})` 确认，
    仅 `status=confirmed` 后执行；`cancelled` 立即停止。
@@ -3111,6 +3096,7 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
             _business_capability_reference_md(manifests),
             encoding="utf-8",
         )
+        _write_generation_guides(folder, docs)
         entry = (manifests[0].action if manifests else "diagnose")
         (folder / "scripts" / "diagnose.sh").write_text(
             _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")
