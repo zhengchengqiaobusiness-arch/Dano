@@ -266,6 +266,85 @@ def test_flow_fingerprint_ignores_output_schema_property_insertion_order() -> No
     assert flow_spec_fingerprint(first) == flow_spec_fingerprint(second)
 
 
+def test_recording_release_survives_jsonb_object_key_reordering() -> None:
+    """PostgreSQL jsonb object order must not reorder explicit capability inputs."""
+
+    spec = _spec()
+    approval_fields = [
+        flow_module.CapabilityField(
+            field_id=f"input:{name}",
+            scope="input",
+            key=name,
+            path=name,
+            display_name=name,
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_caller=True,
+            required=True,
+        )
+        for name in ("领导审批", "人力审批")
+    ]
+    spec.capabilities = [FlowCapability(
+        capability_id="submit-capability",
+        name="submit_request",
+        title="提交申请",
+        kind="submit",
+        nodes=_call_nodes(["submit"]),
+        inputs=[
+            flow_module.CapabilityField(
+                field_id="input:title",
+                scope="input",
+                key="title",
+                path="title",
+                display_name="标题",
+                source_kind="user_input",
+                category="user_param",
+                exposed_to_caller=True,
+            ),
+            *approval_fields,
+        ],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "领导审批": {
+                    "type": "array",
+                    "x-dano-capability-owned": True,
+                    "x-dano-operator-owned": True,
+                },
+                "人力审批": {
+                    "type": "array",
+                    "x-dano-capability-owned": True,
+                    "x-dano-operator-owned": True,
+                },
+            },
+            "required": ["领导审批", "人力审批"],
+        },
+    )]
+    frozen, release = prepare_flow_release_candidate(spec)
+
+    def jsonb_order(value):  # noqa: ANN001, ANN202 - emulate jsonb object ordering
+        if isinstance(value, dict):
+            return {key: jsonb_order(value[key]) for key in sorted(value)}
+        if isinstance(value, list):
+            return [jsonb_order(item) for item in value]
+        return value
+
+    persisted = jsonb_order(flow_module.flow_spec_release_payload(frozen))
+    draft = SimpleNamespace(body={"api_request": {"_release_snapshot": {
+        **release,
+        "flow_spec": persisted,
+    }}})
+
+    assert _recording_release_snapshot_matches(
+        SimpleNamespace(current_flow_spec=lambda: frozen),
+        draft,
+    ) == (True, "ok")
+    assert [field.key for field in FlowSpec.model_validate(persisted).capabilities[0].inputs] == [
+        "title", "领导审批", "人力审批",
+    ]
+
+
 def test_manual_edit_then_release_reviews_the_exact_persisted_snapshot() -> None:
     spec = _spec()
     spec.capabilities = [flow_module.FlowCapability(

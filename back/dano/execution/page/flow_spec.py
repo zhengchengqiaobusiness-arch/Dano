@@ -4034,8 +4034,19 @@ def _capability_inputs_from_top_level_schema(
         for item in (existing or [])
         if not item.step_id
     }
+    # JSONB preserves arrays but not object-key order. Keep the explicit input
+    # array authoritative so a database round trip cannot change the release.
+    names = list(dict.fromkeys([
+        *(
+            str(item.key or item.path or item.display_name)
+            for item in (existing or [])
+            if str(item.key or item.path or item.display_name) in properties
+        ),
+        *properties,
+    ]))
     out: list[CapabilityField] = []
-    for name, raw in properties.items():
+    for name in names:
+        raw = properties[name]
         field_schema = raw if isinstance(raw, dict) else {}
         previous = old_by_name.get(str(name))
         field = previous.model_copy(deep=True) if previous is not None else CapabilityField(
@@ -4110,6 +4121,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             for item in (cap.computed_fields or [])
             if not item.step_id
         ]
+        previous_inputs = list(cap.inputs or [])
         old_dependencies = list(cap.dependencies or [])
         request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
         for st in step_objs:
@@ -4125,7 +4137,9 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         # 可以独立存在。任何绑定到 step_id 的能力字段都是派生镜像，不能回写或
         # 覆盖 ParamField，即使旧镜像曾被 locked/confirmed。
         if _capability_is_batch(spec, cap):
-            cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema)
+            cap.inputs = _capability_inputs_from_top_level_schema(
+                cap.input_schema, previous_inputs,
+            )
             nested_item_names = set(
                 (((cap.input_schema or {}).get("properties") or {}).get("entries") or {}).get("items", {}).get("properties", {})
             )
@@ -4135,7 +4149,9 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         else:
             cap.inputs = list(inputs.values())
             existing_names = {field.key or field.path for field in cap.inputs}
-            for field in _capability_inputs_from_top_level_schema(cap.input_schema):
+            for field in _capability_inputs_from_top_level_schema(
+                cap.input_schema, previous_inputs,
+            ):
                 raw_schema = ((cap.input_schema or {}).get("properties") or {}).get(field.key or field.path)
                 if (
                     isinstance(raw_schema, dict)
