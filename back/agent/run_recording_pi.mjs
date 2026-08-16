@@ -36,6 +36,12 @@ const RECORDING_ANALYSIS_PHASES = new Set([
   "request_batch",
   "final_request_tail",
 ]);
+const RECORDING_ANALYSIS_TOOL_NAMES = [
+  "get_recording_state",
+  "get_recording_delta",
+  "submit_recording_plan",
+  "ask_operator",
+];
 
 installOpenAIToolCallStreamCompatibility({
   baseUrl: process.env.DANO_PI_BASE_URL,
@@ -332,6 +338,7 @@ async function runPrompt(command) {
   const session = active.session;
   beginRecordingToolTurn({
     maxSubmissionAttempts: SUBMISSION_ATTEMPT_LIMIT,
+    allowedTools: usesRecordingSkill ? RECORDING_ANALYSIS_TOOL_NAMES : undefined,
     onLimitExceeded: (error) => {
       submissionLimitError = String(error?.message || error);
       log(submissionLimitError);

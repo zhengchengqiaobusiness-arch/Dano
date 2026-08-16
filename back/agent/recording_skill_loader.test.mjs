@@ -6,6 +6,11 @@ import test from "node:test";
 
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { AgentSession } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js";
+import {
+  beginRecordingToolTurn,
+  endRecordingToolTurn,
+  guardRecordingToolAccess,
+} from "./recording_tools.mjs";
 
 const AGENT_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const BACK_DIR = path.dirname(AGENT_DIR);
@@ -100,6 +105,27 @@ test("runtime applies one Skill to all and only recording analysis phases", asyn
   assert.match(client, /prompt_mode="recording_analysis"/);
   assert.match(client, /else "request_batch"/);
   assert.doesNotMatch(runtime, /promptMode === "(plan|repair|review)"/);
+});
+
+test("recording analysis turn rejects tools outside its four-tool contract", () => {
+  beginRecordingToolTurn({
+    allowedTools: [
+      "get_recording_state",
+      "get_recording_delta",
+      "submit_recording_plan",
+      "ask_operator",
+    ],
+  });
+  try {
+    assert.doesNotThrow(() => guardRecordingToolAccess("get_recording_state"));
+    assert.doesNotThrow(() => guardRecordingToolAccess("submit_recording_plan"));
+    assert.throws(
+      () => guardRecordingToolAccess("replay_request"),
+      /not available in the current recording analysis phase/,
+    );
+  } finally {
+    endRecordingToolTurn();
+  }
 });
 
 test("recording analysis preserves images and retries the identical wrapped prompt once", async () => {

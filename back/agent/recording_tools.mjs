@@ -16,6 +16,7 @@ export function beginRecordingToolTurn({
   maxSubmissionAttempts = 2,
   onLimitExceeded,
   onSubmissionAccepted,
+  allowedTools,
 } = {}) {
   activeTurnBudget = {
     attempts: 0,
@@ -27,11 +28,19 @@ export function beginRecordingToolTurn({
     freshStateVersion: null,
     freshValidationVersion: null,
     submissionTail: Promise.resolve(),
+    allowedTools: Array.isArray(allowedTools) ? new Set(allowedTools) : null,
   };
 }
 
 export function endRecordingToolTurn() {
   activeTurnBudget = null;
+}
+
+export function guardRecordingToolAccess(name, turn = activeTurnBudget) {
+  if (!turn?.allowedTools || turn.allowedTools.has(name)) return;
+  throw new Error(
+    `recording tool ${name} is not available in the current recording analysis phase`,
+  );
 }
 
 export function guardRecordingToolAttempt(name, turn = activeTurnBudget) {
@@ -173,6 +182,7 @@ function proxyTool({ name, label, description, parameters }) {
     parameters,
     ...(SUBMISSION_TOOLS.has(name) ? { executionMode: "sequential" } : {}),
     execute: async (toolCallId, params) => {
+      guardRecordingToolAccess(name);
       const sanitizedParams = sanitizeRecordingToolParams(name, params);
       if (SUBMISSION_TOOLS.has(name)) {
         requireRecordingSubmissionPrerequisite(name, sanitizedParams);
