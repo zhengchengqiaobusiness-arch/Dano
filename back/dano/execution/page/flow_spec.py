@@ -4600,6 +4600,7 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _canonicalize_materialized_request_identities(spec)
     _enrich_materialized_response_shapes(spec)
     _rebind_saved_field_evidence(spec)
+    _repair_readonly_control_defaults(spec)
     _ground_saved_page_enums(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
@@ -8099,6 +8100,80 @@ def _repair_uncontrolled_write_state_fields(spec: FlowSpec) -> int:
             param.editable = False
             param.need_human_confirm = False
             param.reason = "录制中没有可编辑控件证明该写入状态由用户提供，按请求自身命令状态保留"
+            step.sample_inputs.pop(param.key, None)
+            repaired += 1
+    return repaired
+
+
+def _repair_readonly_control_defaults(spec: FlowSpec) -> int:
+    """Bind an aliasless locked control only to one stable write-wire field.
+
+    A disabled value can legitimately appear in several save/submit requests.
+    Requiring one request would misclassify it as caller input, while matching
+    by value alone could bind unrelated fields.  Accept it only when every
+    scoped occurrence of that scalar has the same canonical wire path.
+    """
+    repaired = 0
+
+    def same_scalar(left: Any, right: Any) -> bool:
+        if isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
+            return False
+        return str(left).strip().casefold() == str(right).strip().casefold()
+
+    evidence_items = [
+        item for item in (getattr(spec.request_facts, "field_evidence", []) or [])
+        if isinstance(item, dict)
+        and item.get("value") not in (None, "")
+        and item.get("editable") is False
+        and (
+            item.get("disabled") is True
+            or (
+                item.get("read_only") is True
+                and str(item.get("control_kind") or "").lower()
+                not in {"select", "combobox"}
+            )
+        )
+    ]
+    for evidence in evidence_items:
+        candidates: list[tuple[FlowStep, ParamField, str]] = []
+        for step in spec.steps or []:
+            if not _is_write_step(step) or not _recording_evidence_matches_scope(
+                step.source_meta or {}, evidence,
+            ):
+                continue
+            for param in step.params or []:
+                if not same_scalar(param.value, evidence.get("value")):
+                    continue
+                candidates.append((
+                    step,
+                    param,
+                    _strip_body_prefix(str(param.path or param.key or "")),
+                ))
+        wire_paths = {path for _step, _param, path in candidates if path}
+        if len(wire_paths) != 1 or not candidates:
+            continue
+        wire_path = next(iter(wire_paths))
+        for step, param, _path in candidates:
+            if (
+                param.locked
+                or _param_has_manual_contract(param)
+                or _param_source_agent_classified(param)
+                or _param_has_editable_control_evidence(param)
+            ):
+                continue
+            param.category = "system_const"
+            param.source_kind = "constant"
+            param.source = {
+                "kind": "recorded_control_default",
+                "path": param.path,
+                "wire_path": wire_path,
+                "evidence_id": str(evidence.get("evidence_id") or ""),
+            }
+            param.exposed_to_user = False
+            param.editable = False
+            param.required = False
+            param.need_human_confirm = False
+            param.reason = "页面证据证明该控件不可编辑；录制请求在同一 wire 字段使用其默认值"
             step.sample_inputs.pop(param.key, None)
             repaired += 1
     return repaired
@@ -17551,6 +17626,7 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     _repair_structural_option_bindings(current)
     _refresh_api_option_display_labels(current)
     _infer_computed_runtime_fields(current)
+    _repair_readonly_control_defaults(current)
     _repair_uncontrolled_write_state_fields(current)
     _materialize_captured_response_key_maps(
         current.steps,

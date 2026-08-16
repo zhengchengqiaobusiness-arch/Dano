@@ -518,6 +518,119 @@ def test_publish_rebinds_persisted_unresolved_dom_evidence_to_existing_step() ->
     assert reason.source["required_state"] == "required"
 
 
+def test_disabled_control_default_applies_to_the_same_wire_field_across_writes() -> None:
+    scope = {
+        "page_id": "page-1",
+        "frame_id": "main",
+        "trigger_page_context": {"path": "/records/create"},
+    }
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="draft", method="POST", path="/records/create",
+                body_source='{"quota":5.5,"reason":"draft"}',
+                params=[
+                    ParamField(
+                        path="quota", key="quota", value=5.5,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="reason", key="reason", value="draft",
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+                source_meta={"request_id": "req-draft", **scope},
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/records/submit",
+                body_source='{"quota":5.5,"reason":"submit"}',
+                params=[
+                    ParamField(
+                        path="quota", key="quota", value=5.5,
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="reason", key="reason", value="submit",
+                        category="user_param", source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+                source_meta={"request_id": "req-submit", **scope},
+            ),
+        ],
+        request_facts=RequestFacts(field_evidence=[{
+            "field": "可用额度",
+            "label": "可用额度",
+            "value": "5.5",
+            "control_kind": "number",
+            "disabled": True,
+            "editable": False,
+            "page_id": "page-1",
+            "frame_id": "main",
+            "page_context": {"path": "/records/create"},
+            "binding_status": "unbound",
+        }]),
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    quotas = [
+        param for step in prepared.steps for param in step.params
+        if param.path == "quota"
+    ]
+
+    assert len(quotas) == 2
+    assert all(param.source_kind == "constant" for param in quotas)
+    assert all(param.source["kind"] == "recorded_control_default" for param in quotas)
+    assert all(param.exposed_to_user is False for param in quotas)
+
+
+def test_disabled_control_value_does_not_bind_when_wire_fields_disagree() -> None:
+    scope = {
+        "page_id": "page-1",
+        "frame_id": "main",
+        "trigger_page_context": {"path": "/records/create"},
+    }
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/records/submit",
+            body_source='{"quota":5.5,"rate":5.5}',
+            params=[
+                ParamField(
+                    path="quota", key="quota", value=5.5,
+                    category="user_param", source_kind="user_input",
+                    exposed_to_user=True,
+                ),
+                ParamField(
+                    path="rate", key="rate", value=5.5,
+                    category="user_param", source_kind="user_input",
+                    exposed_to_user=True,
+                ),
+            ],
+            source_meta={"request_id": "req-submit", **scope},
+        )],
+        request_facts=RequestFacts(field_evidence=[{
+            "field": "可用额度",
+            "label": "可用额度",
+            "value": "5.5",
+            "control_kind": "number",
+            "disabled": True,
+            "editable": False,
+            "page_id": "page-1",
+            "frame_id": "main",
+            "page_context": {"path": "/records/create"},
+            "binding_status": "unbound",
+        }]),
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+
+    assert all(param.source_kind == "user_input" for param in prepared.steps[0].params)
+    assert all(param.exposed_to_user is True for param in prepared.steps[0].params)
+
+
 def test_publish_repairs_a_persisted_value_binding_to_background_paging() -> None:
     spec = FlowSpec(
         steps=[
