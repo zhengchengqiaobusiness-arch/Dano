@@ -2445,6 +2445,88 @@ def test_goal_boundary_recovers_recorded_capability_missing_from_stale_live_plan
     )
 
 
+def test_numbered_recording_goal_rebuilds_all_final_request_boundaries():
+    goal_text = (
+        "目的：管理记录\n"
+        "预期产出能力数量：4\n"
+        "1\t查询记录\t按条件查询记录\n"
+        "2\t保存记录草稿\t新建并保存草稿\n"
+        "3\t撤回记录\t撤回正在处理的记录\n"
+        "4\t删除记录\t删除允许删除的记录"
+    )
+    live = FlowSpec(
+        meta={
+            "recording_goal_text": goal_text,
+            "capability_model": {
+                "status": "ready",
+                "semantic_plan": {
+                    "business_understanding": {"business_name": "记录"},
+                    "capabilities": [{
+                        "name": "query_status",
+                        "title": "query_status",
+                        "intent": "query_status",
+                        "kind": "query_status",
+                        "anchor_step_id": "req-query",
+                        "request_refs": [{
+                            "step_id": "req-query",
+                            "usage": "execute",
+                        }],
+                    }],
+                    "unresolved_items": [],
+                },
+            },
+        },
+    )
+    finalized = FlowSpec(
+        title="记录",
+        goal={"capabilities": ["query_status"]},
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={
+                    "request_id": "req-query", "role": "business_get",
+                    "trigger_op": "click", "trigger_locator": "text=查询",
+                    "trigger_transaction_id": "txn-query",
+                },
+            ),
+            FlowStep(
+                step_id="draft-step", method="POST", path="/records/create",
+                source_meta={
+                    "request_id": "req-draft", "role": "business_write",
+                    "trigger_op": "submit", "trigger_locator": "text=保存草稿",
+                    "trigger_transaction_id": "txn-draft",
+                },
+            ),
+            FlowStep(
+                step_id="withdraw-step", method="DELETE", path="/records/withdraw",
+                source_meta={
+                    "request_id": "req-withdraw", "role": "business_write",
+                    "trigger_op": "click", "trigger_locator": "text=撤回",
+                    "trigger_transaction_id": "txn-withdraw",
+                },
+            ),
+            FlowStep(
+                step_id="delete-step", method="DELETE", path="/records/delete",
+                source_meta={
+                    "request_id": "req-delete", "role": "business_write",
+                    "trigger_op": "click", "trigger_locator": "text=删除",
+                    "trigger_transaction_id": "txn-delete",
+                },
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == [
+        "查询记录", "保存记录草稿", "撤回记录", "删除记录",
+    ]
+    assert [capability.kind for capability in merged.capabilities] == [
+        "query_status", "save_draft", "withdraw", "delete",
+    ]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+
+
 def test_goal_kind_without_a_unique_anchor_is_not_bound_to_the_first_request():
     live = FlowSpec(
         flow_id="goal-no-matching-anchor",

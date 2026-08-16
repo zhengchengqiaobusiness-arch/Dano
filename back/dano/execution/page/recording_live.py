@@ -2699,7 +2699,9 @@ _GOAL_CAPABILITY_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _GOAL_CAPABILITY_LINE_RE = re.compile(
-    r"^\s*(?:能力|capability)\s*(\d+)\s*[:：-]\s*(.+?)\s*$",
+    r"^[ \t]*(?:(?:能力|capability)[ \t]*)?(\d+)"
+    r"(?:[ \t]*[:：.．、)）-][ \t]*|[ \t]+)"
+    r"([^\t\r\n]+?)[ \t]*(?:\t+.*)?$",
     re.IGNORECASE | re.MULTILINE,
 )
 
