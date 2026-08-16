@@ -2822,3 +2822,72 @@ def test_field_contract_axes_generalize_to_nested_unrelated_system():
         "quotaLeft": "quota.left", "groupKey": "group.key", "ownerId": "owner.userId",
     }
     assert "amount" not in binding.field_projections
+
+
+def test_exact_response_keys_materialize_a_dynamic_write_dependency() -> None:
+    captured = [
+        {
+            "request_id": "req-approval",
+            "sequence": 1,
+            "method": "GET",
+            "url": "https://example.test/approval-detail",
+            "response_json": {"data": {"activityNodes": [
+                {"id": "Start", "name": "发起人"},
+                {"id": "Node_leader", "name": "领导审批"},
+                {"id": "Node_hr", "name": "人事审批"},
+            ]}},
+        },
+        {
+            "request_id": "req-submit",
+            "sequence": 2,
+            "method": "POST",
+            "url": "https://example.test/applications/submit-process",
+            "post_data": json.dumps({
+                "reason": "出差",
+                "startUserSelectAssignees": {
+                    "Node_leader": [170],
+                    "Node_hr": [165],
+                },
+            }),
+            "content_type": "application/json",
+            "response_json": {"code": 0},
+        },
+    ]
+
+    spec = to_flow_spec(captured_requests=captured, samples={"reason": "出差"})
+
+    approval = next(step for step in spec.steps if "approval-detail" in step.path)
+    submit = next(step for step in spec.steps if "submit-process" in step.path)
+    link = next(item for item in spec.links if item.kind == "response_key_map")
+    assert (link.source_step_id, link.target_step_id) == (approval.step_id, submit.step_id)
+    assert link.source_collection_path == "data.activityNodes"
+    assert link.source_key_path == "id"
+    assert link.source_label_path == "name"
+    assert link.target_container_path == "startUserSelectAssignees"
+    assert link.meta["captured_structure_match"] is True
+
+    public = next(
+        param for param in submit.params
+        if param.path == "startUserSelectAssignees"
+    )
+    assert public.source["kind"] == "dynamic_structure_input"
+    assert public.value == {"领导审批": [170], "人事审批": [165]}
+    assert all(
+        not param.exposed_to_user
+        for param in submit.params
+        if param.path.startswith("startUserSelectAssignees.")
+    )
+
+    from dano.execution.page.capability_compiler import compile_capabilities
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "submit_application",
+        "title": "提交申请",
+        "kind": "submit",
+        "anchor_step_id": submit.step_id,
+    }]}).spec
+    capability = next(cap for cap in compiled.capabilities if cap.name == "submit_application")
+    assert capability.step_ids == [approval.step_id, submit.step_id]
+    assert {field.key for field in capability.inputs} == {
+        "reason", "startUserSelectAssignees",
+    }

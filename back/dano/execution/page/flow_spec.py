@@ -7477,6 +7477,9 @@ def to_flow_spec(
                 ))
         except Exception:
             link_objs = []
+    _materialize_captured_response_key_maps(
+        step_objs, link_objs, captured_requests,
+    )
     _sync_link_sources(step_objs, link_objs)
 
     # 6) 流程整体风险
@@ -7556,6 +7559,206 @@ def to_flow_spec(
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
+
+
+def _materialize_captured_response_key_maps(
+    steps: list[FlowStep],
+    links: list[FlowLink],
+    captured_requests: list[dict[str, Any]],
+) -> None:
+    """Turn exact response-row/request-key matches into executable contracts."""
+    by_request_id = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    for candidate in discover_response_key_maps(captured_requests):
+        source_request_id = str(candidate.get("source_request_id") or "")
+        target_request_id = str(candidate.get("target_request_id") or "")
+        source = by_request_id.get(source_request_id)
+        target = by_request_id.get(target_request_id)
+        if source is None or target is None:
+            continue
+        source_collection_path = str(candidate.get("source_collection_path") or "")
+        source_key_path = str(candidate.get("source_key_path") or "")
+        source_label_path = str(candidate.get("source_label_path") or "")
+        target_container_path = _strip_body_prefix(
+            str(candidate.get("target_container_path") or "")
+        )
+        collection = _flow_path_lookup(source.response_json, source_collection_path)
+        try:
+            recorded_body = (
+                json.loads(target.body_source)
+                if isinstance(target.body_source, str)
+                else copy.deepcopy(target.body_source)
+            )
+        except (TypeError, ValueError):
+            continue
+        recorded_container = _flow_path_lookup(recorded_body, target_container_path)
+        if not (
+            isinstance(collection, list)
+            and collection
+            and all(isinstance(row, dict) for row in collection)
+            and isinstance(recorded_container, dict)
+            and recorded_container
+        ):
+            continue
+        valid_rows = [
+            row for row in collection
+            if row.get(source_key_path) not in (None, "")
+            and row.get(source_label_path) not in (None, "")
+        ]
+        rows_by_key = {
+            str(row.get(source_key_path)): row
+            for row in valid_rows
+        }
+        recorded_keys = [str(key) for key in recorded_container]
+        if (
+            len(rows_by_key) != len(valid_rows)
+            or any(key not in rows_by_key for key in recorded_keys)
+        ):
+            continue
+        matched_labels = [
+            str(rows_by_key[key][source_label_path]) for key in recorded_keys
+        ]
+        if len(set(matched_labels)) != len(matched_labels):
+            continue
+        recorded_values = list(recorded_container.values())
+        if all(isinstance(value, list) for value in recorded_values):
+            value_shape = "item_list"
+        elif all(not isinstance(value, (dict, list)) for value in recorded_values):
+            value_shape = "direct"
+        else:
+            continue
+
+        input_field = target_container_path.rsplit(".", 1)[-1]
+        dynamic_prefix = target_container_path + "."
+        dynamic_paths = {
+            str(param.path or "")
+            for param in target.params
+            if _strip_body_prefix(str(param.path or "")).startswith(dynamic_prefix)
+        }
+        if not dynamic_paths:
+            continue
+        option_bindings = [
+            binding for binding in target.selects
+            if str(binding.path or binding.id_path or "") in dynamic_paths
+        ]
+        option_sources = {
+            (
+                str(binding.source_request_id or ""),
+                str(binding.value_key or ""),
+                str(binding.label_key or ""),
+            )
+            for binding in option_bindings
+            if binding.source_request_id and binding.value_key and binding.label_key
+        }
+        option_source = None
+        if len(option_sources) == 1:
+            request_id, value_path, label_path = next(iter(option_sources))
+            option_source = {
+                "request_id": request_id,
+                "value_path": value_path,
+                "label_path": label_path,
+            }
+
+        public_sample = dict(zip(matched_labels, recorded_values, strict=True))
+        for param in target.params:
+            if str(param.path or "") not in dynamic_paths:
+                continue
+            param.category = "runtime_var"
+            param.source_kind = "dynamic_structure"
+            param.source = {"kind": "dynamic_structure_leaf", "actor": "heuristic"}
+            param.exposed_to_user = False
+            param.editable = False
+            param.required = False
+            param.need_human_confirm = False
+            target.sample_inputs.pop(str(param.key or param.path), None)
+        target.selects = [
+            binding for binding in target.selects
+            if str(binding.path or binding.id_path or "") not in dynamic_paths
+        ]
+        public = next((
+            param for param in target.params
+            if _strip_body_prefix(str(param.path or "")) == target_container_path
+        ), None)
+        if public is None:
+            public = ParamField(path=target_container_path, key=input_field)
+            target.params.append(public)
+        public.key = input_field
+        public.label = public.label or input_field
+        public.value = copy.deepcopy(public_sample)
+        public.type = "object"
+        public.wire_type = "object"
+        public.required = True
+        public.category = "user_param"
+        public.source_kind = "user_input"
+        public.source = {
+            "kind": "dynamic_structure_input",
+            "actor": "heuristic",
+            "required_state": "required",
+            **({"option_source": option_source} if option_source else {}),
+        }
+        public.exposed_to_user = True
+        public.editable = True
+        public.need_human_confirm = False
+        public.reason = "调用方按上游返回的稳定标签提供值，运行期按最新响应键组装请求"
+        public.evidence = [*list(public.evidence or []), {
+            "source": "response_key_map",
+            "actor": "heuristic",
+            "source_request_id": source_request_id,
+            "target_request_id": target_request_id,
+            "wire_path": f"body.{target_container_path}",
+            "labels": matched_labels,
+        }]
+        target.sample_inputs[input_field] = copy.deepcopy(public_sample)
+
+        value_binding = {
+            "kind": "caller_map_by_label",
+            "input_field": input_field,
+            "value_shape": value_shape,
+            "required_labels": matched_labels,
+            "ignored_labels": [
+                str(row[source_label_path])
+                for row in collection
+                if str(row[source_label_path]) not in set(matched_labels)
+            ],
+            **({"option_source": option_source} if option_source else {}),
+        }
+        signature = (
+            source.step_id, source_collection_path,
+            target.step_id, target_container_path,
+        )
+        if any(
+            (
+                link.source_step_id, link.source_path,
+                link.target_step_id, link.target_path,
+            ) == signature
+            for link in links
+        ):
+            continue
+        links.append(FlowLink(
+            source_step_id=source.step_id,
+            source_path=source_collection_path,
+            target_step_id=target.step_id,
+            target_path=target_container_path,
+            kind="response_key_map",
+            source_collection_path=source_collection_path,
+            source_key_path=source_key_path,
+            source_label_path=source_label_path,
+            target_container_path=target_container_path,
+            value_binding=value_binding,
+            confirmed=False,
+            confidence=float(candidate.get("confidence") or 0.99),
+            reason="录制响应行的稳定键与后续请求对象键精确一致",
+            evidence={
+                "kind": "response_key_map",
+                "actor": "heuristic",
+                "source_request_id": source_request_id,
+                "target_request_id": target_request_id,
+            },
+            meta={"actor": "heuristic", "captured_structure_match": True},
+        ))
 
 
 def _derive_title(steps: list[FlowStep]) -> str:
