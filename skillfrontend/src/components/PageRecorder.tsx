@@ -1106,7 +1106,6 @@ export default function PageRecorder({
             <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
               {STATUS_LABELS[status]}
             </Tag>
-            <Button disabled={status !== "recording"}>从这里开始录</Button>
             <Text strong style={{ whiteSpace: "nowrap" }}>动作名：</Text>
             <Input value={snapshot?.action || actionRef.current} readOnly style={{ minWidth: 230, flex: 1 }} />
             <Text strong style={{ whiteSpace: "nowrap" }}>标题：</Text>

@@ -333,23 +333,7 @@ def test_captured_diagnostics_returns_copy():
     assert len(s.diagnostics) == 1
 
 
-# ── 6. reset() 一并清空 ──
-def test_reset_clears_all_requests_and_diagnostics():
-    s = _new_sess()
-    s.steps.append({"op": "click", "locator": "role=button[name=登录]"})
-    s.reads.append({"method": "GET", "url": "https://x/api/options"})
-    s._record_all("GET", "https://x/api/a")
-    s._record_all("POST", "https://x/api/b", pd='{"x":1}')
-    s._record_diag("console", {"level": "error", "message": "y"})
-    s.reset()
-    assert s.steps == []
-    assert s.captured_reads() == []
-    assert s.captured_all_requests() == []
-    assert s.captured_diagnostics() == []
-    assert s._req_counter == 0
-
-
-# ── 7. 字段默认值(零散 / 边界) ──
+# ── 6. 字段默认值(零散 / 边界) ──
 def test_record_all_defaults_when_headers_empty():
     s = _new_sess()
     s._record_all("GET", "https://x/api/a")

@@ -633,7 +633,7 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
   }
   function emit(op, loc, value, field, required, options, evidence, existingActionId) {
-    if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
+    if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录
     try {
       if (!existingActionId) actionSeq += 1;
       var actionId = existingActionId || ('action_' + actionSeq);
@@ -1129,7 +1129,7 @@ class RecordSession:
         # declared option array can be tied to the exact field alias.
         self.script_sources: list[dict] = []
         self._script_source_bytes = 0
-        # 字典接口经常在用户点击“从这里开始录”之前随页面初始化完成。只保留具备
+        # 字典接口经常随页面初始化完成。只保留具备
         # dictType + label + value 结构的引用数据，reset 时不清除，避免枚举证据丢失。
         self.dictionary_reads: list[dict] = []
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
@@ -2325,29 +2325,6 @@ class RecordSession:
     def pause_recording(self) -> None:
         """Stop collecting facts while keeping the browser and transport alive."""
         self._recording_paused = True
-
-    def reset(self) -> None:
-        """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。
-        同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
-        self._recording_paused = False
-        self.steps.clear()
-        self.form_snapshots.clear()
-        self.enum_snapshots.clear()
-        # JS 与结构化字典是当前页面的只读引用证据，通常在开始录制前已经加载；
-        # reset 只清业务轨迹，不能把这些枚举证据一起清掉。
-        self.reads.clear()
-        self.all_requests.clear()
-        self.diagnostics.clear()
-        self.page_events.clear()
-        self._req_counter = 0
-        self._event_counter = 0
-        self._last_action_by_scope.clear()
-        self._request_fact_index.clear()
-        self._page_counter = 0
-        self._frame_counter = 0
-        self._page_ids.clear()
-        self._frame_ids.clear()
-        self._page_id(self.page)
 
     async def storage_state(self) -> dict | None:
         """抓当前会话登录态快照(cookie/localStorage + 各 origin sessionStorage)。

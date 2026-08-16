@@ -1,8 +1,5 @@
 import { api } from "./client";
 
-export interface Category { tag: string; count: number }
-export interface ActionInfo { name: string; method: string; endpoint: string; tags: string[]; summary: string; required: string[] }
-export interface PreviewResp { template: string | null; business_action_count: number; categories: Category[]; actions: ActionInfo[] }
 export interface OnboardEvent {
   type: string; ts?: number; flow?: string; reasons?: string[]; asset_id?: string | null;
   flows?: string[]; index?: number; total?: number; ok?: boolean; rejections?: number;
@@ -31,22 +28,6 @@ export interface FormField { key: string; label: string; type: string }
 export async function templateForm(tenant: string, base_url: string, token: string, template_id: string): Promise<FormField[]> {
   const { data } = await api.post("/onboarding/template-form", { tenant, base_url, token, template_id });
   return data.fields;
-}
-
-export async function preview(tenant: string, openapi: unknown): Promise<PreviewResp> {
-  const { data } = await api.post("/onboarding/preview", { tenant, openapi });
-  return data;
-}
-
-// 平台自动「找出合适的流程」:复合流程 + 连接器(读/写)提案,供前端确认后生成。
-export interface ProposedFlow {
-  flow: string; title: string; kind: "composite" | "connector"; write: boolean;
-  actions: string[]; method: string; endpoint: string; required: string[];
-  suggested_test_input: Record<string, unknown>; reason: string; tags?: string[]; selected: boolean;
-}
-export async function discoverFlows(tenant: string, openapi: unknown, include_tags: string[], subsystem: string): Promise<ProposedFlow[]> {
-  const { data } = await api.post("/onboarding/discover-flows", { tenant, openapi, include_tags, subsystem });
-  return data.flows;
 }
 
 export interface StartReq {

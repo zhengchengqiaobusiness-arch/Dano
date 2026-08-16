@@ -86,7 +86,7 @@ def _strict_dom_enum(path: str, selected_label: str, selected_value, options: li
     }
 
 
-def test_json_write_requests_lists_all_candidates():
+def test_write_requests_lists_all_candidates():
     """候选 = 所有带 JSON body 的写请求(GET / 非JSON 排除),保序;供前端手选用哪个。"""
     cands = write_requests(_REQUESTS)
     urls = [c["url"] for c in cands]
@@ -121,7 +121,7 @@ def test_post_read_detection_does_not_swallow_plain_submit_body():
     })
 
 
-def test_json_write_requests_excludes_post_query_by_body_shape():
+def test_write_requests_excludes_post_query_by_body_shape():
     reads_and_submit = [
         {
             "method": "POST",
@@ -3105,7 +3105,7 @@ def test_looks_like_read_request_general():
     assert not looks_like_read_request("http://oa/admin-api/oa/daily-report/submit-process")
 
 
-def test_json_write_requests_excludes_post_reads():
+def test_write_requests_excludes_post_reads():
     """候选提交请求里排除 POST 形态的读(getXxxList 等)→ 只剩真正的写(createQzqdSl)。"""
     reqs = [
         {"method": "POST", "url": "http://oa/x/getQzqdSlList", "post_data": '{"page":1}'},

@@ -66,17 +66,13 @@ def _ground_unknown_test_sources(spec, *, derived: dict[tuple[str, str], dict] |
                 param.exposed_to_user = True
 
 
-def test_pause_recording_keeps_session_but_stops_fact_collection_until_reset() -> None:
+def test_pause_recording_keeps_session_but_stops_fact_collection() -> None:
     sess = RecordSession()
     event = json.dumps({"op": "click", "locator": "button#submit"})
 
     sess.pause_recording()
     sess._on_record({}, event)
     assert sess.steps == []
-
-    sess.reset()
-    sess._on_record({}, event)
-    assert [step["locator"] for step in sess.steps] == ["button#submit"]
 
 
 def test_query_command_captures_its_form_snapshot() -> None:
@@ -1102,15 +1098,6 @@ def test_observer_never_attaches_another_pages_last_action() -> None:
     assert "trigger_action_id" not in sess.captured_all_requests()[0]
 
 
-def test_reset_clears_observer_causality_state() -> None:
-    sess = RecordSession()
-    sess._on_record(None, json.dumps({"op": "click", "locator": "text=查询"}))
-    sess.reset()
-    sess._record_all("GET", "https://example.test/api/query")
-    assert sess.recorded_page_events() == []
-    assert "trigger_action_id" not in sess.captured_all_requests()[0]
-
-
 def test_recorder_key_safety_policy() -> None:
     from dano.execution.page.recorder import _safe_recorder_key
 
@@ -1697,8 +1684,8 @@ _LOGIN = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 </form></body></html>"""
 
 
-async def test_password_never_recorded_and_reset(tmp_path) -> None:  # noqa: ANN001
-    """安全:密码框(type=password)绝不被录;reset 清空登录步骤。"""
+async def test_password_never_recorded(tmp_path) -> None:  # noqa: ANN001
+    """安全:密码框(type=password)绝不被录。"""
     if not await _chromium_available():
         pytest.skip("chromium 未安装")
     page = tmp_path / "login.html"
@@ -1716,9 +1703,6 @@ async def test_password_never_recorded_and_reset(tmp_path) -> None:  # noqa: ANN
         assert "secret123" not in str(samples)
         snapshot_fields = await sess.page.evaluate("window.__danoFormFieldEvidence()")
         assert "secret123" not in str(snapshot_fields)
-        # reset 清空(登录后只录业务)
-        sess.reset()
-        assert sess.recorded_steps()[0] == []
     finally:
         await sess.stop()
 
