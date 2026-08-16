@@ -38,6 +38,19 @@ def test_package_slug_keeps_long_action_ids_distinct() -> None:
     assert first != second
 
 
+def test_capability_script_name_cannot_shadow_python_stdlib(tmp_path) -> None:
+    skill = _recording_skill("https://example.invalid")
+    skill.api_request["capabilities"][0]["name"] = "inspect"
+    skill.api_request["capabilities"][0]["title"] = "Inspect item"
+
+    package = tmp_path / render_skill_package(skill, str(tmp_path), tenant="tenant-a")
+    contract = json.loads((package / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    inspect_capability = next(item for item in contract["capabilities"] if item["name"] == "inspect")
+
+    assert inspect_capability["script"] != "scripts/inspect.py"
+    assert validate_skill_package(package) == {"ok": True, "issues": []}
+
+
 class _BusinessApi(BaseHTTPRequestHandler):
     items = [{"recordId": "record-1", "name": "seed"}]
 

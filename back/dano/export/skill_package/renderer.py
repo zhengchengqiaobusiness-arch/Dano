@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 from types import SimpleNamespace
 from typing import Any
@@ -49,7 +50,10 @@ def package_slug(skill_id: str) -> str:
 def _script_slug(value: str) -> str:
     raw = str(value or "capability")
     slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
-    return slug or "capability_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    slug = slug or "capability_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    if slug in sys.stdlib_module_names or slug in {"client", "wire_format", "format_list"}:
+        slug = f"capability_{slug}"
+    return slug
 
 
 def _scrub(node: Any, key: str = "") -> Any:
