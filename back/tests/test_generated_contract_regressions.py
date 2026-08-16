@@ -570,6 +570,58 @@ def test_query_defaults_do_not_break_withdraw_identifier_relation():
     assert questions == []
 
 
+def test_query_identifier_relation_wins_over_later_inspect_echoes():
+    process_id = "PROCESS-42"
+    query = FlowStep(
+        step_id="query", method="GET", path="/applications/page",
+        response_json={"data": {"list": [{
+            "id": "record-42", "processInstanceId": process_id,
+        }]}},
+    )
+    inspect = FlowStep(
+        step_id="inspect", method="GET", path="/applications/get?id=record-42",
+        response_json={"data": {
+            "id": "record-42", "processInstanceId": process_id,
+        }},
+    )
+    withdraw = FlowStep(
+        step_id="withdraw", method="DELETE", path="/process/cancel",
+        params=[ParamField(
+            path="id", key="id", value=process_id, default_value=process_id,
+            source_kind="unknown", category="user_param", exposed_to_user=True,
+        )],
+        response_json={"code": 0},
+    )
+    prepared = prepare_flow_spec_for_publish(FlowSpec(
+        steps=[query, inspect, withdraw],
+        capabilities=[
+            FlowCapability(
+                name="query_applications", kind="query_status",
+                nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="inspect_application", kind="inspect",
+                nodes=[{"id": "call_inspect", "type": "call", "step_id": "inspect"}],
+            ),
+            FlowCapability(
+                name="withdraw_application", kind="withdraw",
+                nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+            ),
+        ],
+    ))
+
+    relation = next(
+        item for item in prepared.capability_relations
+        if item.to_capability == "withdraw_application"
+    )
+    assert relation.from_capability == "query_applications"
+    assert relation.from_output == "records[].processInstanceId"
+    target = prepared.capabilities[2].input_schema["properties"]["id"]
+    assert target["x-dano-derived-from-query"] is True
+    assert prepared.steps[2].params[0].source_kind == "user_input"
+    assert prepared.steps[2].params[0].source["kind"] == "capability_relation"
+
+
 def test_api_enum_fields_remain_select_controls_and_long_text_fields_use_textarea():
     submit = FlowStep(
         step_id="submit",

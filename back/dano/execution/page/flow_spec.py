@@ -9219,6 +9219,15 @@ def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
     for relation in spec.capability_relations or []:
         relation.from_capability = renamed.get(relation.from_capability, relation.from_capability)
         relation.to_capability = renamed.get(relation.to_capability, relation.to_capability)
+    for step in spec.steps:
+        for param in step.params or []:
+            source = param.source or {}
+            source_capability = str(source.get("source_capability") or "")
+            if source_capability in renamed:
+                param.source = {
+                    **source,
+                    "source_capability": renamed[source_capability],
+                }
     if isinstance(spec.goal, dict):
         spec.goal["capabilities"] = list(dict.fromkeys(
             renamed.get(str(name), str(name)) for name in (spec.goal.get("capabilities") or []) if str(name)
@@ -9296,6 +9305,15 @@ def _repair_generated_capability_contracts(
         for relation in spec.capability_relations or []:
             relation.from_capability = renamed.get(relation.from_capability, relation.from_capability)
             relation.to_capability = renamed.get(relation.to_capability, relation.to_capability)
+        for step in spec.steps:
+            for param in step.params or []:
+                source = param.source or {}
+                source_capability = str(source.get("source_capability") or "")
+                if source_capability in renamed:
+                    param.source = {
+                        **source,
+                        "source_capability": renamed[source_capability],
+                    }
     _canonicalize_public_capability_identities(spec)
     spec = _prune_empty_capabilities(spec)
     _attach_option_source_memberships(spec)
@@ -9638,6 +9656,14 @@ def _ground_recorded_identifier_relations(
                     or source["capability"].capability_id
                 ) != target_ref
             ]
+            query_matches = [
+                source for source in matches
+                if source["capability"].kind in {"query", "query_status"}
+            ]
+            if query_matches:
+                # Later detail calls may echo the same ID. The selectable
+                # collection remains the actual caller orchestration source.
+                matches = query_matches
             if re.sub(r"[^a-z0-9]+", "", wire_leaf.casefold()) != "id":
                 matches = [
                     source for source in matches
@@ -9677,6 +9703,38 @@ def _ground_recorded_identifier_relations(
             })
             field_schema.pop("default", None)
             field_schema.pop("x-dano-apply-default", None)
+            target_wire_path = str(field_schema.get("x-flow-path") or "")
+            for step_id in _capability_scoped_step_ids(target):
+                target_step = step_by_id.get(step_id)
+                if target_step is None:
+                    continue
+                for param in target_step.params or []:
+                    if not (
+                        str(param.key or "") == str(input_name)
+                        or (target_wire_path and str(param.path or "") == target_wire_path)
+                    ):
+                        continue
+                    if param.source_kind == "unknown":
+                        param.category = "user_param"
+                        param.source_kind = "user_input"
+                        param.source = {
+                            "kind": "capability_relation",
+                            "source_capability": str(source_ref),
+                            "source_output": str(source_path),
+                            "target_path": str(param.path or target_wire_path),
+                        }
+                        param.reason = (
+                            f"调用方先执行能力 `{source_ref}`，再把所选记录的"
+                            f" `{source_path}` 原值传入；不是自由手填字段"
+                        )
+                        param.need_human_confirm = False
+                    elif str((param.source or {}).get("kind") or "") == "capability_relation":
+                        param.source = {
+                            **(param.source or {}),
+                            "source_capability": str(source_ref),
+                            "source_output": str(source_path),
+                            "target_path": str(param.path or target_wire_path),
+                        }
             relation_identity = "|".join(
                 (str(source_ref), str(source_path), str(target_ref), str(input_name))
             )
