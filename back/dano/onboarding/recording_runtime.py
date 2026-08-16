@@ -291,6 +291,7 @@ class ProductionRecordingServices:
         }
         release_spec, candidate = prepare_flow_release_candidate(publishable_spec)
         candidate["machine_verification"] = verification
+        context.remember_draft(release_spec.model_dump(mode="json"))
         # Publishing is deterministic after the repair/verification loop has
         # no remaining issues.  Bind the exact frozen candidate to the active
         # session for the database boundary fingerprint check; no model call is

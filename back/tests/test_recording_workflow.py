@@ -482,6 +482,37 @@ async def test_self_healing_pipeline_repairs_until_publish_without_external_requ
 
 
 @pytest.mark.asyncio
+async def test_published_snapshot_uses_the_frozen_release_draft() -> None:
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {"name": "planner-draft"}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            raise AssertionError("verification is disabled")
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("verification is disabled")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            context.remember_draft({"name": "frozen-release"})
+            return {"skill_id": "skill"}
+
+    context = PipelineContext(
+        progress=lambda *args: _answer(None),
+        ask_operator=lambda question: _answer(""),
+        cancelled=lambda: False,
+    )
+
+    outcome = await SelfHealingPipeline(Runtime()).run(PipelineSeed(
+        kind="recording",
+        machine_verification=False,
+    ), context)
+
+    assert outcome.status == WorkflowStatus.PUBLISHED
+    assert outcome.draft == {"name": "frozen-release"}
+
+
+@pytest.mark.asyncio
 async def test_self_healing_pipeline_stops_after_bounded_no_progress() -> None:
     issue = WorkflowIssue(
         issue_id="i1", code="missing", message="无法自动变化", resolver="machine_repair",

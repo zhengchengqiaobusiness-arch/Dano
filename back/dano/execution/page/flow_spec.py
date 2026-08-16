@@ -4024,7 +4024,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             request_id = request_id_by_step.get(st.step_id, "")
             for param in st.params:
                 request_fields.append(_capability_field_from_param(st, param, scope="request_field", request_id=request_id))
-                if _param_exposed_to_caller(param):
+                if _param_exposed_to_caller(param, set(cap_step_ids)):
                     key = param.key or param.label or param.path
                     inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
                 else:
@@ -7908,8 +7908,32 @@ _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
 })
 
 
-def _param_exposed_to_caller(param: ParamField) -> bool:
+def _previous_response_source_step_id(param: ParamField) -> str:
+    if param.source_kind != "previous_response":
+        return ""
+    source = dict(param.source or {})
+    return str(source.get("step_id") or source.get("source_step_id") or "")
+
+
+def _external_capability_input(
+    param: ParamField,
+    capability_step_ids: set[str] | None,
+) -> bool:
+    source_step_id = _previous_response_source_step_id(param)
+    return bool(
+        capability_step_ids is not None
+        and source_step_id
+        and source_step_id not in capability_step_ids
+    )
+
+
+def _param_exposed_to_caller(
+    param: ParamField,
+    capability_step_ids: set[str] | None = None,
+) -> bool:
     """Whether the caller, rather than the workflow runtime, supplies a value."""
+    if _external_capability_input(param, capability_step_ids):
+        return True
     if (
         param.source_kind == "page_context"
         and bool((param.source or {}).get("caller_override"))
@@ -7922,8 +7946,17 @@ def _param_exposed_to_caller(param: ParamField) -> bool:
     )
 
 
-def _param_requires_caller_input(param: ParamField) -> bool:
-    return bool(param.required and _param_exposed_to_caller(param))
+def _param_requires_caller_input(
+    param: ParamField,
+    capability_step_ids: set[str] | None = None,
+) -> bool:
+    return bool(
+        _external_capability_input(param, capability_step_ids)
+        or (
+            param.required
+            and _param_exposed_to_caller(param, capability_step_ids)
+        )
+    )
 
 
 _NO_SCHEMA_DEFAULT = object()
@@ -8022,11 +8055,14 @@ def _apply_param_schema_default(prop: dict[str, Any], param: ParamField) -> None
         prop["x-dano-apply-default"] = True
 
 
-def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
+def _capability_input_schema(
+    params: list[ParamField],
+    capability_step_ids: set[str] | None = None,
+) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
     for p in params:
-        if not _param_exposed_to_caller(p):
+        if not _param_exposed_to_caller(p, capability_step_ids):
             continue
         key = p.key or p.path
         if key in props:
@@ -8046,7 +8082,7 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
                 paths = existing.setdefault("x-flow-paths", [existing.get("x-flow-path")])
                 if p.path not in paths:
                     paths.append(p.path)
-            if _param_requires_caller_input(p) and key not in required:
+            if _param_requires_caller_input(p, capability_step_ids) and key not in required:
                 required.append(key)
             continue
         props[key] = _schema_for_param_type(p.type)
@@ -8060,6 +8096,21 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
             props[key]["label"] = p.label
         if p.description or p.reason:
             props[key]["description"] = p.description or p.reason
+        if (
+            _external_capability_input(p, capability_step_ids)
+            or p.source_kind == "external_capability_input"
+        ):
+            props[key]["x-dano-external-source"] = {
+                "step_id": str(
+                    (p.source or {}).get("source_step_id")
+                    or _previous_response_source_step_id(p)
+                ),
+                "response_path": str(
+                    (p.source or {}).get("response_path")
+                    or (p.source or {}).get("path")
+                    or ""
+                ),
+            }
         option_source = (p.source or {}).get("option_source")
         if isinstance(option_source, dict) and option_source:
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
@@ -8107,7 +8158,7 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
                     props[key]["enum"] = labels
         if enum_input and p.enum_value_map:
             props[key]["x-enum-value-map"] = dict(p.enum_value_map)
-        if _param_requires_caller_input(p):
+        if _param_requires_caller_input(p, capability_step_ids):
             required.append(key)
     return {"type": "object", "properties": props, "required": required}
 
@@ -8206,7 +8257,7 @@ _IDENTIFIER_ROLE_TITLE = {
     "record": "记录ID",
 }
 _IDENTIFIER_RELATION_TARGET_KINDS = {
-    "update", "approve", "reject", "withdraw", "delete",
+    "inspect", "update", "approve", "reject", "withdraw", "delete",
 }
 
 
@@ -8967,6 +9018,7 @@ def _ground_recorded_identifier_relations(
     for target in spec.capabilities or []:
         if target.kind not in _IDENTIFIER_RELATION_TARGET_KINDS:
             continue
+        target_ref = target.name or target.capability_id
         target_pages = _capability_page_ids(spec, target, step_by_id)
         for input_name, field_schema in (
             (target.input_schema or {}).get("properties") or {}
@@ -8991,6 +9043,10 @@ def _ground_recorded_identifier_relations(
             matches = [
                 source for source in sources
                 if target_values.intersection(source["values"])
+                and (
+                    source["capability"].name
+                    or source["capability"].capability_id
+                ) != target_ref
             ]
             if re.sub(r"[^a-z0-9]+", "", wire_leaf.casefold()) != "id":
                 matches = [
@@ -9031,7 +9087,6 @@ def _ground_recorded_identifier_relations(
             })
             field_schema.pop("default", None)
             field_schema.pop("x-dano-apply-default", None)
-            target_ref = target.name or target.capability_id
             relation_identity = "|".join(
                 (str(source_ref), str(source_path), str(target_ref), str(input_name))
             )
@@ -9204,7 +9259,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             continue
         _disambiguate_capability_param_keys(cap_steps)
         params = [p for st in cap_steps for p in (st.params or [])]
-        derived_input = _capability_input_schema(params)
+        derived_input = _capability_input_schema(params, set(cap.step_ids or []))
         if _capability_is_batch(spec, cap):
             derived_input = _batch_capability_input_schema(cap_steps)
         cap.input_schema = reconcile_schema(derived_input, cap.input_schema or {})
@@ -11298,7 +11353,13 @@ def _capability_operation_kind(step: FlowStep) -> str:
     ):
         if re.search(r"(?:^|[/_.\s-])(?:export|download|excel)(?:$|[/_.\s-])|导出|下载", signature):
             return "export"
-        if re.search(r"(?:detail|inspect|view|progress)|详情|查看|进度", signature):
+        if re.search(
+            r"(?:detail|inspect|view|progress)|"
+            r"(?:^|/)(?:get)(?:$|[/?#])|"
+            r"(?:^|/)(?:list|page)-by-[^/?#]*(?:id|key)(?:$|[/?#])|"
+            r"详情|查看|进度",
+            signature,
+        ):
             return "inspect"
         if re.search(r"(?:preview)|预览", signature):
             return "preview"
@@ -15999,6 +16060,26 @@ def capability_to_flow_spec_view(
     keep = set(step_ids)
     view = current.model_copy(deep=True)
     view.steps = [s for s in view.steps if s.step_id in keep]
+    for step in view.steps:
+        for param in step.params:
+            if not _external_capability_input(param, keep):
+                continue
+            source = dict(param.source or {})
+            source_step_id = _previous_response_source_step_id(param)
+            param.category = "user_param"
+            param.source_kind = "external_capability_input"
+            param.source = {
+                "kind": "external_capability_input",
+                "source_step_id": source_step_id,
+                "response_path": str(
+                    source.get("response_path") or source.get("path") or ""
+                ),
+            }
+            param.exposed_to_user = True
+            param.editable = True
+            param.required = True
+            param.default_value = None
+            param.reason = "该能力独立调用时由调用方传入上游能力的对应输出值"
     view.links = [
         lk for lk in view.links
         if lk.source_step_id in keep and lk.target_step_id in keep
@@ -16027,7 +16108,15 @@ def capability_to_flow_spec_view(
             "step_ids": selected_cap.step_ids,
         },
     }
-    return sync_flow_spec_models(view)
+    selected_cap.input_schema = _capability_input_schema(
+        [
+            param
+            for step in view.steps
+            for param in (step.params or [])
+        ],
+        set(selected_cap.step_ids or []),
+    )
+    return sync_capability_scoped_views(view)
 
 
 def flow_spec_capability_contracts(
@@ -16059,7 +16148,7 @@ def compile_capability_to_api_request(
         )
     except ValueError as exc:
         return None, [str(exc)]
-    api_request, errors = flow_spec_to_api_request(view)
+    api_request, errors = flow_spec_to_api_request(view, _prepared=True)
     if api_request is not None:
         cap = view.capabilities[0] if view.capabilities else None
         if cap is not None:

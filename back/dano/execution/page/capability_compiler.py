@@ -195,8 +195,10 @@ def _option_source_request_ids(
         for binding in step.selects or []:
             add_source({"request_id": binding.source_request_id})
         for param in step.params or []:
-            add_source(param.source or {})
-            add_source((param.source or {}).get("option_source"))
+            source = dict(param.source or {})
+            if param.source_kind == "api_option":
+                add_source(source)
+            add_source(source.get("option_source"))
     member_ids = {step.step_id for step in member_steps}
     for link in _executable_links(spec):
         if link.target_step_id in member_ids:

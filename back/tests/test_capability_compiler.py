@@ -13,6 +13,7 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     SelectBinding,
+    compile_capability_to_api_request,
     flow_spec_to_api_request,
     orchestrate_flow_capabilities,
 )
@@ -422,6 +423,110 @@ def test_capability_request_builder_ignores_links_outside_compiled_membership():
     assert errors == []
     assert request is not None
     assert request["path"] == "/items"
+
+
+def test_read_ability_exposes_an_upstream_value_outside_its_own_execution() -> None:
+    record_id = "record-123456"
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="query",
+                method="GET",
+                path="/applications/page",
+                source_meta={"request_id": "req-query", "role": "business_get"},
+                response_json={"data": {"list": [{"id": record_id, "title": "出差"}]}},
+            ),
+            FlowStep(
+                step_id="detail",
+                method="GET",
+                path=f"/applications/get?id={record_id}",
+                source_meta={"request_id": "req-detail", "role": "business_get"},
+                params=[ParamField(
+                    path="query.id",
+                    key="id",
+                    value=record_id,
+                    type="string",
+                    category="runtime_var",
+                    source_kind="previous_response",
+                    source={
+                        "kind": "previous_response",
+                        "step_id": "query",
+                        "response_path": "data.list[0].id",
+                    },
+                    exposed_to_user=False,
+                )],
+                response_json={"data": {"id": record_id, "title": "出差"}},
+            ),
+        ],
+        links=[FlowLink(
+            link_id="query-detail",
+            source_step_id="query",
+            source_path="data.list[0].id",
+            target_step_id="detail",
+            target_path="query.id",
+            confirmed=True,
+            meta={"captured_value_match": True},
+        )],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req-query", method="GET", path="/applications/page"),
+            RequestFact(request_id="req-detail", method="GET", path="/applications/get"),
+        ]),
+    )
+    plan = {"capabilities": [
+        {
+            "name": "query_applications",
+            "title": "查询申请",
+            "kind": "query",
+            "anchor_step_id": "query",
+        },
+        {
+            "name": "inspect_application",
+            "title": "查看申请详情",
+            "kind": "inspect",
+            "anchor_step_id": "detail",
+        },
+    ]}
+
+    compiled = compile_capabilities(spec, plan).spec
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(compiled)
+    assert [
+        (
+            relation.from_capability, relation.from_output,
+            relation.to_capability, relation.to_input,
+        )
+        for relation in prepared.capability_relations
+    ] == [
+        ("query_applications", "records[].id", "inspect_application", "id"),
+    ]
+    detail = next(cap for cap in compiled.capabilities if cap.name == "inspect_application")
+
+    assert detail.step_ids == ["detail"]
+    assert [(ref.step_id, ref.usage) for ref in detail.request_refs] == [
+        ("detail", "execute"),
+    ]
+    assert {field.key for field in detail.inputs} == {"id"}
+
+    api_request, errors = compile_capability_to_api_request(
+        compiled, capability_name="inspect_application",
+    )
+    assert errors == []
+    assert api_request is not None
+    assert api_request["params"] == ["id"]
+    contract = api_request["capabilities"][0]
+    assert contract["input_schema"]["required"] == ["id"], contract
+    assert contract["input_schema"]["properties"]["id"]["x-dano-external-source"] == {
+        "step_id": "query",
+        "response_path": "data.list[0].id",
+    }
+    assert [
+        (
+            relation["from_capability"], relation["from_output"],
+            relation["to_capability"], relation["to_input"],
+        )
+        for relation in api_request["capability_relations"]
+    ] == [
+        ("query_applications", "records[].id", "inspect_application", "id"),
+    ]
 
 
 def test_query_can_be_public_and_the_same_request_can_verify_a_write():

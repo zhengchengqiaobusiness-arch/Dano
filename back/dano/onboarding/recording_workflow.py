@@ -281,7 +281,7 @@ class SelfHealingPipeline:
             release = await self._bounded(self.runtime.publish(draft, context))
             return PipelineOutcome(
                 status=WorkflowStatus.PUBLISHED,
-                draft=draft,
+                draft=context.latest_draft or draft,
                 release=release,
             )
         unchanged = 0
@@ -307,7 +307,7 @@ class SelfHealingPipeline:
                 release = await self._bounded(self.runtime.publish(draft, context))
                 return PipelineOutcome(
                     status=WorkflowStatus.PUBLISHED,
-                    draft=draft,
+                    draft=context.latest_draft or draft,
                     release=release,
                 )
 
