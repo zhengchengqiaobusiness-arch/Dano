@@ -2790,6 +2790,10 @@ def test_goal_kind_without_a_unique_anchor_is_not_bound_to_the_first_request():
 
     assert merged.capabilities == []
     assert merged.meta["recording_goal_contract"]["satisfied"] is False
+    assert not any(
+        item.get("op") == "enforce_recording_goal"
+        for item in merged.meta.get("unresolved_live_agent_ops", [])
+    )
 
 
 def test_goal_slots_with_same_http_kind_use_live_semantic_evidence() -> None:

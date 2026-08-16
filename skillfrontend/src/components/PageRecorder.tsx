@@ -275,13 +275,6 @@ function paramDisplayName(param: FlowParam) {
 
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
-function expectedCapabilityCount(value: string) {
-  const matched = value.match(/(?:预期|预计|需要)?\s*产出(?:的)?\s*能力(?:数量|数)?\s*[:：=]?\s*(\d+)/i);
-  if (!matched) return 0;
-  const count = Number(matched[1]);
-  return Number.isInteger(count) && count > 0 ? count : 0;
-}
-
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   idle: "等待开始",
   recording: "录制中",
@@ -1073,7 +1066,7 @@ export default function PageRecorder({
             />
             <div style={{ marginTop: 6 }}>
               <Text type="secondary">
-                如需固定能力数量，可写“预期产出能力数量：3”，并逐项说明每个能力。
+                系统只根据实际录制且有完整证据的业务操作生成能力。
               </Text>
             </div>
           </label>
@@ -1564,38 +1557,6 @@ export default function PageRecorder({
   }
 
   function renderResult() {
-    const goalContract = asRecord(snapshot?.draft?.meta?.recording_goal_contract);
-    const normalizedTargets = Array.isArray(goalContract.capabilities)
-      ? goalContract.capabilities
-        .map((item) => String(asRecord(item).name || "").trim())
-        .filter(Boolean)
-      : [];
-    const expectedCount = Number(goalContract.expected_count) || expectedCapabilityCount(goalText);
-    const countMatches = !expectedCount || expectedCount === capabilities.length;
-    const goalSummary = (
-      <div style={{ borderTop: "1px solid rgba(0, 0, 0, 0.06)", marginTop: 8, paddingTop: 8 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16, alignItems: "center" }}>
-          <div>
-            <Text strong>录制目标</Text>
-            <div style={{ whiteSpace: "pre-line", marginTop: 4 }}>{goalText}</div>
-            {normalizedTargets.length ? (
-              <Text type="secondary">
-                系统理解：{normalizedTargets.map((name, index) => `${index + 1}. ${name}`).join("；")}
-              </Text>
-            ) : null}
-          </div>
-          <Space wrap>
-            {expectedCount ? <Tag color="blue">目标 {expectedCount} 个能力</Tag> : null}
-            <Tag color={countMatches ? "success" : "warning"}>实际 {capabilities.length} 个能力</Tag>
-          </Space>
-        </div>
-        {!countMatches ? (
-          <Text type="warning">
-            能力数量与录制目标不一致：目标 {expectedCount} 个，实际 {capabilities.length} 个
-          </Text>
-        ) : null}
-      </div>
-    );
     const description = (
       <Space direction="vertical" size={4}>
         <Text>{snapshot?.progress.label || STATUS_LABELS[status]}</Text>
@@ -1617,7 +1578,6 @@ export default function PageRecorder({
             {String(snapshot.release.lifecycle_message || "资产已发布，生命周期登记待补偿")}
           </Text>
         ) : null}
-        {goalSummary}
       </Space>
     );
     return (

@@ -267,13 +267,6 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
-        goal_contract = (spec.meta or {}).get("recording_goal_contract") or {}
-        expected_count = int(goal_contract.get("expected_count") or 0)
-        if expected_count and len(spec.capabilities) != expected_count:
-            raise RuntimeError(
-                "录制目标要求产出 "
-                f"{expected_count} 个能力，当前仅形成 {len(spec.capabilities)} 个可执行能力"
-            )
         if context.machine_verification:
             decision = evaluate_recording_release(spec)
             if decision.callable_spec is None:

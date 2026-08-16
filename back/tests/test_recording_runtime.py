@@ -321,15 +321,28 @@ async def test_direct_export_freezes_candidate_without_release_verification() ->
 
 
 @pytest.mark.asyncio
-async def test_direct_export_rejects_a_draft_that_misses_the_recording_goal_count() -> None:
+async def test_direct_export_publishes_the_capabilities_actually_materialized() -> None:
+    class Pi:
+        def bind_flow_spec(self, _spec: FlowSpec) -> None:
+            return None
+
+    published: dict = {}
+
+    async def provide_pi(_fresh):  # noqa: ANN001
+        return Pi()
+
+    async def publisher(spec, candidate, _context):  # noqa: ANN001
+        published.update({"spec": spec, "candidate": candidate})
+        return {"skill_id": "actual-capabilities"}
+
     async def unused(*_args):  # noqa: ANN002
         raise AssertionError("service is not needed")
 
     services = ProductionRecordingServices(
         recording_id="recording_1",
         materializer=unused,
-        pi_provider=unused,
-        publisher=unused,
+        pi_provider=provide_pi,
+        publisher=publisher,
     )
     context = _context()
     context.machine_verification = False
@@ -337,5 +350,7 @@ async def test_direct_export_rejects_a_draft_that_misses_the_recording_goal_coun
         "recording_goal_contract": {"expected_count": 2, "materialized_count": 0},
     })
 
-    with pytest.raises(RuntimeError, match="要求产出 2 个能力"):
-        await services.publish(draft.model_dump(mode="json"), context)
+    release = await services.publish(draft.model_dump(mode="json"), context)
+
+    assert release == {"skill_id": "actual-capabilities"}
+    assert published["spec"].meta["recording_goal_contract"]["expected_count"] == 2

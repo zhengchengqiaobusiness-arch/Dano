@@ -184,8 +184,11 @@ def test_frontend_removes_redundant_field_category_axis_and_has_goal_template() 
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
     assert "DEFAULT_RECORDING_GOAL_TEMPLATE" in source
-    assert "预期产出能力数量" in source
-    assert "expectedCapabilityCount" in source
+    assert "系统只根据实际录制且有完整证据的业务操作生成能力" in source
+    assert "预期产出能力数量" not in source
+    assert "expectedCapabilityCount" not in source
+    assert "能力数量与录制目标不一致" not in source
+    assert "系统理解：" not in source
     assert "CATEGORY_OPTIONS" not in source
     assert 'aria-label="字段分类"' not in source
     assert "<span>分类</span>" not in source
@@ -214,10 +217,11 @@ def test_recording_page_does_not_resume_historical_session_without_start_click()
     assert "dano.recording.active" not in source
 
 
-def test_result_summary_contains_recording_goal_without_a_second_card() -> None:
+def test_result_summary_reports_only_the_actual_capability_count() -> None:
     source = _PAGE_RECORDER.read_text(encoding="utf-8")
 
-    assert "goalSummary" in source
+    assert "goalSummary" not in source
+    assert "`能力结果 ${capabilities.length}`" in source
     assert '<Card size="small" style={{ marginTop: 12 }}>' not in source
 
 

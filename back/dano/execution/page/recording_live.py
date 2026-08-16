@@ -3339,16 +3339,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             "satisfied": actual_count == expected_count,
         }
         merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
-        if actual_count != expected_count:
-            unresolved.append({
-                "op": "enforce_recording_goal",
-                "status": "rejected",
-                "requested_target": {"expected_count": expected_count},
-                "reason": (
-                    f"recording goal expects {expected_count} capabilities, "
-                    f"but {actual_count} executable anchors were materialized"
-                ),
-            })
 
     merged.meta = {**(merged.meta or {})}
     if unresolved:
