@@ -92,6 +92,10 @@ test("Pi native skill expansion places the complete Skill body before the task",
 test("runtime applies one Skill to all and only recording analysis phases", async () => {
   const runtime = await readFile(RUNTIME_FILE, "utf8");
   const client = await readFile(CLIENT_FILE, "utf8");
+  const { loader } = await loadOnly(SKILL_DIR);
+  const skillBody = (await readFile(SKILL_FILE, "utf8"))
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "")
+    .trim();
 
   assert.match(runtime, /noSkills:\s*true/);
   assert.match(runtime, /additionalSkillPaths:\s*\[RECORDING_ANALYSIS_SKILL_PATH\]/);
@@ -101,6 +105,13 @@ test("runtime applies one Skill to all and only recording analysis phases", asyn
   for (const phase of ["base_state_analysis", "request_batch", "final_request_tail"]) {
     assert.ok(runtime.includes(`"${phase}"`));
     assert.ok(client.includes(`"${phase}"`));
+    const task = `执行 ${phase} 阶段`;
+    const expanded = AgentSession.prototype._expandSkillCommand.call({
+      resourceLoader: loader,
+      _extensionRunner: { emitError: (error) => assert.fail(String(error)) },
+    }, `/skill:${SKILL_NAME} ${task}`);
+    assert.ok(expanded.includes(skillBody), `${phase} did not receive the complete Skill body`);
+    assert.ok(expanded.trim().endsWith(task), `${phase} task was not preserved after Skill expansion`);
   }
   assert.match(client, /prompt_mode="recording_analysis"/);
   assert.match(client, /else "request_batch"/);
