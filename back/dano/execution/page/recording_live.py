@@ -2795,8 +2795,8 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     """Materialize only abilities whose recorded anchor is unambiguous."""
     from dano.execution.page.flow_spec import (
         _capability_operation_kind,
+        _grounded_read_operation_steps,
         _public_capability_anchor_step_ids,
-        _query_operation_key,
         _read_status_steps,
     )
 
@@ -2981,11 +2981,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         request_steps = [step]
         read_steps = _read_status_steps(spec)
         if step in read_steps:
-            operation_key = _query_operation_key(step)
-            request_steps = [
-                candidate for candidate in read_steps
-                if _query_operation_key(candidate) == operation_key
-            ] or [step]
+            request_steps = _grounded_read_operation_steps(spec, step)
         name = _unique_live_capability_name(proposed_name, kind, used_names)
         title = (
             proposed_name
@@ -3000,7 +2996,12 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             "kind_source": "recording_goal" if proposed_name else "recording_fact",
             "anchor_step_id": anchor_id,
             "request_refs": [
-                {"step_id": request_step.step_id, "usage": "execute"}
+                {
+                    "step_id": request_step.step_id,
+                    "usage": (
+                        "execute" if request_step.step_id == anchor_id else "preflight"
+                    ),
+                }
                 for request_step in request_steps
             ],
         })

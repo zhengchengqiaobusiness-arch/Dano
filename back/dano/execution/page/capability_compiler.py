@@ -17,6 +17,7 @@ from dano.execution.page.flow_spec import (
     _capability_operation_kind,
     _default_capability_nodes,
     executable_flow_links,
+    _grounded_read_operation_steps,
     _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
@@ -397,7 +398,9 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             step_ids, dependency_errors = _grounded_dependency_order(current, anchor_step_id)
             errors.extend(f"{prefix}: {message}" for message in dependency_errors)
         else:
-            step_ids = [anchor_step_id]
+            step_ids = [
+                step.step_id for step in _grounded_read_operation_steps(current, anchor)
+            ]
         member_steps = [by_step[step_id] for step_id in step_ids]
         refs = [
             _request_ref(

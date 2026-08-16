@@ -2445,6 +2445,100 @@ def test_goal_boundary_recovers_recorded_capability_missing_from_stale_live_plan
     )
 
 
+def test_goal_boundary_keeps_strong_filtered_query_outside_write_preflight() -> None:
+    live = FlowSpec(meta={
+        "recording_goal_text": (
+            "目的：查询并提交记录\n"
+            "预期产出能力数量：2\n"
+            "能力1：查询记录\n"
+            "能力2：提交记录"
+        ),
+    })
+    finalized = FlowSpec(
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="filtered-query", method="GET",
+                path="/records/page?pageNo=1&status=active&reason=test",
+                response_json={"data": {"list": [{"id": "record-1"}], "total": 1}},
+                source_meta={
+                    "request_id": "req-query", "role": "read_context",
+                    "trigger_op": "control_open", "trigger_locator": "label=状态",
+                    "trigger_transaction_id": "txn-filter",
+                    "control_preflight_for_write": True,
+                    "causality_confidence": "high",
+                },
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/records/submit",
+                source_meta={
+                    "request_id": "req-submit", "role": "business_write",
+                    "trigger_op": "click", "trigger_locator": "text=提交",
+                    "trigger_transaction_id": "txn-submit",
+                },
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == [
+        "查询记录", "提交记录",
+    ]
+    assert [capability.kind for capability in merged.capabilities] == [
+        "query_status", "submit",
+    ]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+
+
+def test_one_read_command_returns_entity_result_and_keeps_its_auxiliary_calls() -> None:
+    live = FlowSpec(meta={
+        "recording_goal_text": (
+            "目的：查看记录详情\n"
+            "预期产出能力数量：1\n"
+            "能力1：查看记录详情"
+        ),
+    })
+    shared_meta = {
+        "role": "business_get", "trigger_op": "click",
+        "trigger_locator": "text=查看", "trigger_transaction_id": "txn-view",
+        "causality_confidence": "high",
+        "trigger_page_context": {"url": "https://example.test/records"},
+    }
+    finalized = FlowSpec(
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="comments", method="GET", path="/workflow/model?id=record-1",
+                params=[ParamField(path="query.id", key="id", value="record-1")],
+                response_json={"data": {"id": "record-1", "nodes": []}},
+                source_meta={
+                    **shared_meta, "request_id": "req-comments", "role": "read_context",
+                },
+            ),
+            FlowStep(
+                step_id="entity", method="GET", path="/records/get?id=record-1",
+                params=[ParamField(path="query.id", key="id", value="record-1")],
+                response_json={"data": {"id": "record-1", "reason": "captured"}},
+                source_meta={**shared_meta, "request_id": "req-entity"},
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert len(merged.capabilities) == 1
+    capability = merged.capabilities[0]
+    assert next(
+        ref.step_id for ref in capability.request_refs if ref.usage == "execute"
+    ) == "entity"
+    assert capability.step_ids == ["comments", "entity"]
+    assert [(ref.step_id, ref.usage) for ref in capability.request_refs] == [
+        ("comments", "preflight"),
+        ("entity", "execute"),
+    ]
+
+
 def test_numbered_recording_goal_rebuilds_all_final_request_boundaries():
     goal_text = (
         "目的：管理记录\n"

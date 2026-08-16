@@ -10245,6 +10245,17 @@ def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep
     # not whether the same request may execute inside a capability.
     if membership and membership.origin in {"manual", "user"} and membership.usage in {"execute", "preflight", "fact_check"}:
         return True
+    if (
+        membership
+        and membership.origin == "compiler"
+        and membership.usage in {"execute", "preflight"}
+        and any(
+            item.get("source") == "grounded_request_graph"
+            for item in (cap.evidence or [])
+            if isinstance(item, dict)
+        )
+    ):
+        return True
     if step.step_id in set(_capability_scoped_step_ids(cap)) and (
         cap.updated_by == "user" or cap.locked or cap.confirmed or not role
     ):
@@ -10401,6 +10412,117 @@ def _query_operation_key(step: FlowStep) -> str:
     action_identity = "|".join((page_scope, action_ref, locator))
     action_key = hashlib.sha1(action_identity.encode("utf-8")).hexdigest()[:10]
     return f"action_{action_key}"
+
+
+def _response_identity_match_count(step: FlowStep) -> int:
+    """Count request identity leaves echoed by the captured response."""
+    identity_keys = {
+        "id", "recordid", "requestid", "applicationid", "businessid",
+        "entityid", "itemid", "instanceid", "processinstanceid",
+    }
+    requested: dict[str, set[str]] = {}
+    for param in step.params or []:
+        leaf = re.split(r"[.\[\]]+", str(param.path or param.key or ""))[-1]
+        key = re.sub(r"[^a-z0-9]+", "", leaf.casefold())
+        if key not in identity_keys or param.value in (None, ""):
+            continue
+        values = param.value if isinstance(param.value, list) else [param.value]
+        requested.setdefault(key, set()).update(
+            str(value) for value in values if value not in (None, "")
+        )
+    if not requested:
+        return 0
+
+    matches: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                key = re.sub(r"[^a-z0-9]+", "", str(raw_key).casefold())
+                if (
+                    key in requested
+                    and not isinstance(child, (dict, list))
+                    and str(child) in requested[key]
+                ):
+                    matches.add(key)
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(step.response_json)
+    return len(matches)
+
+
+def _primary_read_operation_step(steps: list[FlowStep]) -> FlowStep:
+    """Choose the business result of one recorded command, not its first helper call."""
+    if not steps:
+        raise ValueError("read operation requires at least one step")
+
+    def page_path_overlap(step: FlowStep) -> int:
+        meta = step.source_meta or {}
+        page_url = str(
+            (meta.get("trigger_page_context") or {}).get("url")
+            or meta.get("page_url")
+            or meta.get("document_url")
+            or ""
+        )
+
+        def segments(value: str) -> set[str]:
+            return {
+                segment
+                for segment in re.split(
+                    r"[^a-z0-9\u4e00-\u9fff]+",
+                    urlparse(value).path.casefold(),
+                )
+                if segment
+                and segment not in _CAPABILITY_PATH_PREFIXES
+                and segment not in {"get", "list", "page", "detail", "query"}
+                and len(segment) > 1
+            }
+
+        return len(
+            segments(page_url) & segments(str(step.path or step.url or ""))
+        )
+
+    def score(step: FlowStep) -> tuple[int, int, int, int, int]:
+        response = step.response_json
+        payload = response.get("data") if isinstance(response, dict) else response
+        entity_payload = int(isinstance(payload, dict) and not any(
+            isinstance(payload.get(key), list)
+            for key in ("list", "records", "rows", "items")
+        ))
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+        return (
+            _response_identity_match_count(step),
+            page_path_overlap(step),
+            entity_payload,
+            int(role == "business_get"),
+            _business_query_evidence_score(step),
+        )
+
+    return max(steps, key=score)
+
+
+def _grounded_read_operation_steps(
+    spec: FlowSpec, anchor: FlowStep,
+) -> list[FlowStep]:
+    """Return every captured read caused by the anchor's visible command."""
+    operation_key = _query_operation_key(anchor)
+    if not operation_key.startswith("action_"):
+        return [anchor]
+    members: list[FlowStep] = []
+    for step in spec.steps:
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "").lower()
+        if (
+            _is_write_step(step)
+            or role in {"auth", "noise", "duplicate_observation"}
+            or str((step.source_meta or {}).get("duplicate_observation_of") or "")
+        ):
+            continue
+        if _query_operation_key(step) == operation_key:
+            members.append(step)
+    return members or [anchor]
 
 
 def _write_operation_key(step: FlowStep) -> str:
@@ -11411,12 +11533,16 @@ def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
         independently_triggered = _has_query_action_evidence(
             meta.get("trigger_op"), meta.get("trigger_locator"),
         )
-        if step.step_id not in submit_closure or independently_triggered:
+        independently_grounded = _business_query_evidence_score(step) >= 5
+        if step.step_id not in submit_closure or independently_triggered or independently_grounded:
             read_groups.setdefault(_query_operation_key(step), []).append(step)
     # One visible command is one public read ability even when it fans out to
     # record, workflow, user and statistics endpoints. Its full request group
     # is attached later by _semantic_plan_from_live_boundaries.
-    anchors.extend(steps[0].step_id for steps in read_groups.values() if steps)
+    anchors.extend(
+        _primary_read_operation_step(steps).step_id
+        for steps in read_groups.values() if steps
+    )
     order = {step.step_id: index for index, step in enumerate(spec.steps)}
     return sorted(dict.fromkeys(anchors), key=lambda step_id: order.get(step_id, 10**9))
 
