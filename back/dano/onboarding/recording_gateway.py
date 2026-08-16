@@ -331,8 +331,12 @@ class RecordingGatewaySession:
         # therefore stop with a short final tail that never reached the batch
         # threshold.  Drain that same queue once more; do not start a separate
         # final planning path.
-        if len(self.capture.captured_all_requests()) > self._last_live_count:
-            self._live_pending_reason = self._live_pending_reason or "final_request_tail"
+        if self.capture.captured_all_requests():
+            # The final tail is a consolidation phase, not merely a count
+            # threshold. Run it once even when the latest request was already
+            # seen by a live batch so the Skill can resubmit the complete
+            # collection from the frozen facts.
+            self._live_pending_reason = "final_request_tail"
             self._live_task = asyncio.create_task(self._drain_live())
             await asyncio.gather(self._live_task, return_exceptions=True)
         self._capture_frozen = True

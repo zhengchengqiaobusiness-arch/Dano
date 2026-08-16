@@ -258,7 +258,7 @@ async def test_freeze_drains_a_queued_live_batch_before_direct_export() -> None:
     await session._freeze_capture()
 
     assert session._capture_frozen is True
-    assert pi.reasons == ["submit_candidate"]
+    assert pi.reasons == ["submit_candidate", "final_request_tail"]
     assert session._live_pending_reason == ""
     assert session._live_notebook is not None
     assert session._live_notebook.insights == [
@@ -320,6 +320,57 @@ async def test_freeze_drains_the_final_unanalysed_request_tail() -> None:
 
     assert pi.since == [2]
     assert session._last_live_count == 3
+
+
+@pytest.mark.asyncio
+async def test_freeze_always_runs_final_tail_for_an_existing_recording() -> None:
+    class Capture:
+        async def flush_recording(self) -> None:
+            return None
+
+        def pause_recording(self) -> None:
+            return None
+
+        def captured_all_requests(self) -> list[dict]:
+            return [{"request_id": "req-1"}, {"request_id": "req-2"}]
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec()
+            self.batches: list[dict] = []
+
+        async def notify_live_batch(self, delta: dict) -> None:
+            self.batches.append(dict(delta))
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+    async def unused(*_args):  # noqa: ANN002
+        raise AssertionError("service is not needed")
+
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="tenant",
+            subsystem="system",
+            recording_id="recording_" + "9" * 32,
+            action="action_final_tail",
+            start_url="https://example.invalid",
+        ),
+        send=None,
+        pi_factory=unused,
+        publisher=unused,
+    )
+    pi = Pi()
+    session.capture = Capture()  # type: ignore[assignment]
+    session._pi = pi
+    session._last_live_count = 2
+
+    await session._freeze_capture()
+
+    assert pi.batches == [{"reason": "final_request_tail", "since_seq": 2}]
 
 
 def test_non_static_read_request_schedules_live_analysis() -> None:
