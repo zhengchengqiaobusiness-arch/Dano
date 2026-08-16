@@ -1,6 +1,8 @@
 // Long-lived recording-only Pi AgentSession runtime.
 // stdin/stdout are JSONL. stdout is reserved for protocol events; diagnostics use stderr.
 import readline from "node:readline";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   createAgentSession,
@@ -20,6 +22,20 @@ const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 const log = (...parts) => process.stderr.write(`[recording_pi] ${parts.join(" ")}\n`);
 const CWD = process.env.DANO_RECORDING_PI_CWD || path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const AGENT_DIR = process.env.DANO_RECORDING_PI_AGENT_DIR || path.join(CWD, ".pi-recording-agent");
+const RECORDING_ANALYSIS_SKILL_NAME = "analyze-recording-evidence";
+const RECORDING_ANALYSIS_SKILL_PATH = path.join(
+  CWD,
+  "agent",
+  "recording-pi",
+  "skills",
+  RECORDING_ANALYSIS_SKILL_NAME,
+);
+const RECORDING_ANALYSIS_SKILL_FILE = path.join(RECORDING_ANALYSIS_SKILL_PATH, "SKILL.md");
+const RECORDING_ANALYSIS_PHASES = new Set([
+  "base_state_analysis",
+  "request_batch",
+  "final_request_tail",
+]);
 
 installOpenAIToolCallStreamCompatibility({
   baseUrl: process.env.DANO_PI_BASE_URL,
@@ -30,11 +46,9 @@ installOpenAIToolCallStreamCompatibility({
 });
 
 const SYSTEM_PROMPT = `你是 Dano 网页录制现场的伴随分析 Agent。
-你只能使用当前提供的录制工具，不具备 Shell、文件、技能、扩展、模板或上下文文件能力。
+只启用项目明确加载的 analyze-recording-evidence Skill 和当前录制工具；不启用 Shell、文件编辑、扩展、全局 Skill、旧 Skill 或其他项目 Skill。
 所有录制事实、FlowSpec、人工修改和验证结果都以后端工具返回的当前版本为唯一权威来源，不得凭记忆补造。
-从录制开始持续完成目标解析、操作与请求的因果对齐、请求角色判定、参数来源(caller_input/constant/session/context/response_binding/computed/generated)和依赖假设。启发式输出仅是候选，不能直接当结论。goal_text 中的预期能力数量和能力名称是强边界：只能产出目标内能力，页面加载、认证、字典和其他辅助请求只能作为编排成员，不能扩成额外能力。
-实时任务必须调用 get_recording_delta 拉取增量；若 has_more=true，必须用 next_seq 继续分页直到 has_more=false。响应中的 __truncated_* 只表示模型投影有界，原始录制事实仍完整保存。随后通过 submit_recording_plan 的 plan.ops 提交 set_goal、set_request_role、set_param_source、set_param_type、set_param_required、set_param_enum、rename_field、propose_dependency、add_pitfall；同时在 semantic_plan.capabilities 提交截至当前全部事实的完整能力边界。capabilities 是全量替换，不是本批增量：后续轮次必须保留仍成立的已有能力，每个 business_read/business_write 执行锚点只能属于一个能力，并覆盖 response_binding 或动态结构所需的上游请求，不能只提交最后一个写接口。字段操作在 canonical step 尚未物化时可把 request_id 填入 step_id。set_goal.goal.evidence 必须是对象数组，例如 [{"source":"goal_text","ref":"用户输入的目标"}]，不能使用字符串。请求角色只允许 auth/support/option/context/business_read/business_write。参数七分类必须按证据判定：caller_input 仅用于目标或 fill/select 等可编辑控件明确证明由操作人提供的业务值；录制值固定的业务常量（body/query 里的单据类型、流程 key 等）属于 constant；session 用于认证状态，非请求头字段必须带 session_key；context 必须带明确 context_key，未被操作人修改的 pageNo/pageSize/current/limit/offset 等分页值也归 context，并编译为录制默认值且允许调用方覆盖；上游响应强值被后续请求复用属于 response_binding，必须带 origin_request_id 和 origin_path；由其他用户参数推导的值（如天数=结束时间-开始时间）属于 computed，必须带 strategy=date_span_days_json、start_field、end_field；页面在运行期生成 UUID、随机字符串/数字或当前时间属于 generated，必须选择 uuid/random_string/random_number/now_ms/now_s/now_iso/now_date 策略。每个分类都会做可执行编译校验，被拒绝时按返回原因改类重提，禁止硬塞最接近的类。上游响应决定请求键结构时（如动态审批节点 ID 作为请求键），优先使用 heuristic_candidates.response_key_maps 的精确候选，提交 propose_dependency kind=response_key_map，并原样填写 source_collection_path、source_key_path、source_label_path、target_container_path 和 value_binding。业务类型必须用 set_param_type、必填性必须用 set_param_required、业务名称必须用 rename_field、页面字典枚举必须用 set_param_enum；这些字段结论都会与 field_evidence/字典映射逐值回检，evidence_refs 至少一条必须引用真实 request_id/event_id/step_id。禁止只在 field_semantics 里提交这些字段轴变更以绕过证据闸门。依赖只能用 propose_dependency 提出并附证据与验证计划，绝不能自行标记 verified。结论必须带 evidence_refs 或可复核 reason。提交后检查 op_results；deferred 表示已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back，不能假装成功。
-内部 category 只由 source_kind 派生，不是模型或用户可编辑的字段属性；不得单独提交、展示或推断 category。
+录制分析任务的请求语义、字段来源、能力边界、接口依赖、动态结构和录制目标约束方法，必须严格执行当前提示中展开的 analyze-recording-evidence Skill；系统提示只定义工具协议、安全边界和提交约束，不得静默回退到旧语义规则。
 仅当同等级证据冲突、required 无法通过页面/API/安全重放确认、业务含义有多个合理选项、操作人必须选择业务策略、写操作需要真人授权，或外部系统必须由用户完成登录/验证码/权限操作时，才调用 ask_operator；同一轮最多提出一个聚合问题。发布或验证待办必须把 issue_id 填入 context_ref。严禁询问 recording_id、flow_version、run_id、step_id、request_id、内部节点 ID，以及可以由页面、HAR、响应、字典、编译器或依赖图确定的事实。实时录制阶段若返回 deferred_until_final_analysis，只登记候选问题并继续提交 plan；最终处理阶段人工问题才保持工具调用等待。required 问题的“必填”回答必须转换为 set_param_required.required=true，“选填”转换为 false，再重新验证；不得把回答文本当字段值写入请求。收到其他回答后也必须通过对应的受控 FlowSpec 操作提交并重新验证；不得猜测、不得把自然语言直接写入任意字段、不得重复追问。
 规划任务必须先调用 get_recording_state，再调用 submit_recording_plan。submit_recording_plan.plan 必须直接传结构化对象，严禁把 plan 用 JSON.stringify 编码成字符串。business_understanding 只允许 business_name、summary、intent、object、purpose；risk_level、capabilities、evidence 必须放在 plan.ops 的 set_goal.goal 内，其中 evidence 也必须在 goal 内，不能放在 op 顶层。
 规划任务读取状态后禁止输出分析过程，必须立即调用提交工具。计划只提交实际变化和必要能力边界，字段优先使用紧凑 key=value;... 记录；不要复述未变化字段，不要在工具调用前写长篇说明。
@@ -161,10 +175,57 @@ function messageText(message) {
   return content.map((item) => item?.type === "text" ? item.text || "" : "").join("");
 }
 
-function promptWasAppended(session, startIndex, text) {
-  return session.messages.slice(startIndex).some((message) => (
-    message?.role === "user" && messageText(message).trim() === text.trim()
-  ));
+function promptWasAppended(session, startIndex, text, skillName = "") {
+  const expected = text.trim();
+  return session.messages.slice(startIndex).some((message) => {
+    if (message?.role !== "user") return false;
+    const actual = messageText(message).trim();
+    if (!skillName) return actual === expected;
+    return actual.includes(`<skill name="${skillName}"`) && actual.endsWith(expected);
+  });
+}
+
+function normalizedPath(value) {
+  const resolved = path.normalize(path.resolve(value));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+async function validateRecordingAnalysisSkill(resourceLoader) {
+  const result = resourceLoader.getSkills();
+  if (result.diagnostics.length) {
+    const details = result.diagnostics
+      .map((item) => `${item.path || "unknown"}: ${item.message || "parse error"}`)
+      .join("; ");
+    throw new Error(`recording analysis Skill failed to load: ${details}`);
+  }
+  const matches = result.skills.filter((skill) => skill.name === RECORDING_ANALYSIS_SKILL_NAME);
+  if (matches.length !== 1) {
+    throw new Error(
+      `recording analysis Skill configuration error: expected exactly one ${RECORDING_ANALYSIS_SKILL_NAME}, loaded ${matches.length}`,
+    );
+  }
+  if (result.skills.length !== 1) {
+    throw new Error(
+      `recording analysis Skill isolation error: expected 1 project Skill, loaded ${result.skills.length}`,
+    );
+  }
+  const skill = matches[0];
+  if (normalizedPath(skill.filePath) !== normalizedPath(RECORDING_ANALYSIS_SKILL_FILE)) {
+    throw new Error(
+      `recording analysis Skill path mismatch: expected ${RECORDING_ANALYSIS_SKILL_FILE}, loaded ${skill.filePath}`,
+    );
+  }
+  if (result.skills.some((item) => /onboard-system/i.test(`${item.name} ${item.filePath}`))) {
+    throw new Error("recording analysis Skill isolation error: retired onboard-system was loaded");
+  }
+  const body = await readFile(RECORDING_ANALYSIS_SKILL_FILE);
+  return {
+    name: RECORDING_ANALYSIS_SKILL_NAME,
+    path: RECORDING_ANALYSIS_SKILL_PATH,
+    file: RECORDING_ANALYSIS_SKILL_FILE,
+    sha256: createHash("sha256").update(body).digest("hex"),
+    loadedSkillCount: result.skills.length,
+  };
 }
 
 function normalizePromptImages(value) {
@@ -201,12 +262,14 @@ async function startSession(command) {
     settingsManager,
     noExtensions: true,
     noSkills: true,
+    additionalSkillPaths: [RECORDING_ANALYSIS_SKILL_PATH],
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
     systemPrompt: SYSTEM_PROMPT,
   });
   await resourceLoader.reload();
+  const recordingSkill = await validateRecordingAnalysisSkill(resourceLoader);
 
   const created = await createAgentSession({
     cwd: CWD,
@@ -225,7 +288,15 @@ async function startSession(command) {
     request_id: promptRequestId,
     session_id: created.session.sessionId,
   }));
-  active = { session: created.session, unsubscribe };
+  active = { session: created.session, unsubscribe, recordingSkill };
+  log(
+    "recording analysis Skill loaded",
+    `name=${recordingSkill.name}`,
+    `path=${recordingSkill.path}`,
+    `sha256=${recordingSkill.sha256}`,
+    `count=${recordingSkill.loadedSkillCount}`,
+    "analysis_phase=idle",
+  );
   emit({
     type: "session_started",
     request_id: command.request_id,
@@ -234,6 +305,8 @@ async function startSession(command) {
     resumed: Boolean(command.session_file),
     retry: settingsManager.getRetrySettings(),
     compaction: settingsManager.getCompactionSettings(),
+    recording_skill: recordingSkill,
+    analysis_phase: "idle",
   });
 }
 
@@ -241,6 +314,16 @@ async function runPrompt(command) {
   if (!active) throw new Error("no active recording Pi session");
   if (promptInFlight) throw new Error("a prompt is already running");
   if (typeof command.text !== "string" || !command.text.trim()) throw new Error("prompt.text must be a non-empty string");
+
+  const promptMode = String(command.prompt_mode || "workflow");
+  const usesRecordingSkill = promptMode === "recording_analysis";
+  const analysisPhase = String(command.analysis_phase || "");
+  if (usesRecordingSkill && !RECORDING_ANALYSIS_PHASES.has(analysisPhase)) {
+    throw new Error(`invalid recording analysis phase: ${analysisPhase || "missing"}`);
+  }
+  const sessionPrompt = usesRecordingSkill
+    ? `/skill:${RECORDING_ANALYSIS_SKILL_NAME} ${command.text}`
+    : command.text;
 
   promptRequestId = command.request_id || null;
   promptCancelled = false;
@@ -265,12 +348,30 @@ async function runPrompt(command) {
   });
   const images = normalizePromptImages(command.images);
   const promptOptions = {
-    expandPromptTemplates: false,
+    expandPromptTemplates: usesRecordingSkill,
     source: "rpc",
     ...(images.length ? { images } : {}),
   };
+  if (usesRecordingSkill) {
+    log(
+      "recording analysis Skill applied",
+      `name=${active.recordingSkill.name}`,
+      `phase=${analysisPhase}`,
+      `sha256=${active.recordingSkill.sha256}`,
+    );
+    emit({
+      type: "agent_event",
+      event: "recording_skill_applied",
+      request_id: command.request_id,
+      session_id: session.sessionId,
+      skill_name: active.recordingSkill.name,
+      skill_path: active.recordingSkill.path,
+      skill_sha256: active.recordingSkill.sha256,
+      analysis_phase: analysisPhase,
+    });
+  }
   const startIndex = session.messages.length;
-  let work = session.prompt(command.text, promptOptions);
+  let work = session.prompt(sessionPrompt, promptOptions);
   promptInFlight = work;
   try {
     try {
@@ -280,7 +381,12 @@ async function runPrompt(command) {
         "Cannot continue from message role: assistant",
       );
       if (!continuationBoundaryError) throw error;
-      if (!promptWasAppended(session, startIndex, command.text)) {
+      if (!promptWasAppended(
+        session,
+        startIndex,
+        command.text,
+        usesRecordingSkill ? RECORDING_ANALYSIS_SKILL_NAME : "",
+      )) {
         // Pi may finish automatic compaction with an assistant message and then
         // call Agent.continue() before appending this RPC prompt. Retry exactly
         // once at the now-stable boundary; unrelated provider/runtime failures
@@ -291,7 +397,7 @@ async function runPrompt(command) {
           request_id: command.request_id,
           session_id: session.sessionId,
         });
-        work = session.prompt(command.text, promptOptions);
+        work = session.prompt(sessionPrompt, promptOptions);
         promptInFlight = work;
         await work;
       } else {
@@ -326,6 +432,12 @@ async function runPrompt(command) {
     ...(!acceptedSubmission && submissionLimitError ? { error: submissionLimitError } : {}),
     ...(acceptedSubmission ? { accepted_submission: acceptedSubmission } : {}),
     image_count: images.length,
+    prompt_mode: promptMode,
+    ...(usesRecordingSkill ? {
+      analysis_phase: analysisPhase,
+      skill_name: active.recordingSkill.name,
+      skill_sha256: active.recordingSkill.sha256,
+    } : {}),
     final_text: lastAssistantText(session).slice(0, 100000),
     usage: stats.tokens,
     session: stats,

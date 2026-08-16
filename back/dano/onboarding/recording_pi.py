@@ -273,7 +273,14 @@ class RecordingPiSession:
         })
         return env
 
-    async def prompt(self, text: str, *, timeout_s: float | None = None) -> dict[str, Any]:
+    async def prompt(
+        self,
+        text: str,
+        *,
+        timeout_s: float | None = None,
+        prompt_mode: str = "workflow",
+        analysis_phase: str = "",
+    ) -> dict[str, Any]:
         """Append one turn to the same Pi session; no Python message history exists."""
         if not text.strip():
             raise ValueError("Pi prompt must not be empty")
@@ -287,6 +294,8 @@ class RecordingPiSession:
                 event = await self._command(
                     "prompt", timeout_s=timeout_s, text=text,
                     images=images,
+                    prompt_mode=prompt_mode,
+                    analysis_phase=analysis_phase,
                 )
                 # A terminal tool submission has already been persisted by the
                 # Python bridge. It is authoritative even if an older sidecar
@@ -534,45 +543,26 @@ class RecordingPiSession:
         """Ask the same Pi session to consume one triggered live batch."""
         reason = str((delta or {}).get("reason") or "request_batch")
         since_seq = max(0, int((delta or {}).get("since_seq") or 0))
-        goal_instruction = (
-            "若 goal_text 非空，先用 set_goal 写入结构化 RecordedGoal，并在 goal.evidence 中引用 goal_text。"
-            if self._live_goal_text
-            else "若目标存在多个合理业务解释且事实无法排除，可调用 ask_operator 一次；实时阶段返回 deferred_until_final_analysis 时只登记候选问题，继续提交 plan，不得猜测。"
+        analysis_phase = (
+            "base_state_analysis"
+            if reason == "recording_started"
+            else "final_request_tail"
+            if reason == "final_request_tail"
+            else "request_batch"
         )
+        goal_text = self._live_goal_text.strip() or "（未提供明确录制目标）"
         return await self.prompt(
-            "你正在伴随分析网页录制。先调用 get_recording_state，再调用 "
-            f"get_recording_delta(since_seq={since_seq}) 拉取新增事实。触发原因={reason}。"
-            "若返回 has_more=true，必须继续用 next_seq 作为 since_seq 分页读取，直到 has_more=false。"
-            f"{goal_instruction}"
-            "基于操作与请求的时间、事务和值证据，提交 set_request_role、set_param_source、"
-            "set_param_type、set_param_required、set_param_enum、rename_field、propose_dependency、add_pitfall 等必要增量；"
-            "步骤尚未物化时字段操作可把 request_id 填入 step_id；依赖只能先提案，禁止标 verified。"
-            "必须调用 submit_recording_plan，并把上述操作放入 plan.ops；实时阶段不需要读取验证报告。"
-            "录制目标是能力边界的强约束：严格按 goal_text 中的预期能力数量和能力名称维护"
-            "set_goal.goal.capabilities；页面加载、字典、认证及目标之外的接口不得另建能力。"
-            "每轮在 semantic_plan.capabilities 提交截至当前全部事实的完整能力边界，不能只交本批"
-            "新增接口；每个能力的 request_refs 必须包含主执行请求及完成调用所需的上游接口。"
-            "请求角色只允许 auth/support/option/context/business_read/business_write。"
-            "参数来源只使用 caller_input/constant/session/context/response_binding/computed/generated："
-            "caller_input 必须有 fill/select 等可编辑控件证据；录制值固定的业务常量归 constant；"
-            "session 用于认证状态，非请求头字段必须带 session_key；context 必须带明确 context_key；"
-            "未被操作人修改的 pageNo/pageSize/current/limit/offset 等分页值归 context（录制默认值且调用方可覆盖）；"
-            "上游响应强值复用归 response_binding"
-            "（必须带 origin_request_id 和 origin_path）；由用户参数推导的值（如天数=结束-开始）归 computed"
-            "（必须带 strategy=date_span_days_json、start_field、end_field）。来源会做可执行编译校验，"
-            "页面运行期生成的 UUID、随机字符串/数字或当前时间归 generated"
-            "（strategy 取 uuid/random_string/random_number/now_ms/now_s/now_iso/now_date）。"
-            "被拒绝时按返回原因改类重提。上游响应决定请求键结构时（如动态审批节点 ID 作为键），"
-            "优先使用 heuristic_candidates.response_key_maps 给出的精确候选，提交 propose_dependency "
-            "kind=response_key_map，并原样填写 source_collection_path/source_key_path/source_label_path/"
-            "target_container_path；value_binding 用 caller_map_by_label，input_field 使用稳定业务名。"
-            "逐字段用 set_param_required 提交有证据的必填性，用 rename_field 提交有证据的业务名称，"
-            "用 set_param_type 提交由匹配控件证明的业务类型；wire_type、路径和录制默认值不可修改。"
-            "页面字典枚举用 set_param_enum 提交完整 label/value 映射；三者都会回查 field_evidence/字典，"
-            "禁止只写 field_semantics 绕过证据闸门，evidence_refs 至少要有一条引用真实 request_id/event_id/step_id。"
-            "提交后检查 op_results，skipped/rolled_back 均表示未落地，必须按 reason 修正。"
-            "一次只问一个真正无法自答的问题。",
+            "执行当前录制分析任务。"
+            f"analysis_phase={analysis_phase}；触发原因={reason}；since_seq={since_seq}。"
+            f"当前录制目标：{goal_text}。"
+            "必须按当前项目 Skill 读取这一阶段要求的完整事实；读取增量时若 has_more=true，"
+            "继续用 next_seq 分页直到 has_more=false。必须调用 submit_recording_plan，"
+            "并在 semantic_plan.capabilities 中提交截至当前仍成立的完整能力集合，"
+            "不能只提交本批新增能力，也不能因单个操作失败清空已有能力。"
+            "实时阶段不读取验证报告；只有事实真正无法推导时才可用业务语言询问操作人。",
             timeout_s=None,
+            prompt_mode="recording_analysis",
+            analysis_phase=analysis_phase,
         )
 
     @property
