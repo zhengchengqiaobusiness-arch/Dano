@@ -12,7 +12,6 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -509,7 +508,6 @@ class RecordingWorkflow:
     pipeline: WorkflowPipeline
     listener: SnapshotListener | None = None
     cancel_listener: CancelListener | None = None
-    snapshot_path: Path | None = None
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
@@ -790,22 +788,7 @@ class RecordingWorkflow:
         **changes: Any,
     ) -> None:
         self.snapshot = transition_snapshot(self.snapshot, status, progress=progress, **changes)
-        self._persist_snapshot()
         if self.listener is not None:
             emitted = self.listener(self.snapshot)
             if isinstance(emitted, Awaitable):
                 await emitted
-
-    def _persist_snapshot(self) -> None:
-        """Persist the latest authority without coupling task lifetime to a socket."""
-
-        if self.snapshot_path is None:
-            return
-        path = Path(self.snapshot_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pending = path.with_suffix(path.suffix + ".tmp")
-        pending.write_text(
-            self.snapshot.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
-        pending.replace(path)

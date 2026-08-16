@@ -3826,9 +3826,7 @@ async def test_recording_session_delta_question_and_live_prompt_contract():
     delta = await session.get_recording_delta(0, limit=1)
     assert delta["has_more"] is True
     assert delta["requests"][0]["request_id"] == "req-0"
-    assert session.recording_delta_cursor() == 1
     await session.get_recording_delta(1, limit=10)
-    assert session.recording_delta_cursor() == 2
     answer = await session.ask_operator(text="选择？", options=["选项A"])
     assert answer == {"answered": True, "answer": "选项A"}
     assert questions[0]["text"] == "选择？"

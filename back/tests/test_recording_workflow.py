@@ -395,17 +395,6 @@ async def test_failed_or_cancelled_draft_can_be_edited_before_retry(status) -> N
 
 
 @pytest.mark.asyncio
-async def test_recording_workflow_persists_each_authoritative_snapshot(tmp_path) -> None:
-    path = tmp_path / "action.json"
-    workflow = RecordingWorkflow(_snapshot(), _ImmediatePipeline(), snapshot_path=path)
-
-    result = await workflow.start()
-
-    assert path.exists()
-    assert WorkflowSnapshot.model_validate_json(path.read_text(encoding="utf-8")) == result
-
-
-@pytest.mark.asyncio
 async def test_recording_workflow_cancel_preserves_draft_and_stops_task() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()

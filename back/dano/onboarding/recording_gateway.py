@@ -7,7 +7,6 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from dano.execution.page.flow_spec import (
@@ -37,10 +36,6 @@ from dano.onboarding.recording_workflow import (
 
 SendMessage = Callable[[dict[str, Any]], Awaitable[None]]
 PiFactory = Callable[[bool], Awaitable[Any]]
-
-
-def _workflow_snapshot_path(action: str) -> Path:
-    return Path(__file__).resolve().parents[2] / ".dano-recording-workflows" / f"{action}.json"
 
 
 def _project_page_enums(recorded: dict[str, Any], samples: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +159,6 @@ class RecordingGatewaySession:
             SelfHealingPipeline(runtime),
             listener=self._on_snapshot,
             cancel_listener=self._cancel_analysis,
-            snapshot_path=_workflow_snapshot_path(self.config.action),
         )
         await self.capture.start(
             self.config.start_url,
@@ -582,11 +576,6 @@ class RecordingGatewaySession:
         except Exception:  # noqa: BLE001 - transport loss must not stop the workflow
             if self.send is sender:
                 self.send = None
-
-    def _send_background(self, payload: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._send(payload))
-        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-
 
 @dataclass
 class RecordingSessionRegistry:

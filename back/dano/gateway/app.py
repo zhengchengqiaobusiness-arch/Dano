@@ -150,18 +150,13 @@ def _new_recording_action() -> str:
 
 
 class _WebSocketSendQueue:
-    """Serialize writes; reliable controls queue, while screenshots coalesce latest-only."""
-
-    _FRAME_ITEM = object()
+    """Serialize WebSocket writes."""
 
     def __init__(self, ws: WebSocket) -> None:
         self._ws = ws
         self._queue: asyncio.Queue = asyncio.Queue()
         self._closed = False
         self._failure: BaseException | None = None
-        self._background: set[asyncio.Task] = set()
-        self._latest_frame: dict | None = None
-        self._frame_enqueued = False
         self._writer = asyncio.create_task(self._run())
 
     async def send_json(self, message: dict) -> None:
@@ -173,31 +168,6 @@ class _WebSocketSendQueue:
         await self._queue.put((message, acknowledged))
         await acknowledged
 
-    def send_background(self, message: dict) -> None:
-        """Enqueue a synchronous recorder callback without leaking task failures."""
-        if self._closed:
-            return
-        task = asyncio.create_task(self.send_json(message))
-        self._background.add(task)
-        task.add_done_callback(self._background_done)
-
-    def send_latest_frame(self, message: dict) -> bool:
-        """Keep at most one unsent screenshot and return without waiting for network I/O."""
-        if self._closed:
-            return False
-        self._latest_frame = message
-        if not self._frame_enqueued:
-            self._frame_enqueued = True
-            self._queue.put_nowait(self._FRAME_ITEM)
-        return True
-
-    def _background_done(self, task: asyncio.Task) -> None:
-        self._background.discard(task)
-        try:
-            task.result()
-        except (Exception, asyncio.CancelledError):
-            pass
-
     async def _run(self) -> None:
         try:
             while True:
@@ -205,15 +175,7 @@ class _WebSocketSendQueue:
                 if item is None:
                     self._closed = True
                     return
-                if item is self._FRAME_ITEM:
-                    message = self._latest_frame
-                    self._latest_frame = None
-                    self._frame_enqueued = False
-                    acknowledged = None
-                    if message is None:
-                        continue
-                else:
-                    message, acknowledged = item
+                message, acknowledged = item
                 try:
                     await self._ws.send_json(message)
                 except BaseException as exc:
@@ -244,17 +206,11 @@ class _WebSocketSendQueue:
                 return
             if item is None:
                 continue
-            if item is self._FRAME_ITEM:
-                self._latest_frame = None
-                self._frame_enqueued = False
-                continue
             _, acknowledged = item
             if not acknowledged.done():
                 acknowledged.set_exception(exc)
 
     async def close(self) -> None:
-        if self._background:
-            await asyncio.gather(*tuple(self._background), return_exceptions=True)
         if not self._writer.done():
             await self._queue.put(None)
         await asyncio.gather(self._writer, return_exceptions=True)

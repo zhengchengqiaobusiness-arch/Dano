@@ -168,7 +168,6 @@ class RecordingPiSession:
         self._active_analysis_image_count = 0
         self._live_recorder: Any = None
         self._live_evidence_marker: tuple[Any, ...] | None = None
-        self._recording_delta_cursor = 0
         self._live_goal_text = ""
         self._operator_asker: Callable[..., Any] | None = None
         self.last_submission_kind = ""
@@ -398,15 +397,7 @@ class RecordingPiSession:
             captured_requests=captured,
             page_events=page_events,
         )
-        self._recording_delta_cursor = max(
-            self._recording_delta_cursor,
-            int(delta.get("next_seq") or 0),
-        )
         return delta
-
-    def recording_delta_cursor(self) -> int:
-        """Highest request cursor actually returned to this Pi session."""
-        return self._recording_delta_cursor
 
     async def refresh_live_evidence(
         self,

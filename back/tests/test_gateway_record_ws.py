@@ -95,7 +95,7 @@ async def test_pi_candidate_is_closed_when_start_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_queue_serializes_controls_and_coalesces_frames() -> None:
+async def test_send_queue_serializes_messages() -> None:
     class Socket:
         sent: list[dict[str, Any]] = []
 
