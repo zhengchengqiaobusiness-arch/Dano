@@ -904,6 +904,12 @@ def _read_is_option_source(read: dict) -> bool:
     has_list_payload = bool(as_list_payload(payload))
     if _read_is_entity_enrichment_lookup(read):
         return False
+    if _request_has_business_query_evidence(read):
+        # A business collection and an option endpoint can both return rows
+        # shaped like ``{id, name}``.  A recorded search/list action with real
+        # business filters owns those fields as caller-facing query inputs; its
+        # result shape alone must not turn the whole request into a chooser.
+        return False
     if role == "explicit_read_option":
         return has_list_payload
     if role == "read_option":
@@ -1041,6 +1047,7 @@ def _param_source_guess(
     samples: dict,
     request_headers: dict | None = None,
     query_is_option_source: bool = False,
+    query_is_business_query: bool = False,
 ) -> dict[str, Any]:
     value = str(field.get("value") or "")
 
@@ -1241,6 +1248,20 @@ def _param_source_guess(
                 "editable": True,
                 "exposed_to_user": False,
                 "reason": "该参数是候选接口录制时的固定筛选条件，未匹配到用户操作，作为接口内部常量保留",
+                "need_human_confirm": False,
+            }
+        if query_is_business_query:
+            return {
+                "category": "user_param",
+                "source_kind": "user_input",
+                "source": {
+                    "kind": "business_query_filter",
+                    "path": path,
+                    "required_state": "optional",
+                },
+                "editable": True,
+                "exposed_to_user": True,
+                "reason": "录制的业务查询携带该非分页筛选字段；调用方可省略或传入新的筛选条件",
                 "need_human_confirm": False,
             }
         if _looks_system_const_field(key, path) or _is_const_value(value):
@@ -1707,6 +1728,7 @@ def _build_step_from_capture(
         if _recording_evidence_matches_request(req, read)
     ])
     query_is_option_source = method == "GET" and _read_is_option_source(req)
+    query_is_business_query = method == "GET" and _request_has_business_query_evidence(req)
     grounded_samples = dict(samples or {})
     for picked, raw_options in (page_enum_options or {}).items():
         if not isinstance(raw_options, dict):
@@ -1874,6 +1896,7 @@ def _build_step_from_capture(
             samples=samples,
             request_headers=req.get("headers") or {},
             query_is_option_source=query_is_option_source,
+            query_is_business_query=query_is_business_query,
         )
         missing_wire_placeholder = _is_missing_wire_placeholder(f.get("value"))
         if missing_wire_placeholder:
@@ -2949,6 +2972,11 @@ def _has_query_action_evidence(trigger_op: Any, trigger_locator: Any) -> bool:
 
 
 def _request_has_business_query_evidence(req: dict) -> bool:
+    if _INTERNAL_WORKFLOW_READ_RE.search(_request_path(req)):
+        # Workflow definitions, approval metadata and form configuration are
+        # orchestration reads.  They can feed a business capability, but their
+        # fixed routing parameters are not end-user search filters.
+        return False
     business_filters = _business_filter_count(req)
     trigger_op = str(req.get("trigger_op") or "").lower()
     trigger_locator = str(req.get("trigger_locator") or "").lower()

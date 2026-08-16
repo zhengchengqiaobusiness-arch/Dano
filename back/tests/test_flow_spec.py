@@ -528,6 +528,62 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(by_path["query.endDate"].type, "date")
         self.assertEqual(by_path["query.startDate"].key, "开始日期")
 
+    def test_business_collection_rows_do_not_hide_recorded_search_filters_as_option_constants(self):
+        request = _get(
+            "https://example.test/records/page?"
+            "pageNo=1&pageSize=10&type=2&projectCode=P1&reason=annual&"
+            "createTime%5B0%5D=2026-08-01&createTime%5B1%5D=2026-08-16",
+            {"data": {"list": [{"id": "record-1", "name": "one", "status": 1}], "total": 1}},
+        )
+        request.update({
+            "request_id": "req-search",
+            "trigger_action_id": "action-search",
+            "trigger_transaction_id": "txn-search",
+            "trigger_op": "click",
+            "trigger_locator": "text=搜索",
+        })
+
+        spec = to_flow_spec([request])
+        step = next(item for item in spec.steps if item.method == "GET")
+        by_path = {param.path: param for param in step.params}
+
+        for path in {
+            "query.type", "query.projectCode", "query.reason",
+            "query.createTime[0]", "query.createTime[1]",
+        }:
+            self.assertEqual(by_path[path].category, "user_param")
+            self.assertEqual(by_path[path].source_kind, "user_input")
+            self.assertTrue(by_path[path].exposed_to_user)
+            self.assertFalse(by_path[path].required)
+        self.assertEqual(by_path["query.pageNo"].source_kind, "page_context")
+        self.assertEqual(by_path["query.pageSize"].source_kind, "page_context")
+
+    def test_workflow_preflight_query_parameters_are_not_public_business_filters(self):
+        request = _get(
+            "https://example.test/workflow/process-instance/get-approval-detail?"
+            "processDefinitionId=leave%3A15&activityId=StartUserNode&"
+            "processVariablesStr=%7B%22day%22%3A7%7D",
+            {"data": [{"id": "StartUserNode", "name": "发起人"}]},
+        )
+        request.update({
+            "request_id": "req-preflight",
+            "trigger_action_id": "action-open",
+            "trigger_transaction_id": "txn-open",
+            "trigger_op": "click",
+            "trigger_locator": "text=发起申请",
+        })
+
+        step = flow_spec_module._build_step_from_capture(
+            request, reads=[], samples={}, storage_state=None,
+            required_labels=set(), page_enum_options={}, step_index=0,
+        )
+        by_path = {param.path: param for param in step.params}
+
+        self.assertEqual(by_path["query.processDefinitionId"].source_kind, "constant")
+        self.assertFalse(by_path["query.processDefinitionId"].exposed_to_user)
+        self.assertEqual(by_path["query.activityId"].source_kind, "constant")
+        self.assertFalse(by_path["query.activityId"].exposed_to_user)
+
     def test_query_dict_is_executable_even_when_captured_url_has_no_query_string(self):
         response = {"data": {"list": [{"id": 1, "applyDate": "2026-07-03"}], "total": 1}, "code": 0}
         captured = [{
