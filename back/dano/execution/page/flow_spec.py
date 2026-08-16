@@ -12683,16 +12683,90 @@ async def orchestrate_flow_capabilities(
             for item in previous_semantic_plan.get("capabilities") or []
         )
     )
-    effective_semantic_plan = (
-        proposed_semantic_plan
-        if strict_semantic_submission
-        else previous_semantic_plan if previous_strict_plan else {}
-    )
     fact_request_ids = {
         str(item.get("request_id") or "")
         for item in _request_fact_items(current)
         if str(item.get("request_id") or "")
     }
+    if strict_semantic_submission and previous_strict_plan:
+        # Live batches are complete snapshots, but a model may accidentally
+        # omit an earlier ability while focusing on new facts. Preserve each
+        # still-grounded boundary unless the new plan replaces the same name or
+        # the same public anchor. Explicit operator removals remain authoritative.
+        proposed_semantic_plan = copy.deepcopy(proposed_semantic_plan)
+        proposed_items = [
+            item for item in proposed_semantic_plan.get("capabilities") or []
+            if isinstance(item, dict)
+        ]
+        proposed_by_name = {
+            str(item.get("name") or ""): item for item in proposed_items
+            if str(item.get("name") or "")
+        }
+        proposed_by_boundary = {
+            (
+                _capability_kind_family(str(item.get("kind") or "")),
+                str(item.get("anchor_step_id") or ""),
+            ): item
+            for item in proposed_items
+        }
+        step_ids = {step.step_id for step in current.steps}
+        removed_names = _removed_capability_names(current)
+        merged_items: list[dict[str, Any]] = []
+        emitted_names: set[str] = set()
+        for previous_item in previous_semantic_plan.get("capabilities") or []:
+            previous_name = str(previous_item.get("name") or "")
+            replacement = proposed_by_name.get(previous_name)
+            if replacement is None:
+                replacement = proposed_by_boundary.get((
+                    _capability_kind_family(str(previous_item.get("kind") or "")),
+                    str(previous_item.get("anchor_step_id") or ""),
+                ))
+            if replacement is not None:
+                replacement_name = str(replacement.get("name") or "")
+                if replacement_name not in emitted_names:
+                    merged_items.append(replacement)
+                    emitted_names.add(replacement_name)
+                continue
+            previous_anchor = str(previous_item.get("anchor_step_id") or "")
+            previous_refs = [
+                str(ref.get("step_id") or "")
+                for ref in previous_item.get("request_refs") or []
+                if isinstance(ref, dict)
+            ]
+            if current.steps:
+                still_grounded = bool(
+                    previous_anchor in step_ids
+                    and all(ref in step_ids for ref in previous_refs)
+                    and _planned_capability_has_public_anchor(
+                        current,
+                        str(previous_item.get("kind") or ""),
+                        [previous_anchor],
+                    )
+                )
+            else:
+                still_grounded = bool(
+                    previous_anchor in fact_request_ids
+                    and all(ref in fact_request_ids for ref in previous_refs)
+                )
+            if (
+                previous_name
+                and previous_name not in removed_names
+                and previous_name not in emitted_names
+                and still_grounded
+            ):
+                merged_items.append(copy.deepcopy(previous_item))
+                emitted_names.add(previous_name)
+        for proposed_item in proposed_items:
+            proposed_name = str(proposed_item.get("name") or "")
+            if proposed_name not in emitted_names:
+                merged_items.append(proposed_item)
+                emitted_names.add(proposed_name)
+        proposed_semantic_plan["capabilities"] = merged_items
+    effective_semantic_plan = (
+        proposed_semantic_plan
+        if strict_semantic_submission
+        else previous_semantic_plan if previous_strict_plan else {}
+    )
     pre_materialization_strict_plan = bool(
         strict_semantic_submission
         and not current.steps
@@ -12853,14 +12927,17 @@ async def orchestrate_flow_capabilities(
         # plan before automatic publishing. Rolling the whole candidate back
         # here made one bad helper/boundary erase unrelated valid abilities.
         if not partial_safe_compilation:
-            current = proposal_baseline
+            # A rejected complete snapshot must not erase the last accepted
+            # collection. The next Pi batch can retry from that authoritative
+            # baseline while newly captured facts remain available on the spec.
+            current = _prune_empty_capabilities(original.model_copy(deep=True))
         # Reject only the unsafe model proposal. Grounded recorder repairs are
         # independent facts and must survive the rollback; otherwise one bad
         # screenshot suggestion also restores stale user-input/option bindings.
         if screenshot_analysis:
             _repair_structural_option_bindings(current)
             current = _sync_capability_io_schemas(sync_flow_spec_models(current))
-        if not initial_generation:
+        if previous_strict_plan:
             semantic_plan = previous_semantic_plan
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
         source = (
@@ -12892,6 +12969,8 @@ async def orchestrate_flow_capabilities(
         semantic_plan = copy.deepcopy(effective_semantic_plan)
     elif strict_anchor_contract and not capability_compilation_errors:
         semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
+    elif previous_strict_plan:
+        semantic_plan = copy.deepcopy(previous_semantic_plan)
     else:
         # Never synthesize a strict plan from an old/default capability.  Doing
         # so would turn the fallback back into the apparent source of truth on

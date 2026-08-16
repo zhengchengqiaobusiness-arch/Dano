@@ -110,6 +110,86 @@ def _dom_enum(label, alias, selected_label, selected_value, options, *, page_id=
     }
 
 
+def test_later_strict_plan_preserves_every_still_grounded_earlier_capability():
+    query = _get("https://work.test/orders/page?pageNo=1&pageSize=10", {"data": []})
+    query.update({"request_id": "req-query", "index": 1, "sequence": 1})
+    submit = _post(
+        "https://work.test/orders/submit",
+        {"name": "demo"},
+        resp={"code": 0, "data": {"id": "order-1"}},
+    )
+    submit.update({"request_id": "req-submit", "index": 2, "sequence": 2})
+    spec = to_flow_spec(
+        [query, submit],
+        request_role_overrides={
+            "req-query": {
+                "role": "business_get", "keep": True,
+                "reason": "用户执行的业务查询", "confidence": 0.99,
+            },
+            "req-submit": {
+                "role": "business_write", "keep": True,
+                "reason": "用户执行的业务提交", "confidence": 0.99,
+            },
+        },
+    )
+    query_id = next(step.step_id for step in spec.steps if step.method == "GET")
+    submit_id = next(step.step_id for step in spec.steps if step.method == "POST")
+    full_plan = _strict_submission(
+        (
+            "query_orders", "查询订单", "query_status", query_id,
+            [(query_id, "execute")],
+        ),
+        (
+            "submit_order", "提交订单", "submit", submit_id,
+            [(submit_id, "execute")],
+        ),
+    )
+    first = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=full_plan,
+        generation_mode="initial",
+    ))
+    assert {item.name for item in first.capabilities} == {"query_orders", "submit_order"}
+
+    omitted_query_plan = _strict_submission(
+        (
+            "submit_order", "提交订单", "submit", submit_id,
+            [(submit_id, "execute")],
+        ),
+    )
+    second = asyncio.run(orchestrate_flow_capabilities(
+        first,
+        submission=omitted_query_plan,
+    ))
+    third = asyncio.run(orchestrate_flow_capabilities(
+        second,
+        submission=omitted_query_plan,
+    ))
+
+    assert {item.name for item in second.capabilities} == {"query_orders", "submit_order"}
+    assert [item.name for item in third.capabilities] == [item.name for item in second.capabilities]
+    assert (
+        third.meta["capability_model"]["semantic_plan"]["capabilities"]
+        == second.meta["capability_model"]["semantic_plan"]["capabilities"]
+    )
+
+    invalid_replacement = _strict_submission(
+        (
+            "submit_order", "提交订单", "submit", "missing-step",
+            [("missing-step", "execute")],
+        ),
+    )
+    rejected = asyncio.run(orchestrate_flow_capabilities(
+        first,
+        submission=invalid_replacement,
+    ))
+    assert {item.name for item in rejected.capabilities} == {"query_orders", "submit_order"}
+    assert (
+        rejected.meta["capability_model"]["semantic_plan"]["capabilities"]
+        == first.meta["capability_model"]["semantic_plan"]["capabilities"]
+    )
+
+
 class ToFlowSpecTest(unittest.TestCase):
     def test_missing_query_placeholder_becomes_required_caller_input(self):
         request = _post(
