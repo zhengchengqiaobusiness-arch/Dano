@@ -776,15 +776,20 @@ def _runtime_values(step, inputs):
         name = str(field.get("name") or "")
         if not name or name in values:
             continue
-        if str(field.get("kind") or "") != "date_span_days_json":
+        kind = str(field.get("kind") or "")
+        if kind not in {"date_span_days", "date_span_days_json"}:
             continue
         start_name = str(field.get("start_field") or "")
         end_name = str(field.get("end_field") or "")
         if start_name not in values or end_name not in values:
             raise RuntimeError(f"computed field {name} is missing {start_name or end_name}")
-        values[name] = json.dumps(
-            {str(field.get("output_key") or "days"): date_span_days(values[start_name], values[end_name])},
-            ensure_ascii=False, separators=(",", ":"),
+        days = date_span_days(values[start_name], values[end_name])
+        values[name] = (
+            json.dumps(
+                {str(field.get("output_key") or "days"): days},
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            if kind == "date_span_days_json" else days
         )
     return apply_wire_formats(values, step.get("wire_formats") or {})
 

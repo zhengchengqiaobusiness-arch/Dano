@@ -559,6 +559,59 @@ def test_process_variables_date_span_is_computed_and_hidden_from_skill_inputs():
     assert dry["query"]["processVariablesStr"] == '{"day":9}'
 
 
+def test_date_span_inference_uses_the_matching_operation_and_supports_scalar_body_days():
+    unrelated = FlowStep(
+        step_id="query", method="GET", path="/items",
+        params=[
+            ParamField(path="query.startTime", key="queryStart", value="1782835200000"),
+            ParamField(path="query.endTime", key="queryEnd", value="1782921600000"),
+        ],
+    )
+    approval = FlowStep(
+        step_id="approval", method="GET", path="/approval-detail",
+        params=[ParamField(
+            path="query.processVariablesStr", key="processVariablesStr",
+            value='{"day":6}', category="system_const", source_kind="constant",
+        )],
+    )
+    update = FlowStep(
+        step_id="update", method="POST", path="/applications/submit-process",
+        body_source=json.dumps({
+            "startTime": 1786550400000,
+            "endTime": 1787068800000,
+            "day": "6",
+        }),
+        params=[
+            ParamField(path="startTime", key="startTime", value=1786550400000, type="datetime"),
+            ParamField(path="endTime", key="endTime", value=1787068800000, type="datetime"),
+            ParamField(path="day", key="day", value="6", source_kind="user_input"),
+        ],
+    )
+    spec = FlowSpec(steps=[unrelated, approval, update])
+
+    flow_spec_module._infer_computed_runtime_fields(spec)
+
+    process_variables = approval.params[0]
+    day = update.params[2]
+    assert process_variables.source == {
+        "kind": "computed", "strategy": "date_span_days_json",
+        "start_field": "startTime", "end_field": "endTime",
+        "path": "query.processVariablesStr", "sample_verified": True,
+        "sample_days": 6, "output_key": "day",
+    }
+    assert day.source_kind == "computed"
+    assert day.source["strategy"] == "date_span_days"
+    assert day.exposed_to_user is False
+
+    api_request, errors = flow_spec_module._flow_step_to_api_step(update)
+    assert errors == []
+    dry = asyncio.run(execute_api_request(api_request, {
+        "startTime": "2026-08-13T00:00:00+08:00",
+        "endTime": "2026-08-19T00:00:00+08:00",
+    }, send=False))
+    assert dry["body"]["day"] == 6
+
+
 def test_rebuild_dependency_promotes_unique_internal_id_constant_to_upstream_response():
     source = FlowStep(
         step_id="definition",

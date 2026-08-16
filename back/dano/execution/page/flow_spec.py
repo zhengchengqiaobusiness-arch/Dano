@@ -943,6 +943,8 @@ def _read_is_business_entity_collection(read: dict, payload: Any) -> bool:
         and str(read.get("method") or "GET").upper() in {"GET", "HEAD"}
         and _list_payload_has_reference_contract(payload)
         and not _read_is_entity_enrichment_lookup(read)
+        and not _request_has_option_endpoint_hint(read)
+        and not _request_has_reference_entity_hint(read)
     )
 
 
@@ -6534,8 +6536,15 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                     f"该字段由上一步 `{source.name or source.path}` 的响应 `{lk.source_path}` 提供，"
                     "运行期自动注入，不能使用录制旧值"
                 )
-            p.need_human_confirm = not bool(lk.confirmed)
-            p.confidence = max(float(p.confidence or 0.0), float(lk.confidence or 0.0))
+            if _link_is_auto_generated(lk) or any(
+                (lk.meta or {}).get(key) is True
+                for key in ("captured_value_match", "captured_structure_match")
+            ):
+                p.confidence = max(
+                    float(p.confidence or 0.0), float(lk.confidence or 0.0),
+                )
+                if lk.confirmed:
+                    p.need_human_confirm = False
             p.confidence_tier = "linked"
             if p.key in target.sample_inputs:
                 target.sample_inputs.pop(p.key, None)
@@ -6807,6 +6816,10 @@ def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             if p.source_kind != "previous_response":
                 continue
             link_id = p.source.get("link_id")
+            if not link_id:
+                # An explicitly declared but incomplete response source is an
+                # advisory contract problem; do not silently erase it.
+                continue
             if (link_id, st.step_id, p.path) in valid_targets:
                 continue
             _reset_param_source(p, reason="上游依赖已删除或目标已改变，字段已恢复为用户输入")
@@ -7920,56 +7933,144 @@ def _date_like_epoch_seconds(value: Any) -> float | None:
 
 
 def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
-    """Hide serialized date-span query variables when their sample proves the formula."""
-    params = [param for step in spec.steps for param in (step.params or [])]
+    """Hide recorded date-span fields only when their samples prove the formula."""
     def leaf_name(param: ParamField) -> str:
         raw = param.key or str(param.path or "").split(".")[-1]
         return re.sub(r"[^a-z0-9]+", "", str(raw).lower())
 
-    start = next((param for param in params if re.fullmatch(r"(?:start|begin)(?:time|date)?", leaf_name(param))), None)
-    end = next((param for param in params if re.fullmatch(r"(?:end|finish|back)(?:time|date)?", leaf_name(param))), None)
-    if start is None or end is None:
+    date_pairs: list[tuple[FlowStep, ParamField, ParamField, int]] = []
+    for step in spec.steps or []:
+        starts = [
+            param for param in step.params or []
+            if re.fullmatch(r"(?:start|begin)(?:time|date)?", leaf_name(param))
+        ]
+        ends = [
+            param for param in step.params or []
+            if re.fullmatch(r"(?:end|finish|back)(?:time|date)?", leaf_name(param))
+        ]
+        for start in starts:
+            for end in ends:
+                start_seconds = _date_like_epoch_seconds(start.value)
+                end_seconds = _date_like_epoch_seconds(end.value)
+                if start_seconds is None or end_seconds is None:
+                    continue
+                date_pairs.append((
+                    step, start, end,
+                    int(round(abs(end_seconds - start_seconds) / 86400.0)),
+                ))
+    if not date_pairs:
         return
-    start_seconds = _date_like_epoch_seconds(start.value)
-    end_seconds = _date_like_epoch_seconds(end.value)
-    if start_seconds is None or end_seconds is None:
-        return
-    observed_days = int(round(abs(end_seconds - start_seconds) / 86400.0))
-    for step in spec.steps:
+
+    capability_memberships = [
+        set(_capability_node_step_ids(capability))
+        for capability in spec.capabilities or []
+    ]
+
+    for step in spec.steps or []:
         for param in step.params or []:
-            if param.locked or not str(param.path or "").startswith("query."):
+            if param.locked or _param_has_editable_control_evidence(param):
                 continue
             key_norm = leaf_name(param)
-            if not re.search(r"(process)?variables?(str)?$|context(json|str)?$", key_norm):
+            strategy = ""
+            output_key = ""
+            sample_value: Any = None
+            if (
+                str(param.path or "").startswith("query.")
+                and re.search(r"(process)?variables?(str)?$|context(json|str)?$", key_norm)
+            ):
+                try:
+                    payload = json.loads(str(param.value or ""))
+                except Exception:  # noqa: BLE001
+                    payload = None
+                if isinstance(payload, dict) and len(payload) == 1:
+                    output_key, sample_value = next(iter(payload.items()))
+                    if str(output_key).lower() in {"day", "days", "duration", "durationdays"}:
+                        strategy = "date_span_days_json"
+            elif re.fullmatch(r"(?:day|days|duration|durationdays)", key_norm):
+                sample_value = param.value
+                strategy = "date_span_days"
+            if not strategy:
                 continue
             try:
-                payload = json.loads(str(param.value or ""))
-            except Exception:  # noqa: BLE001
-                continue
-            if not isinstance(payload, dict) or len(payload) != 1:
-                continue
-            output_key, sample_value = next(iter(payload.items()))
-            if str(output_key).lower() not in {"day", "days", "duration", "durationdays"}:
-                continue
-            try:
-                if int(sample_value) != observed_days:
-                    continue
+                observed_days = int(sample_value)
             except (TypeError, ValueError):
                 continue
+            matches = [pair for pair in date_pairs if pair[3] == observed_days]
+            if not matches:
+                continue
+
+            def pair_rank(pair: tuple[FlowStep, ParamField, ParamField, int]) -> tuple[int, int, float]:
+                source_step = pair[0]
+                same_step = int(source_step.step_id == step.step_id)
+                shared_capability = int(any(
+                    step.step_id in members and source_step.step_id in members
+                    for members in capability_memberships
+                ))
+                target_sequence = _step_sequence(step)
+                source_sequence = _step_sequence(source_step)
+                distance = (
+                    abs(target_sequence - source_sequence)
+                    if target_sequence is not None and source_sequence is not None
+                    else 10**9
+                )
+                return same_step, shared_capability, -distance
+
+            ranked = sorted(matches, key=pair_rank, reverse=True)
+            if len(ranked) > 1 and pair_rank(ranked[0]) == pair_rank(ranked[1]):
+                continue
+            _source_step, start, end, _days = ranked[0]
             param.category = "runtime_var"
             param.source_kind = "computed"
             param.source = {
                 "kind": "computed",
-                "strategy": "date_span_days_json",
+                "strategy": strategy,
                 "start_field": start.key,
                 "end_field": end.key,
-                "output_key": str(output_key),
                 "path": param.path,
+                "sample_verified": True,
+                "sample_days": observed_days,
+                **({"output_key": str(output_key)} if output_key else {}),
             }
             param.exposed_to_user = False
+            param.editable = False
             param.need_human_confirm = False
             param.reason = f"录制样例证明该字段由 `{start.key}` 与 `{end.key}` 的日期跨度生成，运行期自动计算"
             step.sample_inputs.pop(param.key, None)
+
+
+def _repair_uncontrolled_write_state_fields(spec: FlowSpec) -> int:
+    """Keep request-owned command state out of the caller contract."""
+    repaired = 0
+    for step in spec.steps or []:
+        if not _is_write_step(step):
+            continue
+        for param in step.params or []:
+            leaf = re.sub(
+                r"[^a-z0-9]+", "",
+                str(param.path or param.key).split(".")[-1].casefold(),
+            )
+            if (
+                not re.fullmatch(r"(?:(?:process|workflow|approval|record))?(?:status|state)", leaf)
+                or param.source_kind != "unknown"
+                or param.locked
+                or _param_has_manual_contract(param)
+                or _param_has_editable_control_evidence(param)
+                or isinstance(param.value, (dict, list))
+            ):
+                continue
+            param.category = "system_const"
+            param.source_kind = "constant"
+            param.source = {
+                "kind": "recorded_command_state",
+                "path": param.path,
+            }
+            param.exposed_to_user = False
+            param.editable = False
+            param.need_human_confirm = False
+            param.reason = "录制中没有可编辑控件证明该写入状态由用户提供，按请求自身命令状态保留"
+            step.sample_inputs.pop(param.key, None)
+            repaired += 1
+    return repaired
 
 
 def _schema_for_param_type(ptype: str) -> dict[str, Any]:
@@ -9940,6 +10041,28 @@ def _mark_repeated_write_observations(spec: FlowSpec) -> None:
             "role": "duplicate_observation",
             "duplicate_observation_of": representative.step_id,
         }
+        for capability in spec.capabilities or []:
+            member_ids = set(_capability_node_step_ids(capability))
+            if step.step_id not in member_ids:
+                continue
+            if representative.step_id in member_ids:
+                capability.nodes = _remove_capability_step_nodes(
+                    capability.nodes, step.step_id,
+                )
+            else:
+                def replace_duplicate(nodes: list[dict[str, Any]]) -> None:
+                    for node in nodes or []:
+                        if not isinstance(node, dict):
+                            continue
+                        for key in ("step_id", "from", "source"):
+                            if str(node.get(key) or "") == step.step_id:
+                                node[key] = representative.step_id
+                        for child_key in ("children", "steps", "then", "else", "otherwise"):
+                            if isinstance(node.get(child_key), list):
+                                replace_duplicate(node[child_key])
+
+                replace_duplicate(capability.nodes)
+            _sync_capability_order(spec, capability)
         request_ids = [
             request_id
             for request_id, usage in spec.request_facts.usage.items()
@@ -15746,7 +15869,7 @@ def _field_source_configuration_advice(param: ParamField) -> str | None:
     }:
         return f"字段 `{param.path}` 的系统生成值缺少有效生成策略"
     if source_kind == "computed" and not (
-        (param.source or {}).get("strategy") == "date_span_days_json"
+        (param.source or {}).get("strategy") in {"date_span_days", "date_span_days_json"}
         and (param.source or {}).get("start_field")
         and (param.source or {}).get("end_field")
     ):
@@ -17189,6 +17312,9 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True))
     _repair_structural_option_bindings(current)
+    _refresh_api_option_display_labels(current)
+    _infer_computed_runtime_fields(current)
+    _repair_uncontrolled_write_state_fields(current)
     _materialize_captured_response_key_maps(
         current.steps,
         current.links,
@@ -18683,6 +18809,116 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         ]
             repaired += 1
 
+    return repaired
+
+
+def _refresh_api_option_display_labels(spec: FlowSpec) -> int:
+    """Repair persisted live-option labels from their captured response rows."""
+    snapshots: list[tuple[float, str, str, list[dict[str, Any]]]] = []
+    for fact in (spec.request_facts or RequestFacts()).requests or []:
+        rows = [
+            dict(item) for item in (as_list_payload(fact.response_json) or [])
+            if isinstance(item, dict)
+        ]
+        if rows:
+            snapshots.append((
+                _request_sequence_value(fact.sequence) or -1.0,
+                str(fact.request_id or ""),
+                _option_source_contract_endpoint(fact.url or fact.path),
+                rows,
+            ))
+    for step in spec.steps or []:
+        rows = [
+            dict(item) for item in (as_list_payload(step.response_json) or [])
+            if isinstance(item, dict)
+        ]
+        if rows:
+            snapshots.append((
+                _step_sequence(step) or -1.0,
+                str((step.source_meta or {}).get("request_id") or ""),
+                _option_source_contract_endpoint(step.url or step.path),
+                rows,
+            ))
+
+    repaired = 0
+    for step in spec.steps or []:
+        for param in step.params or []:
+            if (
+                param.source_kind != "api_option"
+                or param.locked
+                or _param_has_manual_contract(param)
+            ):
+                continue
+            source = dict(param.source or {})
+            value_key = str(source.get("value_key") or "")
+            current_label = str(source.get("label_key") or "")
+            if not value_key or (
+                current_label
+                and current_label != value_key
+                and not _is_idlike(current_label)
+            ):
+                continue
+            source_request_id = str(source.get("source_request_id") or "")
+            source_endpoint = _option_source_contract_endpoint(
+                str(source.get("source_url") or "")
+            )
+            matches = [
+                item for item in snapshots
+                if (
+                    source_request_id
+                    and item[1] == source_request_id
+                ) or (
+                    source_endpoint
+                    and item[2] == source_endpoint
+                )
+            ]
+            if not matches:
+                continue
+            _sequence, _request_id, _endpoint, rows = max(matches, key=lambda item: item[0])
+            selected_rows = [
+                row for row in rows
+                if _recorded_scalar_values_match(
+                    _flow_path_lookup(row, value_key), param.value,
+                )
+            ]
+            sample = selected_rows[0] if len(selected_rows) == 1 else rows[0]
+            label_key = _pick_label_key(sample, value_key)
+            if label_key == value_key or (
+                _is_idlike(label_key)
+                and not re.search(r"(?:code|no|number|serial)$", label_key, re.I)
+            ):
+                continue
+            records: list[dict[str, Any]] = []
+            label_values: dict[str, Any] = {}
+            ambiguous = False
+            for row in rows:
+                value = _flow_path_lookup(row, value_key)
+                label = _flow_path_lookup(row, label_key)
+                if value is _FLOW_PATH_MISSING or label is _FLOW_PATH_MISSING:
+                    continue
+                label_text = str(label or "").strip()
+                if not label_text:
+                    continue
+                if label_text in label_values and label_values[label_text] != value:
+                    ambiguous = True
+                    break
+                label_values[label_text] = value
+            if ambiguous or not label_values:
+                continue
+            records = [
+                {"label": label, "value": value}
+                for label, value in label_values.items()
+            ]
+            param.source = {**source, "label_key": label_key}
+            param.enum_options = records
+            param.enum_value_map = dict(label_values)
+            binding = _find_select_binding(step, param)
+            if binding is not None:
+                binding.label_key = label_key
+                binding.options = records
+                binding.option_map = dict(label_values)
+                binding.count = len(records)
+            repaired += 1
     return repaired
 
 def _attach_option_source_memberships(spec: FlowSpec) -> None:

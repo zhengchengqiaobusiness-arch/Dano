@@ -3101,6 +3101,9 @@ def test_publish_resolves_selected_entity_and_projects_the_same_record_fields() 
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="update", method="POST", path="/applications/submit-process",
+            body_source=json.dumps({
+                "id": "entity-1", "billCode": "REQ-001", "reason": "changed",
+            }),
             source_meta={
                 "request_id": "req-update", "role": "business_write",
                 "trigger_page_context": {
@@ -3170,3 +3173,85 @@ def test_publish_resolves_selected_entity_and_projects_the_same_record_fields() 
     assert bill_code.source_kind == "selected_option_field"
     assert bill_code.exposed_to_user is False
     assert selector.field_projections == {"billCode": "billCode"}
+    api_request, errors = flow_spec_module.flow_spec_to_api_request(
+        prepared, _prepared=True,
+    )
+    assert errors == []
+    exported_selector = next(
+        binding for binding in api_request["selects"]
+        if binding["param"] == "id"
+    )
+    assert exported_selector["path"] == "id"
+    assert exported_selector["field_projections"] == {"billCode": "billCode"}
+
+
+def test_publish_repairs_internal_id_display_for_a_live_api_option() -> None:
+    rows = [
+        {"id": "row-1", "processInstanceId": "process-1", "billCode": "REQ-001"},
+        {"id": "row-2", "processInstanceId": "process-2", "billCode": "REQ-002"},
+    ]
+    source_url = "https://example.test/applications/page?pageNo=1&pageSize=10"
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="progress", method="GET", path="/process/progress",
+            params=[ParamField(
+                path="query.processInstanceId", key="processInstanceId",
+                value="process-1", type="enum", source_kind="api_option",
+                source={
+                    "kind": "api_option", "source_request_id": "req-list",
+                    "source_url": source_url, "value_key": "processInstanceId",
+                    "label_key": "id",
+                },
+                enum_options=[{"label": "row-1", "value": "process-1"}],
+                enum_value_map={"row-1": "process-1"},
+            )],
+            selects=[flow_spec_module.SelectBinding(
+                param="processInstanceId", path="query.processInstanceId",
+                source_url=source_url, source_request_id="req-list",
+                value_key="processInstanceId", label_key="id",
+                options=[{"label": "row-1", "value": "process-1"}],
+                option_map={"row-1": "process-1"}, enum_source="api",
+            )],
+        )],
+        request_facts={"requests": [{
+            "request_id": "req-list", "sequence": 1, "method": "GET",
+            "url": source_url, "response_json": {"data": {"list": rows}},
+        }]},
+    )
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    param = prepared.steps[0].params[0]
+    binding = prepared.steps[0].selects[0]
+    assert param.source["label_key"] == "billCode"
+    assert param.enum_value_map == {"REQ-001": "process-1", "REQ-002": "process-2"}
+    assert binding.label_key == "billCode"
+    assert binding.option_map == param.enum_value_map
+
+
+def test_publish_hides_uncontrolled_write_state_but_keeps_a_real_form_control() -> None:
+    hidden = ParamField(
+        path="processStatus", key="processStatus", value=0,
+        category="user_param", source_kind="unknown", exposed_to_user=True,
+    )
+    controlled = ParamField(
+        path="status", key="status", value="approved",
+        category="user_param", source_kind="unknown", exposed_to_user=True,
+        evidence=[{
+            "kind": "page_control", "source": "recorder_dom",
+            "control_kind": "select", "editable": True, "interacted": True,
+        }],
+    )
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="update", method="POST", path="/applications/update",
+        body_source=json.dumps({"processStatus": 0, "status": "approved"}),
+        params=[hidden, controlled],
+    )])
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    by_path = {param.path: param for param in prepared.steps[0].params}
+    assert by_path["processStatus"].source_kind == "constant"
+    assert by_path["processStatus"].exposed_to_user is False
+    assert by_path["status"].source_kind == "unknown"
+    assert by_path["status"].exposed_to_user is True

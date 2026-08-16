@@ -437,12 +437,18 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
                     "step_id": "detail", "method": "POST", "path": "/approval-detail",
                     "body_template": {
                         "startTime": "{{startTime}}", "endTime": "{{endTime}}",
-                        "processVariablesStr": "{{__days}}",
+                        "processVariablesStr": "{{__days}}", "day": "{{__day_count}}",
                     },
-                    "runtime_fields": [{
-                        "name": "__days", "kind": "date_span_days_json",
-                        "start_field": "startTime", "end_field": "endTime", "output_key": "day",
-                    }],
+                    "runtime_fields": [
+                        {
+                            "name": "__days", "kind": "date_span_days_json",
+                            "start_field": "startTime", "end_field": "endTime", "output_key": "day",
+                        },
+                        {
+                            "name": "__day_count", "kind": "date_span_days",
+                            "start_field": "startTime", "end_field": "endTime",
+                        },
+                    ],
                     "wire_formats": {"startTime": "epoch_ms", "endTime": "epoch_ms"},
                 },
                 {
@@ -473,6 +479,7 @@ def test_self_contained_client_executes_wire_computed_and_response_key_map(tmp_p
             "startTime": 1785945600000,
             "endTime": 1786032000000,
             "processVariablesStr": '{"day":1}',
+            "day": 1,
         }
         assert sent[1]["body"]["startUserSelectAssignees"] == {
             "Activity_runtime_leader": [200, 202],

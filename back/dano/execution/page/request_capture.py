@@ -2380,10 +2380,18 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
     for s in (selects or []):
         if s.get("path") not in param_map:
             continue
-        meta = {"param": param_map[s["path"]], "source_url": s.get("source_url"),
+        meta = {"param": param_map[s["path"]], "path": s.get("path"),
+                "source_url": s.get("source_url"),
+                "source_method": s.get("source_method") or "GET",
                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
                 "options": list(s.get("options") or []),     # 候选选项快照(存进 skill 让 agent 从中选,问题1)
                 "count": s.get("count")}
+        if s.get("source_body") is not None:
+            meta["source_body"] = copy.deepcopy(s.get("source_body"))
+        if s.get("source_content_type"):
+            meta["source_content_type"] = s.get("source_content_type")
+        if s.get("field_projections"):
+            meta["field_projections"] = dict(s.get("field_projections") or {})
         if s.get("option_map"):
             meta["option_map"] = dict(s.get("option_map") or {})
         if s.get("option_map_source_url"):
@@ -2641,18 +2649,21 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
         if not name or name in out:
             continue
         kind = str(field.get("kind") or "uuid")
-        if kind == "date_span_days_json":
-            import json as _json
+        if kind in {"date_span_days", "date_span_days_json"}:
             start_name = str(field.get("start_field") or "")
             end_name = str(field.get("end_field") or "")
             if start_name not in out or end_name not in out:
                 continue
             days = date_span_days(out[start_name], out[end_name])
-            out[name] = _json.dumps(
-                {str(field.get("output_key") or "days"): days},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            if kind == "date_span_days_json":
+                import json as _json
+                out[name] = _json.dumps(
+                    {str(field.get("output_key") or "days"): days},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            else:
+                out[name] = days
         else:
             out[name] = _system_generated_value(kind)
     return out
