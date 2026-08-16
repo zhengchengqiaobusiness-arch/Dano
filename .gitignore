@@ -36,3 +36,4 @@ back/.dano-sessions/
 back/.dano/
 /.claude
 .codex/environments/environment.toml
+/back/.dano-recording-workflows
