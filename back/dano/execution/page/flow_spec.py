@@ -489,6 +489,7 @@ def executable_flow_links(spec: FlowSpec) -> list[FlowLink]:
         capture_grounded = bool(
             meta.get("captured_value_match") is True
             or meta.get("captured_structure_match") is True
+            or meta.get("captured_record_hydration") is True
         )
         if active and (machine_verified or capture_grounded):
             executable.append(link)
@@ -6624,6 +6625,7 @@ def _link_is_auto_generated(lk: FlowLink) -> bool:
             or "值" in reason
             or "匹配" in reason
             or evidence.get("kind") == "value_match"
+            or evidence.get("kind") == "record_hydration"
             or evidence.get("auto_rebuilt") is True
         )
     )
@@ -6672,13 +6674,30 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
         return False
     if param is None:
         return False
+    evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
+    source_leaf = re.sub(
+        r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower(),
+    )
+    target_leaf = re.sub(
+        r"[^a-z0-9]+", "",
+        str(param.path or param.key or "").split(".")[-1].lower(),
+    )
+    if (
+        lk is not None
+        and lk.confirmed
+        and float(lk.confidence or 0.0) >= 0.95
+        and evidence.get("kind") == "record_hydration"
+        and int(evidence.get("match_count") or 0) >= 3
+        and bool(evidence.get("identity_paths"))
+        and source_leaf == target_leaf
+    ):
+        return True
     if param.category == "user_param" or param.source_kind == "user_input" or _looks_user_entered_business_field(param.key, param.path):
         # A recorded value or a similar field name cannot prove that an editable
         # business field is supplied by an earlier response.  The exception is
         # an exact field projection observed in the same action chain: edit
         # forms use that value as an overrideable default, not as a hidden
         # runtime-only field.
-        evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
         if (
             lk is not None
             and lk.confirmed
@@ -6749,9 +6768,21 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
     if source_value is _FLOW_PATH_MISSING:
         return False
     target_param = _resolve_param_reference(target, link.target_path)
-    if target_param is None or not _recorded_scalar_values_match(source_value, target_param.value):
-        return False
     evidence = link.evidence if isinstance(link.evidence, dict) else {}
+    hydration_match = bool(
+        evidence.get("kind") == "record_hydration"
+        and not isinstance(evidence.get("captured_source_value"), (dict, list, bool))
+        and not isinstance(evidence.get("captured_target_value"), (dict, list, bool))
+        and str(evidence.get("captured_source_value")).strip()
+        == str(evidence.get("captured_target_value")).strip()
+        and str(evidence.get("captured_target_value")).strip()
+        == str(target_param.value if target_param is not None else "").strip()
+    )
+    if target_param is None or not (
+        _recorded_scalar_values_match(source_value, target_param.value)
+        or hydration_match
+    ):
+        return False
     source_action = str(evidence.get("source_action_id") or "")
     target_action = str(evidence.get("target_action_id") or "")
     source_transaction = str((source.source_meta or {}).get("trigger_transaction_id") or "")
@@ -6762,6 +6793,7 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
         or (source_transaction and source_transaction == target_transaction)
         or evidence.get("kind") in {
             "response_projection", "request_dependency", "causal_transaction", "explicit_projection",
+            "record_hydration",
         }
     )
     separate_observed_operations = bool(
@@ -6952,6 +6984,92 @@ def _merge_flow_read_sources(explicit_reads: list[dict], captured_requests: list
     return out
 
 
+def _discover_record_hydration_links(
+    captured_requests: list[dict[str, Any]],
+    target_request_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Find a record read whose object is copied into a later write form."""
+    identity_keys = {
+        "id", "recordid", "requestid", "applicationid", "businessid",
+        "entityid", "itemid",
+    }
+    candidates_by_target: dict[str, list[dict[str, Any]]] = {}
+    for target in captured_requests:
+        target_id = str(target.get("request_id") or "")
+        if target_id not in target_request_ids:
+            continue
+        target_body = _parse_body(target.get("post_data"))
+        if not isinstance(target_body, dict):
+            continue
+        target_values = {
+            path: raw
+            for path, _tokens, _scalar, raw in _leaf_paths(target_body)
+            if raw not in (None, "") and not isinstance(raw, (dict, list, bool))
+        }
+        if not target_values:
+            continue
+        for source in captured_requests:
+            if (
+                str(source.get("method") or "GET").upper() not in {"GET", "HEAD"}
+                or not _request_precedes(source, target)
+            ):
+                continue
+            if any(
+                str(source.get(key) or "")
+                and str(target.get(key) or "")
+                and str(source.get(key)) != str(target.get(key))
+                for key in ("page_id", "frame_id")
+            ):
+                continue
+            response = source.get("response_json")
+            if not isinstance(response, dict):
+                continue
+            payload = response
+            prefix = ""
+            for envelope in ("data", "result"):
+                if isinstance(response.get(envelope), dict):
+                    payload = response[envelope]
+                    prefix = f"{envelope}."
+                    break
+            matches: list[dict[str, str]] = []
+            for path, _tokens, _scalar, raw in _leaf_paths(payload):
+                if (
+                    path not in target_values
+                    or isinstance(raw, (dict, list, bool))
+                    or not _recorded_scalar_values_match(raw, target_values[path])
+                ):
+                    continue
+                matches.append({
+                    "source_path": f"{prefix}{path}" if path else prefix.rstrip("."),
+                    "target_path": path,
+                    "source_value": copy.deepcopy(raw),
+                    "target_value": copy.deepcopy(target_values[path]),
+                })
+            identity_paths = [
+                item["target_path"] for item in matches
+                if re.sub(
+                    r"[^a-z0-9]+", "",
+                    item["target_path"].split(".")[-1].casefold(),
+                ) in identity_keys
+            ]
+            if len(matches) < 3 or not identity_paths:
+                continue
+            candidates_by_target.setdefault(target_id, []).append({
+                "source_request_id": str(source.get("request_id") or ""),
+                "target_request_id": target_id,
+                "matches": matches,
+                "identity_paths": identity_paths,
+                "source_order": _request_order_value(source),
+            })
+    selected: list[dict[str, Any]] = []
+    for candidates in candidates_by_target.values():
+        selected.append(max(
+            candidates,
+            key=lambda item: (len(item["matches"]), item["source_order"]),
+        ))
+    return selected
+
+
 def to_flow_spec(
     captured_requests: list[dict],
     *,
@@ -7058,7 +7176,15 @@ def to_flow_spec(
     selected_write_request_ids = {
         str(request.get("request_id") or "") for request in write_cands if request.get("request_id")
     }
+    record_hydration_candidates = _discover_record_hydration_links(
+        captured_requests, selected_write_request_ids,
+    )
     machine_preflight_request_ids: set[str] = set()
+    machine_preflight_request_ids.update(
+        str(candidate.get("source_request_id") or "")
+        for candidate in record_hydration_candidates
+        if candidate.get("source_request_id")
+    )
     for candidate in discover_response_key_maps(captured_requests):
         if str(candidate.get("target_request_id") or "") in selected_write_request_ids:
             machine_preflight_request_ids.add(str(candidate.get("source_request_id") or ""))
@@ -7244,6 +7370,15 @@ def to_flow_spec(
         for index, request in enumerate(potential_steps)
         if request.get("request_id")
     }
+    for candidate in record_hydration_candidates:
+        source_pos = position_by_request_id.get(str(candidate.get("source_request_id") or ""))
+        target_pos = position_by_request_id.get(str(candidate.get("target_request_id") or ""))
+        if (
+            source_pos is not None
+            and target_pos in write_positions
+            and _request_role_key(potential_steps[source_pos]) in preread_keys
+        ):
+            owners_by_position.setdefault(source_pos, set()).add(target_pos)
     # Exact response-row keys matching a later request object is machine
     # evidence that the read controls the write's request shape. Keep that
     # source in the preflight closure so Pi can propose and verify the richer
@@ -7487,6 +7622,57 @@ def to_flow_spec(
             "control_preflight_for_write": bool(owner_step_ids),
             "control_preflight_for_write_ids": owner_step_ids,
         }
+    hydration_owner_ids: dict[str, list[str]] = {}
+    for candidate in record_hydration_candidates:
+        source_request_id = str(candidate.get("source_request_id") or "")
+        target_step_id = step_id_by_request_id.get(
+            str(candidate.get("target_request_id") or ""),
+        )
+        if source_request_id and target_step_id:
+            hydration_owner_ids.setdefault(source_request_id, []).append(target_step_id)
+    for source_request_id, owner_step_ids in hydration_owner_ids.items():
+        source_step_id = step_id_by_request_id.get(source_request_id)
+        source_step = next((
+            step for step in step_objs if step.step_id == source_step_id
+        ), None)
+        if source_step is not None:
+            source_step.source_meta = {
+                **(source_step.source_meta or {}),
+                "record_hydration_for_write_ids": list(dict.fromkeys(owner_step_ids)),
+            }
+            identity_leaves = {
+                re.sub(
+                    r"[^a-z0-9]+", "", str(path).split(".")[-1].casefold(),
+                )
+                for candidate in record_hydration_candidates
+                if str(candidate.get("source_request_id") or "") == source_request_id
+                for path in candidate.get("identity_paths") or []
+            }
+            for param in source_step.params or []:
+                leaf = re.sub(
+                    r"[^a-z0-9]+", "",
+                    str(param.path or param.key or "").split(".")[-1].casefold(),
+                )
+                if (
+                    not str(param.path or "").startswith("query.")
+                    or leaf not in identity_leaves
+                    or param.locked
+                    or _param_has_manual_contract(param)
+                ):
+                    continue
+                param.category = "user_param"
+                param.source_kind = "user_input"
+                param.source = {
+                    "kind": "selected_record_identity",
+                    "path": param.path,
+                    "required_state": "required",
+                }
+                param.required = True
+                param.exposed_to_user = True
+                param.editable = True
+                param.need_human_confirm = False
+                param.reason = "调用方提供要编辑的记录标识；详情接口据此读取其当前字段"
+                source_step.sample_inputs[param.key] = param.value
 
     # 5) 多步 link（自动值驱动）
     link_objs: list[FlowLink] = []
@@ -7585,6 +7771,57 @@ def to_flow_spec(
                 ))
         except Exception:
             link_objs = []
+    for candidate in record_hydration_candidates:
+        source_step_id = step_id_by_request_id.get(
+            str(candidate.get("source_request_id") or ""),
+        )
+        target_step_id = step_id_by_request_id.get(
+            str(candidate.get("target_request_id") or ""),
+        )
+        if not source_step_id or not target_step_id:
+            continue
+        for match in candidate.get("matches") or []:
+            source_path = str(match.get("source_path") or "")
+            target_path = str(match.get("target_path") or "")
+            signature = (source_step_id, source_path, target_step_id, target_path)
+            existing_link = next((
+                link for link in link_objs
+                if (
+                    link.source_step_id, link.source_path,
+                    link.target_step_id, link.target_path,
+                ) == signature
+            ), None)
+            evidence = {
+                "kind": "record_hydration",
+                "source_request_id": candidate.get("source_request_id"),
+                "target_request_id": candidate.get("target_request_id"),
+                "identity_paths": list(candidate.get("identity_paths") or []),
+                "match_count": len(candidate.get("matches") or []),
+                "captured_source_value": copy.deepcopy(match.get("source_value")),
+                "captured_target_value": copy.deepcopy(match.get("target_value")),
+            }
+            meta = {
+                "actor": "heuristic",
+                "captured_record_hydration": True,
+            }
+            if existing_link is not None:
+                existing_link.confirmed = True
+                existing_link.confidence = max(float(existing_link.confidence or 0.0), 0.99)
+                existing_link.reason = "同一记录详情对象的多个同名字段被后续写请求原样采用"
+                existing_link.evidence = evidence
+                existing_link.meta = {**dict(existing_link.meta or {}), **meta}
+                continue
+            link_objs.append(FlowLink(
+                source_step_id=source_step_id,
+                source_path=source_path,
+                target_step_id=target_step_id,
+                target_path=target_path,
+                confirmed=True,
+                confidence=0.99,
+                reason="同一记录详情对象的多个同名字段被后续写请求原样采用",
+                evidence=evidence,
+                meta=meta,
+            ))
     _materialize_captured_response_key_maps(
         step_objs, link_objs, captured_requests,
     )
@@ -11719,6 +11956,8 @@ def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
         independently_triggered = _has_query_action_evidence(
             meta.get("trigger_op"), meta.get("trigger_locator"),
         )
+        if meta.get("record_hydration_for_write_ids") and not independently_triggered:
+            continue
         independently_grounded = _business_query_evidence_score(step) >= 5
         if step.step_id not in submit_closure or independently_triggered or independently_grounded:
             read_groups.setdefault(_query_operation_key(step), []).append(step)

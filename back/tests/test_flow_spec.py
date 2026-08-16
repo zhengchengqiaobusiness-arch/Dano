@@ -2984,6 +2984,102 @@ def test_publish_upgrades_a_persisted_dynamic_request_draft() -> None:
     }
 
 
+def test_edit_hydrates_unchanged_fields_from_the_nearest_record_read() -> None:
+    captured = [
+        {
+            "request_id": "req-edit-detail",
+            "sequence": 1,
+            "method": "GET",
+            "url": "https://example.test/records/get?id=record-1",
+            "query": {"id": "record-1"},
+            "role": "business_get", "keep": True, "confidence": 0.99,
+            "page_id": "page-1", "frame_id": "main",
+            "trigger_action_id": "action-edit",
+            "trigger_transaction_id": "txn-edit",
+            "trigger_op": "click", "trigger_locator": "text=编辑",
+            "response_json": {"data": {
+                "id": "record-1", "type": 2,
+                "reason": "captured reason", "quota": 5.5,
+            }},
+        },
+        {
+            "request_id": "req-update",
+            "sequence": 2,
+            "method": "POST",
+            "url": "https://example.test/records/submit",
+            "post_data": json.dumps({
+                "id": "record-1", "type": 2,
+                "reason": "captured reason", "quota": 5.5,
+            }),
+            "content_type": "application/json",
+            "role": "business_write", "keep": True, "confidence": 0.99,
+            "page_id": "page-1", "frame_id": "main",
+            "trigger_action_id": "action-submit",
+            "trigger_transaction_id": "txn-submit",
+            "trigger_op": "click", "trigger_locator": "text=提交",
+            "response_json": {"code": 0},
+        },
+    ]
+
+    spec = to_flow_spec(captured_requests=captured)
+    detail = next(step for step in spec.steps if step.method == "GET")
+    update = next(step for step in spec.steps if step.method == "POST")
+
+    assert detail.source_meta["record_hydration_for_write_ids"] == [update.step_id]
+    assert {
+        (link.source_path, link.target_path)
+        for link in spec.links
+        if link.meta.get("captured_record_hydration") is True
+    } == {
+        ("data.id", "id"),
+        ("data.type", "type"),
+        ("data.reason", "reason"),
+        ("data.quota", "quota"),
+    }
+    assert all(param.source_kind == "previous_response" for param in update.params)
+    assert all(param.exposed_to_user is False for param in update.params)
+
+    from dano.execution.page.capability_compiler import compile_capabilities
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "update_record",
+        "title": "编辑记录",
+        "kind": "update",
+        "kind_source": "recording_goal",
+        "anchor_step_id": update.step_id,
+    }]}).spec
+    capability = compiled.capabilities[0]
+    assert capability.step_ids == [detail.step_id, update.step_id]
+    assert set(capability.input_schema["properties"]) == {"id"}
+
+
+def test_record_read_with_only_an_id_match_is_not_form_hydration() -> None:
+    captured = [
+        {
+            "request_id": "req-detail", "sequence": 1,
+            "method": "GET", "url": "https://example.test/records/get?id=record-1",
+            "query": {"id": "record-1"},
+            "role": "business_get", "keep": True, "confidence": 0.99,
+            "response_json": {"data": {"id": "record-1"}},
+        },
+        {
+            "request_id": "req-update", "sequence": 2,
+            "method": "POST", "url": "https://example.test/records/submit",
+            "post_data": json.dumps({"id": "record-1", "reason": "new"}),
+            "content_type": "application/json",
+            "role": "business_write", "keep": True, "confidence": 0.99,
+            "response_json": {"code": 0},
+        },
+    ]
+
+    spec = to_flow_spec(captured_requests=captured)
+
+    assert not any(
+        link.meta.get("captured_record_hydration") is True
+        for link in spec.links
+    )
+
+
 def test_publish_uses_only_the_latest_matching_dynamic_source() -> None:
     old_response = {"data": {"activityNodes": [
         {"id": "Node_leader", "name": "旧领导审批"},
