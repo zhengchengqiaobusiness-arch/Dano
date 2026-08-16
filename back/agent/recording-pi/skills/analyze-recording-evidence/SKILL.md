@@ -20,17 +20,25 @@ through the current recording tools; never construct or publish a FlowSpec direc
 
 ## Use the recording goal as the public boundary
 
-1. Read `goal_text` before deciding capabilities. When it states expected names or a count, keep
-   one working slot per target capability across turns.
-2. Match observed business actions to those slots using page action, transaction, request, and
+1. Read `goal_text` before deciding capabilities. The operator may use ordinary natural language;
+   never require a numbered template or an explicit count. Normalize explicitly requested business
+   operations, in their original order, by submitting one `set_goal` operation whose `intent` keeps
+   the operator's meaning, whose `capabilities` contains concise public business titles, and whose
+   evidence cites `goal_text` / `recording_goal_text`. This accepted operation is the structured goal
+   contract used by later turns.
+2. When the operator names concrete operations, keep one working slot per named operation. When the
+   operator instead asks to preserve every operation they will perform, do not invent slots at the
+   start; extend `set_goal.capabilities` only from distinct observed business actions. Page traffic
+   alone must never broaden a concrete operator goal.
+3. Match observed business actions to those slots using page action, transaction, request, and
    response evidence. Do not invent an execute request for a slot whose business action was not
    observed; leave it unresolved so a later batch can supply evidence.
-3. Preserve every still-grounded earlier capability. One unresolved slot or rejected operation
+4. Preserve every still-grounded earlier capability. One unresolved slot or rejected operation
    must not erase other accepted capabilities.
-4. Do not publish page bootstrap, authentication, permission, telemetry, dictionary, option,
+5. Do not publish page bootstrap, authentication, permission, telemetry, dictionary, option,
    current-user, token, workflow-definition, or other preparation traffic independently. Attach it
    to a goal-matching capability only when evidence shows that it supports the execute request.
-5. Give every public capability exactly one observed business execute anchor. A read anchor must
+6. Give every public capability exactly one observed business execute anchor. A read anchor must
    return the requested business result; a write anchor must create, update, submit, approve,
    reject, withdraw, or delete the requested business state.
 

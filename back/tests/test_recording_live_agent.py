@@ -2527,6 +2527,67 @@ def test_numbered_recording_goal_rebuilds_all_final_request_boundaries():
     assert merged.meta["recording_goal_contract"]["satisfied"] is True
 
 
+def test_pi_normalized_natural_language_goal_becomes_strong_final_boundary():
+    live = FlowSpec(meta={
+        "recording_goal_text": "请把查询记录、保存草稿和提交记录分别做成可调用能力。",
+    })
+    apply_recording_agent_edit(live, {
+        "op": "set_goal",
+        "goal": {
+            "intent": "将查询记录、保存草稿和提交记录沉淀为可调用能力",
+            "capabilities": ["查询记录", "保存记录草稿", "提交记录"],
+            "success_criteria": ["三个目标操作均形成独立能力"],
+            "evidence": [{"source": "goal_text", "ref": "recording_goal_text"}],
+        },
+    })
+    finalized = FlowSpec(
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={
+                    "request_id": "req-query", "role": "business_get",
+                    "trigger_op": "click", "trigger_locator": "text=查询",
+                    "trigger_transaction_id": "txn-query",
+                },
+            ),
+            FlowStep(
+                step_id="draft-step", method="POST", path="/records/create",
+                source_meta={
+                    "request_id": "req-draft", "role": "business_write",
+                    "trigger_op": "click", "trigger_locator": "text=保存草稿",
+                    "trigger_transaction_id": "txn-draft",
+                },
+            ),
+            FlowStep(
+                step_id="submit-step", method="POST", path="/records/submit",
+                source_meta={
+                    "request_id": "req-submit", "role": "business_write",
+                    "trigger_op": "click", "trigger_locator": "text=提交",
+                    "trigger_transaction_id": "txn-submit",
+                },
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == [
+        "查询记录", "保存记录草稿", "提交记录",
+    ]
+    assert merged.meta["recording_goal_contract"] == {
+        "source": "pi_normalized_goal",
+        "expected_count": 3,
+        "capabilities": [
+            {"ordinal": 1, "name": "查询记录"},
+            {"ordinal": 2, "name": "保存记录草稿"},
+            {"ordinal": 3, "name": "提交记录"},
+        ],
+        "materialized_count": 3,
+        "satisfied": True,
+    }
+
+
 def test_goal_kind_without_a_unique_anchor_is_not_bound_to_the_first_request():
     live = FlowSpec(
         flow_id="goal-no-matching-anchor",

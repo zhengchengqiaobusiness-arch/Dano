@@ -1503,6 +1503,26 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             if value not in (None, "", [], {}):
                 merged_goal[key] = value
         spec.goal = merged_goal
+        goal_text_grounded = any(
+            str(item.get("source") or "") == "goal_text"
+            or str(item.get("ref") or "") == "recording_goal_text"
+            for item in goal.evidence
+            if isinstance(item, dict)
+        )
+        if goal.capabilities and goal_text_grounded and not _GOAL_CAPABILITY_COUNT_RE.search(
+            str((spec.meta or {}).get("recording_goal_text") or "")
+        ):
+            spec.meta = {
+                **(spec.meta or {}),
+                "recording_goal_contract": {
+                    "source": "pi_normalized_goal",
+                    "expected_count": len(goal.capabilities),
+                    "capabilities": [
+                        {"ordinal": index, "name": name}
+                        for index, name in enumerate(goal.capabilities, start=1)
+                    ],
+                },
+            }
         _append_insight(spec, kind="goal", text=f"目标：{goal.intent}", refs=["goal_text"])
 
     elif kind == "set_request_role":
@@ -2715,7 +2735,22 @@ def _recording_goal_contract(spec) -> dict:  # noqa: ANN001
     raw = str((spec.meta or {}).get("recording_goal_text") or "").strip()
     count_match = _GOAL_CAPABILITY_COUNT_RE.search(raw)
     if count_match is None:
-        return {}
+        normalized = (spec.meta or {}).get("recording_goal_contract")
+        if not isinstance(normalized, dict) or normalized.get("source") != "pi_normalized_goal":
+            return {}
+        expected_count = int(normalized.get("expected_count") or 0)
+        capabilities = [
+            deepcopy(item)
+            for item in normalized.get("capabilities") or []
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        if expected_count <= 0 or len(capabilities) != expected_count:
+            return {}
+        return {
+            "source": "pi_normalized_goal",
+            "expected_count": expected_count,
+            "capabilities": capabilities,
+        }
     expected_count = int(count_match.group(1))
     if expected_count <= 0:
         return {}
@@ -3072,7 +3107,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             merged.meta["versions"] = deepcopy(live_meta["versions"])
     for key in (
         "verification_log", "agent_answers", "live_pending_questions",
-        "recording_goal_text",
+        "recording_goal_text", "recording_goal_contract",
     ):
         if live_meta.get(key):
             merged.meta = {**(merged.meta or {}), key: deepcopy(live_meta[key])}

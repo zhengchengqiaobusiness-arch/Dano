@@ -210,9 +210,7 @@ function paramDisplayName(param: FlowParam) {
   return String(param.label || param.key || param.path || "未命名字段");
 }
 
-const DEFAULT_RECORDING_GOAL_TEMPLATE = `目的：将本次页面中真实完成的业务操作沉淀为可调用能力
-预期产出能力数量：1
-能力1：本次录制完成的业务操作`;
+const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
 function expectedCapabilityCount(value: string) {
   const matched = value.match(/(?:预期|预计|需要)?\s*产出(?:的)?\s*能力(?:数量|数)?\s*[:：=]?\s*(\d+)/i);
@@ -638,10 +636,6 @@ export default function PageRecorder({
       message.error("请填写业务页地址和录制目标");
       return;
     }
-    if (!expectedCapabilityCount(goalText)) {
-      message.error("录制目标需要写明预期产出能力数量");
-      return;
-    }
     if (wsRef.current) return;
     const action = newActionName();
     actionRef.current = action;
@@ -1010,7 +1004,7 @@ export default function PageRecorder({
             <Input.TextArea
               value={goalText}
               onChange={(event) => setGoalText(event.target.value)}
-              placeholder="完整描述需要在页面完成的业务目标"
+              placeholder="直接描述要完成的业务，例如：查询记录、保存草稿并提交申请"
               autoSize={{ minRows: 3, maxRows: 5 }}
               style={{ marginTop: 8 }}
             />
@@ -1437,7 +1431,13 @@ export default function PageRecorder({
   }
 
   function renderResult() {
-    const expectedCount = expectedCapabilityCount(goalText);
+    const goalContract = asRecord(snapshot?.draft?.meta?.recording_goal_contract);
+    const normalizedTargets = Array.isArray(goalContract.capabilities)
+      ? goalContract.capabilities
+        .map((item) => String(asRecord(item).name || "").trim())
+        .filter(Boolean)
+      : [];
+    const expectedCount = Number(goalContract.expected_count) || expectedCapabilityCount(goalText);
     const countMatches = !expectedCount || expectedCount === capabilities.length;
     const goalSummary = (
       <div style={{ borderTop: "1px solid rgba(0, 0, 0, 0.06)", marginTop: 8, paddingTop: 8 }}>
@@ -1445,6 +1445,11 @@ export default function PageRecorder({
           <div>
             <Text strong>录制目标</Text>
             <div style={{ whiteSpace: "pre-line", marginTop: 4 }}>{goalText}</div>
+            {normalizedTargets.length ? (
+              <Text type="secondary">
+                系统理解：{normalizedTargets.map((name, index) => `${index + 1}. ${name}`).join("；")}
+              </Text>
+            ) : null}
           </div>
           <Space wrap>
             {expectedCount ? <Tag color="blue">目标 {expectedCount} 个能力</Tag> : null}
