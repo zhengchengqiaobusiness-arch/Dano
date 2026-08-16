@@ -1470,10 +1470,6 @@ def _normalize_strict_recording_plan_submission(raw_plan: dict, spec) -> dict:  
         "semantic_plan": semantic,
         "ops": operations,
     }
-    if "_analysis_screenshot_count" in raw_plan:
-        submission["_analysis_screenshot_count"] = int(
-            raw_plan.get("_analysis_screenshot_count") or 0
-        )
     if "_submitted_semantic_keys" in raw_plan:
         submission["_submitted_semantic_keys"] = deepcopy(
             raw_plan.get("_submitted_semantic_keys") or []
@@ -1498,7 +1494,6 @@ _STRICT_UNRESOLVED_KEYS = {
 }
 _STRICT_RECORDING_PLAN_KEYS = {
     "semantic_plan", "ops", "_submitted_semantic_keys",
-    "_analysis_screenshot_count",
 }
 _TYPED_RECORDING_OPERATION_NAMES = {
     "set_goal", "set_request_role", "set_param_source", "set_param_type", "set_param_required",
@@ -1706,11 +1701,7 @@ def _validate_strict_recording_plan(raw_plan: dict) -> None:
     _validate_typed_recording_operations(raw_plan.get("ops", []), label="plan.ops")
 
 
-def _require_complete_submitted_semantic_keys(
-    raw_plan: dict,
-    *,
-    allow_screenshot_field_overlay: bool = False,
-) -> None:
+def _require_complete_submitted_semantic_keys(raw_plan: dict) -> None:
     """Validate incremental transport metadata without forcing empty sections."""
     submitted = raw_plan.get("_submitted_semantic_keys")
     if submitted is None:
@@ -1742,54 +1733,19 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
                 ),
             )
         raise ToolError("plan 必须是对象")
-    if int(getattr(session, "analysis_image_count", 0) or 0):
-        raw_plan = {
-            **deepcopy(raw_plan),
-            "_analysis_screenshot_count": int(session.analysis_image_count),
-        }
     raw_plan = _canonicalize_recording_plan_aliases(raw_plan)
     _validate_strict_recording_plan(raw_plan)
-    screenshot_count = int(getattr(session, "analysis_image_count", 0) or 0)
-    _require_complete_submitted_semantic_keys(
-        raw_plan,
-        allow_screenshot_field_overlay=bool(screenshot_count),
+    _require_complete_submitted_semantic_keys(raw_plan)
+    submission = _normalize_strict_recording_plan_submission(
+        raw_plan, session.current_flow_spec()
     )
-    if screenshot_count:
-        semantic = raw_plan.get("semantic_plan")
-        has_grounded_proposal = bool(
-            raw_plan.get("ops")
-            or (
-                isinstance(semantic, dict)
-                and (
-                    semantic.get("business_understanding")
-                    or semantic.get("capabilities")
-                    or semantic.get("unresolved_items")
-                )
-            )
-        )
-        if not has_grounded_proposal:
-            return await session.accept_unchanged_plan(
-                base_flow_version=params["base_flow_version"],
-                warning="截图与当前配置一致，未发现有证据支持的修改；当前配置未修改",
-            )
-    try:
-        submission = _normalize_strict_recording_plan_submission(
-            raw_plan, session.current_flow_spec()
-        )
-        submission.setdefault("submission_id", str(uuid4()))
-        return await _apply_recording_submission_atomic(
-            session,
-            submission,
-            mode="plan",
-            base_flow_version=params["base_flow_version"],
-        )
-    except ToolError as exc:
-        if screenshot_count:
-            return await session.accept_unchanged_plan(
-                base_flow_version=params["base_flow_version"],
-                warning=f"{exc}，当前配置未修改",
-            )
-        raise
+    submission.setdefault("submission_id", str(uuid4()))
+    return await _apply_recording_submission_atomic(
+        session,
+        submission,
+        mode="plan",
+        base_flow_version=params["base_flow_version"],
+    )
 
 
 async def get_validation_report(run_id: str, params: dict) -> dict:

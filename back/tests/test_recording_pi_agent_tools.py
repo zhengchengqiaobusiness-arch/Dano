@@ -557,7 +557,6 @@ class _Session:
         self.recording_id = recording_id
         self.spec = _spec()
         self.last_submission_kind = ""
-        self.analysis_image_count = 0
         self.received_submission = None
         self.received_delta = None
 
@@ -1123,7 +1122,6 @@ def test_recording_agent_state_omits_raw_dom_mutation_noise() -> None:
 
 def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch):
     session = _bind(monkeypatch)
-    session.analysis_image_count = 2
     state = asyncio.run(get_recording_state("run-recording", {"recording_id": "rec-1"}))
     assert state["flow_version"] == 1
     before_facts = session.spec.request_facts.model_dump(mode="json")
@@ -1147,7 +1145,6 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
     assert result["flow_version"] > 1
     assert "report" not in result
     assert "repair_context" not in result
-    assert session.received_submission["_analysis_screenshot_count"] == 2
     assert session.spec.request_facts.model_dump(mode="json") == before_facts
     validation = asyncio.run(get_validation_report("run-recording", {"recording_id": "rec-1"}))
     assert validation["flow_version"] == result["flow_version"]
@@ -1156,7 +1153,6 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
 
 def test_pi_plan_applies_live_param_source_operation(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-live-op")
-    session.analysis_image_count = 1
     session.spec.steps[0].source_meta = {"request_id": "req-submit"}
     session.spec.request_facts.requests = [RequestFact(
         request_id="req-submit", request_index=1, method="POST", path="/api/submit",
@@ -1797,7 +1793,7 @@ def test_transport_allows_incremental_semantic_keys():
         "semantic_plan": {"field_semantics": [{
             "step_id": "submit", "wire_path": "title",
         }]},
-    }, allow_screenshot_field_overlay=True)
+    })
 
 
 def test_real_pi_harmless_schema_drift_is_canonicalized_before_validation():
@@ -1885,9 +1881,8 @@ async def test_recording_replay_auth_prefers_fresh_captured_headers(monkeypatch)
     assert len({name.casefold() for name in headers}) == len(headers)
 
 
-def test_screenshot_field_overlay_cannot_bypass_typed_field_operations(monkeypatch):
+def test_field_semantics_cannot_bypass_typed_field_operations(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-field-overlay")
-    session.analysis_image_count = 1
     with pytest.raises(ToolError, match="field_semantics"):
         asyncio.run(submit_recording_plan("run-field-overlay", {
             "recording_id": "rec-field-overlay",
@@ -1910,7 +1905,6 @@ def test_recovered_legacy_screenshot_payload_is_rejected_instead_of_partially_ap
     monkeypatch,
 ):
     session = _bind(monkeypatch, recording_id="rec-long-overlay")
-    session.analysis_image_count = 1
     with pytest.raises(ToolError, match="field_semantics"):
         asyncio.run(submit_recording_plan("run-long-overlay", {
             "base_flow_version": 1,
@@ -1956,9 +1950,8 @@ def test_internal_recording_identity_question_never_reaches_operator(monkeypatch
     }
 
 
-def test_length_truncated_screenshot_plan_finishes_without_retry_loop(monkeypatch):
+def test_length_truncated_plan_finishes_without_retry_loop(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-truncated-plan")
-    session.analysis_image_count = 2
 
     result = asyncio.run(submit_recording_plan("run-truncated-plan", {
         "base_flow_version": 1,
@@ -1981,27 +1974,6 @@ def test_length_truncated_screenshot_plan_finishes_without_retry_loop(monkeypatc
 
 
 
-
-
-def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
-    return {
-        "_analysis_screenshot_count": 1,
-        "semantic_plan": {
-            "business_understanding": {"summary": "Submit request"},
-            "request_roles": [{
-                "step_id": "submit", "role": "business_write",
-                "name": "Submit request", "reason": "recorded request",
-            }],
-            "field_semantics": field_semantics,
-            "capabilities": [{
-                "name": "submit_request", "title": "Submit request",
-                "intent": "Submit request", "kind": "submit", "step_ids": ["submit"],
-            }],
-            "capability_relations": [],
-            "unresolved_items": [],
-        },
-        "ops": [],
-    }
 
 
 
@@ -2056,126 +2028,4 @@ def test_explicit_read_option_cannot_become_public_query_capability():
     assert flow_module._planned_capability_has_public_anchor(
         FlowSpec(steps=[option_step]), "query_status", ["people"],
     ) is False
-
-
-
-
-
-
-
-
-
-
-
-
-@pytest.mark.parametrize("existing_capabilities", [False, True])
-@pytest.mark.asyncio
-async def test_partial_screenshot_semantics_require_typed_operations(
-    monkeypatch, existing_capabilities,
-):
-    session = _bind(monkeypatch)
-    session.analysis_image_count = 1
-    session.spec = ensure_flow_version(FlowSpec(
-        steps=[FlowStep(
-            step_id="submit", method="POST", path="/api/request",
-            source_meta={"role": "business_write"},
-            params=[
-                ParamField(
-                    path="quantity", key="unknownQuantity", value=7,
-                    type="enum", wire_type="number", category="user_param",
-                    source_kind="api_option",
-                    source={"kind": "api_option", "source_url": "/api/unrelated/options"},
-                    enum_options=[{"label": "unrelated", "value": 7}],
-                    evidence=[{
-                        "source": "recorder_dom", "control_kind": "number",
-                        "editable": True, "disabled": False, "read_only": False,
-                    }],
-                ),
-                ParamField(path="untouched", key="untouched", value="same"),
-            ],
-        )],
-        capabilities=[flow_module.FlowCapability(
-            capability_id="existing", name="existing", title="Existing",
-            kind="submit", nodes=[{"id": "call-submit", "type": "call", "step_id": "submit"}],
-        )] if existing_capabilities else [],
-    ), "recorded", reason="test")
-    plan = _screenshot_match_plan([{
-        "step_id": "submit", "wire_path": "wrong.path", "public_name": "数量",
-        "business_type": "number", "category": "user_param",
-        "source_kind": "user_input", "required": True, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "数量", "visible_value": 7,
-            "control_kind": "number", "editable": True,
-        }],
-    }, {
-        "public_name": "无法匹配", "business_type": "string",
-        "category": "user_param", "source_kind": "user_input", "confidence": 0.8,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "无法匹配", "control_kind": "text", "editable": True,
-        }],
-    }])
-
-    before = session.spec.model_dump(mode="json")
-    with pytest.raises(ToolError, match="field_semantics"):
-        await submit_recording_plan("run-1", {
-            "recording_id": session.recording_id,
-            "base_flow_version": int(session.spec.meta["current_version"]),
-            "plan": plan,
-        })
-    assert session.spec.model_dump(mode="json") == before
-
-
-
-
-@pytest.mark.asyncio
-async def test_unmatched_screenshot_field_cannot_enter_semantic_plan(monkeypatch):
-    session = _bind(monkeypatch)
-    session.analysis_image_count = 1
-    session.spec = ensure_flow_version(FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/request",
-        source_meta={"role": "business_write"},
-        params=[
-            ParamField(path="applicant.remark", key="备注", label="备注"),
-            ParamField(path="review.remark", key="备注", label="备注"),
-        ],
-    )]), "recorded", reason="test")
-    plan = _screenshot_match_plan([{
-        "public_name": "备注", "business_type": "string",
-        "category": "user_param", "source_kind": "user_input",
-        "required": False, "confidence": 0.98,
-        "evidence": [{
-            "source": "screenshot", "screenshot_name": "form.png",
-            "visible_label": "备注", "control_kind": "textarea", "editable": True,
-        }],
-    }])
-
-    with pytest.raises(ToolError, match="field_semantics"):
-        await submit_recording_plan("run-1", {
-            "recording_id": session.recording_id,
-            "base_flow_version": int(session.spec.meta["current_version"]),
-            "plan": plan,
-        })
-    assert session.last_submission_kind == ""
-
-
-@pytest.mark.asyncio
-async def test_invalid_screenshot_plan_finishes_without_model_retry(monkeypatch):
-    session = _bind(monkeypatch)
-    session.analysis_image_count = 1
-
-    result = await submit_recording_plan("run-1", {
-        "recording_id": session.recording_id,
-        "base_flow_version": int(session.spec.meta["current_version"]),
-        "plan": {"semantic_plan": {"business_understanding": {}}},
-    })
-
-    assert result["accepted"] is True
-    assert result["unchanged"] is True
-    assert "当前配置未修改" in result["warning"]
-    assert session.last_submission_kind == "plan"
-
-
-
 

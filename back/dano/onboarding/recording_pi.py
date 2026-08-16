@@ -164,8 +164,6 @@ class RecordingPiSession:
         self._write_verification_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
         self.flow_spec: Any = None
-        self._analysis_images: list[dict[str, str]] = []
-        self._active_analysis_image_count = 0
         self._live_recorder: Any = None
         self._live_evidence_marker: tuple[Any, ...] | None = None
         self._live_goal_text = ""
@@ -286,12 +284,9 @@ class RecordingPiSession:
             raise RecordingPiError("录制 Pi Session 尚未启动")
         async with self._prompt_lock:
             try:
-                images = [dict(image) for image in self._analysis_images]
-                self._analysis_images = []
-                self._active_analysis_image_count = len(images)
                 event = await self._command(
                     "prompt", timeout_s=timeout_s, text=text,
-                    images=images,
+                    images=[],
                     prompt_mode=prompt_mode,
                     analysis_phase=analysis_phase,
                 )
@@ -331,30 +326,13 @@ class RecordingPiSession:
                 except BaseException:  # noqa: BLE001 - preserve the caller's cancellation
                     pass
                 raise
-            finally:
-                self._active_analysis_image_count = 0
 
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
         self.flow_spec = spec.model_copy(deep=True)
         self._live_evidence_marker = None
-        self._analysis_images = []
         self.last_submission_kind = ""
         self.last_submission_warning = ""
-
-
-    def bind_analysis_images(self, images: list[dict] | None) -> None:
-        """Bind validated screenshot evidence for the next Pi prompt."""
-        normalized: list[dict[str, str]] = []
-        for image in images or []:
-            if not isinstance(image, dict):
-                raise ValueError("Pi analysis image must be an object")
-            data = str(image.get("data") or "")
-            mime_type = str(image.get("mimeType") or "")
-            if image.get("type") != "image" or not data or not mime_type.startswith("image/"):
-                raise ValueError("Pi analysis image is invalid")
-            normalized.append({"type": "image", "data": data, "mimeType": mime_type})
-        self._analysis_images = normalized
 
     def bind_live_recording(
         self,
@@ -561,10 +539,6 @@ class RecordingPiSession:
             prompt_mode="recording_analysis",
             analysis_phase=analysis_phase,
         )
-
-    @property
-    def analysis_image_count(self) -> int:
-        return self._active_analysis_image_count or len(self._analysis_images)
 
     def current_flow_spec(self) -> Any:
 

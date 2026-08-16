@@ -5679,70 +5679,7 @@ def test_ops_only_submission_without_strict_plan_cannot_mutate_machine_capabilit
     )
 
 
-def test_rejected_screenshot_plan_keeps_grounded_option_repairs():
-    first = ParamField(
-        path="assignees.Activity_first[0]", key="Approver 1", label="Approver 1",
-        value=148, type="number", wire_type="number",
-        category="user_param", source_kind="user_input",
-    )
-    second = ParamField(
-        path="assignees.Activity_second[0]", key="Approver 2", label="Approver 2",
-        value=145, type="enum", wire_type="number",
-        category="user_param", source_kind="api_option",
-        source={
-            "kind": "api_option",
-            "source_url": "/api/users",
-            "source_request_id": "users",
-        },
-        enum_options=[
-            {"label": "Reviewer A", "value": 148},
-            {"label": "Reviewer B", "value": 145},
-        ],
-        enum_value_map={"Reviewer A": 148, "Reviewer B": 145},
-    )
-    spec = FlowSpec(
-        steps=[FlowStep(
-            step_id="submit", method="POST", path="/api/request/submit",
-            body_source="{}", params=[first, second],
-            selects=[SelectBinding(
-                param="Approver 2", path=second.path, id_path=second.path,
-                source_url="/api/users", source_request_id="users",
-                value_key="id", label_key="name",
-                options=second.enum_options, option_map=second.enum_value_map,
-                enum_source="api", enum_confirmed=True,
-            )],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_request", title="Submit request", kind="submit",
-            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
-        )],
-        meta={"capability_model": {"status": "ready"}},
-    )
-
-    optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec,
-        submission={
-            "_analysis_screenshot_count": 1,
-            "ops": [{
-                "op": "set_condition",
-                "capability": "submit_request",
-                "node": {
-                    "id": "invalid_condition",
-                    "condition": "input.entries.length > 0",
-                    "then": [{"id": "call", "type": "call", "step_id": "submit"}],
-                },
-            }],
-        },
-        generation_mode="optimize",
-    ))
-
-    repaired = optimized.steps[0].params[0]
-    assert optimized.meta["capability_model"]["source"] == "strict_plan_pending"
-    assert (repaired.type, repaired.source_kind) == ("enum", "api_option")
-    assert repaired.enum_value_map == {"Reviewer A": 148, "Reviewer B": 145}
-
-
-def test_legacy_screenshot_field_paragraph_cannot_mutate_flow_fields():
+def test_legacy_field_paragraph_cannot_mutate_flow_fields():
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/api/request/submit",
@@ -5766,7 +5703,6 @@ def test_legacy_screenshot_field_paragraph_cannot_mutate_flow_fields():
     optimized = asyncio.run(orchestrate_flow_capabilities(
         spec,
         submission={
-            "_analysis_screenshot_count": 1,
             "semantic_plan": {
                 "field_semantics": [{
                     "step_id": "submit",
@@ -5816,7 +5752,7 @@ def test_legacy_screenshot_field_paragraph_cannot_mutate_flow_fields():
 
 
 @pytest.mark.parametrize("generation_mode", ["initial", "optimize"])
-def test_screenshot_semantic_paragraph_cannot_materialize_unobserved_wire_field(generation_mode):
+def test_semantic_paragraph_cannot_materialize_unobserved_wire_field(generation_mode):
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="query", method="GET", path="/api/leave/page",
@@ -5838,7 +5774,6 @@ def test_screenshot_semantic_paragraph_cannot_materialize_unobserved_wire_field(
     optimized = asyncio.run(orchestrate_flow_capabilities(
         spec,
         submission={
-            "_analysis_screenshot_count": 1,
             "semantic_plan": {"field_semantics": [{
                 "step_id": "query", "wire_path": "processStatus",
                 "public_name": "审批结果", "business_type": "enum",
@@ -8543,4 +8478,3 @@ def test_closed_query_select_is_still_a_choice_without_opened_options():
         assert param.source_kind == "form_option"
         assert param.category == "user_param"
         assert param.need_human_confirm is True
-

@@ -131,9 +131,6 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE, session_root=tmp_path,
     )
     await client.start()
-    client.bind_analysis_images([
-        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
-    ])
     first = await client.prompt("执行规划")
     second = await client.prompt("执行修复")
 
@@ -142,9 +139,7 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
     assert [command["type"] for command in process.stdin.commands] == [
         "start_session", "prompt", "prompt",
     ]
-    assert process.stdin.commands[1]["images"] == [
-        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
-    ]
+    assert process.stdin.commands[1]["images"] == []
     assert process.stdin.commands[2]["images"] == []
     assert runs.is_valid(client.run_id, client.token)
     assert materials.get(client.run_id, "A-OA") is not None
@@ -154,37 +149,6 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
     assert not runs.is_valid(client.run_id, client.token)
     assert materials.get(client.run_id, "A-OA") is None
     assert server.should_exit
-
-
-@pytest.mark.asyncio
-async def test_analysis_image_count_remains_visible_during_prompt() -> None:
-    client = recording_pi.RecordingPiSession(
-        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE,
-    )
-    client._proc = object()
-    observed_counts: list[int] = []
-
-    async def fake_command(command_type: str, **payload):  # noqa: ANN003, ANN202
-        assert command_type == "prompt"
-        observed_counts.append(client.analysis_image_count)
-        assert payload["prompt_mode"] == "recording_analysis"
-        assert payload["analysis_phase"] == "request_batch"
-        return {"image_count": len(payload.get("images") or [])}
-
-    client._command = fake_command
-    client.bind_analysis_images([
-        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
-    ])
-
-    result = await client.prompt(
-        "执行截图分析",
-        prompt_mode="recording_analysis",
-        analysis_phase="request_batch",
-    )
-
-    assert result["image_count"] == 1
-    assert observed_counts == [1]
-    assert client.analysis_image_count == 0
 
 
 @pytest.mark.asyncio
@@ -527,7 +491,7 @@ async def test_recording_pi_prevents_concurrent_open_of_same_persisted_scope(mon
 
 
 @pytest.mark.asyncio
-async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_changes(
+async def test_incomplete_semantic_coverage_does_not_undo_accepted_core_changes(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -567,9 +531,7 @@ async def test_incomplete_screenshot_coverage_does_not_undo_accepted_core_change
     )
     client.bind_flow_spec(before)
 
-    await client.apply_submission(
-        {"_analysis_screenshot_count": 1}, mode="plan", base_flow_version=0,
-    )
+    await client.apply_submission({}, mode="plan", base_flow_version=0)
 
     assert client.current_flow_spec().title == "grounded-partial-update"
     assert client.last_submission_kind == "plan"
@@ -855,7 +817,7 @@ async def test_partial_capability_plan_is_not_marked_terminal(
 
 
 @pytest.mark.asyncio
-async def test_unmatched_screenshot_plan_can_finish_without_mutating_or_checkpointing(
+async def test_unchanged_plan_can_finish_without_mutating_or_checkpointing(
     tmp_path,
 ) -> None:
     before = FlowSpec(
@@ -875,7 +837,7 @@ async def test_unmatched_screenshot_plan_can_finish_without_mutating_or_checkpoi
 
     result = await client.accept_unchanged_plan(
         base_flow_version=3,
-        warning="截图分析未匹配到任何真实接口字段，当前配置未修改",
+        warning="当前分析没有可应用的修改，当前配置未修改",
     )
 
     assert result["accepted"] is True

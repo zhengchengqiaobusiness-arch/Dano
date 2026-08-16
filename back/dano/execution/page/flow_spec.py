@@ -6062,29 +6062,6 @@ def _param_has_grounded_direct_input_contract(param: ParamField) -> bool:
     return False
 
 
-def _screenshot_control_business_type(
-    control: dict[str, Any],
-    proposed: Any,
-) -> str:
-    kind = str(control.get("control_kind") or "").strip().lower()
-    proposed_type = str(proposed or "").strip()
-    if kind in {"input", "text", "textarea", "rich_text"}:
-        return proposed_type if proposed_type in {"string", "email", "url"} else "string"
-    if kind in {"number", "slider"}:
-        return proposed_type if proposed_type in {"number", "integer"} else "number"
-    if kind in {"date", "datetime", "time"}:
-        return kind
-    if kind in {"select", "combobox", "cascader", "picker", "radio", "tree_select"}:
-        return "list-enum" if control.get("multiple") else "enum"
-    if kind in {"checkbox", "switch"}:
-        if kind == "checkbox" and (control.get("multiple") or control.get("options")):
-            return "list-enum"
-        return "boolean"
-    if kind in {"upload", "file"}:
-        return "array" if control.get("multiple") else "string"
-    return proposed_type
-
-
 def _param_has_executable_source(param: ParamField) -> bool:
     if param.source_kind == "api_option":
         return bool(param.source or param.enum_value_map or param.enum_options)
@@ -13794,18 +13771,13 @@ async def orchestrate_flow_capabilities(
     if not isinstance(submission.get("ops", []), list):
         raise ValueError("recording plan ops must be a list")
     _validate_recording_agent_ops(submission.get("ops") or [])
-    screenshot_analysis = bool(int(submission.get("_analysis_screenshot_count") or 0))
     original = spec.model_copy(deep=True)
     _prune_auth_materializations(original)
     _mark_repeated_write_observations(original)
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
-    # No-image analysis can repair recorded option facts immediately. Screenshot
-    # analysis waits until its field edits are applied, then binds once below;
-    # binding both before and after would retain stale evidence and fake a diff.
-    if not screenshot_analysis:
-        _repair_structural_option_bindings(current)
+    _repair_structural_option_bindings(current)
     capability_model = (current.meta or {}).get("capability_model") or {}
     auto_generated_existing = bool(
         current.capabilities
@@ -13847,7 +13819,6 @@ async def orchestrate_flow_capabilities(
     if initial_generation:
         proposal_baseline = _repair_generated_capability_contracts(
             proposal_baseline,
-            repair_option_bindings=not screenshot_analysis,
         )
     proposal_baseline = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline))
@@ -14022,8 +13993,6 @@ async def orchestrate_flow_capabilities(
         ]
         current.capability_relations = []
     if initial_generation or complete_semantic_submission:
-        # A fresh full screenshot analysis replaces the previous accepted
-        # semantic memory only after the candidate quality gate succeeds.
         semantic_plan = effective_semantic_plan
         semantic_coverage = _semantic_plan_coverage(current, submission)
     else:
@@ -14045,16 +14014,10 @@ async def orchestrate_flow_capabilities(
     # channel before this function. Capability membership is compiler-owned;
     # translating the semantic plan back into generic edit ops would reintroduce
     # a second producer.
-    # Screenshot-corrected names/control evidence can make a recorded option
-    # endpoint uniquely matchable. Ordinary no-image analysis already ran the
-    # binder above and does not need another full scan.
-    if screenshot_analysis:
-        _repair_structural_option_bindings(current)
     _normalize_capability_references(current)
     if initial_generation:
         current = _repair_generated_capability_contracts(
             current,
-            repair_option_bindings=not screenshot_analysis,
         )
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
@@ -14135,12 +14098,6 @@ async def orchestrate_flow_capabilities(
             # collection. The next Pi batch can retry from that authoritative
             # baseline while newly captured facts remain available on the spec.
             current = _prune_empty_capabilities(original.model_copy(deep=True))
-        # Reject only the unsafe model proposal. Grounded recorder repairs are
-        # independent facts and must survive the rollback; otherwise one bad
-        # screenshot suggestion also restores stale user-input/option bindings.
-        if screenshot_analysis:
-            _repair_structural_option_bindings(current)
-            current = _sync_capability_io_schemas(sync_flow_spec_models(current))
         if previous_strict_plan:
             semantic_plan = previous_semantic_plan
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
