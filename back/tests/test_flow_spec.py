@@ -3109,6 +3109,69 @@ def test_edit_hydrates_unchanged_fields_from_the_nearest_record_read() -> None:
     assert set(capability.input_schema["properties"]) == {"id"}
 
 
+def test_compiler_keeps_route_disambiguated_read_preflight_chain() -> None:
+    definition_id = "workflow:15:aa840521"
+    route_token = "ROUTE-12345"
+    captured = [
+        {
+            "request_id": "req-definition", "sequence": 1,
+            "method": "GET", "url": "https://example.test/process-definition/get",
+            "role": "read_context", "keep": True, "confidence": 0.99,
+            "trigger_action_id": "action-open", "trigger_op": "click",
+            "response_json": {"data": {"id": definition_id}},
+        },
+        {
+            "request_id": "req-echo", "sequence": 2,
+            "method": "GET", "url": "https://example.test/approval/detail?mode=preview",
+            "role": "read_context", "keep": True, "confidence": 0.99,
+            "trigger_action_id": "action-preview", "trigger_op": "click",
+            "response_json": {"data": {"processDefinition": {"id": definition_id}}},
+        },
+        {
+            "request_id": "req-approval", "sequence": 3,
+            "method": "GET", "url": "https://example.test/approval/detail",
+            "query": {"processDefinitionId": [definition_id]},
+            "role": "read_context", "keep": True, "confidence": 0.99,
+            "trigger_action_id": "action-submit", "trigger_op": "click",
+            "response_json": {"data": {"routeToken": route_token}},
+        },
+        {
+            "request_id": "req-submit", "sequence": 4,
+            "method": "POST", "url": "https://example.test/applications/submit",
+            "post_data": json.dumps({"routeToken": route_token, "reason": "出差"}),
+            "content_type": "application/json",
+            "role": "business_write", "keep": True, "confidence": 0.99,
+            "trigger_action_id": "action-submit", "trigger_op": "click",
+            "response_json": {"code": 0},
+        },
+    ]
+
+    spec = to_flow_spec(captured_requests=captured, samples={"reason": "出差"})
+    submit = next(step for step in spec.steps if step.method == "POST")
+
+    from dano.execution.page.capability_compiler import compile_capabilities
+
+    compiled = compile_capabilities(spec, {"capabilities": [{
+        "name": "submit_application",
+        "title": "提交申请",
+        "kind": "submit",
+        "anchor_step_id": submit.step_id,
+    }]}).spec
+    capability = compiled.capabilities[0]
+    member_paths = [
+        step.path.split("?", 1)[0]
+        for step in compiled.steps
+        if step.step_id in set(capability.step_ids)
+    ]
+
+    assert member_paths == [
+        "/process-definition/get",
+        "/approval/detail",
+        "/applications/submit",
+    ]
+    assert "processDefinitionId" not in capability.input_schema["properties"]
+
+
 def test_record_read_with_only_an_id_match_is_not_form_hydration() -> None:
     captured = [
         {

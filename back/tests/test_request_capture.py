@@ -305,6 +305,74 @@ def test_discover_step_links_includes_get_query_targets():
     }]
 
 
+def test_discover_step_links_treats_single_query_list_as_scalar():
+    process_id = "workflow:15:aa840521"
+    requests = [
+        {
+            "method": "GET",
+            "url": "/definitions/current",
+            "response_json": {"data": {"id": process_id}},
+        },
+        {
+            "method": "GET",
+            "url": "/workflow/approval",
+            "query": {"processDefinitionId": [process_id]},
+            "response_json": {"data": {"nodes": []}},
+        },
+    ]
+
+    assert discover_step_links(requests) == [{
+        "target_step": 1,
+        "target_path": "query.processDefinitionId",
+        "target_tokens": ["query", "processDefinitionId"],
+        "source_step": 0,
+        "source_path": "data.id",
+        "source_tokens": ["data", "id"],
+    }]
+
+
+def test_discover_step_links_prefers_route_matching_source_over_echoes():
+    process_id = "workflow:15:aa840521"
+    requests = [
+        {
+            "method": "GET",
+            "url": "/process-definition/get",
+            "response_json": {"data": {"id": process_id}},
+        },
+        {
+            "method": "GET",
+            "url": "/approval/detail",
+            "response_json": {"data": {"processDefinition": {"id": process_id}}},
+        },
+        {
+            "method": "GET",
+            "url": "/approval/detail",
+            "query": {"processDefinitionId": [process_id]},
+            "response_json": {"data": {"nodes": []}},
+        },
+    ]
+
+    assert discover_step_links(requests) == [{
+        "target_step": 2,
+        "target_path": "query.processDefinitionId",
+        "target_tokens": ["query", "processDefinitionId"],
+        "source_step": 0,
+        "source_path": "data.id",
+        "source_tokens": ["data", "id"],
+    }]
+
+
+def test_discover_step_links_keeps_unrelated_equal_sources_ambiguous():
+    record_id = "record-12345"
+    requests = [
+        {"method": "GET", "url": "/alpha", "response_json": {"data": {"id": record_id}}},
+        {"method": "GET", "url": "/beta", "response_json": {"data": {"id": record_id}}},
+        {"method": "GET", "url": "/records", "query": {"ownerId": [record_id]}},
+    ]
+
+    assert discover_step_links(requests) == []
+
+
 def test_suggest_selects_code_dropdown_via_small_dict():
     """代码型下拉:type=2 命中字典小列表 dictValue=2 → 绑 select,agent 传"病假"、运行期换 2。"""
     submit = '{"type":2,"reason":"回家"}'

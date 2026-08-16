@@ -480,12 +480,59 @@ def _request_input_leaves(request: dict) -> list[tuple[str, list[str | int], str
             query = {}
     leaves: list[tuple[str, list[str | int], str, object]] = []
     for key, raw in (query or {}).items():
-        if isinstance(raw, list):
+        if isinstance(raw, list) and len(raw) == 1:
+            # RequestFact preserves the transport parser's list shape even
+            # for an ordinary scalar query parameter.  Its executable field
+            # is still ``query.key``; inventing ``[0]`` prevents the discovered
+            # response link from resolving to the real ParamField.
+            leaves.append((f"query.{key}", ["query", key], str(raw[0]), raw[0]))
+        elif isinstance(raw, list):
             for index, item in enumerate(raw):
                 leaves.append((f"query.{key}[{index}]", ["query", key, index], str(item), item))
         elif raw is not None:
             leaves.append((f"query.{key}", ["query", key], str(raw), raw))
     return leaves
+
+
+def select_dependency_source(
+    candidates: set[tuple[str, str, str]],
+    *,
+    target_path: str,
+    target_method: str,
+    target_route: str,
+) -> tuple[str, str, str] | None:
+    """Resolve repeated equivalent sources without guessing between businesses."""
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if not candidates:
+        return None
+
+    target_identity = (str(target_method or "GET").upper(), urlparse(target_route).path)
+    different_route = {
+        item for item in candidates
+        if (item[0], urlparse(item[1]).path) != target_identity
+    }
+    narrowed = different_route or candidates
+
+    def terms(value: str) -> set[str]:
+        split_camel = _re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+        return {
+            term for term in _re.split(r"[^a-z0-9]+", split_camel.casefold())
+            if term not in {
+                "", "admin", "api", "body", "query", "response", "data",
+                "get", "list", "page", "detail", "id", "ids", "key", "code",
+            }
+        }
+
+    target_terms = terms(target_path)
+    ranked = [
+        (len(terms(route) & target_terms), item)
+        for item in narrowed
+        for _method, route, _source_path in [item]
+    ]
+    best = max((score for score, _item in ranked), default=0)
+    winners = {item for score, item in ranked if score == best and score > 0}
+    return next(iter(winners)) if len(winners) == 1 else None
 
 
 def discover_step_links(writes: list[dict]) -> list[dict]:
@@ -517,12 +564,41 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
                     matches.append((j, stoks))
             # 相同录制值在多个前置响应出现时没有足够证据判断来源。宁可留给 Planner/
             # 人工确认，也不能用“第一个命中”制造时好时坏的假依赖。
-            unique = {
-                (source_step, _tokens_to_str(source_tokens)): (source_step, source_tokens)
+            identities = {
+                (
+                    str(writes[source_step].get("method") or "GET").upper(),
+                    urlparse(str(
+                        writes[source_step].get("url")
+                        or writes[source_step].get("path")
+                        or ""
+                    )).path,
+                    _tokens_to_str(source_tokens),
+                )
                 for source_step, source_tokens in matches
             }
-            if len(unique) == 1:
-                source_step, source_tokens = next(iter(unique.values()))
+            selected = select_dependency_source(
+                identities,
+                target_path=tpath,
+                target_method=str(writes[i].get("method") or "GET"),
+                target_route=str(writes[i].get("url") or writes[i].get("path") or ""),
+            )
+            if selected is not None:
+                source_step, source_tokens = max(
+                    (
+                        (candidate_step, candidate_tokens)
+                        for candidate_step, candidate_tokens in matches
+                        if (
+                            str(writes[candidate_step].get("method") or "GET").upper(),
+                            urlparse(str(
+                                writes[candidate_step].get("url")
+                                or writes[candidate_step].get("path")
+                                or ""
+                            )).path,
+                            _tokens_to_str(candidate_tokens),
+                        ) == selected
+                    ),
+                    key=lambda item: item[0],
+                )
                 links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
                               "source_step": source_step, "source_path": _tokens_to_str(source_tokens),
                               "source_tokens": source_tokens})

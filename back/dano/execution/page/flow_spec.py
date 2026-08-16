@@ -33,6 +33,7 @@ from dano.execution.page.request_capture import (
     build_api_request,
     classify_request_role,
     discover_step_links,
+    select_dependency_source,
     page_enum_selects,
     extract_auth_headers,
     flatten_body,
@@ -7715,6 +7716,8 @@ def to_flow_spec(
                 target_path = _strip_body_prefix(str(lk.get("target_path", "")))
                 target_param = next((p for p in target_step.params if p.path == target_path), None)
                 target_value = str(target_param.value if target_param is not None else "")
+                source_request = cands[src_pos]
+                target_request = cands[tgt_pos]
                 matching_sources: set[tuple[str, str, str]] = set()
                 # 唯一性必须以完整请求事实库为准，不能只看已物化步骤；两个候选 GET
                 # 返回同一 ID 时，即使去重后只保留一个步骤，也仍属于歧义证据。
@@ -7729,9 +7732,22 @@ def to_flow_spec(
                                 _request_path(candidate_request),
                                 response_path,
                             ))
+                selected_source = select_dependency_source(
+                    matching_sources,
+                    target_path=target_path,
+                    target_method=str(target_request.get("method") or "GET"),
+                    target_route=str(
+                        target_request.get("url") or target_request.get("path") or ""
+                    ),
+                )
+                current_source = (
+                    str(source_request.get("method") or "GET").upper(),
+                    _request_path(source_request),
+                    str(lk.get("source_path") or "").removeprefix("response."),
+                )
                 strong_unique_match = (
                     len(target_value) >= 4
-                    and len(matching_sources) == 1
+                    and selected_source == current_source
                     and target_value.lower() not in {"true", "false", "null", "none", "success"}
                 )
                 source_leaf = re.sub(
@@ -7741,8 +7757,6 @@ def to_flow_spec(
                     r"[^a-z0-9]+", "", str(target_path or "").split(".")[-1].lower()
                 )
                 strong_id_dependency = strong_unique_match and source_leaf == "id" and target_leaf.endswith("id")
-                source_request = cands[src_pos]
-                target_request = cands[tgt_pos]
                 source_action = str(source_request.get("trigger_action_id") or "")
                 target_action = str(target_request.get("trigger_action_id") or "")
                 causal_supported = bool(target_action)
@@ -7794,8 +7808,19 @@ def to_flow_spec(
                         "target_action_id": target_action,
                         "same_action_chain": same_action_chain,
                         "observer_available": bool(page_events),
+                        **({
+                            "captured_value_match": {
+                                "occurrences": 1,
+                                "source_identity": list(selected_source or ()),
+                                "disambiguation": "route_semantics",
+                            },
+                        } if strong_unique_match else {}),
                     },
-                    meta={"actor": "heuristic", "verified": False},
+                    meta={
+                        "actor": "heuristic",
+                        "verified": False,
+                        **({"captured_value_match": True} if strong_unique_match else {}),
+                    },
                 ))
         except Exception:
             link_objs = []
