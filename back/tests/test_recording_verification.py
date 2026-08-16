@@ -26,12 +26,11 @@ from dano.execution.page.verification_log import (
 )
 from dano.onboarding.recording_verify import (
     finalize_verification_state,
-    require_verification_complete,
     verification_report,
     verification_todos,
 )
 from dano.onboarding.recording_pi import RecordingPiSession
-from dano.onboarding.recording_release import _active_link_errors
+from dano.onboarding.recording_release import _active_link_issues
 
 
 @pytest.fixture(autouse=True)
@@ -594,12 +593,12 @@ def test_release_rechecks_dependency_verification_against_current_signature():
         "link_id": "link-1",
         "verification_id": verification_id,
     }])
-    assert _active_link_errors(confirmed) == []
+    assert _active_link_issues(confirmed) == []
 
     # Simulate a stale persisted/client draft that changed after verification.
     confirmed.links[0].target_path = "body.otherJobId"
 
-    assert _active_link_errors(confirmed) == [
+    assert [issue.message for issue in _active_link_issues(confirmed)] == [
         "依赖 `link-1` 的 dependency_execute 验证与当前依赖定义不一致"
     ]
 
@@ -760,12 +759,6 @@ async def test_execute_write_failure_stops_before_verify_and_cleanup(monkeypatch
     record = get_verification(result["verification_id"])
     assert record["status"] == "failed"
     assert record["failure_reason"] == "HTTP 500"
-
-
-def test_machine_publish_gate_rejects_unfinished_verification_but_has_debug_escape():
-    with pytest.raises(ValueError, match="尚未完成"):
-        require_verification_complete(_spec())
-    assert require_verification_complete(_spec(), skip_verify=True)["complete"] is False
 
 
 @pytest.mark.asyncio

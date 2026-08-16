@@ -30,7 +30,6 @@ from dano.execution.page.recording_live import (
     _constrain_semantic_plan_to_goal,
     LiveNotebook,
     apply_recording_agent_edit,
-    live_request_role_overrides,
     merge_live_agent_state,
     recording_delta,
 )
@@ -2999,7 +2998,6 @@ def test_live_request_role_aliases_are_canonical_before_materialization(
     }])
 
     assert live.request_facts.analysis["req-detail"].role == canonical
-    assert live_request_role_overrides(live)["req-detail"]["role"] == canonical
 
 
 def test_unknown_live_request_role_is_rejected_instead_of_silently_disappearing():

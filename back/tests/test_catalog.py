@@ -75,25 +75,6 @@ async def test_connector_fact_check_from_body_not_gated_by_action_name():
     assert by["create_leave"].fact_check_query == "query_balance"
 
 
-async def test_registry_exposes_capability_lookup_for_published_assets():
-    store = _Store({AssetType.CONNECTOR: [
-        _Env({
-            "action": "query_daily",
-            "field_bindings": [],
-            "risk_level": "L1",
-            "capabilities": [{"name": "query_status", "kind": "query_status"}],
-        }, "query_daily"),
-    ]})
-    reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem.OA])
-
-    skill_id = f"{Subsystem.OA.value}.query_daily"
-    assert reg.get_by_skill_id(skill_id) is not None
-    assert reg.get_capability(skill_id, "query_status") == {
-        "name": "query_status",
-        "kind": "query_status",
-    }
-
-
 async def test_workflow_step_connector_never_exposed():
     # 即便某 workflow_step 连接器没有任何复合流程引用(孤儿),也绝不单独露出,不污染目录
     store = _Store({AssetType.CONNECTOR: [_conn_env("query_balance"),

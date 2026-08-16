@@ -331,14 +331,6 @@ def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001
     }
 
 
-def require_verification_complete(spec, *, skip_verify: bool = False) -> dict[str, Any]:  # noqa: ANN001
-    report = verification_report(spec)
-    run = dict((spec.meta or {}).get("verification_run") or {})
-    if not skip_verify and (not run.get("complete") or report["todos"]):
-        raise ValueError("录制验证阶段尚未完成")
-    return report
-
-
 def finalize_verification_state(
     spec,
     *,

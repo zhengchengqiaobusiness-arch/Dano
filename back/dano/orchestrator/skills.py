@@ -216,19 +216,3 @@ class SkillRegistry:
     def get_by_skill_id(self, skill_id: str) -> SkillSpec | None:
         return next((s for s in self.skills if s.skill_id == skill_id), None)
 
-    def get_capability(self, skill_id: str, capability: str) -> dict | None:
-        skill = self.get_by_skill_id(skill_id)
-        if skill is None:
-            return None
-        target = str(capability or "").strip()
-        for cap in getattr(skill, "capabilities", []) or []:
-            if not isinstance(cap, dict):
-                continue
-            names = {
-                str(cap.get("name") or "").strip(),
-                str(cap.get("kind") or "").strip(),
-                str(cap.get("capability_id") or "").strip(),
-            }
-            if target in names:
-                return cap
-        return None

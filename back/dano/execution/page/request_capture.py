@@ -249,11 +249,6 @@ def write_requests(requests: list[dict]) -> list[dict]:
     return out
 
 
-def json_write_requests(requests: list[dict]) -> list[dict]:
-    """Backward-compatible name for :func:`write_requests`."""
-    return write_requests(requests)
-
-
 # 读响应里"候选列表"的常见包装键:rows/records/list/data/content/items/result
 _LIST_KEYS = ("rows", "records", "list", "data", "content", "items", "result", "results")
 
@@ -1809,49 +1804,6 @@ def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
     if last_write is not None:
         return last_write
     return first_write                                 # H17:全 auth / 全过滤时退化到第一个写
-
-
-def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
-    """**自动建议**哪些写请求组成业务流程、及顺序(确定性,"提交锚点 + 数据依赖闭包")。
-
-    锚点=提交那条(带最多用户值);从它**回溯**纳入"其响应喂给已纳入步 body"的更早写请求(taskId 等串联);
-    按录制序排(源在前、提交最后)。不在依赖链上的(聊天/改旧实体/无关写)= 噪声,不纳入。
-    返回 writes 里的全局下标(有序);单条或无依赖时只返回提交那条。通用,不挑系统。"""
-    biz = []
-    for i, w in enumerate(writes):
-        if (w.get("method") or "").upper() not in _WRITE:
-            continue
-        body = _parse_body(w.get("post_data"))
-        if body is None or looks_like_auth_write(w.get("url") or "", body):   # 排除登录/鉴权/基建写
-            continue
-        if looks_like_read_request(w.get("url") or "", w.get("post_data")):    # 排除 POST 形态的读/查询(下拉/列表源)
-            continue
-        biz.append((i, w))
-    if not biz:
-        return []
-    submit = pick_submit_request([w for _i, w in biz], samples)
-    sub_pos = next((k for k, (_i, w) in enumerate(biz) if w is submit), len(biz) - 1)
-    deps: dict[int, set] = {}                          # 目标步 ← 来源步(相对 biz 的下标,源响应喂目标 body)
-    for lk in discover_step_links([w for _i, w in biz]):
-        deps.setdefault(lk["target_step"], set()).add(lk["source_step"])
-    included, stack = set(), [sub_pos]                 # 从提交回溯依赖闭包
-    while stack:
-        p = stack.pop()
-        if p in included:
-            continue
-        included.add(p)
-        stack.extend(deps.get(p, ()))
-    # 依赖闭包之外,也纳入**含用户填写值**的业务写(它们是有意的流程步,非噪声;无值无依赖的才丢)
-    sample_vals = {str(v) for v in (samples or {}).values() if v not in ("", None)}
-    for pos, (_gi, w) in enumerate(biz):
-        if pos not in included:
-            b = _parse_body(w.get("post_data"))
-            if b and (sample_vals & set(_values(b))):
-                included.add(pos)
-    ordered = sorted(included, key=lambda p: (p == sub_pos, p))   # 提交最后,其余按录制序(≈依赖序)
-    return [biz[p][0] for p in ordered]
-
-
 
 
 # key 像内部标识(默认不当参数):以 id/key/code/token/... 结尾

@@ -3358,39 +3358,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     )
 
 
-def live_request_role_overrides(live_spec) -> dict[str, dict]:  # noqa: ANN001
-    """Project accepted agent role ops for use before canonical materialization."""
-    overrides: dict[str, dict] = {}
-    for operation in (live_spec.meta or {}).get("recording_agent_ops") or []:
-        if not isinstance(operation, dict) or operation.get("op") != "set_request_role":
-            continue
-        request_id = str(operation.get("request_id") or "")
-        try:
-            role = _canonical_request_role(
-                live_spec,
-                request_id,
-                str(operation.get("role") or ""),
-            )
-        except ValueError:
-            continue
-        reason = str(operation.get("reason") or "")
-        if not request_id or not role or not reason:
-            continue
-        overrides[request_id] = {
-            "role": _INTERNAL_REQUEST_ROLE[role],
-            "keep": role in {"business_read", "business_write"},
-            "reason": reason,
-            "confidence": max(0.8, float(operation.get("confidence") or 0)),
-            "actor": "agent",
-            "evidence": {
-                "actor": "agent",
-                "reason": reason,
-                "evidence_refs": _evidence_refs(operation),
-            },
-        }
-    return overrides
-
-
 def recording_agent_evidence_issues(spec) -> list[dict]:  # noqa: ANN001
     """Report agent conclusions that lack their required evidence."""
     issues: list[dict] = []

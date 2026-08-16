@@ -18,7 +18,6 @@ from dano.execution.page.flow_spec import (
 from dano.execution.page.recording_field_identity import FieldRef, FieldReferenceError, resolve_field_ref
 from dano.execution.page.recording_live import (
     dependency_link_signature,
-    live_request_role_overrides,
     merge_live_agent_state,
 )
 from dano.execution.page.request_capture import execute_api_workflow
@@ -280,7 +279,6 @@ def test_finalize_recompiles_live_capability_plan_from_request_ids():
     finalized = to_flow_spec(
         requests,
         recording_mode="real_submit",
-        request_role_overrides=live_request_role_overrides(live),
     )
 
     merged = merge_live_agent_state(live, finalized)
@@ -361,7 +359,6 @@ def test_accepted_pre_materialization_plan_survives_finalize_with_monotonic_vers
     finalized = to_flow_spec(
         requests,
         recording_mode="real_submit",
-        request_role_overrides=live_request_role_overrides(live),
     )
 
     merged = merge_live_agent_state(live, finalized)

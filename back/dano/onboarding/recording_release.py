@@ -256,11 +256,6 @@ def _active_link_issues(spec: FlowSpec, capability_id: str = "") -> list[Release
     return issues
 
 
-def _active_link_errors(spec: FlowSpec) -> list[str]:
-    """Compatibility projection for existing callers and tests."""
-    return [item.message for item in _active_link_issues(spec)]
-
-
 def _recorded_body(step) -> Any:  # noqa: ANN001
     value = step.body_template if step.body_template is not None else step.body_source
     if isinstance(value, str):

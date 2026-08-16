@@ -23,7 +23,7 @@ from dano.execution.page.request_capture import (
     extract_auth_headers,
     flatten_body,
     fetch_field_options,
-    json_write_requests,
+    write_requests,
     pick_submit_request,
     resolve_identity_value,
     self_check,
@@ -88,7 +88,7 @@ def _strict_dom_enum(path: str, selected_label: str, selected_value, options: li
 
 def test_json_write_requests_lists_all_candidates():
     """候选 = 所有带 JSON body 的写请求(GET / 非JSON 排除),保序;供前端手选用哪个。"""
-    cands = json_write_requests(_REQUESTS)
+    cands = write_requests(_REQUESTS)
     urls = [c["url"] for c in cands]
     assert urls == ["http://oa.x/prod-api/login", "http://oa.x/prod-api/captcha",
                     "http://oa.x/prod-api/oa/leave/start"]   # 3 个 JSON 写请求,GET 的 getInfo 不在内
@@ -135,7 +135,7 @@ def test_json_write_requests_excludes_post_query_by_body_shape():
         },
     ]
 
-    assert [r["url"] for r in json_write_requests(reads_and_submit)] == ["/api/submit"]
+    assert [r["url"] for r in write_requests(reads_and_submit)] == ["/api/submit"]
 
 
 def test_multipart_upload_is_explicitly_marked_unsupported():
@@ -3112,7 +3112,7 @@ def test_json_write_requests_excludes_post_reads():
         {"method": "POST", "url": "http://oa/x/queryNrxxListForKfmh", "post_data": '{"k":1}'},
         {"method": "POST", "url": "http://oa/x/createQzqdSl", "post_data": '{"csmc":"1"}'},
     ]
-    urls = [c["url"] for c in json_write_requests(reqs)]
+    urls = [c["url"] for c in write_requests(reqs)]
     assert urls == ["http://oa/x/createQzqdSl"]
 
 
@@ -4226,35 +4226,6 @@ async def test_onboarding_repair_loop_fixes_and_publishes():
 
 
 # ─────────── 多接口自动判流程:提交锚点 + 数据依赖闭包,丢噪声 ───────────
-def test_suggest_workflow_steps_drops_noise_keeps_chain():
-    from dano.execution.page.request_capture import suggest_workflow_steps
-    writes = [
-        {"method": "POST", "url": "http://x/task/create", "post_data": '{"name":"x"}',
-         "response_json": {"data": {"taskId": "TASK-9988"}}},                       # 0 创建(产 taskId)
-        {"method": "PUT", "url": "http://x/old/SEQ-1/status", "post_data": '{"status":"done"}',
-         "response_json": {"code": 0}},                                             # 1 改旧实体(噪声)
-        {"method": "POST", "url": "http://x/task/submit",
-         "post_data": '{"taskId":"TASK-9988","reason":"回家"}', "response_json": {"code": 0}},  # 2 提交
-    ]
-    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [0, 2]   # 提交+其依赖;噪声步1被丢
-
-
-def test_suggest_workflow_steps_single_submit():
-    from dano.execution.page.request_capture import suggest_workflow_steps
-    writes = [{"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}',
-               "response_json": {"code": 0}}]
-    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [0]
-
-
-def test_suggest_workflow_steps_excludes_auth():
-    from dano.execution.page.request_capture import suggest_workflow_steps
-    writes = [
-        {"method": "POST", "url": "http://x/login", "post_data": '{"password":"p"}', "response_json": {}},  # 鉴权,排除
-        {"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}', "response_json": {"code": 0}},
-    ]
-    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [1]
-
-
 # ─────────── 审计修复:回滚/source_path/bind_placeholder/多占位/脱敏/聚焦问题 ───────────
 def test_redact_keeps_credential_type_and_environment():
     """脱敏 bug 修复:credential_type/environment 是评审元数据,绝不脱敏(否则 compliance fail-closed 误判)。"""
@@ -4308,18 +4279,6 @@ def test_focus_question_single():
     from dano.onboarding.page_onboard import _focus_question
     q = _focus_question("提交请假", [{"detail": "参数A语义不清"}, {"detail": "参数B不清"}])
     assert "提交请假" in q and "参数A语义不清" in q and "还有 1 项" in q
-
-
-def test_suggest_workflow_steps_keeps_user_value_step():
-    """多接口优化:含用户填写值的业务写也纳入(非噪声),即便它不数据依赖提交。"""
-    from dano.execution.page.request_capture import suggest_workflow_steps
-    writes = [
-        {"method": "POST", "url": "http://x/draft", "post_data": '{"title":"我的标题"}', "response_json": {"code": 0}},
-        {"method": "POST", "url": "http://x/heartbeat", "post_data": '{"t":1}', "response_json": {"code": 0}},  # 噪声
-        {"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}', "response_json": {"code": 0}},
-    ]
-    out = suggest_workflow_steps(writes, {"标题": "我的标题", "原因": "回家"})
-    assert 0 in out and 2 in out and 1 not in out          # draft(含用户值)+提交;心跳(无值)丢
 
 
 @pytest.mark.asyncio
