@@ -564,12 +564,16 @@ def _pick_label_key(item: dict, value_key: str) -> str:
     def rank(k: str) -> int:
         kl = k.lower()
         if any(h in kl for h in _CONTEXT_ID_HINTS):
-            return 3                                     # 部门/组织/租户等"上下文 id-like"字段不当 label(选人下拉里它们是噪音)
+            return 5                                     # 部门/组织/租户等"上下文 id-like"字段不当 label(选人下拉里它们是噪音)
         if any(h in kl for h in _LOGIN_HINTS) and "nick" not in kl:
-            return 2                                     # 登录名最后(username/account)
+            return 4                                     # 登录名最后(username/account)
         if any(h in kl for h in _DISPLAY_HINTS):
             return 0                                     # 显示名优先
-        return 1                                         # 其它文字字段居中
+        if _re.search(r"(?:code|no|number|serial)$", kl):
+            return 1                                     # 无名称时，业务编号比另一个内部 ID 更适合展示
+        if _is_idlike(k):
+            return 3                                     # processInstanceId 等内部标识不能仅因字符串更长而成为显示名
+        return 2                                         # 其它文字字段居中
 
     return min(text, key=lambda k: (rank(k), -len(item[k])))
 

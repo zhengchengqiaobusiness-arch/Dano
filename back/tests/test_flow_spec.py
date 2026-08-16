@@ -3084,3 +3084,89 @@ def test_publish_removes_stale_generated_option_source_membership() -> None:
     assert [(ref.request_id, ref.usage) for ref in prepared.capabilities[0].request_refs] == [
         ("req-detail", "execute"),
     ]
+
+
+def test_publish_resolves_selected_entity_and_projects_the_same_record_fields() -> None:
+    rows = [
+        {
+            "id": "entity-1", "billCode": "REQ-001",
+            "processInstanceId": "PROCESS-001",
+        },
+        {
+            "id": "entity-2", "billCode": "REQ-002",
+            "processInstanceId": "PROCESS-002",
+        },
+    ]
+    source_url = "https://example.test/applications/page?pageNo=1&pageSize=10"
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="update", method="POST", path="/applications/submit-process",
+            source_meta={
+                "request_id": "req-update", "role": "business_write",
+                "trigger_page_context": {
+                    "url": "https://example.test/applications/editor?id=entity-1",
+                },
+            },
+            params=[
+                ParamField(
+                    path="id", key="id", value="entity-1",
+                    category="runtime_var", source_kind="unknown",
+                    source={"kind": "selected_entity_id"}, exposed_to_user=False,
+                ),
+                ParamField(
+                    path="billCode", key="billCode", value="REQ-001",
+                    category="user_param", source_kind="api_option",
+                    source={
+                        "kind": "api_option", "source_request_id": "req-list",
+                        "source_url": source_url, "value_key": "billCode",
+                        "label_key": "id",
+                    },
+                ),
+                ParamField(
+                    path="reason", key="reason", value="changed",
+                    category="user_param", source_kind="user_input",
+                    exposed_to_user=True,
+                ),
+            ],
+            selects=[flow_spec_module.SelectBinding(
+                param="billCode", path="billCode", source_url=source_url,
+                source_request_id="req-list", value_key="billCode", label_key="id",
+                option_map={"entity-1": "REQ-001", "entity-2": "REQ-002"},
+                enum_source="api", enum_confirmed=True,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="update_application", kind="update",
+            nodes=[
+                {"id": "call", "type": "call", "step_id": "update"},
+                {"id": "return", "type": "return", "from": "update", "path": "response"},
+            ],
+        )],
+        request_facts={
+            "requests": [{
+                "request_id": "req-list", "sequence": 1, "method": "GET",
+                "url": source_url, "path": "/applications/page",
+                "response_json": {"data": {"list": rows}},
+            }],
+            "analysis": {
+                "req-list": {
+                    "request_id": "req-list", "role": "business_get",
+                    "keep": True, "confidence": 1.0,
+                },
+            },
+        },
+    )
+
+    prepared = flow_spec_module.prepare_flow_spec_for_publish(spec)
+
+    update = prepared.steps[0]
+    entity_id = next(param for param in update.params if param.path == "id")
+    bill_code = next(param for param in update.params if param.path == "billCode")
+    selector = next(binding for binding in update.selects if binding.path == "id")
+    assert entity_id.source_kind == "api_option"
+    assert entity_id.source["source_url"] == source_url
+    assert entity_id.source["value_key"] == "id"
+    assert entity_id.source["label_key"] == "billCode"
+    assert bill_code.source_kind == "selected_option_field"
+    assert bill_code.exposed_to_user is False
+    assert selector.field_projections == {"billCode": "billCode"}

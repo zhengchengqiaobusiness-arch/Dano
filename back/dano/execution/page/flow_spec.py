@@ -463,6 +463,38 @@ class FlowSpec(BaseModel):
         return sync_flow_spec_models(self)
 
 
+def executable_flow_links(spec: FlowSpec) -> list[FlowLink]:
+    """Return dependencies backed by replay or immutable recording evidence."""
+    trusted_verification_ids = {
+        str(item.get("verification_id"))
+        for item in (spec.meta or {}).get("verification_log") or []
+        if isinstance(item, dict)
+        and item.get("status") == "passed"
+        and item.get("verification_id")
+    }
+    executable: list[FlowLink] = []
+    for link in spec.links or []:
+        meta = dict(link.meta or {})
+        verification_id = str(
+            meta.get("verification_id")
+            or (link.evidence or {}).get("verification_id")
+            or ""
+        )
+        active = meta.get("active", True) is not False
+        machine_verified = bool(
+            link.confirmed
+            and meta.get("verified") is True
+            and verification_id in trusted_verification_ids
+        )
+        capture_grounded = bool(
+            meta.get("captured_value_match") is True
+            or meta.get("captured_structure_match") is True
+        )
+        if active and (machine_verified or capture_grounded):
+            executable.append(link)
+    return executable
+
+
 # ─────────── Step A: 收敛函数 ───────────
 def _infer_type_from_value(value: Any) -> str:
     if value in (None, ""):
@@ -901,6 +933,16 @@ def _read_transport_can_supply_options(read: dict) -> bool:
             str(read.get("url") or read.get("path") or ""),
             read.get("post_data"),
         )
+    )
+
+
+def _read_is_business_entity_collection(read: dict, payload: Any) -> bool:
+    """Return whether a business read can resolve one caller-selected entity."""
+    return bool(
+        str(read.get("role") or read.get("request_role") or "") == "business_get"
+        and str(read.get("method") or "GET").upper() in {"GET", "HEAD"}
+        and _list_payload_has_reference_contract(payload)
+        and not _read_is_entity_enrichment_lookup(read)
     )
 
 
@@ -6613,6 +6655,26 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
             and _dependency_match_score(param, source_path) >= 40
         ):
             return True
+        evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
+        captured_match = evidence.get("captured_value_match")
+        source_leaf = re.sub(
+            r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower(),
+        )
+        target_leaf = re.sub(
+            r"[^a-z0-9]+", "",
+            str(param.path or param.key or "").split(".")[-1].lower(),
+        )
+        if (
+            lk is not None
+            and lk.confirmed
+            and float(lk.confidence or 0.0) >= 0.95
+            and isinstance(captured_match, dict)
+            and int(captured_match.get("occurrences") or 0) == 1
+            and not _param_has_editable_control_evidence(param)
+            and source_leaf == "id"
+            and target_leaf.endswith("id")
+        ):
+            return True
         # Manual links have already returned above; other automatic links need
         # a real runtime contract.
         return False
@@ -6677,12 +6739,21 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
             and source_transaction != target_transaction
         )
     )
-    if separate_observed_operations and not causal:
-        return False
     source_leaf = re.sub(r"[^a-z0-9]+", "", source_path.split(".")[-1].casefold())
     target_leaf = re.sub(
         r"[^a-z0-9]+", "", str(target_param.path or target_param.key).split(".")[-1].casefold(),
     )
+    captured_match = evidence.get("captured_value_match")
+    stable_identifier_projection = bool(
+        link.confirmed
+        and float(link.confidence or 0.0) >= 0.95
+        and isinstance(captured_match, dict)
+        and int(captured_match.get("occurrences") or 0) == 1
+        and source_leaf == "id"
+        and target_leaf.endswith("id")
+    )
+    if separate_observed_operations and not (causal or stable_identifier_projection):
+        return False
     scalar_envelope_projection = bool(
         source_path in {"data", "result", "value"}
         and not isinstance(source_value, (dict, list))
@@ -6698,7 +6769,7 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
             or scalar_envelope_projection
         )
     )
-    return causal or structural_projection
+    return causal or stable_identifier_projection or structural_projection
 
 
 def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> None:
@@ -11422,6 +11493,37 @@ def _capability_operation_kind(step: FlowStep) -> str:
         return "reject"
     if re.search(r"(?:approve|approval|pass)|审批|同意|通过", signature):
         return "approve"
+    context_url = str((meta.get("trigger_page_context") or {}).get("url") or "")
+    context_ids = {
+        str(value)
+        for values in parse_qs(urlparse(context_url).query).values()
+        for value in values
+        if value not in (None, "") and not _is_missing_wire_placeholder(value)
+    }
+    request_ids = {
+        str(param.value)
+        for param in step.params or []
+        if re.sub(
+            r"[^a-z0-9]+", "",
+            str(param.path or param.key).split(".")[-1].casefold(),
+        ) == "id"
+        and param.value not in (None, "")
+        and not _is_missing_wire_placeholder(param.value)
+    }
+    editable_business_fields = [
+        param for param in step.params or []
+        if param.exposed_to_user
+        and param.source_kind == "user_input"
+        and re.sub(
+            r"[^a-z0-9]+", "",
+            str(param.path or param.key).split(".")[-1].casefold(),
+        ) != "id"
+    ]
+    if context_ids & request_ids and editable_business_fields:
+        # Some systems reuse a submit-looking endpoint when an existing record
+        # is edited. The selected identity plus caller-edited business fields
+        # is stronger operation evidence than that route name.
+        return "update"
     if re.search(r"(?:submit-process|submit|commit)|提交", signature):
         return "submit"
     if re.search(r"(?:draft|save-draft)|草稿|暂存", signature):
@@ -17086,27 +17188,36 @@ def _prune_invalid_fact_checks(spec: FlowSpec) -> None:
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True))
-    before_link_ids = {link.link_id for link in current.links}
+    _repair_structural_option_bindings(current)
     _materialize_captured_response_key_maps(
         current.steps,
         current.links,
         [fact.model_dump(exclude_none=True) for fact in current.request_facts.requests],
     )
-    new_structure_links = [
-        link for link in current.links
-        if link.link_id not in before_link_ids
-        and link.kind == "response_key_map"
-    ]
-    if new_structure_links:
-        _sync_link_sources(current.steps, current.links)
-        for capability in current.capabilities:
+    _sync_link_sources(current.steps, current.links)
+    by_step_id = {step.step_id: step for step in current.steps}
+    public_anchor_ids = set(_public_capability_anchor_step_ids(current))
+    for capability in current.capabilities:
+        changed = True
+        while changed:
+            changed = False
             member_ids = set(_capability_node_step_ids(capability))
-            for link in new_structure_links:
-                if link.target_step_id in member_ids:
+            for link in executable_flow_links(current):
+                source = by_step_id.get(link.source_step_id)
+                if (
+                    link.target_step_id in member_ids
+                    and link.source_step_id not in member_ids
+                    and link.source_step_id not in public_anchor_ids
+                    and source is not None
+                    and not _is_write_step(source)
+                ):
                     _add_step_id_to_capability(
                         current, capability, link.source_step_id,
                     )
-            _sync_capability_order(current, capability)
+                    changed = link.source_step_id in set(
+                        _capability_node_step_ids(capability)
+                    )
+        _sync_capability_order(current, capability)
     _prune_invalid_fact_checks(current)
     _canonicalize_public_capability_identities(current)
     _normalize_capability_references(current)
@@ -17894,6 +18005,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             **dict(source.source_meta or {}),
         }
         items = as_list_payload(source.response_json) or []
+        entity_collection_source = _read_is_business_entity_collection(
+            read, source.response_json,
+        )
         if (
             _read_transport_can_supply_options(read)
             and items
@@ -17901,6 +18015,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
+                or entity_collection_source
                 or (
                     _list_payload_has_reference_contract(source.response_json)
                     and (
@@ -17922,6 +18037,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "explicit_option_source": role in {
                     "read_option", "option_source", "explicit_read_option",
                 } or _choice_control_triggered(read),
+                "entity_collection_source": entity_collection_source,
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
             if request_id:
@@ -17970,6 +18086,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         read = fact.model_dump(exclude_none=True)
         read["role"] = str(analysis.role if analysis is not None else read.get("role") or "")
         items = as_list_payload(fact.response_json) or []
+        entity_collection_source = _read_is_business_entity_collection(
+            read, fact.response_json,
+        )
         if (
             _read_transport_can_supply_options(read)
             and items
@@ -17977,6 +18096,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             and not _read_is_entity_enrichment_lookup(read)
             and (
                 _read_is_option_source(read)
+                or entity_collection_source
                 or (
                     _list_payload_has_reference_contract(fact.response_json)
                     and (
@@ -17998,6 +18118,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "explicit_option_source": read["role"] in {
                     "read_option", "option_source", "explicit_read_option",
                 } or _choice_control_triggered(read),
+                "entity_collection_source": entity_collection_source,
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
 
@@ -18306,6 +18427,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
 
     for target in spec.steps:
         for param in target.params or []:
+            selected_entity_target = bool(
+                str((param.source or {}).get("kind") or "") == "selected_entity_id"
+                and re.sub(
+                    r"[^a-z0-9]+", "",
+                    str(param.path or param.key).split(".")[-1].casefold(),
+                ) == "id"
+            )
             rebindable_option = bool(
                 param.source_kind == "api_option" and has_screenshot_choice(param)
             ) or bool(
@@ -18317,7 +18445,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             )
             if (
                 param.locked
-                or param.source_kind == "dynamic_structure"
+                or param.source_kind in {"dynamic_structure", "selected_option_field"}
                 or _param_has_manual_contract(param)
                 or _param_has_grounded_direct_input_contract(param)
                 or (
@@ -18341,6 +18469,8 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             page_contracts = page_evidence_for(target, param, value)
             matches: list[dict[str, Any]] = []
             for source in candidates:
+                if source.get("entity_collection_source") is True and not selected_entity_target:
+                    continue
                 items = source["items"]
                 source_url = str(source.get("source_url") or "")
                 source_text = " ".join([
@@ -18352,6 +18482,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 semantic_match = bool(
                     (target_tokens & source_tokens)
                     or (target_families & source_families)
+                    or (
+                        selected_entity_target
+                        and source.get("entity_collection_source") is True
+                    )
                 )
                 # Page evidence is a strong bridge when it describes this
                 # source, but an unrelated open popup must not suppress a
@@ -18431,6 +18565,122 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 multi=multi,
                 actor="recorder",
             )
+            if selected_entity_target:
+                selected_rows = [
+                    item for item in match["items"]
+                    if str(item.get(match["value_key"])) == value
+                ]
+                selector = _find_select_binding(target, param)
+                if len(selected_rows) == 1 and selector is not None:
+                    selected_row = selected_rows[0]
+                    projected_paths: set[str] = set()
+                    for sibling in target.params or []:
+                        if sibling is param or sibling.source_kind != "api_option":
+                            continue
+                        sibling_source = sibling.source or {}
+                        sibling_endpoint = _option_source_contract_endpoint(
+                            str(sibling_source.get("source_url") or "")
+                        )
+                        selected_endpoint = _option_source_contract_endpoint(
+                            str(match.get("source_url") or "")
+                        )
+                        same_source = bool(
+                            (
+                                sibling_source.get("source_request_id")
+                                and sibling_source.get("source_request_id")
+                                == match.get("source_request_id")
+                            )
+                            or (
+                                sibling_endpoint
+                                and selected_endpoint
+                                and sibling_endpoint == selected_endpoint
+                            )
+                        )
+                        response_path = str(sibling_source.get("value_key") or "")
+                        if not (
+                            same_source
+                            and response_path
+                            and _recorded_scalar_values_match(
+                                sibling.value,
+                                _flow_path_lookup(selected_row, response_path),
+                            )
+                        ):
+                            continue
+                        selector.field_projections[sibling.path] = response_path
+                        sibling.category = "runtime_var"
+                        sibling.source_kind = "selected_option_field"
+                        sibling.source = {
+                            "kind": "selected_option_field",
+                            "selector_path": param.path,
+                            "selector_param": param.key,
+                            "source_url": str(match.get("source_url") or ""),
+                            "response_path": response_path,
+                            "target_path": sibling.path,
+                        }
+                        sibling.exposed_to_user = False
+                        sibling.editable = False
+                        sibling.required = False
+                        sibling.need_human_confirm = False
+                        sibling.reason = (
+                            f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
+                        )
+                        projected_paths.add(sibling.path)
+                    for sibling in target.params or []:
+                        if (
+                            sibling is param
+                            or sibling.path in projected_paths
+                            or sibling.locked
+                            or sibling.source_kind in {
+                                "user_input", "constant", "system_time", "system_generated",
+                                "computed", "current_user", "dynamic_structure",
+                                "selected_option_field",
+                            }
+                            or _looks_user_entered_business_field(
+                                sibling.key, sibling.path,
+                            )
+                        ):
+                            continue
+                        target_leaf = re.sub(
+                            r"[^a-z0-9]+", "",
+                            str(sibling.path or sibling.key).split(".")[-1].casefold(),
+                        )
+                        response_paths = [
+                            source_path
+                            for source_path, _tokens, _raw_value, raw in _leaf_paths(selected_row)
+                            if re.sub(
+                                r"[^a-z0-9]+", "",
+                                str(source_path).split(".")[-1].casefold(),
+                            ) == target_leaf
+                            and _recorded_scalar_values_match(sibling.value, raw)
+                        ]
+                        if len(response_paths) != 1:
+                            continue
+                        response_path = response_paths[0]
+                        selector.field_projections[sibling.path] = response_path
+                        sibling.category = "runtime_var"
+                        sibling.source_kind = "selected_option_field"
+                        sibling.source = {
+                            "kind": "selected_option_field",
+                            "selector_path": param.path,
+                            "selector_param": param.key,
+                            "source_url": str(match.get("source_url") or ""),
+                            "response_path": response_path,
+                            "target_path": sibling.path,
+                        }
+                        sibling.exposed_to_user = False
+                        sibling.editable = False
+                        sibling.required = False
+                        sibling.need_human_confirm = False
+                        sibling.reason = (
+                            f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
+                        )
+                        projected_paths.add(sibling.path)
+                    if projected_paths:
+                        target.selects = [
+                            binding for binding in target.selects
+                            if binding is selector
+                            or str(binding.path or binding.id_path or "") not in projected_paths
+                        ]
             repaired += 1
 
     return repaired

@@ -16,6 +16,7 @@ from dano.execution.page.flow_spec import (
     WRITE_CAPABILITY_KINDS,
     _capability_operation_kind,
     _default_capability_nodes,
+    executable_flow_links,
     _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
@@ -34,6 +35,16 @@ class CapabilityCompilation:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
+
+
+def _trusted_verification_ids(spec: FlowSpec) -> set[str]:
+    return {
+        str(item.get("verification_id"))
+        for item in (spec.meta or {}).get("verification_log") or []
+        if isinstance(item, dict)
+        and item.get("status") == "passed"
+        and item.get("verification_id")
+    }
 
 
 def _stable_capability_id(name: str, kind: str, anchor_step_id: str) -> str:
@@ -85,33 +96,8 @@ def _request_ref(
     )
 
 
-def _trusted_verification_ids(spec: FlowSpec) -> set[str]:
-    return {
-        str(item.get("verification_id"))
-        for item in (spec.meta or {}).get("verification_log") or []
-        if isinstance(item, dict)
-        and item.get("status") == "passed"
-        and item.get("verification_id")
-    }
-
-
 def _executable_links(spec: FlowSpec):  # noqa: ANN202
-    trusted = _trusted_verification_ids(spec)
-    for link in spec.links or []:
-        meta = dict(link.meta or {})
-        verification_id = str(meta.get("verification_id") or (link.evidence or {}).get("verification_id") or "")
-        active = meta.get("active", True) is not False and getattr(link, "active", True) is not False
-        machine_verified = (
-            link.confirmed
-            and meta.get("verified") is True
-            and verification_id in trusted
-        )
-        capture_grounded = (
-            meta.get("captured_value_match") is True
-            or meta.get("captured_structure_match") is True
-        )
-        if active and (machine_verified or capture_grounded):
-            yield link
+    yield from executable_flow_links(spec)
 
 
 def _grounded_dependency_order(spec: FlowSpec, anchor_step_id: str) -> tuple[list[str], list[str]]:

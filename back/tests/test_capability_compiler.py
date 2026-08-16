@@ -658,6 +658,47 @@ def test_recording_goal_cannot_relabel_a_grounded_submit_as_update() -> None:
     assert "replaced by grounded kind 'submit'" in result.warnings[0]
 
 
+def test_existing_entity_form_submit_is_grounded_as_update() -> None:
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="save-existing",
+        method="POST",
+        path="/applications/submit-process",
+        source_meta={
+            "role": "business_write",
+            "trigger_op": "click",
+            "trigger_locator": "text=提交",
+            "trigger_page_context": {
+                "url": "https://example.test/applications/editor?id=entity-1",
+            },
+        },
+        params=[
+            ParamField(
+                path="id", key="id", value="entity-1",
+                category="runtime_var", source_kind="unknown",
+                source={"kind": "selected_entity_id"}, exposed_to_user=False,
+            ),
+            ParamField(
+                path="reason", key="reason", value="changed",
+                category="user_param", source_kind="user_input",
+                exposed_to_user=True,
+            ),
+        ],
+    )])
+    plan = {"capabilities": [{
+        "name": "update_application",
+        "title": "编辑申请",
+        "kind": "update",
+        "kind_source": "recording_goal",
+        "anchor_step_id": "save-existing",
+    }]}
+
+    result = compile_capabilities(spec, plan)
+
+    assert result.errors == []
+    assert result.warnings == []
+    assert result.capabilities[0].kind == "update"
+
+
 def test_strict_pi_plan_coverage_uses_the_declared_anchor_contract() -> None:
     coverage = flow_spec_module._semantic_plan_coverage(
         _verified_graph(),
