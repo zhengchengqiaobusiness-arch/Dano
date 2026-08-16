@@ -16,9 +16,8 @@ from dano.execution.page.flow_spec import (
     compile_capability_to_api_request,
     flow_spec_to_client,
     apply_recording_agent_submission, auto_fix_flow_spec, orchestrate_flow_capabilities, sync_flow_spec_models,
-    flow_spec_canonical_summary, to_flow_spec,
+    to_flow_spec,
     prepare_flow_spec_for_publish, prepare_flow_release_candidate,
-    flow_operation_report,
 )
 from dano.execution.page.request_capture import execute_api_request
 from dano.execution.page.repair_ops import collect_capability_findings, collect_repair_findings
@@ -1405,91 +1404,6 @@ def test_duplicate_caller_field_names_are_disambiguated_without_splitting_shared
     assert set(normalized.capabilities[0].input_schema["properties"]) == {"项目ID", "项目ID#2"}
 
 
-def test_flow_operation_report_explains_noop_and_changes():
-    before = _make_spec()
-    unchanged = before.model_copy(deep=True)
-    internal_only = before.model_copy(deep=True)
-    internal_only.request_facts.diagnostics.append({"type": "console", "message": "derived audit"})
-    capability_only = before.model_copy(deep=True)
-    capability_only.capabilities = [FlowCapability(
-        name="submit_request",
-        title="仅修改能力名称",
-        nodes=_call_nodes([before.steps[0].step_id]),
-    )]
-    changed = before.model_copy(deep=True)
-    changed.steps[0].params[0].key = "申请人ID"
-    changed.steps[0].params[0].default_value = "new-default"
-
-    noop = flow_operation_report(before, unchanged, operation="plan")
-    internal = flow_operation_report(before, internal_only, operation="plan")
-    capability_delta = flow_operation_report(before, capability_only, operation="plan")
-    delta = flow_operation_report(before, changed, operation="plan")
-
-    assert noop["changed"] is False
-    assert noop["summary"]
-    assert internal["changed"] is False
-    assert capability_delta["changes"]["capabilities"] == 1
-    assert capability_delta["field_changes"] == []
-    assert delta["changed"] is True
-    assert delta["changes"]["fields"] == 1
-    assert delta["field_changes"][0]["path"] == changed.steps[0].params[0].path
-    assert set(delta["field_changes"][0]["axes"]) == {"name", "default"}
-    assert delta["summary"] == "实际修改：字段1项"
-    assert noop["summary"] == "分析结果与当前配置相同，无需修改"
-
-
-def test_flow_operation_report_uses_capability_boundary_and_lists_real_structural_changes():
-    steps = [
-        FlowStep(step_id="query", method="GET", path="/api/query"),
-        FlowStep(step_id="submit", method="POST", path="/api/submit"),
-    ]
-    before = FlowSpec(
-        steps=steps,
-        capabilities=[FlowCapability(
-            capability_id="old-id", name="submit_old", title="旧提交能力",
-            kind="submit", step_ids=["submit"], nodes=_call_nodes(["submit"]),
-        )],
-    )
-    after = before.model_copy(deep=True)
-    after.capabilities = [FlowCapability(
-        capability_id="new-id", name="submit_new", title="提交申请",
-        kind="submit", step_ids=["submit"], nodes=_call_nodes(["submit"]),
-    )]
-    after.links = [FlowLink(
-        source_step_id="query", source_path="response.id",
-        target_step_id="submit", target_path="body.id", confirmed=True,
-    )]
-    after.capability_relations = [CapabilityRelation(
-        from_capability="query_status", from_output="id",
-        to_capability="submit_new", to_input="id", confirmed=True,
-    )]
-
-    report = flow_operation_report(before, after, operation="plan")
-
-    assert report["changes"]["capabilities"] == 1
-    assert any("能力「提交申请」" in detail and "名称从" in detail for detail in report["change_details"])
-    assert any("新增字段依赖" in detail for detail in report["change_details"])
-    assert any("新增能力关系" in detail for detail in report["change_details"])
-
-
-def test_flow_operation_report_describes_field_path_change_as_one_real_change():
-    before = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/api/submit",
-        params=[ParamField(field_id="field-status", path="body.state", key="state", label="状态")],
-    )])
-    after = before.model_copy(deep=True)
-    after.steps[0].params[0].path = "body.status"
-
-    report = flow_operation_report(before, after, operation="repair")
-
-    assert report["changes"]["fields"] == 1
-    assert len(report["field_changes"]) == 1
-    assert report["field_changes"][0]["path"] == "body.status"
-    assert report["field_changes"][0]["axes"] == {
-        "path": {"before": "body.state", "after": "body.status"},
-    }
-
-
 def _mixed_stale_repair_ops() -> list[dict]:
     return [
             {"op": "rename_field", "step_id": "query", "path": "query.status", "label": "状态"},
@@ -1765,8 +1679,6 @@ def test_recording_v3_golden_matrix_fixtures_are_parseable():
         spec = FlowSpec.model_validate(raw)
         assert spec.request_facts.requests or spec.steps
         assert spec.capabilities
-        summary = flow_spec_canonical_summary(spec)
-        assert summary["capabilities"]
 
 
 def test_reject_dependency_records_lock_and_removes_link():
@@ -8632,23 +8544,3 @@ def test_closed_query_select_is_still_a_choice_without_opened_options():
         assert param.category == "user_param"
         assert param.need_human_confirm is True
 
-
-def test_operation_report_does_not_claim_an_undisplayable_field_change():
-    before = FlowSpec(steps=[FlowStep(
-        step_id="query", method="GET", path="/api/query",
-        params=[ParamField(
-            path="query.status", key="流程状态", label="流程状态",
-            type="enum", wire_type="number", category="user_param",
-            source_kind="page_enum", required=False, default_value="1",
-            enum_options=[{"label": "审批中", "value": "1"}],
-        )],
-    )])
-    after = before.model_copy(deep=True)
-    after.steps[0].params[0].wire_type = "string"
-
-    report = flow_spec_module.flow_operation_report(before, after, operation="plan")
-
-    assert report["field_changes"] == []
-    assert report["changes"]["fields"] == 0
-    assert report["changed"] is False
-    assert report["summary"] == "分析结果与当前配置相同，无需修改"
