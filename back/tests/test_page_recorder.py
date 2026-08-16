@@ -707,9 +707,13 @@ def test_real_business_writes_are_materialized_before_pi_boundary_analysis() -> 
     capability_steps = [set(capability.step_ids) for capability in planned.capabilities]
     assert {frozenset(step_ids) for step_ids in capability_steps} == {
         frozenset({step_by_request["req_query"].step_id}),
-        # Model-supplied preflight membership is only a hypothesis.  With no
-        # verified dependency edge, the compiler keeps the write anchor alone.
-        frozenset({step_by_request["req_submit"].step_id}),
+        # The fixture explicitly grounds definitionId in the definition
+        # response above, so the compiler must retain that executable
+        # preflight while still rejecting the ungrounded approval hypothesis.
+        frozenset({
+            step_by_request["req_definition"].step_id,
+            step_by_request["req_submit"].step_id,
+        }),
         frozenset({step_by_request["req_withdraw"].step_id}),
         frozenset({step_by_request["req_delete"].step_id}),
     }

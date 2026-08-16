@@ -7761,6 +7761,17 @@ def to_flow_spec(
                 target_action = str(target_request.get("trigger_action_id") or "")
                 causal_supported = bool(target_action)
                 same_action_chain = bool(source_action and source_action == target_action)
+                captured_dependency_match = bool(
+                    strong_unique_match
+                    and (
+                        same_action_chain
+                        # A repeated value may still be resolved across actions
+                        # when route semantics select one source from multiple
+                        # candidates.  A lone equal value across two unrelated
+                        # observed actions remains insufficient evidence.
+                        or len(matching_sources) > 1
+                    )
+                )
                 editable_prefill_dependency = bool(
                     target_param is not None
                     and _param_has_editable_control_evidence(target_param)
@@ -7813,13 +7824,14 @@ def to_flow_spec(
                                 "occurrences": 1,
                                 "source_identity": list(selected_source or ()),
                                 "disambiguation": "route_semantics",
+                                "candidate_count": len(matching_sources),
                             },
-                        } if strong_unique_match else {}),
+                        } if captured_dependency_match else {}),
                     },
                     meta={
                         "actor": "heuristic",
                         "verified": False,
-                        **({"captured_value_match": True} if strong_unique_match else {}),
+                        **({"captured_value_match": True} if captured_dependency_match else {}),
                     },
                 ))
         except Exception:
