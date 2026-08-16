@@ -215,4 +215,3 @@ class SkillRegistry:
 
     def get_by_skill_id(self, skill_id: str) -> SkillSpec | None:
         return next((s for s in self.skills if s.skill_id == skill_id), None)
-
