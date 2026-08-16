@@ -212,6 +212,60 @@ def _compiled_nodes(step_ids: list[str], anchor_step_id: str) -> list[dict[str, 
     return nodes
 
 
+def _has_stable_record_identity(step: FlowStep) -> bool:
+    identity_keys = {
+        "id", "recordid", "requestid", "applicationid",
+        "businessid", "entityid", "itemid",
+    }
+    for param in step.params or []:
+        terminal = re.split(r"[.\[\]]+", str(param.path or param.key or ""))[-1]
+        normalized = re.sub(r"[^a-z0-9]+", "", terminal.casefold())
+        if normalized not in identity_keys:
+            continue
+        value = param.value
+        if value is not None and str(value).strip().casefold() not in {"", "null", "undefined"}:
+            return True
+    return False
+
+
+def _goal_update_is_grounded_by_sibling_create(
+    plan_items: list[dict[str, Any]],
+    by_step: dict[str, FlowStep],
+    item: dict[str, Any],
+    anchor: FlowStep,
+    grounded_kind: str,
+) -> bool:
+    """Keep update distinct when one endpoint serves old and new records.
+
+    The goal label alone is not evidence.  The distinction is accepted only
+    when this anchor carries a stable record identity and the same captured
+    write endpoint also has a planned create/submit anchor without one.
+    """
+    if (
+        str(item.get("kind") or "") != "update"
+        or str(item.get("kind_source") or "") != "recording_goal"
+        or grounded_kind not in {"create", "submit"}
+        or not _has_stable_record_identity(anchor)
+    ):
+        return False
+    method = str(anchor.method or "POST").upper()
+    path = urlparse(str(anchor.path or anchor.url or "")).path
+    for sibling in plan_items:
+        if sibling is item or str(sibling.get("kind") or "") not in {"create", "submit"}:
+            continue
+        sibling_anchor = by_step.get(str(sibling.get("anchor_step_id") or ""))
+        if sibling_anchor is None:
+            continue
+        sibling_path = urlparse(str(sibling_anchor.path or sibling_anchor.url or "")).path
+        if (
+            str(sibling_anchor.method or "POST").upper() == method
+            and sibling_path == path
+            and not _has_stable_record_identity(sibling_anchor)
+        ):
+            return True
+    return False
+
+
 def _normalize_compiled_call_keys(
     spec: FlowSpec,
     capabilities: list[FlowCapability],
@@ -322,9 +376,13 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             errors.append(f"{prefix}: capability kind does not match the grounded business operation")
             continue
         grounded_batch = bool(is_write and _write_contract_is_batch(current, [anchor]))
+        grounded_goal_update = _goal_update_is_grounded_by_sibling_create(
+            plan_items, by_step, item, anchor, grounded_kind,
+        )
         if (
             kind != grounded_kind
             and not (kind == "submit_batch" and grounded_batch)
+            and not grounded_goal_update
         ):
             warnings.append(
                 f"{prefix}: model kind {kind!r} replaced by grounded kind {grounded_kind!r}"
@@ -332,7 +390,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         kind = (
             "submit_batch"
             if grounded_batch
-            else grounded_kind
+            else kind if grounded_goal_update else grounded_kind
         )
 
         if is_write:

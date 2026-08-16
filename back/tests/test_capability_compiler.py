@@ -658,6 +658,41 @@ def test_recording_goal_cannot_relabel_a_grounded_submit_as_update() -> None:
     assert "replaced by grounded kind 'submit'" in result.warnings[0]
 
 
+def test_recording_goal_distinguishes_existing_record_update_on_shared_endpoint() -> None:
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="edit-existing", method="POST", path="/applications/submit",
+            params=[ParamField(path="id", key="id", value="application-42")],
+            source_meta={"role": "business_write"},
+        ),
+        FlowStep(
+            step_id="submit-new", method="POST", path="/applications/submit",
+            source_meta={"role": "business_write"},
+        ),
+    ])
+    plan = {"capabilities": [
+        {
+            "name": "update_application", "title": "编辑申请",
+            "kind": "update", "kind_source": "recording_goal",
+            "anchor_step_id": "edit-existing",
+        },
+        {
+            "name": "submit_application", "title": "提交申请",
+            "kind": "submit", "kind_source": "recording_goal",
+            "anchor_step_id": "submit-new",
+        },
+    ]}
+
+    result = compile_capabilities(spec, plan)
+
+    assert result.errors == []
+    assert result.warnings == []
+    assert [(cap.name, cap.kind) for cap in result.capabilities] == [
+        ("update_application", "update"),
+        ("submit_application", "submit"),
+    ]
+
+
 def test_existing_entity_form_submit_is_grounded_as_update() -> None:
     spec = FlowSpec(steps=[FlowStep(
         step_id="save-existing",
