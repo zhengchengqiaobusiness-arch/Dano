@@ -44,6 +44,28 @@ REVIEW_REQUIRED_TYPES: set[AssetType] = {
 REQUIRED_ROLES: set[str] = {"acceptance", "security", "compliance"}
 
 
+def _postgres_safe_text(value: str) -> str:
+    """Replace Unicode code points that PostgreSQL UTF-8 text cannot store."""
+    return "".join(
+        "\ufffd" if char == "\x00" or 0xD800 <= ord(char) <= 0xDFFF else char for char in value
+    )
+
+
+def _postgres_safe_json(value: Any) -> Any:
+    if isinstance(value, str):
+        return _postgres_safe_text(value)
+    if isinstance(value, dict):
+        return {
+            _postgres_safe_text(key) if isinstance(key, str) else key: _postgres_safe_json(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_postgres_safe_json(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_postgres_safe_json(item) for item in value)
+    return value
+
+
 def page_is_write(body: dict | None) -> bool:
     """页面脚本是否为写操作:有提交步(op==submit)或风险等级 L3+。查询类页面免三模型评审。"""
     b = body or {}
@@ -106,9 +128,11 @@ class ReviewRun(BaseModel):
 
 def content_hash(*, asset_type: AssetType, scope: Scope, asset_key: str, body: dict) -> str:
     """资产内容指纹:绑定 类型+作用域+key+body。验证证据须对应同一 hash。"""
+    body = _postgres_safe_json(body)
     canonical = json.dumps(
-        {"asset_type": asset_type.value, "tenant": scope.tenant,
-         "subsystem": scope.subsystem.value, "asset_key": asset_key, "body": body},
+        {"asset_type": asset_type.value, "tenant": _postgres_safe_text(scope.tenant),
+         "subsystem": _postgres_safe_text(scope.subsystem.value),
+         "asset_key": _postgres_safe_text(asset_key), "body": body},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -119,12 +143,17 @@ class DraftStore:
 
     async def save_draft(self, *, run_id: str, scope: Scope, asset_type: AssetType,
                          asset_key: str, body: dict) -> AssetDraft:
+        run_id = _postgres_safe_text(run_id)
+        tenant = _postgres_safe_text(scope.tenant)
+        subsystem = _postgres_safe_text(scope.subsystem.value)
+        asset_key = _postgres_safe_text(asset_key)
+        body = _postgres_safe_json(body)
         h = content_hash(asset_type=asset_type, scope=scope, asset_key=asset_key, body=body)
         async with get_pool().acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO asset_drafts (run_id, tenant, subsystem, asset_type, asset_key, body, content_hash)
                    VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
-                run_id, scope.tenant, scope.subsystem.value, asset_type.value,
+                run_id, tenant, subsystem, asset_type.value,
                 asset_key, json.dumps(body), h,
             )
         return self._draft(row)
@@ -303,7 +332,7 @@ class DraftStore:
 
 
 def _j(v: dict | None) -> str | None:
-    return json.dumps(v) if v is not None else None
+    return json.dumps(_postgres_safe_json(v)) if v is not None else None
 
 
 def _d(v: Any) -> dict | None:
