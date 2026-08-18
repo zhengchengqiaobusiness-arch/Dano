@@ -13,6 +13,8 @@ import sys
 
 import structlog
 
+from dano.infra import run_logging
+
 _CONFIGURED = False
 
 
@@ -26,15 +28,61 @@ def configure_logging(level: str | None = None) -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=lvl)
     structlog.configure(
         processors=[
-            structlog.contextvars.merge_contextvars,      # 把 bind_contextvars 的 run_id/action 带进每条日志
+            structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
             structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,          # exc_info=True → 打 traceback,便于定位报错
-            structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()),
+            structlog.processors.format_exc_info,
+            _persist_structlog,
+            _render_console,
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(lvl),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
         logger_factory=structlog.PrintLoggerFactory(sys.stdout),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
     _CONFIGURED = True
+
+
+def _persist_structlog(_logger: object, _method: str, event_dict: dict) -> dict:
+    try:
+        run_logging.persist_structlog_event(dict(event_dict))
+    except Exception:  # noqa: BLE001 - logging must never raise into business
+        pass
+    return event_dict
+
+
+def _render_console(_logger: object, _method: str, event_dict: dict) -> str:
+    level = str(event_dict.get("level") or "info").lower()
+    threshold = (os.environ.get("DANO_LOG_LEVEL") or "INFO").lower()
+    if run_logging.LEVEL_RANKS.get(level, 20) < run_logging.LEVEL_RANKS.get(threshold, 20):
+        raise structlog.DropEvent
+    record = {
+        "timestamp": event_dict.get("timestamp"),
+        "level": level,
+        "event": event_dict.get("event"),
+        "stage": event_dict.get("stage") or "",
+        "status": event_dict.get("status") or "progress",
+        "summary": event_dict.get("summary") or event_dict.get("event") or "",
+        "details": {
+            key: value
+            for key, value in event_dict.items()
+            if key not in {
+                "timestamp", "level", "event", "stage", "status", "summary",
+                "exception", "exc_info",
+            }
+        },
+        "error": event_dict.get("error"),
+        "next_action": event_dict.get("next_action") or "",
+        "run_id": event_dict.get("run_id"),
+    }
+    stamp = str(event_dict.get("timestamp") or "")
+    if " " in stamp:
+        stamp = stamp.split(" ")[-1][:8]
+    elif "T" in stamp:
+        stamp = stamp.split("T", 1)[1][:8]
+    label = run_logging._stage_label(record)
+    extras = run_logging._headline_extras(record)
+    line = f"{stamp} {level.upper():<5} [{label}] {record['summary']}"
+    if extras:
+        line = f"{line} | {extras}"
+    return line
