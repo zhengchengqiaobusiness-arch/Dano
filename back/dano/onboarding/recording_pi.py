@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 from uuid import uuid4
@@ -22,6 +23,12 @@ from uuid import uuid4
 import structlog
 
 from dano.agent_tools import materials, runs
+from dano.infra.run_logging import (
+    bind_run_context,
+    emit_run_event,
+    emit_run_exception,
+    new_span_id,
+)
 
 log = structlog.get_logger(__name__)
 BACK_DIR = Path(__file__).resolve().parent.parent.parent
@@ -245,6 +252,20 @@ class RecordingPiSession:
             if not self.session_id or not self.session_file:
                 raise RecordingPiError("Pi 未返回有效的 session_id/session_file")
             _ACTIVE_RECORDING_SESSIONS[self.run_id] = self
+            bind_run_context(
+                run_id=self.run_id,
+                recording_id=self.recording_id,
+                tenant=self.tenant,
+                subsystem=self.subsystem,
+            )
+            emit_run_event(
+                "recording.pi.started",
+                stage="analysis",
+                status="started",
+                summary="录制分析进程已启动",
+                session_id=self.session_id,
+                details={"resumed": self.resumed, "session_id": self.session_id},
+            )
             return self
         except BaseException:
             await self.close()
@@ -283,6 +304,17 @@ class RecordingPiSession:
         if self._proc is None:
             raise RecordingPiError("录制 Pi Session 尚未启动")
         async with self._prompt_lock:
+            span_id = new_span_id("analysis")
+            started = time.monotonic()
+            if prompt_mode == "recording_analysis":
+                emit_run_event(
+                    "recording.analysis.started",
+                    stage="analysis",
+                    status="started",
+                    summary="开始录制分析",
+                    span_id=span_id,
+                    details={"analysis_phase": analysis_phase, "prompt_mode": prompt_mode},
+                )
             try:
                 event = await self._command(
                     "prompt", timeout_s=timeout_s, text=text,
@@ -296,18 +328,60 @@ class RecordingPiSession:
                 if event.get("accepted_submission"):
                     event["status"] = "submitted"
                     event.pop("error", None)
+                    if prompt_mode == "recording_analysis":
+                        emit_run_event(
+                            "recording.analysis.completed",
+                            stage="analysis",
+                            status="succeeded",
+                            summary="录制分析完成",
+                            span_id=span_id,
+                            duration_ms=(time.monotonic() - started) * 1000,
+                            details={
+                                "analysis_phase": analysis_phase,
+                                "accepted_submission": event.get("accepted_submission"),
+                            },
+                        )
                     return event
                 if event.get("status") == "submission_limit":
-                    raise RecordingPiError(
+                    error = RecordingPiError(
                         "录制 Pi 在同一任务中连续提交被拒，已停止本轮以避免无效 Token 消耗；"
                         "请基于最新状态重新发起操作"
                     )
+                    if prompt_mode == "recording_analysis":
+                        emit_run_exception(
+                            "recording.analysis.failed",
+                            error,
+                            stage="analysis",
+                            span_id=span_id,
+                            duration_ms=(time.monotonic() - started) * 1000,
+                            details={"analysis_phase": analysis_phase, "status": "submission_limit"},
+                        )
+                    raise error
                 if (
                     prompt_mode == "recording_analysis"
                     and event.get("status") == "missing_submission"
                 ):
-                    raise RecordingPiError(
+                    error = RecordingPiError(
                         "录制 Pi 已重试但仍未提交完整能力计划；本轮分析结果未被采纳"
+                    )
+                    emit_run_exception(
+                        "recording.analysis.failed",
+                        error,
+                        stage="analysis",
+                        span_id=span_id,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        details={"analysis_phase": analysis_phase, "status": "missing_submission"},
+                    )
+                    raise error
+                if prompt_mode == "recording_analysis":
+                    emit_run_event(
+                        "recording.analysis.completed",
+                        stage="analysis",
+                        status="succeeded",
+                        summary="录制分析完成",
+                        span_id=span_id,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        details={"analysis_phase": analysis_phase, "status": event.get("status")},
                     )
                 return event
             except asyncio.TimeoutError as exc:
@@ -317,6 +391,14 @@ class RecordingPiSession:
                     raise RecordingPiError(
                         "录制 Pi 操作超时且取消确认失败；会话不可继续使用"
                     ) from cancel_exc
+                if prompt_mode == "recording_analysis":
+                    emit_run_exception(
+                        "recording.analysis.failed",
+                        RecordingPiError("录制 Pi 操作超时"),
+                        stage="analysis",
+                        span_id=span_id,
+                        details={"analysis_phase": analysis_phase},
+                    )
                 raise RecordingPiError("录制 Pi 操作超时，已取消；未切换到其他模型链路") from exc
             except asyncio.CancelledError:
                 try:
@@ -805,12 +887,64 @@ class RecordingPiSession:
         async for raw in self._proc.stderr:
             line = raw.decode(errors="replace").rstrip()
             if line:
-                log.info("recording_pi.stderr", run_id=self.run_id, line=line[:1000])
+                self._record_stderr_line(line)
+
+    def _record_stderr_line(self, line: str) -> None:
+        payload = None
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("type") == "recording_log":
+            event = str(payload.get("event") or "recording.pi.message")
+            skill_name = payload.get("skill_name") or ""
+            summary = (
+                "识别 Skill 已加载"
+                if event == "recording.skill.loaded"
+                else "识别 Skill 已应用"
+                if event == "recording.skill.applied"
+                else str(payload.get("summary") or payload.get("message") or event)
+            )
+            emit_run_event(
+                event,
+                stage=str(payload.get("stage") or "analysis"),
+                status=str(payload.get("status") or "progress"),
+                summary=summary,
+                details={
+                    "skill_name": skill_name,
+                    "analysis_phase": payload.get("analysis_phase"),
+                    "skill_sha256": payload.get("skill_sha256"),
+                    "session_id": payload.get("session_id"),
+                    "prompt": payload.get("prompt"),
+                    "turn": payload.get("turn"),
+                    "batch": payload.get("batch"),
+                    "message": payload.get("message"),
+                },
+            )
+            return
+        text = line[:1000]
+        noisy = bool(re.search(r"error|fatal|exception", text, re.I))
+        emit_run_event(
+            "recording.pi.stderr",
+            stage="analysis",
+            status="warning" if noisy else "progress",
+            level="warning" if noisy else "debug",
+            visibility="console" if noisy else "detail",
+            summary="录制分析进程未知输出",
+            details={"line": text},
+        )
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        emit_run_event(
+            "recording.pi.closed",
+            stage="analysis",
+            status="succeeded",
+            summary="录制分析进程已关闭",
+            run_id=self.run_id,
+        )
         _ACTIVE_RECORDING_SESSIONS.pop(self.run_id, None)
         try:
             proc = self._proc

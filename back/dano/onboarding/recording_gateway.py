@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from dano.infra.run_logging import emit_run_event, emit_run_exception, new_span_id, note_run_fact
 
 from dano.execution.page.flow_spec import (
     FlowSpec,
@@ -36,6 +39,78 @@ from dano.onboarding.recording_workflow import (
 
 SendMessage = Callable[[dict[str, Any]], Awaitable[None]]
 PiFactory = Callable[[bool], Awaitable[Any]]
+
+
+def _safe_list(owner: Any, name: str) -> list[Any]:
+    reader = getattr(owner, name, None)
+    if not callable(reader):
+        return []
+    try:
+        value = reader() or []
+    except Exception:  # noqa: BLE001 - logging must not break freeze/drain
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _capture_counts(capture: Any) -> dict[str, int]:
+    if capture is None:
+        return {
+            "request_count": 0,
+            "page_event_count": 0,
+            "field_evidence_count": 0,
+            "option_source_count": 0,
+        }
+    enums = getattr(capture, "recorded_page_enum_options", None)
+    try:
+        option_source_count = len(enums() or {}) if callable(enums) else 0
+    except Exception:  # noqa: BLE001
+        option_source_count = 0
+    return {
+        "request_count": len(_safe_list(capture, "captured_all_requests")),
+        "page_event_count": len(_safe_list(capture, "recorded_page_events")),
+        "field_evidence_count": len(_safe_list(capture, "recorded_field_evidence")),
+        "option_source_count": option_source_count,
+    }
+
+
+def _spec_fields(spec: Any) -> dict[str, Any]:
+    if spec is None:
+        return {
+            "flow_version": 0,
+            "capability_count": 0,
+            "capability_names": [],
+            "unresolved_count": 0,
+            "field_binding_stats": {"bound": 0, "ambiguous": 0, "unbound": 0, "unresolved": 0},
+        }
+    meta = dict(getattr(spec, "meta", None) or {})
+    facts = getattr(spec, "request_facts", None)
+    evidence = [item for item in list(getattr(facts, "field_evidence", None) or []) if isinstance(item, dict)]
+    capabilities = list(getattr(spec, "capabilities", None) or [])
+    names: list[str] = []
+    for cap in capabilities:
+        name = getattr(cap, "name", None)
+        if name is None and isinstance(cap, dict):
+            name = cap.get("name") or cap.get("id")
+        if name:
+            names.append(str(name))
+    stats = {"bound": 0, "ambiguous": 0, "unbound": 0, "unresolved": 0}
+    for item in evidence:
+        status = str(item.get("binding_status") or "unbound")
+        stats[status if status in stats else "unbound"] += 1
+    unresolved = 0
+    for item in list(getattr(spec, "review_items", None) or []):
+        resolved = getattr(item, "resolved", None)
+        if resolved is None and isinstance(item, dict):
+            resolved = item.get("resolved")
+        if not resolved:
+            unresolved += 1
+    return {
+        "flow_version": int(meta.get("current_version") or 0),
+        "capability_count": len(capabilities),
+        "capability_names": names,
+        "unresolved_count": unresolved,
+        "field_binding_stats": stats,
+    }
 
 
 def _project_page_enums(recorded: dict[str, Any], samples: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +194,7 @@ class RecordingGatewaySession:
     _live_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _live_pending_reason: str = field(default="", init=False)
     _last_live_count: int = field(default=0, init=False)
+    _live_iteration: int = field(default=0, init=False)
     _live_notebook: LiveNotebook | None = field(default=None, init=False, repr=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
@@ -310,6 +386,17 @@ class RecordingGatewaySession:
     async def _freeze_capture(self) -> None:
         if self._capture_frozen or self.capture is None:
             return
+        span_id = new_span_id("freeze")
+        started = time.monotonic()
+        counts = _capture_counts(self.capture)
+        emit_run_event(
+            "recording.freeze.started",
+            stage="freeze",
+            status="started",
+            summary="开始冻结录制事实",
+            span_id=span_id,
+            details=counts,
+        )
         await self.capture.flush_recording()
         self.capture.pause_recording()
         if self._live_pending_reason and (
@@ -341,6 +428,26 @@ class RecordingGatewaySession:
                 goal_text=self.config.goal_text,
                 operator_asker=self._ask_operator,
             )
+        finished = _capture_counts(self.capture)
+        spec_fields = _spec_fields(self._pi.flow_spec if self._pi is not None else None)
+        note_run_fact(
+            request_count=finished.get("request_count"),
+            page_event_count=finished.get("page_event_count"),
+            field_evidence_count=finished.get("field_evidence_count"),
+            capability_count=spec_fields.get("capability_count"),
+            capability_names=spec_fields.get("capability_names"),
+            unresolved_count=spec_fields.get("unresolved_count"),
+            field_binding_stats=spec_fields.get("field_binding_stats"),
+        )
+        emit_run_event(
+            "recording.freeze.completed",
+            stage="freeze",
+            status="succeeded",
+            summary="录制事实已冻结",
+            span_id=span_id,
+            duration_ms=(time.monotonic() - started) * 1000,
+            details=finished,
+        )
 
     async def _ensure_pi(self, fresh: bool) -> Any:
         if fresh and self._pi is not None:
@@ -503,6 +610,37 @@ class RecordingGatewaySession:
         while self._live_pending_reason and not self._capture_frozen:
             reason = self._live_pending_reason
             self._live_pending_reason = ""
+            self._live_iteration += 1
+            batch_id = f"batch-{self._live_iteration}"
+            span_id = new_span_id("batch")
+            started = time.monotonic()
+            before_counts = _capture_counts(self.capture)
+            before_spec = _spec_fields(self._pi.flow_spec if self._pi is not None else None)
+            emit_run_event(
+                "recording.batch.started",
+                stage="analysis",
+                status="started",
+                summary=(
+                    "开始处理最终请求尾部"
+                    if reason == "final_request_tail"
+                    else "开始基础状态分析"
+                    if reason == "recording_started"
+                    else "开始处理请求批次"
+                ),
+                span_id=span_id,
+                batch_id=batch_id,
+                batch_reason=reason,
+                since_seq=self._last_live_count,
+                iteration=self._live_iteration,
+                details={
+                    "batch_id": batch_id,
+                    "batch_reason": reason,
+                    "request_count_before": before_counts.get("request_count"),
+                    "since_seq": self._last_live_count,
+                    "flow_version_before": before_spec.get("flow_version"),
+                    "iteration": self._live_iteration,
+                },
+            )
             try:
                 pi = await self._ensure_pi(False)
                 await pi.notify_live_batch({
@@ -513,6 +651,52 @@ class RecordingGatewaySession:
                     return
                 self._capture_live_notebook()
                 self._last_live_count = len(self.capture.captured_all_requests())
+                after_counts = _capture_counts(self.capture)
+                after_spec = _spec_fields(pi.flow_spec)
+                note_run_fact(
+                    request_count=after_counts.get("request_count"),
+                    page_event_count=after_counts.get("page_event_count"),
+                    field_evidence_count=after_counts.get("field_evidence_count"),
+                    capability_count=after_spec.get("capability_count"),
+                    capability_names=after_spec.get("capability_names"),
+                    unresolved_count=after_spec.get("unresolved_count"),
+                    field_binding_stats=after_spec.get("field_binding_stats"),
+                )
+                emit_run_event(
+                    "recording.batch.completed",
+                    stage="analysis",
+                    status="succeeded",
+                    summary=(
+                        "最终请求尾部处理完成"
+                        if reason == "final_request_tail"
+                        else "请求批次处理完成"
+                    ),
+                    span_id=span_id,
+                    batch_id=batch_id,
+                    batch_reason=reason,
+                    since_seq=before_counts.get("request_count"),
+                    next_seq=self._last_live_count,
+                    has_more=bool(self._live_pending_reason),
+                    iteration=self._live_iteration,
+                    flow_version_before=before_spec.get("flow_version"),
+                    flow_version_after=after_spec.get("flow_version"),
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    details={
+                        "batch_id": batch_id,
+                        "batch_reason": reason,
+                        "request_count_before": before_counts.get("request_count"),
+                        "request_count_after": after_counts.get("request_count"),
+                        "since_seq": before_counts.get("request_count"),
+                        "next_seq": self._last_live_count,
+                        "has_more": bool(self._live_pending_reason),
+                        "flow_version_before": before_spec.get("flow_version"),
+                        "flow_version_after": after_spec.get("flow_version"),
+                        "capability_count": after_spec.get("capability_count"),
+                        "capability_names": after_spec.get("capability_names"),
+                        "unresolved_count": after_spec.get("unresolved_count"),
+                        "field_binding_stats": after_spec.get("field_binding_stats"),
+                    },
+                )
                 if self.workflow is not None:
                     insights = self._live_notebook.insights if self._live_notebook else []
                     await self.workflow.update_recording(
@@ -522,6 +706,22 @@ class RecordingGatewaySession:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep capture responsive
+                emit_run_exception(
+                    "recording.batch.failed",
+                    exc,
+                    stage="analysis",
+                    span_id=span_id,
+                    batch_id=batch_id,
+                    batch_reason=reason,
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    details={
+                        "batch_id": batch_id,
+                        "batch_reason": reason,
+                        "request_count_before": before_counts.get("request_count"),
+                        "since_seq": self._last_live_count,
+                    },
+                    next_action="保留已捕获事实，后续批次继续分析",
+                )
                 self._capture_live_notebook()
                 if self.workflow is not None:
                     insights = self._live_notebook.insights if self._live_notebook else []

@@ -16,6 +16,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from dano.infra.run_logging import emit_run_event, note_run_fact
+
 
 class WorkflowStatus(StrEnum):
     IDLE = "idle"
@@ -271,6 +273,13 @@ class SelfHealingPipeline:
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
         if not seed.machine_verification:
+            emit_run_event(
+                "recording.verification.skipped",
+                stage="verification",
+                status="skipped",
+                summary="verification skipped",
+                details={"machine_verification": False},
+            )
             await context.progress(
                 WorkflowStep.PUBLISHING,
                 "机器验证已关闭，正在直接导出当前 Skill",
@@ -787,7 +796,71 @@ class RecordingWorkflow:
         progress: WorkflowProgress | None = None,
         **changes: Any,
     ) -> None:
+        previous = self.snapshot
         self.snapshot = transition_snapshot(self.snapshot, status, progress=progress, **changes)
+        current = self.snapshot
+        if previous.status != current.status or previous.progress.step != current.progress.step:
+            spec = current.draft
+            capability_count = 0
+            if isinstance(spec, dict):
+                capability_count = len(spec.get("capabilities") or [])
+            emit_run_event(
+                "recording.workflow.transition",
+                stage="workflow",
+                status="progress",
+                summary=current.progress.label or f"{previous.status.value} → {current.status.value}",
+                run_id=current.run_id,
+                action=current.action,
+                details={
+                    "status_from": previous.status.value,
+                    "status_to": current.status.value,
+                    "step_from": previous.progress.step.value,
+                    "step_to": current.progress.step.value,
+                    "label": current.progress.label,
+                    "revision": current.revision,
+                    "request_count": current.progress.request_count,
+                    "issue_count": len(current.issues),
+                    "capability_count": capability_count,
+                },
+            )
+            note_run_fact(
+                request_count=current.progress.request_count,
+                issue_count=len(current.issues),
+                capability_count=capability_count,
+            )
+        if (
+            current.status in {
+                WorkflowStatus.PUBLISHED,
+                WorkflowStatus.FAILED,
+                WorkflowStatus.CANCELLED,
+            }
+            and previous.status != current.status
+        ):
+            result = {
+                WorkflowStatus.PUBLISHED: "succeeded",
+                WorkflowStatus.FAILED: "failed",
+                WorkflowStatus.CANCELLED: "cancelled",
+            }[current.status]
+            emit_run_event(
+                "recording.run.completed",
+                stage="end",
+                status=result,
+                summary=(
+                    "录制运行已取消"
+                    if current.status == WorkflowStatus.CANCELLED
+                    else "录制运行失败"
+                    if current.status == WorkflowStatus.FAILED
+                    else "录制工作流已结束"
+                ),
+                run_id=current.run_id,
+                action=current.action,
+                details={
+                    "result": result,
+                    "error": current.error,
+                    "request_count": current.progress.request_count,
+                    "issue_count": len(current.issues),
+                },
+            )
         if self.listener is not None:
             emitted = self.listener(self.snapshot)
             if isinstance(emitted, Awaitable):

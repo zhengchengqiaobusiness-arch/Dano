@@ -19,7 +19,20 @@ import {
 import { installOpenAIToolCallStreamCompatibility } from "./openai_stream_compat.mjs";
 
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
-const log = (...parts) => process.stderr.write(`[recording_pi] ${parts.join(" ")}\n`);
+let analysisTurn = 0;
+const emitRecordingLog = (payload) => process.stderr.write(`${JSON.stringify({
+  type: "recording_log",
+  ...payload,
+})}\n`);
+const log = (...parts) => emitRecordingLog({
+  event: "recording.pi.message",
+  stage: "analysis",
+  status: "progress",
+  prompt: promptRequestId,
+  turn: analysisTurn,
+  batch: "",
+  message: parts.map((part) => (part instanceof Error ? (part.stack || String(part)) : String(part))).join(" "),
+});
 const CWD = process.env.DANO_RECORDING_PI_CWD || path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const AGENT_DIR = process.env.DANO_RECORDING_PI_AGENT_DIR || path.join(CWD, ".pi-recording-agent");
 const RECORDING_ANALYSIS_SKILL_NAME = "analyze-recording-evidence";
@@ -295,14 +308,20 @@ async function startSession(command) {
     session_id: created.session.sessionId,
   }));
   active = { session: created.session, unsubscribe, recordingSkill };
-  log(
-    "recording analysis Skill loaded",
-    `name=${recordingSkill.name}`,
-    `path=${recordingSkill.path}`,
-    `sha256=${recordingSkill.sha256}`,
-    `count=${recordingSkill.loadedSkillCount}`,
-    "analysis_phase=idle",
-  );
+  emitRecordingLog({
+    event: "recording.skill.loaded",
+    stage: "analysis",
+    status: "succeeded",
+    skill_name: recordingSkill.name,
+    analysis_phase: "idle",
+    skill_sha256: recordingSkill.sha256,
+    session_id: created.session.sessionId,
+    skill_path: recordingSkill.path,
+    loaded_skill_count: recordingSkill.loadedSkillCount,
+    prompt: command.request_id || "",
+    turn: 0,
+    batch: "idle",
+  });
   emit({
     type: "session_started",
     request_id: command.request_id,
@@ -360,12 +379,19 @@ async function runPrompt(command) {
     ...(images.length ? { images } : {}),
   };
   if (usesRecordingSkill) {
-    log(
-      "recording analysis Skill applied",
-      `name=${active.recordingSkill.name}`,
-      `phase=${analysisPhase}`,
-      `sha256=${active.recordingSkill.sha256}`,
-    );
+    analysisTurn += 1;
+    emitRecordingLog({
+      event: "recording.skill.applied",
+      stage: "analysis",
+      status: "succeeded",
+      skill_name: active.recordingSkill.name,
+      analysis_phase: analysisPhase,
+      skill_sha256: active.recordingSkill.sha256,
+      session_id: session.sessionId,
+      prompt: command.request_id || promptMode,
+      turn: analysisTurn,
+      batch: analysisPhase,
+    });
     emit({
       type: "agent_event",
       event: "recording_skill_applied",
