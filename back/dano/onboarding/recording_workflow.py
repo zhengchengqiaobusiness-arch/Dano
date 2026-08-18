@@ -254,7 +254,6 @@ class SelfHealingPipeline:
     """Bounded resolve/check loop shared by first publication and republish."""
 
     runtime: PipelineRuntime
-    max_rounds: int = 5
     max_unchanged_rounds: int = 2
     operation_timeout_s: float = 1800.0
     overall_timeout_s: float = 10800.0
@@ -549,6 +548,7 @@ class RecordingWorkflow:
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
+    _latest_draft: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     async def start(self) -> WorkflowSnapshot:
         if self.snapshot.status == WorkflowStatus.IDLE:
@@ -696,6 +696,11 @@ class RecordingWorkflow:
         }:
             await self._set(
                 WorkflowStatus.CANCELLED,
+                draft=(
+                    self._latest_draft
+                    if self._latest_draft is not None
+                    else self.snapshot.draft
+                ),
                 progress=self._next_progress(WorkflowStep.READY, "当前分析已终止，草稿已保留"),
                 error="",
             )
@@ -729,6 +734,13 @@ class RecordingWorkflow:
             activity=self._record_activity,
             persist_stage_six=self.persist_stage_six,
         )
+        remember = context.remember_draft
+
+        def remember_latest(draft: dict[str, Any]) -> None:
+            remember(draft)
+            self._latest_draft = draft
+
+        context.remember_draft = remember_latest  # type: ignore[method-assign]
         try:
             outcome = await self.pipeline.run(seed, context)
             context.ensure_active()
