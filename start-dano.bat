@@ -18,7 +18,6 @@ echo Cleaning temporary files...
 call :rmdir_if "%ROOT%.runtime"
 call :rmdir_if "%ROOT%back\.pi-agent"
 call :rmdir_if "%ROOT%back\.dano"
-call :rmdir_if "%ROOT%back\.dano-sessions"
 call :rmdir_if "%ROOT%skillfrontend\dist"
 call :rmdir_if "%ROOT%back\examples\_chunks"
 if exist "%ROOT%back\*.log" del /q "%ROOT%back\*.log" >nul 2>&1
