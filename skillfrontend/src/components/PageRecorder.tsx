@@ -12,12 +12,13 @@ import {
   Space,
   Steps,
   Switch,
+  Table,
   Tabs,
   Tag,
   Typography,
   message,
 } from "antd";
-import { RobotOutlined, StopOutlined } from "@ant-design/icons";
+import { DeleteOutlined, RobotOutlined, StopOutlined } from "@ant-design/icons";
 import {
   useEffect,
   useMemo,
@@ -301,6 +302,13 @@ function paramDisplayName(param: FlowParam) {
   return String(param.label || param.key || param.path || "未命名字段");
 }
 
+function fmtHistoryTime(value?: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
@@ -322,9 +330,10 @@ const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
   waiting_operator: { label: "需要确认", color: "warning" },
 };
 
-function pageStage(status: WorkflowStatus, resumeOnly = false) {
+function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
   if (resumeOnly) return status === "idle" ? 0 : 2;
   if (status === "idle") return 0;
+  if (verificationLive && ["processing", "waiting_operator"].includes(status)) return 2;
   if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
   return 2;
 }
@@ -428,7 +437,10 @@ export default function PageRecorder({
   const [resumeOnly, setResumeOnly] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [activeResultId, setActiveResultId] = useState("");
+  const [deletingId, setDeletingId] = useState("");
   const reachedStageRef = useRef(0);
+  const verificationLogRef = useRef<HTMLDivElement | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
@@ -455,6 +467,8 @@ export default function PageRecorder({
   const finishRequestedRef = useRef(false);
   const machineVerificationRef = useRef(setup.machineVerification);
   const socketInitRef = useRef<Record<string, unknown> | null>(null);
+  const activeResultIdRef = useRef("");
+  const deletingIdRef = useRef("");
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -463,7 +477,12 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const reachedStage = pageStage(status, resumeOnly);
+  const historyLocked = connecting || processing || Boolean(activeResultId && processing) || Boolean(deletingId);
+  const showLiveVerificationLog = resumeOnly || machineVerification
+    || releaseUsedMachineVerification(snapshot?.release)
+    || Boolean((snapshot?.activity || []).length)
+    || Boolean(snapshot?.question);
+  const reachedStage = pageStage(status, resumeOnly, machineVerification && processing);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -485,6 +504,13 @@ export default function PageRecorder({
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
 
+  function upsertHistory(row: RecordingResultSummary) {
+    setHistory((current) => {
+      const next = current.filter((item) => item.id !== row.id && item.action !== row.action);
+      return [row, ...next];
+    });
+  }
+
   useEffect(() => {
     if (!tenant) {
       setHistory([]);
@@ -503,6 +529,19 @@ export default function PageRecorder({
       cancelled = true;
     };
   }, [tenant, subsystem]);
+
+  useEffect(() => {
+    if (["published", "editable", "failed", "cancelled"].includes(status)) {
+      activeResultIdRef.current = "";
+      setActiveResultId("");
+    }
+  }, [status]);
+
+  useEffect(() => {
+    const box = verificationLogRef.current;
+    if (!box) return;
+    box.scrollTop = box.scrollHeight;
+  }, [snapshot?.activity, snapshot?.progress.label, snapshot?.insights, snapshot?.progress.round]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -657,7 +696,10 @@ export default function PageRecorder({
     setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
-    if (next.status === "waiting_operator") setAssistantOpen(true);
+    if (next.status === "waiting_operator") {
+      setKeepResult(true);
+      setViewStage(2);
+    }
     if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
       finishRequestedRef.current = false;
@@ -711,6 +753,14 @@ export default function PageRecorder({
       }
       if (incoming.type === "snapshot" && incoming.snapshot) {
         receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
+      } else if (incoming.type === "recording_result_saved" && incoming.result) {
+        const row = incoming.result as RecordingResultSummary;
+        upsertHistory(row);
+        const running = ["processing", "waiting_operator"].includes(String(snapshotRef.current?.status || ""));
+        if (row.action === actionRef.current && running) {
+          activeResultIdRef.current = row.id;
+          setActiveResultId(row.id);
+        }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);
       } else if (incoming.type === "input_error") {
@@ -755,9 +805,11 @@ export default function PageRecorder({
       message.error("请填写业务页地址和录制目标");
       return;
     }
-    if (wsRef.current) return;
+    if (wsRef.current || connecting || processing) return;
     const action = newActionName();
     actionRef.current = action;
+    activeResultIdRef.current = "";
+    setActiveResultId("");
     setResumeOnly(false);
     setKeepResult(false);
     setKeepRecording(true);
@@ -799,8 +851,10 @@ export default function PageRecorder({
       message.error("请先选择租户");
       return;
     }
-    if (wsRef.current || connecting || processing) return;
+    if (wsRef.current || connecting || processing || activeResultIdRef.current || deletingIdRef.current) return;
     actionRef.current = item.action;
+    activeResultIdRef.current = item.id;
+    setActiveResultId(item.id);
     setResumeOnly(true);
     setKeepRecording(false);
     setKeepResult(true);
@@ -818,7 +872,6 @@ export default function PageRecorder({
     setLocalValues({});
     setLocalCapabilityStepIds({});
     setEditingResult(false);
-    setAssistantOpen(true);
     socketInitRef.current = {
       type: "resume_verification",
       result_id: item.id,
@@ -829,15 +882,38 @@ export default function PageRecorder({
   }
 
   async function removeResult(item: RecordingResultSummary) {
+    if (historyLocked || deletingIdRef.current || activeResultIdRef.current === item.id) return;
     if (!window.confirm(`删除「${item.title || item.action}」的录制结果？已发布 Skill 不会被删除。`)) {
       return;
     }
+    deletingIdRef.current = item.id;
+    setDeletingId(item.id);
     try {
       await deleteRecordingResult(item.id);
       setHistory((current) => current.filter((row) => row.id !== item.id));
     } catch {
       message.error("删除录制结果失败");
+    } finally {
+      deletingIdRef.current = "";
+      setDeletingId("");
     }
+  }
+
+  function historyItemStatus(item: RecordingResultSummary) {
+    const currentAction = Boolean(item.action && item.action === actionRef.current);
+    const currentResult = Boolean(activeResultId && activeResultId === item.id);
+    const current = currentAction || currentResult;
+    if (current && (connecting || status === "recording")) {
+      return { color: "processing" as const, text: "录制中" };
+    }
+    if (current && status === "waiting_operator") {
+      return { color: "warning" as const, text: "等待确认" };
+    }
+    if (current && status === "processing") {
+      return { color: "processing" as const, text: resumeOnly ? "验证中" : "分析中" };
+    }
+    if (item.published) return { color: "success" as const, text: "已发布" };
+    return { color: "default" as const, text: "未发布" };
   }
 
   function finishRecording() {
@@ -1195,7 +1271,7 @@ export default function PageRecorder({
               style={{ flex: 0.8, minWidth: 120 }}
             />
             {["idle", "published", "failed", "cancelled"].includes(status) ? (
-              <Button type="primary" loading={connecting} onClick={startRecording} style={{ flexShrink: 0 }}>
+              <Button type="primary" loading={connecting} disabled={historyLocked} onClick={startRecording} style={{ flexShrink: 0 }}>
                 开始录制
               </Button>
             ) : null}
@@ -1218,32 +1294,80 @@ export default function PageRecorder({
         </div>
       </Card>
       <Card title="历史录制结果" size="small" style={{ marginTop: 12 }}>
-        <List
+        <Table<RecordingResultSummary>
+          rowKey="id"
+          size="small"
           loading={historyLoading}
-          locale={{ emptyText: "还没有保存的录制结果" }}
+          pagination={false}
           dataSource={history}
-          renderItem={(item) => (
-            <List.Item
-              actions={[
-                <Button key="resume" type="link" onClick={() => continueOptimization(item)}>继续优化</Button>,
-                <Button key="delete" type="link" danger onClick={() => removeResult(item)}>删除</Button>,
-              ]}
-            >
-              <List.Item.Meta
-                title={item.title || item.action}
-                description={(
-                  <Space wrap size={8}>
-                    <Text code>{item.action}</Text>
-                    <Text type="secondary">{item.goal_summary || "无目标摘要"}</Text>
-                    <Text type="secondary">能力 {item.capability_count}</Text>
-                    <Text type="secondary">请求 {item.request_count}</Text>
-                    <Text type="secondary">{item.created_at}</Text>
-                    <Tag color={item.published ? "success" : "default"}>{item.published ? "已发布" : "未发布"}</Tag>
+          locale={{ emptyText: <Empty description="还没有保存的录制结果" /> }}
+          columns={[
+            {
+              title: "Skill",
+              render: (_, item) => {
+                const itemStatus = historyItemStatus(item);
+                return (
+                  <div>
+                    <div>
+                      {(item.title || "").trim() || "未命名录制"}
+                      <Tag color={itemStatus.color} style={{ marginLeft: 8 }}>{itemStatus.text}</Tag>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>
+                  </div>
+                );
+              },
+            },
+            {
+              title: "能力",
+              width: 80,
+              render: (_, item) => item.capability_count,
+            },
+            {
+              title: "请求",
+              width: 80,
+              render: (_, item) => item.request_count,
+            },
+            {
+              title: "状态",
+              width: 100,
+              render: (_, item) => {
+                const itemStatus = historyItemStatus(item);
+                return <Tag color={itemStatus.color}>{itemStatus.text}</Tag>;
+              },
+            },
+            {
+              title: "产出时间",
+              width: 180,
+              render: (_, item) => (
+                <Text type="secondary" style={{ fontSize: 12 }}>{fmtHistoryTime(item.created_at)}</Text>
+              ),
+            },
+            {
+              title: "操作",
+              width: 220,
+              render: (_, item) => {
+                const itemBusy = Boolean(activeResultId === item.id && (connecting || processing));
+                return (
+                  <Space>
+                    <Button
+                      size="small"
+                      disabled={historyLocked}
+                      loading={itemBusy}
+                      onClick={() => continueOptimization(item)}
+                    >继续优化</Button>
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={historyLocked || itemBusy}
+                      loading={deletingId === item.id}
+                      onClick={() => removeResult(item)}
+                    >删除</Button>
                   </Space>
-                )}
-              />
-            </List.Item>
-          )}
+                );
+              },
+            },
+          ]}
         />
       </Card>
       </div>
@@ -1756,6 +1880,105 @@ export default function PageRecorder({
     );
   }
 
+  function renderOperatorQuestion() {
+    const question = snapshot?.question;
+    if (!question) return null;
+    return (
+      <Alert
+        showIcon
+        type="warning"
+        style={{ marginBottom: 8 }}
+        message="需要你确认"
+        description={(
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text>{question.text}</Text>
+            {question.options?.length ? (
+              <Space wrap>
+                {question.options.map((option) => (
+                  <Button key={option} type="primary" onClick={() => answerQuestion(option)}>{option}</Button>
+                ))}
+              </Space>
+            ) : (
+              <Space.Compact style={{ width: "100%" }}>
+                <Input
+                  value={answer}
+                  onChange={(event) => setAnswer(event.target.value)}
+                  onPressEnter={() => answerQuestion()}
+                  placeholder="输入答复后回车，或点回复并继续"
+                />
+                <Button type="primary" onClick={() => answerQuestion()}>回复并继续</Button>
+              </Space.Compact>
+            )}
+          </Space>
+        )}
+      />
+    );
+  }
+
+  function renderVerificationLog() {
+    const activities = snapshot?.activity || [];
+    const insights = snapshot?.insights || [];
+    return (
+      <Card
+        size="small"
+        title={(
+          <Space>
+            <Text>实时验证日志</Text>
+            <Tag color={status === "waiting_operator" ? "warning" : processing ? "processing" : status === "published" ? "success" : "default"}>
+              {snapshot?.progress.label || STATUS_LABELS[status]}
+            </Tag>
+            {snapshot?.progress.round ? <Text type="secondary">第 {snapshot.progress.round} 轮</Text> : null}
+          </Space>
+        )}
+        style={{ marginTop: 12 }}
+      >
+        {renderOperatorQuestion()}
+        <div ref={verificationLogRef} style={{ maxHeight: 280, overflow: "auto" }}>
+          {activities.length ? (
+            <List
+              size="small"
+              dataSource={activities}
+              renderItem={(item) => {
+                const display = ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
+                return (
+                  <List.Item>
+                    <Space align="start" style={{ width: "100%" }}>
+                      <Tag color={display.color}>{display.label}</Tag>
+                      <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+                        <Text>{item.label}</Text>
+                        {item.round ? <Text type="secondary">第 {item.round} 轮</Text> : null}
+                      </Space>
+                    </Space>
+                  </List.Item>
+                );
+              }}
+            />
+          ) : null}
+          {!activities.length && insights.length ? (
+            <List
+              size="small"
+              dataSource={insights}
+              renderItem={(item) => (
+                <List.Item>
+                  <Space align="start">
+                    <Tag>{String(item.kind || "思考")}</Tag>
+                    <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          ) : null}
+          {!activities.length && !insights.length ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={processing ? "正在进入机器验证…" : "暂无验证日志"}
+            />
+          ) : null}
+        </div>
+      </Card>
+    );
+  }
+
   function renderResult() {
     const description = (
       <Space direction="vertical" size={4}>
@@ -1788,6 +2011,7 @@ export default function PageRecorder({
           message={STATUS_LABELS[status]}
           description={description}
         />
+        {showLiveVerificationLog ? renderVerificationLog() : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
             <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>

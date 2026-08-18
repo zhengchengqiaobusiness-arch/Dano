@@ -151,6 +151,44 @@ async def test_failed_verification_marks_saved_result_as_attempted(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_persist_stage_six_notifies_history_once(monkeypatch) -> None:
+    sent: list[dict] = []
+    saved_id = uuid4()
+
+    class Store:
+        async def save_draft(self, **kwargs):  # noqa: ANN003
+            return AssetDraft(
+                asset_draft_id=saved_id,
+                run_id=kwargs["run_id"],
+                tenant=kwargs["scope"].tenant,
+                subsystem=kwargs["scope"].subsystem,
+                asset_type=kwargs["asset_type"],
+                asset_key=kwargs["asset_key"],
+                body=kwargs["body"],
+                content_hash="sha256:test",
+                created_at=datetime.now(timezone.utc),
+            )
+
+    async def send(payload):  # noqa: ANN001
+        sent.append(payload)
+
+    monkeypatch.setattr("dano.assets.drafts.DraftStore", Store)
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    await session._persist_stage_six(_draft())
+
+    assert session._stage_six_result_id == saved_id
+    assert [item["type"] for item in sent] == ["recording_result_saved"]
+    assert sent[0]["result"]["id"] == str(saved_id)
+    assert sent[0]["result"]["action"] == session.config.action
+    assert "flow_spec" not in sent[0]["result"]
+
+
+@pytest.mark.asyncio
 async def test_attach_or_resume_reuses_verification_session() -> None:
     registry = RecordingSessionRegistry()
     first = RecordingGatewaySession(
@@ -246,9 +284,22 @@ def test_setup_history_does_not_autostart_recording() -> None:
     ).read_text(encoding="utf-8")
     assert "历史录制结果" in recorder
     assert "继续优化" in recorder
+    assert 'title: "Skill"' in recorder
+    assert "产出时间" in recorder
+    assert "等待确认" in recorder
+    assert "回复并继续" in recorder
+    assert "renderOperatorQuestion" in recorder
+    assert "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。" not in recorder.split("历史录制结果", 1)[1].split("function renderRecording()", 1)[0]
     assert "listRecordingResults(subsystem)" in recorder
     assert 'type: "resume_verification"' in recorder
+    assert "实时验证日志" in recorder
+    assert "disabled={historyLocked}" in recorder
+    assert "recording_result_saved" in recorder
+    assert "setInterval" not in recorder
     history_load = recorder.split("setHistoryLoading(true)", 1)[1].split("}, [tenant, subsystem]);", 1)[0]
     assert "listRecordingResults(subsystem)" in history_load
     assert "openRecordingSocket" not in history_load
     assert "new WebSocket" not in history_load
+    result_view = recorder.split("function renderResult()", 1)[1]
+    assert "showLiveVerificationLog ? renderVerificationLog()" in result_view
+    assert "renderVerificationLog" in recorder

@@ -797,17 +797,28 @@ class RecordingGatewaySession:
             draft=draft,
         )
         self._stage_six_result_id = saved.asset_draft_id
+        await self._notify_recording_result(saved)
 
     async def _mark_stage_six_terminal(self, *, published: bool) -> None:
         if self._stage_six_result_id is None:
             return
         from dano.assets.drafts import DraftStore
 
-        await DraftStore().patch_recording_result_flags(
+        updated = await DraftStore().patch_recording_result_flags(
             self._stage_six_result_id,
             published=True if published else None,
             machine_verification_ran=True if self._machine_verification else None,
         )
+        if updated is not None:
+            await self._notify_recording_result(updated)
+
+    async def _notify_recording_result(self, saved: Any) -> None:
+        from dano.onboarding.recording_results import recording_result_summary
+
+        await self._send({
+            "type": "recording_result_saved",
+            "result": recording_result_summary(saved),
+        })
 
     async def _on_snapshot(self, snapshot: WorkflowSnapshot) -> None:
         if snapshot.status in {
