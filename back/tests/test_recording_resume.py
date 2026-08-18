@@ -412,8 +412,19 @@ def test_setup_history_does_not_autostart_recording() -> None:
         / "PageRecorder.tsx"
     ).read_text(encoding="utf-8")
     assert "历史录制结果" in recorder
-    assert ">查看</Button>" in recorder
+    assert ">继续分析</Button>" in recorder
+    assert ">查看</Button>" not in recorder
     assert "继续优化" not in recorder
+    stage = recorder[recorder.index("function pageStage"):recorder.index("function recorderWebSocketUrl")]
+    assert "if (resumeOnly) return 2" in stage
+    assert 'if (["recording", "processing", "waiting_operator"].includes(status)) return 1' in stage
+    assert "verificationLive" not in stage
+    assert "return 0;" in stage
+    assert 'return 2;' not in stage.replace("if (resumeOnly) return 2;", "")
+    receiver = recorder[recorder.index("function receiveSnapshot"):recorder.index("function openRecordingSocket")]
+    assert 'next.status === "waiting_operator"' not in receiver
+    assert "setViewStage(2)" not in receiver
+    assert "可在历史中继续分析" in receiver
     assert 'title: "Skill"' in recorder
     assert "产出时间" in recorder
     assert 'title: "执行状态"' not in recorder
@@ -427,8 +438,9 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "function openResult" in recorder
     assert "function startAnalysis" in recorder
     assert "function renderAnalysisActions" in recorder
-    assert ">开始分析</Button>" in recorder
-    assert ">终止分析</Button>" in recorder
+    assert "startAnalysis();" in recorder.split("async function openResult", 1)[1].split("function startAnalysis", 1)[0]
+    assert recorder.count(">开始分析</Button>") == 1
+    assert recorder.count(">终止分析</Button>") == 1
     assert 'type: "resume_verification"' in recorder
     assert "restart: true" in recorder
     assert "canAutoReconnectRecording" in recorder
@@ -436,7 +448,7 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "正在终止" in recorder
     gateway = (Path(__file__).resolve().parents[1] / "dano" / "gateway" / "app.py").read_text(encoding="utf-8")
     assert "restart=init.get(\"restart\") is True" in gateway
-    assert "实时分析日志" in recorder
+    assert "分析日志" in recorder
     assert "recording_result_saved" in recorder
     assert "setInterval" not in recorder
     history_load = recorder.split("setHistoryLoading(true)", 1)[1].split("}, [tenant, subsystem]);", 1)[0]
@@ -456,9 +468,9 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert 'label: "准备处理"' in recorder
     assert 'incoming.type === "thought"' in recorder
     assert "appendThought" in recorder
-    assert "内心独白" in recorder
+    assert "thinking" in recorder
     assert "renderThoughtBlock" in recorder
     assert "等待返回" in recorder
     assert "cancelProcessing" in recorder
-    assert "renderAnalysisActions" in result_view
+    assert "renderAnalysisActions" not in result_view
     assert ">终止分析</Button>" in recorder

@@ -15,10 +15,24 @@ import {
   Table,
   Tabs,
   Tag,
+  Timeline,
+  Tooltip,
   Typography,
   message,
 } from "antd";
-import { DeleteOutlined, RobotOutlined, StopOutlined } from "@ant-design/icons";
+import {
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  CodeOutlined,
+  DeleteOutlined,
+  ExclamationCircleOutlined,
+  LoadingOutlined,
+  MessageOutlined,
+  RobotOutlined,
+  StopOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 import {
   useEffect,
   useMemo,
@@ -319,7 +333,7 @@ function fmtHistoryTime(value?: string) {
   return date.toLocaleString();
 }
 
-const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 360, boxSizing: "border-box" as const };
+const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 460, boxSizing: "border-box" as const };
 
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
@@ -352,12 +366,12 @@ function activityDisplay(item: { status: string; label: string }) {
   return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
 }
 
-function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
+function pageStage(status: WorkflowStatus, resumeOnly = false) {
+  // 能力结果只从历史「继续分析」进入。停止录制即使已发布，也回到准备页。
   if (resumeOnly) return 2;
   if (status === "idle") return 0;
-  if (verificationLive && ["processing", "waiting_operator"].includes(status)) return 2;
   if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
-  return 2;
+  return 0;
 }
 
 function recorderWebSocketUrl() {
@@ -451,6 +465,7 @@ export default function PageRecorder({
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
+  const [expandedTools, setExpandedTools] = useState<Record<number, boolean>>({});
   const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -498,7 +513,7 @@ export default function PageRecorder({
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
   const runBusy = (analysisRequested || connecting || processing) && !cancelling && status !== "cancelled";
-  const reachedStage = pageStage(status, resumeOnly, machineVerification && processing);
+  const reachedStage = pageStage(status, resumeOnly);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -512,13 +527,24 @@ export default function PageRecorder({
   useEffect(() => {
     if (resumeOnly) {
       if (reachedStage >= 2) setKeepResult(true);
-    } else {
-      if (reachedStage >= 1) setKeepRecording(true);
-      if (reachedStage >= 2) setKeepResult(true);
+    } else if (reachedStage >= 1) {
+      setKeepRecording(true);
     }
-    if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
-    reachedStageRef.current = reachedStage;
-  }, [reachedStage, resumeOnly]);
+    if (reachedStage > reachedStageRef.current) {
+      setViewStage(reachedStage);
+    } else if (
+      !resumeOnly
+      && ["published", "editable", "failed", "cancelled"].includes(status)
+    ) {
+      setViewStage(0);
+      setKeepRecording(false);
+      setKeepResult(false);
+      setAssistantOpen(false);
+    }
+    if (status !== "idle" || resumeOnly) {
+      reachedStageRef.current = reachedStage;
+    }
+  }, [reachedStage, resumeOnly, status]);
 
   function appendThought(chunk: ThoughtChunk) {
     setThoughts((current) => {
@@ -766,11 +792,14 @@ export default function PageRecorder({
     setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
-    if (next.status === "waiting_operator") {
-      setKeepResult(true);
-      setViewStage(2);
-    }
     if (next.status === "published") setEditingResult(false);
+    if (
+      current?.status !== "published"
+      && next.status === "published"
+      && socketInitRef.current?.type === "start"
+    ) {
+      message.success("录制结果已保存，可在历史中继续分析");
+    }
     if (finishRequestedRef.current && next.status !== "recording") {
       finishRequestedRef.current = false;
       setFinishRequested(false);
@@ -901,7 +930,7 @@ export default function PageRecorder({
     snapshotRef.current = null;
     setSnapshot(null);
     setThoughts([]);
-    pendingEditsRef.current = [];
+    setExpandedTools({});
     patchInFlightRef.current = null;
     republishRequestedRef.current = false;
     finishRequestedRef.current = false;
@@ -936,7 +965,7 @@ export default function PageRecorder({
       title: item.title,
       revision: 0,
       status: "editable",
-      progress: { step: "ready", label: "已打开录制结果，点击开始分析" },
+      progress: { step: "ready", label: "正在开始分析" },
       draft,
       capture_frozen: true,
     };
@@ -965,19 +994,14 @@ export default function PageRecorder({
     setViewStage(2);
     reachedStageRef.current = 2;
     setThoughts([]);
+    setExpandedTools({});
     pendingEditsRef.current = [];
-    patchInFlightRef.current = null;
-    republishRequestedRef.current = false;
-    finishRequestedRef.current = false;
-    setFinishRequested(false);
-    setPendingEdits([]);
-    setLocalValues({});
-    setLocalCapabilityStepIds({});
     setEditingResult(false);
     socketInitRef.current = null;
     try {
       const detail = await getRecordingResult(item.id);
       applyViewedDraft(item, (detail.draft || null) as FlowSpec | null);
+      startAnalysis();
     } catch {
       message.error("打开录制结果失败");
       setKeepResult(false);
@@ -997,6 +1021,7 @@ export default function PageRecorder({
     if (!resultId || runBusy || cancellingRef.current) return;
     setAnalysisRequested(true);
     setThoughts([]);
+    setExpandedTools({});
     setConnecting(true);
     socketInitRef.current = {
       type: "resume_verification",
@@ -1054,7 +1079,7 @@ export default function PageRecorder({
     })) {
       finishRequestedRef.current = false;
       setFinishRequested(false);
-    } else {
+    } else if (machineVerificationRef.current) {
       setAssistantOpen(true);
     }
   }
@@ -1480,7 +1505,7 @@ export default function PageRecorder({
                     size="small"
                     loading={openingId === item.id}
                     onClick={() => openResult(item)}
-                  >查看</Button>
+                  >继续分析</Button>
                   <Button
                     size="small"
                     danger
@@ -2039,64 +2064,99 @@ export default function PageRecorder({
   }
 
   function renderThoughtBlock(item: ThoughtChunk, index: number) {
-    const label = item.kind === "tool"
-      ? (item.tool ? `调用 ${item.tool}` : "调用工具")
-      : item.kind === "thinking"
-        ? "内心独白"
-        : "模型输出";
-    const color = item.kind === "tool" ? "processing" : item.kind === "thinking" ? "purple" : "default";
-    const background = item.kind === "thinking" ? "#faf5ff" : item.kind === "tool" ? "#f6ffed" : "#fafafa";
-    const preStyle = {
-      margin: "4px 0 0",
-      padding: 8,
-      background: "#fff",
-      border: "1px solid #f0f0f0",
-      borderRadius: 6,
-      maxHeight: 360,
-      overflow: "auto",
-      whiteSpace: "pre-wrap" as const,
-      wordBreak: "break-word" as const,
-      fontSize: 12,
-      lineHeight: 1.55,
-    };
-    return (
-      <div
-        key={`${item.kind}-${item.tool || ""}-${index}`}
-        style={{
-          border: "1px solid #f0f0f0",
-          borderRadius: 8,
-          padding: "10px 12px",
-          background,
-        }}
-      >
-        <Space size={6} style={{ marginBottom: 6 }} wrap>
-          <Tag color={color}>{label}</Tag>
-          {item.kind === "tool" && item.phase === "end" ? (
-            <Tag color={item.ok === false ? "error" : "success"}>{item.ok === false ? "失败" : "成功"}</Tag>
-          ) : null}
-        </Space>
-        {item.kind === "tool" ? (
-          <Space direction="vertical" size={8} style={{ width: "100%" }}>
-            {item.args ? (
-              <div>
-                <Text type="secondary">参数</Text>
-                <pre style={preStyle}>{item.args}</pre>
-              </div>
-            ) : (
-              <Text type="secondary">{item.text || "无参数"}</Text>
+    const isToolStart = item.kind === "tool" && item.phase !== "end";
+    const isToolEnd = item.kind === "tool" && item.phase === "end";
+    const expanded = Boolean(expandedTools[index]);
+    const toggleExpand = () => setExpandedTools((prev) => ({ ...prev, [index]: !prev[index] }));
+
+    // ── tool call row ─────────────────────────────────────────────────────────
+    if (item.kind === "tool") {
+      const isPending = isToolStart;
+      const succeeded = isToolEnd && item.ok !== false;
+      const failed = isToolEnd && item.ok === false;
+      const statusIcon = isPending
+        ? <LoadingOutlined style={{ color: "#1677ff", fontSize: 13 }} spin />
+        : succeeded
+          ? <CheckCircleOutlined style={{ color: "#52c41a", fontSize: 13 }} />
+          : <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 13 }} />;
+      const toolLabel = item.tool || "工具";
+
+      return (
+        <div key={`thought-${index}`} style={{ marginLeft: 2 }}>
+          <button
+            type="button"
+            onClick={toggleExpand}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              width: "100%",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: "3px 0",
+              textAlign: "left",
+            }}
+          >
+            <CodeOutlined style={{ color: "#8c8c8c", fontSize: 12, flexShrink: 0 }} />
+            <Text code style={{ fontSize: 12 }}>{toolLabel}</Text>
+            {statusIcon}
+            {isPending && <Text type="secondary" style={{ fontSize: 11 }}>运行中…</Text>}
+            {!isPending && (
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 2 }}>
+                {expanded ? "▲" : "▼"} 详情
+              </Text>
             )}
-            {item.result ? (
-              <div>
-                <Text type="secondary">结果</Text>
-                <pre style={preStyle}>{item.result}</pre>
-              </div>
-            ) : item.phase !== "end" ? (
-              <Text type="secondary">等待返回…</Text>
-            ) : null}
-          </Space>
-        ) : (
-          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.7 }}>{item.text}</div>
-        )}
+          </button>
+          {expanded && (
+            <div style={{
+              marginTop: 4,
+              marginLeft: 18,
+              background: "#fafafa",
+              border: "1px solid #f0f0f0",
+              borderRadius: 6,
+              padding: "8px 10px",
+              fontSize: 12,
+            }}>
+              {item.args ? (
+                <div style={{ marginBottom: item.result ? 8 : 0 }}>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 2 }}>请求参数</Text>
+                  <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 12, lineHeight: 1.5, maxHeight: 180, overflow: "auto" }}>{item.args}</pre>
+                </div>
+              ) : null}
+              {item.result ? (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 2 }}>返回结果</Text>
+                  <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 12, lineHeight: 1.5, maxHeight: 180, overflow: "auto" }}>{item.result}</pre>
+                </div>
+              ) : isToolStart ? (
+                <Text type="secondary" style={{ fontSize: 11 }}>等待返回…</Text>
+              ) : null}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── thinking ──────────────────────────────────────────────────────────────
+    if (item.kind === "thinking") {
+      return (
+        <div key={`thought-${index}`} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <RobotOutlined style={{ color: "#d9d9d9", fontSize: 12, marginTop: 3, flexShrink: 0 }} />
+          <Text type="secondary" style={{ fontSize: 12, fontStyle: "italic", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {item.text}
+          </Text>
+        </div>
+      );
+    }
+
+    // ── text (model commentary) ───────────────────────────────────────────────
+    return (
+      <div key={`thought-${index}`} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+        <MessageOutlined style={{ color: "#1677ff", fontSize: 12, marginTop: 3, flexShrink: 0 }} />
+        <Text style={{ fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {item.text}
+        </Text>
       </div>
     );
   }
@@ -2124,18 +2184,214 @@ export default function PageRecorder({
   }
 
   function renderVerificationLog() {
-    const activities = snapshot?.activity || [];
-    const insights = snapshot?.insights || [];
+    const activities: WorkflowActivity[] = snapshot?.activity || [];
+
+    // ── Build unified timeline items ─────────────────────────────────────────
+    // Each entry: { kind: "round_divider" | "activity" | "thought", ... }
+    type TLEntry =
+      | { kind: "round_divider"; round: number }
+      | { kind: "activity"; item: WorkflowActivity; idx: number }
+      | { kind: "thought"; item: ThoughtChunk; idx: number };
+
+    const entries: TLEntry[] = [];
+
+    // Activities first (they carry round numbers and are authoritative events)
+    const seenRounds = new Set<number>();
+    for (let i = 0; i < activities.length; i++) {
+      const act = activities[i];
+      const round = act.round || 0;
+      if (round > 0 && !seenRounds.has(round)) {
+        seenRounds.add(round);
+        entries.push({ kind: "round_divider", round });
+      }
+      entries.push({ kind: "activity", item: act, idx: i });
+    }
+
+    // Thought stream appended after — if present they represent the CURRENT turn
+    for (let i = 0; i < thoughts.length; i++) {
+      entries.push({ kind: "thought", item: thoughts[i], idx: i });
+    }
+
+    // ── Status badge ─────────────────────────────────────────────────────────
+    const statusColor = cancelling ? "warning"
+      : status === "waiting_operator" ? "warning"
+      : status === "published" ? "success"
+      : status === "failed" ? "error"
+      : processing ? "processing"
+      : "default";
+    const statusLabel = cancelling && status !== "cancelled"
+      ? "正在终止"
+      : (snapshot?.progress.label || STATUS_LABELS[status]);
+
+    // ── Map entries to Ant Timeline items ────────────────────────────────────
+    const tlItems = entries.map((entry, ei): NonNullable<React.ComponentProps<typeof Timeline>["items"]>[number] => {
+      if (entry.kind === "round_divider") {
+        return {
+          key: `round-${entry.round}`,
+          dot: (
+            <div style={{
+              width: 20,
+              height: 20,
+              borderRadius: "50%",
+              background: "#e6f4ff",
+              border: "1px solid #91caff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 10,
+              color: "#1677ff",
+              fontWeight: 600,
+            }}>
+              {entry.round}
+            </div>
+          ),
+          children: (
+            <Text type="secondary" style={{ fontSize: 11, fontWeight: 500, letterSpacing: "0.05em" }}>
+              第 {entry.round} 轮
+            </Text>
+          ),
+        };
+      }
+
+      if (entry.kind === "activity") {
+        const act = entry.item;
+        const display = activityDisplay(act);
+        const isResolved = act.status === "resolved" || display.color === "success";
+        const isBlocked = act.status === "blocked" || display.color === "error";
+        const isWaiting = act.status === "waiting_operator";
+        const isRunning = act.status === "running" && display.color === "processing";
+
+        const dotIcon = isResolved
+          ? <CheckCircleOutlined style={{ color: "#52c41a", fontSize: 14 }} />
+          : isBlocked
+            ? <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />
+            : isWaiting
+              ? <ExclamationCircleOutlined style={{ color: "#faad14", fontSize: 14 }} />
+              : isRunning
+                ? <LoadingOutlined style={{ color: "#1677ff", fontSize: 14 }} spin />
+                : <ClockCircleOutlined style={{ color: "#8c8c8c", fontSize: 14 }} />;
+
+        return {
+          key: `act-${act.sequence}-${ei}`,
+          dot: dotIcon,
+          children: (
+            <div style={{ paddingBottom: 2 }}>
+              <Text style={{
+                fontSize: 13,
+                lineHeight: 1.6,
+                color: isBlocked ? "#cf1322" : isResolved ? "#389e0d" : isWaiting ? "#d46b08" : undefined,
+              }}>
+                {act.label}
+              </Text>
+            </div>
+          ),
+        };
+      }
+
+      // thought entry
+      const thought = entry.item;
+      if (thought.kind === "tool") {
+        const isToolStart = thought.phase !== "end";
+        const succeeded = !isToolStart && thought.ok !== false;
+        const failed = !isToolStart && thought.ok === false;
+        const toolIdx = entry.idx;
+        const expanded = Boolean(expandedTools[toolIdx]);
+        const toggleExpand = () => setExpandedTools((prev) => ({ ...prev, [toolIdx]: !prev[toolIdx] }));
+
+        const dotIcon = isToolStart
+          ? <LoadingOutlined style={{ color: "#1677ff", fontSize: 13 }} spin />
+          : succeeded
+            ? <CheckCircleOutlined style={{ color: "#52c41a", fontSize: 13 }} />
+            : <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 13 }} />;
+
+        return {
+          key: `thought-${toolIdx}-${ei}`,
+          dot: dotIcon,
+          children: (
+            <div>
+              <button
+                type="button"
+                onClick={toggleExpand}
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6 }}
+              >
+                <Text code style={{ fontSize: 12 }}>{thought.tool || "tool"}</Text>
+                {isToolStart && <Text type="secondary" style={{ fontSize: 11 }}>运行中…</Text>}
+                {!isToolStart && (
+                  <Text type="secondary" style={{ fontSize: 11 }}>{expanded ? "▲" : "▼"} 详情</Text>
+                )}
+              </button>
+              {expanded && (
+                <div style={{ marginTop: 4, background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: "8px 10px" }}>
+                  {thought.args ? (
+                    <div style={{ marginBottom: thought.result ? 8 : 0 }}>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 2 }}>请求参数</Text>
+                      <pre style={{ margin: 0, fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 180, overflow: "auto" }}>{thought.args}</pre>
+                    </div>
+                  ) : null}
+                  {thought.result ? (
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 2 }}>返回结果</Text>
+                      <pre style={{ margin: 0, fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 180, overflow: "auto" }}>{thought.result}</pre>
+                    </div>
+                  ) : isToolStart ? (
+                    <Text type="secondary" style={{ fontSize: 11 }}>等待返回…</Text>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          ),
+        };
+      }
+
+      if (thought.kind === "thinking") {
+        return {
+          key: `thought-${entry.idx}-${ei}`,
+          dot: <RobotOutlined style={{ color: "#d9d9d9", fontSize: 12 }} />,
+          children: (
+            <Text type="secondary" style={{ fontSize: 12, fontStyle: "italic", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {thought.text}
+            </Text>
+          ),
+        };
+      }
+
+      return {
+        key: `thought-${entry.idx}-${ei}`,
+        dot: <MessageOutlined style={{ color: "#1677ff", fontSize: 12 }} />,
+        children: (
+          <Text style={{ fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {thought.text}
+          </Text>
+        ),
+      };
+    });
+
+    // Trailing pulse while processing
+    if (processing && !cancelling) {
+      tlItems.push({
+        key: "pulse",
+        dot: <LoadingOutlined style={{ color: "#1677ff", fontSize: 13 }} spin />,
+        children: (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {snapshot?.progress.label || "分析中…"}
+          </Text>
+        ),
+      });
+    }
+
+    const isEmpty = entries.length === 0 && !processing && !connecting;
+
     return (
       <Card
         size="small"
         title={(
-          <Space>
-            <Text>实时分析日志</Text>
-            <Tag color={cancelling ? "warning" : status === "waiting_operator" ? "warning" : processing ? "processing" : status === "published" ? "success" : "default"}>
-              {cancelling && status !== "cancelled" ? "正在终止" : (snapshot?.progress.label || STATUS_LABELS[status])}
-            </Tag>
-            {snapshot?.progress.round ? <Text type="secondary">第 {snapshot.progress.round} 轮</Text> : null}
+          <Space size={6}>
+            <ThunderboltOutlined style={{ color: processing ? "#1677ff" : "#8c8c8c" }} />
+            <Text style={{ fontWeight: 500 }}>分析日志</Text>
+            <Tag color={statusColor} style={{ fontSize: 11 }}>{statusLabel}</Tag>
+            {snapshot?.progress.round
+              ? <Text type="secondary" style={{ fontSize: 11 }}>第 {snapshot.progress.round} 轮</Text>
+              : null}
           </Space>
         )}
         extra={renderAnalysisActions("small")}
@@ -2147,55 +2403,24 @@ export default function PageRecorder({
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",
+            padding: "8px 12px",
           },
         }}
       >
         {renderOperatorQuestion()}
         <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {thoughts.length ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {thoughts.map((item, index) => renderThoughtBlock(item, index))}
-            </div>
-          ) : null}
-          {!thoughts.length && activities.length ? (
-            <List
-              size="small"
-              dataSource={activities}
-              renderItem={(item) => {
-                const display = activityDisplay(item);
-                return (
-                  <List.Item>
-                    <Space align="start" style={{ width: "100%" }}>
-                      <Tag color={display.color}>{display.label}</Tag>
-                      <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
-                        <Text>{item.label}</Text>
-                      </Space>
-                    </Space>
-                  </List.Item>
-                );
-              }}
-            />
-          ) : null}
-          {!thoughts.length && !activities.length && insights.length ? (
-            <List
-              size="small"
-              dataSource={insights}
-              renderItem={(item) => (
-                <List.Item>
-                  <Space align="start">
-                    <Tag>思考</Tag>
-                    <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
-                  </Space>
-                </List.Item>
-              )}
-            />
-          ) : null}
-          {!thoughts.length && !activities.length && !insights.length ? (
+          {isEmpty ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={processing || connecting ? "等待模型开口…" : "点击开始分析后显示实时日志"}
+              description={connecting || runBusy ? "正在连接…" : "等待分析开始"}
+              style={{ marginTop: 24 }}
             />
-          ) : null}
+          ) : (
+            <Timeline
+              style={{ paddingTop: 8 }}
+              items={tlItems}
+            />
+          )}
         </div>
       </Card>
     );
@@ -2225,7 +2450,6 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
-              {renderAnalysisActions("middle")}
               <Button
                 disabled={!draft || processing}
                 onClick={() => setEditingResult(true)}
