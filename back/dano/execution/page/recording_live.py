@@ -3055,6 +3055,30 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     }
 
 
+def compile_recorded_capabilities(spec):  # noqa: ANN001, ANN202
+    """Compile public capabilities from recorded anchors without a live Pi plan."""
+    from dano.execution.page.capability_compiler import compile_capabilities
+
+    plan = _semantic_plan_from_live_boundaries(spec)
+    planned = [
+        item for item in (plan.get("capabilities") or [])
+        if isinstance(item, dict) and item.get("name") and item.get("anchor_step_id")
+    ]
+    if not planned:
+        return spec
+    current = spec.model_copy(deep=True)
+    current.meta = {
+        **(current.meta or {}),
+        "capability_model": {
+            "status": "ready",
+            "source": "recorded_request_graph",
+            "semantic_plan": plan,
+        },
+    }
+    compilation = compile_capabilities(current, plan)
+    return compilation.spec if compilation.capabilities else current
+
+
 def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa: ANN001
     """Apply goal count/names without inventing or positionally relabeling anchors."""
     contract = _recording_goal_contract(spec)

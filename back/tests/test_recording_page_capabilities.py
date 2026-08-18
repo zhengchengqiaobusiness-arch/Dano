@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 from dano.execution.page.capability_compiler import compile_capabilities
@@ -11,7 +12,10 @@ from dano.execution.page.flow_spec import (
     _step_has_stable_record_identity,
     to_flow_spec,
 )
-from dano.execution.page.recording_live import _semantic_plan_from_live_boundaries
+from dano.execution.page.recording_live import (
+    _semantic_plan_from_live_boundaries,
+    compile_recorded_capabilities,
+)
 
 
 SALE_PAGE = {
@@ -375,6 +379,26 @@ def test_line_item_id_is_not_document_record_identity() -> None:
         params=[ParamField(path="id", key="id", value="9")],
     )
     assert _step_has_stable_record_identity(document) is True
+
+
+def test_materialize_without_live_plan_still_compiles_capabilities() -> None:
+    raw = _sale_order_spec()
+    assert raw.capabilities == []
+
+    compiled = compile_recorded_capabilities(raw)
+    assert {capability.kind for capability in compiled.capabilities} == {
+        "query_status", "export", "create",
+    }
+    assert (compiled.meta or {}).get("capability_model", {}).get("source") == (
+        "recorded_request_graph"
+    )
+    gateway = (
+        Path(__file__).resolve().parents[1]
+        / "dano"
+        / "onboarding"
+        / "recording_gateway.py"
+    ).read_text(encoding="utf-8")
+    assert "compile_recorded_capabilities" in gateway
 
 
 def test_sale_order_page_compiles_query_export_and_create() -> None:
