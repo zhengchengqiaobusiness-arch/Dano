@@ -252,18 +252,10 @@ class RecordingGatewaySession:
         result_id: Any = None,
     ) -> None:
         if self.workflow is not None:
-            if (
-                self.workflow.snapshot.status
-                in {
-                    WorkflowStatus.EDITABLE,
-                    WorkflowStatus.CANCELLED,
-                    WorkflowStatus.FAILED,
-                }
-                and not self.workflow._active()
-            ):
-                await self.workflow.republish(machine_verification=True)
+            if self.workflow._active():
+                await self._emit_snapshot()
                 return
-            await self._emit_snapshot()
+            await self.workflow.republish(machine_verification=True)
             return
         self.capture = None
         self._capture_frozen = True
@@ -869,9 +861,12 @@ class RecordingGatewaySession:
             WorkflowStatus.FAILED,
             WorkflowStatus.CANCELLED,
         }:
-            await self._mark_stage_six_terminal(
-                published=snapshot.status == WorkflowStatus.PUBLISHED,
-            )
+            try:
+                await self._mark_stage_six_terminal(
+                    published=snapshot.status == WorkflowStatus.PUBLISHED,
+                )
+            except Exception:  # noqa: BLE001 - terminal flags must not abort the snapshot
+                pass
 
     async def _emit_snapshot(self, snapshot: WorkflowSnapshot | None = None) -> None:
         if self.workflow is None:
@@ -879,10 +874,17 @@ class RecordingGatewaySession:
         current = snapshot or self.workflow.snapshot
         payload = current.model_dump(mode="json")
         if current.draft is not None:
-            spec = FlowSpec.model_validate(current.draft)
-            payload["draft"] = flow_spec_to_client(spec)
-            payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
-            payload["check_report"] = validate_flow_spec(spec)
+            try:
+                spec = FlowSpec.model_validate(current.draft)
+                payload["draft"] = flow_spec_to_client(spec)
+                payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
+                payload["check_report"] = validate_flow_spec(spec)
+            except Exception as exc:  # noqa: BLE001 - resume must still show the draft
+                payload["draft"] = current.draft
+                payload["check_report"] = {
+                    "passed": False,
+                    "errors": [f"草稿投影失败：{exc}"],
+                }
         await self._send({"type": "snapshot", "snapshot": payload})
         if current.question is not None:
             await self._send({

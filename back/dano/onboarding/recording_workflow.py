@@ -280,7 +280,14 @@ class SelfHealingPipeline:
     async def _run(self, seed: PipelineSeed, context: PipelineContext) -> PipelineOutcome:
         context.machine_verification = seed.machine_verification
         context.ensure_active()
-        await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
+        if seed.kind == "edited_spec":
+            await context.progress(
+                WorkflowStep.VERIFYING if seed.machine_verification else WorkflowStep.MATERIALIZING,
+                "正在开始机器验证" if seed.machine_verification else "正在加载已保存草稿",
+                0,
+            )
+        else:
+            await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
         if seed.kind == "recording" and context.persist_stage_six is not None:
@@ -735,11 +742,20 @@ class RecordingWorkflow:
     async def republish(self, *, machine_verification: bool = False) -> WorkflowSnapshot:
         if self._active():
             return self.snapshot
-        # A published draft can only be republished after patch_draft moves it
-        # back to editable.  Failed/cancelled runs have a newer authoritative
-        # revision and must remain retryable even when the draft is unchanged.
+        # Direct publish (no machine verification) stays published until the
+        # operator edits.  Stage 7 resume must be allowed from a published
+        # draft: move it back to editable, then run the verify/repair loop.
         if self.snapshot.status == WorkflowStatus.PUBLISHED:
-            return self.snapshot
+            if not machine_verification or self.snapshot.draft is None:
+                return self.snapshot
+            await self._set(
+                WorkflowStatus.EDITABLE,
+                draft=self.snapshot.draft,
+                release=None,
+                issues=[],
+                error="",
+                progress=self._next_progress(WorkflowStep.READY, "开始机器验证"),
+            )
         if self.snapshot.status not in {
             WorkflowStatus.EDITABLE,
             WorkflowStatus.CANCELLED,
@@ -849,9 +865,13 @@ class RecordingWorkflow:
 
     async def _launch(self, seed: PipelineSeed) -> None:
         self._cancelled = False
+        if seed.kind == "edited_spec" and seed.machine_verification:
+            progress = self._next_progress(WorkflowStep.VERIFYING, "正在开始机器验证")
+        else:
+            progress = self._next_progress(WorkflowStep.FREEZING, "正在冻结录制事实")
         await self._set(
             WorkflowStatus.PROCESSING,
-            progress=self._next_progress(WorkflowStep.FREEZING, "正在冻结录制事实"),
+            progress=progress,
             issues=[],
             release=None,
             error="",

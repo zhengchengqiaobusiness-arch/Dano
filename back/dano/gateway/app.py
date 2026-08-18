@@ -1047,27 +1047,28 @@ async def record_ws(ws: WebSocket) -> None:
                 saved = await DraftStore().get_draft(uuid.UUID(result_id)) if result_id else None
             except ValueError:
                 saved = None
-            if (
-                saved is None
-                or saved.tenant != tenant
-                or not is_recording_result_key(saved.asset_key)
-                or not isinstance(saved.body.get("flow_spec"), dict)
-            ):
-                await sender.send_json({
-                    "type": "error",
-                    "detail": "首帧须为 {type:'resume_verification', result_id, ...}",
-                })
+            if not result_id:
+                detail = "继续分析缺少 result_id"
+            elif saved is None:
+                detail = "录制结果不存在或已删除"
+            elif saved.tenant != tenant:
+                detail = "录制结果不属于当前租户"
+            elif not is_recording_result_key(saved.asset_key):
+                detail = "该草稿不是录制结果，不能继续分析"
+            elif not isinstance(saved.body.get("flow_spec"), dict):
+                detail = "录制结果没有完整 FlowSpec，请重新录制"
+            else:
+                detail = ""
+            if detail:
+                await sender.send_json({"type": "error", "detail": detail})
                 return
             resume_draft = saved.body["flow_spec"]
             resume_title = str(saved.body.get("title") or "")
             resume_result_id = saved.asset_draft_id
             action = str(saved.body.get("action") or "")
             subsystem = saved.subsystem.value
-            recording_id = (
-                saved.run_id
-                if re.fullmatch(r"recording_[0-9a-f]{32}", str(saved.run_id or ""))
-                else f"recording_{uuid.uuid4().hex}"
-            )
+            # A new Pi scope avoids colliding with the original recording lock.
+            recording_id = f"recording_{uuid.uuid4().hex}"
             resume_goal = saved.body.get("goal") if isinstance(saved.body.get("goal"), dict) else {}
             init["goal_text"] = str(
                 init.get("goal_text") or resume_goal.get("text") or resume_goal.get("intent") or ""

@@ -8,8 +8,10 @@ from dano.onboarding.recording_workflow import (
     PipelineCheck,
     PipelineContext,
     PipelineSeed,
+    RecordingWorkflow,
     SelfHealingPipeline,
     WorkflowIssue,
+    WorkflowSnapshot,
     WorkflowStatus,
 )
 
@@ -173,14 +175,20 @@ async def test_pi_protocol_error_keeps_capabilities(monkeypatch) -> None:
     context = _context()
     draft = await services.repair(
         _spec().model_dump(mode="json"),
-        (WorkflowIssue(issue_id="i1", code="dependency", message="缺依赖", resolver="machine_repair"),),
+        (WorkflowIssue(
+            issue_id="write_verify:submit",
+            code="write_verify",
+            message="写操作还没有回读校验",
+            resolver="collect_evidence",
+            target={"step_id": "submit"},
+        ),),
         {},
         context,
     )
 
     assert [item["capability_id"] for item in draft["capabilities"]] == ["cap_submit"]
     assert context.last_repair_report is not None
-    assert "i1" in context.last_repair_report.still_pending
+    assert "write_verify:submit" in context.last_repair_report.still_pending
 
 
 @pytest.mark.asyncio
@@ -217,10 +225,11 @@ async def test_unchanged_repair_attempts_are_not_reported_as_progress(monkeypatc
         draft,
         (
             WorkflowIssue(
-                issue_id="i1",
-                code="dependency",
-                message="缺依赖",
-                resolver="machine_repair",
+                issue_id="write_verify:submit",
+                code="write_verify",
+                message="写操作还没有回读校验",
+                resolver="collect_evidence",
+                target={"step_id": "submit"},
             ),
         ),
         {},
@@ -230,7 +239,7 @@ async def test_unchanged_repair_attempts_are_not_reported_as_progress(monkeypatc
     assert repaired == draft
     assert context.last_repair_report is not None
     assert context.last_repair_report.applied == []
-    assert context.last_repair_report.still_pending == ["i1"]
+    assert context.last_repair_report.still_pending == ["write_verify:submit"]
 
 
 @pytest.mark.asyncio
@@ -698,3 +707,99 @@ async def test_repair_does_not_call_pi_for_evidence_resolved_fields(monkeypatch)
         _context(),
     )
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_write_verify_falls_back_to_saved_session_storage(monkeypatch) -> None:
+    from dano.agent_tools import tools as agent_tools
+
+    loaded: list[tuple[str, str]] = []
+
+    class Session:
+        tenant = "tenant"
+        subsystem = "oa"
+        _live_recorder = None
+
+    monkeypatch.setattr(
+        "dano.execution.page.sessions.load_session_state",
+        lambda tenant, subsystem: loaded.append((tenant, subsystem)) or {"cookies": [{"name": "a"}]},
+    )
+    state = await agent_tools._recording_storage_state(Session())
+    assert loaded == [("tenant", "oa")]
+    assert state == {"cookies": [{"name": "a"}]}
+
+
+@pytest.mark.asyncio
+async def test_resolved_write_verify_is_not_still_open() -> None:
+    from dano.onboarding.recording_runtime import _issue_still_open
+
+    spec = _spec()
+    spec.steps[0].fact_check = {"verified": True, "verification_id": "ver_1"}
+    issue = WorkflowIssue(
+        issue_id="write_verify:submit",
+        code="write_verify",
+        message="写操作还没有回读校验",
+        resolver="collect_evidence",
+        target={"step_id": "submit"},
+    )
+    assert _issue_still_open(spec, issue) is False
+
+
+@pytest.mark.asyncio
+async def test_republish_machine_verification_from_published() -> None:
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return seed.draft or {"rev": 1}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("clean published resume must not repair")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            return {"ok": True}
+
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action="action_1",
+            status=WorkflowStatus.PUBLISHED,
+            draft={"rev": 1},
+            release={"ok": True},
+            capture_frozen=True,
+        ),
+        SelfHealingPipeline(Runtime()),
+    )
+    await workflow.republish(machine_verification=True)
+    await workflow.wait()
+    assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
+    assert workflow.snapshot.release == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_edited_spec_starts_at_verifying(monkeypatch) -> None:
+    steps: list[str] = []
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {"rev": 0}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("no repair")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            return {"ok": True}
+
+    async def progress(step, label, round_number=0):  # noqa: ANN001
+        steps.append(str(step))
+
+    await SelfHealingPipeline(Runtime()).run(
+        PipelineSeed(kind="edited_spec", draft={"rev": 0}, machine_verification=True),
+        _context(progress=progress),
+    )
+    assert steps[0] == "verifying"
+    assert "materializing" not in steps[:1]

@@ -416,3 +416,17 @@ async def test_get_recording_state_skips_live_refresh_during_repair() -> None:
     state = await session.get_recording_state()
     assert "flow_version" in state
     assert "current_contract" in state
+
+
+@pytest.mark.asyncio
+async def test_get_recording_delta_without_browser_does_not_raise() -> None:
+    session = RecordingPiSession(
+        tenant="tenant-1",
+        subsystem="sales",
+        recording_id="recording_" + "d" * 32,
+    )
+    session.bind_flow_spec(FlowSpec(tenant="tenant-1", subsystem="sales"))
+    delta = await session.get_recording_delta(since_seq=3)
+    assert delta["has_more"] is False
+    assert delta["requests"] == []
+    assert "get_validation_report" in delta["note"]

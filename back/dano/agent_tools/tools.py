@@ -1142,6 +1142,17 @@ def _find_captured_requests(session, request_ids: list[str]) -> list[dict]:  # n
     return [by_id[request_id] for request_id in request_ids]
 
 
+async def _recording_storage_state(session) -> dict | None:  # noqa: ANN001
+    recorder = getattr(session, "_live_recorder", None)
+    if recorder is not None and callable(getattr(recorder, "storage_state", None)):
+        state = await recorder.storage_state()
+        if state:
+            return state
+    from dano.execution.page.sessions import load_session_state
+
+    return load_session_state(session.tenant, session.subsystem)
+
+
 async def _recording_auth_headers(session, requests: list[dict]) -> dict:  # noqa: ANN001
     from dano.execution.page.request_capture import extract_auth_headers
     from dano.infra.token_store import get_token_headers, normalize_headers
@@ -1241,10 +1252,7 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
             "verification_ids": [],
         }
     requests = _captured_recording_requests(session)
-    recorder = getattr(session, "_live_recorder", None)
-    storage_state = None
-    if recorder is not None and callable(getattr(recorder, "storage_state", None)):
-        storage_state = await recorder.storage_state()
+    storage_state = await _recording_storage_state(session)
     try:
         result = await verify_dependency(
             spec,
@@ -1320,10 +1328,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
             )
             if existing_record.get("status") != "passed" and write_succeeded:
                 requests = _find_captured_requests(session, request_ids)
-                storage_state = None
-                recorder = getattr(session, "_live_recorder", None)
-                if recorder is not None and callable(getattr(recorder, "storage_state", None)):
-                    storage_state = await recorder.storage_state()
+                storage_state = await _recording_storage_state(session)
                 result = await verify_existing_write(
                     requests[1],
                     previous_write=previous_write,
@@ -1362,10 +1367,7 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
 
         try:
             requests = _find_captured_requests(session, request_ids)
-            storage_state = None
-            recorder = getattr(session, "_live_recorder", None)
-            if recorder is not None and callable(getattr(recorder, "storage_state", None)):
-                storage_state = await recorder.storage_state()
+            storage_state = await _recording_storage_state(session)
             result = await execute_write_with_verify(
                 requests[0],
                 requests[1],

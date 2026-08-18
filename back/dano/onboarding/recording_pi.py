@@ -498,7 +498,18 @@ class RecordingPiSession:
         from dano.execution.page.recording_live import recording_delta
 
         if self._live_recorder is None:
-            raise RecordingPiError("实时录制事实源尚未绑定")
+            return {
+                "reason": "verification",
+                "since_seq": int(since_seq or 0),
+                "next_seq": int(since_seq or 0),
+                "has_more": False,
+                "requests": [],
+                "page_events": [],
+                "note": (
+                    "第七阶段没有实时浏览器。请调用 get_validation_report，"
+                    "不要调用 get_recording_delta 或 browser_*。"
+                ),
+            }
         # A live turn is scoped to the batch that triggered it.  The model may
         # request an older cursor after context compaction, but replaying the
         # complete recording here duplicates thousands of facts and can make
@@ -653,7 +664,10 @@ class RecordingPiSession:
 
     def _require_live_recorder(self):  # noqa: ANN202
         if self._live_recorder is None:
-            raise RecordingPiError("实时录制浏览器尚未绑定")
+            raise RecordingPiError(
+                "第七阶段没有浏览器。请用 get_validation_report / execute_write_with_verify，"
+                "不要打开浏览器重录。"
+            )
         return self._live_recorder
 
     async def browser_navigate(self, url: str) -> dict[str, Any]:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -419,6 +418,70 @@ async def test_attach_or_resume_restarts_cancelled_verification(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_start_verification_only_restarts_published_same_session(monkeypatch) -> None:
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        "dano.onboarding.recording_gateway.SelfHealingPipeline",
+        lambda *_args, **_kwargs: pipeline,
+    )
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("fake pipeline")),
+    )
+    session.capture = None
+    session.workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action=session.config.action,
+            status=WorkflowStatus.PUBLISHED,
+            draft=_draft(),
+            release={"ok": True},
+            capture_frozen=True,
+        ),
+        pipeline,
+    )
+
+    await session.start_verification_only(_draft(), title="请假")
+    await session.workflow.wait()
+
+    assert pipeline.seeds
+    assert pipeline.seeds[-1].kind == "edited_spec"
+    assert pipeline.seeds[-1].machine_verification is True
+
+
+@pytest.mark.asyncio
+async def test_emit_snapshot_survives_invalid_draft() -> None:
+    sent: list[dict] = []
+
+    async def send(payload):  # noqa: ANN001
+        sent.append(payload)
+
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    session.workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action="action_1",
+            status=WorkflowStatus.PROCESSING,
+            draft={"capabilities": "not-a-list"},
+            capture_frozen=True,
+        ),
+        FakePipeline(),
+    )
+    await session._emit_snapshot()
+    assert sent
+    assert sent[0]["type"] == "snapshot"
+    assert sent[0]["snapshot"]["draft"] == {"capabilities": "not-a-list"}
+    assert sent[0]["snapshot"]["check_report"]["passed"] is False
+
+
+@pytest.mark.asyncio
 async def test_delete_recording_result_does_not_delete_skill(monkeypatch) -> None:
     from dano.gateway import app as gateway
 
@@ -564,6 +627,12 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert recorder.count(">终止分析</Button>") == 1
     assert "!analysisMode && currentResultId()" not in recorder
     assert "if (!analysisSessionLive) return null" in recorder
+    assert "acceptNextSnapshotRef" in recorder
+    assert "正在启动机器验证" in recorder
+    assert "stageSevenOpen" in recorder
+    assert "分析连接已断开，请重新继续分析" in recorder
+    assert "if (processing && socketLive) return" in recorder
+    assert "if (current && next.revision < current.revision && !acceptNextSnapshotRef.current) return" in recorder
     assert "onClick={() => startAnalysis(item)}" in recorder
     assert "closeRecordingSocket();" in recorder[recorder.index("function startAnalysis"):recorder.index("async function removeResult")]
     assert "currentResultId()" in recorder[recorder.index("function startAnalysis"):recorder.index("async function removeResult")]
@@ -574,6 +643,9 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "正在终止" in recorder
     gateway = (Path(__file__).resolve().parents[1] / "dano" / "gateway" / "app.py").read_text(encoding="utf-8")
     assert "restart=init.get(\"restart\") is True" in gateway
+    assert "继续分析缺少 result_id" in gateway
+    assert "录制结果不存在或已删除" in gateway
+    assert 'recording_id = f"recording_{uuid.uuid4().hex}"' in gateway
     assert "实时分析模式" in recorder
     assert "analysisMode" in recorder
     assert 'type: "set_analysis_mode"' in recorder

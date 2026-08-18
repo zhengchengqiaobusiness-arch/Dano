@@ -295,14 +295,6 @@ def _dedupe_workflow_issues(issues: tuple[WorkflowIssue, ...]) -> tuple[Workflow
     return tuple(kept[key] for key in order if key in kept)
 
 
-_EVIDENCE_RESOLVABLE_CODES = frozenset({
-    "field_source_unknown",
-    "enum",
-    "enum_options_unverified",
-    "required_axis_unconfirmed",
-})
-
-
 def _issue_still_open(spec: FlowSpec, issue: WorkflowIssue) -> bool:
     report = verification_report(spec)
     todos = [item for item in report.get("todos") or [] if isinstance(item, dict)]
@@ -315,7 +307,7 @@ def _issue_still_open(spec: FlowSpec, issue: WorkflowIssue) -> bool:
     identity = _issue_field_identity(issue)
     if any(_issue_field_identity(_todo_issue(item, spec)) == identity for item in todos):
         return True
-    return issue.code not in _EVIDENCE_RESOLVABLE_CODES
+    return False
 
 
 @dataclass

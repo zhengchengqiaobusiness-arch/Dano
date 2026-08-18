@@ -510,6 +510,8 @@ export default function PageRecorder({
   const socketInitRef = useRef<Record<string, unknown> | null>(null);
   const activeResultIdRef = useRef("");
   const deletingIdRef = useRef("");
+  const acceptNextSnapshotRef = useRef(false);
+  const [stageSevenOpen, setStageSevenOpen] = useState(false);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -521,7 +523,8 @@ export default function PageRecorder({
   const runBusy = (connecting || processing) && !cancelling && status !== "cancelled";
   const analysisSessionLive = analysisRequested
     || status === "waiting_operator"
-    || isStageSevenProgress(snapshot?.progress);
+    || isStageSevenProgress(snapshot?.progress)
+    || stageSevenOpen;
   const analysisMode = analysisSessionLive;
   const reachedStage = pageStage(status, resumeOnly, analysisSessionLive);
 
@@ -597,16 +600,18 @@ export default function PageRecorder({
   }, [tenant, subsystem]);
 
   useEffect(() => {
+    if (analysisRequested || isStageSevenProgress(snapshot?.progress) || status === "waiting_operator") {
+      setStageSevenOpen(true);
+    }
+  }, [analysisRequested, snapshot?.progress, status]);
+
+  useEffect(() => {
     if (["published", "editable", "failed", "cancelled"].includes(status)) {
       cancellingRef.current = false;
       setCancelling(false);
-      setAnalysisRequested(false);
       setConnecting(false);
-      // Keep the saved result id so history 继续分析 can resume stage 7.
-      // Close the socket so a finished recording does not leave a stale
-      // connection that would swallow the next resume_verification.
-      socketInitRef.current = null;
-      closeRecordingSocket();
+      // Keep the socket and analysis window so the operator can answer,
+      // retry, or republish. startRecording / startAnalysis / unmount close it.
     }
   }, [status]);
 
@@ -784,7 +789,8 @@ export default function PageRecorder({
 
   function receiveSnapshot(next: WorkflowSnapshot) {
     const current = snapshotRef.current;
-    if (current && next.revision < current.revision) return;
+    if (current && next.revision < current.revision && !acceptNextSnapshotRef.current) return;
+    acceptNextSnapshotRef.current = false;
     snapshotRef.current = next;
     setSnapshot(next);
     actionRef.current = next.action;
@@ -878,7 +884,22 @@ export default function PageRecorder({
         } else {
           finishRequestedRef.current = false;
           setFinishRequested(false);
-          message.error(String(incoming.detail || "录制处理失败"));
+          const detail = String(incoming.detail || "录制处理失败");
+          if (snapshotRef.current?.status === "processing") {
+            const failed: WorkflowSnapshot = {
+              ...snapshotRef.current,
+              status: "failed",
+              error: detail,
+              progress: {
+                step: "ready",
+                label: "处理失败，草稿已保留",
+                round: snapshotRef.current.progress.round || 0,
+              },
+            };
+            snapshotRef.current = failed;
+            setSnapshot(failed);
+          }
+          message.error(detail);
         }
       }
     };
@@ -889,7 +910,24 @@ export default function PageRecorder({
       wsRef.current = null;
       setConnected(false);
       setConnecting(false);
-      if (closingRef.current || cancellingRef.current || !canAutoReconnectRecording()) return;
+      if (closingRef.current || cancellingRef.current || !canAutoReconnectRecording()) {
+        if (
+          acceptNextSnapshotRef.current
+          && snapshotRef.current?.status === "processing"
+          && snapshotRef.current.progress.label === "正在启动机器验证"
+        ) {
+          const failed: WorkflowSnapshot = {
+            ...snapshotRef.current,
+            status: "failed",
+            error: "分析连接已断开",
+            progress: { step: "ready", label: "分析连接已断开，请重新继续分析", round: 0 },
+          };
+          snapshotRef.current = failed;
+          setSnapshot(failed);
+          acceptNextSnapshotRef.current = false;
+        }
+        return;
+      }
       reconnectAttemptRef.current += 1;
       const delay = Math.min(5000, 500 * (2 ** Math.min(4, reconnectAttemptRef.current)));
       reconnectTimerRef.current = window.setTimeout(() => {
@@ -916,6 +954,8 @@ export default function PageRecorder({
     setActiveResultId("");
     setResumeOnly(false);
     setAnalysisRequested(false);
+    setStageSevenOpen(false);
+    acceptNextSnapshotRef.current = true;
     setKeepResult(false);
     setKeepRecording(true);
     setViewStage(1);
@@ -978,6 +1018,7 @@ export default function PageRecorder({
     cancellingRef.current = false;
     setCancelling(false);
     setAnalysisRequested(false);
+    setStageSevenOpen(false);
     closeRecordingSocket();
     setOpeningId(item.id);
     actionRef.current = item.action;
@@ -1019,7 +1060,9 @@ export default function PageRecorder({
       message.error("请先选择租户");
       return;
     }
-    if (processing || cancellingRef.current) return;
+    if (cancellingRef.current) return;
+    const socketLive = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
+    if (processing && socketLive) return;
     if (item) {
       actionRef.current = item.action;
       activeResultIdRef.current = item.id;
@@ -1040,6 +1083,22 @@ export default function PageRecorder({
     activeResultIdRef.current = resultId;
     setActiveResultId(resultId);
     closeRecordingSocket();
+    acceptNextSnapshotRef.current = true;
+    setStageSevenOpen(true);
+    const starting: WorkflowSnapshot = {
+      run_id: "",
+      action: item?.action || actionRef.current,
+      title: item?.title || title,
+      revision: 0,
+      status: "processing",
+      progress: { step: "verifying", label: "正在启动机器验证", round: 0 },
+      draft: snapshotRef.current?.draft || null,
+      capture_frozen: true,
+      activity: [],
+      issues: [],
+    };
+    snapshotRef.current = starting;
+    setSnapshot(starting);
     setAnalysisRequested(true);
     setThoughts([]);
     setExpandedTools({});
@@ -1299,10 +1358,14 @@ export default function PageRecorder({
       flushDraftEdits();
       return;
     }
-    send({ type: "republish",
+    const payload = {
+      type: "republish",
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
-    });
+    };
+    if (send(payload)) return;
+    republishRequestedRef.current = true;
+    startAnalysis();
   }
 
   function requestPublish() {
@@ -2242,7 +2305,9 @@ export default function PageRecorder({
       : "default";
     const statusLabel = cancelling && status !== "cancelled"
       ? "正在终止"
-      : (snapshot?.progress.label || STATUS_LABELS[status]);
+      : snapshot?.error
+        ? snapshot.error
+        : (snapshot?.progress.label || STATUS_LABELS[status]);
 
     // ── Map entries to Ant Timeline items ────────────────────────────────────
     const tlItems = entries.map((entry, ei): NonNullable<React.ComponentProps<typeof Timeline>["items"]>[number] => {
