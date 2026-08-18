@@ -301,5 +301,6 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "openRecordingSocket" not in history_load
     assert "new WebSocket" not in history_load
     result_view = recorder.split("function renderResult()", 1)[1]
-    assert "showLiveVerificationLog ? renderVerificationLog()" in result_view
+    assert "showLiveVerificationLog ? renderVerificationLog() : (" in result_view
+    assert "RESULT_STATUS_BOX_STYLE" in recorder
     assert "renderVerificationLog" in recorder

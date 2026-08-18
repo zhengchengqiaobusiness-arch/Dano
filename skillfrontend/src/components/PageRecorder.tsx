@@ -309,6 +309,8 @@ function fmtHistoryTime(value?: string) {
   return date.toLocaleString();
 }
 
+const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 360, boxSizing: "border-box" as const };
+
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
@@ -1930,10 +1932,19 @@ export default function PageRecorder({
             {snapshot?.progress.round ? <Text type="secondary">第 {snapshot.progress.round} 轮</Text> : null}
           </Space>
         )}
-        style={{ marginTop: 12 }}
+        style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
+        styles={{
+          body: {
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          },
+        }}
       >
         {renderOperatorQuestion()}
-        <div ref={verificationLogRef} style={{ maxHeight: 280, overflow: "auto" }}>
+        <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
           {activities.length ? (
             <List
               size="small"
@@ -2005,13 +2016,17 @@ export default function PageRecorder({
     );
     return (
       <Card>
-        <Alert
-          showIcon
-          type={issueType(status)}
-          message={STATUS_LABELS[status]}
-          description={description}
-        />
-        {showLiveVerificationLog ? renderVerificationLog() : null}
+        <div style={RESULT_STATUS_BOX_STYLE}>
+          {showLiveVerificationLog ? renderVerificationLog() : (
+            <Alert
+              showIcon
+              type={issueType(status)}
+              message={STATUS_LABELS[status]}
+              description={description}
+              style={{ width: "100%", height: "100%", overflow: "auto" }}
+            />
+          )}
+        </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
             <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>
