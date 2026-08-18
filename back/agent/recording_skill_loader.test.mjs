@@ -49,6 +49,20 @@ async function loadOnly(skillPath, { cwd = BACK_DIR, agentDir } = {}) {
   return { loader, result: loader.getSkills() };
 }
 
+function skillMarkdownBody(raw) {
+  return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim().replace(/\r\n/g, "\n");
+}
+
+function expandedSkillBody(expanded, task) {
+  const match = expanded.match(/^<skill[\s\S]*?>\n?([\s\S]*?)<\/skill>/);
+  assert.ok(match, "expanded Skill output must include a skill wrapper");
+  assert.equal(expanded.slice(match.index + match[0].length).trim(), task.trim());
+  return match[1]
+    .replace(/^References are relative to[^\n]*\n\n/, "")
+    .trim()
+    .replace(/\r\n/g, "\n");
+}
+
 test("loads exactly the project recording analysis Skill from the required path", async () => {
   const { result } = await loadOnly(SKILL_DIR);
 
@@ -87,10 +101,10 @@ test("Pi native skill expansion places the complete Skill body before the task",
     _extensionRunner: { emitError: (error) => assert.fail(String(error)) },
   }, `/skill:${SKILL_NAME} ${task}`);
   const raw = await readFile(SKILL_FILE, "utf8");
-  const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+  const body = skillMarkdownBody(raw);
 
   assert.match(expanded, new RegExp(`<skill name="${SKILL_NAME}"`));
-  assert.ok(expanded.includes(body));
+  assert.equal(expandedSkillBody(expanded, task), body);
   assert.ok(expanded.trim().endsWith(task));
 });
 
@@ -98,9 +112,7 @@ test("runtime applies one Skill to all and only recording analysis phases", asyn
   const runtime = await readFile(RUNTIME_FILE, "utf8");
   const client = await readFile(CLIENT_FILE, "utf8");
   const { loader } = await loadOnly(SKILL_DIR);
-  const skillBody = (await readFile(SKILL_FILE, "utf8"))
-    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "")
-    .trim();
+  const skillBody = skillMarkdownBody(await readFile(SKILL_FILE, "utf8"));
 
   assert.match(runtime, /noSkills:\s*true/);
   assert.match(runtime, /additionalSkillPaths:\s*\[RECORDING_ANALYSIS_SKILL_PATH\]/);
@@ -115,7 +127,7 @@ test("runtime applies one Skill to all and only recording analysis phases", asyn
       resourceLoader: loader,
       _extensionRunner: { emitError: (error) => assert.fail(String(error)) },
     }, `/skill:${SKILL_NAME} ${task}`);
-    assert.ok(expanded.includes(skillBody), `${phase} did not receive the complete Skill body`);
+    assert.equal(expandedSkillBody(expanded, task), skillBody, `${phase} did not receive the complete Skill body`);
     assert.ok(expanded.trim().endsWith(task), `${phase} task was not preserved after Skill expansion`);
   }
   assert.match(client, /prompt_mode="recording_analysis"/);
@@ -194,6 +206,11 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /expose one\s+caller choice per required label/i);
   assert.match(skill, /confirmed captured response binding supplies a later request inside the same capability/i);
   assert.match(skill, /exact current request identities/i);
+  assert.match(skill, /sole author of business semantics/i);
+  assert.match(skill, /Never treat a mismatch between goal wording and observed actions as a failure/i);
+  assert.match(skill, /source_request_id/i);
+  assert.match(skill, /resubmit\s+the complete current `semantic_plan`/i);
+  assert.match(skill, /Judge each field independently in this order/i);
   assert.match(runtime, /recording_submission_retry/);
   assert.match(runtime, /missing_submission/);
 });

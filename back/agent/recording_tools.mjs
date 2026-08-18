@@ -348,14 +348,9 @@ export function sanitizeRecordingToolParams(name, params) {
     allowed.filter((key) => key in params).map((key) => [key, params[key]]),
   );
   if (typeof sanitized.plan === "string") {
-    try {
-      const decoded = JSON.parse(sanitized.plan);
-      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
-        sanitized.plan = decoded;
-      }
-    } catch {
-      // Preserve malformed text for the deterministic invalid-plan fallback.
-    }
+    delete sanitized.plan;
+    sanitized.submission_error = "invalid_non_object_plan";
+    return sanitized;
   }
   let plan = (
     sanitized.plan
@@ -854,15 +849,12 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的严格类型语义增量。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；实时任务中的 capabilities 必须是截至当前事实的完整能力边界而非本批增量，后续轮次必须保留仍成立的已有能力。capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和录制值匹配或机器验证的依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 七分类为 caller_input、constant、session、context、response_binding、computed、generated，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。plan 必须直接传结构化对象，禁止 JSON 字符串。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；实时任务中的 capabilities 必须是截至当前事实的完整能力边界而非本批增量，后续轮次必须保留仍成立的已有能力。capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和录制值匹配或机器验证的依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 七分类为 caller_input、constant、session、context、response_binding、computed、generated，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: Type.Optional(Type.Union([
-          RecordingPlan,
-          Type.String({ minLength: 1 }),
-        ])),
+        plan: Type.Optional(RecordingPlan),
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.

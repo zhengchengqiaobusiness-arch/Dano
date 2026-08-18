@@ -270,11 +270,17 @@ function verifyServerOwnedRecordingContext() {
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
   const planSchema = planTool?.parameters?.properties?.plan;
-  const planVariants = planSchema?.anyOf || [];
-  const structuredPlanSchema = planVariants.find((variant) => variant?.type === "object");
+  const planVariants = planSchema?.anyOf || (planSchema?.type === "object" ? [planSchema] : []);
+  const structuredPlanSchema = planVariants.find((variant) => variant?.type === "object")
+    || (planSchema?.type === "object" ? planSchema : null);
   assert(
-    structuredPlanSchema && planVariants.some((variant) => variant?.type === "string"),
-    "plan boundary must accept structured plans and recover JSON-stringified plans",
+    structuredPlanSchema?.type === "object",
+    "plan boundary must require a structured object",
+  );
+  assert(
+    planSchema?.type !== "string"
+      && !planVariants.some((variant) => variant?.type === "string"),
+    "plan schema must not accept JSON strings",
   );
   assert(
     planTool?.description?.includes("plan.ops")
@@ -452,8 +458,18 @@ function verifyPlanToolCompatibility() {
     plan: JSON.stringify(plan),
   });
   assert(
-    JSON.stringify(stringified.plan) === JSON.stringify(sanitized.plan),
-    "JSON-stringified plans were not recovered to the canonical structured plan",
+    stringified.submission_error === "invalid_non_object_plan"
+      && !("plan" in stringified),
+    "JSON-stringified plans must be rejected instead of recovered",
+  );
+  const extraBrace = sanitizeRecordingToolParams("submit_recording_plan", {
+    base_flow_version: 3,
+    plan: `${JSON.stringify(plan)}}`,
+  });
+  assert(
+    extraBrace.submission_error === "invalid_non_object_plan"
+      && !("plan" in extraBrace),
+    "malformed trailing-brace plan strings must be rejected",
   );
 }
 
