@@ -31,7 +31,7 @@ import type {
   PointerEvent,
   WheelEvent,
 } from "react";
-import { deleteRecordingResult, listRecordingResults } from "../api/recording";
+import { deleteRecordingResult, getRecordingResult, listRecordingResults } from "../api/recording";
 import type { RecordingResultSummary } from "../api/recording";
 
 const { Text, Title } = Typography;
@@ -353,7 +353,7 @@ function activityDisplay(item: { status: string; label: string }) {
 }
 
 function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
-  if (resumeOnly) return status === "idle" ? 0 : 2;
+  if (resumeOnly) return 2;
   if (status === "idle") return 0;
   if (verificationLive && ["processing", "waiting_operator"].includes(status)) return 2;
   if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
@@ -423,13 +423,6 @@ function releaseUsedMachineVerification(release?: Record<string, unknown> | null
   );
 }
 
-function issueType(status: WorkflowStatus): "success" | "warning" | "error" | "info" {
-  if (status === "published") return "success";
-  if (status === "failed") return "error";
-  if (status === "editable") return "warning";
-  return "info";
-}
-
 export default function PageRecorder({
   tenant,
   subsystem,
@@ -458,10 +451,13 @@ export default function PageRecorder({
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
+  const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [activeResultId, setActiveResultId] = useState("");
   const [deletingId, setDeletingId] = useState("");
+  const [openingId, setOpeningId] = useState("");
+  const [analysisRequested, setAnalysisRequested] = useState(false);
   const reachedStageRef = useRef(0);
   const verificationLogRef = useRef<HTMLDivElement | null>(null);
 
@@ -488,6 +484,7 @@ export default function PageRecorder({
   const reconnectAttemptRef = useRef(0);
   const closingRef = useRef(false);
   const finishRequestedRef = useRef(false);
+  const cancellingRef = useRef(false);
   const machineVerificationRef = useRef(setup.machineVerification);
   const socketInitRef = useRef<Record<string, unknown> | null>(null);
   const activeResultIdRef = useRef("");
@@ -500,12 +497,7 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const historyLocked = connecting || processing || Boolean(activeResultId && processing) || Boolean(deletingId);
-  const showLiveVerificationLog = resumeOnly || machineVerification
-    || releaseUsedMachineVerification(snapshot?.release)
-    || Boolean((snapshot?.activity || []).length)
-    || Boolean(snapshot?.question)
-    || Boolean(thoughts.length);
+  const runBusy = (analysisRequested || connecting || processing) && !cancelling && status !== "cancelled";
   const reachedStage = pageStage(status, resumeOnly, machineVerification && processing);
 
   useEffect(() => {
@@ -581,10 +573,19 @@ export default function PageRecorder({
 
   useEffect(() => {
     if (["published", "editable", "failed", "cancelled"].includes(status)) {
-      activeResultIdRef.current = "";
-      setActiveResultId("");
+      cancellingRef.current = false;
+      setCancelling(false);
+      setAnalysisRequested(false);
+      if (status === "cancelled") {
+        socketInitRef.current = null;
+        closeRecordingSocket();
+      }
+      if (!resumeOnly) {
+        activeResultIdRef.current = "";
+        setActiveResultId("");
+      }
     }
-  }, [status]);
+  }, [status, resumeOnly]);
 
   useEffect(() => {
     const box = verificationLogRef.current;
@@ -605,6 +606,26 @@ export default function PageRecorder({
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
     };
   }, []);
+
+  function stopReconnect() {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }
+
+  function closeRecordingSocket() {
+    stopReconnect();
+    const socket = wsRef.current;
+    wsRef.current = null;
+    setConnected(false);
+    setConnecting(false);
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
+  }
+
+  function canAutoReconnectRecording() {
+    return snapshotRef.current?.status === "recording" && socketInitRef.current?.type === "start";
+  }
 
   function send(payload: Record<string, unknown>) {
     const socket = wsRef.current;
@@ -842,14 +863,16 @@ export default function PageRecorder({
     // onclose owns reconnects; a transient transport error is not a workflow failure.
     socket.onerror = () => undefined;
     socket.onclose = () => {
-      if (wsRef.current === socket) wsRef.current = null;
+      if (wsRef.current !== socket) return;
+      wsRef.current = null;
       setConnected(false);
       setConnecting(false);
-      if (closingRef.current || !actionRef.current) return;
+      if (closingRef.current || cancellingRef.current || !canAutoReconnectRecording()) return;
       reconnectAttemptRef.current += 1;
       const delay = Math.min(5000, 500 * (2 ** Math.min(4, reconnectAttemptRef.current)));
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null;
+        if (!canAutoReconnectRecording()) return;
         openRecordingSocket(actionRef.current);
       }, delay);
     };
@@ -864,7 +887,7 @@ export default function PageRecorder({
       message.error("请填写业务页地址和录制目标");
       return;
     }
-    if (wsRef.current || connecting || processing) return;
+    closeRecordingSocket();
     const action = newActionName();
     actionRef.current = action;
     activeResultIdRef.current = "";
@@ -906,12 +929,33 @@ export default function PageRecorder({
     openRecordingSocket(action);
   }
 
-  function continueOptimization(item: RecordingResultSummary) {
+  function applyViewedDraft(item: RecordingResultSummary, draft: FlowSpec | null) {
+    const next: WorkflowSnapshot = {
+      run_id: "",
+      action: item.action,
+      title: item.title,
+      revision: 0,
+      status: "editable",
+      progress: { step: "ready", label: "已打开录制结果，点击开始分析" },
+      draft,
+      capture_frozen: true,
+    };
+    snapshotRef.current = next;
+    setSnapshot(next);
+    if (item.title) setTitle(item.title);
+  }
+
+  async function openResult(item: RecordingResultSummary) {
     if (!tenant) {
       message.error("请先选择租户");
       return;
     }
-    if (wsRef.current || connecting || processing || activeResultIdRef.current || deletingIdRef.current) return;
+    if (deletingIdRef.current || openingId) return;
+    cancellingRef.current = false;
+    setCancelling(false);
+    setAnalysisRequested(false);
+    closeRecordingSocket();
+    setOpeningId(item.id);
     actionRef.current = item.action;
     activeResultIdRef.current = item.id;
     setActiveResultId(item.id);
@@ -920,9 +964,6 @@ export default function PageRecorder({
     setKeepResult(true);
     setViewStage(2);
     reachedStageRef.current = 2;
-    setConnecting(true);
-    snapshotRef.current = null;
-    setSnapshot(null);
     setThoughts([]);
     pendingEditsRef.current = [];
     patchInFlightRef.current = null;
@@ -933,17 +974,46 @@ export default function PageRecorder({
     setLocalValues({});
     setLocalCapabilityStepIds({});
     setEditingResult(false);
+    socketInitRef.current = null;
+    try {
+      const detail = await getRecordingResult(item.id);
+      applyViewedDraft(item, (detail.draft || null) as FlowSpec | null);
+    } catch {
+      message.error("打开录制结果失败");
+      setKeepResult(false);
+      setViewStage(0);
+      setResumeOnly(false);
+    } finally {
+      setOpeningId("");
+    }
+  }
+
+  function startAnalysis() {
+    if (!tenant) {
+      message.error("请先选择租户");
+      return;
+    }
+    const resultId = activeResultIdRef.current;
+    if (!resultId || runBusy || cancellingRef.current) return;
+    setAnalysisRequested(true);
+    setThoughts([]);
+    setConnecting(true);
     socketInitRef.current = {
       type: "resume_verification",
-      result_id: item.id,
+      result_id: resultId,
       tenant,
       subsystem,
+      restart: true,
     };
-    openRecordingSocket(item.action);
+    openRecordingSocket(actionRef.current);
   }
 
   async function removeResult(item: RecordingResultSummary) {
-    if (historyLocked || deletingIdRef.current || activeResultIdRef.current === item.id) return;
+    if (deletingIdRef.current) return;
+    if (activeResultIdRef.current === item.id && runBusy) {
+      message.warning("请先终止分析再删除");
+      return;
+    }
     if (!window.confirm(`删除「${item.title || item.action}」的录制结果？已发布 Skill 不会被删除。`)) {
       return;
     }
@@ -952,6 +1022,16 @@ export default function PageRecorder({
     try {
       await deleteRecordingResult(item.id);
       setHistory((current) => current.filter((row) => row.id !== item.id));
+      if (activeResultIdRef.current === item.id) {
+        closeRecordingSocket();
+        activeResultIdRef.current = "";
+        setActiveResultId("");
+        setResumeOnly(false);
+        setKeepResult(false);
+        setViewStage(0);
+        snapshotRef.current = null;
+        setSnapshot(null);
+      }
     } catch {
       message.error("删除录制结果失败");
     } finally {
@@ -962,37 +1042,6 @@ export default function PageRecorder({
 
   function historyPublishLabel(item: RecordingResultSummary) {
     return item.published ? "已发布" : "";
-  }
-
-  function historyExecutionStatus(item: RecordingResultSummary) {
-    const current = Boolean(
-      (item.action && item.action === actionRef.current)
-      || (activeResultId && activeResultId === item.id),
-    );
-    const step = String(snapshot?.progress.step || "");
-    if (current && (connecting || status === "recording")) {
-      return { color: "processing" as const, text: "录制中" };
-    }
-    if (current && status === "waiting_operator") {
-      return { color: "warning" as const, text: "等待确认" };
-    }
-    if (current && status === "processing") {
-      if (step === "publishing" || step === "exporting") {
-        return { color: "processing" as const, text: "正在发布" };
-      }
-      if (resumeOnly || ["verifying", "resolving", "compiling"].includes(step)) {
-        return { color: "processing" as const, text: "验证中" };
-      }
-      return { color: "processing" as const, text: "分析中" };
-    }
-    if (current && status === "failed") {
-      return { color: "error" as const, text: "执行失败" };
-    }
-    if (current && status === "cancelled") {
-      return { color: "default" as const, text: "已终止" };
-    }
-    if (item.published) return { color: "default" as const, text: "已完成" };
-    return { color: "default" as const, text: "未发布" };
   }
 
   function finishRecording() {
@@ -1011,7 +1060,10 @@ export default function PageRecorder({
   }
 
   function cancelProcessing() {
-    send({ type: "cancel" });
+    if (cancellingRef.current) return;
+    if (!send({ type: "cancel" })) return;
+    cancellingRef.current = true;
+    setCancelling(true);
   }
 
   function answerQuestion(value?: string) {
@@ -1349,8 +1401,14 @@ export default function PageRecorder({
               placeholder="例如：请假申请"
               style={{ flex: 0.8, minWidth: 120 }}
             />
-            {["idle", "published", "failed", "cancelled"].includes(status) ? (
-              <Button type="primary" loading={connecting} disabled={historyLocked} onClick={startRecording} style={{ flexShrink: 0 }}>
+            {status !== "recording" ? (
+              <Button
+                type="primary"
+                loading={connecting && !resumeOnly}
+                disabled={processing && !resumeOnly}
+                onClick={startRecording}
+                style={{ flexShrink: 0 }}
+              >
                 开始录制
               </Button>
             ) : null}
@@ -1407,14 +1465,6 @@ export default function PageRecorder({
               render: (_, item) => item.request_count,
             },
             {
-              title: "执行状态",
-              width: 110,
-              render: (_, item) => {
-                const itemStatus = historyExecutionStatus(item);
-                return <Tag color={itemStatus.color}>{itemStatus.text}</Tag>;
-              },
-            },
-            {
               title: "产出时间",
               width: 180,
               render: (_, item) => (
@@ -1423,28 +1473,24 @@ export default function PageRecorder({
             },
             {
               title: "操作",
-              width: 220,
-              render: (_, item) => {
-                const itemBusy = Boolean(activeResultId === item.id && (connecting || processing));
-                return (
-                  <Space>
-                    <Button
-                      size="small"
-                      disabled={historyLocked}
-                      loading={itemBusy}
-                      onClick={() => continueOptimization(item)}
-                    >继续优化</Button>
-                    <Button
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      disabled={historyLocked || itemBusy}
-                      loading={deletingId === item.id}
-                      onClick={() => removeResult(item)}
-                    >删除</Button>
-                  </Space>
-                );
-              },
+              width: 160,
+              render: (_, item) => (
+                <Space>
+                  <Button
+                    size="small"
+                    loading={openingId === item.id}
+                    onClick={() => openResult(item)}
+                  >查看</Button>
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    disabled={deletingId === item.id}
+                    loading={deletingId === item.id}
+                    onClick={() => removeResult(item)}
+                  >删除</Button>
+                </Space>
+              ),
             },
           ]}
         />
@@ -1481,8 +1527,8 @@ export default function PageRecorder({
             >
               停止并发布
             </Button>
-            {processing ? (
-              <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>一键终止</Button>
+            {processing || cancelling ? (
+              <Button danger icon={<StopOutlined />} loading={cancelling} onClick={cancelProcessing}>一键终止</Button>
             ) : null}
             <Button icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}>录制助手</Button>
           </div>
@@ -2055,6 +2101,28 @@ export default function PageRecorder({
     );
   }
 
+  function renderAnalysisActions(size: "small" | "middle" = "small") {
+    return (
+      <Space>
+        <Button
+          type="primary"
+          size={size}
+          loading={connecting && !processing && !cancelling}
+          disabled={runBusy || !activeResultId}
+          onClick={startAnalysis}
+        >开始分析</Button>
+        <Button
+          danger
+          size={size}
+          icon={<StopOutlined />}
+          loading={cancelling}
+          disabled={!processing && !connecting && !cancelling}
+          onClick={cancelProcessing}
+        >终止分析</Button>
+      </Space>
+    );
+  }
+
   function renderVerificationLog() {
     const activities = snapshot?.activity || [];
     const insights = snapshot?.insights || [];
@@ -2063,16 +2131,14 @@ export default function PageRecorder({
         size="small"
         title={(
           <Space>
-            <Text>实时验证日志</Text>
-            <Tag color={status === "waiting_operator" ? "warning" : processing ? "processing" : status === "published" ? "success" : "default"}>
-              {snapshot?.progress.label || STATUS_LABELS[status]}
+            <Text>实时分析日志</Text>
+            <Tag color={cancelling ? "warning" : status === "waiting_operator" ? "warning" : processing ? "processing" : status === "published" ? "success" : "default"}>
+              {cancelling && status !== "cancelled" ? "正在终止" : (snapshot?.progress.label || STATUS_LABELS[status])}
             </Tag>
             {snapshot?.progress.round ? <Text type="secondary">第 {snapshot.progress.round} 轮</Text> : null}
           </Space>
         )}
-        extra={processing || connecting ? (
-          <Button danger size="small" icon={<StopOutlined />} onClick={cancelProcessing}>终止</Button>
-        ) : null}
+        extra={renderAnalysisActions("small")}
         style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
         styles={{
           body: {
@@ -2127,7 +2193,7 @@ export default function PageRecorder({
           {!thoughts.length && !activities.length && !insights.length ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={processing ? "等待模型开口…" : "暂无验证日志"}
+              description={processing || connecting ? "等待模型开口…" : "点击开始分析后显示实时日志"}
             />
           ) : null}
         </div>
@@ -2136,41 +2202,10 @@ export default function PageRecorder({
   }
 
   function renderResult() {
-    const description = (
-      <Space direction="vertical" size={4}>
-        <Text>{snapshot?.progress.label || STATUS_LABELS[status]}</Text>
-        {snapshot?.error ? <Text type="danger">{snapshot.error}</Text> : null}
-        {(snapshot?.issues || []).map((issue) => (
-          <Text key={issue.issue_id} type={issue.severity === "blocking" ? "danger" : "warning"}>
-            {issue.message}
-          </Text>
-        ))}
-        {status === "published" && snapshot?.release ? (
-          <Text type="success">
-            {releaseUsedMachineVerification(snapshot.release)
-              ? "能力已通过机器验证并发布；Skill 导出仅包含本次动作的发布结果。"
-              : "能力已按实时分析结果直接发布；Skill 导出仅包含本次动作的发布结果。"}
-          </Text>
-        ) : null}
-        {status === "published" && snapshot?.release?.lifecycle_pending ? (
-          <Text type="warning">
-            {String(snapshot.release.lifecycle_message || "资产已发布，生命周期登记待补偿")}
-          </Text>
-        ) : null}
-      </Space>
-    );
     return (
       <Card>
         <div style={RESULT_STATUS_BOX_STYLE}>
-          {showLiveVerificationLog ? renderVerificationLog() : (
-            <Alert
-              showIcon
-              type={issueType(status)}
-              message={STATUS_LABELS[status]}
-              description={description}
-              style={{ width: "100%", height: "100%", overflow: "auto" }}
-            />
-          )}
+          {renderVerificationLog()}
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
@@ -2190,9 +2225,7 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
-              {processing || connecting ? (
-                <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>终止</Button>
-              ) : null}
+              {renderAnalysisActions("middle")}
               <Button
                 disabled={!draft || processing}
                 onClick={() => setEditingResult(true)}

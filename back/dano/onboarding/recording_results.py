@@ -78,6 +78,23 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
     }
 
 
+def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
+    """Return one saved result plus its client FlowSpec for the capability page."""
+
+    payload = recording_result_summary(draft)
+    spec = draft.body.get("flow_spec") if isinstance(draft.body, dict) else None
+    if not isinstance(spec, dict):
+        payload["draft"] = None
+        return payload
+    try:
+        from dano.execution.page.flow_spec import FlowSpec, flow_spec_to_client
+
+        payload["draft"] = flow_spec_to_client(FlowSpec.model_validate(spec))
+    except Exception:  # noqa: BLE001 - viewing must still open with the saved draft
+        payload["draft"] = spec
+    return payload
+
+
 async def persist_stage_six_result(
     store: DraftStore,
     *,

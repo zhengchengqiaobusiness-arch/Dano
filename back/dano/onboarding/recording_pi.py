@@ -1037,9 +1037,10 @@ class RecordingPiSession:
                 self._server.should_exit = True
             if self._server_task is not None:
                 try:
-                    await self._server_task
-                except BaseException:  # noqa: BLE001
-                    pass
+                    await asyncio.wait_for(self._server_task, timeout=3.0)
+                except (asyncio.TimeoutError, BaseException):  # noqa: BLE001
+                    self._server_task.cancel()
+                    await asyncio.gather(self._server_task, return_exceptions=True)
         finally:
             runs.unregister(self.run_id)
             materials.clear_run(self.run_id)

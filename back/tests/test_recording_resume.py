@@ -199,7 +199,12 @@ async def test_attach_or_resume_reuses_verification_session() -> None:
     )
     first.capture = None
     first.workflow = RecordingWorkflow(
-        WorkflowSnapshot(run_id="r1", action=first.config.action, draft=_draft()),
+        WorkflowSnapshot(
+            run_id="r1",
+            action=first.config.action,
+            status=WorkflowStatus.PROCESSING,
+            draft=_draft(),
+        ),
         FakePipeline(),
     )
     registry._sessions[first.config.action] = first
@@ -213,6 +218,90 @@ async def test_attach_or_resume_reuses_verification_session() -> None:
         title="请假",
     )
     assert attached is first
+
+
+@pytest.mark.asyncio
+async def test_attach_or_resume_restart_replaces_in_flight_session(monkeypatch) -> None:
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        "dano.onboarding.recording_gateway.SelfHealingPipeline",
+        lambda *_args, **_kwargs: pipeline,
+    )
+    registry = RecordingSessionRegistry()
+    first = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    first.capture = None
+    first.workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action=first.config.action,
+            status=WorkflowStatus.PROCESSING,
+            draft=_draft(),
+            capture_frozen=True,
+        ),
+        FakePipeline(),
+    )
+    registry._sessions[first.config.action] = first
+
+    attached = await registry.attach_or_resume(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("fake pipeline")),
+        draft=_draft(),
+        title="请假",
+        restart=True,
+    )
+    assert attached is not first
+    await attached.workflow.wait()
+    assert pipeline.seeds
+    assert attached.workflow.snapshot.status == WorkflowStatus.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_attach_or_resume_restarts_cancelled_verification(monkeypatch) -> None:
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        "dano.onboarding.recording_gateway.SelfHealingPipeline",
+        lambda *_args, **_kwargs: pipeline,
+    )
+    registry = RecordingSessionRegistry()
+    first = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    first.capture = None
+    first.workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action=first.config.action,
+            status=WorkflowStatus.CANCELLED,
+            draft=_draft(),
+            capture_frozen=True,
+        ),
+        FakePipeline(),
+    )
+    registry._sessions[first.config.action] = first
+
+    attached = await registry.attach_or_resume(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("fake pipeline")),
+        draft=_draft(),
+        title="请假",
+        restart=True,
+    )
+    assert attached is not first
+    await attached.workflow.wait()
+    assert pipeline.seeds
+    assert attached.workflow.snapshot.status == WorkflowStatus.PUBLISHED
 
 
 @pytest.mark.asyncio
@@ -274,6 +363,46 @@ async def test_list_recording_results_returns_summaries_only(monkeypatch) -> Non
     assert "flow_spec" not in rows[0]
 
 
+@pytest.mark.asyncio
+async def test_get_recording_result_returns_client_draft(monkeypatch) -> None:
+    from dano.gateway import app as gateway
+    from dano.onboarding.recording_results import recording_result_asset_key, stage_six_result_body
+
+    monkeypatch.setattr(gateway, "_auth_tenant", AsyncMock(return_value="tenant"))
+    result_id = uuid4()
+    body = stage_six_result_body(
+        action="action_1",
+        title="请假申请",
+        goal="提交请假",
+        tenant="tenant",
+        subsystem="oa",
+        draft=_draft(),
+    )
+    saved = AssetDraft(
+        asset_draft_id=result_id,
+        run_id="r1",
+        tenant="tenant",
+        subsystem=Subsystem("oa"),
+        asset_type=AssetType.PAGE_SCRIPT,
+        asset_key=recording_result_asset_key("action_1"),
+        body=body,
+        content_hash="sha256:test",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    class Store:
+        async def get_draft(self, saved_id):  # noqa: ANN001
+            assert saved_id == result_id
+            return saved
+
+    monkeypatch.setattr("dano.assets.drafts.DraftStore", Store)
+    payload = await gateway.get_recording_result(str(result_id), x_tenant_key="key")
+    assert payload["id"] == str(result_id)
+    assert payload["title"] == "请假申请"
+    assert isinstance(payload["draft"], dict)
+    assert payload["draft"]["capabilities"][0]["name"] == "submit"
+
+
 def test_setup_history_does_not_autostart_recording() -> None:
     recorder = (
         Path(__file__).resolve().parents[2]
@@ -283,31 +412,45 @@ def test_setup_history_does_not_autostart_recording() -> None:
         / "PageRecorder.tsx"
     ).read_text(encoding="utf-8")
     assert "历史录制结果" in recorder
-    assert "继续优化" in recorder
+    assert ">查看</Button>" in recorder
+    assert "继续优化" not in recorder
     assert 'title: "Skill"' in recorder
     assert "产出时间" in recorder
+    assert 'title: "执行状态"' not in recorder
+    assert "historyExecutionStatus" not in recorder
     assert "等待确认" in recorder
     assert "回复并继续" in recorder
     assert "renderOperatorQuestion" in recorder
     assert "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。" not in recorder.split("历史录制结果", 1)[1].split("function renderRecording()", 1)[0]
     assert "listRecordingResults(subsystem)" in recorder
+    assert "getRecordingResult" in recorder
+    assert "function openResult" in recorder
+    assert "function startAnalysis" in recorder
+    assert "function renderAnalysisActions" in recorder
+    assert ">开始分析</Button>" in recorder
+    assert ">终止分析</Button>" in recorder
     assert 'type: "resume_verification"' in recorder
-    assert "实时验证日志" in recorder
-    assert "disabled={historyLocked}" in recorder
+    assert "restart: true" in recorder
+    assert "canAutoReconnectRecording" in recorder
+    assert "closeRecordingSocket" in recorder
+    assert "正在终止" in recorder
+    gateway = (Path(__file__).resolve().parents[1] / "dano" / "gateway" / "app.py").read_text(encoding="utf-8")
+    assert "restart=init.get(\"restart\") is True" in gateway
+    assert "实时分析日志" in recorder
     assert "recording_result_saved" in recorder
     assert "setInterval" not in recorder
     history_load = recorder.split("setHistoryLoading(true)", 1)[1].split("}, [tenant, subsystem]);", 1)[0]
     assert "listRecordingResults(subsystem)" in history_load
     assert "openRecordingSocket" not in history_load
     assert "new WebSocket" not in history_load
+    history_view = recorder.split("历史录制结果", 1)[1].split("function renderRecording()", 1)[0]
+    assert "openRecordingSocket" not in history_view
+    assert "startAnalysis" not in history_view
     result_view = recorder.split("function renderResult()", 1)[1]
-    assert "showLiveVerificationLog ? renderVerificationLog() : (" in result_view
+    assert "renderVerificationLog()" in result_view
     assert "RESULT_STATUS_BOX_STYLE" in recorder
     assert "renderVerificationLog" in recorder
     assert "defaultActiveKey={[]}" in recorder
-    assert 'title: "执行状态"' in recorder
-    assert "正在发布" in recorder
-    assert "historyExecutionStatus" in recorder
     assert "activityDisplay" in recorder
     assert 'label: "发现了"' in recorder
     assert 'label: "准备处理"' in recorder
@@ -317,5 +460,5 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "renderThoughtBlock" in recorder
     assert "等待返回" in recorder
     assert "cancelProcessing" in recorder
-    assert "onClick={cancelProcessing}" in result_view
-    assert ">终止</Button>" in result_view
+    assert "renderAnalysisActions" in result_view
+    assert ">终止分析</Button>" in recorder

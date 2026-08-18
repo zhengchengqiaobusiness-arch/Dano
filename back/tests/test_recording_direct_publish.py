@@ -258,6 +258,46 @@ async def test_cancel_keeps_stage_six_draft() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_marks_cancelled_before_slow_teardown() -> None:
+    started = asyncio.Event()
+    seen: list[str] = []
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return _draft()
+
+        async def check(self, draft, context):  # noqa: ANN001
+            started.set()
+            await asyncio.sleep(30)
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("cancelled")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            raise AssertionError("cancelled")
+
+    async def hang_cancel() -> None:
+        await asyncio.sleep(30)
+
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(run_id="r1", action="action_1"),
+        SelfHealingPipeline(Runtime()),
+        listener=lambda snapshot: seen.append(snapshot.status.value),
+        cancel_listener=hang_cancel,
+    )
+    await workflow.start()
+    await workflow.finish(machine_verification=True)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task = asyncio.create_task(workflow.cancel())
+    await asyncio.sleep(0.05)
+    assert workflow.snapshot.status == WorkflowStatus.CANCELLED
+    assert "cancelled" in seen
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_operator_answer_is_written_back_to_flow_spec(monkeypatch) -> None:
     from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep, ParamField
     from dano.onboarding.recording_runtime import ProductionRecordingServices

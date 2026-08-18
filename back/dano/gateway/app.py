@@ -1163,6 +1163,7 @@ async def record_ws(ws: WebSocket) -> None:
                 draft=resume_draft,
                 title=resume_title,
                 result_id=resume_result_id,
+                restart=init.get("restart") is True,
             )
         else:
             session, _created = await _recording_session_registry.attach_or_create(
@@ -1520,6 +1521,29 @@ async def list_recording_results(
             reverse=True,
         )
     return [recording_result_summary(item) for item in drafts]
+
+
+@app.get("/v1/recording-results/{result_id}")
+async def get_recording_result(
+    result_id: str,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.assets.drafts import DraftStore
+    from dano.onboarding.recording_results import is_recording_result_key, recording_result_detail
+
+    try:
+        parsed = uuid.UUID(result_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    saved = await DraftStore().get_draft(parsed)
+    if (
+        saved is None
+        or saved.tenant != tenant
+        or not is_recording_result_key(saved.asset_key)
+    ):
+        raise HTTPException(status_code=404, detail="录制结果不存在")
+    return recording_result_detail(saved)
 
 
 @app.delete("/v1/recording-results/{result_id}")

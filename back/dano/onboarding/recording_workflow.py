@@ -593,23 +593,42 @@ def _issue_resolution_label(issue: WorkflowIssue) -> str:
 
 
 def _operator_question(issue: WorkflowIssue) -> WorkflowQuestion:
-    if issue.code == "required_axis_unconfirmed":
+    if issue.code == “required_axis_unconfirmed”:
         field = str(
-            issue.target.get("field_label")
-            or issue.target.get("wire_path")
-            or "该字段"
-        ).removeprefix("body.").removeprefix("query.")
+            issue.target.get(“field_label”)
+            or issue.target.get(“wire_path”)
+            or “该字段”
+        ).removeprefix(“body.”).removeprefix(“query.”)
         return WorkflowQuestion(
-            question_id=f"question:{issue.issue_id}",
+            question_id=f”question:{issue.issue_id}”,
             issue_id=issue.issue_id,
-            text=f"请确认“{field}”在提交申请时是否必须填写。\n请输入“必填”或“可选”。",
-            options=["必填", "可选"],
+            text=f”请确认”{field}”在提交申请时是否必须填写。\n请输入”必填”或”可选”。”,
+            options=[“必填”, “可选”],
+            context_ref=issue.issue_id,
+        )
+    if issue.code == “field_source_unknown”:
+        field = str(
+            issue.target.get(“wire_path”)
+            or issue.target.get(“field_id”)
+            or “该字段”
+        ).removeprefix(“body.”).removeprefix(“query.”)
+        label = str(issue.target.get(“field_label”) or “”)
+        display = f””{label}”（{field}）” if label else f””{field}””
+        return WorkflowQuestion(
+            question_id=f”question:{issue.issue_id}”,
+            issue_id=issue.issue_id,
+            text=(
+                f”字段 {display} 没有可信的来源证据。\n”
+                “请确认：这个字段是调用 Skill 时由用户填写的参数，还是应使用录制时捕获的固定值？\n”
+                “请输入”用户参数”或”固定值”。”
+            ),
+            options=[“用户参数”, “固定值”],
             context_ref=issue.issue_id,
         )
     return WorkflowQuestion(
-        question_id=f"question:{issue.issue_id}",
+        question_id=f”question:{issue.issue_id}”,
         issue_id=issue.issue_id,
-        text=f"请确认以下业务规则：{issue.message}",
+        text=f”请确认以下业务规则：{issue.message}”,
         options=[],
         context_ref=issue.issue_id,
     )
@@ -769,15 +788,6 @@ class RecordingWorkflow:
 
     async def cancel(self) -> WorkflowSnapshot:
         self._cancelled = True
-        if self.cancel_listener is not None:
-            cancelled = self.cancel_listener()
-            if isinstance(cancelled, Awaitable):
-                await cancelled
-        if self._answer is not None and not self._answer.done():
-            self._answer.cancel()
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
         if self.snapshot.status not in {
             WorkflowStatus.PUBLISHED,
             WorkflowStatus.CANCELLED,
@@ -792,7 +802,28 @@ class RecordingWorkflow:
                 progress=self._next_progress(WorkflowStep.READY, "当前分析已终止，草稿已保留"),
                 error="",
             )
+        await self._stop_running_work()
         return self.snapshot
+
+    async def _stop_running_work(self) -> None:
+        if self.cancel_listener is not None:
+            try:
+                cancelled = self.cancel_listener()
+                if isinstance(cancelled, Awaitable):
+                    await asyncio.wait_for(cancelled, timeout=8.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - UI already left the run
+                pass
+        if self._answer is not None and not self._answer.done():
+            self._answer.cancel()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(self._task, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def wait(self) -> WorkflowSnapshot:
         task = self._task
@@ -926,6 +957,11 @@ class RecordingWorkflow:
         progress: WorkflowProgress | None = None,
         **changes: Any,
     ) -> None:
+        if self._cancelled and status not in {
+            WorkflowStatus.CANCELLED,
+            WorkflowStatus.PUBLISHED,
+        }:
+            return
         previous = self.snapshot
         self.snapshot = transition_snapshot(self.snapshot, status, progress=progress, **changes)
         current = self.snapshot

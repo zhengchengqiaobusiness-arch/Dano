@@ -353,21 +353,33 @@ class RecordingGatewaySession:
             WorkflowStatus.FAILED,
         }:
             await self.workflow.cancel()
-        if self._pi is not None:
-            await self._pi.close()
-            self._pi = None
+        await self._close_pi()
         if self.capture is not None:
             await self.capture.stop()
             self.capture = None
+
+    async def _close_pi(self) -> None:
+        pi = self._pi
+        self._pi = None
+        if pi is None:
+            return
+        try:
+            await asyncio.wait_for(pi.close(), timeout=8.0)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - cancel must not stall the UI
+            pass
 
     async def _cancel_analysis(self) -> None:
         self._live_pending_reason = ""
         if self._live_task is not None and not self._live_task.done():
             self._live_task.cancel()
-            await asyncio.gather(self._live_task, return_exceptions=True)
-        if self._pi is not None:
-            await self._pi.close()
-            self._pi = None
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(self._live_task, return_exceptions=True),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError:
+                pass
+        await self._close_pi()
 
     async def _materialize(
         self,
@@ -830,6 +842,7 @@ class RecordingGatewaySession:
         })
 
     async def _on_snapshot(self, snapshot: WorkflowSnapshot) -> None:
+        await self._emit_snapshot(snapshot)
         if snapshot.status in {
             WorkflowStatus.PUBLISHED,
             WorkflowStatus.EDITABLE,
@@ -839,7 +852,6 @@ class RecordingGatewaySession:
             await self._mark_stage_six_terminal(
                 published=snapshot.status == WorkflowStatus.PUBLISHED,
             )
-        await self._emit_snapshot(snapshot)
 
     async def _emit_snapshot(self, snapshot: WorkflowSnapshot | None = None) -> None:
         if self.workflow is None:
@@ -922,10 +934,20 @@ class RecordingSessionRegistry:
         draft: dict[str, Any],
         title: str = "",
         result_id: Any = None,
+        restart: bool = False,
     ) -> RecordingGatewaySession:
         async with self._lock:
             existing = self._sessions.get(config.action)
-        if existing is not None and existing.capture is None and existing.workflow is not None:
+        in_flight = (
+            existing is not None
+            and existing.capture is None
+            and existing.workflow is not None
+            and existing.workflow.snapshot.status in {
+                WorkflowStatus.PROCESSING,
+                WorkflowStatus.WAITING_OPERATOR,
+            }
+        )
+        if in_flight and not restart:
             await existing.attach(send)
             return existing
         if existing is not None:
