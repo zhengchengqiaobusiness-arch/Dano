@@ -8619,6 +8619,14 @@ def _param_exposed_to_caller(
         and bool((param.source or {}).get("caller_override"))
     ):
         return bool(param.category == "user_param" and param.exposed_to_user)
+    if (
+        param.source_kind == "previous_response"
+        and bool(
+            (param.source or {}).get("allow_caller_override")
+            or (param.source or {}).get("caller_override")
+        )
+    ):
+        return bool(param.category == "user_param" and param.exposed_to_user)
     return bool(
         param.category == "user_param"
         and param.exposed_to_user

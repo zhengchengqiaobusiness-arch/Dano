@@ -156,6 +156,52 @@ async def test_default_off_does_not_add_an_empty_capability_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_off_preserves_but_never_publishes_an_incomplete_live_plan() -> None:
+    published = False
+    incomplete_draft = {
+        "capabilities": ["query", "submit"],
+        "meta": {
+            "capability_model": {"status": "needs_review"},
+            "recording_goal_contract": {
+                "expected_count": 8,
+                "materialized_count": 6,
+                "satisfied": False,
+            },
+            "unresolved_live_agent_ops": [{"op": "rename_field"}],
+        },
+    }
+
+    async def materialize(_use_live, _context):  # noqa: ANN001
+        return incomplete_draft
+
+    async def forbidden(*_args):  # noqa: ANN002
+        raise AssertionError("an incomplete direct export must stop before later stages")
+
+    async def publish(*_args):  # noqa: ANN002
+        nonlocal published
+        published = True
+        return {}
+
+    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
+        materialize_recording=materialize,
+        plan_capabilities=forbidden,
+        verify=forbidden,
+        repair=forbidden,
+        publish=publish,
+    ))
+
+    context = _context()
+    with pytest.raises(RuntimeError, match="实时分析未完成"):
+        await SelfHealingPipeline(runtime).run(
+            PipelineSeed(kind="recording", use_live_notebook=True),
+            context,
+        )
+
+    assert context.latest_draft == incomplete_draft
+    assert published is False
+
+
+@pytest.mark.asyncio
 async def test_republish_uses_edited_draft_without_live_notebook() -> None:
     calls: list[tuple[str, bool]] = []
 

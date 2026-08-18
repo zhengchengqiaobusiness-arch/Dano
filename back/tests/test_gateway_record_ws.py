@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -211,6 +211,22 @@ async def test_websocket_is_a_thin_transport_for_the_canonical_session(monkeypat
     assert instances[0].closed is False
     assert instances[0].detached is True
     assert socket.sent[0]["type"] == "snapshot"
+
+    published: list[dict[str, Any]] = []
+
+    async def publish_recording(**kwargs):  # noqa: ANN003
+        published.append(kwargs)
+        return {"published": True}
+
+    monkeypatch.setattr(gateway, "_publish_canonical_recording", publish_recording)
+    release_spec = SimpleNamespace(title="录制结果名称", goal={"intent": "完成目标"})
+    result = await instances[0].publisher(release_spec, {"candidate": True}, SimpleNamespace(
+        ensure_active=lambda: None,
+    ))
+
+    assert result == {"published": True}
+    assert published[0]["title"] == "录制结果名称"
+    assert published[0]["release_flow_spec"] is release_spec
     await gateway._recording_session_registry.close()
     gateway._recording_session_registry = None
 

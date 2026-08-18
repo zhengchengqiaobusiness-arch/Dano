@@ -300,6 +300,47 @@ async def test_recording_analysis_without_a_plan_submission_is_rejected(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_live_analysis_cannot_reread_before_the_trigger_delta(monkeypatch) -> None:  # noqa: ANN001
+    from dano.execution.page import recording_live
+
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client.bind_live_recording(SimpleNamespace(
+        captured_all_requests=lambda: [],
+        recorded_page_events=lambda: [],
+    ))
+    observed: list[int] = []
+
+    monkeypatch.setattr(
+        recording_live,
+        "recording_delta",
+        lambda _recorder, *, since_seq, **_kwargs: observed.append(since_seq) or {
+            "since_seq": since_seq,
+            "next_seq": since_seq,
+            "has_more": False,
+        },
+    )
+
+    async def no_refresh(**_kwargs):
+        return None
+
+    async def analyze(_text, **_kwargs):  # noqa: ANN001
+        return await client.get_recording_delta(0, limit=50)
+
+    monkeypatch.setattr(client, "refresh_live_evidence", no_refresh)
+    monkeypatch.setattr(client, "prompt", analyze)
+
+    result = await client.notify_live_batch({
+        "reason": "final_request_tail",
+        "since_seq": 110,
+    })
+
+    assert observed == [110]
+    assert result["since_seq"] == 110
+
+
+@pytest.mark.asyncio
 async def test_recording_pi_accepted_submission_wins_over_late_limit(monkeypatch) -> None:  # noqa: ANN001
     client = recording_pi.RecordingPiSession(
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,

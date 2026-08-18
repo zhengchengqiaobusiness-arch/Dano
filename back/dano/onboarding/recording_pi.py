@@ -173,6 +173,7 @@ class RecordingPiSession:
         self.flow_spec: Any = None
         self._live_recorder: Any = None
         self._live_evidence_marker: tuple[Any, ...] | None = None
+        self._live_delta_floor = 0
         self._live_goal_text = ""
         self._operator_asker: Callable[..., Any] | None = None
         self.last_submission_kind = ""
@@ -442,6 +443,11 @@ class RecordingPiSession:
 
         if self._live_recorder is None:
             raise RecordingPiError("实时录制事实源尚未绑定")
+        # A live turn is scoped to the batch that triggered it.  The model may
+        # request an older cursor after context compaction, but replaying the
+        # complete recording here duplicates thousands of facts and can make
+        # the final tail lose the very requests it needs to consolidate.
+        since_seq = max(int(since_seq), int(self._live_delta_floor))
         captured = list(self._live_recorder.captured_all_requests() or [])
         page_events = list(self._live_recorder.recorded_page_events() or [])
         delta = recording_delta(
@@ -604,23 +610,28 @@ class RecordingPiSession:
             else "request_batch"
         )
         goal_text = self._live_goal_text.strip() or "（未提供明确录制目标）"
-        return await self.prompt(
-            "执行当前录制分析任务。"
-            f"analysis_phase={analysis_phase}；触发原因={reason}；since_seq={since_seq}。"
-            f"当前录制目标：{goal_text}。"
-            "录制目标允许使用普通自然语言，禁止要求操作人改写为固定模板。"
-            "若当前目标尚未结构化，先按项目 Skill 用 set_goal 将操作人明确要求的业务动作"
-            "归一化为有序 capabilities；若目标要求保留后续实际操作，则只随已观察到的独立"
-            "业务动作增补，不得根据页面加载流量扩张目标。"
-            "必须按当前项目 Skill 读取这一阶段要求的完整事实；读取增量时若 has_more=true，"
-            "继续用 next_seq 分页直到 has_more=false。必须调用 submit_recording_plan，"
-            "并在 semantic_plan.capabilities 中提交截至当前仍成立的完整能力集合，"
-            "不能只提交本批新增能力，也不能因单个操作失败清空已有能力。"
-            "实时阶段不读取验证报告；只有事实真正无法推导时才可用业务语言询问操作人。",
-            timeout_s=None,
-            prompt_mode="recording_analysis",
-            analysis_phase=analysis_phase,
-        )
+        previous_floor = self._live_delta_floor
+        self._live_delta_floor = since_seq
+        try:
+            return await self.prompt(
+                "执行当前录制分析任务。"
+                f"analysis_phase={analysis_phase}；触发原因={reason}；since_seq={since_seq}。"
+                f"当前录制目标：{goal_text}。"
+                "录制目标允许使用普通自然语言，禁止要求操作人改写为固定模板。"
+                "若当前目标尚未结构化，先按项目 Skill 用 set_goal 将操作人明确要求的业务动作"
+                "归一化为有序 capabilities；若目标要求保留后续实际操作，则只随已观察到的独立"
+                "业务动作增补，不得根据页面加载流量扩张目标。"
+                "必须按当前项目 Skill 读取这一阶段要求的完整事实；读取增量时若 has_more=true，"
+                "继续用 next_seq 分页直到 has_more=false。必须调用 submit_recording_plan，"
+                "并在 semantic_plan.capabilities 中提交截至当前仍成立的完整能力集合，"
+                "不能只提交本批新增能力，也不能因单个操作失败清空已有能力。"
+                "实时阶段不读取验证报告；只有事实真正无法推导时才可用业务语言询问操作人。",
+                timeout_s=None,
+                prompt_mode="recording_analysis",
+                analysis_phase=analysis_phase,
+            )
+        finally:
+            self._live_delta_floor = previous_floor
 
     def current_flow_spec(self) -> Any:
 

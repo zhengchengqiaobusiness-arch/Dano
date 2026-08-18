@@ -1063,6 +1063,7 @@ async def _apply_recording_submission_atomic(
             for key in (
                 "flow_version", "op_results", "all_applied", "must_retry",
                 "unresolved_targets", "accepted", "unchanged", "warning",
+                "capability_plan_complete", "submission_complete",
             )
             if key in result
         }

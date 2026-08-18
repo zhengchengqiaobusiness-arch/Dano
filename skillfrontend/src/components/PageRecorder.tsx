@@ -236,6 +236,12 @@ function sourceKindLabel(value?: string) {
 
 function paramSourceLabel(param: FlowParam) {
   const source = asRecord(param.source);
+  if (
+    paramIsCallerInput(param)
+    && ["response_binding", "previous_response", "dynamic_structure"].includes(param.source_kind || "")
+  ) {
+    return "上游默认值，可修改";
+  }
   if (param.source_kind === "constant") {
     const kind = safeString(source.kind);
     if (kind === "recorded_control_default") return "页面只读默认值";
@@ -1114,6 +1120,9 @@ export default function PageRecorder({
                 autoSize={{ minRows: 2, maxRows: 5 }}
                 style={{ width: "100%" }}
               />
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary">系统只根据实际录制且有完整证据的业务操作生成能力。</Text>
+              </div>
             </div>
           </div>
         </div>

@@ -1085,7 +1085,7 @@ async def record_ws(ws: WebSocket) -> None:
                 action=action,
                 title=(
                     (workflow.snapshot.title if workflow is not None else "")
-                    or str(getattr(release_flow_spec, "title", "") or "")
+                    or str(getattr(release_spec, "title", "") or "")
                 ),
                 goal=(
                     dict((release_spec.goal or {}))

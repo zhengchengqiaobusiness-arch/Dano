@@ -205,6 +205,8 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /record identity and several exact same-path values/i);
   assert.match(skill, /expose one\s+caller choice per required label/i);
   assert.match(skill, /confirmed captured response binding supplies a later request inside the same capability/i);
+  assert.match(skill, /Field origin and caller editability are separate facts/i);
+  assert.match(skill, /allow caller override/i);
   assert.match(skill, /exact current request identities/i);
   assert.match(skill, /sole author of business semantics/i);
   assert.match(skill, /Never treat a mismatch between goal wording and observed actions as a failure/i);

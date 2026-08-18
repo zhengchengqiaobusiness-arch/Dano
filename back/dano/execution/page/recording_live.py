@@ -932,7 +932,7 @@ def _reject_source_that_contradicts_cited_page_action(
     spec, step, param, evidence_refs: list[str], *, source_kind: str,
 ) -> None:  # noqa: ANN001
     """Prevent a weaker model source guess from replacing a real user action."""
-    if source_kind == "caller_input" or not evidence_refs:
+    if source_kind in {"caller_input", "response_binding"} or not evidence_refs:
         return
     for item in _field_evidence_candidates(spec, step, param, evidence_refs=evidence_refs):
         if not _evidence_matches_refs(item, evidence_refs):
@@ -1126,6 +1126,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
 
     origin_request_id = str(edit.get("origin_request_id") or "")
     origin_path = str(edit.get("origin_path") or "").removeprefix("response.")
+    evidence_refs = _evidence_refs(edit)
     # Source and requiredness are independent field axes.  Reclassifying the
     # source used to replace the whole source object and silently erase the DOM
     # required marker captured moments earlier.
@@ -1301,6 +1302,19 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                 **(link.meta or {}),
                 "captured_value_match": True,
             }
+        caller_override = any(
+            _evidence_matches_refs(item, evidence_refs)
+            and _page_control_is_editable(item)
+            and bool(
+                item.get("recorded_user_input")
+                or str(item.get("op") or "").lower() in {
+                    "fill", "input", "change", "select", "check", "click",
+                }
+            )
+            for item in _field_evidence_candidates(
+                spec, step, param, evidence_refs=evidence_refs,
+            )
+        )
         param.source_kind = "previous_response"
         param.source = {
             "kind": "previous_response",
@@ -1308,11 +1322,15 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             "response_path": origin_path,
             "link_id": link.link_id,
             "origin_request_id": origin_request_id,
+            "allow_caller_override": caller_override,
+            **({"required_state": required_state} if required_state else {}),
             "reason": reason,
             "actor": "agent",
         }
-        param.category = "runtime_var"
-        param.exposed_to_user = False
+        param.category = "user_param" if caller_override else "runtime_var"
+        param.exposed_to_user = caller_override
+        if caller_override:
+            param.editable = True
 
     elif source_kind == "generated":
         raw_source = edit.get("source") if isinstance(edit.get("source"), dict) else {}
@@ -3178,12 +3196,53 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         live_capability_model.get("semantic_plan")
         if isinstance(live_capability_model, dict) else None
     )
+    if isinstance(live_semantic_plan, dict):
+        live_request_id_by_step_id = {
+            str(step_id): str(request_id)
+            for step_id, request_id in (
+                getattr(live_spec, "step_request_ids", None) or {}
+            ).items()
+            if str(step_id) and str(request_id)
+        }
+        for step in (getattr(live_spec, "steps", None) or []):
+            request_id = str((step.source_meta or {}).get("request_id") or "")
+            if request_id:
+                live_request_id_by_step_id.setdefault(str(step.step_id), request_id)
+        merged_step_id_by_request_id = {
+            str((step.source_meta or {}).get("request_id") or ""): step.step_id
+            for step in merged.steps
+            if str((step.source_meta or {}).get("request_id") or "")
+        }
+        live_semantic_plan = deepcopy(live_semantic_plan)
+        for item in live_semantic_plan.get("capabilities") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_anchor = str(item.get("anchor_step_id") or "")
+            request_id = live_request_id_by_step_id.get(raw_anchor, raw_anchor)
+            item["anchor_step_id"] = merged_step_id_by_request_id.get(
+                request_id, raw_anchor,
+            )
+            for request_ref in item.get("request_refs") or []:
+                if not isinstance(request_ref, dict):
+                    continue
+                identifier = str(request_ref.get("step_id") or "")
+                ref_request_id = live_request_id_by_step_id.get(identifier, identifier)
+                request_ref["step_id"] = merged_step_id_by_request_id.get(
+                    ref_request_id, identifier,
+                )
     boundary_semantic_plan = _semantic_plan_from_live_boundaries(merged)
-    # Under a strong recording goal the finalized request boundaries are the
-    # authoritative capability skeleton.  Pi's live plan is valuable semantic
-    # evidence, but it may have been produced before the last requests arrived
-    # or before final step IDs existed, so it must not replace that skeleton.
-    if goal_contract and boundary_semantic_plan.get("capabilities"):
+    # A submitted semantic plan is the sole owner of public business meaning.
+    # Request-boundary recovery remains a compatibility fallback only when no
+    # strict live plan exists; supplementing a partial plan from goal slots can
+    # relabel submit as detail or merge distinct edit/save operations.
+    if (
+        goal_contract
+        and not (
+            isinstance(live_semantic_plan, dict)
+            and live_semantic_plan.get("capabilities")
+        )
+        and boundary_semantic_plan.get("capabilities")
+    ):
         derived_capabilities = [
             deepcopy(item)
             for item in boundary_semantic_plan.get("capabilities") or []

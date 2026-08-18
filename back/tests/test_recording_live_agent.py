@@ -128,7 +128,7 @@ def test_goal_constraint_never_relabels_an_unrelated_capability_by_position() ->
     assert constrained["capabilities"][0]["anchor_step_id"] == "submit-step"
 
 
-def test_finalize_rebuilds_strong_goal_capabilities_instead_of_reusing_stale_plan() -> None:
+def test_finalize_rejects_a_stale_plan_instead_of_relabeling_goal_slots() -> None:
     goal_text = (
         "目的：提交、查看和编辑申请\n"
         "预期产出能力数量：3\n"
@@ -194,15 +194,8 @@ def test_finalize_rebuilds_strong_goal_capabilities_instead_of_reusing_stale_pla
 
     merged = merge_live_agent_state(live, finalized)
 
-    assert [(cap.title, cap.kind) for cap in merged.capabilities] == [
-        ("提交申请", "submit"),
-        ("查看申请详情", "inspect"),
-        ("编辑申请", "update"),
-    ]
-    assert [
-        next(ref.step_id for ref in cap.request_refs if ref.usage == "execute")
-        for cap in merged.capabilities
-    ] == ["submit", "detail", "edit"]
+    assert merged.capabilities == []
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
 
 
 def test_entity_hydration_read_can_also_anchor_requested_detail_capability() -> None:
@@ -975,6 +968,61 @@ def test_model_cannot_replace_an_interacted_readonly_inner_select_with_constant(
             "reason": "录制值为 2，模型误判为常量",
             "evidence_refs": ["evt-type-select"],
         }])
+
+
+def test_edit_hydration_is_an_upstream_default_with_caller_override():
+    spec = _flow()
+    field = spec.steps[1].params[0]
+    field.category = "user_param"
+    field.source_kind = "user_input"
+    field.exposed_to_user = True
+    field.editable = True
+    spec.request_facts.field_evidence[0].update({
+        "evidence_id": "evt-job",
+        "wire_path": "body.jobId",
+        "op": "fill",
+        "editable": True,
+        "recorded_user_input": True,
+        "binding_status": "bound",
+    })
+
+    updated = apply_flow_edits(spec, [
+        {
+            "op": "set_param_source",
+            "request_id": "req-submit",
+            "wire_path": "body.jobId",
+            "source_kind": "response_binding",
+            "origin_request_id": "req-detail",
+            "origin_path": "data.jobId",
+            "reason": "打开编辑页时由详情响应初始化，保存前仍允许用户修改",
+            "evidence_refs": ["evt-job", "req-detail"],
+        },
+        {
+            "op": "rename_field",
+            "request_id": "req-submit",
+            "wire_path": "body.jobId",
+            "label": "任务编号",
+            "reason": "页面控件标签为任务编号",
+            "evidence_refs": ["evt-job"],
+        },
+        {
+            "op": "set_param_required",
+            "request_id": "req-submit",
+            "wire_path": "body.jobId",
+            "required": False,
+            "reason": "页面控件没有必填标记",
+            "evidence_refs": ["evt-job"],
+        },
+    ])
+
+    param = updated.steps[1].params[0]
+    assert param.source_kind == "previous_response"
+    assert param.source["allow_caller_override"] is True
+    assert param.category == "user_param"
+    assert param.exposed_to_user is True
+    assert param.editable is True
+    assert (param.label, param.required) == ("任务编号", False)
+    assert param.source["required_state"] == "optional"
 
 def test_cited_control_with_a_different_value_does_not_ground_public_source():
     spec = _flow()
@@ -2434,7 +2482,7 @@ def test_finalize_merge_obeys_explicit_recording_goal_capability_count():
     ]
 
 
-def test_goal_boundary_recovers_recorded_capability_missing_from_stale_live_plan():
+def test_goal_boundary_does_not_supplement_a_stale_live_plan():
     live = FlowSpec(
         flow_id="goal-missing-live-capability",
         meta={
@@ -2490,14 +2538,245 @@ def test_goal_boundary_recovers_recorded_capability_missing_from_stale_live_plan
 
     merged = merge_live_agent_state(live, finalized)
 
-    assert [capability.kind for capability in merged.capabilities] == [
-        "query_status", "submit",
-    ]
-    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+    assert [capability.kind for capability in merged.capabilities] == ["submit"]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
     assert not any(
         item.get("op") == "enforce_recording_goal"
         for item in merged.meta.get("unresolved_live_agent_ops", [])
     )
+
+
+def test_finalize_never_invents_missing_capabilities_from_goal_slots() -> None:
+    live = FlowSpec(meta={
+        "recording_goal_text": (
+            "预期产出能力数量：3\n"
+            "能力1：查询记录\n"
+            "能力2：提交记录\n"
+            "能力3：删除记录"
+        ),
+        "capability_model": {
+            "status": "ready",
+            "semantic_plan": {
+                "business_understanding": {"business_name": "记录"},
+                "capabilities": [{
+                    "name": "query_records",
+                    "title": "查询记录",
+                    "intent": "查询记录",
+                    "kind": "query_status",
+                    "anchor_step_id": "req-query",
+                    "request_refs": [{"step_id": "req-query", "usage": "execute"}],
+                }],
+                "unresolved_items": [{
+                    "type": "capability_anchor",
+                    "title": "其余动作尚未完成分析",
+                }],
+            },
+        },
+    })
+    finalized = FlowSpec(
+        title="记录",
+        steps=[
+            FlowStep(
+                step_id="query-step", method="GET", path="/records/page",
+                source_meta={"request_id": "req-query", "role": "business_get"},
+            ),
+            FlowStep(
+                step_id="submit-step", method="POST", path="/records/submit",
+                source_meta={"request_id": "req-submit", "role": "business_write"},
+            ),
+            FlowStep(
+                step_id="delete-step", method="DELETE", path="/records/delete",
+                source_meta={"request_id": "req-delete", "role": "business_write"},
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == ["查询记录"]
+    assert merged.meta["recording_goal_contract"]["materialized_count"] == 1
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
+
+
+def test_finalized_leave_shape_keeps_all_eight_recorded_business_actions_distinct() -> None:
+    titles_and_contracts = [
+        ("query_leave", "查询请假申请", "query_status", "req-query"),
+        ("save_leave_draft", "保存请假草稿", "save_draft", "req-draft"),
+        ("submit_leave", "提交请假申请", "submit", "req-submit"),
+        ("inspect_leave", "查看申请详情", "inspect", "req-detail"),
+        ("edit_save_leave", "编辑草稿,草稿保存", "update", "req-edit-save"),
+        ("withdraw_leave", "撤回请假申请", "withdraw", "req-withdraw"),
+        ("delete_leave", "删除请假申请", "delete", "req-delete"),
+        ("edit_submit_leave", "编辑草稿,提交保存", "update", "req-edit-submit"),
+    ]
+    goal_text = "\n".join([
+        "预期产出能力数量：8",
+        *(f"能力{index}：{title}" for index, (_name, title, _kind, _request) in enumerate(
+            titles_and_contracts, start=1,
+        )),
+    ])
+    live = FlowSpec(meta={
+        "recording_goal_text": goal_text,
+        "capability_model": {
+            "status": "ready",
+            "semantic_plan": {
+                "business_understanding": {"business_name": "请假申请"},
+                "capabilities": [
+                    {
+                        "name": name,
+                        "title": title,
+                        "kind": kind,
+                        "anchor_step_id": request_id,
+                        "request_refs": [{"step_id": request_id, "usage": "execute"}],
+                    }
+                    for name, title, kind, request_id in titles_and_contracts
+                ],
+                "unresolved_items": [],
+            },
+        },
+    })
+
+    def action_meta(request_id: str, action: str, index: int, *, role: str) -> dict:
+        return {
+            "request_id": request_id,
+            "request_index": index,
+            "sequence": index,
+            "role": role,
+            "trigger_op": "click",
+            "trigger_locator": f"text={action}",
+            "trigger_transaction_id": f"txn-{request_id}",
+            "causality_confidence": "high",
+        }
+
+    caller_reason = ParamField(
+        path="reason", key="reason", label="请假原因", value="修改后的原因",
+        category="user_param", source_kind="previous_response",
+        source={
+            "kind": "previous_response", "step_id": "detail-step",
+            "response_path": "data.reason", "allow_caller_override": True,
+        },
+        required=True, editable=True, exposed_to_user=True,
+        evidence=[{
+            "kind": "page_control", "control_kind": "text",
+            "editable": True, "interacted": True,
+        }],
+    )
+    internal_status = ParamField(
+        path="processStatus", key="processStatus", label="流程状态", value=0,
+        category="runtime_var", source_kind="previous_response",
+        source={"kind": "previous_response", "step_id": "detail-step", "response_path": "data.processStatus"},
+        required=False, editable=False, exposed_to_user=False,
+    )
+    steps = [
+        FlowStep(
+            step_id="query-step", method="GET", path="/admin-api/oa/duty-leave/page",
+            response_json={"data": {"list": [{"id": 42}]}},
+            source_meta=action_meta("req-query", "搜索", 1, role="business_get"),
+        ),
+        FlowStep(
+            step_id="draft-step", method="POST", path="/admin-api/oa/duty-leave/create",
+            source_meta=action_meta("req-draft", "保存草稿", 2, role="business_write"),
+        ),
+        FlowStep(
+            step_id="submit-step", method="POST", path="/admin-api/oa/duty-leave/submit-process",
+            source_meta=action_meta("req-submit", "提交", 3, role="business_write"),
+        ),
+        FlowStep(
+            step_id="detail-step", method="GET", path="/admin-api/oa/duty-leave/get?id=42",
+            params=[ParamField(path="query.id", key="id", value=42)],
+            response_json={"data": {"id": 42, "reason": "原原因", "processStatus": 0}},
+            source_meta=action_meta("req-detail", "查看详情", 4, role="business_get"),
+        ),
+        FlowStep(
+            step_id="edit-save-step", method="POST", path="/admin-api/oa/duty-leave/update",
+            params=[
+                ParamField(path="id", key="id", value=42, exposed_to_user=False),
+                caller_reason.model_copy(deep=True),
+                internal_status.model_copy(deep=True),
+            ],
+            source_meta={
+                **action_meta("req-edit-save", "保存草稿", 5, role="business_write"),
+                "trigger_page_context": {"url": "https://example.test/leave/edit?id=42"},
+            },
+        ),
+        FlowStep(
+            step_id="withdraw-step", method="DELETE", path="/admin-api/bpm/process-instance/cancel-by-start-user",
+            params=[ParamField(path="id", key="记录ID", label="记录ID", value=42, required=True)],
+            source_meta=action_meta("req-withdraw", "撤回", 6, role="business_write"),
+        ),
+        FlowStep(
+            step_id="delete-step", method="DELETE", path="/admin-api/oa/duty-leave/delete?id=42",
+            params=[ParamField(path="query.id", key="记录ID", label="记录ID", value=42, required=True)],
+            source_meta=action_meta("req-delete", "删除", 7, role="business_write"),
+        ),
+        FlowStep(
+            step_id="edit-detail-step", method="GET", path="/admin-api/oa/duty-leave/get?id=43",
+            params=[ParamField(path="query.id", key="id", value=43)],
+            response_json={"data": {"id": 43, "reason": "旧原因", "processStatus": 0}},
+            source_meta={"request_id": "req-edit-detail", "request_index": 8, "sequence": 8, "role": "read_context"},
+        ),
+        FlowStep(
+            step_id="edit-submit-step", method="POST", path="/admin-api/oa/duty-leave/submit-process",
+            params=[
+                ParamField(path="id", key="id", value=43, exposed_to_user=False),
+                caller_reason.model_copy(deep=True, update={
+                    "source": {
+                        "kind": "previous_response", "step_id": "edit-detail-step",
+                        "response_path": "data.reason", "allow_caller_override": True,
+                    },
+                }),
+            ],
+            source_meta={
+                **action_meta("req-edit-submit", "提交", 9, role="business_write"),
+                "trigger_page_context": {"url": "https://example.test/leave/edit?id=43"},
+            },
+        ),
+    ]
+    finalized = FlowSpec(
+        title="请假申请",
+        meta={"recording_goal_text": goal_text},
+        steps=steps,
+        links=[
+            FlowLink(
+                source_step_id="detail-step", source_path="data.reason",
+                target_step_id="edit-save-step", target_path="reason",
+                confirmed=True, confidence=0.99,
+                evidence={"kind": "record_hydration", "match_count": 3, "identity_paths": ["data.id"]},
+            ),
+            FlowLink(
+                source_step_id="edit-detail-step", source_path="data.reason",
+                target_step_id="edit-submit-step", target_path="reason",
+                confirmed=True, confidence=0.99,
+                evidence={"kind": "record_hydration", "match_count": 3, "identity_paths": ["data.id"]},
+            ),
+        ],
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.title for capability in merged.capabilities] == [
+        title for _name, title, _kind, _request in titles_and_contracts
+    ]
+    assert [
+        next(ref.step_id for ref in capability.request_refs if ref.usage == "execute")
+        for capability in merged.capabilities
+    ] == [
+        "query-step", "draft-step", "submit-step", "detail-step",
+        "edit-save-step", "withdraw-step", "delete-step", "edit-submit-step",
+    ]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+    assert len({
+        next(ref.step_id for ref in capability.request_refs if ref.usage == "execute")
+        for capability in merged.capabilities
+    }) == 8
+
+    edit_save = next(step for step in merged.steps if step.step_id == "edit-save-step")
+    by_path = {param.path: param for param in edit_save.params}
+    assert (by_path["reason"].label, by_path["reason"].required) == ("请假原因", True)
+    assert by_path["reason"].source_kind == "previous_response"
+    assert by_path["reason"].source["allow_caller_override"] is True
+    assert by_path["reason"].exposed_to_user is True
+    assert by_path["processStatus"].exposed_to_user is False
 
 
 def test_goal_boundary_keeps_strong_filtered_query_outside_write_preflight() -> None:
@@ -2593,7 +2872,7 @@ def test_one_read_command_returns_entity_result_without_parallel_context() -> No
     ]
 
 
-def test_numbered_recording_goal_rebuilds_all_final_request_boundaries():
+def test_numbered_recording_goal_does_not_invent_omitted_live_boundaries():
     goal_text = (
         "目的：管理记录\n"
         "预期产出能力数量：4\n"
@@ -2666,13 +2945,9 @@ def test_numbered_recording_goal_rebuilds_all_final_request_boundaries():
 
     merged = merge_live_agent_state(live, finalized)
 
-    assert [capability.title for capability in merged.capabilities] == [
-        "查询记录", "保存记录草稿", "撤回记录", "删除记录",
-    ]
-    assert [capability.kind for capability in merged.capabilities] == [
-        "query_status", "save_draft", "withdraw", "delete",
-    ]
-    assert merged.meta["recording_goal_contract"]["satisfied"] is True
+    assert [capability.title for capability in merged.capabilities] == ["查询记录"]
+    assert [capability.kind for capability in merged.capabilities] == ["query_status"]
+    assert merged.meta["recording_goal_contract"]["satisfied"] is False
 
 
 def test_pi_normalized_natural_language_goal_becomes_strong_final_boundary():

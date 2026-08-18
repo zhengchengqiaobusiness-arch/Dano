@@ -132,16 +132,19 @@ Use exactly `caller_input`, `constant`, `session`, `context`, `response_binding`
 7. Is there strong evidence of a stable fixed value?
 8. If none of the above can be proved, keep the field unresolved; do not guess.
 
-Only `caller_input` is exposed to callers. Interface return values use `response_binding`. Token
-and user identifiers use `session`. Frontend-calculated values use `computed`. UUIDs, timestamps,
-and similar runtime values use `generated`. A recorded sample value is not automatically
-`constant`. A hidden field is not automatically `caller_input`. A list response does not
-automatically turn filter fields into enums.
+Field origin and caller editability are separate facts. A new value entered by the operator uses
+`caller_input`. A value loaded from an earlier interface uses `response_binding`; when direct
+control evidence also proves that the operator can edit that loaded value, keep the upstream
+binding as its initial value and mark it as caller-overridable. Token and user identifiers use
+`session`. Frontend-calculated values use `computed`. UUIDs, timestamps, and similar runtime values
+use `generated`. A recorded sample value is not automatically `constant`. A hidden field is not
+automatically `caller_input`. A list response does not automatically turn filter fields into
+enums.
 
 A source conclusion is valid only when the current compiler can execute it.
 
 - `caller_input`: a goal input or editable fill/select/upload action proves the operator supplied
-  the business value. Only these values are exposed to the caller.
+  a new business value. These values are exposed to the caller.
 - `constant`: captured evidence proves a stable business discriminator, workflow key, application
   code, or other fixed request value not entered by the operator.
 - `session`: authenticated identity, token, tenant, or login state. Supply `session_key` when the
@@ -149,7 +152,9 @@ A source conclusion is valid only when the current compiler can execute it.
 - `context`: pagination or an explicit runtime/page context value. Supply `context_key`; retain the
   recorded pagination default and allow caller override where the current compiler supports it.
 - `response_binding`: an earlier observed response produces a later request value. Supply the
-  exact `origin_request_id` and `origin_path`.
+  exact `origin_request_id` and `origin_path`. If the target has field-local editable control
+  evidence, preserve the binding as the initial value and allow caller override; otherwise keep
+  it internal.
 - `computed`: the value is derived from other caller inputs. Use only a strategy supported by the
   current schema and provide all required inputs, such as `date_span_days_json` with
   `start_field` and `end_field`.
@@ -161,10 +166,11 @@ input. A token, user ID, tenant, timestamp, upstream ID, random value, or comput
 be exposed merely because it appears in the request.
 
 When a confirmed captured response binding supplies a later request inside the same capability,
-keep that target internal and let the runtime pass the response value directly. Do not reclassify
-it as caller input or replace it with a cross-capability relation merely because another public
-read exposes the same value. If either endpoint was retargeted to a different captured request,
-discard the invalidated binding and rebuild it from the exact current request identities.
+let the runtime pass the response value directly. Keep the target internal unless field-local
+editable control evidence proves caller override. Do not replace it with a cross-capability
+relation merely because another public read exposes the same value. If either endpoint was
+retargeted to a different captured request, discard the invalidated binding and rebuild it from
+the exact current request identities.
 
 Submit source conclusions with `set_param_source`. When a canonical step does not yet exist, use
 the observed `request_id` as allowed by the tool schema. If compilation rejects the conclusion,

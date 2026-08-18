@@ -157,6 +157,26 @@ async function verifyIncompleteSubmissionCanBeCorrectedInTheSameTurn() {
     endRecordingToolTurn();
   }
 }
+
+async function verifyIncompleteCapabilityPlanDoesNotEndTurn() {
+  const accepted = [];
+  beginRecordingToolTurn({
+    maxSubmissionAttempts: 2,
+    onSubmissionAccepted: (name) => accepted.push(name),
+  });
+  try {
+    const incomplete = await runRecordingSubmissionAttempt("submit_recording_plan", async () => ({
+      all_applied: true,
+      must_retry: [],
+      capability_plan_complete: false,
+      submission_complete: false,
+    }));
+    assert(incomplete.accepted === false, "an incomplete capability plan incorrectly ended the turn");
+    assert(accepted.length === 0, "an incomplete capability plan fired the terminal callback");
+  } finally {
+    endRecordingToolTurn();
+  }
+}
 function verifyFreshReadPrerequisites() {
   beginRecordingToolTurn();
   try {
@@ -568,6 +588,7 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   await verifyIncompleteSubmissionCanBeCorrectedInTheSameTurn();
+  await verifyIncompleteCapabilityPlanDoesNotEndTurn();
   verifySubmissionToolsAreSequential();
 verifyWriteAssertionSchema();
   verifyStringifiedWriteAssertionCompatibility();
