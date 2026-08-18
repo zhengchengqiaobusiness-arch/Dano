@@ -14,8 +14,8 @@ export default function AppLayout() {
     : loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Sider theme="light" width={210} style={{ borderRight: "1px solid #f0f0f0" }}>
+    <Layout style={{ height: "100vh", overflow: "hidden" }}>
+      <Sider theme="light" width={210} style={{ height: "100%", overflow: "auto", borderRight: "1px solid #f0f0f0" }}>
         <div style={{ padding: "16px 20px", fontSize: 16, fontWeight: 500 }}>Dano Skill 管理</div>
         <Menu
           mode="inline"
@@ -33,9 +33,9 @@ export default function AppLayout() {
           ]}
         />
       </Sider>
-      <Layout style={{ minWidth: 0 }}>
+      <Layout style={{ minWidth: 0, height: "100%", overflow: "hidden" }}>
         {selected === "skills" && (
-          <Header style={{ background: "#fff", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px" }}>
+          <Header style={{ background: "#fff", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px", flexShrink: 0 }}>
             <Typography.Text type="secondary">阶段一 接入生成 · 阶段三 运维</Typography.Text>
             <Space style={{ marginLeft: "auto" }}>
               <Tag color="blue">租户 {tenant}</Tag>
@@ -45,7 +45,11 @@ export default function AppLayout() {
             </Space>
           </Header>
         )}
-        <Content style={selected === "recording" ? { padding: 8, height: "100vh", overflow: "auto" } : { padding: 20 }}>
+        <Content
+          style={selected === "recording"
+            ? { padding: 8, flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", boxSizing: "border-box" }
+            : { padding: 20, flex: 1, minHeight: 0, overflow: "auto" }}
+        >
           <Outlet />
         </Content>
       </Layout>

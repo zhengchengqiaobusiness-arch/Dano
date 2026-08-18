@@ -1132,8 +1132,8 @@ export default function PageRecorder({
 
   function renderRecording() {
     return (
-      <div style={{ minWidth: 0 }}>
-        <Card size="small" styles={{ body: { padding: 10 } }}>
+      <div style={{ minWidth: 0, flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column" }}>
+        <Card size="small" styles={{ body: { padding: 10 } }} style={{ flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
             <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
               {STATUS_LABELS[status]}
@@ -1160,10 +1160,30 @@ export default function PageRecorder({
         </Card>
         <div
           style={{
-            position: "relative",
+            flex: 1,
+            minHeight: 0,
             marginTop: 10,
             width: "100%",
-            aspectRatio: `${frameMeta.width} / ${frameMeta.height}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+        <div
+          style={{
+            containerType: "size",
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+        <div
+          style={{
+            position: "relative",
+            width: `min(100%, calc(100cqh * ${frameMeta.width} / ${frameMeta.height}))`,
+            height: `min(100%, calc(100cqw * ${frameMeta.height} / ${frameMeta.width}))`,
             overflow: "hidden",
             border: "1px solid #d9d9d9",
             borderRadius: 8,
@@ -1186,7 +1206,12 @@ export default function PageRecorder({
               cursor: status === "recording" ? "default" : "not-allowed",
             }}
           />
-          {!hasFrame ? <Empty description={connecting ? "正在连接业务页面" : "等待页面画面"} style={{ paddingTop: 150 }} /> : null}
+          {!hasFrame ? (
+            <Empty
+              description={connecting ? "正在连接业务页面" : "等待页面画面"}
+              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", margin: 0 }}
+            />
+          ) : null}
           <input
             ref={keyboardRef}
             onInput={onKeyboardInput}
@@ -1205,6 +1230,8 @@ export default function PageRecorder({
             aria-label="录制页面键盘输入"
             style={{ position: "absolute", width: 1, height: 1, opacity: 0, left: 0, top: 0 }}
           />
+        </div>
+        </div>
         </div>
       </div>
     );
@@ -1770,7 +1797,7 @@ export default function PageRecorder({
   );
 
   return (
-    <div style={{ width: "100%", minWidth: 0, padding: "12px 18px 18px", boxSizing: "border-box" }}>
+    <div style={{ width: "100%", height: "100%", minWidth: 0, minHeight: 0, padding: "8px 12px", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <Steps
         current={viewStage}
         onChange={(next) => {
@@ -1792,11 +1819,11 @@ export default function PageRecorder({
             status: viewStage === 2 ? "process" : keepResult ? "finish" : "wait",
           },
         ]}
-        style={{ maxWidth: 980, margin: "0 auto 18px" }}
+        style={{ maxWidth: 980, margin: "0 auto 12px", flexShrink: 0 }}
       />
-      <div hidden={viewStage !== 0}>{renderSetup()}</div>
-      {keepRecording ? <div hidden={viewStage !== 1}>{renderRecording()}</div> : null}
-      {keepResult ? <div hidden={viewStage !== 2}>{renderResult()}</div> : null}
+      <div style={{ display: viewStage === 0 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderSetup()}</div>
+      {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
+      {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
       <Drawer
         title="录制助手"
         placement="right"
