@@ -3146,6 +3146,13 @@ class RecordSession:
             ]))
             if item.get("value") in (None, "") and previous.get("value") not in (None, ""):
                 merged["value"] = previous["value"]
+            for source in (previous, item):
+                if (
+                    str(source.get("op") or "") == "snapshot"
+                    and source.get("value") not in (None, "")
+                    and merged.get("visible_default") in (None, "")
+                ):
+                    merged["visible_default"] = source.get("value")
             deduped[index] = merged
         return deduped[-500:]
 

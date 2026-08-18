@@ -858,6 +858,40 @@ def _field_has_structural_select_identity(field: dict | None) -> bool:
     )
 
 
+_OPTION_SOURCE_GENERIC_TOKENS = frozenset({
+    "id", "ids", "code", "key", "value", "values", "data", "api", "admin",
+    "list", "simple", "options", "option", "query", "page", "get",
+    "info", "information", "name", "title", "label", "text",
+    "system", "common", "adminapi",
+})
+
+
+def _option_source_tokens(value) -> set[str]:
+    text = _re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    tokens = {
+        token.casefold()
+        for token in _re.findall(r"[A-Za-z][A-Za-z0-9]*|[\u4e00-\u9fff]+", text)
+        if token
+    }
+    expanded = set(tokens)
+    expanded.update(token[:-1] for token in tokens if token.endswith("s") and len(token) > 3)
+    return expanded - _OPTION_SOURCE_GENERIC_TOKENS
+
+
+def _field_related_to_option_source(field: dict | None, source_url: str) -> bool:
+    """A select may use an option API only when their identities share a token.
+
+    Numeric IDs and display labels repeat across unrelated dictionaries. The
+    field alias/leaf must overlap the endpoint path before a binding is kept.
+    """
+    if not field or not source_url:
+        return False
+    field_tokens: set[str] = set()
+    for name in _grounded_field_names(field):
+        field_tokens |= _option_source_tokens(name)
+    return bool(field_tokens & _option_source_tokens(source_url))
+
+
 def _is_scalar(v) -> bool:
     return isinstance(v, (str, int, float)) and not isinstance(v, bool)
 
@@ -1010,6 +1044,8 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                 continue
             field = field_by_path.get(path)
             if not _field_has_structural_select_identity(field):
+                continue
+            if not _field_related_to_option_source(field, source_url):
                 continue
             sample_vals = _sample_values_for_leaf(path, sv, samples, field)
             m = _match_select(sv, items, sample_vals)
@@ -2221,9 +2257,17 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         if previous:
             old_label = str(previous.get("label") or previous.get("field") or "").strip()
             new_label = str(item.get("label") or item.get("field") or "").strip()
+            old_op = str(previous.get("op") or "").lower()
+            new_op = str(item.get("op") or "").lower()
+            interacted = {"fill", "select", "pick"}
             if old_label and new_label and old_label != new_label:
-                structural.pop(index, None)
-                continue
+                if new_op in interacted and old_op not in interacted:
+                    pass
+                elif old_op in interacted and new_op not in interacted:
+                    continue
+                else:
+                    structural.pop(index, None)
+                    continue
             if old_label and not new_label:
                 continue
         structural[index] = item
@@ -2322,6 +2366,13 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "required": required,
                     "required_state": required_state,
                     "required_state_grounded": required_grounded,
+                    "visible_default": (
+                        (control or {}).get("visible_default")
+                        if (control or {}).get("visible_default") not in (None, "")
+                        else (control or {}).get("value")
+                        if str((control or {}).get("op") or "").lower() == "snapshot"
+                        else None
+                    ),
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):
@@ -2672,28 +2723,59 @@ def _apply_system_values(body, api_request: dict) -> None:
 
 def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
     out = dict(fields)
-    for field in api_request.get("runtime_fields") or []:
-        name = str(field.get("name") or "")
-        if not name or name in out:
-            continue
-        kind = str(field.get("kind") or "uuid")
-        if kind in {"date_span_days", "date_span_days_json"}:
-            start_name = str(field.get("start_field") or "")
-            end_name = str(field.get("end_field") or "")
-            if start_name not in out or end_name not in out:
+    pending = list(api_request.get("runtime_fields") or [])
+    progressed = True
+    while pending and progressed:
+        progressed = False
+        still = []
+        for field in pending:
+            name = str(field.get("name") or "")
+            if not name or name in out:
                 continue
-            days = date_span_days(out[start_name], out[end_name])
-            if kind == "date_span_days_json":
-                import json as _json
-                out[name] = _json.dumps(
-                    {str(field.get("output_key") or "days"): days},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
+            kind = str(field.get("kind") or field.get("strategy") or "uuid")
+            if kind in {"date_span_days", "date_span_days_json"}:
+                start_name = str(field.get("start_field") or "")
+                end_name = str(field.get("end_field") or "")
+                if start_name not in out or end_name not in out:
+                    still.append(field)
+                    continue
+                days = date_span_days(out[start_name], out[end_name])
+                if kind == "date_span_days_json":
+                    import json as _json
+                    out[name] = _json.dumps(
+                        {str(field.get("output_key") or "days"): days},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                else:
+                    out[name] = days
+                progressed = True
+            elif kind in {"product", "sum", "difference", "percent_of", "remainder_after_percent"}:
+                left_name = str(field.get("left_field") or "")
+                right_name = str(field.get("right_field") or "")
+                if left_name not in out or right_name not in out:
+                    still.append(field)
+                    continue
+                left = float(out[left_name])
+                right = float(out[right_name])
+                computed = {
+                    "product": left * right,
+                    "sum": left + right,
+                    "difference": left - right,
+                    "percent_of": left * right / 100.0,
+                    "remainder_after_percent": left * (1.0 - right / 100.0),
+                }[kind]
+                out[name] = computed
+                result_field = str(field.get("result_field") or "")
+                if result_field and result_field not in out:
+                    out[result_field] = computed
+                progressed = True
+            elif kind in {"now_ms", "now_date", "now_iso", "uuid", "random_string", "random_number"}:
+                out[name] = _system_generated_value(kind)
+                progressed = True
             else:
-                out[name] = days
-        else:
-            out[name] = _system_generated_value(kind)
+                still.append(field)
+        pending = still
     return out
 
 

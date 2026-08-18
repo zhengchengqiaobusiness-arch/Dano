@@ -1046,25 +1046,58 @@ def _system_values(step, body):
 
 def _runtime_values(step, inputs):
     values = dict(inputs)
-    for field in step.get("runtime_fields") or []:
-        name = str(field.get("name") or "")
-        if not name or name in values:
-            continue
-        kind = str(field.get("kind") or "")
-        if kind not in {"date_span_days", "date_span_days_json"}:
-            continue
-        start_name = str(field.get("start_field") or "")
-        end_name = str(field.get("end_field") or "")
-        if start_name not in values or end_name not in values:
-            raise RuntimeError(f"computed field {name} is missing {start_name or end_name}")
-        days = date_span_days(values[start_name], values[end_name])
-        values[name] = (
-            json.dumps(
-                {str(field.get("output_key") or "days"): days},
-                ensure_ascii=False, separators=(",", ":"),
-            )
-            if kind == "date_span_days_json" else days
-        )
+    pending = [field for field in (step.get("runtime_fields") or []) if str(field.get("name") or "")]
+    progressed = True
+    while pending and progressed:
+        progressed = False
+        still = []
+        for field in pending:
+            name = str(field.get("name") or "")
+            if name in values:
+                continue
+            kind = str(field.get("kind") or field.get("strategy") or "")
+            if kind in {"date_span_days", "date_span_days_json"}:
+                start_name = str(field.get("start_field") or "")
+                end_name = str(field.get("end_field") or "")
+                if start_name not in values or end_name not in values:
+                    still.append(field)
+                    continue
+                days = date_span_days(values[start_name], values[end_name])
+                values[name] = (
+                    json.dumps(
+                        {str(field.get("output_key") or "days"): days},
+                        ensure_ascii=False, separators=(",", ":"),
+                    )
+                    if kind == "date_span_days_json" else days
+                )
+                progressed = True
+                continue
+            if kind in {"product", "sum", "difference", "percent_of", "remainder_after_percent"}:
+                left_name = str(field.get("left_field") or "")
+                right_name = str(field.get("right_field") or "")
+                if left_name not in values or right_name not in values:
+                    still.append(field)
+                    continue
+                left = float(values[left_name])
+                right = float(values[right_name])
+                computed = {
+                    "product": left * right,
+                    "sum": left + right,
+                    "difference": left - right,
+                    "percent_of": left * right / 100.0,
+                    "remainder_after_percent": left * (1.0 - right / 100.0),
+                }[kind]
+                values[name] = computed
+                result_field = str(field.get("result_field") or "")
+                if result_field and result_field not in values:
+                    values[result_field] = computed
+                progressed = True
+                continue
+            still.append(field)
+        pending = still
+    if pending:
+        missing = str(pending[0].get("name") or "computed")
+        raise RuntimeError(f"computed field {missing} is missing operands")
     return apply_wire_formats(values, step.get("wire_formats") or {})
 
 
@@ -1128,9 +1161,12 @@ def execute_plan(plan, inputs):
     outputs = []
     option_cache = {}
     for index, step in enumerate(plan.get("steps") or []):
-        values, option_projections = _apply_selects(
-            step, _runtime_values(step, inputs), option_cache,
-        )
+        values, option_projections = _apply_selects(step, dict(inputs), option_cache)
+        for target, value in option_projections.items():
+            leaf = [token for token in re.split(r"[.\[]", str(target)) if token and not token.endswith("]")]
+            if leaf and leaf[-1] not in values:
+                values[leaf[-1]] = value
+        values = _runtime_values(step, values)
         body = render(step.get("body_template"), values) if step.get("body_template") is not None else None
         query = render(step.get("query_template"), values) if step.get("query_template") is not None else None
         url = render(step.get("url_template") or step.get("url") or step.get("path") or "", values)

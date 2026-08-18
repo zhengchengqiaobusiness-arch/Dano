@@ -126,6 +126,8 @@ def _workflow_issue(issue: ReleaseIssue, spec: FlowSpec | None = None) -> Workfl
 
 def _apply_operator_answer(spec: FlowSpec, issue: WorkflowIssue, answer: str) -> bool:
     normalized = answer.strip()
+    if issue.code == "field_source_unknown":
+        return _apply_source_answer(spec, issue, normalized)
     if issue.code != "required_axis_unconfirmed":
         return False
     if normalized in {"必填", "必须", "required", "yes", "是"}:
@@ -151,6 +153,48 @@ def _apply_operator_answer(spec: FlowSpec, issue: WorkflowIssue, answer: str) ->
             param.source = {
                 **(param.source or {}),
                 "required_state": "required" if required else "optional",
+            }
+            return True
+    return False
+
+
+def _apply_source_answer(spec: FlowSpec, issue: WorkflowIssue, answer: str) -> bool:
+    """Apply an operator answer for a field_source_unknown issue.
+
+    The operator can declare:
+    - "用户参数" / "user_input" / "user" → expose as a user-supplied parameter
+    - "固定值" / "constant" / "const"   → freeze the recorded value as a constant
+    """
+    if answer in {"用户参数", "user_input", "user", "用户填写", "是"}:
+        new_source_kind = "user_input"
+        exposed = True
+        editable = True
+    elif answer in {"固定值", "constant", "const", "常量", "否"}:
+        new_source_kind = "constant"
+        exposed = False
+        editable = True
+    else:
+        return False
+    step_id = str(issue.target.get("step_id") or "")
+    field_id = str(issue.target.get("field_id") or "")
+    wire_path = str(issue.target.get("wire_path") or "")
+    for step in spec.steps:
+        if step_id and step.step_id != step_id:
+            continue
+        for param in step.params:
+            matched = (
+                (field_id and str(param.field_id or "") == field_id)
+                or (wire_path and str(param.path or "") == wire_path)
+            )
+            if not matched:
+                continue
+            param.source_kind = new_source_kind
+            param.exposed_to_user = exposed
+            param.editable = editable
+            param.source = {
+                **(param.source or {}),
+                "kind": new_source_kind,
+                "operator_confirmed": True,
             }
             return True
     return False

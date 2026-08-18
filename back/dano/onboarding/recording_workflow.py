@@ -593,42 +593,43 @@ def _issue_resolution_label(issue: WorkflowIssue) -> str:
 
 
 def _operator_question(issue: WorkflowIssue) -> WorkflowQuestion:
-    if issue.code == “required_axis_unconfirmed”:
+    if issue.code == "required_axis_unconfirmed":
         field = str(
-            issue.target.get(“field_label”)
-            or issue.target.get(“wire_path”)
-            or “该字段”
-        ).removeprefix(“body.”).removeprefix(“query.”)
+            issue.target.get("field_label")
+            or issue.target.get("wire_path")
+            or "该字段"
+        ).removeprefix("body.").removeprefix("query.")
         return WorkflowQuestion(
-            question_id=f”question:{issue.issue_id}”,
+            question_id=f"question:{issue.issue_id}",
             issue_id=issue.issue_id,
-            text=f”请确认”{field}”在提交申请时是否必须填写。\n请输入”必填”或”可选”。”,
-            options=[“必填”, “可选”],
+            text=f'请确认"{field}"在提交申请时是否必须填写。\n请输入"必填"或"可选"。',
+            options=["必填", "可选"],
             context_ref=issue.issue_id,
         )
-    if issue.code == “field_source_unknown”:
+    if issue.code == "field_source_unknown":
         field = str(
-            issue.target.get(“wire_path”)
-            or issue.target.get(“field_id”)
-            or “该字段”
-        ).removeprefix(“body.”).removeprefix(“query.”)
-        label = str(issue.target.get(“field_label”) or “”)
-        display = f””{label}”（{field}）” if label else f””{field}””
+            issue.target.get("wire_path")
+            or issue.target.get("field_id")
+            or "该字段"
+        ).removeprefix("body.").removeprefix("query.")
+        label = str(issue.target.get("field_label") or "")
+        display = f'"{label}"({field})' if label else f'"{field}"'
         return WorkflowQuestion(
-            question_id=f”question:{issue.issue_id}”,
+            question_id=f"question:{issue.issue_id}",
             issue_id=issue.issue_id,
             text=(
-                f”字段 {display} 没有可信的来源证据。\n”
-                “请确认：这个字段是调用 Skill 时由用户填写的参数，还是应使用录制时捕获的固定值？\n”
-                “请输入”用户参数”或”固定值”。”
+                f"字段 {display} 没有可信的来源证据。"
+                "请确认：这个字段是调用 Skill 时由用户填写的参数，"
+                "还是应使用录制时捕获的固定值？"
+                "请输入「用户参数」或「固定值」。"
             ),
-            options=[“用户参数”, “固定值”],
+            options=["用户参数", "固定值"],
             context_ref=issue.issue_id,
         )
     return WorkflowQuestion(
-        question_id=f”question:{issue.issue_id}”,
+        question_id=f"question:{issue.issue_id}",
         issue_id=issue.issue_id,
-        text=f”请确认以下业务规则：{issue.message}”,
+        text=f"请确认以下业务规则：{issue.message}",
         options=[],
         context_ref=issue.issue_id,
     )

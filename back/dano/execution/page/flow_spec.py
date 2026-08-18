@@ -587,12 +587,28 @@ def _sample_value_set(samples: dict | None) -> set[str]:
     return {str(v) for v in (samples or {}).values() if v not in (None, "")}
 
 
+_CURRENT_USER_LEAVES = frozenset({
+    "currentuser", "currentuserid", "loginuser", "loginuserid",
+    "applicantid", "applicantuserid",
+})
+
+
+def _field_leaf_token(key: str, path: str = "") -> str:
+    leaf = re.sub(r"[^a-z0-9]+", "", str(key or "").lower())
+    if leaf:
+        return leaf
+    return re.sub(r"[^a-z0-9]+", "", str(path or "").split(".")[-1].lower())
+
+
 def _looks_current_user_field(key: str, path: str) -> bool:
-    k = _norm_field_name(key, path)
-    return any(x in k for x in (
-        "userid", "user_id", "currentuser", "currentuserid", "applicantid",
-        "applicantuserid", "creatorid", "createuserid", "ownerid", "operatorid",
-    ))
+    """Only the acting-user leaf itself is a current-user heuristic.
+
+    Substring matches such as ``assignUserId`` are ordinary choosers.
+    Proven identity bindings still win earlier via ``identity_paths``.
+    """
+    if "[" in str(path or ""):
+        return False
+    return _field_leaf_token(key, path) in _CURRENT_USER_LEAVES
 
 
 def _looks_runtime_field(key: str, path: str) -> bool:
@@ -694,21 +710,32 @@ def _looks_system_const_field(key: str, path: str) -> bool:
     ))
 
 
+_PAGE_CONTEXT_LEAVES = frozenset({
+    "bmid", "bmmc", "ssbmid", "ssbmmc", "deptid", "deptname", "departmentid",
+    "departmentname", "orgid", "orgname", "organid", "organname",
+    "companyid", "companyname", "tenantid", "tenantname",
+})
+
+
 def _looks_page_context_field(key: str, path: str) -> bool:
-    k = _norm_field_name(key, path)
-    raw_key = re.sub(r"[^a-z0-9]+", "", str(key or "").lower())
-    raw_path = re.sub(r"[^a-z0-9]+", "", str(path or "").split(".")[-1].lower())
-    exact = {
-        "bmid", "bmmc", "ssbmid", "ssbmmc", "deptid", "deptname", "departmentid",
-        "departmentname", "orgid", "orgname", "organid", "organname", "unitid",
-        "unitname", "companyid", "companyname", "tenantid", "tenantname",
-    }
-    if raw_key in exact or raw_path in exact:
+    """Page-context heuristics are exact leaves, never short-stem substrings.
+
+    Tokens such as ``org`` / ``unitname`` appear inside ordinary business
+    fields (``originalPrice``, line UOM). Nested array rows are never tenant
+    or department context.
+    """
+    if "[" in str(path or ""):
+        return False
+    leaf = _field_leaf_token(key, path)
+    if leaf in _PAGE_CONTEXT_LEAVES:
         return True
-    return any(x in k for x in (
-        "department", "dept", "organization", "org", "tenant", "company",
-        "bumen", "jigou", "danwei", "deptcode", "orgcode", "unitcode",
-    ))
+    return any(
+        leaf.endswith(token)
+        for token in (
+            "departmentid", "departmentname", "tenantid", "tenantname",
+            "companyid", "companyname", "organizationid", "organizationname",
+        )
+    )
 
 
 _OPTION_SOURCE_KINDS = {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}
@@ -1190,12 +1217,7 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
 
-    recorded_user_input = bool(field.get("recorded_user_input")) or bool(
-        not field.get("control_evidence_available")
-        and method != "GET"
-        and value not in (None, "")
-        and value in _sample_value_set(samples)
-    )
+    recorded_user_input = bool(field.get("recorded_user_input"))
     if recorded_user_input:
         return {
             "category": "user_param",
@@ -1227,24 +1249,42 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
     if has_control and control_kind in {"text", "textarea", "number", "date", "datetime", "time", "checkbox", "radio"}:
-        if not control_locked:
+        if control_locked:
+            return {
+                "category": "runtime_var",
+                "source_kind": "unknown",
+                "source": {"kind": "readonly_control", "path": path},
+                "editable": False,
+                "exposed_to_user": False,
+                "reason": "页面控件为禁用或只读，值应由上游接口或运行上下文提供，不能当作用户输入",
+                "need_human_confirm": True,
+            }
+        if method == "GET" and path.startswith("query."):
             return {
                 "category": "user_param",
                 "source_kind": "user_input",
-                "source": {"kind": "control_default", "path": path},
+                "source": {"kind": "control_default", "path": path, "required_state": "optional"},
                 "editable": True,
                 "exposed_to_user": True,
-                "reason": "页面快照证明该控件可编辑；录制默认值可省略，也允许调用方覆盖",
+                "reason": "查询页上的可编辑筛选控件；调用方可省略或覆盖录制时的筛选值",
                 "need_human_confirm": False,
             }
+        default_value = field.get("visible_default")
+        if default_value in (None, ""):
+            default_value = field.get("raw_value", field.get("value"))
         return {
-            "category": "runtime_var",
-            "source_kind": "unknown",
-            "source": {"kind": "readonly_control", "path": path},
-            "editable": True,
+            "category": "system_const",
+            "source_kind": "page_default",
+            "source": {
+                "kind": "page_default",
+                "path": path,
+                "default_value": default_value,
+                "caller_override": True,
+            },
+            "editable": False,
             "exposed_to_user": False,
-            "reason": "页面控件为禁用或只读，值应由上游接口或运行上下文提供，不能当作用户输入",
-            "need_human_confirm": True,
+            "reason": "页面已带出该默认值，录制中没有改动证据；运行期沿用页面默认，不作为调用方必填",
+            "need_human_confirm": False,
         }
 
     if method == "GET" and path.startswith("query."):
@@ -1305,13 +1345,13 @@ def _param_source_guess(
                 "need_human_confirm": True,
             }
         return {
-            "category": "user_param",
-            "source_kind": "user_input",
-            "source": {"kind": "sample", "path": path},
-            "editable": True,
-            "exposed_to_user": True,
-            "reason": "该字段是业务查询条件，默认作为能力调用参数；若由前置接口提供，可再绑定上游响应",
-            "need_human_confirm": False,
+            "category": "runtime_var",
+            "source_kind": "unknown",
+            "source": {"kind": "unresolved_query", "path": path},
+            "editable": False,
+            "exposed_to_user": False,
+            "reason": "该查询字段没有控件或候选证据，保持内部未决，不暴露给调用方",
+            "need_human_confirm": True,
         }
 
     # 录制期间由用户真实填写/选择并出现在 samples 中，是字段归属的强事实。
@@ -1414,36 +1454,25 @@ def _param_source_guess(
             "need_human_confirm": True,
         }
 
-    if field.get("suggest_param") or value in _sample_value_set(samples):
-        return {
-            "category": "user_param",
-            "source_kind": "user_input",
-            "source": {"kind": "sample", "path": path},
-            "editable": True,
-            "exposed_to_user": True,
-            "reason": "该值与用户录制时填写的表单值匹配，调用 Skill 时应作为用户参数",
-            "need_human_confirm": False,
-        }
-
-    if not field.get("suggest_param") and (value == "" or _is_const_value(value)):
+    if value == "" or _is_const_value(value):
         return {
             "category": "system_const",
             "source_kind": "constant",
             "source": {"kind": "recorded_constant", "path": path},
             "editable": True,
             "exposed_to_user": False,
-            "reason": "该字段未匹配到用户输入，且为空值或内部 ID/固定标识形态，默认作为系统常量隐藏",
+            "reason": "该字段未匹配到用户输入或可编辑控件，且为空值或内部标识形态，保留为内部常量",
             "need_human_confirm": True,
         }
 
     return {
-        "category": "user_param",
+        "category": "runtime_var",
         "source_kind": "unknown",
-        "source": {},
-        "editable": True,
-        "exposed_to_user": True,
-        "reason": "未识别到自动来源，默认作为用户参数暴露，后续可人工调整",
-        "need_human_confirm": False,
+        "source": {"kind": "unresolved", "path": path},
+        "editable": False,
+        "exposed_to_user": False,
+        "reason": "没有可编辑控件、上游响应或计算公式证明来源，保持内部未决，不暴露给调用方",
+        "need_human_confirm": True,
     }
 
 
@@ -1615,6 +1644,153 @@ def _recorded_scalar_values_match(left: Any, right: Any) -> bool:
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         return left == right
     return type(left) is type(right) and left == right
+
+
+_BORING_COMPOSITE_VALUES = frozenset({
+    "", "0", "1", "true", "false", "null", "none", "undefined",
+})
+
+
+def _composite_values_match(left: Any, right: Any) -> bool:
+    if _recorded_scalar_values_match(left, right):
+        return True
+    if left in (None, "") or right in (None, ""):
+        return False
+    if isinstance(left, bool) or isinstance(right, bool):
+        return False
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return str(left).strip() == str(right).strip()
+
+
+def _projection_path_score(source_path: str, target_path: str) -> int:
+    def parts(value: str) -> list[str]:
+        return [
+            token.casefold()
+            for token in re.findall(r"[A-Za-z]+|\d+|[\u4e00-\u9fff]+", str(value or ""))
+        ]
+
+    source_parts = parts(source_path)
+    target_parts = parts(target_path)
+    if not source_parts or not target_parts:
+        return 0
+    if source_parts[-1] == target_parts[-1]:
+        return 100
+    if len(source_parts) >= 2 and "".join(source_parts[-2:]) == "".join(target_parts[-1:]):
+        return 90
+    if target_parts[-1] == "id" and source_parts[-1] == "id":
+        return 75
+    if source_parts[-1] == "id" and target_parts[-1].endswith("id"):
+        return 75
+    return 0
+
+
+def _detect_composite_entity_selects(
+    fields: list[dict],
+    option_reads: list[dict],
+    *,
+    existing_paths: set[str],
+) -> list[dict]:
+    """Bind a chooser from a response row when several write fields match that row.
+
+    Modal/table pickers often have no select widget.  A single short ID is not
+    enough; two or more field matches on one unique row are.
+    """
+    out: list[dict] = []
+    claimed = set(existing_paths)
+    for read in option_reads or []:
+        source_url = str(read.get("url") or "").strip()
+        items = as_list_payload(read.get("json", read.get("response_json")))
+        if not source_url or not items or not isinstance(items[0], dict):
+            continue
+        row_hits: list[tuple[dict, list[tuple[dict, str]]]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            matches: list[tuple[dict, str]] = []
+            for field in fields:
+                target_path = str(field.get("path") or "")
+                if not target_path or target_path in claimed or field.get("recorded_user_input"):
+                    continue
+                raw = field.get("raw_value", field.get("value"))
+                if raw in (None, ""):
+                    continue
+                candidates = [
+                    (_projection_path_score(source_path, target_path), source_path)
+                    for source_path, _tokens, _raw_value, raw_leaf in _leaf_paths(item)
+                    if _composite_values_match(raw, raw_leaf)
+                    and (
+                        _projection_path_score(source_path, target_path) >= 75
+                        or (
+                            str(raw).strip().casefold() not in _BORING_COMPOSITE_VALUES
+                            and _projection_path_score(source_path, target_path) >= 50
+                        )
+                    )
+                ]
+                best = max((score for score, _path in candidates), default=0)
+                best_paths = [path for score, path in candidates if score == best and best]
+                if len(best_paths) == 1:
+                    matches.append((field, best_paths[0]))
+            if len(matches) >= 2:
+                row_hits.append((item, matches))
+        if len(row_hits) != 1:
+            continue
+        selected, matches = row_hits[0]
+        chooser = next(
+            (
+                (field, source_path)
+                for field, source_path in matches
+                if _is_idlike(str(field.get("path") or field.get("key") or "").split(".")[-1])
+            ),
+            None,
+        )
+        if chooser is None:
+            continue
+        chooser_field, value_key = chooser
+        chooser_path = str(chooser_field.get("path") or "")
+        label_key = _pick_label_key(selected, value_key.split(".")[-1] if "." in value_key else value_key)
+        if not label_key:
+            continue
+        records = []
+        option_map: dict[str, Any] = {}
+        seen_values: set[str] = set()
+        valid = True
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get(label_key) or "").strip()
+            raw_value = item.get(value_key if value_key in item else value_key.split(".")[-1])
+            if not label or raw_value in (None, "") or label in option_map or str(raw_value) in seen_values:
+                valid = False
+                break
+            seen_values.add(str(raw_value))
+            option_map[label] = raw_value
+            records.append({"label": label, "value": raw_value})
+        if not valid or len(records) < 2:
+            continue
+        projections = {
+            str(field.get("path")): source_path
+            for field, source_path in matches
+            if str(field.get("path")) != chooser_path
+        }
+        claimed.add(chooser_path)
+        claimed.update(projections)
+        out.append({
+            "path": chooser_path,
+            "source_url": source_url,
+            "source_request_id": str(read.get("request_id") or read.get("id") or ""),
+            "value_key": value_key.split(".")[-1],
+            "label_key": label_key,
+            "count": len(records),
+            "options": records,
+            "option_map": option_map,
+            "enum_source": "api",
+            "enum_confirmed": True,
+            "id_path": chooser_path,
+            "field_projections": projections,
+        })
+    return out
 
 
 def _attach_select_field_projections(
@@ -1809,6 +1985,14 @@ def _build_step_from_capture(
 
     flat_fields.extend(_params_from_url_path(req, grounded_samples))
     _attach_select_field_projections(selects_raw, flat_fields, option_reads)
+    composite_selects = _detect_composite_entity_selects(
+        flat_fields,
+        option_reads,
+        existing_paths={str(item.get("path") or "") for item in selects_raw},
+    )
+    if composite_selects:
+        selects_raw.extend(composite_selects)
+        _attach_select_field_projections(selects_raw, flat_fields, option_reads)
 
     # select 字段配中文名
     sel_names = _select_name_for_step(selects_raw, samples)
@@ -1883,20 +2067,23 @@ def _build_step_from_capture(
         if path in select_paths:
             ptype = "list-enum" if select_meta is not None and select_meta.multi else "enum"
 
-        # 字段中文名优先级
-        nm = f.get("suggest_name") or f.get("key") or ""
-        display_label = nm
+        # Wire key stays the invocation contract; the page label is display-only.
+        wire_key = str(f.get("key") or "").strip()
+        if not wire_key or wire_key == path:
+            wire_key = re.sub(r"\[\d+\]$", "", str(path or "").rsplit(".", 1)[-1])
+        business_label = str(f.get("suggest_name") or "").strip()
+        nm = wire_key
+        display_label = business_label or wire_key
         if _looks_pagination_field(str(f.get("key") or ""), path):
             # Pagination names are part of the public invocation contract. Keep
             # their stable wire-facing key while retaining the localized DOM
             # label separately for UI presentation.
-            nm = f.get("key") or nm
             ns = "auto"
         elif path in sel_names:
-            nm = sel_names[path]
+            display_label = sel_names[path] or display_label
             ns = "sample"
-        elif path in assignee_names and (nm == f.get("key") or _looks_internal(nm)):
-            nm = assignee_names[path]
+        elif path in assignee_names and (not display_label or display_label == wire_key or _looks_internal(display_label)):
+            display_label = assignee_names[path] or display_label
             ns = "assignee"
         else:
             ns = f.get("name_source") or "auto"
@@ -2011,6 +2198,7 @@ def _build_step_from_capture(
                 "previous_response", "current_user", "storage", "cookie",
                 "page_context", "request_header", "system_time",
                 "system_generated", "computed", "constant", "loop_item",
+                "page_default",
             }
         )
         params.append(ParamField(
@@ -2066,7 +2254,7 @@ def _build_step_from_capture(
                 else f.get("raw_value", f.get("value"))
                 if (
                     _looks_pagination_field(nm, path)
-                    or source_guess["source_kind"] == "constant"
+                    or source_guess["source_kind"] in {"constant", "page_default"}
                 )
                 else None
             ),
@@ -2360,8 +2548,8 @@ def _params_from_get_query(
     for k, vals in qs.items():
         v = (vals or [""])[0]
         label = labels.get(k) or str(k)
-        recorded_user_input = k in grounded
         control = control_by_key.get(k) or {}
+        recorded_user_input = str(control.get("op") or "").lower() in {"fill", "select", "pick"}
         control_kind = str(control.get("control_kind") or "").lower()
         inferred_type = _query_param_type(k, v)
         if control_kind in {"text", "textarea"}:
@@ -2388,7 +2576,11 @@ def _params_from_get_query(
             # numeric-looking sample such as hotelName=1 is not a numeric wire
             # contract merely because this recording used digits.
             wire_type = "string"
-        required_evidence = has_required_evidence(k, label, control)
+        required_evidence = (
+            bool(control.get("required_observed"))
+            if isinstance(control.get("required_observed"), bool)
+            else has_required_evidence(k, label, control)
+        )
         out.append({
             "path": f"query.{k}",
             "key": k,
@@ -4838,7 +5030,9 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                     not _param_field_manually_edited(param, "required")
                     and not _param_required_agent_classified(param)
                 ):
-                    param.required = bool(control["required_observed"])
+                    param.required = bool(
+                        control["required_observed"] and _param_exposed_to_caller(param)
+                    )
                     param.source = {
                         **(param.source or {}),
                         "required_state": "required" if param.required else "optional",
@@ -5423,6 +5617,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 semantic_type in {"date", "datetime"}
                 and not _param_field_manually_edited(param, "type")
                 and not _param_has_interacted_temporal_control(param)
+                and not _param_has_grounded_type(param)
             ):
                 param.type = semantic_type
 
@@ -6583,8 +6778,8 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
         target_param = _resolve_param_reference(target, target_path)
         for p in [target_param] if target_param is not None else []:
             captured_binding_overrides_agent_input = bool(
-                p.source_kind == "user_input"
-                and not _param_has_editable_control_evidence(p)
+                p.source_kind in {"user_input", "page_default", "unknown"}
+                and not _param_was_caller_typed(p)
                 and lk.confirmed
                 and float(lk.confidence or 0.0) >= 0.95
                 and not (lk.meta or {}).get("unverified_reason")
@@ -6732,7 +6927,7 @@ def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
         return False
     if _looks_system_const_field(param.key, param.path):
         return False
-    if param.category in {"system_const"}:
+    if param.category in {"system_const"} and param.source_kind != "page_default":
         return False
     if param.source_kind in {"constant", "page_context", "system_time", "system_generated", "computed", "current_user"}:
         return False
@@ -8323,31 +8518,309 @@ def _date_like_epoch_seconds(value: Any) -> float | None:
         return None
 
 
+def _as_finite_number(value: Any) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _numbers_match(expected: float, actual: float) -> bool:
+    return abs(expected - actual) <= max(0.02, abs(expected) * 1e-6)
+
+
+def _param_group_prefix(path: str) -> str:
+    text = str(path or "")
+    if text.startswith("body."):
+        text = text[5:]
+    return re.sub(r"(?:\.[^.\[\]]+|\[\d+\])$", "", text) if ("." in text or "[" in text) else ""
+
+
+def _param_was_caller_typed(param: ParamField) -> bool:
+    for item in param.evidence or []:
+        if isinstance(item, dict) and item.get("kind") == "page_control" and item.get("interacted"):
+            return True
+    return False
+
+
+_ARITHMETIC_STRATEGIES: tuple[tuple[str, Any, bool], ...] = (
+    ("product", lambda left, right: left * right, True),
+    ("sum", lambda left, right: left + right, True),
+    ("difference", lambda left, right: left - right, False),
+    ("percent_of", lambda left, right: left * right / 100.0, False),
+    ("remainder_after_percent", lambda left, right: left * (1.0 - right / 100.0), False),
+)
+_IDENTITY_ARITHMETIC_EPS = 1e-9
+_INPUT_OPERAND_KINDS = frozenset({
+    "selected_option_field", "user_input", "api_option", "form_option", "page_enum",
+})
+_STABLE_OPERAND_KINDS = _INPUT_OPERAND_KINDS | frozenset({
+    "computed", "previous_response", "page_default",
+})
+
+
+def _is_stable_operand(param: ParamField) -> bool:
+    if _looks_pagination_field(param.key, param.path):
+        return False
+    return _param_was_caller_typed(param) or param.source_kind in _STABLE_OPERAND_KINDS
+
+
+def _param_has_page_control_evidence(param: ParamField | None) -> bool:
+    if param is None:
+        return False
+    return any(
+        isinstance(item, dict) and item.get("kind") == "page_control"
+        for item in param.evidence or []
+    )
+
+
+def _param_control_is_readonly(param: ParamField | None) -> bool:
+    if param is None:
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "page_control"
+        and (item.get("read_only") or item.get("disabled"))
+        for item in param.evidence or []
+    )
+
+
+def _arithmetic_target_allowed(param: ParamField) -> bool:
+    """Formulas hide derived numbers, never caller filters or typed controls."""
+    if param.locked or _param_was_caller_typed(param):
+        return False
+    if str(param.path or "").startswith("query."):
+        return False
+    if _looks_pagination_field(param.key, param.path):
+        return False
+    if _param_has_page_control_evidence(param) and not _param_control_is_readonly(param):
+        return False
+    return param.source_kind not in {
+        "computed", "selected_option_field", "previous_response",
+        "api_option", "page_enum", "form_option", "current_user",
+        "system_time", "system_generated", "page_default",
+    }
+
+
+def _is_identity_arithmetic(kind: str, left: float, right: float) -> bool:
+    if kind == "product":
+        return abs(left - 1.0) <= _IDENTITY_ARITHMETIC_EPS or abs(right - 1.0) <= _IDENTITY_ARITHMETIC_EPS
+    if kind == "sum":
+        return abs(left) <= _IDENTITY_ARITHMETIC_EPS or abs(right) <= _IDENTITY_ARITHMETIC_EPS
+    if kind == "difference":
+        return abs(right) <= _IDENTITY_ARITHMETIC_EPS
+    if kind == "percent_of":
+        return abs(right - 100.0) <= _IDENTITY_ARITHMETIC_EPS
+    if kind == "remainder_after_percent":
+        return abs(right) <= _IDENTITY_ARITHMETIC_EPS
+    return False
+
+
+def _operand_quality(param: ParamField) -> int:
+    return {
+        "computed": 4,
+        "selected_option_field": 3,
+        "user_input": 3,
+        "form_option": 3,
+        "api_option": 3,
+        "page_enum": 3,
+    }.get(param.source_kind, 0)
+
+
+def _identity_product_allowed(target: ParamField, left: ParamField, right: ParamField) -> bool:
+    left_number = _as_finite_number(left.value)
+    one = (
+        left
+        if left_number is not None and abs(left_number - 1.0) <= _IDENTITY_ARITHMETIC_EPS
+        else right
+    )
+    other = right if one is left else left
+    return (
+        _param_was_caller_typed(one)
+        and not _param_was_caller_typed(target)
+        and other.source_kind in _INPUT_OPERAND_KINDS
+    )
+
+
+def _arithmetic_match_score(
+    target: ParamField,
+    kind: str,
+    left: ParamField,
+    right: ParamField,
+    identity: bool,
+) -> tuple[int, int, int]:
+    same = int(_param_group_prefix(left.path) == _param_group_prefix(target.path)) + int(
+        _param_group_prefix(right.path) == _param_group_prefix(target.path)
+    )
+    return (same, _operand_quality(left) + _operand_quality(right), int(not identity))
+
+
+def _pick_arithmetic_match(
+    target: ParamField,
+    target_number: float,
+    siblings: list[tuple[ParamField, float]],
+) -> tuple[str, ParamField, ParamField] | None:
+    matches: list[tuple[str, ParamField, ParamField, bool]] = []
+    for left, left_number in siblings:
+        for right, right_number in siblings:
+            if left is right:
+                continue
+            for kind, compute, _commutative in _ARITHMETIC_STRATEGIES:
+                try:
+                    actual = compute(left_number, right_number)
+                except ZeroDivisionError:
+                    continue
+                if not _numbers_match(target_number, actual):
+                    continue
+                identity = _is_identity_arithmetic(kind, left_number, right_number)
+                if identity and not (
+                    kind == "product" and _identity_product_allowed(target, left, right)
+                ):
+                    continue
+                if not (_is_stable_operand(left) and _is_stable_operand(right)):
+                    continue
+                matches.append((kind, left, right, identity))
+    if not matches:
+        return None
+    best_score = max(_arithmetic_match_score(target, *item) for item in matches)
+    top = [item for item in matches if _arithmetic_match_score(target, *item) == best_score]
+    kinds = {item[0] for item in top}
+    if len(kinds) != 1:
+        return None
+    kind = next(iter(kinds))
+
+    def pair_key(left: ParamField, right: ParamField) -> tuple[float, float]:
+        left_number = round(float(_as_finite_number(left.value) or 0.0), 8)
+        right_number = round(float(_as_finite_number(right.value) or 0.0), 8)
+        if kind in {"product", "sum"}:
+            return (min(left_number, right_number), max(left_number, right_number))
+        if kind == "percent_of":
+            return (min(left_number, right_number), max(left_number, right_number))
+        return (left_number, right_number)
+
+    equivalent = {pair_key(left, right) for _kind, left, right, _identity in top}
+    if len(equivalent) != 1:
+        return None
+    top.sort(key=lambda item: (
+        -_operand_quality(item[1]),
+        -_operand_quality(item[2]),
+        str(item[1].path),
+        str(item[2].path),
+        str(item[1].key),
+        str(item[2].key),
+    ))
+    _kind, left, right, _identity = top[0]
+    if kind == "percent_of":
+        left_number = abs(float(_as_finite_number(left.value) or 0.0))
+        right_number = abs(float(_as_finite_number(right.value) or 0.0))
+        left_is_base = (
+            _operand_quality(left) > _operand_quality(right)
+            or (
+                _operand_quality(left) == _operand_quality(right)
+                and left_number > right_number
+            )
+        )
+        if not left_is_base:
+            left, right = right, left
+    return kind, left, right
+
+
+def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
+    """Hide numeric fields that the recorded values prove are derived from siblings."""
+    changed = True
+    while changed:
+        changed = False
+        for step in spec.steps or []:
+            numeric = [
+                (param, number)
+                for param in step.params or []
+                if (number := _as_finite_number(param.value)) is not None
+            ]
+            for target, target_number in numeric:
+                if not _arithmetic_target_allowed(target):
+                    continue
+                prefix = _param_group_prefix(target.path)
+                local = [
+                    (param, number)
+                    for param, number in numeric
+                    if param is not target and _param_group_prefix(param.path) == prefix
+                ]
+                picked = _pick_arithmetic_match(target, target_number, local)
+                if picked is None:
+                    picked = _pick_arithmetic_match(
+                        target,
+                        target_number,
+                        [(param, number) for param, number in numeric if param is not target],
+                    )
+                if picked is None:
+                    continue
+                kind, left, right = picked
+                target.category = "runtime_var"
+                target.source_kind = "computed"
+                target.source = {
+                    "kind": "computed",
+                    "strategy": kind,
+                    "left_field": left.key,
+                    "right_field": right.key,
+                    "result_field": target.key,
+                    "path": target.path,
+                    "sample_verified": True,
+                }
+                target.exposed_to_user = False
+                target.editable = False
+                target.required = False
+                target.need_human_confirm = False
+                target.reason = (
+                    f"录制样例证明该字段由 `{left.key}` 与 `{right.key}` 按 {kind} 计算得到，运行期自动计算"
+                )
+                step.sample_inputs.pop(target.key, None)
+                changed = True
+
+
+def _param_is_temporal(param: ParamField) -> bool:
+    if str(param.type or param.wire_type or "").lower() in {"date", "datetime", "time"}:
+        return True
+    if any(
+        isinstance(item, dict)
+        and str(item.get("control_kind") or "").lower() in {"date", "datetime", "time"}
+        for item in (param.evidence or [])
+    ):
+        return True
+    text = str(param.value or "").strip()
+    return bool(
+        re.fullmatch(r"-?\d{10}|-?\d{13}", text)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ tT]\d{2}:\d{2}(?::\d{2})?)?", text)
+    )
+
+
 def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
-    """Hide recorded date-span fields only when their samples prove the formula."""
+    """Hide recorded computed fields only when their samples prove the formula."""
+    _infer_arithmetic_computed_fields(spec)
     def leaf_name(param: ParamField) -> str:
         raw = param.key or str(param.path or "").split(".")[-1]
         return re.sub(r"[^a-z0-9]+", "", str(raw).lower())
 
     date_pairs: list[tuple[FlowStep, ParamField, ParamField, int]] = []
     for step in spec.steps or []:
-        starts = [
+        temporals = [
             param for param in step.params or []
-            if re.fullmatch(r"(?:start|begin)(?:time|date)?", leaf_name(param))
+            if _param_is_temporal(param) and _date_like_epoch_seconds(param.value) is not None
         ]
-        ends = [
-            param for param in step.params or []
-            if re.fullmatch(r"(?:end|finish|back)(?:time|date)?", leaf_name(param))
-        ]
-        for start in starts:
-            for end in ends:
-                start_seconds = _date_like_epoch_seconds(start.value)
-                end_seconds = _date_like_epoch_seconds(end.value)
-                if start_seconds is None or end_seconds is None:
+        for index, left in enumerate(temporals):
+            for right in temporals[index + 1:]:
+                left_seconds = _date_like_epoch_seconds(left.value)
+                right_seconds = _date_like_epoch_seconds(right.value)
+                if left_seconds is None or right_seconds is None:
                     continue
+                start, end = (left, right) if left_seconds <= right_seconds else (right, left)
                 date_pairs.append((
                     step, start, end,
-                    int(round(abs(end_seconds - start_seconds) / 86400.0)),
+                    int(round(abs(right_seconds - left_seconds) / 86400.0)),
                 ))
     if not date_pairs:
         return
@@ -8357,9 +8830,34 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
         for capability in spec.capabilities or []
     ]
 
+    def pair_rank(step: FlowStep, pair: tuple[FlowStep, ParamField, ParamField, int]) -> tuple[int, int, float]:
+        source_step = pair[0]
+        same_step = int(source_step.step_id == step.step_id)
+        shared_capability = int(any(
+            step.step_id in members and source_step.step_id in members
+            for members in capability_memberships
+        ))
+        target_sequence = _step_sequence(step)
+        source_sequence = _step_sequence(source_step)
+        distance = (
+            abs(target_sequence - source_sequence)
+            if target_sequence is not None and source_sequence is not None
+            else 10**9
+        )
+        return same_step, shared_capability, -distance
+
+    assignments: list[tuple[FlowStep, ParamField, dict[str, Any], str]] = []
     for step in spec.steps or []:
         for param in step.params or []:
-            if param.locked or _param_has_editable_control_evidence(param):
+            if (
+                param.locked
+                or _param_has_editable_control_evidence(param)
+                or _param_is_temporal(param)
+                or param.source_kind in {
+                    "computed", "selected_option_field", "api_option",
+                    "form_option", "page_enum", "current_user",
+                }
+            ):
                 continue
             key_norm = leaf_name(param)
             strategy = ""
@@ -8375,9 +8873,8 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
                     payload = None
                 if isinstance(payload, dict) and len(payload) == 1:
                     output_key, sample_value = next(iter(payload.items()))
-                    if str(output_key).lower() in {"day", "days", "duration", "durationdays"}:
-                        strategy = "date_span_days_json"
-            elif re.fullmatch(r"(?:day|days|duration|durationdays)", key_norm):
+                    strategy = "date_span_days_json"
+            elif _as_finite_number(param.value) is not None:
                 sample_value = param.value
                 strategy = "date_span_days"
             if not strategy:
@@ -8386,33 +8883,29 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
                 observed_days = int(sample_value)
             except (TypeError, ValueError):
                 continue
+            if observed_days < 0 or observed_days > 3660:
+                continue
+            named = bool(
+                strategy == "date_span_days_json"
+                or re.fullmatch(r"(?:day|days|duration|durationdays)", key_norm)
+            )
+            readonly_calc = any(
+                isinstance(item, dict)
+                and item.get("kind") == "page_control"
+                and (item.get("read_only") or item.get("disabled"))
+                for item in (param.evidence or [])
+            )
+            two_dates = sum(1 for item in step.params or [] if _param_is_temporal(item)) == 2
+            if not (named or readonly_calc or two_dates):
+                continue
             matches = [pair for pair in date_pairs if pair[3] == observed_days]
             if not matches:
                 continue
-
-            def pair_rank(pair: tuple[FlowStep, ParamField, ParamField, int]) -> tuple[int, int, float]:
-                source_step = pair[0]
-                same_step = int(source_step.step_id == step.step_id)
-                shared_capability = int(any(
-                    step.step_id in members and source_step.step_id in members
-                    for members in capability_memberships
-                ))
-                target_sequence = _step_sequence(step)
-                source_sequence = _step_sequence(source_step)
-                distance = (
-                    abs(target_sequence - source_sequence)
-                    if target_sequence is not None and source_sequence is not None
-                    else 10**9
-                )
-                return same_step, shared_capability, -distance
-
-            ranked = sorted(matches, key=pair_rank, reverse=True)
-            if len(ranked) > 1 and pair_rank(ranked[0]) == pair_rank(ranked[1]):
+            ranked = sorted(matches, key=lambda pair: pair_rank(step, pair), reverse=True)
+            if len(ranked) > 1 and pair_rank(step, ranked[0]) == pair_rank(step, ranked[1]):
                 continue
             _source_step, start, end, _days = ranked[0]
-            param.category = "runtime_var"
-            param.source_kind = "computed"
-            param.source = {
+            assignments.append((step, param, {
                 "kind": "computed",
                 "strategy": strategy,
                 "start_field": start.key,
@@ -8421,12 +8914,25 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
                 "sample_verified": True,
                 "sample_days": observed_days,
                 **({"output_key": str(output_key)} if output_key else {}),
-            }
-            param.exposed_to_user = False
-            param.editable = False
-            param.need_human_confirm = False
-            param.reason = f"录制样例证明该字段由 `{start.key}` 与 `{end.key}` 的日期跨度生成，运行期自动计算"
-            step.sample_inputs.pop(param.key, None)
+            }, f"录制样例证明该字段由 `{start.key}` 与 `{end.key}` 的日期跨度生成，运行期自动计算"))
+
+    claimed_pairs: dict[tuple[str, str, str], int] = {}
+    for step, param, source, _reason in assignments:
+        key = (step.step_id, str(source.get("start_field")), str(source.get("end_field")))
+        claimed_pairs[key] = claimed_pairs.get(key, 0) + 1
+    for step, param, source, reason in assignments:
+        key = (step.step_id, str(source.get("start_field")), str(source.get("end_field")))
+        if claimed_pairs.get(key, 0) != 1:
+            continue
+        param.category = "runtime_var"
+        param.source_kind = "computed"
+        param.source = source
+        param.exposed_to_user = False
+        param.editable = False
+        param.required = False
+        param.need_human_confirm = False
+        param.reason = reason
+        step.sample_inputs.pop(param.key, None)
 
 
 def _repair_uncontrolled_write_state_fields(spec: FlowSpec) -> int:
@@ -8584,7 +9090,8 @@ def _business_type_for_param(param: ParamField) -> str:
 _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
     "previous_response", "current_user", "storage", "cookie", "page_context",
     "request_header", "system_time", "system_generated", "computed",
-    "constant", "loop_item", "selected_option_field", "dynamic_structure",
+    "constant", "page_default", "loop_item", "selected_option_field",
+    "dynamic_structure",
 })
 
 
