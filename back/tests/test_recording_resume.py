@@ -304,3 +304,4 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "showLiveVerificationLog ? renderVerificationLog() : (" in result_view
     assert "RESULT_STATUS_BOX_STYLE" in recorder
     assert "renderVerificationLog" in recorder
+    assert "defaultActiveKey={[]}" in recorder

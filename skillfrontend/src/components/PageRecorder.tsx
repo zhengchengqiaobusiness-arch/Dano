@@ -1857,9 +1857,7 @@ export default function PageRecorder({
     if (!capabilities.length) return <Empty description="没有生成能力" />;
     return (
       <Collapse
-        defaultActiveKey={capabilities.length
-          ? [String(capabilities[0].capability_id || capabilities[0].name || "0")]
-          : []}
+        defaultActiveKey={[]}
         items={capabilities.map((capability, index) => {
           return {
             key: capability.capability_id || capability.name || String(index),
