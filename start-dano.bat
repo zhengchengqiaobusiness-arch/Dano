@@ -9,19 +9,28 @@ if not defined DANO_FRONTEND_PORT set "DANO_FRONTEND_PORT=5173"
 set "BACKEND_PORT=%DANO_BACKEND_PORT%"
 set "FRONTEND_PORT=%DANO_FRONTEND_PORT%"
 
-pushd "%ROOT%"
-echo Cleaning Python caches...
-for /d /r %%D in (__pycache__ .pytest_cache .mypy_cache .ruff_cache) do (
-    if exist "%%D" rd /s /q "%%D"
-)
-del /s /q "*.pyc" "*.pyo" >nul 2>&1
-echo Done.
-popd
-
 call :clear_port %BACKEND_PORT% Backend
 if errorlevel 1 goto :cleanup_failed
 call :clear_port %FRONTEND_PORT% Frontend
 if errorlevel 1 goto :cleanup_failed
+
+echo Cleaning temporary files...
+call :rmdir_if "%ROOT%.runtime"
+call :rmdir_if "%ROOT%back\.pi-agent"
+call :rmdir_if "%ROOT%back\.dano"
+call :rmdir_if "%ROOT%back\.dano-sessions"
+call :rmdir_if "%ROOT%skillfrontend\dist"
+call :rmdir_if "%ROOT%back\examples\_chunks"
+if exist "%ROOT%back\*.log" del /q "%ROOT%back\*.log" >nul 2>&1
+if exist "%ROOT%*.log" del /q "%ROOT%*.log" >nul 2>&1
+for /d /r "%ROOT%back\dano" %%D in (__pycache__ .pytest_cache .mypy_cache .ruff_cache) do (
+    if exist "%%D" rd /s /q "%%D"
+)
+for /d /r "%ROOT%back\tests" %%D in (__pycache__ .pytest_cache .mypy_cache .ruff_cache) do (
+    if exist "%%D" rd /s /q "%%D"
+)
+del /s /q "%ROOT%back\dano\*.pyc" "%ROOT%back\dano\*.pyo" "%ROOT%back\tests\*.pyc" "%ROOT%back\tests\*.pyo" >nul 2>&1
+echo Done.
 
 if not exist "%PY%" (
     echo ERROR: Backend Python was not found: %PY%
@@ -57,6 +66,10 @@ echo Frontend http://localhost:%FRONTEND_PORT%
 echo First time: open frontend -^> Settings -^> enter model API key -^> Save -^> Onboard.
 echo (You can close THIS window; services run in the other two.)
 if not defined DANO_NONINTERACTIVE pause
+exit /b 0
+
+:rmdir_if
+if exist "%~1" rd /s /q "%~1"
 exit /b 0
 
 :clear_port

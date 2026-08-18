@@ -445,7 +445,8 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const visibleStage = pageStage(status);
+  const autoStage = pageStage(status);
+  const [viewStage, setViewStage] = useState(autoStage);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -455,6 +456,10 @@ export default function PageRecorder({
       machineVerification,
     }));
   }, [startUrl, goalText, title, machineVerification]);
+
+  useEffect(() => {
+    setViewStage(autoStage);
+  }, [autoStage]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -1068,27 +1073,26 @@ export default function PageRecorder({
     return (
       <Card>
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <label>
-            <Text strong><Text type="danger">* </Text>业务页地址</Text>
-            <Input
-              value={startUrl}
-              onChange={(event) => setStartUrl(event.target.value)}
-              placeholder="https://example.com/business/page"
-              style={{ marginTop: 8 }}
-            />
-          </label>
-          <label>
-            <Text strong>Skill 名称</Text>
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如：请假申请。不填则按页面标题自动生成"
-              style={{ marginTop: 8 }}
-            />
-            <div style={{ marginTop: 6 }}>
-              <Text type="secondary">优先用这里填写的名称；留空时由页面/业务理解自动生成，不会使用录制会话 ID。</Text>
-            </div>
-          </label>
+          <div style={{ display: "flex", gap: 16, width: "100%" }}>
+            <label style={{ flex: 1, minWidth: 0 }}>
+              <Text strong><Text type="danger">* </Text>业务页地址</Text>
+              <Input
+                value={startUrl}
+                onChange={(event) => setStartUrl(event.target.value)}
+                placeholder="https://example.com/business/page"
+                style={{ marginTop: 8 }}
+              />
+            </label>
+            <label style={{ flex: 1, minWidth: 0 }}>
+              <Text strong>Skill 名称</Text>
+              <Input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="例如：请假申请"
+                style={{ marginTop: 8 }}
+              />
+            </label>
+          </div>
           <label>
             <Text strong><Text type="danger">* </Text>录制目标</Text>
             <Input.TextArea
@@ -1098,11 +1102,6 @@ export default function PageRecorder({
               autoSize={{ minRows: 3, maxRows: 5 }}
               style={{ marginTop: 8 }}
             />
-            <div style={{ marginTop: 6 }}>
-              <Text type="secondary">
-                系统只根据实际录制且有完整证据的业务操作生成能力。
-              </Text>
-            </div>
           </label>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <Button type="primary" loading={connecting} onClick={startRecording}>开始录制</Button>
@@ -1756,11 +1755,14 @@ export default function PageRecorder({
   return (
     <div style={{ width: "100%", minWidth: 0, padding: "12px 18px 18px", boxSizing: "border-box" }}>
       <Steps
-        current={visibleStage}
+        current={viewStage}
+        onChange={setViewStage}
         items={[{ title: "录制准备" }, { title: "页面录制" }, { title: "能力结果" }]}
         style={{ maxWidth: 980, margin: "0 auto 18px" }}
       />
-      {visibleStage === 0 ? renderSetup() : visibleStage === 1 ? renderRecording() : renderResult()}
+      <div style={{ display: viewStage === 0 ? "block" : "none" }}>{renderSetup()}</div>
+      <div style={{ display: viewStage === 1 ? "block" : "none" }}>{renderRecording()}</div>
+      <div style={{ display: viewStage === 2 ? "block" : "none" }}>{renderResult()}</div>
       <Drawer
         title="录制助手"
         placement="right"
