@@ -656,9 +656,15 @@ const SemanticPlan = Type.Object({
     name: Type.String({ minLength: 1 }),
     title: Type.String({ minLength: 1 }),
     kind: CapabilityKind,
-    anchor_step_id: Type.String({ minLength: 1 }),
+    anchor_step_id: Type.String({
+      minLength: 1,
+      description: "唯一公开执行锚点。实时阶段尚无物化 step 时必须原样使用 get_recording_state 中的 request_id（如 req_86），禁止添加 step_ 前缀",
+    }),
     request_refs: Type.Array(Type.Object({
-      step_id: Type.String({ minLength: 1 }),
+      step_id: Type.String({
+        minLength: 1,
+        description: "实时阶段使用精确 observed request_id；必须且只能有一个 usage=execute，并与 anchor_step_id 相同",
+      }),
       usage: Type.Union([
         Type.Literal("execute"), Type.Literal("preflight"),
         Type.Literal("option_source"), Type.Literal("fact_check"),
@@ -849,7 +855,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交当前录制版本的严格类型语义增量。plan 必须直接传结构化对象，禁止 JSON 字符串。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；实时任务中的 capabilities 必须是截至当前事实的完整能力边界而非本批增量，后续轮次必须保留仍成立的已有能力。capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs，禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和录制值匹配或机器验证的依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 七分类为 caller_input、constant、session、context、response_binding、computed、generated，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
+      "提交当前录制版本的严格类型语义增量。plan 必须直接传结构化对象，禁止 JSON 字符串。字段操作必须使用 request_id 或 step_id 加规范 wire_path，并放入 plan.ops；名称、来源、required、枚举不得写入 semantic_plan。semantic_plan 只允许 business_understanding、capabilities、unresolved_items；实时任务中的 capabilities 必须是截至当前事实的完整能力边界而非本批增量，后续轮次必须保留仍成立的已有能力。capability 必须提供 name、title、kind、anchor_step_id 和带 execute/preflight/option_source/fact_check usage 的 request_refs；请求尚未物化时 anchor_step_id/request_refs.step_id 必须原样使用状态中的 request_id（如 req_86），禁止添加 step_ 前缀；每个能力必须且只能有一个 execute，且它必须等于 anchor_step_id。禁止 steps、id、fields、dependencies、enums 等旧别名。request_refs 仅表达模型观察，后端会从 anchor 和录制值匹配或机器验证的依赖图重新编译实际成员，模型不能强行加入无关请求。请求角色只允许 auth、support、option、context、business_read、business_write。set_param_source 七分类为 caller_input、constant、session、context、response_binding、computed、generated，分类必须可编译并有录制证据。依赖只能先用 propose_dependency 提案，禁止直接标 verified。提交后检查 op_results、capability_plan_complete 和 capability_retry_reasons；deferred 表示结论已持久暂存并会在请求物化后自动重放，不要重复提交；只修正 must_retry 中的 rejected/rolled_back。禁止提交 FlowSpec；后端负责事实、版本和安全准入。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

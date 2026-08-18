@@ -12004,6 +12004,84 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     }
 
 
+def _pre_materialization_semantic_plan_coverage(
+    spec: FlowSpec,
+    semantic_plan: dict[str, Any],
+    fact_request_ids: set[str],
+) -> dict[str, Any]:
+    """Validate a strict live plan before request facts become FlowSteps."""
+    capability_items = [
+        item for item in semantic_plan.get("capabilities") or []
+        if isinstance(item, dict)
+    ]
+    missing: list[str] = []
+    names: set[str] = set()
+    anchors: set[str] = set()
+    for capability in capability_items:
+        name = str(capability.get("name") or "").strip()
+        title = str(capability.get("title") or "").strip()
+        kind = str(capability.get("kind") or "").strip()
+        anchor = str(capability.get("anchor_step_id") or "").strip()
+        refs = capability.get("request_refs")
+        execute_refs = [
+            ref for ref in (refs if isinstance(refs, list) else [])
+            if isinstance(ref, dict) and str(ref.get("usage") or "") == "execute"
+        ]
+        valid = bool(
+            name and title and kind in ALLOWED_CAPABILITY_KINDS
+            and anchor in fact_request_ids
+            and name not in names and anchor not in anchors
+            and isinstance(refs, list) and refs
+            and all(
+                isinstance(ref, dict)
+                and str(ref.get("step_id") or "") in fact_request_ids
+                and str(ref.get("usage") or "")
+                in {"execute", "preflight", "option_source", "fact_check"}
+                for ref in (refs or [])
+            )
+            and len(execute_refs) == 1
+            and str(execute_refs[0].get("step_id") or "") == anchor
+        )
+        if not valid:
+            missing.append("capability_contracts")
+            break
+        names.add(name)
+        anchors.add(anchor)
+
+    if not capability_items:
+        missing.append("capabilities")
+    from dano.execution.page.recording_live import _recording_goal_contract
+
+    expected_count = int(_recording_goal_contract(spec).get("expected_count") or 0)
+    if expected_count and len(capability_items) != expected_count:
+        missing.append("goal_capability_count")
+    understanding = semantic_plan.get("business_understanding")
+    if not isinstance(understanding, dict) or not any(
+        str(understanding.get(key) or "").strip()
+        for key in ("business_name", "summary", "intent", "object", "purpose")
+    ):
+        missing.append("business_understanding")
+    unresolved_items = semantic_plan.get("unresolved_items", [])
+    if not isinstance(unresolved_items, list) or any(
+        not isinstance(item, dict)
+        or item.get("blocking") is True
+        or str(item.get("severity") or "").strip().lower()
+        in {"high", "critical", "blocker", "error"}
+        for item in (unresolved_items if isinstance(unresolved_items, list) else [])
+    ):
+        missing.append("unresolved_blockers")
+    missing = list(dict.fromkeys(missing))
+    return {
+        "complete": not missing,
+        "missing": missing,
+        "covered_steps": len(anchors),
+        "total_steps": expected_count or len(capability_items),
+        "covered_fields": 0,
+        "total_fields": 0,
+        "phase": "request_facts",
+    }
+
+
 def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
     """Derive the complete public action set from recorder-owned facts."""
     write_groups: dict[str, list[FlowStep]] = {}
@@ -13951,7 +14029,7 @@ async def orchestrate_flow_capabilities(
         if strict_semantic_submission
         else previous_semantic_plan if previous_strict_plan else {}
     )
-    pre_materialization_strict_plan = bool(
+    pre_materialization_candidate = bool(
         strict_semantic_submission
         and not current.steps
         and fact_request_ids
@@ -13965,6 +14043,24 @@ async def orchestrate_flow_capabilities(
             for item in (effective_semantic_plan.get("capabilities") or [])
             if isinstance(item, dict)
         )
+    )
+    pre_materialization_coverage = (
+        _pre_materialization_semantic_plan_coverage(
+            current, effective_semantic_plan, fact_request_ids,
+        )
+        if pre_materialization_candidate
+        else {
+            "complete": False,
+            "missing": [],
+            "covered_steps": 0,
+            "total_steps": 0,
+            "covered_fields": 0,
+            "total_fields": 0,
+            "phase": "request_facts",
+        }
+    )
+    pre_materialization_strict_plan = bool(
+        pre_materialization_candidate and pre_materialization_coverage.get("complete")
     )
     ignored_non_public_capabilities: list[str] = []
     if strict_semantic_submission and not pre_materialization_strict_plan:
@@ -14087,12 +14183,18 @@ async def orchestrate_flow_capabilities(
         }
     else:
         proposal_accepted = False
+        pre_materialization_reasons = list(
+            pre_materialization_coverage.get("missing") or []
+        ) if pre_materialization_candidate else []
         proposal_gate = {
             "accepted": False,
             "reasons": (
-                ["capability_compilation_failed"]
-                if capability_compilation_errors
-                else ["strict_semantic_plan_required"]
+                pre_materialization_reasons
+                or (
+                    ["capability_compilation_failed"]
+                    if capability_compilation_errors
+                    else ["strict_semantic_plan_required"]
+                )
             ),
             "producer": "verified_request_graph",
         }
@@ -14165,7 +14267,11 @@ async def orchestrate_flow_capabilities(
                 },
             ],
         }
-    semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
+    semantic_coverage = (
+        pre_materialization_coverage
+        if pre_materialization_strict_plan
+        else _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
+    )
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)
     final_errors = [
@@ -14201,6 +14307,7 @@ async def orchestrate_flow_capabilities(
             "last_incremental_review": incremental_review,
             "proposal_gate": proposal_gate,
             "capability_compilation": capability_compilation_audit,
+            "capability_compilation_errors": capability_compilation_errors,
             "ignored_non_public_capabilities": ignored_non_public_capabilities,
         },
         "capability_orchestration_audit": {
@@ -22281,6 +22388,13 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     ]
     from dano.onboarding.recording_release import evaluate_recording_release
     release_ready = evaluate_recording_release(current).callable_spec is not None
+    capability_plan_complete = recording_capability_plan_complete(current)
+    capability_model = dict((current.meta or {}).get("capability_model") or {})
+    capability_retry_reasons = [] if capability_plan_complete else list(dict.fromkeys([
+        *list((capability_model.get("proposal_gate") or {}).get("reasons") or []),
+        *list((capability_model.get("semantic_coverage") or {}).get("missing") or []),
+        *list(capability_model.get("capability_compilation_errors") or []),
+    ]))[:20]
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "structural_valid": structural_valid,
@@ -22295,7 +22409,8 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
             str(item.get("status") or "") == "applied"
             for item in op_results
         ),
-        "capability_plan_complete": recording_capability_plan_complete(current),
+        "capability_plan_complete": capability_plan_complete,
+        "capability_retry_reasons": capability_retry_reasons,
         # A deferred live field conclusion is durably staged in
         # recording_agent_ops and is replayed after request materialization.
         # It must not consume another Pi submission attempt.
@@ -22310,6 +22425,8 @@ def recording_capability_plan_complete(spec: FlowSpec) -> bool:
     meta = spec.meta or {}
     generation = dict(meta.get("capability_generation") or {})
     model = dict(meta.get("capability_model") or {})
+    if str(model.get("status") or "") == "awaiting_materialization":
+        return True
     if generation:
         return bool(generation.get("initial_completed"))
     return str(model.get("status") or "") in {"ready", "awaiting_materialization"}

@@ -1063,7 +1063,8 @@ async def _apply_recording_submission_atomic(
             for key in (
                 "flow_version", "op_results", "all_applied", "must_retry",
                 "unresolved_targets", "accepted", "unchanged", "warning",
-                "capability_plan_complete", "submission_complete",
+                "capability_plan_complete", "capability_retry_reasons",
+                "submission_complete",
             )
             if key in result
         }
@@ -1458,14 +1459,45 @@ async def get_recording_verification(run_id: str, params: dict) -> dict:
     return {"verification": record}
 
 
-def _normalize_strict_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ARG001, ANN001
-    """Copy the already validated strict plan without semantic reinterpretation.
+def _normalize_strict_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ANN001
+    """Copy the validated plan and resolve unambiguous live request aliases.
 
     The TypeBox boundary and ``_validate_strict_recording_plan`` own shape
     validation.  This adapter must not infer memberships, add legacy semantic
-    axes, or generate deterministic capabilities after that validation.
+    axes, or generate deterministic capabilities after that validation. During
+    live analysis there may not be materialized steps yet; ``step_<request_id>``
+    is therefore normalized only when its suffix exactly identifies a captured
+    request and no real step already owns the submitted identifier.
     """
     semantic = deepcopy(raw_plan.get("semantic_plan") or {})
+    fact_request_ids = {
+        str(item.request_id or "")
+        for item in getattr(getattr(spec, "request_facts", None), "requests", [])
+        if str(item.request_id or "")
+    }
+    materialized_step_ids = {
+        str(item.step_id or "")
+        for item in getattr(spec, "steps", [])
+        if str(item.step_id or "")
+    }
+
+    def live_request_id(value: object) -> str:
+        identifier = str(value or "").strip()
+        if identifier in fact_request_ids or identifier in materialized_step_ids:
+            return identifier
+        if identifier.startswith("step_"):
+            candidate = identifier.removeprefix("step_")
+            if candidate in fact_request_ids:
+                return candidate
+        return identifier
+
+    for capability in semantic.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        capability["anchor_step_id"] = live_request_id(capability.get("anchor_step_id"))
+        for ref in capability.get("request_refs") or []:
+            if isinstance(ref, dict):
+                ref["step_id"] = live_request_id(ref.get("step_id"))
     operations = deepcopy(raw_plan.get("ops") or [])
     submission = {
         "semantic_plan": semantic,
@@ -1563,11 +1595,26 @@ def _canonicalize_recording_plan_aliases(raw_plan: dict) -> dict:
         capabilities = semantic.get("capabilities")
         if isinstance(capabilities, list):
             for capability in capabilities:
-                if not isinstance(capability, dict) or capability.get("request_refs"):
+                if not isinstance(capability, dict):
                     continue
                 anchor = str(capability.get("anchor_step_id") or "").strip()
-                if anchor:
+                refs = capability.get("request_refs")
+                if not refs and anchor:
                     capability["request_refs"] = [{"step_id": anchor, "usage": "execute"}]
+                    continue
+                if not anchor or not isinstance(refs, list):
+                    continue
+                # The explicit public anchor is authoritative. Pi sometimes
+                # repeats a supporting request as a second execute member;
+                # preserve that observed member as preflight so the strict
+                # one-anchor contract can compile without another model turn.
+                for ref in refs:
+                    if (
+                        isinstance(ref, dict)
+                        and str(ref.get("usage") or "") == "execute"
+                        and str(ref.get("step_id") or "").strip() != anchor
+                    ):
+                        ref["usage"] = "preflight"
 
     field_operations = {
         "set_param_source", "set_param_type", "set_param_required",
@@ -1690,6 +1737,18 @@ def _validate_strict_recording_plan(raw_plan: dict) -> None:
                 raise ToolError(f"capabilities[{index}].request_refs[{ref_index}] 格式错误")
             if not str(ref.get("step_id") or "") or str(ref.get("usage") or "") not in _STRICT_REQUEST_USAGES:
                 raise ToolError(f"capabilities[{index}].request_refs[{ref_index}] 缺少有效 step_id/usage")
+        execute_refs = [
+            ref for ref in refs
+            if isinstance(ref, dict) and str(ref.get("usage") or "") == "execute"
+        ]
+        if (
+            len(execute_refs) != 1
+            or str(execute_refs[0].get("step_id") or "").strip()
+            != str(capability.get("anchor_step_id") or "").strip()
+        ):
+            raise ToolError(
+                f"capabilities[{index}] 的唯一 execute 必须等于 anchor_step_id"
+            )
 
     unresolved = semantic.get("unresolved_items", [])
     if not isinstance(unresolved, list):

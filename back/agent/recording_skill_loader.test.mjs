@@ -19,7 +19,8 @@ const SKILL_DIR = path.join(AGENT_DIR, "recording-pi", "skills", SKILL_NAME);
 const SKILL_FILE = path.join(SKILL_DIR, "SKILL.md");
 const RUNTIME_FILE = path.join(AGENT_DIR, "run_recording_pi.mjs");
 const CLIENT_FILE = path.join(BACK_DIR, "dano", "onboarding", "recording_pi.py");
-const PIPELINE_TEST_FILE = path.join(BACK_DIR, "tests", "test_recording_pipeline.py");
+const WORKFLOW_FILE = path.join(BACK_DIR, "dano", "onboarding", "recording_workflow.py");
+const RECORDING_RUNTIME_FILE = path.join(BACK_DIR, "dano", "onboarding", "recording_runtime.py");
 const TEST_TEMP_DIR = path.join(REPO_DIR, ".runtime", "node-tests");
 
 async function makeTempDir(prefix) {
@@ -218,11 +219,15 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
 });
 
 test("default-off machine verification retains the no-final-plan regression contract", async () => {
-  const pipelineTest = await readFile(PIPELINE_TEST_FILE, "utf8");
+  const [workflow, recordingRuntime] = await Promise.all([
+    readFile(WORKFLOW_FILE, "utf8"),
+    readFile(RECORDING_RUNTIME_FILE, "utf8"),
+  ]);
 
-  assert.match(pipelineTest, /test_default_off_machine_verification_exports_live_skill_without_final_plan/);
-  assert.match(pipelineTest, /default-off mode must not run final Pi planning/);
-  assert.match(pipelineTest, /events == \["materialize", "publish"\]/);
+  assert.match(workflow, /async def finish\(self, \*, machine_verification: bool = False\)/);
+  assert.match(workflow, /PipelineSeed\([\s\S]*machine_verification=machine_verification/);
+  assert.match(recordingRuntime, /if context\.machine_verification:[\s\S]*else:\s*publishable_spec = spec/);
+  assert.match(recordingRuntime, /pi = await self\.pi_provider\(False\)/);
 });
 
 test("recording runtime contains no page- or business-specific analysis patch", async () => {

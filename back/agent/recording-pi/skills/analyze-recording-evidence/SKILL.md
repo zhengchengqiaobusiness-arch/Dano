@@ -40,7 +40,10 @@ capabilities after the fact.
 6. If a business action was not observed or lacks an execute anchor, keep it in `unresolved_items`
    and continue preserving every still-valid earlier capability.
 7. Every capability needs `name`, `title`, `kind`, `anchor_step_id`, and non-empty `request_refs`
-   with exactly one `execute` member grounded in the recording.
+   with exactly one `execute` member grounded in the recording. Before requests are materialized as
+   steps, copy the exact observed `request_id` (for example `req_86`) into both `anchor_step_id` and
+   `request_refs[].step_id`; never invent a `step_` prefix. The sole `execute` reference must equal
+   `anchor_step_id`.
 
 ## Use the recording goal as the public boundary
 
@@ -221,11 +224,13 @@ new dependency types.
    `unresolved_items` in `semantic_plan`.
 4. Every capability must provide `name`, `title`, `kind`, `anchor_step_id`, and non-empty
    `request_refs`. Mark exactly one request `execute`; use `preflight`, `option_source`, or
-   `fact_check` only for observed supporting members.
+   `fact_check` only for observed supporting members. In live request-fact state, use exact observed
+   request IDs without adding `step_`; the single `execute` member must equal `anchor_step_id`.
 5. Submit all currently grounded capabilities on every turn. This array is a full replacement,
    not the current batch delta.
 6. Pass `plan` as a structured object, never as JSON-encoded text. Call
-   `submit_recording_plan`, then inspect `op_results` and `must_retry`:
+   `submit_recording_plan`, then inspect `op_results`, `must_retry`, `capability_plan_complete`, and
+   `capability_retry_reasons`:
    - `applied`: retain the conclusion.
    - `deferred`: retain it and do not resubmit while it awaits materialization.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.
