@@ -9,7 +9,14 @@ if not defined DANO_FRONTEND_PORT set "DANO_FRONTEND_PORT=5173"
 set "BACKEND_PORT=%DANO_BACKEND_PORT%"
 set "FRONTEND_PORT=%DANO_FRONTEND_PORT%"
 
-call "%ROOT%clean-python-cache.bat" nopause
+pushd "%ROOT%"
+echo Cleaning Python caches...
+for /d /r %%D in (__pycache__ .pytest_cache .mypy_cache .ruff_cache) do (
+    if exist "%%D" rd /s /q "%%D"
+)
+del /s /q "*.pyc" "*.pyo" >nul 2>&1
+echo Done.
+popd
 
 call :clear_port %BACKEND_PORT% Backend
 if errorlevel 1 goto :cleanup_failed
