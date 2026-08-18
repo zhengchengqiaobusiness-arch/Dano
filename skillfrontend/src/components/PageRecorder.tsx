@@ -901,10 +901,16 @@ export default function PageRecorder({
     }
   }
 
-  function historyItemStatus(item: RecordingResultSummary) {
-    const currentAction = Boolean(item.action && item.action === actionRef.current);
-    const currentResult = Boolean(activeResultId && activeResultId === item.id);
-    const current = currentAction || currentResult;
+  function historyPublishLabel(item: RecordingResultSummary) {
+    return item.published ? "已发布" : "";
+  }
+
+  function historyExecutionStatus(item: RecordingResultSummary) {
+    const current = Boolean(
+      (item.action && item.action === actionRef.current)
+      || (activeResultId && activeResultId === item.id),
+    );
+    const step = String(snapshot?.progress.step || "");
     if (current && (connecting || status === "recording")) {
       return { color: "processing" as const, text: "录制中" };
     }
@@ -912,9 +918,21 @@ export default function PageRecorder({
       return { color: "warning" as const, text: "等待确认" };
     }
     if (current && status === "processing") {
-      return { color: "processing" as const, text: resumeOnly ? "验证中" : "分析中" };
+      if (step === "publishing" || step === "exporting") {
+        return { color: "processing" as const, text: "正在发布" };
+      }
+      if (resumeOnly || ["verifying", "resolving", "compiling"].includes(step)) {
+        return { color: "processing" as const, text: "验证中" };
+      }
+      return { color: "processing" as const, text: "分析中" };
     }
-    if (item.published) return { color: "success" as const, text: "已发布" };
+    if (current && status === "failed") {
+      return { color: "error" as const, text: "执行失败" };
+    }
+    if (current && status === "cancelled") {
+      return { color: "default" as const, text: "已终止" };
+    }
+    if (item.published) return { color: "default" as const, text: "已完成" };
     return { color: "default" as const, text: "未发布" };
   }
 
@@ -1307,12 +1325,12 @@ export default function PageRecorder({
             {
               title: "Skill",
               render: (_, item) => {
-                const itemStatus = historyItemStatus(item);
+                const published = historyPublishLabel(item);
                 return (
                   <div>
                     <div>
                       {(item.title || "").trim() || "未命名录制"}
-                      <Tag color={itemStatus.color} style={{ marginLeft: 8 }}>{itemStatus.text}</Tag>
+                      {published ? <Tag color="success" style={{ marginLeft: 8 }}>{published}</Tag> : null}
                     </div>
                     <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>
                   </div>
@@ -1330,10 +1348,10 @@ export default function PageRecorder({
               render: (_, item) => item.request_count,
             },
             {
-              title: "状态",
-              width: 100,
+              title: "执行状态",
+              width: 110,
               render: (_, item) => {
-                const itemStatus = historyItemStatus(item);
+                const itemStatus = historyExecutionStatus(item);
                 return <Tag color={itemStatus.color}>{itemStatus.text}</Tag>;
               },
             },

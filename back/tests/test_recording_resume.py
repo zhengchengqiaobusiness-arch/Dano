@@ -305,3 +305,6 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "RESULT_STATUS_BOX_STYLE" in recorder
     assert "renderVerificationLog" in recorder
     assert "defaultActiveKey={[]}" in recorder
+    assert 'title: "执行状态"' in recorder
+    assert "正在发布" in recorder
+    assert "historyExecutionStatus" in recorder
