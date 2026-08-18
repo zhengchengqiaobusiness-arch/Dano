@@ -10,7 +10,6 @@ export interface SkillManifest {
   description: string;
   integration: string;     // workflow / api / page
   risk_level: string;      // L1..L5
-  requires_confirmation: boolean;
   verification_status?: string;
   verification_basis?: string;
   recording_mode?: string;
@@ -64,21 +63,6 @@ export interface JSONSchema {
   additionalProperties?: boolean | JSONSchema;
 }
 
-// 与后端 TaskOutcome 对齐(部分字段)
-export interface TaskOutcome {
-  task_id: string;
-  state: string;           // completed / cancelled / needs_input / rejected / failed ...
-  message: string;
-  skill_id?: string;
-  exec_result?: { structured_output?: Record<string, unknown>; [k: string]: unknown } | null;
-  audit?: Record<string, unknown>;
-}
-
-export interface FunctionTool {
-  type: "function";
-  function: { name: string; description: string; parameters: JSONSchema };
-}
-
 export async function createTenantWithPassword(
   tenant: string,
   username: string,
@@ -111,28 +95,6 @@ export async function listSkills(): Promise<SkillManifest[]> {
   return data;
 }
 
-export async function getSkill(skillId: string): Promise<SkillManifest> {
-  const { data } = await api.get(`/v1/skills/${encodeURIComponent(skillId)}`);
-  return data;
-}
-
-export async function invokeSkill(
-  skillId: string,
-  input: Record<string, unknown>,
-  confirm: boolean,
-): Promise<TaskOutcome> {
-  const { data } = await api.post(`/v1/skills/${encodeURIComponent(skillId)}/invoke`, {
-    input,
-    confirm,
-  });
-  return data;
-}
-
-export async function listTools(): Promise<FunctionTool[]> {
-  const { data } = await api.get("/v1/tools");
-  return data;
-}
-
 export async function deleteSkill(skillId: string): Promise<{ deleted: number; removed_folders?: string[] }> {
   const { data } = await api.delete(`/v1/skills/${encodeURIComponent(skillId)}`);
   return data;
@@ -148,16 +110,11 @@ export async function resumeSkill(skillId: string): Promise<{ skill_id: string; 
   return data;
 }
 
-// 导出本租户已上架 Skill 为 pi 文件式 skill(.agents/skills/),后端就地写入 out_dir
+// 导出本租户已上架 Skill 为文件式 skill，后端就地写入 out_dir
 export type SkillExportMode = "proxy" | "package" | "both";
 
 export async function exportAgentSkills(out_dir: string, mode: SkillExportMode = "package"): Promise<{ out_dir: string; mode: SkillExportMode; count: number; written: string[]; removed_frozen_folders?: string[] }> {
   const { data } = await api.post("/export/agent-skills", { out_dir, mode });
-  return data;
-}
-
-export async function listFieldOptions(toolName: string, field: string): Promise<{ field: string; options: Array<JSONSchemaValue | JSONSchemaEnumOption>; count: number; note?: string }> {
-  const { data } = await api.post("/v1/tools/options", { name: toolName, field });
   return data;
 }
 

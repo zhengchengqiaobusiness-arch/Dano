@@ -1,7 +1,7 @@
 """Dano 网关(阶段一+三对外面)。
 
 - 接入:POST /onboarding(pi 自主生成 → 发布)
-- 契约:GET /v1/skills(标准 function-calling 契约,租户隔离)/ GET /v1/skills/{id}
+- 契约:GET /v1/skills(标准 function-calling 契约,租户隔离)
 - 瘦执行:POST /v1/skills/{id}/invoke(前端只给 skill_id+input;后端取资产/凭证/断言执行)
 - 资产:GET /assets/published
 后端不做 NL 意图/多智能体编排(阶段二交前端)。凭证经 Vault/env,平台只存引用。
@@ -1083,7 +1083,10 @@ async def record_ws(ws: WebSocket) -> None:
                 tenant=tenant,
                 subsystem=subsystem,
                 action=action,
-                title=workflow.snapshot.title if workflow is not None else "",
+                title=(
+                    (workflow.snapshot.title if workflow is not None else "")
+                    or str(getattr(release_flow_spec, "title", "") or "")
+                ),
                 goal=(
                     dict((release_spec.goal or {}))
                     if release_spec is not None else {}
@@ -1116,6 +1119,9 @@ async def record_ws(ws: WebSocket) -> None:
             publisher=publisher,
         )
         holder["session"] = session
+        init_title = str(init.get("title") or "").strip()
+        if init_title and session.workflow is not None:
+            await session.workflow.set_title(init_title)
         pi_run_id = str(getattr(getattr(session, "_pi", None), "run_id", "") or "")
         if pi_run_id:
             bind_run_context(run_id=pi_run_id)
@@ -1226,7 +1232,7 @@ async def _auto_export(
 ) -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
-    目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 平台默认** —— 与手动导出落同一处。
+    目录固定为仓库根 export/（可用 DANO_EXPORT_DIR 覆盖），不再套 agent-skills。
     普通接入保持 best-effort；录制原子发布传 strict=True，导出失败不得伪装成 published。
     """
     try:
@@ -1347,16 +1353,17 @@ async def onboarding_job(job_id: str) -> dict:
 
 
 def _default_export_dir() -> str:
-    import sys
-
-    if sys.platform.startswith("linux"):
-        return "/opt/dano/runtime-data/.agents/skills"
-    return str(Path(__file__).resolve().parents[3] / "export" / "agent-skills")
+    return str(Path(__file__).resolve().parents[3] / "export")
 
 
 def _current_export_dir() -> str:
     from dano.execution.page.sessions import get_export_dir
-    return get_export_dir(_default_export_dir())
+
+    raw = get_export_dir(_default_export_dir())
+    p = Path(raw)
+    if p.name.lower() == "agent-skills":
+        return str(p.parent)
+    return raw
 
 
 def _known_export_dirs() -> list[str]:
@@ -1443,15 +1450,6 @@ async def _manifests_for_tenant(tenant: str) -> list[dict]:
 async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     tenant = await _auth_tenant(x_tenant_key)
     return await _manifests_for_tenant(tenant)
-
-
-@app.get("/v1/skills/{skill_id}")
-async def get_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
-    tenant = await _auth_tenant(x_tenant_key)
-    m = next((x for x in await _manifests_for_tenant(tenant) if x["name"] == skill_id), None)
-    if m is None:
-        raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    return m
 
 
 @app.delete("/v1/skills/{skill_id}")
@@ -1617,22 +1615,22 @@ async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(de
 
 
 class ExportSkillsReq(BaseModel):
-    out_dir: str                    # 目标目录(通常是 pi 仓库的 .agents/skills),后端本地写入
+    out_dir: str = ""               # 空则写入仓库 export/;不要再套 agent-skills 等额外目录
     mode: Literal["proxy", "package", "both"] = "package"
 
 
 @app.post("/export/agent-skills")
 async def export_agent_skills_ep(req: ExportSkillsReq,
                                  x_tenant_key: str | None = Header(default=None)) -> dict:
-    """把本租户已上架 Skill 导出为 pi 文件式 skill(.agents/skills/<name>/),写入 out_dir。
+    """把本租户已上架 Skill 导出为文件式 skill，写入 out_dir。
 
-    后端与目标目录同机时直接写文件,免敲命令。真执行仍在 Dano 侧；导出的脚本调用能力级 invoke 端点。
+    后端与目标目录同机时直接写文件。真执行仍在 Dano 侧；导出的脚本调用能力级 invoke 端点。
     """
     tenant = await _auth_tenant(x_tenant_key)
     from dano.execution.page.sessions import save_export_dir
     from dano.export.agent_skills import write_exports
     from dano.export.skill_package.renderer import package_slug
-    out = req.out_dir
+    out = str(req.out_dir or "").strip() or _current_export_dir()
     frozen = await _frozen_skill_ids()
     frozen_manifests = [m for m in await _manifests_for_tenant(tenant) if m["name"] in frozen]
     try:

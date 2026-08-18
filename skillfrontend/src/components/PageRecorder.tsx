@@ -349,10 +349,11 @@ function readSetupDraft() {
       goalText: typeof parsed.goalText === "string" && parsed.goalText.trim()
         ? parsed.goalText
         : DEFAULT_RECORDING_GOAL_TEMPLATE,
+      title: typeof parsed.title === "string" ? parsed.title : "",
       machineVerification: parsed.machineVerification === true,
     };
   } catch {
-    return { startUrl: "", goalText: DEFAULT_RECORDING_GOAL_TEMPLATE, machineVerification: false };
+    return { startUrl: "", goalText: DEFAULT_RECORDING_GOAL_TEMPLATE, title: "", machineVerification: false };
   }
 }
 
@@ -399,7 +400,7 @@ export default function PageRecorder({
   const [startUrl, setStartUrl] = useState(setup.startUrl);
   const [goalText, setGoalText] = useState(setup.goalText);
   const [machineVerification, setMachineVerification] = useState(setup.machineVerification);
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(setup.title);
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -450,9 +451,10 @@ export default function PageRecorder({
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
       startUrl,
       goalText,
+      title,
       machineVerification,
     }));
-  }, [startUrl, goalText, machineVerification]);
+  }, [startUrl, goalText, title, machineVerification]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -643,6 +645,7 @@ export default function PageRecorder({
         type: "start",
         tenant,
         subsystem,
+        title: title.trim(),
         start_url: startUrl.trim(),
         goal_text: goalText.trim(),
         base_url: baseUrl.trim() || undefined,
@@ -728,7 +731,6 @@ export default function PageRecorder({
     setLocalCapabilityStepIds({});
     setEditingResult(false);
     setHasFrame(false);
-    setTitle("");
     renderedFrameRef.current = 0;
     latestFrameRef.current = null;
     frameGenerationRef.current += 1;
@@ -1076,6 +1078,18 @@ export default function PageRecorder({
             />
           </label>
           <label>
+            <Text strong>Skill 名称</Text>
+            <Input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="例如：请假申请。不填则按页面标题自动生成"
+              style={{ marginTop: 8 }}
+            />
+            <div style={{ marginTop: 6 }}>
+              <Text type="secondary">优先用这里填写的名称；留空时由页面/业务理解自动生成，不会使用录制会话 ID。</Text>
+            </div>
+          </label>
+          <label>
             <Text strong><Text type="danger">* </Text>录制目标</Text>
             <Input.TextArea
               value={goalText}
@@ -1106,10 +1120,8 @@ export default function PageRecorder({
             <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
               {STATUS_LABELS[status]}
             </Tag>
-            <Text strong style={{ whiteSpace: "nowrap" }}>动作名：</Text>
-            <Input value={snapshot?.action || actionRef.current} readOnly style={{ minWidth: 230, flex: 1 }} />
-            <Text strong style={{ whiteSpace: "nowrap" }}>标题：</Text>
-            <Input value={title} onChange={(event) => setTitle(event.target.value)} style={{ minWidth: 150, flex: 0.6 }} />
+            <Text strong style={{ whiteSpace: "nowrap" }}>名称：</Text>
+            <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Skill 名称" style={{ minWidth: 180, flex: 0.8 }} />
             <Space size={6} style={{ whiteSpace: "nowrap" }}>
               <Switch
                 size="small"
@@ -1500,7 +1512,7 @@ export default function PageRecorder({
           </label>
         </div>
         <Space wrap>
-          <Text type="secondary">稳定标识</Text><Text code>{capability.name}</Text>
+          <Text type="secondary">能力 ID</Text><Text code>{capability.capability_id || capability.name}</Text>
           <Text type="secondary">接口 {stepIds.length + auxiliaryStepIds.size}</Text>
           <Select
             value={undefined}
@@ -1563,7 +1575,7 @@ export default function PageRecorder({
                 </Tag>
                 <Tag color="blue">{capability.kind || "capability"}</Tag>
                 <Text strong>{capability.title || capability.name || `能力 ${index + 1}`}</Text>
-                <Text code>{capability.name}</Text>
+                <Text code>{capability.capability_id || capability.name}</Text>
               </Space>
             ),
             children: editingResult

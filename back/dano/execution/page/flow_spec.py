@@ -397,7 +397,7 @@ class FlowCapability(BaseModel):
     title: str = ""
     intent: str = ""
     kind: str = "submit"  # query/export/create/update/save_draft/submit/withdraw/delete/...
-    capability_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    capability_id: str = Field(default_factory=lambda: f"cap_{uuid.uuid4().hex}")
     request_refs: list[CapabilityRequestRef] = Field(default_factory=list)
     step_ids: list[str] = Field(default_factory=list)
 
@@ -12082,6 +12082,7 @@ def _is_technical_business_title(value: str) -> bool:
         }
         or re.fullmatch(r"(?:capability|能力)\d*", normalized)
         or re.fullmatch(r"submitprocess流程(?:\(\d+步\))?", normalized)
+        or bool(re.fullmatch(r"(?:action|sk)[_-]?[0-9a-f]{8,}", text, re.I))
     )
 
 

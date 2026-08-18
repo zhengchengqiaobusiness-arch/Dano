@@ -14,7 +14,7 @@ export default function RegisterTenant() {
       const r = await createTenantWithPassword(v.tenant.trim(), v.username.trim(), v.password);
       setTenant(r.tenant, r.api_key);
       message.success(`租户 ${r.tenant} 已就绪`);
-      nav("/skills");
+      nav("/recording");
     } catch (e: any) {
       message.error("建租户失败:" + (e?.response?.data?.detail || e.message));
     } finally {

@@ -3,7 +3,6 @@ import AppLayout from "./layout/AppLayout";
 import Tenant from "./pages/Tenant";
 import RegisterTenant from "./pages/RegisterTenant";
 import Skills from "./pages/Skills";
-import SkillDetail from "./pages/SkillDetail";
 import Onboard from "./pages/Onboard";
 import Recording from "./pages/Recording";
 import { getTenantKey } from "./api/client";
@@ -22,11 +21,10 @@ export default function App() {
       <Route path="/tenant/register" element={<RegisterTenant />} />
       <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
         <Route path="/skills" element={<Skills />} />
-        <Route path="/skills/:skillId" element={<SkillDetail />} />
         <Route path="/onboard" element={<Onboard />} />
         <Route path="/recording" element={<Recording />} />
       </Route>
-      <Route path="*" element={<RequireAuth><Navigate to="/onboard" replace /></RequireAuth>} />
+      <Route path="*" element={<RequireAuth><Navigate to="/recording" replace /></RequireAuth>} />
     </Routes>
   );
 }

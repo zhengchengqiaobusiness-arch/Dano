@@ -1173,3 +1173,38 @@ async def test_workflow_skill_carries_business_meta_to_manifest():
     sk = next(s for s in reg.skills if s.action == "submit_purchase")
     assert sk.business_meta.get("approvalChain")          # workflow 也带出审批链(原先被丢)
     assert to_manifest(sk).business_meta.get("approvalChain")
+
+
+def test_public_skill_action_hides_session_token_and_keeps_ascii_title():
+    from dano.catalog.identity import public_skill_action
+
+    session = "action_8c4e7b1a1b1e4c57ad658df62cd4f7e6"
+    assert public_skill_action("请假申请", session).startswith("sk_")
+    assert public_skill_action("Leave Request", session).startswith("leave_request_")
+    assert public_skill_action(session, session).startswith("sk_")
+    assert public_skill_action("请假申请", session) == public_skill_action("", session)
+    assert public_skill_action("请假申请", "submit_leave") == "submit_leave"
+
+
+def test_manifest_never_uses_session_action_as_title_and_assigns_unique_capability_ids():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="admin-host.action_8c4e7b1a1b1e4c57ad658df62cd4f7e6",
+        subsystem=Subsystem.OA,
+        action="action_8c4e7b1a1b1e4c57ad658df62cd4f7e6",
+        title="action_8c4e7b1a1b1e4c57ad658df62cd4f7e6",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {"name": "query", "kind": "query", "title": "查询请假记录", "capability_id": "ab12cd34ef56"},
+            {"name": "submit", "kind": "submit", "title": "提交请假申请", "capability_id": "11"},
+        ],
+    )
+    manifest = to_manifest(skill)
+    assert manifest.title == "查询请假记录 · 提交请假申请"
+    assert "action_" not in manifest.title
+    ids = [cap["capability_id"] for cap in manifest.capabilities]
+    assert all(item.startswith("cap_") and len(item) >= 20 for item in ids)
+    assert len(set(ids)) == 2

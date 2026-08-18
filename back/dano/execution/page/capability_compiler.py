@@ -49,7 +49,7 @@ def _trusted_verification_ids(spec: FlowSpec) -> set[str]:
 
 def _stable_capability_id(name: str, kind: str, anchor_step_id: str) -> str:
     raw = f"{name}\0{kind}\0{anchor_step_id}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()[:12]
+    return f"cap_{hashlib.sha256(raw).hexdigest()[:16]}"
 
 
 def _request_id_for_step(spec: FlowSpec, step: FlowStep) -> str:

@@ -13,10 +13,15 @@ from dano.gateway import app as gateway
 from dano.onboarding.recording_workflow import CANONICAL_RECORDING_COMMANDS
 
 
-def test_linux_auto_export_uses_the_same_runtime_directory_as_the_ui(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
+def test_default_export_dir_is_repo_export_without_extra_folder(monkeypatch) -> None:
+    from pathlib import Path
 
-    assert gateway._default_export_dir() == "/opt/dano/runtime-data/.agents/skills"
+    monkeypatch.delenv("DANO_EXPORT_DIR", raising=False)
+    root = Path(gateway.__file__).resolve().parents[3]
+    out = Path(gateway._current_export_dir())
+    assert out == root / "export"
+    assert out == Path(gateway._default_export_dir())
+    assert "agent-skills" not in out.parts
 
 
 @pytest.mark.asyncio

@@ -229,6 +229,9 @@ async def run_request_onboarding(
             raise RuntimeError("录制发布的 Pi AgentSession 已丢失或被替换，禁止回退其他模型链路")
         return current
 
+    from dano.catalog.identity import public_skill_action
+
+    action = public_skill_action(str(title or "").strip(), action)
     sid = subsystem
     materials.register(materials.MaterialContext(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,

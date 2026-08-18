@@ -8,9 +8,7 @@
 ## P0 已实现(纯用现有网关 API,零后端改动)
 
 - 租户:`POST /tenants` 建/进入,api_key 存 localStorage。
-- Skill 目录:`GET /v1/skills` 列表(名称/类型/风险/需确认/操作)。
-- Skill 详情:`GET /v1/skills/{id}` 参数 schema + `GET /v1/tools` 的 function-calling 工具定义。
-- 测试调用:`POST /v1/skills/{id}/invoke`(按 input JSON + confirm)→ 显示 state/输出/事实核查。
+- Skill 列表:`GET /v1/skills` 列表(名称/类型/风险/操作)。
 
 ## 运行
 

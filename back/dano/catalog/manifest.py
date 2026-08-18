@@ -8,6 +8,7 @@ import re
 from pydantic import BaseModel, Field
 
 from dano.business_packs import action_titles_for
+from dano.catalog.identity import is_generated_action_id, public_capability_id
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel
 from dano.shared.std_fields import is_flow_internal, is_form_envelope, is_numeric_field, standard_fields_for
@@ -71,7 +72,9 @@ _CAPABILITY_TITLES = {
     "submit_batch": "批量提交",
 }
 _TECHNICAL_TITLE_RE = re.compile(
-    r"(?:\b(?:get|post|put|delete|patch|submit|insert|update)[-_ ]|process|流程\s*\(?\d+\s*步\)?)",
+    r"(?:\b(?:get|post|put|delete|patch|submit|insert|update)[-_ ]|process|流程\s*\(?\d+\s*步\)?"
+    r"|^(?:action|sk)_[0-9a-f]{8,}$"
+    r"|将本次|请将我接下来|沉淀为可调用|分别生成一个可调用)",
     re.I,
 )
 
@@ -82,7 +85,13 @@ def _manifest_title(skill: SkillSpec) -> str:
     kinds = [str(cap.get("kind") or "") for cap in capabilities]
     has_read = any(kind in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
     has_write = any(kind and kind not in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
-    if current and has_read and has_write and re.search(r"查询|列表|状态|query|list", current, re.I):
+    if (
+        current
+        and not is_generated_action_id(current)
+        and not _TECHNICAL_TITLE_RE.search(current)
+        and has_read and has_write
+        and re.search(r"查询|列表|状态|query|list", current, re.I)
+    ):
         write_title = next((
             _canonical_capability_identity(cap)[2] for cap in capabilities
             if str(cap.get("kind") or "") not in _READ_ONLY_CAPABILITY_KINDS
@@ -112,18 +121,22 @@ def _manifest_title(skill: SkillSpec) -> str:
                 return f"{current} · {write_title}"
         return current
     candidates = [
-        str((getattr(skill, "goal", {}) or {}).get("intent") or "").strip(),
-        *[
-            str(cap.get("title") or "").strip()
-            for cap in capabilities
-            if isinstance(cap, dict)
-        ],
+        str(cap.get("title") or "").strip()
+        for cap in capabilities
+        if isinstance(cap, dict)
     ]
     for candidate in candidates:
-        if candidate and not _TECHNICAL_TITLE_RE.search(candidate):
+        if (
+            candidate
+            and not _TECHNICAL_TITLE_RE.search(candidate)
+            and not is_generated_action_id(candidate)
+        ):
             return candidate
     configured = action_titles_for(getattr(skill, "tenant", ""))
-    return current or configured.get(skill.action, skill.action)
+    fallback = configured.get(skill.action, "")
+    if fallback and not is_generated_action_id(fallback) and not _TECHNICAL_TITLE_RE.search(fallback):
+        return fallback
+    return current or skill.action
 
 
 def _api_selects(skill: SkillSpec) -> dict:
@@ -646,6 +659,7 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
     out["name"] = name
     out["kind"] = kind
     out["title"] = title
+    out["capability_id"] = public_capability_id({**out, **cap})
     aliases = [str(value) for value in (out.get("aliases") or []) if str(value)]
     for alias in (kind, str(cap.get("name") or ""), str(cap.get("capability_id") or "")):
         if alias and alias != name and alias not in aliases:

@@ -15,7 +15,7 @@ export default function Tenant() {
       const r = await login(v.username.trim(), v.password);
       setTenant(r.tenant, r.api_key);
       message.success(`已登录租户 ${r.tenant}`);
-      nav("/skills");
+      nav("/recording");
     } catch (e: any) {
       message.error("登录失败:" + (e?.response?.data?.detail || e.message));
     } finally {
@@ -70,7 +70,7 @@ export default function Tenant() {
           </Form>
           <Divider plain />
           <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 0, textAlign: "center" }}>
-            已登录,可直接 <a onClick={() => nav("/skills")}>进入目录</a>。
+            已登录,可直接 <a onClick={() => nav("/recording")}>进入录制 V2</a>。
           </Typography.Paragraph>
         </Card>
       )}
