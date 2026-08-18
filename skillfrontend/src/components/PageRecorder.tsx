@@ -954,7 +954,7 @@ export default function PageRecorder({
       title: item.title,
       revision: 0,
       status: "editable",
-      progress: { step: "ready", label: "正在开始分析" },
+      progress: { step: "ready", label: "已打开录制结果，点击开始分析" },
       draft,
       capture_frozen: true,
     };
@@ -992,7 +992,6 @@ export default function PageRecorder({
     try {
       const detail = await getRecordingResult(item.id);
       applyViewedDraft(item, (detail.draft || null) as FlowSpec | null);
-      startAnalysis();
     } catch {
       message.error("打开录制结果失败");
       setKeepResult(false);
@@ -2406,7 +2405,7 @@ export default function PageRecorder({
           {isEmpty ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={connecting || runBusy ? "正在连接…" : "等待分析开始"}
+              description={connecting || runBusy ? "正在连接…" : "点击开始分析后显示实时日志"}
               style={{ marginTop: 24 }}
             />
           ) : (

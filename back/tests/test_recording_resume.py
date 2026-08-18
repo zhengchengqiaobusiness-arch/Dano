@@ -517,7 +517,7 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "function openResult" in recorder
     assert "function startAnalysis" in recorder
     assert "function renderAnalysisActions" in recorder
-    assert "startAnalysis();" in recorder.split("async function openResult", 1)[1].split("function startAnalysis", 1)[0]
+    assert "startAnalysis();" not in recorder.split("async function openResult", 1)[1].split("function startAnalysis", 1)[0]
     assert recorder.count(">开始分析</Button>") == 1
     assert recorder.count(">终止分析</Button>") == 1
     assert 'type: "resume_verification"' in recorder
