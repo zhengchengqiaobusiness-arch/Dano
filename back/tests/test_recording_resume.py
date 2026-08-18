@@ -118,6 +118,39 @@ async def test_dispatch_works_without_capture() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_verification_marks_saved_result_as_attempted(monkeypatch) -> None:
+    result_id = uuid4()
+    calls: list[dict] = []
+
+    class Store:
+        async def patch_recording_result_flags(self, saved_id, **flags):  # noqa: ANN001
+            calls.append({"saved_id": saved_id, **flags})
+
+    monkeypatch.setattr("dano.assets.drafts.DraftStore", Store)
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=None,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    session._stage_six_result_id = result_id
+    session._machine_verification = True
+
+    await session._on_snapshot(WorkflowSnapshot(
+        run_id="r1",
+        action="action_1",
+        status=WorkflowStatus.FAILED,
+        draft=_draft(),
+    ))
+
+    assert calls == [{
+        "saved_id": result_id,
+        "published": None,
+        "machine_verification_ran": True,
+    }]
+
+
+@pytest.mark.asyncio
 async def test_attach_or_resume_reuses_verification_session() -> None:
     registry = RecordingSessionRegistry()
     first = RecordingGatewaySession(
