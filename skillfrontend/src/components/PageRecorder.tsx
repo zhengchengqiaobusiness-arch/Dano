@@ -63,6 +63,12 @@ interface WorkflowQuestion {
   context_ref?: string;
 }
 
+interface ThoughtChunk {
+  kind: "text" | "thinking" | "tool" | string;
+  text: string;
+  tool?: string;
+}
+
 interface WorkflowActivity {
   sequence: number;
   step: string;
@@ -447,6 +453,7 @@ export default function PageRecorder({
   const [keepRecording, setKeepRecording] = useState(false);
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
+  const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [activeResultId, setActiveResultId] = useState("");
@@ -493,7 +500,8 @@ export default function PageRecorder({
   const showLiveVerificationLog = resumeOnly || machineVerification
     || releaseUsedMachineVerification(snapshot?.release)
     || Boolean((snapshot?.activity || []).length)
-    || Boolean(snapshot?.question);
+    || Boolean(snapshot?.question)
+    || Boolean(thoughts.length);
   const reachedStage = pageStage(status, resumeOnly, machineVerification && processing);
 
   useEffect(() => {
@@ -515,6 +523,18 @@ export default function PageRecorder({
     if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
+
+  function appendThought(chunk: ThoughtChunk) {
+    const text = String(chunk.text || "");
+    if (!text) return;
+    setThoughts((current) => {
+      const last = current[current.length - 1];
+      if (last && last.kind === chunk.kind && (chunk.kind === "text" || chunk.kind === "thinking")) {
+        return [...current.slice(0, -1), { ...last, text: last.text + text }];
+      }
+      return [...current, { kind: chunk.kind, text, tool: chunk.tool }];
+    });
+  }
 
   function upsertHistory(row: RecordingResultSummary) {
     setHistory((current) => {
@@ -553,7 +573,7 @@ export default function PageRecorder({
     const box = verificationLogRef.current;
     if (!box) return;
     box.scrollTop = box.scrollHeight;
-  }, [snapshot?.activity, snapshot?.progress.label, snapshot?.insights, snapshot?.progress.round]);
+  }, [snapshot?.activity, snapshot?.progress.label, snapshot?.insights, snapshot?.progress.round, thoughts]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -765,6 +785,12 @@ export default function PageRecorder({
       }
       if (incoming.type === "snapshot" && incoming.snapshot) {
         receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
+      } else if (incoming.type === "thought") {
+        appendThought({
+          kind: String(incoming.kind || "text"),
+          text: String(incoming.text || ""),
+          tool: incoming.tool ? String(incoming.tool) : undefined,
+        });
       } else if (incoming.type === "recording_result_saved" && incoming.result) {
         const row = incoming.result as RecordingResultSummary;
         upsertHistory(row);
@@ -830,6 +856,7 @@ export default function PageRecorder({
     setConnecting(true);
     snapshotRef.current = null;
     setSnapshot(null);
+    setThoughts([]);
     pendingEditsRef.current = [];
     patchInFlightRef.current = null;
     republishRequestedRef.current = false;
@@ -875,6 +902,7 @@ export default function PageRecorder({
     setConnecting(true);
     snapshotRef.current = null;
     setSnapshot(null);
+    setThoughts([]);
     pendingEditsRef.current = [];
     patchInFlightRef.current = null;
     republishRequestedRef.current = false;
@@ -1286,7 +1314,7 @@ export default function PageRecorder({
       <Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
-            <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务页地址</Text>
+            <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务地址</Text>
             <Input
               value={startUrl}
               onChange={(event) => setStartUrl(event.target.value)}
@@ -1971,7 +1999,19 @@ export default function PageRecorder({
       >
         {renderOperatorQuestion()}
         <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {activities.length ? (
+          {thoughts.length ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {thoughts.map((item, index) => (
+                <div key={`${item.kind}-${index}`}>
+                  <Tag color={item.kind === "tool" ? "processing" : item.kind === "thinking" ? "purple" : "default"}>
+                    {item.kind === "tool" ? "调用工具" : item.kind === "thinking" ? "内心独白" : "模型输出"}
+                  </Tag>
+                  <Text style={{ whiteSpace: "pre-wrap" }}>{item.text}</Text>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {!thoughts.length && activities.length ? (
             <List
               size="small"
               dataSource={activities}
@@ -1990,7 +2030,7 @@ export default function PageRecorder({
               }}
             />
           ) : null}
-          {insights.length ? (
+          {!thoughts.length && !activities.length && insights.length ? (
             <List
               size="small"
               dataSource={insights}
@@ -2004,10 +2044,10 @@ export default function PageRecorder({
               )}
             />
           ) : null}
-          {!activities.length && !insights.length ? (
+          {!thoughts.length && !activities.length && !insights.length ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={processing ? "正在进入机器验证…" : "暂无验证日志"}
+              description={processing ? "等待模型开口…" : "暂无验证日志"}
             />
           ) : null}
         </div>

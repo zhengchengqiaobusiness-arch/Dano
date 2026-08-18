@@ -311,3 +311,6 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "activityDisplay" in recorder
     assert 'label: "发现了"' in recorder
     assert 'label: "准备处理"' in recorder
+    assert 'incoming.type === "thought"' in recorder
+    assert "appendThought" in recorder
+    assert "内心独白" in recorder

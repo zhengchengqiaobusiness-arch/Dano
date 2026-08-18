@@ -200,6 +200,12 @@ class RecordingGatewaySession:
     _closed: bool = field(default=False, init=False)
     _stage_six_result_id: Any = field(default=None, init=False)
     _machine_verification: bool = field(default=False, init=False)
+    _thoughts: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        from dano.onboarding.recording_thoughts import ThoughtBridge
+
+        self._thoughts = ThoughtBridge(self._send)
 
     async def attach(self, send: SendMessage) -> None:
         """Attach one transport without taking ownership of the backend task."""
@@ -496,6 +502,9 @@ class RecordingGatewaySession:
             bind_submission_listener = getattr(self._pi, "bind_submission_listener", None)
             if callable(bind_submission_listener):
                 bind_submission_listener(self._on_live_submission_accepted)
+            bind_thought_listener = getattr(self._pi, "bind_thought_listener", None)
+            if callable(bind_thought_listener):
+                bind_thought_listener(self._thoughts.push, self._thoughts.flush)
             if self.workflow is not None and self.workflow.snapshot.draft is not None:
                 self._pi.bind_flow_spec(FlowSpec.model_validate(self.workflow.snapshot.draft))
             elif self._pi.flow_spec is None:

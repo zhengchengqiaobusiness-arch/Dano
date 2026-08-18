@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -188,6 +189,8 @@ class RecordingPiSession:
             or "deepseek-ai/DeepSeek-V3.2"
         )
         self._on_submission_accepted = on_submission_accepted
+        self._thought_listener: Callable[[dict[str, Any]], Any] | None = None
+        self._thought_flusher: Callable[[], Any] | None = None
 
     async def start(self) -> "RecordingPiSession":
         if self._proc is not None:
@@ -409,6 +412,8 @@ class RecordingPiSession:
                 except BaseException:  # noqa: BLE001 - preserve the caller's cancellation
                     pass
                 raise
+            finally:
+                await self._flush_thoughts()
 
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
@@ -437,6 +442,32 @@ class RecordingPiSession:
         """Publish accepted live-plan checkpoints without waiting for the Pi turn."""
 
         self._on_submission_accepted = listener
+
+    def bind_thought_listener(
+        self,
+        listener: Callable[[dict[str, Any]], Any] | None,
+        flusher: Callable[[], Any] | None = None,
+    ) -> None:
+        """Forward streamed assistant text/tool events without waiting for prompt_completed."""
+
+        self._thought_listener = listener
+        self._thought_flusher = flusher
+
+    async def _emit_thought(self, event: dict[str, Any]) -> None:
+        listener = self._thought_listener
+        if listener is None:
+            return
+        result = listener(event)
+        if asyncio.iscoroutine(result) or inspect.isawaitable(result):
+            await result
+
+    async def _flush_thoughts(self) -> None:
+        flusher = self._thought_flusher
+        if flusher is None:
+            return
+        result = flusher()
+        if asyncio.iscoroutine(result) or inspect.isawaitable(result):
+            await result
 
     async def get_recording_delta(self, since_seq: int = 0, *, limit: int = 25) -> dict[str, Any]:
         from dano.execution.page.recording_live import recording_delta
@@ -887,6 +918,8 @@ class RecordingPiSession:
                     continue
                 event_type = event.get("type")
                 event_error = str(event.get("error") or "")
+                if event_type == "agent_event":
+                    await self._emit_thought(event)
                 if (
                     event_type == "agent_event"
                     and (event.get("stop_reason") == "error" or event.get("error"))

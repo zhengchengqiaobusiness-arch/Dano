@@ -17,6 +17,7 @@ import {
   recordingTools,
 } from "./recording_tools.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai_stream_compat.mjs";
+import { shouldEmitAgentEvent, summarizeAgentEvent } from "./recording_pi_events.mjs";
 
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 let analysisTurn = 0;
@@ -71,7 +72,7 @@ const SYSTEM_PROMPT = `你是 Dano 网页录制现场的伴随分析 Agent。
 仅当同等级证据冲突、required 无法通过页面/API/安全重放确认、业务含义有多个合理选项、操作人必须选择业务策略、写操作需要真人授权，或外部系统必须由用户完成登录/验证码/权限操作时，才调用 ask_operator；同一轮最多提出一个聚合问题。发布或验证待办必须把 issue_id 填入 context_ref。严禁询问 recording_id、flow_version、run_id、step_id、request_id、内部节点 ID，以及可以由页面、HAR、响应、字典、编译器或依赖图确定的事实。实时录制阶段若返回 deferred_until_final_analysis，只登记候选问题并继续提交 plan；最终处理阶段人工问题才保持工具调用等待。required 问题的“必填”回答必须转换为 set_param_required.required=true，“选填”转换为 false，再重新验证；不得把回答文本当字段值写入请求。收到其他回答后也必须通过对应的受控 FlowSpec 操作提交并重新验证；不得猜测、不得把自然语言直接写入任意字段、不得重复追问。
 规划任务必须先调用 get_recording_state，再调用 submit_recording_plan。submit_recording_plan.plan 必须直接传结构化对象，严禁把 plan 用 JSON.stringify 编码成字符串。business_understanding 只允许 business_name、summary、intent、object、purpose；risk_level、capabilities、evidence 必须放在 plan.ops 的 set_goal.goal 内，其中 evidence 也必须在 goal 内，不能放在 op 顶层。
 规划任务读取状态后禁止输出分析过程，必须立即调用提交工具。计划只提交实际变化和必要能力边界，字段优先使用紧凑 key=value;... 记录；不要复述未变化字段，不要在工具调用前写长篇说明。
-修复任务必须先调用 get_validation_report；需要完整事实时再调用 get_recording_state，然后调用 submit_recording_repair。验证报告中的 structural_valid 只表示结构契约合法，verification_complete 表示机器验证待办全部完成，release_ready 才表示已通过完整发布闸门；不得把 report.passed 或 structural_valid 当成已经可以发布。
+修复任务必须先用中文逐句写出当前判断、准备怎么处理、为什么这样修，再调用 get_validation_report；需要完整事实时再调用 get_recording_state，然后调用 submit_recording_repair。每调用一个工具前先用一句话说准备做什么。验证报告中的 structural_valid 只表示结构契约合法，verification_complete 表示机器验证待办全部完成，release_ready 才表示已通过完整发布闸门；不得把 report.passed 或 structural_valid 当成已经可以发布。
 验证任务必须逐项处理后端给出的 verification_todos：依赖链用 perturb_replay，普通读用 replay_request，写契约用 execute_write_with_verify，缺失分支或枚举用 browser_navigate/browser_snapshot/browser_click/browser_fill/browser_select 补采。写请求一旦成功，后续再次调用 execute_write_with_verify 只会重试读取和断言，不会重复写入；首次回读因筛选条件未命中，应改用能按写响应业务 ID 或提交输入指纹精确定位记录的读取请求与断言，不能用“列表非空”替代同一记录证明。dependency_candidate 是捕获事实计算出的高置信值链候选；扰动成功后必须在同一次 submit_recording_repair 中先按候选给定的 link_id 提交 propose_dependency，再用同一 link_id 和真实 verification_id 提交 confirm_dependency。只有执行器返回的 verification_id 才能用于 confirm_dependency、bind_verify_read、attach_enum_options；不得编造 ID。完成一轮后通过 submit_recording_repair 提交这些 ops；无法验证的项目留给编排器在重试耗尽后标记 unverified。verify_dependency 返回 status=stale_link 时，说明该依赖已被先前修复删除或替换；立即重新读取 get_validation_report，并禁止再次验证同一 link_id。
 
 不得泄漏或索取凭证，不得改写原始 URL、HTTP method、请求路径或录制事实，不得绕过版本、校验和发布闸门。
@@ -158,21 +159,6 @@ function createSettingsManager() {
     prompts: [],
     packages: [],
   });
-}
-
-function summarizeAgentEvent(event) {
-  const summary = { type: "agent_event", event: event?.type || "unknown" };
-  for (const key of ["toolName", "toolCallId", "attempt", "maxAttempts", "delayMs", "reason", "willRetry", "success", "aborted"]) {
-    if (event?.[key] !== undefined) summary[key] = event[key];
-  }
-  const message = event?.message;
-  if (message?.role) summary.role = message.role;
-  if (message?.stopReason) summary.stop_reason = message.stopReason;
-  if (message?.errorMessage) summary.error = String(message.errorMessage).slice(0, 2000);
-  if (message?.usage) summary.usage = message.usage;
-  if (event?.errorMessage) summary.error = String(event.errorMessage).slice(0, 2000);
-  if (event?.error) summary.error = String(event.error).slice(0, 2000);
-  return summary;
 }
 
 function lastAssistantText(session) {
@@ -302,11 +288,15 @@ async function startSession(command) {
     noTools: "builtin",
     tools: recordingTools.map((tool) => tool.name),
   });
-  const unsubscribe = created.session.subscribe((event) => emit({
-    ...summarizeAgentEvent(event),
-    request_id: promptRequestId,
-    session_id: created.session.sessionId,
-  }));
+  const unsubscribe = created.session.subscribe((event) => {
+    const summary = summarizeAgentEvent(event);
+    if (!shouldEmitAgentEvent(summary)) return;
+    emit({
+      ...summary,
+      request_id: promptRequestId,
+      session_id: created.session.sessionId,
+    });
+  });
   active = { session: created.session, unsubscribe, recordingSkill };
   emitRecordingLog({
     event: "recording.skill.loaded",

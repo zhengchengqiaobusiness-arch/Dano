@@ -299,7 +299,9 @@ class ProductionRecordingServices:
                 await _submit_with_protocol_recovery(
                     pi,
                     prompt=(
-                    "继续同一录制的修复闭环。只按结构化 issue 的 resolver、target、evidence 和 "
+                    "继续同一录制的修复闭环。先用中文逐句说出：发现了什么不对、我觉得应该怎样处理、"
+                    "准备调用哪个工具、为什么。不要只重复 issue 代码。"
+                    "只按结构化 issue 的 resolver、target、evidence 和 "
                     "allowed_operations 处理剩余问题；不得重建 FlowSpec、清空能力或重新划分能力。"
                     "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/页面/字典/依赖工具补证。"
                     "完成后调用 submit_recording_repair。issues="
