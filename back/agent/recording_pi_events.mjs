@@ -2,6 +2,43 @@
 
 const STREAM_DELTA_TYPES = new Set(["text_delta", "thinking_delta"]);
 const STREAM_EVENTS = new Set(["tool_execution_start", "tool_execution_end"]);
+const PAYLOAD_LIMIT = 100000;
+
+export function unwrapToolPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (Array.isArray(value.content)) {
+    const texts = value.content
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .filter(Boolean);
+    if (texts.length === 1) return texts[0];
+    if (texts.length) return texts.join("\n\n");
+  }
+  return value;
+}
+
+export function formatJsonish(value, limit = PAYLOAD_LIMIT) {
+  const unwrapped = unwrapToolPayload(value);
+  if (unwrapped == null || unwrapped === "") return "";
+  if (typeof unwrapped === "string") {
+    const trimmed = unwrapped.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return formatJsonish(JSON.parse(trimmed), limit);
+      } catch {
+        return unwrapped.slice(0, limit);
+      }
+    }
+    return unwrapped.slice(0, limit);
+  }
+  if (typeof unwrapped === "object") {
+    try {
+      return JSON.stringify(unwrapped, null, 2).slice(0, limit);
+    } catch {
+      return "";
+    }
+  }
+  return String(unwrapped).slice(0, limit);
+}
 
 export function summarizeAgentEvent(event) {
   const summary = { type: "agent_event", event: event?.type || "unknown" };
@@ -25,19 +62,15 @@ export function summarizeAgentEvent(event) {
     }
   }
   if (event?.type === "tool_execution_start") {
-    const args = event.args ?? event.toolArgs;
-    if (args && typeof args === "object") {
-      try {
-        summary.tool_args = JSON.stringify(args).slice(0, 400);
-      } catch {
-        summary.tool_args = "";
-      }
-    }
+    const args = event.args ?? event.toolArgs ?? event.arguments;
+    const formatted = formatJsonish(args);
+    if (formatted) summary.tool_args = formatted;
   }
   if (event?.type === "tool_execution_end") {
     summary.success = event.isError ? false : event.success !== false;
-    const result = event.result ?? event.errorMessage ?? "";
-    if (result) summary.tool_result = String(result).slice(0, 400);
+    const result = event.result ?? event.output ?? event.errorMessage ?? "";
+    const formatted = formatJsonish(result);
+    if (formatted) summary.tool_result = formatted;
   }
   return summary;
 }

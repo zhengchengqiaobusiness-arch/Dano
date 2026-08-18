@@ -314,6 +314,8 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert 'incoming.type === "thought"' in recorder
     assert "appendThought" in recorder
     assert "内心独白" in recorder
+    assert "renderThoughtBlock" in recorder
+    assert "等待返回" in recorder
     assert "cancelProcessing" in recorder
     assert "onClick={cancelProcessing}" in result_view
     assert ">终止</Button>" in result_view

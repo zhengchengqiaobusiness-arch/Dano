@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldEmitAgentEvent, summarizeAgentEvent } from "./recording_pi_events.mjs";
+import { formatJsonish, shouldEmitAgentEvent, summarizeAgentEvent } from "./recording_pi_events.mjs";
 
 test("keeps text_delta tokens for the thought stream", () => {
   const summary = summarizeAgentEvent({
@@ -38,4 +38,27 @@ test("keeps tool start and end", () => {
   assert.equal(start.toolName, "get_validation_report");
   assert.match(String(start.tool_args), /recording_id/);
   assert.equal(shouldEmitAgentEvent(start), true);
+});
+
+test("formats tool results as readable JSON instead of object Object", () => {
+  const end = summarizeAgentEvent({
+    type: "tool_execution_end",
+    toolName: "get_validation_report",
+    isError: false,
+    result: {
+      content: [{ type: "text", text: JSON.stringify({ issues: [{ code: "enum" }], ok: true }) }],
+      isError: false,
+    },
+  });
+  assert.equal(end.success, true);
+  assert.match(String(end.tool_result), /"issues"/);
+  assert.match(String(end.tool_result), /"code": "enum"/);
+  assert.doesNotMatch(String(end.tool_result), /\[object Object\]/);
+  assert.equal(shouldEmitAgentEvent(end), true);
+});
+
+test("formatJsonish pretty-prints objects and nested JSON strings", () => {
+  assert.equal(formatJsonish({ a: 1 }), "{\n  \"a\": 1\n}");
+  assert.equal(formatJsonish("{\"a\":1}"), "{\n  \"a\": 1\n}");
+  assert.equal(formatJsonish(null), "");
 });

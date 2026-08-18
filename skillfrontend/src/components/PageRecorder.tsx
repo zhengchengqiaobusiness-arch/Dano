@@ -67,6 +67,10 @@ interface ThoughtChunk {
   kind: "text" | "thinking" | "tool" | string;
   text: string;
   tool?: string;
+  phase?: string;
+  args?: string;
+  result?: string;
+  ok?: boolean;
 }
 
 interface WorkflowActivity {
@@ -525,14 +529,27 @@ export default function PageRecorder({
   }, [reachedStage, resumeOnly]);
 
   function appendThought(chunk: ThoughtChunk) {
-    const text = String(chunk.text || "");
-    if (!text) return;
     setThoughts((current) => {
       const last = current[current.length - 1];
       if (last && last.kind === chunk.kind && (chunk.kind === "text" || chunk.kind === "thinking")) {
+        const text = String(chunk.text || "");
+        if (!text) return current;
         return [...current.slice(0, -1), { ...last, text: last.text + text }];
       }
-      return [...current, { kind: chunk.kind, text, tool: chunk.tool }];
+      if (chunk.kind === "tool" && last?.kind === "tool" && last.tool && last.tool === chunk.tool) {
+        return [...current.slice(0, -1), {
+          ...last,
+          ...chunk,
+          text: chunk.text || last.text,
+          args: chunk.args || last.args,
+          result: chunk.result || last.result,
+          ok: chunk.phase === "end" ? chunk.ok : last.ok,
+        }];
+      }
+      if (chunk.kind === "tool" || String(chunk.text || "")) {
+        return [...current, chunk];
+      }
+      return current;
     });
   }
 
@@ -790,6 +807,10 @@ export default function PageRecorder({
           kind: String(incoming.kind || "text"),
           text: String(incoming.text || ""),
           tool: incoming.tool ? String(incoming.tool) : undefined,
+          phase: incoming.phase ? String(incoming.phase) : undefined,
+          args: incoming.args ? String(incoming.args) : undefined,
+          result: incoming.result ? String(incoming.result) : undefined,
+          ok: typeof incoming.ok === "boolean" ? incoming.ok : undefined,
         });
       } else if (incoming.type === "recording_result_saved" && incoming.result) {
         const row = incoming.result as RecordingResultSummary;
@@ -1971,6 +1992,69 @@ export default function PageRecorder({
     );
   }
 
+  function renderThoughtBlock(item: ThoughtChunk, index: number) {
+    const label = item.kind === "tool"
+      ? (item.tool ? `调用 ${item.tool}` : "调用工具")
+      : item.kind === "thinking"
+        ? "内心独白"
+        : "模型输出";
+    const color = item.kind === "tool" ? "processing" : item.kind === "thinking" ? "purple" : "default";
+    const background = item.kind === "thinking" ? "#faf5ff" : item.kind === "tool" ? "#f6ffed" : "#fafafa";
+    const preStyle = {
+      margin: "4px 0 0",
+      padding: 8,
+      background: "#fff",
+      border: "1px solid #f0f0f0",
+      borderRadius: 6,
+      maxHeight: 360,
+      overflow: "auto",
+      whiteSpace: "pre-wrap" as const,
+      wordBreak: "break-word" as const,
+      fontSize: 12,
+      lineHeight: 1.55,
+    };
+    return (
+      <div
+        key={`${item.kind}-${item.tool || ""}-${index}`}
+        style={{
+          border: "1px solid #f0f0f0",
+          borderRadius: 8,
+          padding: "10px 12px",
+          background,
+        }}
+      >
+        <Space size={6} style={{ marginBottom: 6 }} wrap>
+          <Tag color={color}>{label}</Tag>
+          {item.kind === "tool" && item.phase === "end" ? (
+            <Tag color={item.ok === false ? "error" : "success"}>{item.ok === false ? "失败" : "成功"}</Tag>
+          ) : null}
+        </Space>
+        {item.kind === "tool" ? (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            {item.args ? (
+              <div>
+                <Text type="secondary">参数</Text>
+                <pre style={preStyle}>{item.args}</pre>
+              </div>
+            ) : (
+              <Text type="secondary">{item.text || "无参数"}</Text>
+            )}
+            {item.result ? (
+              <div>
+                <Text type="secondary">结果</Text>
+                <pre style={preStyle}>{item.result}</pre>
+              </div>
+            ) : item.phase !== "end" ? (
+              <Text type="secondary">等待返回…</Text>
+            ) : null}
+          </Space>
+        ) : (
+          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.7 }}>{item.text}</div>
+        )}
+      </div>
+    );
+  }
+
   function renderVerificationLog() {
     const activities = snapshot?.activity || [];
     const insights = snapshot?.insights || [];
@@ -2003,15 +2087,8 @@ export default function PageRecorder({
         {renderOperatorQuestion()}
         <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
           {thoughts.length ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {thoughts.map((item, index) => (
-                <div key={`${item.kind}-${index}`}>
-                  <Tag color={item.kind === "tool" ? "processing" : item.kind === "thinking" ? "purple" : "default"}>
-                    {item.kind === "tool" ? "调用工具" : item.kind === "thinking" ? "内心独白" : "模型输出"}
-                  </Tag>
-                  <Text style={{ whiteSpace: "pre-wrap" }}>{item.text}</Text>
-                </div>
-              ))}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {thoughts.map((item, index) => renderThoughtBlock(item, index))}
             </div>
           ) : null}
           {!thoughts.length && activities.length ? (

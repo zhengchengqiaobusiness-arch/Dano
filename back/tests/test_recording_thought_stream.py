@@ -18,11 +18,31 @@ def test_thought_from_tool_start() -> None:
     payload = thought_from_agent_event({
         "event": "tool_execution_start",
         "toolName": "get_validation_report",
-        "tool_args": "{\"x\":1}",
+        "tool_args": "{\n  \"x\": 1\n}",
     })
     assert payload is not None
     assert payload["kind"] == "tool"
+    assert payload["phase"] == "start"
+    assert payload["tool"] == "get_validation_report"
+    assert payload["args"] == "{\n  \"x\": 1\n}"
     assert "get_validation_report" in payload["text"]
+
+
+def test_thought_from_tool_end_keeps_json() -> None:
+    payload = thought_from_agent_event({
+        "event": "tool_execution_end",
+        "toolName": "get_validation_report",
+        "success": True,
+        "tool_result": "{\n  \"issues\": []\n}",
+    })
+    assert payload == {
+        "kind": "tool",
+        "phase": "end",
+        "text": "get_validation_report 调用成功",
+        "tool": "get_validation_report",
+        "ok": True,
+        "result": "{\n  \"issues\": []\n}",
+    }
 
 
 @pytest.mark.asyncio

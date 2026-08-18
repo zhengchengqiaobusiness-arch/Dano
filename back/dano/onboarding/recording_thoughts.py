@@ -19,15 +19,23 @@ def thought_from_agent_event(event: dict[str, Any]) -> dict[str, Any] | None:
     name = str(event.get("event") or "")
     tool = str(event.get("toolName") or "")
     if name == "tool_execution_start" and tool:
-        args = str(event.get("tool_args") or "").strip()
-        suffix = f" {args}" if args else ""
-        return {"kind": "tool", "text": f"准备调用 {tool}{suffix}", "tool": tool}
+        return {
+            "kind": "tool",
+            "phase": "start",
+            "text": f"调用 {tool}",
+            "tool": tool,
+            "args": str(event.get("tool_args") or "").strip(),
+        }
     if name == "tool_execution_end" and tool:
         ok = event.get("success", True)
-        detail = str(event.get("tool_result") or "").strip()
-        result = "成功" if ok else "失败"
-        extra = f"：{detail}" if detail else ""
-        return {"kind": "tool", "text": f"{tool} {result}{extra}", "tool": tool}
+        return {
+            "kind": "tool",
+            "phase": "end",
+            "text": f"{tool} 调用{'成功' if ok else '失败'}",
+            "tool": tool,
+            "ok": bool(ok),
+            "result": str(event.get("tool_result") or "").strip(),
+        }
     return None
 
 
