@@ -160,7 +160,6 @@ class ProductionRecordingServices:
     def pipeline_services(self) -> RecordingPipelineServices:
         return RecordingPipelineServices(
             materialize_recording=self.materialize_recording,
-            plan_capabilities=self.plan_capabilities,
             verify=self.verify,
             repair=self.repair,
             publish=self.publish,
@@ -173,31 +172,6 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         spec = await self.materializer(use_live_notebook, context)
         return spec.model_dump(mode="json")
-
-    async def plan_capabilities(
-        self,
-        draft: dict[str, Any],
-        use_live_notebook: bool,
-        context: PipelineContext,
-    ) -> dict[str, Any]:
-        context.ensure_active()
-        spec = FlowSpec.model_validate(draft)
-        pi = await self.pi_provider(not use_live_notebook)
-        pi.bind_flow_spec(spec)
-        await _submit_with_protocol_recovery(
-            pi,
-            prompt=(
-            "为当前录制生成完整且可执行的业务能力契约。先读取录制状态，基于页面、HAR、"
-            "字段证据、字典和上下游响应确定能力成员、字段名称、路径、默认值、类型、来源、"
-            "必填性和依赖编排；"
-            "禁止使用固定页面、字段或接口假设。最后必须调用 submit_recording_plan，"
-            "一次提交完整能力集合，不得部分发布。"
-            f" recording_id={self.recording_id} use_live_notebook={str(use_live_notebook).lower()}"
-            ),
-            accepted_kinds={"plan"},
-            context=context,
-        )
-        return pi.current_flow_spec().model_dump(mode="json")
 
     async def verify(
         self,

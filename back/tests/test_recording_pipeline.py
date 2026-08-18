@@ -33,6 +33,15 @@ def _context() -> PipelineContext:
     )
 
 
+def _runtime(*, materialize, verify, repair, publish) -> CanonicalRecordingRuntime:
+    return CanonicalRecordingRuntime(RecordingPipelineServices(
+        materialize_recording=materialize,
+        verify=verify,
+        repair=repair,
+        publish=publish,
+    ))
+
+
 def test_default_pipeline_budgets_allow_slow_pi_and_multi_round_repair() -> None:
     pipeline = SelfHealingPipeline(runtime=object())  # type: ignore[arg-type]
 
@@ -41,34 +50,35 @@ def test_default_pipeline_budgets_allow_slow_pi_and_multi_round_repair() -> None
 
 
 @pytest.mark.asyncio
-async def test_first_publication_consumes_live_notebook_once() -> None:
+async def test_first_publication_uses_stage_six_draft_without_replanning() -> None:
     calls: list[tuple[str, bool]] = []
+    stage_six = {
+        "capabilities": [
+            {"capability_id": "cap_query", "title": "查询"},
+            {"capability_id": "cap_write", "title": "提交"},
+        ],
+        "steps": [{"step_id": "s1"}, {"step_id": "s2"}],
+    }
 
     async def materialize(use_live, _context):  # noqa: ANN001
         calls.append(("materialize", use_live))
-        return {"capabilities": []}
-
-    async def plan(draft, use_live, _context):  # noqa: ANN001
-        calls.append(("plan", use_live))
-        return {**draft, "capabilities": ["query", "write"]}
+        return stage_six
 
     async def clean(draft, _context):  # noqa: ANN001
+        calls.append(("verify", True))
         return draft, ()
 
     async def repair(*_args):  # noqa: ANN002
         raise AssertionError("repair must not run")
 
     async def publish(draft, _context):  # noqa: ANN001
+        calls.append(("publish", True))
+        assert draft == stage_six
         return {"capability_count": len(draft["capabilities"])}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=clean,
-        repair=repair,
-        publish=publish,
-    ))
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=clean, repair=repair, publish=publish,
+    )).run(
         PipelineSeed(
             kind="recording",
             use_live_notebook=True,
@@ -79,7 +89,39 @@ async def test_first_publication_consumes_live_notebook_once() -> None:
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert outcome.release == {"capability_count": 2}
-    assert calls == [("materialize", True), ("plan", True)]
+    assert outcome.draft == stage_six
+    assert calls == [("materialize", True), ("verify", True), ("publish", True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("machine_verification", [False, True])
+async def test_prepare_keeps_stage_six_capability_boundary(machine_verification: bool) -> None:
+    stage_six = {
+        "capabilities": [
+            {"capability_id": "cap_a"},
+            {"capability_id": "cap_b"},
+        ],
+        "steps": [{"step_id": "step_a"}, {"step_id": "step_b"}],
+        "meta": {"fingerprint": "stage-six"},
+    }
+
+    async def materialize(_use_live, _context):  # noqa: ANN001
+        return dict(stage_six)
+
+    async def forbidden(*_args):  # noqa: ANN002
+        raise AssertionError("prepare must not replan or verify")
+
+    runtime = _runtime(
+        materialize=materialize, verify=forbidden, repair=forbidden, publish=forbidden,
+    )
+    draft = await runtime.prepare(
+        PipelineSeed(kind="recording", machine_verification=machine_verification),
+        _context(),
+    )
+
+    assert [item["capability_id"] for item in draft["capabilities"]] == ["cap_a", "cap_b"]
+    assert [item["step_id"] for item in draft["steps"]] == ["step_a", "step_b"]
+    assert draft["meta"]["fingerprint"] == "stage-six"
 
 
 @pytest.mark.asyncio
@@ -89,9 +131,6 @@ async def test_default_off_machine_verification_exports_live_skill_without_final
     async def materialize(_use_live, _context):  # noqa: ANN001
         events.append("materialize")
         return {"capabilities": ["query", "submit"]}
-
-    async def plan(*_args):  # noqa: ANN002
-        raise AssertionError("default-off mode must not run final Pi planning")
 
     async def verify(*_args):  # noqa: ANN002
         raise AssertionError("default-off mode must not compile or verify")
@@ -104,15 +143,9 @@ async def test_default_off_machine_verification_exports_live_skill_without_final
         assert context.machine_verification is False
         return {"capability_count": len(draft["capabilities"])}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=verify,
-        repair=repair,
-        publish=publish,
-    ))
-
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=verify, repair=repair, publish=publish,
+    )).run(
         PipelineSeed(kind="recording", use_live_notebook=True),
         _context(),
     )
@@ -123,94 +156,47 @@ async def test_default_off_machine_verification_exports_live_skill_without_final
 
 
 @pytest.mark.asyncio
-async def test_default_off_does_not_add_an_empty_capability_gate() -> None:
+async def test_default_off_publishes_stage_six_capabilities_without_an_empty_gate() -> None:
     published = False
 
     async def materialize(_use_live, _context):  # noqa: ANN001
-        return {"steps": [{"step_id": "submit"}], "capabilities": []}
+        return {
+            "steps": [{"step_id": "submit"}],
+            "capabilities": [{"capability_id": "cap_submit"}],
+            "meta": {
+                "capability_model": {"status": "needs_review"},
+                "recording_goal_contract": {
+                    "expected_count": 8,
+                    "materialized_count": 1,
+                    "satisfied": False,
+                },
+            },
+        }
 
     async def forbidden(*_args):  # noqa: ANN002
         raise AssertionError("direct export must not run another pipeline stage")
 
-    async def publish(*_args):  # noqa: ANN002
+    async def publish(draft, *_args):  # noqa: ANN002
         nonlocal published
         published = True
-        return {"capability_count": 0}
+        return {"capability_count": len(draft["capabilities"])}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=forbidden,
-        verify=forbidden,
-        repair=forbidden,
-        publish=publish,
-    ))
-
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=forbidden, repair=forbidden, publish=publish,
+    )).run(
         PipelineSeed(kind="recording", use_live_notebook=True),
         _context(),
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
-    assert outcome.release == {"capability_count": 0}
+    assert outcome.release == {"capability_count": 1}
     assert published is True
 
 
 @pytest.mark.asyncio
-async def test_default_off_preserves_but_never_publishes_an_incomplete_live_plan() -> None:
-    published = False
-    incomplete_draft = {
-        "capabilities": ["query", "submit"],
-        "meta": {
-            "capability_model": {"status": "needs_review"},
-            "recording_goal_contract": {
-                "expected_count": 8,
-                "materialized_count": 6,
-                "satisfied": False,
-            },
-            "unresolved_live_agent_ops": [{"op": "rename_field"}],
-        },
-    }
-
-    async def materialize(_use_live, _context):  # noqa: ANN001
-        return incomplete_draft
-
-    async def forbidden(*_args):  # noqa: ANN002
-        raise AssertionError("an incomplete direct export must stop before later stages")
-
-    async def publish(*_args):  # noqa: ANN002
-        nonlocal published
-        published = True
-        return {}
-
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=forbidden,
-        verify=forbidden,
-        repair=forbidden,
-        publish=publish,
-    ))
-
-    context = _context()
-    with pytest.raises(RuntimeError, match="实时分析未完成"):
-        await SelfHealingPipeline(runtime).run(
-            PipelineSeed(kind="recording", use_live_notebook=True),
-            context,
-        )
-
-    assert context.latest_draft == incomplete_draft
-    assert published is False
-
-
-@pytest.mark.asyncio
 async def test_republish_uses_edited_draft_without_live_notebook() -> None:
-    calls: list[tuple[str, bool]] = []
-
     async def materialize(*_args):  # noqa: ANN002
         raise AssertionError("republish must not rematerialize recording facts")
-
-    async def plan(draft, use_live, _context):  # noqa: ANN001
-        calls.append(("plan", use_live))
-        return draft
 
     async def clean(draft, _context):  # noqa: ANN001
         return draft, ()
@@ -221,14 +207,9 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
     async def publish(_draft, _context):  # noqa: ANN001
         return {"skill_id": "skill"}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=clean,
-        repair=repair,
-        publish=publish,
-    ))
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=clean, repair=repair, publish=publish,
+    )).run(
         PipelineSeed(
             kind="edited_spec",
             draft={"capabilities": ["query"]},
@@ -239,7 +220,6 @@ async def test_republish_uses_edited_draft_without_live_notebook() -> None:
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
-    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -255,10 +235,6 @@ async def test_verification_blocker_returns_to_same_repair_loop_before_atomic_pu
     async def materialize(_use_live, _context):  # noqa: ANN001
         return {"review_fixed": False}
 
-    async def plan(draft, _use_live, _context):  # noqa: ANN001
-        events.append("plan")
-        return draft
-
     async def verify(draft, _context):  # noqa: ANN001
         events.append("verify")
         return draft, (() if draft["review_fixed"] else (verification_issue,))
@@ -272,14 +248,9 @@ async def test_verification_blocker_returns_to_same_repair_loop_before_atomic_pu
         events.append("publish")
         return {"published": True}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=verify,
-        repair=repair,
-        publish=publish,
-    ))
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=verify, repair=repair, publish=publish,
+    )).run(
         PipelineSeed(
             kind="recording",
             use_live_notebook=True,
@@ -289,7 +260,7 @@ async def test_verification_blocker_returns_to_same_repair_loop_before_atomic_pu
     )
 
     assert outcome.status == WorkflowStatus.PUBLISHED
-    assert events == ["plan", "verify", "repair", "verify", "publish"]
+    assert events == ["verify", "repair", "verify", "publish"]
 
 
 @pytest.mark.asyncio
@@ -306,9 +277,6 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
     async def materialize(_use_live, _context):  # noqa: ANN001
         return {"capabilities": ["query", "write"]}
 
-    async def plan(draft, _use_live, _context):  # noqa: ANN001
-        return draft
-
     async def verify(draft, _context):  # noqa: ANN001
         return draft, (issue,)
 
@@ -320,14 +288,9 @@ async def test_any_capability_issue_prevents_partial_publish() -> None:
         published = True
         return {}
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=verify,
-        repair=repair,
-        publish=publish,
-    ))
-    outcome = await SelfHealingPipeline(runtime).run(
+    outcome = await SelfHealingPipeline(_runtime(
+        materialize=materialize, verify=verify, repair=repair, publish=publish,
+    )).run(
         PipelineSeed(
             kind="recording",
             use_live_notebook=True,
@@ -346,23 +309,15 @@ async def test_operation_timeout_preserves_materialized_draft_and_is_not_mislabe
     async def materialize(_use_live, _context):  # noqa: ANN001
         return {"capabilities": ["query", "submit"]}
 
-    async def plan(draft, _use_live, _context):  # noqa: ANN001
+    async def verify(_draft, _context):  # noqa: ANN001
         await asyncio.sleep(0.05)
-        raise AssertionError("operation timeout must stop capability planning")
+        raise AssertionError("operation timeout must stop verification")
 
     async def unused(*_args):  # noqa: ANN002
         raise AssertionError("later pipeline stages must not run")
 
-    runtime = CanonicalRecordingRuntime(RecordingPipelineServices(
-        materialize_recording=materialize,
-        plan_capabilities=plan,
-        verify=unused,
-        repair=unused,
-        publish=unused,
-    ))
-
     outcome = await SelfHealingPipeline(
-        runtime,
+        _runtime(materialize=materialize, verify=verify, repair=unused, publish=unused),
         operation_timeout_s=0.01,
         overall_timeout_s=1,
     ).run(
