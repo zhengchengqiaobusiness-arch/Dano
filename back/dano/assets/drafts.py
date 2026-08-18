@@ -163,6 +163,96 @@ class DraftStore:
             row = await conn.fetchrow("SELECT * FROM asset_drafts WHERE asset_draft_id=$1", asset_draft_id)
         return self._draft(row) if row else None
 
+    async def list_recording_results(self, *, tenant: str, subsystem: str) -> list[AssetDraft]:
+        from dano.onboarding.recording_results import RECORDING_RESULT_KEY_PREFIX
+
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT DISTINCT ON (asset_key) *
+                   FROM asset_drafts
+                   WHERE tenant=$1 AND subsystem=$2 AND asset_type=$3 AND asset_key LIKE $4
+                   ORDER BY asset_key, created_at DESC""",
+                _postgres_safe_text(tenant),
+                _postgres_safe_text(subsystem),
+                AssetType.PAGE_SCRIPT.value,
+                RECORDING_RESULT_KEY_PREFIX + "%",
+            )
+        drafts = [self._draft(row) for row in rows]
+        drafts.sort(key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return drafts
+
+    async def get_latest_recording_result(
+        self,
+        *,
+        tenant: str,
+        subsystem: str,
+        action: str,
+    ) -> AssetDraft | None:
+        from dano.onboarding.recording_results import recording_result_asset_key
+
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT * FROM asset_drafts
+                   WHERE tenant=$1 AND subsystem=$2 AND asset_type=$3 AND asset_key=$4
+                   ORDER BY created_at DESC LIMIT 1""",
+                _postgres_safe_text(tenant),
+                _postgres_safe_text(subsystem),
+                AssetType.PAGE_SCRIPT.value,
+                recording_result_asset_key(action),
+            )
+        return self._draft(row) if row else None
+
+    async def delete_recording_result(self, asset_draft_id: UUID, *, tenant: str) -> bool:
+        from dano.onboarding.recording_results import RECORDING_RESULT_KEY_PREFIX
+
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """DELETE FROM asset_drafts
+                   WHERE asset_draft_id=$1 AND tenant=$2 AND asset_key LIKE $3
+                   RETURNING asset_draft_id""",
+                asset_draft_id,
+                _postgres_safe_text(tenant),
+                RECORDING_RESULT_KEY_PREFIX + "%",
+            )
+        return row is not None
+
+    async def patch_recording_result_flags(
+        self,
+        asset_draft_id: UUID,
+        *,
+        published: bool | None = None,
+        machine_verification_ran: bool | None = None,
+    ) -> AssetDraft | None:
+        from dano.onboarding.recording_results import is_recording_result_key
+
+        draft = await self.get_draft(asset_draft_id)
+        if draft is None or not is_recording_result_key(draft.asset_key):
+            return None
+        body = dict(draft.body or {})
+        if published is not None:
+            body["published"] = published
+        if machine_verification_ran is not None:
+            body["machine_verification_ran"] = machine_verification_ran
+        if body == draft.body:
+            return draft
+        body = _postgres_safe_json(body)
+        scope = Scope(tenant=draft.tenant, subsystem=draft.subsystem)
+        h = content_hash(
+            asset_type=draft.asset_type,
+            scope=scope,
+            asset_key=draft.asset_key,
+            body=body,
+        )
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE asset_drafts SET body=$2, content_hash=$3
+                   WHERE asset_draft_id=$1 RETURNING *""",
+                asset_draft_id,
+                json.dumps(body),
+                h,
+            )
+        return self._draft(row) if row else None
+
     async def record_validation(self, *, asset_draft_id: UUID, kind: ValidationKind, passed: bool,
                                 environment: str = "sandbox", credential_type: str = "test",
                                 request: dict | None = None, response: dict | None = None,

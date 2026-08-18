@@ -198,6 +198,8 @@ class RecordingGatewaySession:
     _live_notebook: LiveNotebook | None = field(default=None, init=False, repr=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
+    _stage_six_result_id: Any = field(default=None, init=False)
+    _machine_verification: bool = field(default=False, init=False)
 
     async def attach(self, send: SendMessage) -> None:
         """Attach one transport without taking ownership of the backend task."""
@@ -235,6 +237,7 @@ class RecordingGatewaySession:
             SelfHealingPipeline(runtime),
             listener=self._on_snapshot,
             cancel_listener=self._cancel_analysis,
+            persist_stage_six=self._persist_stage_six,
         )
         await self.capture.start(
             self.config.start_url,
@@ -260,16 +263,14 @@ class RecordingGatewaySession:
                 })
             return
         if command == "finish":
+            self._machine_verification = message.get("machine_verification") is True
             await self.workflow.set_title(str(message.get("title") or ""))
-            await self.workflow.finish(
-                machine_verification=message.get("machine_verification") is True,
-            )
+            await self.workflow.finish(machine_verification=self._machine_verification)
             return
         if command == "republish":
+            self._machine_verification = message.get("machine_verification") is True
             await self.workflow.set_title(str(message.get("title") or self.workflow.snapshot.title))
-            await self.workflow.republish(
-                machine_verification=message.get("machine_verification") is True,
-            )
+            await self.workflow.republish(machine_verification=self._machine_verification)
             return
         if command == "patch_draft":
             if self.workflow.snapshot.draft is None:
@@ -746,7 +747,41 @@ class RecordingGatewaySession:
             return
         self._live_notebook = LiveNotebook.from_shadow(self._pi.current_flow_spec())
 
+    async def _persist_stage_six(self, draft: dict[str, Any]) -> None:
+        from dano.assets.drafts import DraftStore
+        from dano.onboarding.recording_results import persist_stage_six_result
+        from dano.shared.enums import Subsystem
+        from dano.shared.models import Scope
+
+        title = self.workflow.snapshot.title if self.workflow is not None else ""
+        saved = await persist_stage_six_result(
+            DraftStore(),
+            run_id=self.config.recording_id,
+            scope=Scope(
+                tenant=self.config.tenant,
+                subsystem=Subsystem(self.config.subsystem),
+            ),
+            action=self.config.action,
+            title=title,
+            goal=self.config.goal_text,
+            draft=draft,
+        )
+        self._stage_six_result_id = saved.asset_draft_id
+
+    async def _mark_stage_six_published(self) -> None:
+        if self._stage_six_result_id is None:
+            return
+        from dano.assets.drafts import DraftStore
+
+        await DraftStore().patch_recording_result_flags(
+            self._stage_six_result_id,
+            published=True,
+            machine_verification_ran=self._machine_verification,
+        )
+
     async def _on_snapshot(self, snapshot: WorkflowSnapshot) -> None:
+        if snapshot.status == WorkflowStatus.PUBLISHED:
+            await self._mark_stage_six_published()
         await self._emit_snapshot(snapshot)
 
     async def _emit_snapshot(self, snapshot: WorkflowSnapshot | None = None) -> None:

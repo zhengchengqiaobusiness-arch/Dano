@@ -284,7 +284,7 @@ class SelfHealingPipeline:
         await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
-        if context.persist_stage_six is not None:
+        if seed.kind == "recording" and context.persist_stage_six is not None:
             await context.persist_stage_six(draft)
         if not seed.machine_verification:
             emit_run_event(
@@ -545,6 +545,7 @@ class RecordingWorkflow:
     pipeline: WorkflowPipeline
     listener: SnapshotListener | None = None
     cancel_listener: CancelListener | None = None
+    persist_stage_six: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
@@ -726,6 +727,7 @@ class RecordingWorkflow:
             ask_operator=self._ask_operator,
             cancelled=lambda: self._cancelled,
             activity=self._record_activity,
+            persist_stage_six=self.persist_stage_six,
         )
         try:
             outcome = await self.pipeline.run(seed, context)
