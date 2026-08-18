@@ -281,12 +281,15 @@ def test_frontend_has_one_finish_and_one_republish_entrypoint() -> None:
     assert source.count('send({ type: "finish"') == 1
     assert source.count('send({ type: "republish"') == 2  # direct and after saved patch
     assert source.count('send({ type: "cancel"') == 1
-    assert "停止并分析请求" in source
+    assert "停止并发布" in source
+    assert "停止并分析请求" not in source
     assert "修改后再次发布" in source
+    assert "requestPublish" in source
+    assert "canRetryPublish" in source
     assert "重新分析" not in source
     assert "重新验证并发布" not in source
     assert "finishRequestedRef.current" in source
-    assert 'loading={finishRequested}' in source
+    assert "loading={finishRequested || status === \"processing\"}" in source
 
 
 def test_frontend_describes_direct_publish_without_claiming_machine_verification() -> None:

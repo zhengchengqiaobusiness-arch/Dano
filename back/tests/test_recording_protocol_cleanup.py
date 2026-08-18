@@ -84,7 +84,9 @@ def test_recording_canvas_preserves_captured_frame_aspect_ratio() -> None:
         "function renderParamEditor", 1,
     )[0]
 
-    assert 'aspectRatio: `${frameMeta.width} / ${frameMeta.height}`' in recording_view
+    assert "100cqh * ${frameMeta.width} / ${frameMeta.height}" in recording_view
+    assert "100cqw * ${frameMeta.height} / ${frameMeta.width}" in recording_view
+    assert 'aspectRatio: `${frameMeta.width} / ${frameMeta.height}`' not in recording_view
     assert 'height: "calc(100vh - 245px)"' not in recording_view
 
 

@@ -452,6 +452,7 @@ export default function PageRecorder({
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
   const draft = snapshot?.draft || null;
+  const canRetryPublish = Boolean(draft) && ["editable", "failed", "cancelled"].includes(status);
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
@@ -968,6 +969,14 @@ export default function PageRecorder({
     });
   }
 
+  function requestPublish() {
+    if (status === "recording") {
+      finishRecording();
+      return;
+    }
+    republish();
+  }
+
   function cancelResultEditing() {
     if (patchInFlightRef.current) return;
     pendingEditsRef.current = [];
@@ -1142,7 +1151,7 @@ export default function PageRecorder({
               <Switch
                 size="small"
                 checked={machineVerification}
-                disabled={status !== "recording"}
+                disabled={processing || (status !== "recording" && !canRetryPublish)}
                 onChange={(checked) => {
                   machineVerificationRef.current = checked;
                   setMachineVerification(checked);
@@ -1150,9 +1159,15 @@ export default function PageRecorder({
               />
               <Text>编译并进行机器验证</Text>
             </Space>
-            {status === "recording" ? (
-              <Button type="primary" loading={finishRequested} onClick={finishRecording}>停止并分析请求</Button>
-            ) : processing ? (
+            <Button
+              type="primary"
+              loading={finishRequested || status === "processing"}
+              disabled={processing || (status !== "recording" && !canRetryPublish)}
+              onClick={requestPublish}
+            >
+              停止并发布
+            </Button>
+            {processing ? (
               <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>一键终止</Button>
             ) : null}
             <Button icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}>录制助手</Button>
@@ -1679,11 +1694,20 @@ export default function PageRecorder({
               >修改后再次发布</Button>
             </Space>
           ) : (
-            <Button
-              type="primary"
-              disabled={!draft || processing}
-              onClick={() => setEditingResult(true)}
-            >修改结果</Button>
+            <Space>
+              <Button
+                disabled={!draft || processing}
+                onClick={() => setEditingResult(true)}
+              >修改结果</Button>
+              {canRetryPublish ? (
+                <Button
+                  type="primary"
+                  loading={processing || Boolean(patchInFlightRef.current)}
+                  disabled={!draft || processing}
+                  onClick={republish}
+                >停止并发布</Button>
+              ) : null}
+            </Space>
           )}
         </div>
         {renderCapabilities()}
