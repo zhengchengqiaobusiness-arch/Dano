@@ -413,6 +413,10 @@ export default function PageRecorder({
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
   const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
   const [editingResult, setEditingResult] = useState(false);
+  const [viewStage, setViewStage] = useState(0);
+  const [keepRecording, setKeepRecording] = useState(false);
+  const [keepResult, setKeepResult] = useState(false);
+  const reachedStageRef = useRef(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
@@ -445,8 +449,7 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const autoStage = pageStage(status);
-  const [viewStage, setViewStage] = useState(autoStage);
+  const reachedStage = pageStage(status);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -458,8 +461,11 @@ export default function PageRecorder({
   }, [startUrl, goalText, title, machineVerification]);
 
   useEffect(() => {
-    setViewStage(autoStage);
-  }, [autoStage]);
+    if (reachedStage >= 1) setKeepRecording(true);
+    if (reachedStage >= 2) setKeepResult(true);
+    if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
+    reachedStageRef.current = reachedStage;
+  }, [reachedStage]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -723,6 +729,10 @@ export default function PageRecorder({
     if (wsRef.current) return;
     const action = newActionName();
     actionRef.current = action;
+    setKeepResult(false);
+    setKeepRecording(true);
+    setViewStage(1);
+    reachedStageRef.current = 1;
     setConnecting(true);
     snapshotRef.current = null;
     setSnapshot(null);
@@ -1072,41 +1082,41 @@ export default function PageRecorder({
   function renderSetup() {
     return (
       <Card>
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <div style={{ display: "flex", gap: 16, width: "100%" }}>
-            <label style={{ flex: 1, minWidth: 0 }}>
-              <Text strong><Text type="danger">* </Text>业务页地址</Text>
-              <Input
-                value={startUrl}
-                onChange={(event) => setStartUrl(event.target.value)}
-                placeholder="https://example.com/business/page"
-                style={{ marginTop: 8 }}
-              />
-            </label>
-            <label style={{ flex: 1, minWidth: 0 }}>
-              <Text strong>Skill 名称</Text>
-              <Input
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="例如：请假申请"
-                style={{ marginTop: 8 }}
-              />
-            </label>
-          </div>
-          <label>
-            <Text strong><Text type="danger">* </Text>录制目标</Text>
-            <Input.TextArea
-              value={goalText}
-              onChange={(event) => setGoalText(event.target.value)}
-              placeholder="直接描述要完成的业务，例如：查询记录、保存草稿并提交申请"
-              autoSize={{ minRows: 3, maxRows: 5 }}
-              style={{ marginTop: 8 }}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
+            <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务页地址</Text>
+            <Input
+              value={startUrl}
+              onChange={(event) => setStartUrl(event.target.value)}
+              placeholder="https://example.com/business/page"
+              style={{ flex: 1.4, minWidth: 160 }}
             />
-          </label>
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
-            <Button type="primary" loading={connecting} onClick={startRecording}>开始录制</Button>
+            <Text strong style={{ whiteSpace: "nowrap" }}>Skill 名称</Text>
+            <Input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="例如：请假申请"
+              style={{ flex: 0.8, minWidth: 120 }}
+            />
+            {["idle", "published", "failed", "cancelled"].includes(status) ? (
+              <Button type="primary" loading={connecting} onClick={startRecording} style={{ flexShrink: 0 }}>
+                开始录制
+              </Button>
+            ) : null}
           </div>
-        </Space>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, width: "100%", minWidth: 0 }}>
+            <Text strong style={{ whiteSpace: "nowrap", paddingTop: 5 }}><Text type="danger">* </Text>录制目标</Text>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Input.TextArea
+                value={goalText}
+                onChange={(event) => setGoalText(event.target.value)}
+                placeholder="查询记录、保存草稿并提交申请"
+                autoSize={{ minRows: 2, maxRows: 5 }}
+                style={{ width: "100%" }}
+              />
+            </div>
+          </div>
+        </div>
       </Card>
     );
   }
@@ -1119,8 +1129,6 @@ export default function PageRecorder({
             <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
               {STATUS_LABELS[status]}
             </Tag>
-            <Text strong style={{ whiteSpace: "nowrap" }}>名称：</Text>
-            <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Skill 名称" style={{ minWidth: 180, flex: 0.8 }} />
             <Space size={6} style={{ whiteSpace: "nowrap" }}>
               <Switch
                 size="small"
@@ -1756,13 +1764,30 @@ export default function PageRecorder({
     <div style={{ width: "100%", minWidth: 0, padding: "12px 18px 18px", boxSizing: "border-box" }}>
       <Steps
         current={viewStage}
-        onChange={setViewStage}
-        items={[{ title: "录制准备" }, { title: "页面录制" }, { title: "能力结果" }]}
+        onChange={(next) => {
+          if (next <= (keepResult ? 2 : keepRecording ? 1 : 0)) setViewStage(next);
+        }}
+        items={[
+          {
+            title: "录制准备",
+            status: viewStage === 0 ? "process" : "finish",
+          },
+          {
+            title: "页面录制",
+            disabled: !keepRecording,
+            status: viewStage === 1 ? "process" : keepRecording ? "finish" : "wait",
+          },
+          {
+            title: "能力结果",
+            disabled: !keepResult,
+            status: viewStage === 2 ? "process" : keepResult ? "finish" : "wait",
+          },
+        ]}
         style={{ maxWidth: 980, margin: "0 auto 18px" }}
       />
-      <div style={{ display: viewStage === 0 ? "block" : "none" }}>{renderSetup()}</div>
-      <div style={{ display: viewStage === 1 ? "block" : "none" }}>{renderRecording()}</div>
-      <div style={{ display: viewStage === 2 ? "block" : "none" }}>{renderResult()}</div>
+      <div hidden={viewStage !== 0}>{renderSetup()}</div>
+      {keepRecording ? <div hidden={viewStage !== 1}>{renderRecording()}</div> : null}
+      {keepResult ? <div hidden={viewStage !== 2}>{renderResult()}</div> : null}
       <Drawer
         title="录制助手"
         placement="right"
