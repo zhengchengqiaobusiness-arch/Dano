@@ -308,3 +308,6 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert 'title: "执行状态"' in recorder
     assert "正在发布" in recorder
     assert "historyExecutionStatus" in recorder
+    assert "activityDisplay" in recorder
+    assert 'label: "发现了"' in recorder
+    assert 'label: "准备处理"' in recorder

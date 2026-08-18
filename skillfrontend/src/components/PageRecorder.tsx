@@ -325,12 +325,22 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
 };
 
 const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
-  pending: { label: "待处理" },
-  running: { label: "处理中", color: "processing" },
+  pending: { label: "发现了" },
+  running: { label: "思考中", color: "processing" },
   resolved: { label: "已解决", color: "success" },
   blocked: { label: "未解决", color: "error" },
   waiting_operator: { label: "需要确认", color: "warning" },
 };
+
+function activityDisplay(item: { status: string; label: string }) {
+  if (item.label.startsWith("发现了")) return { label: "发现了" };
+  if (item.label.startsWith("我觉得") || item.label.startsWith("准备")) {
+    return { label: "准备处理", color: "processing" as const };
+  }
+  if (item.label.startsWith("本轮结果")) return { label: "本轮结果", color: "processing" as const };
+  if (item.label.startsWith("已经处理好")) return { label: "已解决", color: "success" as const };
+  return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
+}
 
 function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
   if (resumeOnly) return status === "idle" ? 0 : 2;
@@ -1966,14 +1976,13 @@ export default function PageRecorder({
               size="small"
               dataSource={activities}
               renderItem={(item) => {
-                const display = ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
+                const display = activityDisplay(item);
                 return (
                   <List.Item>
                     <Space align="start" style={{ width: "100%" }}>
                       <Tag color={display.color}>{display.label}</Tag>
                       <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
                         <Text>{item.label}</Text>
-                        {item.round ? <Text type="secondary">第 {item.round} 轮</Text> : null}
                       </Space>
                     </Space>
                   </List.Item>
@@ -1981,14 +1990,14 @@ export default function PageRecorder({
               }}
             />
           ) : null}
-          {!activities.length && insights.length ? (
+          {insights.length ? (
             <List
               size="small"
               dataSource={insights}
               renderItem={(item) => (
                 <List.Item>
                   <Space align="start">
-                    <Tag>{String(item.kind || "思考")}</Tag>
+                    <Tag>思考</Tag>
                     <Text>{String(item.text || item.reason || JSON.stringify(item))}</Text>
                   </Space>
                 </List.Item>
@@ -2149,7 +2158,7 @@ export default function PageRecorder({
             size="small"
             dataSource={snapshot?.activity || []}
             renderItem={(item) => {
-              const display = ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
+              const display = activityDisplay(item);
               return (
                 <List.Item>
                   <Space align="start" style={{ width: "100%" }}>

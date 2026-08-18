@@ -382,3 +382,52 @@ async def test_operator_question_uses_business_language() -> None:
     assert "请假原因" in question.text
     assert "必填" in question.text
     assert question.options == ["必填", "可选"]
+
+
+@pytest.mark.asyncio
+async def test_stage_seven_activity_uses_thinking_language() -> None:
+    from dano.onboarding.recording_workflow import WorkflowActivity
+
+    recorded: list[WorkflowActivity] = []
+    issue = WorkflowIssue(
+        issue_id="enum-1",
+        code="enum",
+        message="待处理：enum",
+        resolver="collect_evidence",
+        target={"path": "body.status"},
+    )
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {"rev": 0}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            if draft["rev"] >= 1:
+                return PipelineCheck(draft=draft, issues=())
+            return PipelineCheck(draft=draft, issues=(issue,))
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            from dano.onboarding.recording_workflow import RepairReport
+            context.last_repair_report = RepairReport(applied=["enum-1"])
+            return {"rev": 1}
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            return {"ok": True}
+
+    async def record(item: WorkflowActivity) -> None:
+        recorded.append(item)
+
+    outcome = await SelfHealingPipeline(Runtime()).run(
+        PipelineSeed(kind="edited_spec", draft={"rev": 0}, machine_verification=True),
+        _context(activity=record),
+    )
+
+    labels = [item.label for item in recorded]
+    assert outcome.status == WorkflowStatus.PUBLISHED
+    assert any(item.startswith("发现了问题") for item in labels)
+    assert any("我觉得应该这样处理" in item for item in labels)
+    assert any(item.startswith("本轮结果") for item in labels)
+    assert any(item.startswith("已经处理好了") for item in labels)
+    assert not any("正在自动补充验证证据" in item for item in labels)
+    assert not any(item == "待处理：enum" for item in labels)
+    assert sum(1 for item in labels if item.startswith("发现了问题")) == 1

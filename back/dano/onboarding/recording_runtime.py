@@ -156,6 +156,19 @@ def _apply_operator_answer(spec: FlowSpec, issue: WorkflowIssue, answer: str) ->
     return False
 
 
+def _default_todo_message(todo: dict[str, Any], code: str) -> str:
+    if code == "write_verify":
+        target = str(todo.get("target_id") or todo.get("write_request_id") or "写操作")
+        return f"写操作 `{target}` 还没有回读校验，不能证明提交已生效"
+    if code == "enum":
+        path = str(todo.get("path") or todo.get("target_id") or "选项字段")
+        return f"字段 `{path}` 的枚举选项还不完整"
+    if code == "dependency":
+        path = str(todo.get("target_path") or todo.get("target_id") or "依赖字段")
+        return f"字段 `{path}` 的取值依赖还没有验证"
+    return f"待处理：{code}"
+
+
 def _todo_issue(todo: dict[str, Any]) -> WorkflowIssue:
     resolver = str(todo.get("resolver") or "collect_evidence")
     if resolver not in {"machine_repair", "collect_evidence", "operator", "external_blocked"}:
@@ -165,11 +178,11 @@ def _todo_issue(todo: dict[str, Any]) -> WorkflowIssue:
     return WorkflowIssue(
         issue_id=issue_id or f"{code}:{todo.get('step_id') or todo.get('wire_path') or 'draft'}",
         code=code,
-        message=str(todo.get("message") or f"待处理：{code}"),
+        message=str(todo.get("message") or _default_todo_message(todo, code)),
         resolver=resolver,
         target={
             key: str(todo.get(key) or "")
-            for key in ("capability_id", "step_id", "field_id", "wire_path", "target_id")
+            for key in ("capability_id", "step_id", "field_id", "wire_path", "target_id", "path")
             if todo.get(key)
         },
         evidence=[dict(todo)],
