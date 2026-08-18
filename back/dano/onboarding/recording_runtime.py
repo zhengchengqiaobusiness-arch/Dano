@@ -22,6 +22,7 @@ from dano.onboarding.recording_verify import (
 )
 from dano.onboarding.recording_workflow import (
     PipelineContext,
+    RepairReport,
     WorkflowIssue,
 )
 
@@ -98,10 +99,13 @@ def _workflow_issue(issue: ReleaseIssue, spec: FlowSpec | None = None) -> Workfl
         ), None)
         if param is not None:
             field_label = str(param.label or param.key or param.path or "")
+    message = issue.message
+    if issue.check_code == "required_axis_unconfirmed" and field_label:
+        message = f"请确认“{field_label}”在提交申请时是否必须填写。"
     return WorkflowIssue(
         issue_id=issue.issue_id,
         code=issue.check_code,
-        message=issue.message,
+        message=message,
         resolver=issue.resolver,
         target={
             key: value
@@ -117,6 +121,38 @@ def _workflow_issue(issue: ReleaseIssue, spec: FlowSpec | None = None) -> Workfl
         evidence=[{"ref": value} for value in issue.evidence_refs],
         allowed_operations=list(issue.suggested_operations),
     )
+
+
+def _apply_operator_answer(spec: FlowSpec, issue: WorkflowIssue, answer: str) -> bool:
+    normalized = answer.strip()
+    if issue.code != "required_axis_unconfirmed":
+        return False
+    if normalized in {"必填", "必须", "required", "yes", "是"}:
+        required = True
+    elif normalized in {"可选", "选填", "optional", "no", "否"}:
+        required = False
+    else:
+        return False
+    step_id = str(issue.target.get("step_id") or "")
+    field_id = str(issue.target.get("field_id") or "")
+    wire_path = str(issue.target.get("wire_path") or "")
+    for step in spec.steps:
+        if step_id and step.step_id != step_id:
+            continue
+        for param in step.params:
+            matched = (
+                (field_id and str(param.field_id or "") == field_id)
+                or (wire_path and str(param.path or "") == wire_path)
+            )
+            if not matched:
+                continue
+            param.required = required
+            param.source = {
+                **(param.source or {}),
+                "required_state": "required" if required else "optional",
+            }
+            return True
+    return False
 
 
 def _todo_issue(todo: dict[str, Any]) -> WorkflowIssue:
@@ -205,33 +241,72 @@ class ProductionRecordingServices:
         context: PipelineContext,
     ) -> dict[str, Any]:
         context.ensure_active()
+        report = RepairReport()
         spec = FlowSpec.model_validate(draft)
-        if not operator_answers:
+        kept_capabilities = list(spec.capabilities)
+        try:
             spec = await auto_fix_flow_spec(
                 spec,
                 repair_ops=[],
                 max_rounds=1,
                 expand_requests=False,
             )
+            report.applied.append("deterministic_fix")
+        except Exception:  # noqa: BLE001 - one failed fix must not stop remaining issues
+            report.rejected.append("deterministic_fix")
 
-        pi = await self.pi_provider(False)
-        pi.bind_flow_spec(spec)
-        payload = [issue.model_dump(mode="json") for issue in issues]
-        await _submit_with_protocol_recovery(
-            pi,
-            prompt=(
-            "继续同一录制的修复闭环。只按结构化 issue 的 resolver、target、evidence 和 "
-            "allowed_operations 处理；machine_repair 提交 FlowSpec 修复，collect_evidence 使用"
-            "回放/页面/字典/依赖工具补证，operator 使用已绑定回答。不得降低闸门、猜测事实、"
-            "改写接口路径或只修复部分能力。完成后调用 submit_recording_repair。issues="
-            + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            + " operator_answers="
-            + json.dumps(operator_answers, ensure_ascii=False, separators=(",", ":"))
-            ),
-            accepted_kinds={"repair"},
-            context=context,
-        )
-        return pi.current_flow_spec().model_dump(mode="json")
+        remaining: list[WorkflowIssue] = []
+        for issue in issues:
+            answer = str(operator_answers.get(issue.issue_id) or "").strip()
+            if not answer or issue.resolver != "operator":
+                remaining.append(issue)
+                continue
+            try:
+                if _apply_operator_answer(spec, issue, answer):
+                    report.applied.append(issue.issue_id)
+                    report.resolved.append(issue.issue_id)
+                else:
+                    report.rejected.append(issue.issue_id)
+                    remaining.append(issue)
+            except Exception:  # noqa: BLE001
+                report.rejected.append(issue.issue_id)
+                remaining.append(issue)
+
+        if remaining:
+            try:
+                pi = await self.pi_provider(False)
+                pi.bind_flow_spec(spec)
+                payload = [issue.model_dump(mode="json") for issue in remaining]
+                await _submit_with_protocol_recovery(
+                    pi,
+                    prompt=(
+                    "继续同一录制的修复闭环。只按结构化 issue 的 resolver、target、evidence 和 "
+                    "allowed_operations 处理剩余问题；不得重建 FlowSpec、清空能力或重新划分能力。"
+                    "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/页面/字典/依赖工具补证。"
+                    "完成后调用 submit_recording_repair。issues="
+                    + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    ),
+                    accepted_kinds={"repair"},
+                    context=context,
+                )
+                repaired = pi.current_flow_spec()
+                if kept_capabilities and not repaired.capabilities:
+                    report.rejected.append("pi_cleared_capabilities")
+                    report.still_pending.extend(issue.issue_id for issue in remaining)
+                else:
+                    spec = repaired
+                    report.applied.extend(issue.issue_id for issue in remaining)
+            except Exception:  # noqa: BLE001 - protocol errors keep the current draft
+                report.still_pending.extend(issue.issue_id for issue in remaining)
+        else:
+            report.skipped.extend(
+                issue.issue_id for issue in issues if issue.issue_id not in report.applied
+            )
+
+        context.last_repair_report = report
+        if kept_capabilities and not spec.capabilities:
+            spec.capabilities = kept_capabilities
+        return spec.model_dump(mode="json")
 
     async def publish(
         self,

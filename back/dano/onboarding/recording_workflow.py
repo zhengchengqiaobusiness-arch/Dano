@@ -8,6 +8,7 @@ represented by ``progress.step`` rather than separate externally visible states.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -187,13 +188,24 @@ class PipelineOutcome:
 
 
 @dataclass
+class RepairReport:
+    applied: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    resolved: list[str] = field(default_factory=list)
+    still_pending: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PipelineContext:
     progress: Callable[[WorkflowStep, str, int], Awaitable[None]]
     ask_operator: Callable[[WorkflowQuestion], Awaitable[str]]
     cancelled: Callable[[], bool]
     activity: Callable[[WorkflowActivity], Awaitable[None]] | None = None
+    persist_stage_six: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     latest_draft: dict[str, Any] | None = None
     machine_verification: bool = False
+    last_repair_report: RepairReport | None = None
 
     def ensure_active(self) -> None:
         if self.cancelled():
@@ -272,6 +284,8 @@ class SelfHealingPipeline:
         await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
+        if context.persist_stage_six is not None:
+            await context.persist_stage_six(draft)
         if not seed.machine_verification:
             emit_run_event(
                 "recording.verification.skipped",
@@ -292,11 +306,16 @@ class SelfHealingPipeline:
                 release=release,
             )
         unchanged = 0
+        previous_fingerprint = ""
         previous_issues: tuple[str, ...] | None = None
+        previous_unresolved = 0
         previous_issue_map: dict[str, WorkflowIssue] = {}
+        last_applied = False
+        round_number = 0
 
-        for round_number in range(1, self.max_rounds + 1):
+        while True:
             context.ensure_active()
+            round_number += 1
             await context.progress(WorkflowStep.VERIFYING, "正在检查和验证能力", round_number)
             checked = await self._bounded(self.runtime.check(draft, context))
             draft = checked.draft
@@ -358,8 +377,19 @@ class SelfHealingPipeline:
                 )
 
             current_issues = _issue_signature(checked.issues)
-            unchanged = unchanged + 1 if current_issues == previous_issues else 0
+            current_fingerprint = _draft_fingerprint(draft)
+            unresolved = len(checked.issues)
+            stalled = (
+                previous_issues is not None
+                and current_fingerprint == previous_fingerprint
+                and current_issues == previous_issues
+                and not last_applied
+                and unresolved >= previous_unresolved
+            )
+            unchanged = unchanged + 1 if stalled else 0
             previous_issues = current_issues
+            previous_fingerprint = current_fingerprint
+            previous_unresolved = unresolved
             if unchanged >= self.max_unchanged_rounds:
                 for issue in checked.issues:
                     await context.record(_issue_activity(
@@ -409,15 +439,8 @@ class SelfHealingPipeline:
             ))
             draft = repaired
             context.remember_draft(draft)
-
-        final = await self._bounded(self.runtime.check(draft, context))
-        context.remember_draft(final.draft)
-        return PipelineOutcome(
-            status=WorkflowStatus.EDITABLE,
-            draft=final.draft,
-            issues=final.issues,
-            error=f"自动处理达到 {self.max_rounds} 轮上限",
-        )
+            report = context.last_repair_report
+            last_applied = bool(report and report.applied)
 
     async def _bounded(self, operation: Awaitable[Any]) -> Any:
         try:
@@ -429,6 +452,11 @@ class SelfHealingPipeline:
 
 class _OperationTimeout(Exception):
     """Distinguish a bounded stage timeout from the whole-run deadline."""
+
+
+def _draft_fingerprint(draft: dict[str, Any] | None) -> str:
+    payload = json.dumps(draft or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _issue_signature(issues: tuple[WorkflowIssue, ...]) -> tuple[str, ...]:
@@ -487,8 +515,8 @@ def _operator_question(issue: WorkflowIssue) -> WorkflowQuestion:
         return WorkflowQuestion(
             question_id=f"question:{issue.issue_id}",
             issue_id=issue.issue_id,
-            text=f"请确认“{field}”在调用这个能力时是否必须提供。",
-            options=["必填", "选填"],
+            text=f"请确认“{field}”在提交申请时是否必须填写。\n请输入“必填”或“可选”。",
+            options=["必填", "可选"],
             context_ref=issue.issue_id,
         )
     return WorkflowQuestion(
