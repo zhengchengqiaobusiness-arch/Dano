@@ -222,23 +222,10 @@ class RecordingGatewaySession:
             capture_reads=True,
             tenant=self.config.tenant,
         )
-        services = ProductionRecordingServices(
-            recording_id=self.config.recording_id,
-            materializer=self._materialize,
-            pi_provider=self._ensure_pi,
-            publisher=self.publisher,
-        )
-        runtime = CanonicalRecordingRuntime(services.pipeline_services())
-        self.workflow = RecordingWorkflow(
-            WorkflowSnapshot(
-                run_id=self.config.recording_id,
-                action=self.config.action,
-            ),
-            SelfHealingPipeline(runtime),
-            listener=self._on_snapshot,
-            cancel_listener=self._cancel_analysis,
-            persist_stage_six=self._persist_stage_six,
-        )
+        self.workflow = self._new_workflow(WorkflowSnapshot(
+            run_id=self.config.recording_id,
+            action=self.config.action,
+        ))
         await self.capture.start(
             self.config.start_url,
             base_url=self.config.base_url,
@@ -249,11 +236,54 @@ class RecordingGatewaySession:
         await self.capture.start_screencast(self._on_frame)
         self._schedule_live("recording_started")
 
+    async def start_verification_only(
+        self,
+        draft: dict[str, Any],
+        *,
+        title: str = "",
+        result_id: Any = None,
+    ) -> None:
+        if self.workflow is not None:
+            await self._emit_snapshot()
+            return
+        self.capture = None
+        self._capture_frozen = True
+        self._machine_verification = True
+        self._stage_six_result_id = result_id
+        self.workflow = self._new_workflow(WorkflowSnapshot(
+            run_id=self.config.recording_id,
+            action=self.config.action,
+            title=title,
+            status=WorkflowStatus.EDITABLE,
+            draft=draft,
+            capture_frozen=True,
+        ))
+        await self.workflow.republish(machine_verification=True)
+
+    def _new_workflow(self, snapshot: WorkflowSnapshot) -> RecordingWorkflow:
+        services = ProductionRecordingServices(
+            recording_id=self.config.recording_id,
+            materializer=self._materialize,
+            pi_provider=self._ensure_pi,
+            publisher=self.publisher,
+        )
+        runtime = CanonicalRecordingRuntime(services.pipeline_services())
+        persist = self._persist_stage_six if snapshot.status == WorkflowStatus.IDLE else None
+        return RecordingWorkflow(
+            snapshot,
+            SelfHealingPipeline(runtime),
+            listener=self._on_snapshot,
+            cancel_listener=self._cancel_analysis,
+            persist_stage_six=persist,
+        )
+
     async def dispatch(self, message: dict[str, Any]) -> None:
-        if self.workflow is None or self.capture is None:
+        if self.workflow is None:
             raise RuntimeError("recording session has not started")
         command = str(message.get("type") or "")
         if command == "input":
+            if self.capture is None:
+                raise ValueError("当前会话没有页面录制")
             result = await self.capture.dispatch_input(message.get("event") or {})
             if isinstance(result, dict) and not result.get("ok", True):
                 await self._send({
@@ -854,6 +884,43 @@ class RecordingSessionRegistry:
         else:
             await session.attach(send)
         return session, created
+
+    async def attach_or_resume(
+        self,
+        *,
+        config: RecordingSessionConfig,
+        send: SendMessage,
+        pi_factory: PiFactory,
+        publisher: Publisher,
+        draft: dict[str, Any],
+        title: str = "",
+        result_id: Any = None,
+    ) -> RecordingGatewaySession:
+        async with self._lock:
+            existing = self._sessions.get(config.action)
+        if existing is not None and existing.capture is None and existing.workflow is not None:
+            await existing.attach(send)
+            return existing
+        if existing is not None:
+            async with self._lock:
+                self._sessions.pop(config.action, None)
+            await existing.close()
+        session = RecordingGatewaySession(
+            config=config,
+            send=send,
+            pi_factory=pi_factory,
+            publisher=publisher,
+        )
+        async with self._lock:
+            self._sessions[config.action] = session
+        try:
+            await session.start_verification_only(draft, title=title, result_id=result_id)
+        except Exception:
+            async with self._lock:
+                self._sessions.pop(config.action, None)
+            await session.close()
+            raise
+        return session
 
     def detach(self, action: str, send: SendMessage) -> None:
         session = self._sessions.get(action)

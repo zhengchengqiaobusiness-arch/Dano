@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -1033,30 +1033,71 @@ async def record_ws(ws: WebSocket) -> None:
     action = ""
     try:
         init = await ws.receive_json()
-        if init.get("type") != "start" or not init.get("start_url"):
+        command = str(init.get("type") or "")
+        resume_draft: dict | None = None
+        resume_title = ""
+        resume_result_id = None
+        if command == "resume_verification":
+            from dano.assets.drafts import DraftStore
+            from dano.onboarding.recording_results import is_recording_result_key
+
+            result_id = str(init.get("result_id") or "").strip()
+            tenant = str(init.get("tenant") or "")
+            try:
+                saved = await DraftStore().get_draft(uuid.UUID(result_id)) if result_id else None
+            except ValueError:
+                saved = None
+            if (
+                saved is None
+                or saved.tenant != tenant
+                or not is_recording_result_key(saved.asset_key)
+                or not isinstance(saved.body.get("flow_spec"), dict)
+            ):
+                await sender.send_json({
+                    "type": "error",
+                    "detail": "首帧须为 {type:'resume_verification', result_id, ...}",
+                })
+                return
+            resume_draft = saved.body["flow_spec"]
+            resume_title = str(saved.body.get("title") or "")
+            resume_result_id = saved.asset_draft_id
+            action = str(saved.body.get("action") or "")
+            subsystem = saved.subsystem.value
+            recording_id = (
+                saved.run_id
+                if re.fullmatch(r"recording_[0-9a-f]{32}", str(saved.run_id or ""))
+                else f"recording_{uuid.uuid4().hex}"
+            )
+            resume_goal = saved.body.get("goal") if isinstance(saved.body.get("goal"), dict) else {}
+            init["goal_text"] = str(
+                init.get("goal_text") or resume_goal.get("text") or resume_goal.get("intent") or ""
+            )
+            init["start_url"] = ""
+        elif command != "start" or not init.get("start_url"):
             await sender.send_json({
                 "type": "error",
-                "detail": "首帧须为 {type:'start', start_url, ...}",
+                "detail": "首帧须为 {type:'start', start_url, ...} 或 {type:'resume_verification', result_id}",
             })
             return
-        tenant = str(init.get("tenant") or "")
-        subsystem = _recording_subsystem(
-            tenant,
-            init.get("subsystem"),
-            str(init["start_url"]),
-        )
-        requested_action = str(init.get("resume_action") or "")
-        action = (
-            requested_action
-            if re.fullmatch(r"action_[0-9a-f]{32}", requested_action)
-            else _new_recording_action()
-        )
-        requested_recording_id = str(init.get("pi_recording_id") or "")
-        recording_id = (
-            requested_recording_id
-            if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
-            else f"recording_{uuid.uuid4().hex}"
-        )
+        else:
+            tenant = str(init.get("tenant") or "")
+            subsystem = _recording_subsystem(
+                tenant,
+                init.get("subsystem"),
+                str(init["start_url"]),
+            )
+            requested_action = str(init.get("resume_action") or "")
+            action = (
+                requested_action
+                if re.fullmatch(r"action_[0-9a-f]{32}", requested_action)
+                else _new_recording_action()
+            )
+            requested_recording_id = str(init.get("pi_recording_id") or "")
+            recording_id = (
+                requested_recording_id
+                if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
+                else f"recording_{uuid.uuid4().hex}"
+            )
         bind_run_context(
             recording_id=recording_id,
             action=action,
@@ -1102,22 +1143,34 @@ async def record_ws(ws: WebSocket) -> None:
         global _recording_session_registry
         if _recording_session_registry is None:
             _recording_session_registry = RecordingSessionRegistry()
-        session, _created = await _recording_session_registry.attach_or_create(
-            config=RecordingSessionConfig(
-                tenant=tenant,
-                subsystem=subsystem,
-                recording_id=recording_id,
-                action=action,
-                start_url=str(init["start_url"]),
-                goal_text=str(init.get("goal_text") or ""),
-                base_url=str(init.get("base_url") or ""),
-                token=str(init.get("token") or ""),
-                storage_state=init.get("storage_state") or None,
-            ),
-            send=send_message,
-            pi_factory=pi_factory,
-            publisher=publisher,
+        session_config = RecordingSessionConfig(
+            tenant=tenant,
+            subsystem=subsystem,
+            recording_id=recording_id,
+            action=action,
+            start_url=str(init.get("start_url") or ""),
+            goal_text=str(init.get("goal_text") or ""),
+            base_url=str(init.get("base_url") or ""),
+            token=str(init.get("token") or ""),
+            storage_state=init.get("storage_state") or None,
         )
+        if resume_draft is not None:
+            session = await _recording_session_registry.attach_or_resume(
+                config=session_config,
+                send=send_message,
+                pi_factory=pi_factory,
+                publisher=publisher,
+                draft=resume_draft,
+                title=resume_title,
+                result_id=resume_result_id,
+            )
+        else:
+            session, _created = await _recording_session_registry.attach_or_create(
+                config=session_config,
+                send=send_message,
+                pi_factory=pi_factory,
+                publisher=publisher,
+            )
         holder["session"] = session
         init_title = str(init.get("title") or "").strip()
         if init_title and session.workflow is not None:
@@ -1446,6 +1499,47 @@ async def _manifests_for_tenant(tenant: str) -> list[dict]:
 
 
 # ── 契约目录(租户隔离)──
+@app.get("/v1/recording-results")
+async def list_recording_results(
+    subsystem: str = "",
+    x_tenant_key: str | None = Header(default=None),
+) -> list[dict]:
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.assets.drafts import DraftStore
+    from dano.onboarding.recording_results import recording_result_summary
+
+    store = DraftStore()
+    if subsystem:
+        drafts = await store.list_recording_results(tenant=tenant, subsystem=subsystem)
+    else:
+        drafts = []
+        for item in await _tenant_subsystems(tenant):
+            drafts.extend(await store.list_recording_results(tenant=tenant, subsystem=item.value))
+        drafts.sort(
+            key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+    return [recording_result_summary(item) for item in drafts]
+
+
+@app.delete("/v1/recording-results/{result_id}")
+async def delete_recording_result(
+    result_id: str,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.assets.drafts import DraftStore
+
+    try:
+        parsed = uuid.UUID(result_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    deleted = await DraftStore().delete_recording_result(parsed, tenant=tenant)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="录制结果不存在")
+    return {"deleted": True, "id": result_id}
+
+
 @app.get("/v1/skills")
 async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     tenant = await _auth_tenant(x_tenant_key)

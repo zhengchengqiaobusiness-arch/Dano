@@ -30,6 +30,8 @@ import type {
   PointerEvent,
   WheelEvent,
 } from "react";
+import { deleteRecordingResult, listRecordingResults } from "../api/recording";
+import type { RecordingResultSummary } from "../api/recording";
 
 const { Text, Title } = Typography;
 
@@ -320,7 +322,8 @@ const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
   waiting_operator: { label: "需要确认", color: "warning" },
 };
 
-function pageStage(status: WorkflowStatus) {
+function pageStage(status: WorkflowStatus, resumeOnly = false) {
+  if (resumeOnly) return status === "idle" ? 0 : 2;
   if (status === "idle") return 0;
   if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
   return 2;
@@ -422,6 +425,9 @@ export default function PageRecorder({
   const [viewStage, setViewStage] = useState(0);
   const [keepRecording, setKeepRecording] = useState(false);
   const [keepResult, setKeepResult] = useState(false);
+  const [resumeOnly, setResumeOnly] = useState(false);
+  const [history, setHistory] = useState<RecordingResultSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const reachedStageRef = useRef(0);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -448,6 +454,7 @@ export default function PageRecorder({
   const closingRef = useRef(false);
   const finishRequestedRef = useRef(false);
   const machineVerificationRef = useRef(setup.machineVerification);
+  const socketInitRef = useRef<Record<string, unknown> | null>(null);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -456,7 +463,7 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const reachedStage = pageStage(status);
+  const reachedStage = pageStage(status, resumeOnly);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -468,11 +475,34 @@ export default function PageRecorder({
   }, [startUrl, goalText, title, machineVerification]);
 
   useEffect(() => {
-    if (reachedStage >= 1) setKeepRecording(true);
-    if (reachedStage >= 2) setKeepResult(true);
+    if (resumeOnly) {
+      if (reachedStage >= 2) setKeepResult(true);
+    } else {
+      if (reachedStage >= 1) setKeepRecording(true);
+      if (reachedStage >= 2) setKeepResult(true);
+    }
     if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
     reachedStageRef.current = reachedStage;
-  }, [reachedStage]);
+  }, [reachedStage, resumeOnly]);
+
+  useEffect(() => {
+    if (!tenant) {
+      setHistory([]);
+      return;
+    }
+    let cancelled = false;
+    setHistoryLoading(true);
+    listRecordingResults(subsystem).then((rows) => {
+      if (!cancelled) setHistory(rows);
+    }).catch(() => {
+      if (!cancelled) setHistory([]);
+    }).finally(() => {
+      if (!cancelled) setHistoryLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenant, subsystem]);
 
   useEffect(() => {
     closingRef.current = false;
@@ -659,20 +689,12 @@ export default function PageRecorder({
       reconnectAttemptRef.current = 0;
       setConnected(true);
       setConnecting(false);
-      socket.send(JSON.stringify({
-        type: "start",
-        tenant,
-        subsystem,
-        title: title.trim(),
-        start_url: startUrl.trim(),
-        goal_text: goalText.trim(),
-        base_url: baseUrl.trim() || undefined,
-        storage_state: parseStorageState(storageState),
-        resume_action: action,
-      }));
+      const init = socketInitRef.current;
+      if (!init) return;
+      socket.send(JSON.stringify(init));
       // A disconnected finish command is safe to repeat: the authoritative
       // workflow deduplicates it and returns the current snapshot.
-      if (finishRequestedRef.current) {
+      if (init.type === "start" && finishRequestedRef.current) {
         socket.send(JSON.stringify({
           type: "finish",
           title: title.trim(),
@@ -736,6 +758,7 @@ export default function PageRecorder({
     if (wsRef.current) return;
     const action = newActionName();
     actionRef.current = action;
+    setResumeOnly(false);
     setKeepResult(false);
     setKeepRecording(true);
     setViewStage(1);
@@ -756,8 +779,65 @@ export default function PageRecorder({
     renderedFrameRef.current = 0;
     latestFrameRef.current = null;
     frameGenerationRef.current += 1;
+    socketInitRef.current = {
+      type: "start",
+      tenant,
+      subsystem,
+      title: title.trim(),
+      start_url: startUrl.trim(),
+      goal_text: goalText.trim(),
+      base_url: baseUrl.trim() || undefined,
+      storage_state: parseStorageState(storageState),
+      resume_action: action,
+    };
 
     openRecordingSocket(action);
+  }
+
+  function continueOptimization(item: RecordingResultSummary) {
+    if (!tenant) {
+      message.error("请先选择租户");
+      return;
+    }
+    if (wsRef.current || connecting || processing) return;
+    actionRef.current = item.action;
+    setResumeOnly(true);
+    setKeepRecording(false);
+    setKeepResult(true);
+    setViewStage(2);
+    reachedStageRef.current = 2;
+    setConnecting(true);
+    snapshotRef.current = null;
+    setSnapshot(null);
+    pendingEditsRef.current = [];
+    patchInFlightRef.current = null;
+    republishRequestedRef.current = false;
+    finishRequestedRef.current = false;
+    setFinishRequested(false);
+    setPendingEdits([]);
+    setLocalValues({});
+    setLocalCapabilityStepIds({});
+    setEditingResult(false);
+    setAssistantOpen(true);
+    socketInitRef.current = {
+      type: "resume_verification",
+      result_id: item.id,
+      tenant,
+      subsystem,
+    };
+    openRecordingSocket(item.action);
+  }
+
+  async function removeResult(item: RecordingResultSummary) {
+    if (!window.confirm(`删除「${item.title || item.action}」的录制结果？已发布 Skill 不会被删除。`)) {
+      return;
+    }
+    try {
+      await deleteRecordingResult(item.id);
+      setHistory((current) => current.filter((row) => row.id !== item.id));
+    } catch {
+      message.error("删除录制结果失败");
+    }
   }
 
   function finishRecording() {
@@ -1096,6 +1176,7 @@ export default function PageRecorder({
 
   function renderSetup() {
     return (
+      <div>
       <Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
@@ -1136,6 +1217,36 @@ export default function PageRecorder({
           </div>
         </div>
       </Card>
+      <Card title="历史录制结果" size="small" style={{ marginTop: 12 }}>
+        <List
+          loading={historyLoading}
+          locale={{ emptyText: "还没有保存的录制结果" }}
+          dataSource={history}
+          renderItem={(item) => (
+            <List.Item
+              actions={[
+                <Button key="resume" type="link" onClick={() => continueOptimization(item)}>继续优化</Button>,
+                <Button key="delete" type="link" danger onClick={() => removeResult(item)}>删除</Button>,
+              ]}
+            >
+              <List.Item.Meta
+                title={item.title || item.action}
+                description={(
+                  <Space wrap size={8}>
+                    <Text code>{item.action}</Text>
+                    <Text type="secondary">{item.goal_summary || "无目标摘要"}</Text>
+                    <Text type="secondary">能力 {item.capability_count}</Text>
+                    <Text type="secondary">请求 {item.request_count}</Text>
+                    <Text type="secondary">{item.created_at}</Text>
+                    <Tag color={item.published ? "success" : "default"}>{item.published ? "已发布" : "未发布"}</Tag>
+                  </Space>
+                )}
+              />
+            </List.Item>
+          )}
+        />
+      </Card>
+      </div>
     );
   }
 
