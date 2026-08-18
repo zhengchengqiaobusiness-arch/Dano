@@ -139,11 +139,11 @@ class _FakeCapture:
 
 
 @pytest.mark.asyncio
-async def test_live_analysis_stays_off_until_enabled() -> None:
+async def test_live_batches_run_without_verification_switch() -> None:
     session = RecordingGatewaySession(
         config=_config(),
         send=_send,
-        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError("未开分析不得启动 Pi")),
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
         publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
     )
     session.capture = _FakeCapture()
@@ -157,44 +157,44 @@ async def test_live_analysis_stays_off_until_enabled() -> None:
 
     session._drain_live = _noop_drain  # type: ignore[method-assign]
     session._schedule_live("recording_started")
-    assert session._live_task is None
-    assert session._live_pending_reason == ""
+    assert session._live_task is not None
+    assert session._live_pending_reason == "recording_started"
+    await session._live_task
 
     await session.dispatch({"type": "set_analysis_mode", "machine_verification": True})
     assert session._machine_verification is True
-    assert session._live_pending_reason == "analysis_enabled"
-    assert session._live_task is not None
-    await session._live_task
-
+    session._live_task = None
+    session._live_pending_reason = ""
     await session.dispatch({"type": "set_analysis_mode", "machine_verification": False})
     assert session._machine_verification is False
-    session._live_task = None
     session._schedule_live("request_batch")
-    assert session._live_task is None
-    assert session._live_pending_reason == ""
+    assert session._live_task is not None
+    assert session._live_pending_reason == "request_batch"
+    await session._live_task
 
 
 @pytest.mark.asyncio
-async def test_freeze_without_analysis_does_not_drain_live() -> None:
-    started = {"pi": False}
-
-    async def pi_factory(_fresh):
-        started["pi"] = True
-        raise AssertionError("未开分析不得启动 Pi")
+async def test_freeze_drains_queued_live_batches_without_verification() -> None:
+    drained: list[str] = []
 
     session = RecordingGatewaySession(
         config=_config(),
         send=_send,
-        pi_factory=pi_factory,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
         publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
     )
     session.capture = _FakeCapture()
     session._machine_verification = False
+
+    async def _record_drain() -> None:
+        drained.append(session._live_pending_reason or "drained")
+        session._live_pending_reason = ""
+
+    session._drain_live = _record_drain  # type: ignore[method-assign]
     session._live_pending_reason = "request_batch"
     await session._freeze_capture()
     assert session._capture_frozen is True
-    assert session._live_pending_reason == ""
-    assert started["pi"] is False
+    assert drained == ["request_batch", "final_request_tail"]
 
 
 @pytest.mark.asyncio
@@ -340,6 +340,40 @@ async def test_attach_or_resume_restart_replaces_in_flight_session(monkeypatch) 
     await attached.workflow.wait()
     assert pipeline.seeds
     assert attached.workflow.snapshot.status == WorkflowStatus.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_start_verification_only_restarts_cancelled_same_session(monkeypatch) -> None:
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        "dano.onboarding.recording_gateway.SelfHealingPipeline",
+        lambda *_args, **_kwargs: pipeline,
+    )
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("fake pipeline")),
+    )
+    session.capture = None
+    session.workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="r1",
+            action=session.config.action,
+            status=WorkflowStatus.CANCELLED,
+            draft=_draft(),
+            capture_frozen=True,
+        ),
+        pipeline,
+    )
+
+    await session.start_verification_only(_draft(), title="请假")
+    await session.workflow.wait()
+
+    assert pipeline.seeds
+    assert pipeline.seeds[-1].kind == "edited_spec"
+    assert pipeline.seeds[-1].machine_verification is True
+    assert session.capture is None
 
 
 @pytest.mark.asyncio
@@ -498,8 +532,16 @@ def test_setup_history_does_not_autostart_recording() -> None:
     stage = recorder[recorder.index("function pageStage"):recorder.index("function recorderWebSocketUrl")]
     assert "if (resumeOnly) return 2" in stage
     assert "verificationLive" in stage
-    assert '["recording", "processing", "waiting_operator"].includes(status)' in stage
+    assert "isStageSevenProgress" in recorder
+    assert "analysisSessionLive" in recorder
+    assert "stageSevenLive" not in recorder
+    assert 'if (status === "processing") return verificationLive ? 2 : 1' in stage
+    assert '["verifying", "resolving"].includes(step)' in recorder
     assert "return 2" in stage
+    assert "analysisMode && processing" not in recorder
+    assert "setAssistantOpen(true)" not in recorder.split("function finishRecording", 1)[1].split("function cancelProcessing", 1)[0]
+    recording_view = recorder.split("function renderRecording()", 1)[1].split("function renderResult()", 1)[0]
+    assert "snapshot?.progress.label" in recording_view
     receiver = recorder[recorder.index("function receiveSnapshot"):recorder.index("function openRecordingSocket")]
     assert "machineVerificationRef.current" in receiver
     assert "setViewStage(2)" in receiver
@@ -518,8 +560,13 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "function startAnalysis" in recorder
     assert "function renderAnalysisActions" in recorder
     assert "startAnalysis();" not in recorder.split("async function openResult", 1)[1].split("function startAnalysis", 1)[0]
-    assert recorder.count(">开始分析</Button>") == 1
+    assert recorder.count(">开始分析</Button>") == 0
     assert recorder.count(">终止分析</Button>") == 1
+    assert "!analysisMode && currentResultId()" not in recorder
+    assert "if (!analysisSessionLive) return null" in recorder
+    assert "onClick={() => startAnalysis(item)}" in recorder
+    assert "closeRecordingSocket();" in recorder[recorder.index("function startAnalysis"):recorder.index("async function removeResult")]
+    assert "currentResultId()" in recorder[recorder.index("function startAnalysis"):recorder.index("async function removeResult")]
     assert 'type: "resume_verification"' in recorder
     assert "restart: true" in recorder
     assert "canAutoReconnectRecording" in recorder
@@ -539,7 +586,8 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "new WebSocket" not in history_load
     history_view = recorder.split("历史录制结果", 1)[1].split("function renderRecording()", 1)[0]
     assert "openRecordingSocket" not in history_view
-    assert "startAnalysis" not in history_view
+    assert "startAnalysis(item)" in history_view
+    assert "openRecordingSocket" not in history_view.split("startAnalysis(item)", 1)[0]
     result_view = recorder.split("function renderResult()", 1)[1]
     assert "renderVerificationLog()" in result_view
     assert "RESULT_STATUS_BOX_STYLE" in recorder
@@ -555,4 +603,6 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "等待返回" in recorder
     assert "cancelProcessing" in recorder
     assert "renderAnalysisActions" not in result_view
+    assert ">开始分析</Button>" not in result_view
+    assert ">终止分析</Button>" not in result_view
     assert ">终止分析</Button>" in recorder

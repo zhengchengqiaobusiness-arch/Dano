@@ -2842,6 +2842,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     """Materialize only abilities whose recorded anchor is unambiguous."""
     from dano.execution.page.flow_spec import (
         _capability_operation_kind,
+        _generalize_capability_title,
         _grounded_read_operation_steps,
         _is_technical_business_title,
         _page_context_business_name,
@@ -3023,7 +3024,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         if step in read_steps:
             request_steps = _grounded_read_operation_steps(spec, step)
         name = _unique_live_capability_name(proposed_name, kind, used_names)
-        title = (
+        title = _generalize_capability_title(
             proposed_name
             if proposed_name in contract_names
             else f"{action_labels.get(kind, '执行')}{business}"

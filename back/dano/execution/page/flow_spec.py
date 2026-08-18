@@ -724,21 +724,42 @@ _PAGE_CONTEXT_LEAVES = frozenset({
 
 
 _RECORD_IDENTITY_LEAVES = frozenset({
-    "id", "recordid", "requestid", "applicationid",
+    "id", "ids", "recordid", "requestid", "applicationid",
     "businessid", "entityid",
 })
 
 
-def _param_is_document_record_identity(param: ParamField) -> bool:
+def _is_document_record_identity_path(key: str, path: str) -> bool:
     """True only for the document/record id itself, never line or chooser ids.
 
+    ``query.ids`` / ``query.ids[0]`` name the document being mutated.
     Nested array paths such as ``items[0].itemId`` identify a selected catalog
-    row, not the document being edited.  ``itemId`` at any depth is a chooser.
+    row, not the document being edited.
     """
-    path = str(param.path or "")
-    if "[" in path:
+    relative = str(path or key or "")
+    for prefix in ("query.", "body.", "path.", "request."):
+        if relative.startswith(prefix):
+            relative = relative[len(prefix):]
+            break
+    if "." in re.sub(r"\[\d+\]", "", relative):
         return False
-    return _field_leaf_token(param.key, path) in _RECORD_IDENTITY_LEAVES
+    return _field_leaf_token(key, path) in _RECORD_IDENTITY_LEAVES
+
+
+def _record_identity_is_caller_owned(method: str, value: Any) -> bool:
+    """A recorded row id is a sample, not a reusable constant."""
+    if value in (None, "") or _is_missing_wire_placeholder(value):
+        return False
+    if str(value).strip().casefold() in {"null", "undefined"}:
+        return False
+    method = str(method or "").upper()
+    if method == "POST" and str(value).strip() in {"0", "0.0"}:
+        return False
+    return method in {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _param_is_document_record_identity(param: ParamField) -> bool:
+    return _is_document_record_identity_path(param.key, param.path)
 
 
 def _step_has_stable_record_identity(step: FlowStep) -> bool:
@@ -1449,6 +1470,21 @@ def _param_source_guess(
             "exposed_to_user": False,
             "reason": "字段名像部门/组织/租户等调用上下文；运行期需按 context_key 注入或改绑上游响应",
             "need_human_confirm": True,
+        }
+
+    if (
+        _is_document_record_identity_path(key, path)
+        and _record_identity_is_caller_owned(method, field.get("raw_value", field.get("value")))
+    ):
+        return {
+            "category": "user_param",
+            "source_kind": "user_input",
+            "source": {"kind": "record_identity", "path": path, "required_state": "required"},
+            "editable": True,
+            "exposed_to_user": True,
+            "required": True,
+            "reason": "该字段是删除/更新目标记录的标识；调用方必须传入要操作的记录，不能把录制时点中的 ID 当成可复用常量",
+            "need_human_confirm": False,
         }
 
     # 系统化:datetime 字段(用户填的具体时间)即使值是 13 位毫秒,也不当 session_literal。
@@ -2285,6 +2321,7 @@ def _build_step_from_capture(
                 (
                     missing_wire_placeholder
                     or str(f.get("required_state") or "unknown") == "required"
+                    or bool(source_guess.get("required"))
                 )
                 and caller_owned
                 and not _looks_pagination_field(nm, path)
@@ -2301,11 +2338,11 @@ def _build_step_from_capture(
                 **source_guess["source"],
                 **({
                     "required_state": (
-                        "required" if missing_wire_placeholder
+                        "required" if missing_wire_placeholder or bool(source_guess.get("required"))
                         else "optional" if _looks_pagination_field(nm, path)
                         else str(f.get("required_state") or "unknown")
                     ),
-                } if missing_wire_placeholder or f.get("required_state_grounded") or (
+                } if missing_wire_placeholder or bool(source_guess.get("required")) or f.get("required_state_grounded") or (
                     f.get("control_evidence_available")
                     and source_guess["category"] == "user_param"
                     and source_guess["exposed_to_user"]
@@ -6901,6 +6938,8 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             p.exposed_to_user = caller_editable
             if not caller_editable:
                 p.default_value = None
+                p.required = False
+                p.source = {**(p.source or {}), "required_state": "optional"}
             if caller_editable:
                 p.reason = (
                     f"编辑场景默认来自上一步 `{source.name or source.path}` 的响应 `{lk.source_path}`；"
@@ -11177,9 +11216,6 @@ def _repeated_write_command_signature(step: FlowStep) -> tuple[Any, ...] | None:
         return None
     meta = step.source_meta or {}
     trigger_op = str(meta.get("trigger_op") or "").lower()
-    locator = re.sub(
-        r"\s+", "", str(meta.get("trigger_locator") or "").casefold(),
-    )
     if trigger_op not in {"click", "submit", "select", "pick"}:
         return None
     raw_path = str(step.path or step.url or "")
@@ -11190,7 +11226,7 @@ def _repeated_write_command_signature(step: FlowStep) -> tuple[Any, ...] | None:
         _write_command_discriminators(step),
         str(meta.get("page_id") or meta.get("page_url") or ""),
         str(meta.get("frame_id") or meta.get("frame_url") or ""),
-        locator,
+        _locator_action_name(str(meta.get("trigger_locator") or "")).casefold(),
     )
 
 
@@ -11779,26 +11815,26 @@ def _grounded_read_operation_steps(
 
 
 def _write_operation_key(step: FlowStep) -> str:
-    """Prefer grounded visible-action boundaries over vendor URL conventions."""
+    """Group one reusable write command, not one recorded row click.
+
+    Per-click action/transaction ids and row wrappers in the locator are
+    samples of the same business operation.  Similar commands stay distinct
+    when the HTTP contract, visible action name, or command discriminators
+    differ.
+    """
     meta = step.source_meta or {}
-    action_ref = str(meta.get("trigger_transaction_id") or meta.get("trigger_action_id") or "").strip()
-    locator = re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold())
-    trigger_op = str(meta.get("trigger_op") or "").lower()
-    confidence = str(meta.get("causality_confidence") or "high").lower()
-    grounded_action = trigger_op in {"click", "submit", "select", "pick"} or (
-        trigger_op == "fill" and bool(action_ref)
-    )
-    if (action_ref or locator) and grounded_action and confidence in {"high", "medium"}:
-        page_scope = str(
-            meta.get("page_id") or meta.get("page_url") or meta.get("document_url") or ""
-        )
-        identity = "|".join((
-            page_scope,
-            str(meta.get("frame_id") or meta.get("frame_url") or ""),
-            action_ref or f"locator:{locator}",
-        ))
-        return f"action_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:10]}"
-    return _capability_business_key(step)
+    raw_path = str(step.path or step.url or "")
+    identity = "|".join((
+        str(meta.get("page_id") or meta.get("page_url") or meta.get("document_url") or ""),
+        str(meta.get("frame_id") or meta.get("frame_url") or ""),
+        str(step.method or "POST").upper(),
+        urlparse(raw_path).path or raw_path.split("?", 1)[0],
+        _capability_operation_kind(step),
+        _locator_action_name(str(meta.get("trigger_locator") or "")).casefold(),
+        ",".join(sorted(str(param.path or "") for param in step.params or [])),
+        json.dumps(_write_command_discriminators(step), ensure_ascii=False),
+    ))
+    return f"write_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:10]}"
 
 
 
@@ -12687,13 +12723,7 @@ def _public_capability_anchor_step_ids(spec: FlowSpec) -> list[str]:
         not in {"auth", "noise", "read_context", "read_option", "option_source"}
     ]
     for step in write_steps:
-        operation_key = _write_operation_key(step)
-        group_key = (
-            operation_key
-            if operation_key.startswith("action_")
-            else f"{operation_key}:{_capability_operation_kind(step)}"
-        )
-        write_groups.setdefault(group_key, []).append(step)
+        write_groups.setdefault(_write_operation_key(step), []).append(step)
 
     anchors = [steps[-1].step_id for steps in write_groups.values() if steps]
     submit_closure = {
@@ -12863,13 +12893,16 @@ def _locator_action_name(locator: str) -> str:
     match = re.search(r"\[name=([^\]]+)\]", text)
     if match:
         return match.group(1).strip(" '\"")
+    text_matches = re.findall(r"(?:^|[\s>])text=([^\s>\]]+)", text)
+    if text_matches:
+        return text_matches[-1].strip(" '\"")
     if text.startswith("text="):
         return text[5:].strip(" '\"")
     if "=" in text:
         prefix, value = text.split("=", 1)
         if prefix.strip().lower() in {"button", "role", "label", "name"}:
             return value.strip(" '\"")
-    return ""
+    return next((label for label in _ACTION_LABELS if label in text), "")
 
 
 _ACTION_LABELS = (
@@ -13029,6 +13062,16 @@ def _capability_param_labels(spec: FlowSpec, capability: FlowCapability) -> list
             if label and label not in labels:
                 labels.append(label)
     return labels
+
+
+_INSTANCE_TITLE_SUFFIX_RE = re.compile(
+    r"\s*[\(（]\s*(?:ID|id|编号|单号|No\.?|NO)\s*[:：#]?\s*[^)）]+[\)）]\s*$"
+)
+
+
+def _generalize_capability_title(title: str) -> str:
+    """Drop recorded row samples from public capability titles."""
+    return _INSTANCE_TITLE_SUFFIX_RE.sub("", str(title or "")).strip()
 
 
 def _capability_fallback_title(business: str, action: str, kind: str) -> str:
@@ -13307,6 +13350,7 @@ def _apply_semantic_business_understanding(
             if capability.locked or capability.updated_by == "user":
                 continue
             if not _is_technical_business_title(capability.title):
+                capability.title = _generalize_capability_title(capability.title) or capability.title
                 continue
             capability.title = _capability_fallback_title(
                 business_title,
@@ -19038,7 +19082,7 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
             value=str(value),
             type=_param_type_from_value(value),
             wire_type=_param_type_from_value(value),
-            required=False,
+            required=bool(source_guess.get("required")),
             category=source_guess["category"],
             source_kind=source_guess["source_kind"],
             source={**source_guess["source"], "from": "query"},

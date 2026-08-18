@@ -11,6 +11,154 @@ from dano.execution.page.value_tracing import discover_response_key_maps, discov
 
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_CALLER_OPS = frozenset({"fill", "select", "pick"})
+_ENUM_TYPES = frozenset({"enum", "list-enum"})
+
+
+def _field_key(step_id: str, path: str) -> tuple[str, str]:
+    return (str(step_id or ""), str(path or "").removeprefix("body.").removeprefix("query."))
+
+
+def _set_param_from_evidence(
+    param,
+    source_kind: str,
+    *,
+    exposed: bool,
+    editable: bool,
+    reason: str,
+) -> None:  # noqa: ANN001
+    param.source_kind = source_kind
+    param.exposed_to_user = exposed
+    param.editable = editable
+    if source_kind == "user_input":
+        param.category = "user_param"
+    elif source_kind in {"previous_response", "page_default", "computed"}:
+        param.category = "runtime_var"
+        param.exposed_to_user = False
+    param.source = {
+        **(param.source or {}),
+        "kind": source_kind,
+        "recorded_evidence": True,
+        "reason": reason,
+    }
+    param.reason = reason
+    param.evidence = [
+        *list(param.evidence or []),
+        {
+            "actor": "stage_seven",
+            "kind": "recorded_evidence_fix",
+            "source_kind": source_kind,
+            "reason": reason,
+        },
+    ]
+
+
+def _evidence_is_caller_edit(evidence: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("op") or "") in _CALLER_OPS
+        or item.get("editable") is True
+        for item in evidence
+        if isinstance(item, dict)
+    )
+
+
+def _evidence_is_readonly(evidence: list[dict[str, Any]]) -> bool:
+    return any(
+        item.get("editable") is False
+        or item.get("read_only") is True
+        or item.get("disabled") is True
+        for item in evidence
+        if isinstance(item, dict)
+    ) and not _evidence_is_caller_edit(evidence)
+
+
+def _required_from_evidence(evidence: list[dict[str, Any]]) -> bool | None:
+    observed = [
+        bool(item.get("required_observed", item.get("required")))
+        for item in evidence
+        if isinstance(item, dict) and ("required_observed" in item or "required" in item)
+    ]
+    if not observed:
+        return None
+    return any(observed)
+
+
+def apply_recorded_evidence_fixes(spec):  # noqa: ANN001, ANN202
+    """Bind unknown fields and attach recorded enums from facts already on the spec.
+
+    Stage 7 only: this does not recompile capabilities or rewrite stage 1–6
+    capture. It applies conclusions that the recording already contains so
+    the verify/repair loop does not ask Pi to rediscover them.
+    """
+    from dano.execution.page.recording_live import _field_evidence_candidates
+
+    current = spec.model_copy(deep=True)
+    for step in current.steps:
+        projections: dict[str, str] = {}
+        bindings_by_wire: dict[str, Any] = {}
+        for binding in step.selects:
+            wire = canonical_wire_path(step, str(binding.path or binding.id_path or ""))
+            if wire:
+                bindings_by_wire[wire] = binding
+            for target_path in (binding.field_projections or {}):
+                projections[canonical_wire_path(step, str(target_path))] = str(target_path)
+        for param in step.params:
+            if param.locked:
+                continue
+            wire = canonical_wire_path(step, param.path)
+            evidence = _field_evidence_candidates(current, step, param)
+            binding = bindings_by_wire.get(wire)
+            if binding is None:
+                binding = next(
+                    (
+                        item for item in step.selects
+                        if item.path == param.path or item.id_path == param.path
+                    ),
+                    None,
+                )
+            if param.source_kind == "unknown":
+                if binding is not None or _evidence_is_caller_edit(evidence):
+                    _set_param_from_evidence(
+                        param,
+                        "user_input",
+                        exposed=True,
+                        editable=True,
+                        reason="录制已有选择/填写证据，字段由调用方提供",
+                    )
+                elif wire in projections or _evidence_is_readonly(evidence):
+                    _set_param_from_evidence(
+                        param,
+                        "previous_response",
+                        exposed=False,
+                        editable=False,
+                        reason="录制已有只读投影证据，提交时从选中行带出",
+                    )
+                elif any(str(item.get("binding_status") or "") == "bound" for item in evidence):
+                    _set_param_from_evidence(
+                        param,
+                        "page_default",
+                        exposed=False,
+                        editable=False,
+                        reason="录制页面已带出该值，无人改动",
+                    )
+            if binding is not None and binding.options and not param.enum_options:
+                param.enum_options = list(binding.options)
+                if binding.option_map and not param.enum_value_map:
+                    param.enum_value_map = dict(binding.option_map)
+                if param.type not in _ENUM_TYPES:
+                    param.type = "list-enum" if binding.multi else "enum"
+            required = _required_from_evidence(evidence)
+            if (
+                required is not None
+                and str((param.source or {}).get("required_state") or "")
+                not in {"required", "optional"}
+            ):
+                param.required = required
+                param.source = {
+                    **(param.source or {}),
+                    "required_state": "required" if required else "optional",
+                }
+    return current
 
 
 def _unverified_targets(spec) -> set[tuple[str, str]]:  # noqa: ANN001
@@ -153,6 +301,10 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
             {
                 "kind": "write_verify",
                 "target_id": step.step_id,
+                "issue_id": f"write_verify:{step.step_id}",
+                "check_code": "write_verify",
+                "step_id": step.step_id,
+                "message": f"写操作 `{step.step_id}` 还没有回读校验，不能证明提交已生效",
                 "write_request_id": str((step.source_meta or {}).get("request_id") or ""),
                 "candidate_read_request_ids": [
                     fact.request_id
@@ -164,56 +316,92 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
                 "completion_op": "bind_verify_read",
             }
         )
+    from dano.execution.page.flow_spec import _capability_param_enum_issue
+
     for step in spec.steps:
-        bindings = {
-            binding.path or binding.id_path: binding
-            for binding in step.selects
-            if binding.path or binding.id_path
-        }
+        bindings: dict[str, Any] = {}
+        for binding in step.selects:
+            stored = str(binding.path or binding.id_path or "")
+            if not stored:
+                continue
+            bindings[stored] = binding
+            bindings[canonical_wire_path(step, stored)] = binding
         enum_paths = {
-            param.path
+            canonical_wire_path(step, param.path) or param.path
             for param in step.params
-            if param.type in {"enum", "list-enum"}
+            if param.type in _ENUM_TYPES
             and param.source_kind != "api_option"
-            and not param.enum_options
+            and _capability_param_enum_issue(param)
         }
-        enum_paths.update(bindings)
+        for stored, binding in list(bindings.items()):
+            param = next(
+                (
+                    item for item in step.params
+                    if canonical_wire_path(step, item.path) == canonical_wire_path(step, stored)
+                    or item.path == stored
+                ),
+                None,
+            )
+            if param is not None and not _capability_param_enum_issue(param):
+                continue
+            if param is None and (
+                binding.enum_confirmed is True
+                or (binding.options and not (
+                    binding.count and len(binding.options or []) < binding.count
+                ))
+            ):
+                continue
+            enum_paths.add(canonical_wire_path(step, stored) or stored)
+        seen_enum: set[str] = set()
         for path in sorted(enum_paths):
-            binding = bindings.get(path)
+            wire = canonical_wire_path(step, path) or path
+            if wire in seen_enum:
+                continue
+            seen_enum.add(wire)
+            binding = bindings.get(path) or bindings.get(wire)
             verification_id = str(binding.verification_id or "") if binding is not None else ""
+            param = next(
+                (
+                    item for item in step.params
+                    if canonical_wire_path(step, item.path) == wire or item.path == path
+                ),
+                None,
+            )
+            param_incomplete = bool(param is not None and _capability_param_enum_issue(param))
             binding_incomplete = bool(
                 binding is not None
+                and param is None
                 and (
                     binding.enum_confirmed is not True
                     or (binding.count and len(binding.options or []) < binding.count)
                 )
             )
-            param = next((item for item in step.params if item.path == path), None)
-            param_incomplete = bool(
-                param is not None
-                and param.type in {"enum", "list-enum"}
-                and param.source_kind != "api_option"
-                and not param.enum_options
-            )
-            target_id = f"{step.step_id}:{path}"
+            target_id = f"{step.step_id}:{wire}"
             if (
                 not verification_id
                 and (binding_incomplete or param_incomplete)
                 and ("enum", target_id) not in skipped
             ):
                 completion_op = "attach_enum_options" if binding is not None else "set_param_enum"
+                label = str((param.label if param is not None else "") or (param.key if param is not None else "") or path)
                 todos.append(
                     {
                         "kind": "enum",
                         "target_id": target_id,
+                        "issue_id": f"enum:{target_id}",
+                        "check_code": "enum",
                         "step_id": step.step_id,
-                        "path": path,
+                        "field_id": str(param.field_id or "") if param is not None else "",
+                        "wire_path": wire,
+                        "path": str(param.path if param is not None else path),
+                        "field_label": label,
+                        "message": f"字段 `{step.step_id}:{wire}` 的枚举选项还不完整",
                         "source_request_id": str(binding.source_request_id or "")
                         if binding is not None
                         else "",
                         "known_count": len(binding.options or [])
                         if binding is not None
-                        else len(param.enum_options or []),
+                        else len((param.enum_options if param is not None else None) or []),
                         "expected_count": binding.count if binding is not None else 0,
                         "suggested_tools": (
                             ["browser_snapshot", "browser_click", "replay_request"]
@@ -255,13 +443,23 @@ def _release_issue_todos(
         issues.append(dict(issue))
 
     existing_kinds = {str(item.get("kind") or "") for item in existing}
+    existing_fields = {
+        _field_key(
+            str(item.get("step_id") or item.get("target_step_id") or ""),
+            str(item.get("wire_path") or item.get("path") or item.get("target_path") or ""),
+        ): str(item.get("kind") or "")
+        for item in existing
+    }
+    existing_write_steps = {
+        str(item.get("target_id") or item.get("step_id") or "")
+        for item in existing
+        if str(item.get("kind") or "") == "write_verify"
+    }
     covered_codes: set[str] = set()
     if "dependency" in existing_kinds:
         covered_codes.update({"dependency_verification_missing", "dependency_verification_stale"})
     if "write_verify" in existing_kinds:
         covered_codes.add("write_readback_missing")
-    if "enum" in existing_kinds:
-        covered_codes.add("enum_options_unverified")
 
     unique_issues: dict[str, dict[str, Any]] = {}
     for issue in issues:
@@ -273,6 +471,23 @@ def _release_issue_todos(
         for issue in unique_issues.values()
         if not (existing and str(issue.get("resolver") or "") == "operator")
     ]
+
+    def _release_covered(issue: dict[str, Any]) -> bool:
+        code = str(issue.get("check_code") or "")
+        if code in covered_codes:
+            return True
+        field = _field_key(str(issue.get("step_id") or ""), str(issue.get("wire_path") or ""))
+        existing_kind = existing_fields.get(field, "")
+        if code == "enum_options_unverified" and existing_kind == "enum":
+            return True
+        if code == "field_source_unknown" and existing_kind == "enum":
+            # A selectable field already queued for enum completion is not also
+            # an unknown-source mystery; the same leaf must not appear twice.
+            return True
+        if code == "write_readback_missing" and str(issue.get("step_id") or "") in existing_write_steps:
+            return True
+        return False
+
     todos = [
         {
             "kind": "release_issue",
@@ -298,7 +513,7 @@ def _release_issue_todos(
             ),
         }
         for issue in active_issues
-        if str(issue.get("check_code") or "") not in covered_codes
+        if not _release_covered(issue)
     ]
     return active_issues, todos
 

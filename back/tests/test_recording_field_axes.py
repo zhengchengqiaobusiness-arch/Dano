@@ -863,3 +863,31 @@ def test_unproven_query_filter_is_not_guessed_as_caller_input() -> None:
     for path in ("query.traceId", "query.flag"):
         if path in params:
             assert params[path].exposed_to_user is False
+
+
+def test_standalone_delete_ids_are_required_caller_input() -> None:
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_delete",
+            "sequence": 1,
+            "method": "DELETE",
+            "url": "http://example.test/api/doc/delete?ids=39",
+            "query": {"ids": ["39"]},
+            "response_status": 200,
+            "response_json": {"code": 0},
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_op": "click",
+            "trigger_locator": 'tr:has-text("DOC-39") >> text=删除',
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+        }],
+    )
+    params = {param.path: param for param in spec.steps[0].params}
+    ids = params["query.ids"]
+    assert ids.key == "ids"
+    assert ids.source_kind == "user_input"
+    assert ids.category == "user_param"
+    assert ids.exposed_to_user is True
+    assert ids.required is True
+    assert ids.source.get("kind") == "record_identity"

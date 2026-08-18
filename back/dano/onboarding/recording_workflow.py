@@ -285,6 +285,12 @@ class SelfHealingPipeline:
         context.remember_draft(draft)
         if seed.kind == "recording" and context.persist_stage_six is not None:
             await context.persist_stage_six(draft)
+            if seed.machine_verification:
+                await context.progress(
+                    WorkflowStep.VERIFYING,
+                    "第 1～6 阶段已完成，开始机器验证",
+                    0,
+                )
         if not seed.machine_verification:
             emit_run_event(
                 "recording.verification.skipped",
@@ -503,13 +509,19 @@ def _issue_activity(
 
 
 def _issue_subject(issue: WorkflowIssue) -> str:
-    field = str(
-        issue.target.get("field_label")
-        or issue.target.get("wire_path")
+    label = str(issue.target.get("field_label") or "").strip()
+    path = str(
+        issue.target.get("wire_path")
         or issue.target.get("path")
-        or issue.target.get("target_id")
         or ""
     ).removeprefix("body.").removeprefix("query.")
+    step = str(issue.target.get("step_id") or "").strip()
+    if label and path and label != path and not path.endswith(label):
+        field = f"{label} / {path}"
+    else:
+        field = path or label or str(issue.target.get("target_id") or "")
+    if step and field and step not in field:
+        field = f"{step} {field}"
     if field:
         return f"「{field}」"
     return ""
@@ -906,9 +918,13 @@ class RecordingWorkflow:
     async def _progress(self, step: WorkflowStep, label: str, round_number: int = 0) -> None:
         if self._cancelled:
             raise WorkflowCancelled
+        changes: dict[str, Any] = {}
+        if self._latest_draft is not None:
+            changes["draft"] = self._latest_draft
         await self._set(
             WorkflowStatus.PROCESSING,
             progress=self._next_progress(step, label, round_number),
+            **changes,
         )
 
     async def _ask_operator(self, question: WorkflowQuestion) -> str:

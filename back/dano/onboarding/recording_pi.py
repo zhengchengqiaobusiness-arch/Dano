@@ -33,6 +33,25 @@ from dano.infra.run_logging import (
 
 log = structlog.get_logger(__name__)
 BACK_DIR = Path(__file__).resolve().parent.parent.parent
+# Default asyncio StreamReader limit is 64KiB. A single agent_event /
+# prompt_completed JSONL line from a large recording easily exceeds that;
+# LimitOverrunError used to abort the reader and mark every in-flight RPC as
+# "录制 Pi 进程已结束" while Node was still alive.
+_STDOUT_LINE_LIMIT = 16 * 1024 * 1024
+
+
+def configure_recording_pi_stdout_limit(reader: Any) -> None:
+    """Raise the JSONL reader limit so large tool events stay on the same process."""
+    if reader is None:
+        return
+    current = int(getattr(reader, "_limit", 0) or 0)
+    if current < _STDOUT_LINE_LIMIT:
+        reader._limit = _STDOUT_LINE_LIMIT
+
+
+def recording_pi_process_has_exited(proc: Any) -> bool:
+    """True only when the sidecar process is gone; stdout EOF alone is not death."""
+    return proc is None or getattr(proc, "returncode", None) is not None
 _OS_ENV_WHITELIST = (
     "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "windir", "ComSpec",
     "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
@@ -166,8 +185,10 @@ class RecordingPiSession:
         self._proc: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._watch_task: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._prompt_lock = asyncio.Lock()
+        self._active_prompt_mode = ""
         self._state_lock = asyncio.Lock()
         self._write_verification_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
@@ -242,8 +263,10 @@ class RecordingPiSession:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            configure_recording_pi_stdout_limit(self._proc.stdout)
             self._stdout_task = asyncio.create_task(self._read_stdout(), name=f"{self.run_id}-stdout")
             self._stderr_task = asyncio.create_task(self._read_stderr(), name=f"{self.run_id}-stderr")
+            self._watch_task = asyncio.create_task(self._watch_process(), name=f"{self.run_id}-wait")
             event = await self._command(
                 "start_session",
                 session_file=self.session_file,
@@ -308,6 +331,7 @@ class RecordingPiSession:
         if self._proc is None:
             raise RecordingPiError("录制 Pi Session 尚未启动")
         async with self._prompt_lock:
+            self._active_prompt_mode = prompt_mode
             span_id = new_span_id("analysis")
             started = time.monotonic()
             if prompt_mode == "recording_analysis":
@@ -320,9 +344,9 @@ class RecordingPiSession:
                     details={"analysis_phase": analysis_phase, "prompt_mode": prompt_mode},
                 )
             try:
-                event = await self._command(
-                    "prompt", timeout_s=timeout_s, text=text,
-                    images=[],
+                event = await self._prompt_command(
+                    timeout_s=timeout_s,
+                    text=text,
                     prompt_mode=prompt_mode,
                     analysis_phase=analysis_phase,
                 )
@@ -413,6 +437,7 @@ class RecordingPiSession:
                     pass
                 raise
             finally:
+                self._active_prompt_mode = ""
                 await self._flush_thoughts()
 
     def bind_flow_spec(self, spec: Any) -> None:
@@ -694,7 +719,8 @@ class RecordingPiSession:
     async def get_recording_state(self) -> dict[str, Any]:
         from dano.execution.page.flow_spec import recording_agent_state
 
-        await self.refresh_live_evidence()
+        if self._active_prompt_mode == "recording_analysis":
+            await self.refresh_live_evidence()
         async with self._state_lock:
             current = self.current_flow_spec()
             return await asyncio.to_thread(recording_agent_state, current)
@@ -702,7 +728,8 @@ class RecordingPiSession:
     async def get_validation_report(self) -> dict[str, Any]:
         from dano.execution.page.flow_spec import recording_agent_validation
 
-        await self.refresh_live_evidence()
+        if self._active_prompt_mode == "recording_analysis":
+            await self.refresh_live_evidence()
         async with self._state_lock:
             current = self.current_flow_spec()
             return await asyncio.to_thread(recording_agent_validation, current)
@@ -885,6 +912,37 @@ class RecordingPiSession:
             "resumed": self.resumed,
         }
 
+    async def _prompt_command(
+        self,
+        *,
+        timeout_s: float | None,
+        text: str,
+        prompt_mode: str,
+        analysis_phase: str,
+    ) -> dict[str, Any]:
+        """Send one prompt, retrying a stale overlap that Node may still be finishing."""
+        try:
+            return await self._command(
+                "prompt",
+                timeout_s=timeout_s,
+                text=text,
+                images=[],
+                prompt_mode=prompt_mode,
+                analysis_phase=analysis_phase,
+            )
+        except RecordingPiError as exc:
+            if "a prompt is already running" not in str(exc):
+                raise
+            await asyncio.sleep(0.2)
+            return await self._command(
+                "prompt",
+                timeout_s=timeout_s,
+                text=text,
+                images=[],
+                prompt_mode=prompt_mode,
+                analysis_phase=analysis_phase,
+            )
+
     async def _command(self, command_type: str, *, timeout_s: float | None = None, **payload: Any) -> dict[str, Any]:
         request_id = uuid4().hex
         loop = asyncio.get_running_loop()
@@ -904,10 +962,44 @@ class RecordingPiSession:
         proc.stdin.write((json.dumps(command, ensure_ascii=False) + "\n").encode())
         await proc.stdin.drain()
 
+    def _fail_pending(self, error: Exception) -> None:
+        for future in tuple(self._pending.values()):
+            if not future.done():
+                future.set_exception(error)
+
+    async def _watch_process(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        await proc.wait()
+        self._fail_pending(RecordingPiError("录制 Pi 进程已结束"))
+
+    async def _read_stdout_line(self, reader: asyncio.StreamReader) -> bytes:
+        configure_recording_pi_stdout_limit(reader)
+        try:
+            return await reader.readline()
+        except asyncio.LimitOverrunError:
+            log.warning("recording_pi.stdout_line_oversize", run_id=self.run_id)
+            configure_recording_pi_stdout_limit(reader)
+            try:
+                return await reader.readline()
+            except asyncio.LimitOverrunError:
+                buffer = getattr(reader, "_buffer", None)
+                if buffer:
+                    del buffer[:]
+                return b""
+
     async def _read_stdout(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
+        reader = self._proc.stdout
+        configure_recording_pi_stdout_limit(reader)
         try:
-            async for raw in self._proc.stdout:
+            while True:
+                raw = await self._read_stdout_line(reader)
+                if not raw:
+                    if reader.at_eof():
+                        break
+                    continue
                 line = raw.decode(errors="replace").strip()
                 if not line:
                     continue
@@ -942,10 +1034,10 @@ class RecordingPiSession:
                 elif event_type == "runtime_error":
                     future.set_exception(RecordingPiError(str(event.get("error") or "Pi runtime error")))
         finally:
-            error = RecordingPiError("录制 Pi 进程已结束")
-            for future in tuple(self._pending.values()):
-                if not future.done():
-                    future.set_exception(error)
+            if not recording_pi_process_has_exited(self._proc):
+                log.warning("recording_pi.stdout_closed_while_alive", run_id=self.run_id)
+                return
+            self._fail_pending(RecordingPiError("录制 Pi 进程已结束"))
 
     async def _read_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
@@ -1025,7 +1117,7 @@ class RecordingPiSession:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
-            for task in (self._stdout_task, self._stderr_task):
+            for task in (self._stdout_task, self._stderr_task, self._watch_task):
                 if task is not None and not task.done():
                     task.cancel()
                     try:

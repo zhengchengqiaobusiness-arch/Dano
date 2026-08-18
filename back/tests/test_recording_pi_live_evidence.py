@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from dano.execution.page.flow_spec import FlowSpec, to_flow_spec
-from dano.onboarding.recording_pi import RecordingPiSession
+from dano.onboarding.recording_pi import (
+    RecordingPiSession,
+    configure_recording_pi_stdout_limit,
+    recording_pi_process_has_exited,
+)
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 
 
@@ -373,3 +377,42 @@ def test_sales_order_query_preserves_all_recorded_field_contracts() -> None:
 
     assert params["query.pageNo"].category == "runtime_var"
     assert params["query.pageSize"].category == "runtime_var"
+
+
+def test_stdout_limit_is_raised_without_treating_alive_process_as_dead() -> None:
+    class Reader:
+        _limit = 64 * 1024
+
+    reader = Reader()
+    configure_recording_pi_stdout_limit(reader)
+    assert reader._limit >= 16 * 1024 * 1024
+
+    class Alive:
+        returncode = None
+
+    class Dead:
+        returncode = 1
+
+    assert recording_pi_process_has_exited(Alive()) is False
+    assert recording_pi_process_has_exited(Dead()) is True
+    assert recording_pi_process_has_exited(None) is True
+
+
+@pytest.mark.asyncio
+async def test_get_recording_state_skips_live_refresh_during_repair() -> None:
+    session = RecordingPiSession(
+        tenant="tenant-1",
+        subsystem="sales",
+        recording_id="recording_" + "c" * 32,
+    )
+    session.bind_flow_spec(FlowSpec(tenant="tenant-1", subsystem="sales"))
+
+    class Boom(_Recorder):
+        def captured_all_requests(self) -> list[dict]:
+            raise AssertionError("修复轮不得重刷实时证据")
+
+    session.bind_live_recording(Boom())
+    session._active_prompt_mode = "workflow"
+    state = await session.get_recording_state()
+    assert "flow_version" in state
+    assert "current_contract" in state

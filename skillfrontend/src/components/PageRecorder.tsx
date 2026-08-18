@@ -366,11 +366,17 @@ function activityDisplay(item: { status: string; label: string }) {
   return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
 }
 
+function isStageSevenProgress(progress?: { step?: string; round?: number } | null) {
+  const step = String(progress?.step || "");
+  return (Number(progress?.round || 0) > 0) || ["verifying", "resolving"].includes(step);
+}
+
 function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
   if (resumeOnly) return 2;
   if (status === "idle") return 0;
-  if (verificationLive && ["processing", "waiting_operator"].includes(status)) return 2;
-  if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
+  if (status === "recording") return 1;
+  if (status === "waiting_operator") return 2;
+  if (status === "processing") return verificationLive ? 2 : 1;
   return 2;
 }
 
@@ -512,9 +518,12 @@ export default function PageRecorder({
   const capabilities = draft?.capabilities || [];
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
-  const runBusy = (analysisRequested || connecting || processing) && !cancelling && status !== "cancelled";
-  const analysisMode = resumeOnly || machineVerification || analysisRequested;
-  const reachedStage = pageStage(status, resumeOnly, analysisMode && processing);
+  const runBusy = (connecting || processing) && !cancelling && status !== "cancelled";
+  const analysisSessionLive = analysisRequested
+    || status === "waiting_operator"
+    || isStageSevenProgress(snapshot?.progress);
+  const analysisMode = analysisSessionLive;
+  const reachedStage = pageStage(status, resumeOnly, analysisSessionLive);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -592,16 +601,14 @@ export default function PageRecorder({
       cancellingRef.current = false;
       setCancelling(false);
       setAnalysisRequested(false);
-      if (status === "cancelled") {
-        socketInitRef.current = null;
-        closeRecordingSocket();
-      }
-      if (!resumeOnly) {
-        activeResultIdRef.current = "";
-        setActiveResultId("");
-      }
+      setConnecting(false);
+      // Keep the saved result id so history 继续分析 can resume stage 7.
+      // Close the socket so a finished recording does not leave a stale
+      // connection that would swallow the next resume_verification.
+      socketInitRef.current = null;
+      closeRecordingSocket();
     }
-  }, [status, resumeOnly]);
+  }, [status]);
 
   useEffect(() => {
     const box = verificationLogRef.current;
@@ -852,8 +859,7 @@ export default function PageRecorder({
       } else if (incoming.type === "recording_result_saved" && incoming.result) {
         const row = incoming.result as RecordingResultSummary;
         upsertHistory(row);
-        const running = ["processing", "waiting_operator"].includes(String(snapshotRef.current?.status || ""));
-        if (row.action === actionRef.current && running) {
+        if (row.action === actionRef.current) {
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
         }
@@ -954,7 +960,7 @@ export default function PageRecorder({
       title: item.title,
       revision: 0,
       status: "editable",
-      progress: { step: "ready", label: "已打开录制结果，点击开始分析" },
+      progress: { step: "ready", label: "已打开录制结果" },
       draft,
       capture_frozen: true,
     };
@@ -1002,13 +1008,38 @@ export default function PageRecorder({
     }
   }
 
-  function startAnalysis() {
+  function currentResultId() {
+    return activeResultIdRef.current
+      || history.find((row) => row.action === actionRef.current)?.id
+      || "";
+  }
+
+  function startAnalysis(item?: RecordingResultSummary) {
     if (!tenant) {
       message.error("请先选择租户");
       return;
     }
-    const resultId = activeResultIdRef.current;
-    if (!resultId || runBusy || cancellingRef.current) return;
+    if (processing || cancellingRef.current) return;
+    if (item) {
+      actionRef.current = item.action;
+      activeResultIdRef.current = item.id;
+      setActiveResultId(item.id);
+      setResumeOnly(true);
+      machineVerificationRef.current = true;
+      setMachineVerification(true);
+      setKeepRecording(false);
+      setKeepResult(true);
+      setViewStage(2);
+      reachedStageRef.current = 2;
+    }
+    const resultId = item?.id || currentResultId();
+    if (!resultId) {
+      message.warning("没有可分析的录制结果，请先停止录制或从历史打开");
+      return;
+    }
+    activeResultIdRef.current = resultId;
+    setActiveResultId(resultId);
+    closeRecordingSocket();
     setAnalysisRequested(true);
     setThoughts([]);
     setExpandedTools({});
@@ -1069,16 +1100,19 @@ export default function PageRecorder({
     })) {
       finishRequestedRef.current = false;
       setFinishRequested(false);
-    } else if (machineVerificationRef.current) {
-      setAssistantOpen(true);
     }
   }
 
   function cancelProcessing() {
     if (cancellingRef.current) return;
-    if (!send({ type: "cancel" })) return;
-    cancellingRef.current = true;
-    setCancelling(true);
+    if (send({ type: "cancel" })) {
+      cancellingRef.current = true;
+      setCancelling(true);
+      return;
+    }
+    closeRecordingSocket();
+    setAnalysisRequested(false);
+    setConnecting(false);
   }
 
   function answerQuestion(value?: string) {
@@ -1494,7 +1528,7 @@ export default function PageRecorder({
                   <Button
                     size="small"
                     loading={openingId === item.id}
-                    onClick={() => openResult(item)}
+                    onClick={() => startAnalysis(item)}
                   >继续分析</Button>
                   <Button
                     size="small"
@@ -1520,7 +1554,9 @@ export default function PageRecorder({
         <Card size="small" styles={{ body: { padding: 10 } }} style={{ flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
             <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
-              {STATUS_LABELS[status]}
+              {status === "processing" && snapshot?.progress.label
+                ? snapshot.progress.label
+                : STATUS_LABELS[status]}
             </Tag>
             <Space size={6} style={{ whiteSpace: "nowrap" }}>
               <Switch
@@ -2155,24 +2191,16 @@ export default function PageRecorder({
   }
 
   function renderAnalysisActions(size: "small" | "middle" = "small") {
+    if (!analysisSessionLive) return null;
     return (
-      <Space>
-        <Button
-          type="primary"
-          size={size}
-          loading={connecting && !processing && !cancelling}
-          disabled={runBusy || !activeResultId}
-          onClick={startAnalysis}
-        >开始分析</Button>
-        <Button
-          danger
-          size={size}
-          icon={<StopOutlined />}
-          loading={cancelling}
-          disabled={!processing && !connecting && !cancelling}
-          onClick={cancelProcessing}
-        >终止分析</Button>
-      </Space>
+      <Button
+        danger
+        size={size}
+        icon={<StopOutlined />}
+        loading={cancelling}
+        disabled={!processing && !connecting && !cancelling}
+        onClick={cancelProcessing}
+      >终止分析</Button>
     );
   }
 
@@ -2405,7 +2433,7 @@ export default function PageRecorder({
           {isEmpty ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={connecting || runBusy ? "正在连接…" : "点击开始分析后显示实时日志"}
+              description={connecting || runBusy ? "正在连接…" : "分析日志将显示在这里"}
               style={{ marginTop: 24 }}
             />
           ) : (

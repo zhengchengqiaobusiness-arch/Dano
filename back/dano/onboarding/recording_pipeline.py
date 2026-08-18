@@ -65,9 +65,6 @@ class CanonicalRecordingRuntime:
 
     async def check(self, draft: Draft, context: PipelineContext) -> PipelineCheck:
         context.ensure_active()
-        await context.progress(WorkflowStep.COMPILING, "正在编译能力调用结构", 0)
-        context.ensure_active()
-        await context.progress(WorkflowStep.VERIFYING, "正在验证接口、字段和依赖", 0)
         verified, verification_issues = await self.services.verify(draft, context)
         return PipelineCheck(draft=verified, issues=verification_issues)
 

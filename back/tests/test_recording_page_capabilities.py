@@ -362,6 +362,77 @@ def _sale_order_spec(*, price_op: str = "", include_inspect: bool = False) -> Fl
     )
 
 
+def _delete_request(
+    request_id: str,
+    *,
+    sequence: int,
+    ids: str,
+    path: str = "/admin-api/erp/sale-order/delete",
+    locator: str = "",
+    page_context: dict | None = None,
+) -> dict:
+    return {
+        "request_id": request_id,
+        "sequence": sequence,
+        "method": "DELETE",
+        "url": f"http://admin.dianshixinxi.com:90{path}?ids={ids}",
+        "query": {"ids": [ids]},
+        "response_status": 200,
+        "response_json": {"code": 0},
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": page_context or SALE_PAGE,
+        "trigger_op": "click",
+        "trigger_locator": locator or f'tr:has-text("SO-{ids}") >> text=删除',
+        "trigger_action_id": f"act_{request_id}",
+        "trigger_transaction_id": f"txn_{request_id}",
+        "causality_confidence": "high",
+        "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+    }
+
+
+def _sale_order_search_and_deletes(*ids: str) -> FlowSpec:
+    captured = [
+        {
+            "request_id": "req_query",
+            "sequence": 1,
+            "method": "GET",
+            "url": "http://admin.dianshixinxi.com:90/admin-api/erp/sale-order/page?pageNo=1&pageSize=10",
+            "query": {"pageNo": ["1"], "pageSize": ["10"]},
+            "response_status": 200,
+            "response_json": {
+                "data": {
+                    "list": [{"id": int(item), "no": f"SO-{item}"} for item in ids],
+                    "total": len(ids),
+                },
+            },
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": SALE_PAGE,
+            "trigger_op": "click",
+            "trigger_locator": "text=搜索",
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+        },
+        *(
+            _delete_request(f"req_delete_{item}", sequence=index + 2, ids=item)
+            for index, item in enumerate(ids)
+        ),
+    ]
+    spec = to_flow_spec(captured_requests=captured, page_context=SALE_PAGE)
+    spec.meta = {
+        **(spec.meta or {}),
+        "recording_goal_text": "\n".join([
+            f"预期产出能力数量：{1 + len(ids)}",
+            "能力1：搜索销售订单",
+            *(
+                f"能力{index}：删除销售订单 (ID {item})"
+                for index, item in enumerate(ids, start=2)
+            ),
+        ]),
+    }
+    return spec
+
+
 def test_line_item_id_is_not_document_record_identity() -> None:
     line_only = FlowStep(
         step_id="create",
@@ -379,6 +450,76 @@ def test_line_item_id_is_not_document_record_identity() -> None:
         params=[ParamField(path="id", key="id", value="9")],
     )
     assert _step_has_stable_record_identity(document) is True
+
+    batch_delete = FlowStep(
+        step_id="delete",
+        method="DELETE",
+        params=[ParamField(path="query.ids", key="ids", value="39")],
+    )
+    assert _step_has_stable_record_identity(batch_delete) is True
+
+
+def test_repeated_delete_clicks_compile_one_caller_identity_capability() -> None:
+    spec = compile_recorded_capabilities(_sale_order_search_and_deletes("39", "38"))
+    deletes = [capability for capability in spec.capabilities if capability.kind == "delete"]
+    queries = [capability for capability in spec.capabilities if capability.kind == "query_status"]
+
+    assert len(queries) == 1
+    assert len(deletes) == 1
+    assert "38" not in str(deletes[0].title or "")
+    assert "39" not in str(deletes[0].title or "")
+    assert "删除" in str(deletes[0].title or "")
+    assert _execute_paths(deletes[0]) == ["/admin-api/erp/sale-order/delete"]
+    assert all("/sale-order/page" not in path for path in _execute_paths(deletes[0]))
+
+    delete_step = next(step for step in spec.steps if (step.method or "").upper() == "DELETE")
+    ids_param = next(param for param in delete_step.params if str(param.key or "").casefold() == "ids")
+    assert ids_param.source_kind == "user_input"
+    assert ids_param.exposed_to_user is True
+    assert ids_param.required is True
+    assert ids_param.category == "user_param"
+
+    props, required = _schema(deletes[0])
+    assert "ids" in props
+    assert "ids" in required
+
+
+def test_similar_delete_contracts_stay_distinct() -> None:
+    spec = compile_recorded_capabilities(to_flow_spec(
+        captured_requests=[
+            _delete_request("req_order", sequence=1, ids="39"),
+            _delete_request(
+                "req_item",
+                sequence=2,
+                ids="7",
+                path="/admin-api/erp/sale-order-item/delete",
+                locator="text=删除明细",
+            ),
+        ],
+        page_context=SALE_PAGE,
+    ))
+    deletes = [capability for capability in spec.capabilities if capability.kind == "delete"]
+    assert len(deletes) == 2
+    assert sorted(_execute_paths(capability)[0] for capability in deletes) == [
+        "/admin-api/erp/sale-order-item/delete",
+        "/admin-api/erp/sale-order/delete",
+    ]
+
+
+def test_single_delete_without_page_control_still_exposes_ids() -> None:
+    spec = compile_recorded_capabilities(to_flow_spec(
+        captured_requests=[_delete_request("req_delete", sequence=1, ids="39")],
+        page_context=SALE_PAGE,
+    ))
+    delete = next(capability for capability in spec.capabilities if capability.kind == "delete")
+    props, required = _schema(delete)
+    assert set(props) == {"ids"}
+    assert required == ["ids"]
+    step = next(item for item in spec.steps if (item.method or "").upper() == "DELETE")
+    assert step.params[0].source_kind == "user_input"
+    assert step.params[0].category == "user_param"
+    assert "未决" not in str(step.params[0].reason or "")
+    assert "record_identity" in str((step.params[0].source or {}).get("kind") or "")
 
 
 def test_materialize_without_live_plan_still_compiles_capabilities() -> None:

@@ -19,7 +19,9 @@ from dano.onboarding.recording_release import (
     evaluate_recording_release,
 )
 from dano.onboarding.recording_verify import (
+    apply_recorded_evidence_fixes,
     finalize_verification_state,
+    verification_report,
 )
 from dano.onboarding.recording_workflow import (
     PipelineContext,
@@ -213,22 +215,40 @@ def _default_todo_message(todo: dict[str, Any], code: str) -> str:
     return f"待处理：{code}"
 
 
-def _todo_issue(todo: dict[str, Any]) -> WorkflowIssue:
+def _todo_issue(todo: dict[str, Any], spec: FlowSpec | None = None) -> WorkflowIssue:
     resolver = str(todo.get("resolver") or "collect_evidence")
     if resolver not in {"machine_repair", "collect_evidence", "operator", "external_blocked"}:
         resolver = "collect_evidence"
     issue_id = str(todo.get("issue_id") or todo.get("target_id") or "")
     code = str(todo.get("check_code") or todo.get("kind") or "verification_pending")
+    field_label = str(todo.get("field_label") or "")
+    wire_path = str(todo.get("wire_path") or todo.get("path") or "")
+    step_id = str(todo.get("step_id") or todo.get("target_step_id") or "")
+    if spec is not None and not field_label and (step_id or wire_path):
+        step = next((item for item in spec.steps if item.step_id == step_id), None)
+        param = next((
+            item for item in (step.params if step is not None else [])
+            if str(item.path or "") == wire_path or str(item.field_id or "") == str(todo.get("field_id") or "")
+        ), None)
+        if param is not None:
+            field_label = str(param.label or param.key or param.path or "")
+    target = {
+        key: str(todo.get(key) or "")
+        for key in ("capability_id", "step_id", "field_id", "wire_path", "target_id", "path")
+        if todo.get(key)
+    }
+    if wire_path:
+        target["wire_path"] = wire_path
+    if field_label:
+        target["field_label"] = field_label
+    if step_id:
+        target["step_id"] = step_id
     return WorkflowIssue(
-        issue_id=issue_id or f"{code}:{todo.get('step_id') or todo.get('wire_path') or 'draft'}",
+        issue_id=issue_id or f"{code}:{step_id or wire_path or 'draft'}",
         code=code,
         message=str(todo.get("message") or _default_todo_message(todo, code)),
         resolver=resolver,
-        target={
-            key: str(todo.get(key) or "")
-            for key in ("capability_id", "step_id", "field_id", "wire_path", "target_id", "path")
-            if todo.get(key)
-        },
+        target=target,
         evidence=[dict(todo)],
         allowed_operations=[
             str(value)
@@ -240,6 +260,62 @@ def _todo_issue(todo: dict[str, Any]) -> WorkflowIssue:
             if value
         ],
     )
+
+
+def _issue_field_identity(issue: WorkflowIssue) -> tuple[str, str, str]:
+    family = "enum" if issue.code in {"enum", "enum_options_unverified"} else issue.code
+    if family == "field_source_unknown":
+        family = "source"
+    return (
+        family,
+        str(issue.target.get("step_id") or ""),
+        str(issue.target.get("wire_path") or issue.target.get("path") or "").removeprefix("body."),
+    )
+
+
+def _dedupe_workflow_issues(issues: tuple[WorkflowIssue, ...]) -> tuple[WorkflowIssue, ...]:
+    """Keep one issue per field/problem so the same leaf cannot tell two stories."""
+    kept: dict[tuple[str, str, str], WorkflowIssue] = {}
+    order: list[tuple[str, str, str]] = []
+    for issue in issues:
+        key = _issue_field_identity(issue)
+        if key[0] == "source":
+            enum_key = ("enum", key[1], key[2])
+            if enum_key in kept:
+                continue
+        if key in kept:
+            continue
+        if key[0] == "enum":
+            source_key = ("source", key[1], key[2])
+            kept.pop(source_key, None)
+            if source_key in order:
+                order.remove(source_key)
+        kept[key] = issue
+        order.append(key)
+    return tuple(kept[key] for key in order if key in kept)
+
+
+_EVIDENCE_RESOLVABLE_CODES = frozenset({
+    "field_source_unknown",
+    "enum",
+    "enum_options_unverified",
+    "required_axis_unconfirmed",
+})
+
+
+def _issue_still_open(spec: FlowSpec, issue: WorkflowIssue) -> bool:
+    report = verification_report(spec)
+    todos = [item for item in report.get("todos") or [] if isinstance(item, dict)]
+    tokens = {
+        str(item.get("issue_id") or item.get("target_id") or "")
+        for item in todos
+    }
+    if issue.issue_id in tokens:
+        return True
+    identity = _issue_field_identity(issue)
+    if any(_issue_field_identity(_todo_issue(item, spec)) == identity for item in todos):
+        return True
+    return issue.code not in _EVIDENCE_RESOLVABLE_CODES
 
 
 @dataclass
@@ -273,22 +349,22 @@ class ProductionRecordingServices:
         context: PipelineContext,
     ) -> tuple[dict[str, Any], tuple[WorkflowIssue, ...]]:
         context.ensure_active()
-        spec = FlowSpec.model_validate(draft)
+        spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
         spec, report = finalize_verification_state(
             spec,
             rounds=0,
             max_rounds=0,
         )
         if report["todos"]:
-            return spec.model_dump(mode="json"), tuple(
-                _todo_issue(todo) for todo in report["todos"]
-            )
+            return spec.model_dump(mode="json"), _dedupe_workflow_issues(tuple(
+                _todo_issue(todo, spec) for todo in report["todos"]
+            ))
         decision = evaluate_recording_release(spec)
-        issues = tuple(
+        issues = _dedupe_workflow_issues(tuple(
             _workflow_issue(issue, spec)
             for capability in decision.capabilities
             for issue in capability.issues
-        )
+        ))
         return spec.model_dump(mode="json"), issues
 
     async def repair(
@@ -300,7 +376,7 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         report = RepairReport()
-        spec = FlowSpec.model_validate(draft)
+        spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
         kept_capabilities = list(spec.capabilities)
         try:
             before_fix = flow_spec_fingerprint(spec)
@@ -310,6 +386,7 @@ class ProductionRecordingServices:
                 max_rounds=1,
                 expand_requests=False,
             )
+            spec = apply_recorded_evidence_fixes(spec)
             if flow_spec_fingerprint(spec) != before_fix:
                 report.applied.append("deterministic_fix")
             else:
@@ -334,6 +411,15 @@ class ProductionRecordingServices:
                 report.rejected.append(issue.issue_id)
                 remaining.append(issue)
 
+        still_open: list[WorkflowIssue] = []
+        for issue in remaining:
+            if _issue_still_open(spec, issue):
+                still_open.append(issue)
+                continue
+            report.applied.append(issue.issue_id)
+            report.resolved.append(issue.issue_id)
+        remaining = still_open
+
         if remaining:
             try:
                 pi = await self.pi_provider(False)
@@ -345,9 +431,12 @@ class ProductionRecordingServices:
                     prompt=(
                     "继续同一录制的修复闭环。先用中文逐句说出：发现了什么不对、我觉得应该怎样处理、"
                     "准备调用哪个工具、为什么。不要只重复 issue 代码。"
+                    "先调用 get_validation_report 读取当前待办；不要一上来就调用 get_recording_state。"
                     "只按结构化 issue 的 resolver、target、evidence 和 "
                     "allowed_operations 处理剩余问题；不得重建 FlowSpec、清空能力或重新划分能力。"
-                    "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/页面/字典/依赖工具补证。"
+                    "write_verify 用 execute_write_with_verify，读请求必须来自 issue 里已有的 "
+                    "candidate_read_request_ids 或 validation report；不要打开浏览器重录。"
+                    "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/字典/依赖工具补证。"
                     "完成后调用 submit_recording_repair。issues="
                     + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                     ),

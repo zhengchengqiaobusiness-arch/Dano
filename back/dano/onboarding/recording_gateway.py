@@ -242,8 +242,7 @@ class RecordingGatewaySession:
         await self.workflow.start()
         await self.capture.start_screencast(self._on_frame)
         self._machine_verification = self.config.analysis_mode
-        if self._machine_verification:
-            self._schedule_live("recording_started")
+        self._schedule_live("recording_started")
 
     async def start_verification_only(
         self,
@@ -253,6 +252,17 @@ class RecordingGatewaySession:
         result_id: Any = None,
     ) -> None:
         if self.workflow is not None:
+            if (
+                self.workflow.snapshot.status
+                in {
+                    WorkflowStatus.EDITABLE,
+                    WorkflowStatus.CANCELLED,
+                    WorkflowStatus.FAILED,
+                }
+                and not self.workflow._active()
+            ):
+                await self.workflow.republish(machine_verification=True)
+                return
             await self._emit_snapshot()
             return
         self.capture = None
@@ -308,10 +318,6 @@ class RecordingGatewaySession:
             return
         if command == "set_analysis_mode":
             self._machine_verification = message.get("machine_verification") is True
-            if self._machine_verification and not self._capture_frozen:
-                self._schedule_live("analysis_enabled")
-            else:
-                self._live_pending_reason = ""
             return
         if command == "republish":
             self._machine_verification = message.get("machine_verification") is True
@@ -449,10 +455,6 @@ class RecordingGatewaySession:
     async def _freeze_capture(self) -> None:
         if self._capture_frozen or self.capture is None:
             return
-        analyze = self._machine_verification
-        if not analyze:
-            self._capture_frozen = True
-            self._live_pending_reason = ""
         span_id = new_span_id("freeze")
         started = time.monotonic()
         counts = _capture_counts(self.capture)
@@ -466,32 +468,28 @@ class RecordingGatewaySession:
         )
         await self.capture.flush_recording()
         self.capture.pause_recording()
-        if analyze:
-            if self._live_pending_reason and (
-                self._live_task is None or self._live_task.done()
-            ):
-                self._live_task = asyncio.create_task(self._drain_live())
-            if self._live_task is not None and not self._live_task.done():
-                # Pause new browser facts first, then drain every already queued
-                # real-time batch.  Direct export is allowed to use those live
-                # conclusions, but must never start a separate final Pi plan.
-                await asyncio.gather(self._live_task, return_exceptions=True)
-            # The normal live queue is coalesced while Pi is busy.  A recording can
-            # therefore stop with a short final tail that never reached the batch
-            # threshold.  Drain that same queue once more; do not start a separate
-            # final planning path.
-            if self.capture.captured_all_requests():
-                # The final tail is a consolidation phase, not merely a count
-                # threshold. Run it once even when the latest request was already
-                # seen by a live batch so the Skill can resubmit the complete
-                # collection from the frozen facts.
-                self._live_pending_reason = "final_request_tail"
-                self._live_task = asyncio.create_task(self._drain_live())
-                await asyncio.gather(self._live_task, return_exceptions=True)
-            self._capture_frozen = True
-        elif self._live_task is not None and not self._live_task.done():
-            self._live_task.cancel()
+        if self._live_pending_reason and (
+            self._live_task is None or self._live_task.done()
+        ):
+            self._live_task = asyncio.create_task(self._drain_live())
+        if self._live_task is not None and not self._live_task.done():
+            # Pause new browser facts first, then drain every already queued
+            # real-time batch.  Direct export is allowed to use those live
+            # conclusions, but must never start a separate final Pi plan.
             await asyncio.gather(self._live_task, return_exceptions=True)
+        # The normal live queue is coalesced while Pi is busy.  A recording can
+        # therefore stop with a short final tail that never reached the batch
+        # threshold.  Drain that same queue once more; do not start a separate
+        # final planning path.
+        if self.capture.captured_all_requests():
+            # The final tail is a consolidation phase, not merely a count
+            # threshold. Run it once even when the latest request was already
+            # seen by a live batch so the Skill can resubmit the complete
+            # collection from the frozen facts.
+            self._live_pending_reason = "final_request_tail"
+            self._live_task = asyncio.create_task(self._drain_live())
+            await asyncio.gather(self._live_task, return_exceptions=True)
+        self._capture_frozen = True
         self._capture_live_notebook()
         if self._pi is not None:
             self._pi.bind_live_recording(
@@ -674,14 +672,14 @@ class RecordingGatewaySession:
         await self._send({"type": "frame", **frame})
 
     def _schedule_live(self, reason: str) -> None:
-        if self._capture_frozen or self._closed or not self._machine_verification:
+        if self._capture_frozen or self._closed:
             return
         self._live_pending_reason = self._live_pending_reason or reason
         if self._live_task is None or self._live_task.done():
             self._live_task = asyncio.create_task(self._drain_live())
 
     async def _drain_live(self) -> None:
-        while self._live_pending_reason and not self._capture_frozen and self._machine_verification:
+        while self._live_pending_reason and not self._capture_frozen:
             reason = self._live_pending_reason
             self._live_pending_reason = ""
             self._live_iteration += 1

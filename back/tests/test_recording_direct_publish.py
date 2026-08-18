@@ -71,6 +71,18 @@ def test_self_healing_pipeline_has_no_fixed_round_cap() -> None:
     assert "max_rounds" not in source
     assert "自动处理达到" not in source
     assert "while True:" in source
+    persist_block = source.split("await context.persist_stage_six(draft)", 1)[1].split(
+        "if not seed.machine_verification:",
+        1,
+    )[0]
+    assert "第 1～6 阶段已完成，开始机器验证" in persist_block
+    check_fn = (ONBOARDING / "recording_pipeline.py").read_text(encoding="utf-8").split(
+        "async def check",
+        1,
+    )[1].split("async def repair", 1)[0]
+    assert "progress" not in check_fn
+    assert "COMPILING" not in check_fn
+    assert "VERIFYING" not in check_fn
 
 
 def test_publish_exports_only_current_action() -> None:
@@ -224,6 +236,54 @@ async def test_external_block_keeps_complete_draft() -> None:
     assert outcome.status == WorkflowStatus.EDITABLE
     assert outcome.draft == _draft()
     assert outcome.issues[0].resolver == "external_blocked"
+
+
+@pytest.mark.asyncio
+async def test_machine_verification_keeps_stage_six_on_recording_page_until_verify() -> None:
+    snapshots: list[WorkflowSnapshot] = []
+    persisted = asyncio.Event()
+    verifying = asyncio.Event()
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return _draft()
+
+        async def check(self, draft, context):  # noqa: ANN001
+            await verifying.wait()
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("no repair")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            return {"ok": True}
+
+    async def persist(_draft_body):  # noqa: ANN001
+        persisted.set()
+
+    async def on_snapshot(snapshot: WorkflowSnapshot) -> None:
+        snapshots.append(snapshot)
+        if snapshot.progress.step.value == "verifying":
+            verifying.set()
+
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(run_id="r1", action="action_1"),
+        SelfHealingPipeline(Runtime()),
+        listener=on_snapshot,
+        persist_stage_six=persist,
+    )
+    await workflow.start()
+    await workflow.finish(machine_verification=True)
+    await asyncio.wait_for(verifying.wait(), timeout=2)
+    first_verify = next(item for item in snapshots if item.progress.step.value == "verifying")
+    earlier = [item for item in snapshots if item.revision < first_verify.revision]
+    assert persisted.is_set()
+    assert first_verify.progress.label == "第 1～6 阶段已完成，开始机器验证"
+    assert first_verify.draft == _draft()
+    assert all(item.progress.step.value != "verifying" for item in earlier)
+    assert all(item.draft is None for item in earlier if item.status == WorkflowStatus.PROCESSING)
+    await workflow.wait()
+    assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
 
 
 @pytest.mark.asyncio

@@ -84,6 +84,7 @@ let promptInFlight = null;
 let promptRequestId = null;
 let promptCancelled = false;
 let closing = false;
+let commandChain = Promise.resolve();
 
 function envInt(name, fallback, minimum = 0) {
   const parsed = Number.parseInt(process.env[name] || "", 10);
@@ -327,7 +328,14 @@ async function startSession(command) {
 
 async function runPrompt(command) {
   if (!active) throw new Error("no active recording Pi session");
-  if (promptInFlight) throw new Error("a prompt is already running");
+  if (promptInFlight) {
+    log("queueing prompt until the in-flight turn finishes");
+    try {
+      await promptInFlight;
+    } catch {
+      // The previous turn already reported its own protocol error.
+    }
+  }
   if (typeof command.text !== "string" || !command.text.trim()) throw new Error("prompt.text must be a non-empty string");
 
   const promptMode = String(command.prompt_mode || "workflow");
@@ -552,7 +560,7 @@ rl.on("line", (line) => {
     emit({ type: "runtime_error", error: `invalid JSON: ${error.message}` });
     return;
   }
-  void handleCommand(command).catch((error) => {
+  const reportCommandError = (error) => {
     emit({
       type: "runtime_error",
       request_id: command.request_id,
@@ -566,7 +574,17 @@ rl.on("line", (line) => {
       promptRequestId = null;
       promptCancelled = false;
     }
-  });
+  };
+  // cancel/close must interrupt the current turn immediately. Other commands
+  // wait so freeze's final_request_tail cannot overlap an unfinished batch.
+  if (command.type === "cancel" || command.type === "close") {
+    void handleCommand(command).catch(reportCommandError);
+    return;
+  }
+  commandChain = commandChain.then(
+    () => handleCommand(command),
+    () => handleCommand(command),
+  ).catch(reportCommandError);
 });
 
 rl.on("close", () => {

@@ -24,6 +24,7 @@ def _context(**kwargs) -> PipelineContext:  # noqa: ANN003
         ask_operator=kwargs.get("ask_operator", _no_ask),
         cancelled=lambda: False,
         activity=kwargs.get("activity"),
+        persist_stage_six=kwargs.get("persist_stage_six"),
     )
 
 
@@ -233,6 +234,51 @@ async def test_unchanged_repair_attempts_are_not_reported_as_progress(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stage_seven_starts_only_after_stage_six_persist() -> None:
+    steps: list[tuple[str, str]] = []
+    persisted: list[dict] = []
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            assert persisted == []
+            assert all(step != "verifying" for step, _label in steps)
+            return {"rev": 0}
+
+        async def check(self, draft, context):  # noqa: ANN001
+            assert persisted == [draft]
+            assert any(
+                step == "verifying" and label == "第 1～6 阶段已完成，开始机器验证"
+                for step, label in steps
+            )
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("no repair before first check")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            return {"ok": True}
+
+    async def persist(draft):  # noqa: ANN001
+        assert all(step != "verifying" for step, _label in steps)
+        persisted.append(draft)
+
+    async def progress(step, label, round_number=0):  # noqa: ANN001
+        steps.append((str(step), str(label)))
+
+    outcome = await SelfHealingPipeline(Runtime()).run(
+        PipelineSeed(kind="recording", draft={"rev": 0}, machine_verification=True),
+        _context(progress=progress, persist_stage_six=persist),
+    )
+
+    assert outcome.status == WorkflowStatus.PUBLISHED
+    assert persisted == [{"rev": 0}]
+    assert steps[0][0] == "materializing"
+    verify_index = next(i for i, item in enumerate(steps) if item[0] == "verifying")
+    assert steps[verify_index][1] == "第 1～6 阶段已完成，开始机器验证"
+    assert all(item[0] != "verifying" for item in steps[:verify_index])
+
+
+@pytest.mark.asyncio
 async def test_no_progress_requires_fingerprint_and_unapplied_ops() -> None:
     issue = WorkflowIssue(issue_id="i1", code="missing", message="无法变化", resolver="machine_repair")
 
@@ -431,3 +477,224 @@ async def test_stage_seven_activity_uses_thinking_language() -> None:
     assert not any("正在自动补充验证证据" in item for item in labels)
     assert not any(item == "待处理：enum" for item in labels)
     assert sum(1 for item in labels if item.startswith("发现了问题")) == 1
+
+
+def _sale_unknown_spec() -> FlowSpec:
+    from dano.execution.page.flow_spec import CapabilityRequestRef, RequestFacts, SelectBinding
+
+    return FlowSpec(
+        tenant="tenant",
+        subsystem="erp",
+        title="销售订单",
+        steps=[
+            FlowStep(
+                step_id="query",
+                name="查询",
+                method="GET",
+                path="/sale-order/page",
+                source_meta={"request_id": "req_query"},
+                params=[
+                    ParamField(
+                        path="productId",
+                        key="productId",
+                        label="产品",
+                        type="enum",
+                        source_kind="user_input",
+                        enum_options=[{"label": "苹果", "value": "1"}],
+                    ),
+                ],
+            ),
+            FlowStep(
+                step_id="create",
+                name="新增",
+                method="POST",
+                path="/sale-order/create",
+                source_meta={"request_id": "req_create"},
+                params=[
+                    ParamField(
+                        path="items[0].productId",
+                        key="productId",
+                        label="产品",
+                        field_id="p1",
+                        source_kind="unknown",
+                    ),
+                    ParamField(
+                        path="items[0].productBarCode",
+                        key="productBarCode",
+                        label="条码",
+                        field_id="p2",
+                        source_kind="unknown",
+                    ),
+                ],
+                selects=[
+                    SelectBinding(
+                        path="items[0].productId",
+                        options=[{"label": "苹果", "value": "1"}],
+                        enum_confirmed=True,
+                        field_projections={"items[0].productBarCode": "barCode"},
+                    ),
+                ],
+            ),
+        ],
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_create",
+                name="create",
+                title="新增销售订单",
+                kind="create",
+                step_ids=["create"],
+                request_refs=[
+                    CapabilityRequestRef(
+                        request_id="req_create",
+                        step_id="create",
+                        usage="execute",
+                    ),
+                ],
+                nodes=[{"step_id": "create"}],
+            ),
+        ],
+        request_facts=RequestFacts.model_validate({
+            "field_evidence": [
+                {
+                    "binding_status": "bound",
+                    "request_id": "req_create",
+                    "wire_path": "body.items[0].productId",
+                    "op": "select",
+                    "control_kind": "select",
+                    "editable": True,
+                    "label": "产品",
+                    "required": True,
+                },
+                {
+                    "binding_status": "bound",
+                    "request_id": "req_create",
+                    "wire_path": "body.items[0].productBarCode",
+                    "op": "snapshot",
+                    "editable": False,
+                    "read_only": True,
+                    "label": "条码",
+                },
+            ],
+        }),
+    )
+
+
+def test_recorded_evidence_fixes_unknown_select_and_projection() -> None:
+    from dano.onboarding.recording_verify import apply_recorded_evidence_fixes
+
+    spec = apply_recorded_evidence_fixes(_sale_unknown_spec())
+    create = next(step for step in spec.steps if step.step_id == "create")
+    by_key = {param.key: param for param in create.params}
+    assert by_key["productId"].source_kind == "user_input"
+    assert by_key["productId"].enum_options
+    assert by_key["productBarCode"].source_kind == "previous_response"
+    assert by_key["productBarCode"].exposed_to_user is False
+
+
+def test_verification_todos_do_not_repeat_the_same_product_id() -> None:
+    from dano.onboarding.recording_verify import apply_recorded_evidence_fixes, verification_todos
+
+    spec = apply_recorded_evidence_fixes(_sale_unknown_spec())
+    enums = [item for item in verification_todos(spec) if item["kind"] == "enum"]
+    assert enums == []
+
+
+def test_same_leaf_on_two_steps_has_distinct_subjects() -> None:
+    from dano.onboarding.recording_workflow import _discovery_thought, _issue_subject
+
+    query = WorkflowIssue(
+        issue_id="enum:query:productId",
+        code="enum",
+        message="待处理：enum",
+        resolver="collect_evidence",
+        target={"step_id": "query", "path": "productId", "field_label": "产品"},
+    )
+    create = WorkflowIssue(
+        issue_id="enum:create:productId",
+        code="enum",
+        message="待处理：enum",
+        resolver="collect_evidence",
+        target={
+            "step_id": "create",
+            "wire_path": "body.items[0].productId",
+            "field_label": "产品",
+        },
+    )
+    assert _issue_subject(query) != _issue_subject(create)
+    assert "query" in _discovery_thought(query)
+    assert "items[0].productId" in _discovery_thought(create) or "create" in _discovery_thought(create)
+
+
+@pytest.mark.asyncio
+async def test_verify_resolves_contradictory_field_stories() -> None:
+    services = ProductionRecordingServices(
+        recording_id="r1",
+        materializer=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+        pi_provider=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+        publisher=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+    )
+    draft, issues = await services.verify(
+        _sale_unknown_spec().model_dump(mode="json"),
+        _context(),
+    )
+    create = next(step for step in draft["steps"] if step["step_id"] == "create")
+    by_key = {param["key"]: param for param in create["params"]}
+    assert by_key["productId"]["source_kind"] == "user_input"
+    assert by_key["productBarCode"]["source_kind"] == "previous_response"
+    field_codes = {(issue.code, issue.target.get("wire_path") or issue.target.get("path") or "") for issue in issues}
+    assert not any(code == "field_source_unknown" for code, _path in field_codes)
+    enum_paths = [path for code, path in field_codes if code == "enum"]
+    assert len(enum_paths) == len(set(enum_paths))
+    assert any(issue.code == "write_verify" for issue in issues)
+
+
+@pytest.mark.asyncio
+async def test_repair_does_not_call_pi_for_evidence_resolved_fields(monkeypatch) -> None:
+    async def auto_fix(spec, **_kwargs):  # noqa: ANN001, ANN003
+        return spec
+
+    monkeypatch.setattr("dano.onboarding.recording_runtime.auto_fix_flow_spec", auto_fix)
+
+    called = False
+
+    class Pi:
+        last_submission_kind = "repair"
+
+        def bind_flow_spec(self, spec):  # noqa: ANN001
+            self.spec = spec
+
+        def current_flow_spec(self):
+            return self.spec
+
+        async def prompt(self, _text):  # noqa: ANN001
+            nonlocal called
+            called = True
+
+    services = ProductionRecordingServices(
+        recording_id="r1",
+        materializer=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+        pi_provider=lambda _fresh: Pi(),
+        publisher=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+    )
+    await services.repair(
+        _sale_unknown_spec().model_dump(mode="json"),
+        (
+            WorkflowIssue(
+                issue_id="src-product",
+                code="field_source_unknown",
+                message="来源为 unknown",
+                resolver="collect_evidence",
+                target={"step_id": "create", "wire_path": "items[0].productId"},
+            ),
+            WorkflowIssue(
+                issue_id="src-barcode",
+                code="field_source_unknown",
+                message="来源为 unknown",
+                resolver="collect_evidence",
+                target={"step_id": "create", "wire_path": "items[0].productBarCode"},
+            ),
+        ),
+        {},
+        _context(),
+    )
+    assert called is False
