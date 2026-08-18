@@ -333,7 +333,7 @@ _RECORDER_JS = r"""() => {
             && (vue2.$vnode.componentOptions.propsData.prop || vue2.$vnode.componentOptions.propsData.name)
         ].forEach(add);
         var vue3 = node.__vueParentComponent;
-        for (var vi = 0; vue3 && vi < 5; vi++, vue3 = vue3.parent) {
+        for (var vi = 0; vue3 && vi < 12; vi++, vue3 = vue3.parent) {
           add(vue3.props && (vue3.props.prop || vue3.props.name));
           add(vue3.attrs && (vue3.attrs.name || vue3.attrs['data-prop']));
           add(vue3.vnode && vue3.vnode.props && (vue3.vnode.props.prop || vue3.vnode.props.name || vue3.vnode.props['data-prop']));
@@ -454,9 +454,15 @@ _RECORDER_JS = r"""() => {
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
         // 页面快照只为业务字段匹配服务；密码、验证码、支付与令牌类控件绝不采集值。
-        var value = isSensitive(el) ? '' : clean(el.value || el.getAttribute('value') || '');
-        if (!label && !field) continue;
+        // Element Plus/Ant 等选择器经常把显示值放在宿主文本节点，内部 input.value
+        // 始终为空。复用实时选择捕获的同一读值逻辑，避免后续空 fill 覆盖已选项。
         var evidence = fieldEvidence(el);
+        var value = isSensitive(el) ? '' : clean(el.value || el.getAttribute('value') || '');
+        if (!value && evidence.control_kind === 'select') {
+          var selectHost = el.closest ? el.closest(TRIGGER_CLS) : null;
+          value = clean(pickVal(selectHost || el));
+        }
+        if (!label && !field) continue;
         out.push({
           field: field, label: label, value: value, required: requiredOf(el),
           field_aliases: evidence.field_aliases || [],
@@ -3101,18 +3107,47 @@ class RecordSession:
                 "transaction_id": str(step.get("transaction_id") or ""),
                 "observed_at": step.get("observed_at"),
             })
-        deduped: dict[tuple, dict] = {}
+        deduped: list[dict] = []
         for item in evidence:
-            aliases = tuple(str(value) for value in (item.get("field_aliases") or []) if str(value or ""))
-            key = (
+            aliases = {
+                str(value) for value in (item.get("field_aliases") or [])
+                if str(value or "")
+            }
+            identity = (
                 str(item.get("page_id") or ""), str(item.get("frame_id") or ""),
-                route_identity(item),
-                aliases, str(item.get("label") or item.get("field") or ""),
+                route_identity(item), str(item.get("label") or item.get("field") or ""),
                 str(item.get("control_kind") or ""),
             )
-            previous = deduped.get(key, {})
-            deduped[key] = {**previous, **item}
-        return list(deduped.values())[-500:]
+            matches = []
+            for index, previous in enumerate(deduped):
+                previous_identity = (
+                    str(previous.get("page_id") or ""), str(previous.get("frame_id") or ""),
+                    route_identity(previous),
+                    str(previous.get("label") or previous.get("field") or ""),
+                    str(previous.get("control_kind") or ""),
+                )
+                if previous_identity != identity:
+                    continue
+                previous_aliases = {
+                    str(value) for value in (previous.get("field_aliases") or [])
+                    if str(value or "")
+                }
+                if not aliases or not previous_aliases or aliases.intersection(previous_aliases):
+                    matches.append(index)
+            if len(matches) != 1:
+                deduped.append(item)
+                continue
+            index = matches[0]
+            previous = deduped[index]
+            merged = {**previous, **item}
+            merged["field_aliases"] = list(dict.fromkeys([
+                *list(previous.get("field_aliases") or []),
+                *list(item.get("field_aliases") or []),
+            ]))
+            if item.get("value") in (None, "") and previous.get("value") not in (None, ""):
+                merged["value"] = previous["value"]
+            deduped[index] = merged
+        return deduped[-500:]
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""

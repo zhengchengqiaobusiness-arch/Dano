@@ -1109,19 +1109,19 @@ def _param_source_guess(
         if default_value in (None, ""):
             default_value = field.get("raw_value", field.get("value"))
         return {
-            "category": "user_param",
+            "category": "runtime_var",
             "source_kind": "page_context",
             "source": {
                 "kind": "page_context",
                 "context_key": str(field.get("key") or key or path).split(".")[-1].split("[")[0],
                 "path": path,
                 "default_value": default_value,
-                "caller_override": True,
+                "caller_override": False,
                 "required_state": "optional",
             },
-            "editable": True,
-            "exposed_to_user": True,
-            "reason": "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖",
+            "editable": False,
+            "exposed_to_user": False,
+            "reason": "分页参数由运行上下文使用录制默认值自动注入，不作为业务筛选字段暴露给调用方",
             "need_human_confirm": False,
         }
 
@@ -5340,7 +5340,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                     default_value = param.default_value
                 if default_value in (None, ""):
                     default_value = param.value
-                param.category = "user_param"
+                param.category = "runtime_var"
                 param.source_kind = "page_context"
                 param.source = {
                     **existing_source,
@@ -5348,11 +5348,11 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                     "context_key": context_key,
                     "path": param.path,
                     "default_value": default_value,
-                    "caller_override": True,
+                    "caller_override": False,
                     "required_state": "optional",
                 }
-                param.exposed_to_user = True
-                param.editable = True
+                param.exposed_to_user = False
+                param.editable = False
             if not _param_field_manually_edited(param, "need_human_confirm"):
                 param.need_human_confirm = False
             if not _param_axis_manually_edited(param, "enum_options", "enum_value_map"):
@@ -5361,7 +5361,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             if not _param_field_manually_edited(param, "description"):
                 param.description = _strip_option_descriptions(param.description) or None
             if not _param_field_manually_edited(param, "reason") and not _param_source_agent_classified(param):
-                param.reason = "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖"
+                param.reason = "分页参数由运行上下文使用录制默认值自动注入，不作为业务筛选字段暴露给调用方"
             continue
         if param.source_kind == "api_option":
             # A live candidate source remains valid even when the captured
@@ -18958,8 +18958,6 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             return True
         if page_contract is None:
             return False
-        if page_contract.get("semantic_match"):
-            return True
         raw = page_contract.get("raw") or {}
         source_request_id = str(source.get("source_request_id") or "")
         page_request_ids = {
