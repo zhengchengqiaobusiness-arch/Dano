@@ -373,3 +373,118 @@ def test_same_run_identity_across_recording_stages(log_env) -> None:
         assert item["run_id"] == "run-id-1"
         assert item["recording_id"] == "recording_1"
         assert item["tenant"] == "111"
+
+
+def test_lifecycle_and_export_keep_run_id_after_contextvar_clear(log_env) -> None:
+    import structlog
+
+    _bind("run-life")
+    structlog.contextvars.clear_contextvars()
+    run_logging.bind_run_context(
+        run_id="run-life",
+        recording_id="recording_1",
+        action="action_1",
+        tenant="111",
+        subsystem="admin",
+    )
+    run_logging.emit_run_event("recording.lifecycle.completed", stage="lifecycle", status="succeeded")
+    run_logging.emit_run_event("recording.export.completed", stage="export", status="failed", level="error")
+    events = _events(log_env, "run-life")
+    assert [item["run_id"] for item in events] == ["run-life", "run-life"]
+
+
+def test_final_summary_expresses_published_asset_and_failed_package(log_env) -> None:
+    import time
+
+    from dano.gateway import app as gateway
+
+    _bind("run-sum")
+    run_logging.note_run_fact(
+        request_count=43,
+        page_event_count=12,
+        field_evidence_count=8,
+        field_binding_stats={"bound": 6, "ambiguous": 1, "unbound": 1},
+        capability_count=5,
+        capability_names=["query_leave"],
+        unresolved_count=0,
+        exported_count=0,
+        export_directory=r"E:\python\try\Dano\export\agent-skills",
+    )
+    gateway._emit_run_summary(
+        run_id="run-sum",
+        asset_status="published",
+        package_status="failed",
+        started=time.monotonic() - 10,
+        failed_stage="export",
+        root_cause="CANONICAL_CAPABILITY_CONTRACT_MISSING",
+        skill_id="admin.action_1",
+    )
+    summary = next(item for item in _events(log_env, "run-sum") if item["event"] == "recording.run.summary")
+    assert _field(summary, "asset_status") == "published"
+    assert _field(summary, "skill_package_status") == "failed"
+    assert _field(summary, "result") == "partial_failure"
+    assert _field(summary, "capability_names") == ["query_leave"]
+    assert _field(summary, "export_directory")
+    assert _field(summary, "full_log")
+
+
+@pytest.mark.asyncio
+async def test_auto_export_missing_skill_is_logged_not_raised(log_env, monkeypatch) -> None:
+    from dano.gateway import app as gateway
+
+    async def write_exports(*_args, **_kwargs):
+        return []
+
+    async def frozen_skill_ids() -> set[str]:
+        return set()
+
+    monkeypatch.setattr("dano.export.agent_skills.write_exports", write_exports)
+    monkeypatch.setattr(gateway, "_current_export_dir", lambda: str(log_env))
+    monkeypatch.setattr(gateway, "_frozen_skill_ids", frozen_skill_ids)
+    _bind("run-miss")
+    result = await gateway._auto_export("111", skill_ids={"admin.action_1"}, strict=True)
+    assert result is None
+    events = _events(log_env, "run-miss")
+    failed = next(
+        item for item in events
+        if (item.get("error") or {}).get("code") == "REQUESTED_SKILL_PACKAGE_NOT_WRITTEN"
+    )
+    assert failed["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_export_failure_contains_traceback_reason_and_skill_id(log_env, monkeypatch, tmp_path) -> None:
+    from dano.export.skill_package import renderer as packages
+
+    class Skill:
+        skill_id = "admin.action_1"
+        recording_asset_id = "aid"
+        api_request = {}
+        lifecycle_state = "published"
+
+    class Repo:
+        async def distinct_subsystems(self, _tenant):
+            return ["admin"]
+
+    class Registry:
+        skills = [Skill()]
+
+        @classmethod
+        async def from_store(cls, *_args, **_kwargs):
+            return cls()
+
+    def boom(_skill, _out_dir, *, tenant):  # noqa: ANN001
+        del tenant
+        raise ValueError("admin.action_1 has no canonical published capability contract")
+
+    monkeypatch.setattr("dano.assets.repository.AssetRepository", lambda: Repo())
+    monkeypatch.setattr("dano.orchestrator.skills.SkillRegistry", Registry)
+    monkeypatch.setattr(packages, "render_skill_package", boom)
+    _bind("run-export")
+    written = await packages.write_skill_packages("111", str(tmp_path), skill_ids=[Skill.skill_id])
+    assert written == []
+    failed = next(item for item in _events(log_env, "run-export") if item["event"] == "skill.package.export.failed")
+    assert failed["error"]["code"] == "CANONICAL_CAPABILITY_CONTRACT_MISSING"
+    assert failed["error"]["traceback"]
+    assert _field(failed, "skill_id") == "admin.action_1"
+    assert _field(failed, "canonical_contract_present") is False

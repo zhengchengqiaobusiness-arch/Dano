@@ -7,8 +7,68 @@ from uuid import uuid4
 import structlog
 
 from dano.agent_tools import materials
+from dano.infra.run_logging import (
+    bind_run_context,
+    emit_run_event,
+    emit_run_exception,
+    note_run_fact,
+)
 
 log = structlog.get_logger(__name__)
+
+
+def _log_asset_published(
+    *,
+    run_id: str,
+    action: str,
+    tenant: str,
+    subsystem: str,
+    api_request: dict,
+    published: dict,
+) -> None:
+    release = dict(api_request.get("_release_snapshot") or {})
+    flow = release.get("flow_spec") if isinstance(release.get("flow_spec"), dict) else {}
+    summary = api_request.get("_flow_spec") if isinstance(api_request.get("_flow_spec"), dict) else {}
+    capabilities = api_request.get("capabilities") if isinstance(api_request.get("capabilities"), list) else []
+    names = [
+        str(item.get("name") or item.get("id") or "")
+        for item in capabilities
+        if isinstance(item, dict) and (item.get("name") or item.get("id"))
+    ]
+    flow_version = (
+        dict(flow.get("meta") or {}).get("current_version")
+        or summary.get("flow_version")
+        or dict(summary.get("meta") or {}).get("current_version")
+    )
+    note_run_fact(
+        asset_id=published.get("asset_id"),
+        asset_version=published.get("version"),
+        asset_status="published" if published.get("published") else "failed",
+        capability_count=len(capabilities),
+        capability_names=names,
+        flow_version=flow_version,
+    )
+    emit_run_event(
+        "recording.publish.asset_succeeded" if published.get("published") else "recording.publish.asset_failed",
+        stage="publish",
+        status="succeeded" if published.get("published") else "failed",
+        level="info" if published.get("published") else "error",
+        summary="资产发布成功" if published.get("published") else "资产发布失败",
+        run_id=run_id,
+        action=action,
+        tenant=tenant,
+        subsystem=subsystem,
+        asset_id=published.get("asset_id"),
+        skill_id=f"{subsystem}.{action}",
+        details={
+            "asset_id": published.get("asset_id"),
+            "asset_version": published.get("version"),
+            "lifecycle": "published" if published.get("published") else published.get("reason"),
+            "capability_count": len(capabilities),
+            "capability_names": names,
+            "flow_version": flow_version,
+        },
+    )
 
 
 def _has_request_template(api_request: dict) -> bool:
@@ -178,6 +238,8 @@ async def run_request_onboarding(
         from dano.infra.logging import configure_logging
         configure_logging()                                   # 幂等:直连/离线调用也能看到日志
         structlog.contextvars.bind_contextvars(run_id=run_id, action=action, tenant=tenant, subsystem=str(sid))
+        bind_run_context(run_id=run_id, action=action, tenant=tenant, subsystem=str(sid))
+        latest_stage = "start"
         log.info("ingest.start", title=title, has_steps=bool(api_request.get("steps")),
                  method=api_request.get("method"), url=api_request.get("url") or api_request.get("path"))
         # 单请求取自身 params;多步工作流(Q3)取最后一步(用户提交那步)的 params
@@ -211,6 +273,7 @@ async def run_request_onboarding(
                 "body": body,
             })
             require_same_recording_session()
+            latest_stage = "publish"
             published = await T.publish_asset(run_id, {
                 "asset_draft_id": draft["asset_draft_id"],
                 "validation_run_ids": [],
@@ -219,6 +282,14 @@ async def run_request_onboarding(
                 "recording_machine_validated": False,
                 "recording_direct_export": True,
             })
+            _log_asset_published(
+                run_id=run_id,
+                action=action,
+                tenant=tenant,
+                subsystem=str(sid),
+                api_request=api_request,
+                published=published,
+            )
             return {
                 "ok": bool(published.get("published")),
                 "stage": "publish",
@@ -443,8 +514,17 @@ async def run_request_onboarding(
         live_ok = rp.get("mode") == "live" and bool(rp.get("passed"))
         status = (IngestionStatus.REJECTED if not published else
                   IngestionStatus.VERIFIED if live_ok else IngestionStatus.PARTIALLY_VERIFIED)
+        latest_stage = "publish"
         log.info("ingest.published", published=published, status=status.value,
                  asset_id=pub.get("asset_id"), live_ok=live_ok, reason=pub.get("reason", ""))
+        _log_asset_published(
+            run_id=run_id,
+            action=action,
+            tenant=tenant,
+            subsystem=str(sid),
+            api_request=api_request,
+            published=pub,
+        )
         # Acceptance/security/compliance review above already covers the former
         # post-publish advisory dimensions. Re-calling the same model after a
         # successful publish added cost without changing the release decision.
@@ -462,8 +542,18 @@ async def run_request_onboarding(
                 "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),
                         "params": params}}
-    except Exception:
+    except Exception as exc:
         log.error("ingest.error", exc_info=True)              # 带 traceback,快速定位崩在哪一步
+        emit_run_exception(
+            "ingest.error",
+            exc,
+            stage=latest_stage if "latest_stage" in locals() else "publish",
+            summary="发布阶段异常",
+            run_id=run_id,
+            action=action,
+            details={"latest_successful_stage": latest_stage if "latest_stage" in locals() else ""},
+            next_action="从异常 stage 和 traceback 定位发布失败点",
+        )
         raise
     finally:
         materials.clear_run(run_id)

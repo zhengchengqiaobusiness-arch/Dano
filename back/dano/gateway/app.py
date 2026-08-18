@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
+import os
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Literal
 from urllib.parse import urlsplit
 import uuid
@@ -37,6 +40,14 @@ from dano.registry import InMemoryRegistry, PgRegistry, TenantRecord
 from dano.shared.asset_bodies import EnvProfileBody
 from dano.shared.enums import AssetType, Subsystem
 from dano.shared.models import Scope
+from dano.infra.run_logging import (
+    bind_run_context,
+    current_run_notes,
+    emit_run_event,
+    emit_run_exception,
+    log_root,
+    note_run_fact,
+)
 
 from dano.lifecycle.state_machine import SkillLifecycle
 from dano.lifecycle.outbox import InMemoryLifecycleOutboxStore, LifecycleRegistrationReconciler
@@ -223,6 +234,7 @@ async def lifespan(app: FastAPI):
     configure_logging()                    # **先配日志**:否则后台看不到任何记录
     log.info("gateway.starting")
     global _registry, _lifecycle, _lifecycle_reconciler, _breaker
+    db_status = "unavailable"
     try:
         await init_pool()
         await run_migrations()
@@ -241,6 +253,7 @@ async def lifespan(app: FastAPI):
         if reconcile_result["completed"] or reconcile_result["pending"]:
             log.info("lifecycle.startup_reconciled", **reconcile_result)
         log.info("gateway.db_ready")
+        db_status = "ready"
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.db_unavailable", error=str(e))
     try:                                   # 注入三模型评审 client(发布硬闸门 + 录制语义顾问复用同一 client)
@@ -249,6 +262,17 @@ async def lifespan(app: FastAPI):
         set_review_board(ReviewBoard.from_settings())
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.review_board_unavailable", error=str(e))
+    emit_run_event(
+        "gateway.ready",
+        stage="system",
+        status="succeeded" if db_status == "ready" else "warning",
+        summary="Dano 网关启动完成",
+        details={
+            "pid": os.getpid(),
+            "db": db_status,
+            "address": f"127.0.0.1:{os.environ.get('DANO_BACKEND_PORT') or os.environ.get('DANO_GATEWAY_PORT') or '8077'}",
+        },
+    )
     yield
     if _recording_session_registry is not None:
         await _recording_session_registry.close()
@@ -757,6 +781,34 @@ async def _publish_canonical_recording(
     context,
 ) -> dict:
     """Freeze and export one complete recording release through one boundary."""
+    started = time.monotonic()
+    capabilities = list(getattr(release_flow_spec, "capabilities", None) or [])
+    capability_names = [
+        str(getattr(item, "name", None) or getattr(item, "id", None) or "")
+        for item in capabilities
+        if getattr(item, "name", None) or getattr(item, "id", None)
+    ]
+    flow_version = int(dict(getattr(release_flow_spec, "meta", None) or {}).get("current_version") or 0)
+    bind_run_context(run_id=run_id, action=action, tenant=tenant, subsystem=subsystem)
+    note_run_fact(
+        capability_count=len(capabilities),
+        capability_names=capability_names,
+        flow_version=flow_version,
+        skill_id=f"{subsystem}.{action}",
+    )
+    emit_run_event(
+        "recording.publish.started",
+        stage="publish",
+        status="started",
+        summary="开始发布录制资产",
+        skill_id=f"{subsystem}.{action}",
+        details={
+            "skill_id": f"{subsystem}.{action}",
+            "capabilities": len(capabilities),
+            "capability_names": capability_names,
+            "flow_version": flow_version,
+        },
+    )
     from dano.execution.page.flow_spec import (
         flow_spec_release_payload,
         flow_spec_required_params,
@@ -812,7 +864,23 @@ async def _publish_canonical_recording(
         recording_machine_validated=machine_verification_enabled,
         direct_recording_export=not machine_verification_enabled,
     )
+    bind_run_context(
+        run_id=run_id,
+        action=action,
+        tenant=tenant,
+        subsystem=subsystem,
+        skill_id=str(report.get("skill_id") or f"{subsystem}.{action}"),
+        asset_id=report.get("asset_id"),
+    )
     if not report.get("ok"):
+        _emit_run_summary(
+            run_id=run_id,
+            asset_status="failed",
+            package_status="skipped",
+            started=started,
+            failed_stage="publish",
+            root_cause=str(report.get("reason") or "录制发布失败"),
+        )
         raise RuntimeError(str(report.get("reason") or "录制发布失败"))
     skill_id = str(report.get("skill_id") or f"{subsystem}.{action}")
     version = int(report.get("asset_version") or 0)
@@ -823,16 +891,122 @@ async def _publish_canonical_recording(
             action,
             {"integration": "page"},
         )
+    emit_run_event(
+        "recording.publish.asset_succeeded",
+        stage="publish",
+        status="succeeded",
+        summary="资产发布成功",
+        skill_id=skill_id,
+        asset_id=report.get("asset_id"),
+        details={
+            "asset_id": report.get("asset_id"),
+            "asset_version": version,
+            "lifecycle": "published",
+            "capability_count": len(capabilities),
+            "flow_version": flow_version,
+        },
+    )
     lifecycle = await _lifecycle_reconciler.register_or_defer(
         skill_id=skill_id,
         subsystem=Subsystem(subsystem),
         action=action,
         asset_version=version,
     )
+    emit_run_event(
+        "recording.lifecycle.completed",
+        stage="lifecycle",
+        status="succeeded",
+        summary="生命周期登记成功",
+        skill_id=skill_id,
+        details=dict(lifecycle),
+    )
     context.ensure_active()
     from dano.onboarding.recording_workflow import WorkflowStep
     await context.progress(WorkflowStep.EXPORTING, "正在导出当前动作的 Skill", 0)
-    await _auto_export(tenant, skill_ids={skill_id}, strict=True)
+    emit_run_event(
+        "recording.export.started",
+        stage="export",
+        status="started",
+        summary="开始导出 Skill 包",
+        skill_id=skill_id,
+    )
+    try:
+        await _auto_export(tenant, skill_ids={skill_id}, strict=True)
+    except Exception as exc:
+        notes = current_run_notes()
+        emit_run_exception(
+            "recording.export.completed",
+            exc,
+            stage="export",
+            summary="Skill 包导出失败",
+            skill_id=skill_id,
+            details={"exported_count": notes.get("exported_count", 0), "output_directory": notes.get("export_directory")},
+            next_action="检查该 asset version 对应的发布能力契约和 release identity",
+        )
+        _emit_run_summary(
+            run_id=run_id,
+            asset_status="published",
+            package_status="failed",
+            started=started,
+            failed_stage="export",
+            root_cause=notes.get("root_cause") or type(exc).__name__,
+            skill_id=skill_id,
+        )
+        raise
+    notes = current_run_notes()
+    package_status = str(notes.get("skill_package_status") or "succeeded")
+    exported_count = int(notes.get("exported_count") or 0)
+    if package_status == "failed" or exported_count <= 0:
+        emit_run_event(
+            "recording.export.completed",
+            stage="export",
+            status="failed",
+            level="error",
+            summary="Skill 包导出失败",
+            skill_id=skill_id,
+            details={
+                "exported_count": exported_count,
+                "output_directory": notes.get("export_directory"),
+                "canonical_contract_present": notes.get("canonical_contract_present"),
+                "code": notes.get("root_cause") or "REQUESTED_SKILL_PACKAGE_NOT_WRITTEN",
+            },
+            error={
+                "code": notes.get("root_cause") or "REQUESTED_SKILL_PACKAGE_NOT_WRITTEN",
+                "type": "ExportError",
+                "message": "requested skill package was not written",
+                "cause": "当前发布资产没有可供包生成器读取的规范能力契约"
+                if notes.get("root_cause") == "CANONICAL_CAPABILITY_CONTRACT_MISSING"
+                else "指定 Skill 未写出包",
+                "traceback": None,
+                "artifact_refs": [f"skill_id:{skill_id}"],
+            },
+            next_action="检查该 asset version 对应的发布能力契约和 release identity",
+        )
+        _emit_run_summary(
+            run_id=run_id,
+            asset_status="published",
+            package_status="failed",
+            started=started,
+            failed_stage="export",
+            root_cause=notes.get("root_cause") or "REQUESTED_SKILL_PACKAGE_NOT_WRITTEN",
+            skill_id=skill_id,
+        )
+    else:
+        emit_run_event(
+            "recording.export.completed",
+            stage="export",
+            status="succeeded",
+            summary="Skill 包导出成功",
+            skill_id=skill_id,
+            details={"exported_count": exported_count, "output_directory": notes.get("export_directory")},
+        )
+        _emit_run_summary(
+            run_id=run_id,
+            asset_status="published",
+            package_status="succeeded",
+            started=started,
+            skill_id=skill_id,
+        )
     return {
         **report,
         **lifecycle,
@@ -882,6 +1056,12 @@ async def record_ws(ws: WebSocket) -> None:
             requested_recording_id
             if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
             else f"recording_{uuid.uuid4().hex}"
+        )
+        bind_run_context(
+            recording_id=recording_id,
+            action=action,
+            tenant=tenant,
+            subsystem=subsystem,
         )
         holder: dict[str, object] = {}
 
@@ -936,6 +1116,9 @@ async def record_ws(ws: WebSocket) -> None:
             publisher=publisher,
         )
         holder["session"] = session
+        pi_run_id = str(getattr(getattr(session, "_pi", None), "run_id", "") or "")
+        if pi_run_id:
+            bind_run_context(run_id=pi_run_id)
         while True:
             try:
                 message = await ws.receive_json()
@@ -965,6 +1148,75 @@ async def record_ws(ws: WebSocket) -> None:
             pass
 
 
+def _emit_run_summary(
+    *,
+    run_id: str,
+    asset_status: str,
+    package_status: str,
+    started: float,
+    failed_stage: str = "",
+    root_cause: str = "",
+    skill_id: str = "",
+) -> None:
+    notes = current_run_notes()
+    duration_ms = int((time.monotonic() - started) * 1000)
+    result = (
+        "succeeded"
+        if asset_status == "published" and package_status == "succeeded"
+        else "partial_failure"
+        if asset_status == "published"
+        else "failed"
+        if asset_status == "failed"
+        else "cancelled"
+    )
+    day = datetime.now().strftime("%Y-%m-%d")
+    emit_run_event(
+        "recording.run.summary",
+        stage="end",
+        status="succeeded" if result == "succeeded" else "failed",
+        level="info" if result == "succeeded" else "error",
+        summary=(
+            "本次运行成功"
+            if result == "succeeded"
+            else "本次运行部分失败"
+            if result == "partial_failure"
+            else "本次运行失败"
+        ),
+        skill_id=skill_id or notes.get("skill_id"),
+        duration_ms=duration_ms,
+        details={
+            "request_count": notes.get("request_count"),
+            "page_event_count": notes.get("page_event_count"),
+            "field_evidence_count": notes.get("field_evidence_count"),
+            "bound_count": (notes.get("field_binding_stats") or {}).get("bound") if isinstance(notes.get("field_binding_stats"), dict) else notes.get("bound_count"),
+            "ambiguous_count": (notes.get("field_binding_stats") or {}).get("ambiguous") if isinstance(notes.get("field_binding_stats"), dict) else notes.get("ambiguous_count"),
+            "unbound_count": (notes.get("field_binding_stats") or {}).get("unbound") if isinstance(notes.get("field_binding_stats"), dict) else notes.get("unbound_count"),
+            "capability_count": notes.get("capability_count"),
+            "capability_names": notes.get("capability_names"),
+            "unresolved_count": notes.get("unresolved_count"),
+            "asset_status": asset_status,
+            "skill_package_status": package_status,
+            "exported_count": notes.get("exported_count", 0),
+            "export_directory": notes.get("export_directory"),
+            "failed_stage": failed_stage or notes.get("failed_stage"),
+            "root_cause": root_cause or notes.get("root_cause"),
+            "total_duration": _human_duration(duration_ms),
+            "full_log": str(log_root() / "runs" / day / f"{run_id}.jsonl"),
+            "result": result,
+        },
+    )
+
+
+def _human_duration(duration_ms: int) -> str:
+    if duration_ms >= 60_000:
+        minutes, rest = divmod(duration_ms, 60_000)
+        seconds = rest / 1000
+        return f"{minutes}m{seconds:.0f}s"
+    if duration_ms >= 1000:
+        return f"{duration_ms / 1000:.1f}s"
+    return f"{duration_ms}ms"
+
+
 async def _auto_export(
     tenant: str,
     *,
@@ -987,6 +1239,45 @@ async def _auto_export(
             exclude_skill_ids=await _frozen_skill_ids(),
             skill_ids=skill_ids,
         )
+        missing: list[str] = []
+        if skill_ids:
+            from dano.export.skill_package.renderer import package_slug
+
+            written_set = set(written)
+            missing = [
+                skill_id
+                for skill_id in skill_ids
+                if package_slug(skill_id) not in written_set and skill_id not in written_set
+            ]
+        failed = bool(skill_ids) and (not written or missing)
+        note_run_fact(
+            exported_count=len(written),
+            export_directory=out,
+            skill_package_status="failed" if failed else "succeeded",
+            root_cause="REQUESTED_SKILL_PACKAGE_NOT_WRITTEN" if failed and not current_run_notes().get("root_cause") else current_run_notes().get("root_cause"),
+        )
+        if failed:
+            emit_run_event(
+                "recording.export.completed",
+                stage="export",
+                status="failed",
+                level="error",
+                summary="指定 Skill 包未写出",
+                details={
+                    "exported_count": len(written),
+                    "output_directory": out,
+                    "missing_skill_ids": missing,
+                    "requested_skill_ids": sorted(skill_ids),
+                },
+                error={
+                    "code": current_run_notes().get("root_cause") or "REQUESTED_SKILL_PACKAGE_NOT_WRITTEN",
+                    "type": "ExportError",
+                    "message": "requested skill package was not written",
+                    "cause": "指定 skill_ids 但 written 中没有对应 Skill",
+                    "traceback": None,
+                    "artifact_refs": [f"skill_id:{item}" for item in missing],
+                },
+            )
         log.info(
             "onboard.auto_export",
             tenant=tenant,
@@ -994,8 +1285,15 @@ async def _auto_export(
             mode=mode,
             count=len(written),
             skill_ids=sorted(skill_ids) if skill_ids is not None else None,
+            status="failed" if failed else "succeeded",
         )
     except Exception as e:  # noqa: BLE001
+        note_run_fact(
+            skill_package_status="failed",
+            exported_count=0,
+            root_cause=type(e).__name__,
+            failed_stage="export",
+        )
         log.warning("onboard.auto_export_failed", error=str(e))
         if strict:
             raise

@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import structlog
 
+from dano.infra.run_logging import emit_run_exception, note_run_fact
+
 from dano.export.agent_skills import (
     _configured_reference_dir,
     _load_reference_markdown,
@@ -71,6 +73,42 @@ def _scrub(node: Any, key: str = "") -> Any:
     if isinstance(node, str):
         return _INLINE_SECRET_RE.sub("<runtime-auth>", node)
     return node
+
+
+def _export_reason_code(exc: BaseException) -> str:
+    text = str(exc).casefold()
+    if "canonical published capability contract" in text:
+        return "CANONICAL_CAPABILITY_CONTRACT_MISSING"
+    if "invalid published flowspec" in text:
+        return "INVALID_PUBLISHED_FLOWSPEC"
+    if "skill package validation failed" in text:
+        return "SKILL_PACKAGE_VALIDATION_FAILED"
+    return "SKILL_PACKAGE_EXPORT_FAILED"
+
+
+def _export_failure_details(skill, out_dir: str, exc: BaseException) -> dict[str, Any]:  # noqa: ANN001
+    api = dict(getattr(skill, "api_request", None) or {})
+    release = dict(api.get("_release_snapshot") or {})
+    flow = release.get("flow_spec") if isinstance(release.get("flow_spec"), dict) else {}
+    meta = dict(flow.get("meta") or {})
+    capabilities = api.get("capabilities") if isinstance(api.get("capabilities"), list) else []
+    return {
+        "skill_id": getattr(skill, "skill_id", ""),
+        "output_directory": out_dir,
+        "package_written": False,
+        "asset_found": True,
+        "published_status": getattr(skill, "lifecycle_state", None) or "published",
+        "capability_count": len(capabilities),
+        "canonical_contract_present": bool(capabilities and _steps(api)),
+        "capability_model_status": meta.get("capability_model"),
+        "flow_version": meta.get("current_version"),
+        "release_identity": {
+            "skill_id": getattr(skill, "skill_id", ""),
+            "recording_asset_id": str(getattr(skill, "recording_asset_id", "") or ""),
+            "asset_version": getattr(skill, "created_at", None),
+        },
+        "error": str(exc),
+    }
 
 
 def _safe_text(value: Any) -> str:
@@ -1552,5 +1590,29 @@ async def write_skill_packages(
         try:
             written.append(render_skill_package(skill, out_dir, tenant=tenant))
         except Exception as exc:  # noqa: BLE001 - one malformed legacy asset cannot block peers
+            details = _export_failure_details(skill, out_dir, exc)
+            note_run_fact(
+                skill_package_status="failed",
+                exported_count=len(written),
+                export_directory=out_dir,
+                root_cause=_export_reason_code(exc),
+                failed_stage="export",
+                canonical_contract_present=details.get("canonical_contract_present"),
+            )
+            emit_run_exception(
+                "skill.package.export.failed",
+                exc,
+                stage="export",
+                code=_export_reason_code(exc),
+                cause=(
+                    "当前发布资产没有可供 Skill 包生成器读取的规范能力契约"
+                    if _export_reason_code(exc) == "CANONICAL_CAPABILITY_CONTRACT_MISSING"
+                    else str(exc)
+                ),
+                artifact_refs=[f"skill_id:{skill.skill_id}"],
+                skill_id=skill.skill_id,
+                details=details,
+                next_action="检查该 asset version 对应的发布能力契约和 release identity",
+            )
             log.warning("export.skill_package_failed", skill_id=skill.skill_id, error=str(exc))
     return written
