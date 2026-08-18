@@ -10,6 +10,7 @@ from typing import Any
 from dano.execution.page.flow_spec import (
     FlowSpec,
     auto_fix_flow_spec,
+    flow_spec_fingerprint,
     prepare_flow_release_candidate,
 )
 from dano.onboarding.recording_pipeline import RecordingPipelineServices
@@ -245,13 +246,17 @@ class ProductionRecordingServices:
         spec = FlowSpec.model_validate(draft)
         kept_capabilities = list(spec.capabilities)
         try:
+            before_fix = flow_spec_fingerprint(spec)
             spec = await auto_fix_flow_spec(
                 spec,
                 repair_ops=[],
                 max_rounds=1,
                 expand_requests=False,
             )
-            report.applied.append("deterministic_fix")
+            if flow_spec_fingerprint(spec) != before_fix:
+                report.applied.append("deterministic_fix")
+            else:
+                report.skipped.append("deterministic_fix")
         except Exception:  # noqa: BLE001 - one failed fix must not stop remaining issues
             report.rejected.append("deterministic_fix")
 
@@ -276,6 +281,7 @@ class ProductionRecordingServices:
             try:
                 pi = await self.pi_provider(False)
                 pi.bind_flow_spec(spec)
+                before_pi = flow_spec_fingerprint(spec)
                 payload = [issue.model_dump(mode="json") for issue in remaining]
                 await _submit_with_protocol_recovery(
                     pi,
@@ -292,6 +298,9 @@ class ProductionRecordingServices:
                 repaired = pi.current_flow_spec()
                 if kept_capabilities and not repaired.capabilities:
                     report.rejected.append("pi_cleared_capabilities")
+                    report.still_pending.extend(issue.issue_id for issue in remaining)
+                elif flow_spec_fingerprint(repaired) == before_pi:
+                    report.skipped.append("pi_repair")
                     report.still_pending.extend(issue.issue_id for issue in remaining)
                 else:
                     spec = repaired

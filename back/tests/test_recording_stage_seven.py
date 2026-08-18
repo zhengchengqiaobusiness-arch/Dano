@@ -183,6 +183,56 @@ async def test_pi_protocol_error_keeps_capabilities(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_unchanged_repair_attempts_are_not_reported_as_progress(monkeypatch) -> None:
+    async def auto_fix(spec, **_kwargs):  # noqa: ANN001, ANN003
+        return spec
+
+    monkeypatch.setattr("dano.onboarding.recording_runtime.auto_fix_flow_spec", auto_fix)
+
+    class Pi:
+        last_submission_kind = "repair"
+
+        def bind_flow_spec(self, spec):  # noqa: ANN001
+            self.spec = spec
+
+        def current_flow_spec(self):
+            return self.spec
+
+        async def prompt(self, _text):  # noqa: ANN001
+            return None
+
+    async def provider(_fresh):  # noqa: ANN001
+        return Pi()
+
+    services = ProductionRecordingServices(
+        recording_id="r1",
+        materializer=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+        pi_provider=provider,
+        publisher=lambda *_a: (_ for _ in ()).throw(AssertionError()),
+    )
+    context = _context()
+    draft = _spec().model_dump(mode="json")
+    repaired = await services.repair(
+        draft,
+        (
+            WorkflowIssue(
+                issue_id="i1",
+                code="dependency",
+                message="缺依赖",
+                resolver="machine_repair",
+            ),
+        ),
+        {},
+        context,
+    )
+
+    assert repaired == draft
+    assert context.last_repair_report is not None
+    assert context.last_repair_report.applied == []
+    assert context.last_repair_report.still_pending == ["i1"]
+
+
+@pytest.mark.asyncio
 async def test_no_progress_requires_fingerprint_and_unapplied_ops() -> None:
     issue = WorkflowIssue(issue_id="i1", code="missing", message="无法变化", resolver="machine_repair")
 
