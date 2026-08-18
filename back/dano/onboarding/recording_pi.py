@@ -505,18 +505,34 @@ class RecordingPiSession:
             sort_keys=True,
             default=str,
         ).encode("utf-8")).hexdigest()
+        request_digest = hashlib.sha256(json.dumps([
+            {
+                key: item.get(key)
+                for key in (
+                    "request_id", "request_index", "sequence", "method", "url", "path",
+                    "query", "post_data", "response_status", "response_json", "response_schema",
+                    "trigger_action_id", "trigger_transaction_id", "trigger_op", "trigger_locator",
+                )
+            }
+            for item in captured
+            if isinstance(item, dict)
+        ], ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         marker = (
             len(captured),
             str(last_request.get("request_id") or ""),
             last_request.get("sequence", last_request.get("index")),
             len(page_events),
             str(last_event.get("event_id") or last_event.get("action_id") or ""),
+            request_digest,
             semantic_digest,
         )
         if marker == self._live_evidence_marker:
             return
 
-        from dano.execution.page.flow_spec import _option_sources_from_page_enum_options
+        from dano.execution.page.flow_spec import (
+            RequestFact,
+            _option_sources_from_page_enum_options,
+        )
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
         # Binding a large DOM/request fact set is CPU-heavy. It must not share
@@ -545,6 +561,11 @@ class RecordingPiSession:
                     if isinstance(item, dict) and item.get("request_id")
                 ][-500:],
             }
+            current.request_facts.requests = [
+                RequestFact.model_validate(deepcopy(item))
+                for item in captured
+                if isinstance(item, dict)
+            ]
             current.request_facts.page_events = deepcopy(page_events)
             current.request_facts.field_evidence = deepcopy(bound_fields)
             retained_sources = [
