@@ -60,6 +60,7 @@ from dano.execution.page.value_tracing import discover_response_key_maps, discov
 _REQUEST_OBSERVER_KEYS = (
     "trigger_action_id", "trigger_transaction_id", "trigger_event_id",
     "trigger_op", "trigger_locator", "trigger_page_context",
+    "page_context",
     "action_delta_ms", "causality_confidence",
     "resource_type", "navigation_request",
 )
@@ -671,6 +672,11 @@ def _looks_session_literal_after_key_check(value: Any, key: str, path: str) -> b
     # datetime 字段名 → 当 datetime,不当 session literal
     if any(x in norm for x in ("time", "date", "day")) and not any(x in norm for x in ("id", "key", "code", "token")):
         return False
+    # 条形码/扫码字段：13 位数字是物理条码而非运行期 ID；不当 session_literal
+    # barcode/qrcode/scancode/eancode/upccode 等名称里虽含「code」，但代表扫描出的业务标识
+    if any(x in norm for x in ("barcode", "qrcode", "scancode", "eancode", "upccode",
+                                "pincode", "serialcode", "serialno", "serialnum")):
+        return False
     return True
 
 
@@ -715,6 +721,38 @@ _PAGE_CONTEXT_LEAVES = frozenset({
     "departmentname", "orgid", "orgname", "organid", "organname",
     "companyid", "companyname", "tenantid", "tenantname",
 })
+
+
+_RECORD_IDENTITY_LEAVES = frozenset({
+    "id", "recordid", "requestid", "applicationid",
+    "businessid", "entityid",
+})
+
+
+def _param_is_document_record_identity(param: ParamField) -> bool:
+    """True only for the document/record id itself, never line or chooser ids.
+
+    Nested array paths such as ``items[0].itemId`` identify a selected catalog
+    row, not the document being edited.  ``itemId`` at any depth is a chooser.
+    """
+    path = str(param.path or "")
+    if "[" in path:
+        return False
+    return _field_leaf_token(param.key, path) in _RECORD_IDENTITY_LEAVES
+
+
+def _step_has_stable_record_identity(step: FlowStep) -> bool:
+    """Distinguish an edit of an existing record from a new submission."""
+    for param in step.params or []:
+        if not _param_is_document_record_identity(param):
+            continue
+        value = param.value
+        if value is None or _is_missing_wire_placeholder(value):
+            continue
+        if str(value).strip().casefold() in {"", "null", "undefined"}:
+            continue
+        return True
+    return False
 
 
 def _looks_page_context_field(key: str, path: str) -> bool:
@@ -1711,7 +1749,15 @@ def _detect_composite_entity_selects(
             matches: list[tuple[dict, str]] = []
             for field in fields:
                 target_path = str(field.get("path") or "")
-                if not target_path or target_path in claimed or field.get("recorded_user_input"):
+                control_kind = str(field.get("control_kind") or "").lower()
+                if not target_path or target_path in claimed:
+                    continue
+                if field.get("recorded_user_input") and control_kind not in {"select", "combobox"}:
+                    continue
+                if (
+                    _field_has_unlocked_editable_control(field)
+                    and control_kind not in {"select", "combobox"}
+                ):
                     continue
                 raw = field.get("raw_value", field.get("value"))
                 if raw in (None, ""):
@@ -1793,6 +1839,28 @@ def _detect_composite_entity_selects(
     return out
 
 
+def _field_has_unlocked_editable_control(field: dict | None) -> bool:
+    """True when a page control can still accept caller input.
+
+    Selected-row projections must not hide an editable number/text/date just
+    because the captured value also appears on the chosen option. Locked
+    siblings such as barcode or stock remain projectable.
+    """
+    if not isinstance(field, dict):
+        return False
+    kind = str(field.get("control_kind") or "unknown").lower()
+    if field.get("control_disabled") is True:
+        return False
+    if kind in {"select", "combobox"}:
+        return True
+    if field.get("control_read_only") is True:
+        return False
+    return kind in {
+        "text", "textarea", "number", "date", "datetime", "time",
+        "checkbox", "radio", "spinbutton",
+    }
+
+
 def _attach_select_field_projections(
     selects: list[dict],
     fields: list[dict],
@@ -1866,7 +1934,12 @@ def _attach_select_field_projections(
         projections: dict[str, str] = {}
         for field in fields:
             target_path = str(field.get("path") or "")
-            if not target_path or target_path in excluded or field.get("recorded_user_input"):
+            if (
+                not target_path
+                or target_path in excluded
+                or field.get("recorded_user_input")
+                or _field_has_unlocked_editable_control(field)
+            ):
                 continue
             candidates = [
                 (projection_path_score(source_path, target_path), source_path)
@@ -2282,6 +2355,10 @@ def _build_step_from_capture(
         for target_path, response_path in (binding.field_projections or {}).items():
             target = next((param for param in params if param.path == target_path), None)
             if target is None or target.locked:
+                continue
+            if target.source_kind in {"user_input", "page_default"}:
+                continue
+            if _param_has_editable_control_evidence(target):
                 continue
             target.category = "runtime_var"
             target.source_kind = "selected_option_field"
@@ -8176,7 +8253,7 @@ def to_flow_spec(
             step.fact_check = fc
 
     # 8) title
-    title = _derive_title(step_objs)
+    title = _derive_title(step_objs, extra_contexts=[page_context])
 
     spec = FlowSpec(
         tenant=tenant,
@@ -8474,18 +8551,28 @@ def _materialize_captured_response_key_maps(
         ))
 
 
-def _derive_title(steps: list[FlowStep]) -> str:
+def _derive_title(
+    steps: list[FlowStep],
+    extra_contexts: list[dict[str, Any]] | None = None,
+) -> str:
     if not steps:
         return ""
     # The recorder already carries the page titles that were visible when an
     # operation was clicked.  They are stronger business evidence than an API
     # action suffix (``submit-process``, ``cancel-by-start-user`` and the like).
     # Prefer that evidence before exposing a transport path as the flow title.
-    page_business = _page_context_business_name_from_contexts([
-        dict((step.source_meta or {}).get("trigger_page_context") or {})
-        for step in steps
-        if isinstance((step.source_meta or {}).get("trigger_page_context"), dict)
-    ])
+    contexts: list[dict[str, Any]] = [
+        dict(context)
+        for context in (extra_contexts or [])
+        if isinstance(context, dict) and context
+    ]
+    for step in steps:
+        meta = step.source_meta or {}
+        for key in ("trigger_page_context", "page_context"):
+            value = meta.get(key)
+            if isinstance(value, dict) and value:
+                contexts.append(dict(value))
+    page_business = _page_context_business_name_from_contexts(contexts)
     if page_business:
         return page_business
     first = next((s for s in reversed(steps) if (s.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}), steps[-1])
@@ -13155,8 +13242,14 @@ def _ensure_capability_explanations(
 
 
 def _page_context_business_name(spec: FlowSpec) -> str:
-    context = dict((spec.meta or {}).get("page_context") or {})
-    return _page_context_business_name_from_contexts([context])
+    contexts = [dict((spec.meta or {}).get("page_context") or {})]
+    for step in spec.steps or []:
+        meta = step.source_meta or {}
+        for key in ("trigger_page_context", "page_context"):
+            value = meta.get(key)
+            if isinstance(value, dict) and value:
+                contexts.append(dict(value))
+    return _page_context_business_name_from_contexts(contexts)
 
 
 def _capability_business_name(spec: FlowSpec) -> str:
@@ -19701,10 +19794,11 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             or sibling.path in projected_paths
                             or sibling.locked
                             or sibling.source_kind in {
-                                "user_input", "constant", "system_time", "system_generated",
-                                "computed", "current_user", "dynamic_structure",
-                                "selected_option_field",
+                                "user_input", "page_default", "constant", "system_time",
+                                "system_generated", "computed", "current_user",
+                                "dynamic_structure", "selected_option_field",
                             }
+                            or _param_has_editable_control_evidence(sibling)
                             or _looks_user_entered_business_field(
                                 sibling.key, sibling.path,
                             )

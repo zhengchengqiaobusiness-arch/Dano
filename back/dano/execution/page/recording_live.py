@@ -2705,8 +2705,28 @@ def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
     _apply_link_sources(spec.steps, spec.links)
 
 
+def _is_auto_capability_kind_slug(name: str) -> bool:
+    """Family slugs written by ``ensure_recorded_goal`` are not operator names."""
+    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
+
+    normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
+    if not normalized:
+        return False
+    return normalized in {
+        re.sub(r"[^a-z0-9]+", "", item.casefold())
+        for item in (*ALLOWED_CAPABILITY_KINDS, "query")
+    }
+
+
 def _live_capability_kind_hint(name: str) -> str:
     """Read an operation hint from a Pi-authored public capability name."""
+    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
+
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").casefold()).strip("_")
+    if slug == "query":
+        return "query_status"
+    if slug in ALLOWED_CAPABILITY_KINDS:
+        return slug
     value = str(name or "").casefold()
     hints = (
         ("withdraw", ("withdraw", "revoke", "cancel", "撤回", "撤销")),
@@ -2810,8 +2830,9 @@ def _goal_capability_names(spec, contract: dict) -> list[str]:  # noqa: ANN001
     goal = spec.goal if isinstance(spec.goal, dict) else {}
     for value in goal.get("capabilities") or []:
         name = str(value or "").strip()
-        if name and name not in names:
-            names.append(name)
+        if not name or name in names or _is_auto_capability_kind_slug(name):
+            continue
+        names.append(name)
         if expected_count and len(names) >= expected_count:
             break
     return names[:expected_count] if expected_count else names
@@ -2822,8 +2843,11 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     from dano.execution.page.flow_spec import (
         _capability_operation_kind,
         _grounded_read_operation_steps,
+        _is_technical_business_title,
+        _page_context_business_name,
         _public_capability_anchor_step_ids,
         _read_status_steps,
+        _step_has_stable_record_identity,
     )
 
     anchor_ids = _public_capability_anchor_step_ids(spec)
@@ -2837,7 +2861,7 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         if contract else [
             str(value).strip()
             for value in (goal.get("capabilities") or [])
-            if str(value).strip()
+            if str(value).strip() and not _is_auto_capability_kind_slug(str(value))
         ]
     )
     expected_count = int(contract.get("expected_count") or 0)
@@ -2848,11 +2872,17 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
     unresolved_items: list[dict] = []
     action_labels = {
         "query_status": "查询", "inspect": "查看", "preview": "预览",
-        "export": "导出", "create": "创建", "update": "更新",
+        "export": "导出", "create": "新增", "update": "更新",
         "save_draft": "暂存", "submit": "提交", "approve": "审批",
         "reject": "驳回", "withdraw": "撤回", "delete": "删除",
     }
-    business = str(spec.title or "业务").strip() or "业务"
+    page_business = _page_context_business_name(spec)
+    spec_title = str(spec.title or "").strip()
+    business = (
+        page_business
+        or (spec_title if spec_title and not _is_technical_business_title(spec_title) else "")
+        or "业务"
+    )
     # The strong target may have come from ``spec.goal.capabilities`` even
     # when the editable goal text only supplied a count.  Those accepted
     # target slots are equally authoritative for public titles.
@@ -2888,22 +2918,6 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
             )
         return terms
 
-    def has_stable_record_identity(step) -> bool:  # noqa: ANN001
-        """Distinguish an edit of an existing record from a new submission."""
-        identity_keys = {
-            "id", "recordid", "requestid", "applicationid",
-            "businessid", "entityid", "itemid",
-        }
-        for param in step.params or []:
-            terminal = re.split(r"[.\[\]]+", str(param.path or param.key or ""))[-1]
-            normalized = re.sub(r"[^a-z0-9]+", "", terminal.casefold())
-            if normalized not in identity_keys:
-                continue
-            value = param.value
-            if value is not None and str(value).strip().casefold() not in {"", "null", "undefined"}:
-                return True
-        return False
-
     def semantic_match_position(target: str) -> int | None:
         if not target:
             return 0
@@ -2919,11 +2933,11 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
         ]
         stable_write_positions = [
             position for position in write_positions
-            if has_stable_record_identity(candidate_steps[position])
+            if _step_has_stable_record_identity(candidate_steps[position])
         ]
         new_write_positions = [
             position for position in write_positions
-            if not has_stable_record_identity(candidate_steps[position])
+            if not _step_has_stable_record_identity(candidate_steps[position])
         ]
         # A stable record identity separates editing an existing record from
         # creating/submitting a new one even when both commands share the same
@@ -2948,12 +2962,12 @@ def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
                 score += 30
             if hinted_kind and _capability_operation_kind(step) == hinted_kind:
                 score += 10
-            if hinted_kind == "update" and has_stable_record_identity(step):
+            if hinted_kind == "update" and _step_has_stable_record_identity(step):
                 score += 40
             elif (
                 hinted_kind in {"create", "submit"}
                 and _capability_operation_kind(step) == "submit"
-                and not has_stable_record_identity(step)
+                and not _step_has_stable_record_identity(step)
             ):
                 score += 8
             scored.append((score, position))

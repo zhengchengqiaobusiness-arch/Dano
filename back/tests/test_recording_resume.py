@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -115,6 +116,85 @@ async def test_dispatch_works_without_capture() -> None:
     await session.dispatch({"type": "cancel"})
     with pytest.raises(ValueError, match="没有页面录制"):
         await session.dispatch({"type": "input", "event": {}})
+
+
+class _FakeCapture:
+    def captured_all_requests(self):
+        return [{"request_id": "req_1"}]
+
+    async def flush_recording(self) -> None:
+        return None
+
+    def pause_recording(self) -> None:
+        return None
+
+    def recorded_page_events(self):
+        return []
+
+    def recorded_field_evidence(self):
+        return []
+
+    def recorded_page_enum_options(self):
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_live_analysis_stays_off_until_enabled() -> None:
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=lambda _fresh: (_ for _ in ()).throw(AssertionError("未开分析不得启动 Pi")),
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    session.capture = _FakeCapture()
+    session.workflow = RecordingWorkflow(
+        WorkflowSnapshot(run_id="r1", action="action_1", status=WorkflowStatus.RECORDING),
+        FakePipeline(),
+    )
+
+    async def _noop_drain() -> None:
+        return None
+
+    session._drain_live = _noop_drain  # type: ignore[method-assign]
+    session._schedule_live("recording_started")
+    assert session._live_task is None
+    assert session._live_pending_reason == ""
+
+    await session.dispatch({"type": "set_analysis_mode", "machine_verification": True})
+    assert session._machine_verification is True
+    assert session._live_pending_reason == "analysis_enabled"
+    assert session._live_task is not None
+    await session._live_task
+
+    await session.dispatch({"type": "set_analysis_mode", "machine_verification": False})
+    assert session._machine_verification is False
+    session._live_task = None
+    session._schedule_live("request_batch")
+    assert session._live_task is None
+    assert session._live_pending_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_freeze_without_analysis_does_not_drain_live() -> None:
+    started = {"pi": False}
+
+    async def pi_factory(_fresh):
+        started["pi"] = True
+        raise AssertionError("未开分析不得启动 Pi")
+
+    session = RecordingGatewaySession(
+        config=_config(),
+        send=_send,
+        pi_factory=pi_factory,
+        publisher=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()),
+    )
+    session.capture = _FakeCapture()
+    session._machine_verification = False
+    session._live_pending_reason = "request_batch"
+    await session._freeze_capture()
+    assert session._capture_frozen is True
+    assert session._live_pending_reason == ""
+    assert started["pi"] is False
 
 
 @pytest.mark.asyncio
@@ -417,14 +497,13 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "继续优化" not in recorder
     stage = recorder[recorder.index("function pageStage"):recorder.index("function recorderWebSocketUrl")]
     assert "if (resumeOnly) return 2" in stage
-    assert 'if (["recording", "processing", "waiting_operator"].includes(status)) return 1' in stage
-    assert "verificationLive" not in stage
-    assert "return 0;" in stage
-    assert 'return 2;' not in stage.replace("if (resumeOnly) return 2;", "")
+    assert "verificationLive" in stage
+    assert '["recording", "processing", "waiting_operator"].includes(status)' in stage
+    assert "return 2" in stage
     receiver = recorder[recorder.index("function receiveSnapshot"):recorder.index("function openRecordingSocket")]
-    assert 'next.status === "waiting_operator"' not in receiver
-    assert "setViewStage(2)" not in receiver
-    assert "可在历史中继续分析" in receiver
+    assert "machineVerificationRef.current" in receiver
+    assert "setViewStage(2)" in receiver
+    assert "可在历史中继续分析" not in recorder
     assert 'title: "Skill"' in recorder
     assert "产出时间" in recorder
     assert 'title: "执行状态"' not in recorder
@@ -448,7 +527,10 @@ def test_setup_history_does_not_autostart_recording() -> None:
     assert "正在终止" in recorder
     gateway = (Path(__file__).resolve().parents[1] / "dano" / "gateway" / "app.py").read_text(encoding="utf-8")
     assert "restart=init.get(\"restart\") is True" in gateway
-    assert "分析日志" in recorder
+    assert "实时分析模式" in recorder
+    assert "analysisMode" in recorder
+    assert 'type: "set_analysis_mode"' in recorder
+    assert "machine_verification: machineVerificationRef.current" in recorder
     assert "recording_result_saved" in recorder
     assert "setInterval" not in recorder
     history_load = recorder.split("setHistoryLoading(true)", 1)[1].split("}, [tenant, subsystem]);", 1)[0]

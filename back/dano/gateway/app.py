@@ -1153,6 +1153,7 @@ async def record_ws(ws: WebSocket) -> None:
             base_url=str(init.get("base_url") or ""),
             token=str(init.get("token") or ""),
             storage_state=init.get("storage_state") or None,
+            analysis_mode=init.get("machine_verification") is True,
         )
         if resume_draft is not None:
             session = await _recording_session_registry.attach_or_resume(

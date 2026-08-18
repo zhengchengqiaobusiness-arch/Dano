@@ -14,9 +14,11 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     READ_CAPABILITY_KINDS,
     WRITE_CAPABILITY_KINDS,
+    _apply_semantic_business_understanding,
     _capability_operation_kind,
     _default_capability_nodes,
     executable_flow_links,
+    _step_has_stable_record_identity,
     _write_contract_is_batch,
     _semantic_plan_coverage,
     _stable_json_hash,
@@ -222,19 +224,7 @@ def _compiled_nodes(step_ids: list[str], anchor_step_id: str) -> list[dict[str, 
 
 
 def _has_stable_record_identity(step: FlowStep) -> bool:
-    identity_keys = {
-        "id", "recordid", "requestid", "applicationid",
-        "businessid", "entityid", "itemid",
-    }
-    for param in step.params or []:
-        terminal = re.split(r"[.\[\]]+", str(param.path or param.key or ""))[-1]
-        normalized = re.sub(r"[^a-z0-9]+", "", terminal.casefold())
-        if normalized not in identity_keys:
-            continue
-        value = param.value
-        if value is not None and str(value).strip().casefold() not in {"", "null", "undefined"}:
-            return True
-    return False
+    return _step_has_stable_record_identity(step)
 
 
 def _goal_update_is_grounded_by_sibling_create(
@@ -483,6 +473,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         if relation.from_capability in valid_refs and relation.to_capability in valid_refs
     ]
     current = _sync_capability_io_schemas(current)
+    current = _apply_semantic_business_understanding(current, plan)
     audit = {
         "protocol": "dano.capability_compilation.v1",
         "planned": len(plan_items),

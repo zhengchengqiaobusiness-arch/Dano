@@ -230,6 +230,24 @@ def _field_match_score(aliases: set[str], wire_path: str) -> int:
     return 1 if leaf and leaf in aliases else 0
 
 
+def _is_array_row_only_ambiguity(items: list[tuple[str, str]]) -> bool:
+    """Return True when every candidate path is the same field in different array rows.
+
+    e.g. [body.items[0].productBarCode, body.items[1].productBarCode] differ only in
+    the numeric array index — they represent the same structural field repeated per row.
+    Collapsing them to the first row is safe because the DOM evidence describes one
+    interaction, not N simultaneous interactions.
+
+    ``items`` is a list of (request_id, wire_path) tuples, matching the keys
+    of the ``unique`` / ``structural_unique`` dicts.
+    """
+    if len(items) < 2:
+        return False
+    paths = [item[1] for item in items]  # wire_path is the second element
+    stripped = {re.sub(r"\[\d+\]", "[*]", p) for p in paths}
+    return len(stripped) == 1
+
+
 def _causal_match(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
     evidence_action = str(evidence.get("action_id") or "")
     evidence_transaction = str(evidence.get("transaction_id") or "")
@@ -454,10 +472,23 @@ def bind_field_evidence(
             (item["request_id"], item["wire_path"]): item
             for item in selected
         }
+        # When every selected candidate represents the same field name repeated
+        # across array rows (e.g. body.items[0].productBarCode vs [1].productBarCode),
+        # treat it as a unique structural match and bind to the first row.  A
+        # DOM fill event describes one interaction, not N simultaneous writes.
+        if len(unique) != 1 and _is_array_row_only_ambiguity(list(unique)):
+            first_key = min(unique)
+            unique = {first_key: unique[first_key]}
+            if not binding_method:
+                binding_method = "array_row_leaf_match"
         structural_unique = {
             (item["request_id"], item["wire_path"]): item
             for item in candidates
         }
+        # Same array-row collapse for structural_unique (used for ambiguity status)
+        if len(structural_unique) != 1 and _is_array_row_only_ambiguity(list(structural_unique)):
+            first_key = min(structural_unique)
+            structural_unique = {first_key: structural_unique[first_key]}
         public_candidates = [
             {"request_id": request_id, "wire_path": wire_path}
             for request_id, wire_path in sorted(structural_unique)

@@ -366,12 +366,12 @@ function activityDisplay(item: { status: string; label: string }) {
   return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
 }
 
-function pageStage(status: WorkflowStatus, resumeOnly = false) {
-  // 能力结果只从历史「继续分析」进入。停止录制即使已发布，也回到准备页。
+function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
   if (resumeOnly) return 2;
   if (status === "idle") return 0;
+  if (verificationLive && ["processing", "waiting_operator"].includes(status)) return 2;
   if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
-  return 0;
+  return 2;
 }
 
 function recorderWebSocketUrl() {
@@ -513,7 +513,8 @@ export default function PageRecorder({
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
   const runBusy = (analysisRequested || connecting || processing) && !cancelling && status !== "cancelled";
-  const reachedStage = pageStage(status, resumeOnly);
+  const analysisMode = resumeOnly || machineVerification || analysisRequested;
+  const reachedStage = pageStage(status, resumeOnly, analysisMode && processing);
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -527,24 +528,13 @@ export default function PageRecorder({
   useEffect(() => {
     if (resumeOnly) {
       if (reachedStage >= 2) setKeepResult(true);
-    } else if (reachedStage >= 1) {
-      setKeepRecording(true);
+    } else {
+      if (reachedStage >= 1) setKeepRecording(true);
+      if (reachedStage >= 2) setKeepResult(true);
     }
-    if (reachedStage > reachedStageRef.current) {
-      setViewStage(reachedStage);
-    } else if (
-      !resumeOnly
-      && ["published", "editable", "failed", "cancelled"].includes(status)
-    ) {
-      setViewStage(0);
-      setKeepRecording(false);
-      setKeepResult(false);
-      setAssistantOpen(false);
-    }
-    if (status !== "idle" || resumeOnly) {
-      reachedStageRef.current = reachedStage;
-    }
-  }, [reachedStage, resumeOnly, status]);
+    if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
+    reachedStageRef.current = reachedStage;
+  }, [reachedStage, resumeOnly]);
 
   function appendThought(chunk: ThoughtChunk) {
     setThoughts((current) => {
@@ -792,14 +782,11 @@ export default function PageRecorder({
     setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
-    if (next.status === "published") setEditingResult(false);
-    if (
-      current?.status !== "published"
-      && next.status === "published"
-      && socketInitRef.current?.type === "start"
-    ) {
-      message.success("录制结果已保存，可在历史中继续分析");
+    if (next.status === "waiting_operator" && machineVerificationRef.current) {
+      setKeepResult(true);
+      setViewStage(2);
     }
+    if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
       finishRequestedRef.current = false;
       setFinishRequested(false);
@@ -922,6 +909,7 @@ export default function PageRecorder({
     activeResultIdRef.current = "";
     setActiveResultId("");
     setResumeOnly(false);
+    setAnalysisRequested(false);
     setKeepResult(false);
     setKeepRecording(true);
     setViewStage(1);
@@ -953,6 +941,7 @@ export default function PageRecorder({
       base_url: baseUrl.trim() || undefined,
       storage_state: parseStorageState(storageState),
       resume_action: action,
+      machine_verification: machineVerificationRef.current,
     };
 
     openRecordingSocket(action);
@@ -989,6 +978,8 @@ export default function PageRecorder({
     activeResultIdRef.current = item.id;
     setActiveResultId(item.id);
     setResumeOnly(true);
+    machineVerificationRef.current = true;
+    setMachineVerification(true);
     setKeepRecording(false);
     setKeepResult(true);
     setViewStage(2);
@@ -1540,6 +1531,9 @@ export default function PageRecorder({
                 onChange={(checked) => {
                   machineVerificationRef.current = checked;
                   setMachineVerification(checked);
+                  if (status === "recording") {
+                    send({ type: "set_analysis_mode", machine_verification: checked });
+                  }
                 }}
               />
               <Text>编译并进行机器验证</Text>
@@ -2387,7 +2381,7 @@ export default function PageRecorder({
         title={(
           <Space size={6}>
             <ThunderboltOutlined style={{ color: processing ? "#1677ff" : "#8c8c8c" }} />
-            <Text style={{ fontWeight: 500 }}>分析日志</Text>
+            <Text style={{ fontWeight: 500 }}>实时分析模式</Text>
             <Tag color={statusColor} style={{ fontSize: 11 }}>{statusLabel}</Tag>
             {snapshot?.progress.round
               ? <Text type="secondary" style={{ fontSize: 11 }}>第 {snapshot.progress.round} 轮</Text>
@@ -2429,9 +2423,11 @@ export default function PageRecorder({
   function renderResult() {
     return (
       <Card>
-        <div style={RESULT_STATUS_BOX_STYLE}>
-          {renderVerificationLog()}
-        </div>
+        {analysisMode ? (
+          <div style={RESULT_STATUS_BOX_STYLE}>
+            {renderVerificationLog()}
+          </div>
+        ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
             <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>

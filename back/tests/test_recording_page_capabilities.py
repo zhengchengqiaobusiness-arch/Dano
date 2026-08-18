@@ -1,0 +1,605 @@
+from __future__ import annotations
+
+import json
+from urllib.parse import urlparse
+
+from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.flow_spec import (
+    FlowSpec,
+    FlowStep,
+    ParamField,
+    _step_has_stable_record_identity,
+    to_flow_spec,
+)
+from dano.execution.page.recording_live import _semantic_plan_from_live_boundaries
+
+
+SALE_PAGE = {
+    "path": "/erp/sale/order",
+    "url": "http://admin.dianshixinxi.com:90/erp/sale/order",
+    "document_title": "销售订单",
+    "visible_titles": ["销售订单"],
+}
+LEAVE_PAGE = {
+    "path": "/office/leave",
+    "url": "http://example.test/office/leave",
+    "document_title": "请假申请",
+    "visible_titles": ["请假申请"],
+}
+
+
+def _control(
+    *,
+    request_id: str,
+    path: str,
+    label: str,
+    aliases: list[str],
+    kind: str,
+    value: str,
+    op: str = "",
+    required: bool = False,
+    read_only: bool = False,
+    page_context: dict | None = None,
+) -> dict:
+    return {
+        "label": label,
+        "value": value,
+        "control_kind": kind,
+        "field_aliases": aliases,
+        "required": required,
+        "required_observed": required,
+        "binding_status": "bound",
+        "op": op,
+        "read_only": read_only,
+        "request_id": request_id,
+        "wire_path": path if path.startswith(("body.", "query.")) else f"body.{path}",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": page_context or SALE_PAGE,
+    }
+
+
+def _option_get(
+    request_id: str,
+    path: str,
+    rows: list[dict],
+    sequence: int,
+    page_context: dict | None = None,
+) -> dict:
+    return {
+        "request_id": request_id,
+        "sequence": sequence,
+        "method": "GET",
+        "url": f"http://admin.dianshixinxi.com:90{path}",
+        "response_status": 200,
+        "response_json": {"data": rows},
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": page_context or SALE_PAGE,
+        "_request_role": {"role": "read_option", "keep": False, "confidence": 0.99},
+    }
+
+
+def _enum(label: str, aliases: list[str], selected: str, page_context: dict | None = None) -> dict:
+    return {
+        "field_key": label,
+        "field_aliases": aliases,
+        "control_kind": "select",
+        "selected": selected,
+        "selected_label": selected,
+        "mapping_complete": True,
+        "options": [{"label": selected}, {"label": f"{selected}-alt"}],
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": page_context or SALE_PAGE,
+    }
+
+
+def _compile(spec: FlowSpec) -> FlowSpec:
+    plan = _semantic_plan_from_live_boundaries(spec)
+    assert plan.get("unresolved_items") in (None, [])
+    compiled = compile_capabilities(spec, plan)
+    assert compiled.errors == []
+    return compiled.spec
+
+
+def _by_kind(spec: FlowSpec) -> dict[str, object]:
+    return {capability.kind: capability for capability in spec.capabilities}
+
+
+def _ref_path(value: str) -> str:
+    raw = str(value or "")
+    parsed = urlparse(raw)
+    return parsed.path or raw.split("?", 1)[0]
+
+
+def _execute_paths(capability) -> list[str]:
+    return [
+        _ref_path(ref.path)
+        for ref in (capability.request_refs or [])
+        if ref.usage == "execute"
+    ]
+
+
+def _option_paths(capability) -> list[str]:
+    return [
+        _ref_path(ref.path)
+        for ref in (capability.request_refs or [])
+        if ref.usage == "option_source"
+    ]
+
+
+def _schema(capability) -> tuple[dict, list[str]]:
+    schema = capability.input_schema or {}
+    return dict(schema.get("properties") or {}), list(schema.get("required") or [])
+
+
+def _sale_order_spec(*, price_op: str = "", include_inspect: bool = False) -> FlowSpec:
+    body = {
+        "customerId": 5,
+        "accountId": 2,
+        "saleUserId": 165,
+        "orderTime": 1785513600000,
+        "remark": "1",
+        "discountPercent": 110,
+        "discountPrice": 6600,
+        "totalPrice": -600,
+        "depositPrice": 1110,
+        "items": [{
+            "productId": 3,
+            "productUnitName": "台",
+            "productBarCode": "0101010101",
+            "productPrice": 6000,
+            "stockCount": 924.5,
+            "count": 1,
+            "totalProductPrice": 6000,
+            "taxPrice": None,
+            "totalPrice": 6000,
+        }],
+    }
+    query = {
+        "pageNo": ["1"],
+        "pageSize": ["10"],
+        "no": ["1"],
+        "customerId": ["5"],
+        "productId": ["3"],
+        "orderTime[0]": ["2026-08-07 00:00:00"],
+        "orderTime[1]": ["2026-08-08 23:59:59"],
+        "status": ["10"],
+        "remark": ["1"],
+        "creator": ["100"],
+        "outStatus": ["0"],
+        "returnStatus": ["1"],
+    }
+    query_fields = [
+        ("no", "订单单号", "text", "1"),
+        ("customerId", "客户", "select", "甲公司"),
+        ("productId", "产品", "select", "主机"),
+        ("orderTime[0]", "开始日期", "date", "2026-08-07"),
+        ("orderTime[1]", "结束日期", "date", "2026-08-08"),
+        ("status", "状态", "select", "未审核"),
+        ("remark", "备注", "text", "1"),
+        ("creator", "创建人", "select", "管理员"),
+        ("outStatus", "出库数量", "select", "未出库"),
+        ("returnStatus", "退货数量", "select", "未退货"),
+    ]
+    return to_flow_spec(
+        captured_requests=[
+            _option_get("req_customer", "/admin-api/erp/customer/simple-list", [
+                {"id": 5, "name": "甲公司"}, {"id": 6, "name": "乙公司"},
+            ], 1),
+            _option_get("req_account", "/admin-api/erp/account/simple-list", [
+                {"id": 2, "name": "基本户"}, {"id": 3, "name": "现金"},
+            ], 2),
+            _option_get("req_user", "/admin-api/system/user/simple-list", [
+                {"id": 165, "name": "李四"}, {"id": 166, "name": "王五"},
+            ], 3),
+            _option_get("req_product", "/admin-api/erp/product/simple-list", [
+                {
+                    "id": 3, "name": "主机", "productBarCode": "0101010101",
+                    "productUnitName": "台", "stockCount": 924.5, "productPrice": 6000,
+                },
+                {
+                    "id": 4, "name": "配件", "productBarCode": "0202020202",
+                    "productUnitName": "件", "stockCount": 12, "productPrice": 80,
+                },
+            ], 4),
+            {
+                "request_id": "req_tenant",
+                "sequence": 5,
+                "method": "GET",
+                "url": "http://admin.dianshixinxi.com:90/admin-api/system/tenant/simple-list",
+                "response_status": 200,
+                "response_json": {"data": [{"id": 1, "name": "未退货"}, {"id": 2, "name": "部分退货"}]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": SALE_PAGE,
+                "_request_role": {"role": "read_option", "keep": False, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_query",
+                "sequence": 6,
+                "method": "GET",
+                "url": "http://admin.dianshixinxi.com:90/admin-api/erp/sale-order/page",
+                "query": query,
+                "response_status": 200,
+                "response_json": {"data": {"list": [{"id": 1, "no": "SO-1"}], "total": 1}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": SALE_PAGE,
+                "trigger_op": "click",
+                "trigger_locator": "text=搜索",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_export",
+                "sequence": 7,
+                "method": "GET",
+                "url": "http://admin.dianshixinxi.com:90/admin-api/erp/sale-order/export-excel",
+                "query": {"no": ["1"], "customerId": ["5"]},
+                "response_status": 200,
+                "response_json": {"data": "ok"},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": SALE_PAGE,
+                "trigger_op": "click",
+                "trigger_locator": "text=确定",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_write",
+                "sequence": 8,
+                "method": "POST",
+                "url": "http://admin.dianshixinxi.com:90/admin-api/erp/sale-order/create",
+                "post_data": json.dumps(body, ensure_ascii=False),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": SALE_PAGE,
+                "trigger_op": "click",
+                "trigger_locator": "text=确定",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+            *(
+                [{
+                    "request_id": "req_detail",
+                    "sequence": 9,
+                    "method": "GET",
+                    "url": "http://admin.dianshixinxi.com:90/admin-api/erp/sale-order/get?id=40",
+                    "query": {"id": ["40"]},
+                    "response_status": 200,
+                    "response_json": {"data": {"id": 40, "no": "SO-1"}},
+                    "page_id": "page_1",
+                    "frame_id": "frame_1",
+                    "page_context": SALE_PAGE,
+                    "trigger_op": "click",
+                    "trigger_locator": "text=详情",
+                    "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+                }]
+                if include_inspect else []
+            ),
+        ],
+        field_evidence=[
+            *(
+                _control(
+                    request_id="req_query", path=f"query.{path}", label=label,
+                    aliases=[path.split("[")[0]], kind=kind, value=value,
+                )
+                for path, label, kind, value in query_fields
+            ),
+            _control(
+                request_id="req_write", path="body.customerId", label="客户",
+                aliases=["customerId"], kind="select", value="甲公司", op="select", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.accountId", label="结算账户",
+                aliases=["accountId"], kind="select", value="基本户", op="select",
+            ),
+            _control(
+                request_id="req_write", path="body.saleUserId", label="销售人员",
+                aliases=["saleUserId"], kind="select", value="李四", op="select",
+            ),
+            _control(
+                request_id="req_write", path="body.orderTime", label="订单时间",
+                aliases=["orderTime"], kind="datetime", value="2026-08-01", op="fill", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.remark", label="备注",
+                aliases=["remark"], kind="text", value="1", op="fill",
+            ),
+            _control(
+                request_id="req_write", path="body.discountPercent", label="优惠率",
+                aliases=["discountPercent"], kind="number", value="110", op="fill",
+            ),
+            _control(
+                request_id="req_write", path="body.depositPrice", label="收取订金",
+                aliases=["depositPrice"], kind="number", value="1110", op="fill",
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].productId", label="产品名称",
+                aliases=["productId"], kind="select", value="主机", op="select", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].count", label="数量",
+                aliases=["count"], kind="number", value="1", op="fill", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].productPrice", label="产品单价",
+                aliases=["productPrice"], kind="number", value="6000", op=price_op,
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].productBarCode", label="条码",
+                aliases=["productBarCode"], kind="text", value="0101010101", read_only=True,
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].productUnitName", label="单位",
+                aliases=["productUnitName"], kind="text", value="台", read_only=True,
+            ),
+            _control(
+                request_id="req_write", path="body.items[0].stockCount", label="库存",
+                aliases=["stockCount"], kind="number", value="924.5", read_only=True,
+            ),
+        ],
+        page_enum_options={
+            "客户": _enum("客户", ["customerId"], "甲公司"),
+            "退货数量": {
+                **_enum("退货数量", ["returnStatus"], "未退货"),
+                "mapping_complete": False,
+            },
+        },
+        page_context=SALE_PAGE,
+        samples={
+            "客户": "甲公司",
+            "结算账户": "基本户",
+            "销售人员": "李四",
+            "备注": "1",
+        },
+    )
+
+
+def test_line_item_id_is_not_document_record_identity() -> None:
+    line_only = FlowStep(
+        step_id="create",
+        method="POST",
+        params=[
+            ParamField(path="items[0].itemId", key="itemId", value="3"),
+            ParamField(path="items[0].count", key="count", value="1"),
+        ],
+    )
+    assert _step_has_stable_record_identity(line_only) is False
+
+    document = FlowStep(
+        step_id="update",
+        method="PUT",
+        params=[ParamField(path="id", key="id", value="9")],
+    )
+    assert _step_has_stable_record_identity(document) is True
+
+
+def test_sale_order_page_compiles_query_export_and_create() -> None:
+    spec = _compile(_sale_order_spec())
+    by_kind = _by_kind(spec)
+
+    assert spec.title == "销售订单"
+    assert set(by_kind) == {"query_status", "export", "create"}
+    assert all("销售订单" in str(capability.title or "") for capability in spec.capabilities)
+
+    query = by_kind["query_status"]
+    export = by_kind["export"]
+    create = by_kind["create"]
+
+    assert _execute_paths(query) == ["/admin-api/erp/sale-order/page"]
+    assert _execute_paths(export) == ["/admin-api/erp/sale-order/export-excel"]
+    assert _execute_paths(create) == ["/admin-api/erp/sale-order/create"]
+    assert all("/export-excel" not in path for path in _execute_paths(query))
+    assert all("/sale-order/page" not in path for path in _execute_paths(create))
+    assert all("/sale-order/create" not in path for path in _execute_paths(query))
+
+    option_paths = _option_paths(create)
+    assert any(path.endswith("/erp/customer/simple-list") for path in option_paths)
+    assert any(path.endswith("/erp/product/simple-list") for path in option_paths)
+    assert any(path.endswith("/erp/account/simple-list") for path in option_paths)
+    assert any(path.endswith("/system/user/simple-list") for path in option_paths)
+    assert all("tenant/simple-list" not in path for path in option_paths)
+    assert all(ref.usage != "execute" for ref in create.request_refs if "simple-list" in str(ref.path or ""))
+
+
+def test_sale_order_query_schema_keeps_filters_not_pagination() -> None:
+    spec = _compile(_sale_order_spec())
+    props, required = _schema(_by_kind(spec)["query_status"])
+
+    assert "pageNo" not in props
+    assert "pageSize" not in props
+    assert props["no"]["label"] == "订单单号"
+    assert props["customerId"]["label"] == "客户"
+    assert props["productId"]["label"] == "产品"
+    assert props["orderTime[0]"]["label"] == "开始日期"
+    assert props["orderTime[1]"]["label"] == "结束日期"
+    assert props["status"]["label"] == "状态"
+    assert props["remark"]["label"] == "备注"
+    assert props["creator"]["label"] == "创建人"
+    assert props["outStatus"]["label"] == "出库数量"
+    assert props["returnStatus"]["label"] == "退货数量"
+    assert required == []
+    assert "tenant" not in str(props["returnStatus"].get("x-dano-option-source") or {}).lower()
+
+
+def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
+    spec = _compile(_sale_order_spec())
+    write = next(step for step in spec.steps if (step.method or "").upper() == "POST")
+    params = {param.path: param for param in write.params}
+    props, required = _schema(_by_kind(spec)["create"])
+
+    assert params["customerId"].source_kind == "api_option"
+    assert params["customerId"].label == "客户"
+    assert params["saleUserId"].source_kind != "current_user"
+    assert params["saleUserId"].label == "销售人员"
+    assert params["items[0].productId"].source_kind == "api_option"
+    for path in (
+        "items[0].productBarCode",
+        "items[0].productUnitName",
+        "items[0].stockCount",
+    ):
+        assert params[path].source_kind == "selected_option_field"
+        assert params[path].exposed_to_user is False
+        assert params[path].key == path.split(".")[-1]
+    assert params["items[0].productPrice"].source_kind == "page_default"
+    assert params["items[0].productPrice"].exposed_to_user is False
+    for path in ("discountPrice", "totalPrice", "items[0].totalProductPrice", "items[0].totalPrice"):
+        assert params[path].source_kind == "computed"
+        assert params[path].exposed_to_user is False
+    assert params["items[0].count"].key == "count"
+    assert params["items[0].count"].label == "数量"
+    assert params["items[0].count"].exposed_to_user is True
+
+    assert set(props) == {
+        "customerId", "accountId", "saleUserId", "orderTime",
+        "remark", "discountPercent", "depositPrice", "productId", "count",
+    }
+    assert props["customerId"]["label"] == "客户"
+    assert props["saleUserId"]["label"] == "销售人员"
+    assert props["depositPrice"]["label"] == "收取订金"
+    assert props["count"]["label"] == "数量"
+    assert set(required) == {"customerId", "orderTime", "productId", "count"}
+    for hidden in (
+        "productBarCode", "productUnitName", "stockCount", "productPrice",
+        "discountPrice", "totalPrice", "totalProductPrice", "taxPrice",
+    ):
+        assert hidden not in props
+
+
+def test_edited_unit_price_stays_caller_input() -> None:
+    spec = _compile(_sale_order_spec(price_op="fill"))
+    write = next(step for step in spec.steps if (step.method or "").upper() == "POST")
+    params = {param.path: param for param in write.params}
+    props, _required = _schema(_by_kind(spec)["create"])
+
+    assert params["items[0].productPrice"].source_kind == "user_input"
+    assert params["items[0].productPrice"].exposed_to_user is True
+    assert props["productPrice"]["label"] == "产品单价"
+
+
+def test_sale_order_detail_compiles_inspect() -> None:
+    spec = _compile(_sale_order_spec(include_inspect=True))
+    by_kind = _by_kind(spec)
+    assert set(by_kind) >= {"query_status", "export", "create", "inspect"}
+    assert _execute_paths(by_kind["inspect"]) == ["/admin-api/erp/sale-order/get"]
+    assert all("/sale-order/get" not in path for path in _execute_paths(by_kind["create"]))
+    assert all("/sale-order/get" not in path for path in _execute_paths(by_kind["query_status"]))
+
+
+def test_leave_page_still_splits_query_and_create() -> None:
+    begin = 1_785_513_600_000
+    finish = begin + 3 * 86_400_000
+    spec = _compile(to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_kind",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/api/office/kind/simple-list",
+                "response_status": 200,
+                "response_json": {"data": [{"id": 2, "name": "年假"}, {"id": 3, "name": "事假"}]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": LEAVE_PAGE,
+                "_request_role": {"role": "read_option", "keep": False, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_query",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://example.test/api/office/leave/page",
+                "query": {"pageNo": ["1"], "pageSize": ["10"], "keyword": ["回家"], "status": ["0"]},
+                "response_status": 200,
+                "response_json": {"data": {"list": [], "total": 0}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": LEAVE_PAGE,
+                "trigger_op": "click",
+                "trigger_locator": "text=查询",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_write",
+                "sequence": 3,
+                "method": "POST",
+                "url": "http://example.test/api/office/leave/create",
+                "post_data": json.dumps({
+                    "kindId": 2,
+                    "beginAt": begin,
+                    "finishAt": finish,
+                    "span": 3,
+                    "comment": "回家",
+                }),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": LEAVE_PAGE,
+                "trigger_op": "click",
+                "trigger_locator": "text=提交",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+        ],
+        field_evidence=[
+            _control(
+                request_id="req_query", path="query.keyword", label="关键字",
+                aliases=["keyword"], kind="text", value="回家", op="fill",
+                page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_query", path="query.status", label="状态",
+                aliases=["status"], kind="select", value="待审批",
+                page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_write", path="body.kindId", label="请假类型",
+                aliases=["kindId"], kind="select", value="年假", op="select",
+                required=True, page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_write", path="body.beginAt", label="开始日期",
+                aliases=["beginAt"], kind="date", value="2026-08-01", op="fill",
+                required=True, page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_write", path="body.finishAt", label="结束日期",
+                aliases=["finishAt"], kind="date", value="2026-08-04", op="fill",
+                required=True, page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_write", path="body.span", label="天数",
+                aliases=["span"], kind="number", value="3",
+                read_only=True, page_context=LEAVE_PAGE,
+            ),
+            _control(
+                request_id="req_write", path="body.comment", label="事由",
+                aliases=["comment"], kind="textarea", value="回家", op="fill",
+                required=True, page_context=LEAVE_PAGE,
+            ),
+        ],
+        page_enum_options={"请假类型": _enum("请假类型", ["kindId"], "年假", LEAVE_PAGE)},
+        page_context=LEAVE_PAGE,
+        samples={"请假类型": "年假", "事由": "回家"},
+    ))
+    by_kind = _by_kind(spec)
+
+    assert spec.title == "请假申请"
+    assert set(by_kind) == {"query_status", "submit"}
+    assert _execute_paths(by_kind["query_status"]) == ["/api/office/leave/page"]
+    assert _execute_paths(by_kind["submit"]) == ["/api/office/leave/create"]
+
+    query_props, query_required = _schema(by_kind["query_status"])
+    assert "pageNo" not in query_props
+    assert query_props["keyword"]["label"] == "关键字"
+    assert query_props["status"]["label"] == "状态"
+    assert query_required == []
+
+    create_props, create_required = _schema(by_kind["submit"])
+    assert set(create_props) == {"kindId", "beginAt", "finishAt", "comment"}
+    assert create_props["kindId"]["label"] == "请假类型"
+    assert create_props["comment"]["label"] == "事由"
+    assert set(create_required) == {"kindId", "beginAt", "finishAt", "comment"}
+    assert "span" not in create_props
