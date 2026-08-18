@@ -1986,6 +1986,9 @@ export default function PageRecorder({
             {snapshot?.progress.round ? <Text type="secondary">第 {snapshot.progress.round} 轮</Text> : null}
           </Space>
         )}
+        extra={processing || connecting ? (
+          <Button danger size="small" icon={<StopOutlined />} onClick={cancelProcessing}>终止</Button>
+        ) : null}
         style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
         styles={{
           body: {
@@ -2110,6 +2113,9 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
+              {processing || connecting ? (
+                <Button danger icon={<StopOutlined />} onClick={cancelProcessing}>终止</Button>
+              ) : null}
               <Button
                 disabled={!draft || processing}
                 onClick={() => setEditingResult(true)}
