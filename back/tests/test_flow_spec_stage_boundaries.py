@@ -175,9 +175,16 @@ def test_new_internal_modules_do_not_import_flow_spec_facade() -> None:
             "flow_client_projection.py",
         }:
             continue
-        for module in _module_imports(path):
-            if module == "dano.execution.page.flow_spec":
-                offenders.append(rel)
+        tree = _parse(path)
+        for node in tree.body:
+            imported = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+            elif isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            for module in imported:
+                if module == "dano.execution.page.flow_spec":
+                    offenders.append(rel)
     assert offenders == [], offenders
 
 
