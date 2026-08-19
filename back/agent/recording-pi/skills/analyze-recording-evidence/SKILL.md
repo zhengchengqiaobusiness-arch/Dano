@@ -345,14 +345,26 @@ Stage seven repair uses `submit_recording_repair`, not a new capability plan.
    `reason` and `allowed_values` when present (for example
    `source_kind` must be one of `caller_input`, `constant`, `session`,
    `context`, `response_binding`, `computed`, `generated`).
-3. `mark_unverified` is not the default strategy. The orchestrator marks a
-   capability unverified after two repair dispatches. Do not spend a turn
-   marking items unverified just to clear the queue.
-4. Do not create new public capabilities, rebuild the FlowSpec, or empty the
-   capability list. Option sources and supporting reads stay members of the
-   existing execute capability (`preflight` / `option_source`).
+3. `mark_unverified` only records that the current attempt cannot prove a
+   target. It does not resolve the issue, does not make verification complete,
+   and must not be treated as a successful repair. After two no-progress
+   dispatches the orchestrator marks the capability `incomplete`, keeps the
+   issues, and does not publish.
+4. Do not create, delete, rename, or rebuild public capabilities, change
+   `name` / `title` / `intent` / `kind`, change the public execute anchor, or
+   empty the capability list. Option sources and supporting reads stay members
+   of the existing execute capability (`preflight` / `option_source` /
+   `fact_check`).
 5. For caller-supplied fields, the Skill op value is `caller_input`. Do not
-   write FlowSpec `user_input` in ops.
+   write FlowSpec `user_input` in ops. Do not guess caller input from an empty
+   recorded value.
+6. Do not self-report machine verification as passed, and do not decide to
+   publish. Python publishes only when backend evidence makes the Stage 7
+   verdict `publishable`.
+7. Stay inside the current capability group. Do not repair other capabilities
+   in the same turn. Do not pick a write readback outside the given candidate
+   list. Do not re-execute a write that already has passed or unknown outcome
+   evidence.
 
 ## Ask the operator only for irreducible business decisions
 
