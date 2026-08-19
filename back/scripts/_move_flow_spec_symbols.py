@@ -122,9 +122,12 @@ def free_names(segments: list[tuple[int, int, str, str]]) -> set[str]:
     return loaded - defined - set(dir(__import__("builtins")))
 
 
-def write_module(dest: Path, header: str, segments: list[tuple[int, int, str, str]], extras: list[str]) -> None:
+def write_module(dest: Path, header: str, segments: list[tuple[int, int, str, str]], extras: list[str], docstring: str = "") -> None:
     chunks = [text.rstrip() for _s, _e, text, _k in segments]
-    dest.write_text(header.rstrip() + "\n\n\n" + "\n\n\n".join(chunks) + "\n", encoding="utf-8")
+    prefix = header.rstrip()
+    if docstring:
+        prefix = f'"""{docstring}"""\n{prefix}'
+    dest.write_text(prefix + "\n\n\n" + "\n\n\n".join(chunks) + "\n", encoding="utf-8")
     if extras:
         print("lazy helpers expected from flow_spec:", ", ".join(extras))
 
@@ -164,7 +167,19 @@ def owner_names(owner: str) -> list[str]:
     for row in payload["symbols"].values():
         if row["owner"] == owner:
             names.append(row["name"])
-    # Unique while preserving first occurrence order.
+    return unique_names(names)
+
+
+def module_names(module: str) -> list[str]:
+    payload = json.loads(OWNERS.read_text(encoding="utf-8"))
+    names = []
+    for row in payload["symbols"].values():
+        if row["module"] == module:
+            names.append(row["name"])
+    return unique_names(names)
+
+
+def unique_names(names: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for name in names:
@@ -242,6 +257,8 @@ def peer_symbol_map() -> dict[str, str]:
         module = "dano.execution.page." + rel.with_suffix("").as_posix().replace("/", ".")
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for name in defined_locally(tree):
+            if name in {"_bind_flow_spec_helpers", "_PENDING_FLOW_SPEC_HELPERS"}:
+                continue
             mapping.setdefault(name, module)
     return mapping
 
@@ -274,6 +291,8 @@ def main() -> None:
     for item in raw_names:
         if item.startswith("owner:"):
             names.extend(owner_names(item.split(":", 1)[1]))
+        elif item.startswith("module:"):
+            names.extend(module_names(item.split(":", 1)[1]))
         else:
             names.append(item)
     dest = PAGE / f"{dest_mod.replace('.', '/')}.py"
@@ -288,6 +307,9 @@ def main() -> None:
     missing = sorted(set(names) - local)
     if missing:
         print("skip already-moved or absent:", ", ".join(missing))
+    if not wanted:
+        print("nothing to move")
+        return
     if use_closure:
         while True:
             segments = source_segments(lines, tree, wanted)
