@@ -1579,7 +1579,7 @@ export default function PageRecorder({
                 return (
                   <div>
                     <div>
-                      {(item.title || "").trim() || "未命名录制"}
+                      {(item.title || "").trim() || (item.goal_summary || "").trim() || "未命名录制"}
                       {published ? <Tag color="success" style={{ marginLeft: 8 }}>{published}</Tag> : null}
                     </div>
                     <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>

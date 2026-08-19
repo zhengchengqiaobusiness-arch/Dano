@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -17,8 +18,10 @@ from dano.execution.page.flow_spec import (
     ParamField,
     RequestFact,
     RequestFacts,
+    _semantic_plan_coverage,
     apply_flow_edits,
     apply_recording_agent_submission,
+    flow_spec_to_api_request,
     recording_agent_validation,
 )
 from dano.execution.page.recording_live import merge_live_agent_state
@@ -441,3 +444,123 @@ def test_leave_recording_materializes_all_eight_distinct_business_capabilities()
     }
     assert ("detail", "preflight") in refs_by_title["编辑草稿,草稿保存"]
     assert ("edit-detail", "preflight") in refs_by_title["编辑草稿,提交保存"]
+
+
+def test_unknown_origin_is_a_finished_field_contract() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="create",
+                method="POST",
+                path="/sale-order/create",
+                source_meta={"request_id": "req_create", "role": "business_write"},
+                params=[
+                    ParamField(
+                        path="body.note", key="note", label="备注", type="string",
+                        category="user_param", source_kind="user_input",
+                        required=False, exposed_to_user=True, value="hello",
+                    ),
+                    ParamField(
+                        path="body.hiddenToken", key="hiddenToken", label="hiddenToken",
+                        type="string", category="runtime_var", source_kind="unknown",
+                        required=False, exposed_to_user=False, value="tok-1",
+                    ),
+                ],
+            ),
+        ],
+    )
+    coverage = _semantic_plan_coverage(spec, {
+        "semantic_plan": {
+            "business_understanding": {"intent": "新增销售订单", "business_name": "销售订单"},
+            "capabilities": [{
+                "name": "create_sale_order",
+                "title": "新增销售订单",
+                "kind": "create",
+                "anchor_step_id": "create",
+                "request_refs": [{"step_id": "create", "usage": "execute"}],
+            }],
+            "unresolved_items": [],
+        },
+    })
+
+    assert "field_axis_contract" not in coverage["missing"]
+    assert coverage["complete"] is True
+
+
+def test_live_plan_keeps_capabilities_before_steps_materialize() -> None:
+    updated = asyncio.run(apply_recording_agent_submission(
+        FlowSpec(request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_86", method="GET", path="/sale-order/page"),
+            RequestFact(request_id="req_93", method="POST", path="/sale-order/create"),
+        ])),
+        submission=_two_capability_plan(),
+        mode="plan",
+    ))
+
+    validation = recording_agent_validation(updated)
+    stored = (updated.meta.get("capability_model") or {}).get("semantic_plan") or {}
+    assert [item["name"] for item in stored.get("capabilities") or []] == [
+        "query_purchase_orders", "create_purchase_order",
+    ]
+    assert updated.meta["capability_model"]["status"] == "awaiting_materialization"
+    assert validation["capability_plan_complete"] is True
+
+
+def test_unknown_request_leaves_do_not_block_stage_six_compile_or_publish() -> None:
+    live = FlowSpec(meta={
+        "capability_model": {
+            "status": "awaiting_materialization",
+            "semantic_plan": {
+                "business_understanding": {
+                    "intent": "新增销售订单",
+                    "business_name": "销售订单",
+                },
+                "capabilities": [{
+                    "name": "create_sale_order",
+                    "title": "新增销售订单",
+                    "kind": "create",
+                    "anchor_step_id": "req_create",
+                    "request_refs": [{"step_id": "req_create", "usage": "execute"}],
+                }],
+                "unresolved_items": [],
+            },
+        },
+    })
+    finalized = FlowSpec(
+        title="销售订单",
+        steps=[
+            FlowStep(
+                step_id="create",
+                method="POST",
+                path="/sale-order/create",
+                url="http://example.test/sale-order/create",
+                source_meta={"request_id": "req_create", "role": "business_write"},
+                body_source=json.dumps({"qty": 1, "hiddenToken": "tok-1"}),
+                params=[
+                    ParamField(
+                        path="body.qty", key="qty", label="数量", type="number",
+                        category="user_param", source_kind="page_default",
+                        required=False, exposed_to_user=True, editable=True,
+                        value=1,
+                    ),
+                    ParamField(
+                        path="body.hiddenToken", key="hiddenToken", label="hiddenToken",
+                        type="string", category="runtime_var", source_kind="unknown",
+                        required=False, exposed_to_user=False, value="tok-1",
+                    ),
+                ],
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_create", method="POST", path="/sale-order/create"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+    assert [capability.name for capability in merged.capabilities] == ["create_sale_order"]
+    api_request, errors = flow_spec_to_api_request(merged)
+    assert errors == []
+    assert api_request is not None
+    body = api_request.get("body_template") or {}
+    assert str(body.get("hiddenToken") or "") == "tok-1"
+    assert body.get("qty") == 1

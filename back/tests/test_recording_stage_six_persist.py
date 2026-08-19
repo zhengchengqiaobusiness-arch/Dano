@@ -8,6 +8,7 @@ import pytest
 from dano.assets.drafts import AssetDraft, DraftStore
 from dano.onboarding.recording_results import (
     persist_stage_six_result,
+    recording_display_title,
     recording_result_asset_key,
     recording_result_summary,
     stage_six_result_body,
@@ -95,6 +96,42 @@ async def test_saved_fingerprint_matches_stage_six_draft() -> None:
     assert saved.body["capability_count"] == 1
     assert saved.body["request_count"] == 2
     assert saved.body["flow_spec"]["capabilities"][0]["capability_id"] == "cap_submit"
+
+
+@pytest.mark.asyncio
+async def test_empty_capabilities_skip_direct_publish() -> None:
+    published: list[dict] = []
+    saved: list[dict] = []
+
+    async def persist(draft):  # noqa: ANN001
+        saved.append(dict(draft))
+
+    class Runtime:
+        async def prepare(self, seed, context):  # noqa: ANN001
+            return {
+                "title": "销售订单",
+                "capabilities": [],
+                "request_facts": {"requests": [{"request_id": "req_1"}]},
+            }
+
+        async def check(self, draft, context):  # noqa: ANN001
+            raise AssertionError("must not check")
+
+        async def repair(self, draft, issues, operator_answers, context):  # noqa: ANN001
+            raise AssertionError("must not repair")
+
+        async def publish(self, draft, context):  # noqa: ANN001
+            published.append(draft)
+            raise AssertionError("empty capabilities must not publish")
+
+    outcome = await SelfHealingPipeline(Runtime()).run(
+        PipelineSeed(kind="recording", machine_verification=False),
+        _context(persist_stage_six=persist),
+    )
+    assert outcome.status == WorkflowStatus.EDITABLE
+    assert saved
+    assert published == []
+    assert "尚未生成可发布能力" in outcome.error
 
 
 @pytest.mark.asyncio
@@ -205,6 +242,24 @@ async def test_edited_spec_resume_does_not_persist_again() -> None:
 
     assert outcome.status == WorkflowStatus.PUBLISHED
     assert saved == []
+
+
+def test_empty_user_title_uses_page_business_name() -> None:
+    draft = {
+        "title": "销售订单",
+        "meta": {
+            "page_context": {"document_title": "销售订单", "visible_titles": ["销售订单"]},
+            "capability_model": {
+                "semantic_plan": {
+                    "business_understanding": {"business_name": "销售订单"},
+                },
+            },
+        },
+        "capabilities": [{"capability_id": "cap_create", "name": "create_sale_order"}],
+        "request_facts": {"requests": [{"request_id": "req_1"}]},
+    }
+    assert recording_display_title(user_title="", draft=draft) == "销售订单"
+    assert recording_display_title(user_title="  我的技能  ", draft=draft) == "我的技能"
 
 
 def test_result_summary_omits_full_flow_spec() -> None:

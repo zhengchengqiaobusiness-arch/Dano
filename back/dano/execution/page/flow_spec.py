@@ -12403,7 +12403,7 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
             and str(param.label or param.key or "").strip()
             and str(param.type or "").strip().lower() not in {"", "unknown"}
             and str(param.category or "").strip().lower() not in {"", "unknown"}
-            and str(param.source_kind or "").strip().lower() not in {"", "unknown"}
+            and bool(str(param.source_kind or "").strip())
             and _field_source_configuration_advice(param) is None
             and isinstance(param.required, bool)
         )
@@ -14301,8 +14301,11 @@ async def orchestrate_flow_capabilities(
             "phase": "request_facts",
         }
     )
+    live_blocking_gaps = set(pre_materialization_coverage.get("missing") or []) & {
+        "capability_contracts", "capabilities", "goal_capability_count", "unresolved_blockers",
+    }
     pre_materialization_strict_plan = bool(
-        pre_materialization_candidate and pre_materialization_coverage.get("complete")
+        pre_materialization_candidate and not live_blocking_gaps
     )
     ignored_non_public_capabilities: list[str] = []
     if strict_semantic_submission and not pre_materialization_strict_plan:
@@ -14380,7 +14383,7 @@ async def orchestrate_flow_capabilities(
         item.get("name") and item.get("kind") and item.get("anchor_step_id")
         for item in planned_capability_contracts
     )
-    if strict_anchor_contract and not pre_materialization_strict_plan:
+    if strict_anchor_contract and not pre_materialization_strict_plan and current.steps:
         from dano.execution.page.capability_compiler import compile_capabilities
 
         compilation = compile_capabilities(current, effective_semantic_plan)
@@ -14416,7 +14419,7 @@ async def orchestrate_flow_capabilities(
             "pending": "request_materialization",
         }
         source = "strict_plan_awaiting_materialization"
-    elif strict_anchor_contract and not capability_compilation_errors:
+    elif strict_anchor_contract and not capability_compilation_errors and current.steps:
         proposal_accepted = True
         proposal_gate = {
             "accepted": True,
@@ -14486,28 +14489,33 @@ async def orchestrate_flow_capabilities(
     elif previous_strict_plan:
         semantic_plan = copy.deepcopy(previous_semantic_plan)
     else:
-        # Never synthesize a strict plan from an old/default capability.  Doing
-        # so would turn the fallback back into the apparent source of truth on
-        # the next analysis pass.
+        # Keep the last fact-addressable Skill plan. Wiping capabilities here
+        # made an incomplete live coverage check erase a complete submitted
+        # boundary set, so stage six compiled nothing and publish crashed.
+        kept_capabilities = [
+            copy.deepcopy(item)
+            for item in (effective_semantic_plan.get("capabilities") or [])
+            if isinstance(item, dict)
+        ]
+        unresolved_items = [
+            copy.deepcopy(item)
+            for item in (semantic_plan.get("unresolved_items") or [])
+            if isinstance(item, dict)
+        ]
+        if not kept_capabilities:
+            unresolved_items.append({
+                "type": "capability_plan",
+                "title": "需要严格能力边界计划",
+                "blocking": True,
+            })
         semantic_plan = {
             "business_understanding": (
                 copy.deepcopy(semantic_plan.get("business_understanding"))
                 if isinstance(semantic_plan.get("business_understanding"), dict)
                 else {}
             ),
-            "capabilities": [],
-            "unresolved_items": [
-                *[
-                    copy.deepcopy(item)
-                    for item in (semantic_plan.get("unresolved_items") or [])
-                    if isinstance(item, dict)
-                ],
-                {
-                    "type": "capability_plan",
-                    "title": "需要严格能力边界计划",
-                    "blocking": True,
-                },
-            ],
+            "capabilities": kept_capabilities,
+            "unresolved_items": unresolved_items,
         }
     semantic_coverage = (
         pre_materialization_coverage

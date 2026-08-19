@@ -376,7 +376,9 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         title = str(item.get("title") or name).strip()
         kind = str(item.get("kind") or "").strip()
         anchor_step_id = str(item.get("anchor_step_id") or "").strip()
-        anchor = by_step.get(anchor_step_id)
+        anchor = by_step.get(anchor_step_id) or by_request.get(anchor_step_id)
+        if anchor is not None:
+            anchor_step_id = anchor.step_id
         prefix = f"semantic_plan.capabilities[{index}]"
         if not name or name in seen_names:
             errors.append(f"{prefix}: capability name is missing or duplicated")

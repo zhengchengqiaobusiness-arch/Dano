@@ -818,11 +818,16 @@ class RecordingGatewaySession:
 
     async def _persist_stage_six(self, draft: dict[str, Any]) -> None:
         from dano.assets.drafts import DraftStore
-        from dano.onboarding.recording_results import persist_stage_six_result
+        from dano.onboarding.recording_results import persist_stage_six_result, recording_display_title
         from dano.shared.enums import Subsystem
         from dano.shared.models import Scope
 
-        title = self.workflow.snapshot.title if self.workflow is not None else ""
+        title = recording_display_title(
+            user_title=self.workflow.snapshot.title if self.workflow is not None else "",
+            draft=draft,
+        )
+        if self.workflow is not None and title and title != self.workflow.snapshot.title:
+            await self.workflow.set_title(title)
         saved = await persist_stage_six_result(
             DraftStore(),
             run_id=self.config.recording_id,

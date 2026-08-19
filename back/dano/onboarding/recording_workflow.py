@@ -299,6 +299,12 @@ class SelfHealingPipeline:
                     0,
                 )
         if not seed.machine_verification:
+            if not list(draft.get("capabilities") or []):
+                return PipelineOutcome(
+                    status=WorkflowStatus.EDITABLE,
+                    draft=context.latest_draft or draft,
+                    error="尚未生成可发布能力，阶段六结果已保存，可继续分析",
+                )
             emit_run_event(
                 "recording.verification.skipped",
                 stage="verification",
