@@ -1512,12 +1512,8 @@ async def list_recording_results(
     from dano.onboarding.recording_results import recording_result_summary
 
     store = DraftStore()
-    if subsystem:
-        drafts = await store.list_recording_results(tenant=tenant, subsystem=subsystem)
-    else:
-        drafts = []
-        for item in await _tenant_subsystems(tenant):
-            drafts.extend(await store.list_recording_results(tenant=tenant, subsystem=item.value))
+    drafts = await store.list_recording_results(tenant=tenant, subsystem=subsystem)
+    if not subsystem:
         drafts.sort(
             key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,

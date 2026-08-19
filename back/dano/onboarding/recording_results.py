@@ -53,6 +53,52 @@ def is_recording_result_key(asset_key: str) -> bool:
     return str(asset_key or "").startswith(RECORDING_RESULT_KEY_PREFIX)
 
 
+def _redact_headers(headers: Any) -> Any:
+    if not isinstance(headers, dict):
+        return headers
+    return {str(key): "***" for key in headers}
+
+
+def _redact_request_entry(entry: Any) -> Any:
+    if not isinstance(entry, dict):
+        return entry
+    item = dict(entry)
+    if item.get("headers"):
+        item["headers"] = _redact_headers(item["headers"])
+    if item.get("post_data") is not None:
+        item["post_data"] = ""
+    item["body_source"] = ""
+    item["backup_body_source"] = ""
+    if item.get("response_json") is not None:
+        item["response_json"] = {}
+    return item
+
+
+def client_recording_draft(draft: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Project a saved FlowSpec for the workbench without compiling it.
+
+    ``flow_spec_to_client`` can take tens of seconds on a real recording and
+    would leave the capability page empty until it finishes.
+    """
+
+    if draft is None:
+        return None
+    projected = dict(draft)
+    steps = projected.get("steps")
+    if isinstance(steps, list):
+        projected["steps"] = [_redact_request_entry(step) for step in steps]
+    facts = projected.get("request_facts")
+    if isinstance(facts, dict):
+        facts = dict(facts)
+        if isinstance(facts.get("requests"), list):
+            facts["requests"] = [_redact_request_entry(req) for req in facts["requests"]]
+        for key in ("field_evidence", "option_sources", "page_events"):
+            if facts.get(key):
+                facts[key] = []
+        projected["request_facts"] = facts
+    return projected
+
+
 def stage_six_result_body(
     *,
     action: str,
@@ -119,12 +165,7 @@ def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
     if not isinstance(spec, dict):
         payload["draft"] = None
         return payload
-    try:
-        from dano.execution.page.flow_spec import FlowSpec, flow_spec_to_client
-
-        payload["draft"] = flow_spec_to_client(FlowSpec.model_validate(spec))
-    except Exception:  # noqa: BLE001 - viewing must still open with the saved draft
-        payload["draft"] = spec
+    payload["draft"] = client_recording_draft(spec)
     return payload
 
 

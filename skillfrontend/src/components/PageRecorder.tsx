@@ -10,6 +10,7 @@ import {
   List,
   Select,
   Space,
+  Spin,
   Steps,
   Switch,
   Table,
@@ -29,6 +30,7 @@ import {
   ExclamationCircleOutlined,
   LoadingOutlined,
   MessageOutlined,
+  PlayCircleOutlined,
   RobotOutlined,
   StopOutlined,
   ThunderboltOutlined,
@@ -325,6 +327,32 @@ const CALLER_SOURCE_KINDS = new Set([
 function paramIsCallerInput(param: FlowParam) {
   if (typeof param.exposed_to_user === "boolean") return param.exposed_to_user;
   return CALLER_SOURCE_KINDS.has(param.source_kind || "caller_input");
+}
+
+function looksPaginationField(field: { key?: string; path?: string } | null | undefined) {
+  const raw = `${field?.key || ""}.${field?.path || ""}`.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return /(?:pageno|pagenum|pagesize|pageindex|currentpage|limit|offset)$/.test(raw);
+}
+
+function paramSourceTagColor(param: FlowParam) {
+  const kind = param.source_kind || "";
+  if (["api_option", "page_enum", "static_enum", "manual_enum", "form_option"].includes(kind)) {
+    return "purple";
+  }
+  if (["previous_response", "response_binding", "dynamic_structure"].includes(kind)) {
+    return "cyan";
+  }
+  if (kind === "page_default") return "geekblue";
+  if (["selected_record_identity", "record_identity", "selected_option_field"].includes(kind)) {
+    return "blue";
+  }
+  if (["session", "current_user", "storage", "cookie", "context", "page_context"].includes(kind)) {
+    return "gold";
+  }
+  if (kind === "constant") return "default";
+  if (kind === "unknown") return "orange";
+  if (paramIsCallerInput(param)) return "blue";
+  return "default";
 }
 
 function paramTypeLabel(param: FlowParam) {
@@ -737,6 +765,17 @@ export default function PageRecorder({
   }, [status]);
 
   useEffect(() => {
+    if (!connected) return undefined;
+    if (!["recording", "processing", "waiting_operator"].includes(status)) return undefined;
+    const timer = window.setInterval(() => {
+      const socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: "ping" }));
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [connected, status]);
+
+  useEffect(() => {
     const box = verificationLogRef.current;
     if (!box) return;
     box.scrollTop = box.scrollHeight;
@@ -1032,11 +1071,12 @@ export default function PageRecorder({
       setConnected(false);
       setConnecting(false);
       if (closingRef.current || cancellingRef.current || !canAutoReconnectRecording()) {
-        if (
-          acceptNextSnapshotRef.current
+        const resumeDisconnected = socketInitRef.current?.type === "resume_verification"
+          && snapshotRef.current?.status === "processing";
+        const neverStarted = acceptNextSnapshotRef.current
           && snapshotRef.current?.status === "processing"
-          && snapshotRef.current.progress.label === "正在启动机器验证"
-        ) {
+          && snapshotRef.current.progress.label === "正在启动机器验证";
+        if (resumeDisconnected || neverStarted) {
           const failed: WorkflowSnapshot = {
             ...snapshotRef.current,
             status: "failed",
@@ -1176,7 +1216,7 @@ export default function PageRecorder({
       || "";
   }
 
-  function startAnalysis(item?: RecordingResultSummary) {
+  async function startAnalysis(item?: RecordingResultSummary) {
     if (!tenant) {
       message.error("请先选择租户");
       return;
@@ -1206,6 +1246,7 @@ export default function PageRecorder({
     closeRecordingSocket();
     acceptNextSnapshotRef.current = true;
     setStageSevenOpen(true);
+    let draft = snapshotRef.current?.draft || null;
     const starting: WorkflowSnapshot = {
       run_id: "",
       action: item?.action || actionRef.current,
@@ -1213,7 +1254,7 @@ export default function PageRecorder({
       revision: 0,
       status: "processing",
       progress: { step: "verifying", label: "正在启动机器验证", round: 0 },
-      draft: snapshotRef.current?.draft || null,
+      draft,
       capture_frozen: true,
       activity: [],
       issues: [],
@@ -1232,6 +1273,19 @@ export default function PageRecorder({
       restart: true,
     };
     openRecordingSocket(actionRef.current);
+    if (draft) return;
+    try {
+      const detail = await getRecordingResult(resultId);
+      const current = snapshotRef.current;
+      if (current?.status === "processing" && !current.draft && detail.draft) {
+        const next = { ...current, draft: detail.draft as FlowSpec };
+        snapshotRef.current = next;
+        setSnapshot(next);
+      }
+      if (detail.title) setTitle(detail.title);
+    } catch {
+      // The websocket snapshot can still populate the draft.
+    }
   }
 
   async function removeResult(item: RecordingResultSummary) {
@@ -1712,7 +1766,7 @@ export default function PageRecorder({
                   <Button
                     size="small"
                     loading={openingId === item.id}
-                    onClick={() => startAnalysis(item)}
+                    onClick={() => openResult(item)}
                   >继续分析</Button>
                   <Button
                     size="small"
@@ -2267,7 +2321,19 @@ export default function PageRecorder({
   }
 
   function renderCapabilities() {
-    if (!capabilities.length) return <Empty description="没有生成能力" />;
+    if (openingId) {
+      return (
+        <div style={{ textAlign: "center", padding: "48px 0" }}>
+          <Spin />
+          <div style={{ marginTop: 12 }}>
+            <Text type="secondary">正在打开录制结果…</Text>
+          </div>
+        </div>
+      );
+    }
+    if (!capabilities.length) {
+      return <Empty description={processing ? "正在载入能力草稿…" : "没有生成能力"} />;
+    }
     return (
       <Collapse
         defaultActiveKey={[]}
@@ -2427,16 +2493,27 @@ export default function PageRecorder({
   }
 
   function renderAnalysisActions(size: "small" | "middle" = "small") {
-    if (!analysisSessionLive) return null;
+    if (processing || connecting || cancelling) {
+      if (!analysisSessionLive) return null;
+      return (
+        <Button
+          danger
+          size={size}
+          icon={<StopOutlined />}
+          loading={cancelling}
+          disabled={!processing && !connecting && !cancelling}
+          onClick={cancelProcessing}
+        >终止分析</Button>
+      );
+    }
+    if (!draft) return null;
     return (
       <Button
-        danger
+        type="primary"
         size={size}
-        icon={<StopOutlined />}
-        loading={cancelling}
-        disabled={!processing && !connecting && !cancelling}
-        onClick={cancelProcessing}
-      >终止分析</Button>
+        icon={<PlayCircleOutlined />}
+        onClick={() => startAnalysis()}
+      >开始分析</Button>
     );
   }
 
@@ -2665,6 +2742,10 @@ export default function PageRecorder({
             <>
               {activities.length ? (
                 <div style={{ marginBottom: 8 }}>{renderGroupedActivities(activities)}</div>
+              ) : processing ? (
+                <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
+                  {snapshot?.progress.label || "正在启动机器验证"}
+                </Text>
               ) : null}
               {tlItems.length ? (
                 <Timeline
@@ -2689,7 +2770,7 @@ export default function PageRecorder({
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
-            <Text strong>{editingResult ? "修改结果" : `能力结果 ${capabilities.length}`}</Text>
+            <Text strong>{editingResult ? "修改结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
             {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
             {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
           </Space>
@@ -2705,6 +2786,13 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
+              {draft && !analysisMode && !processing && !connecting && !cancelling ? (
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  onClick={() => startAnalysis()}
+                >开始分析</Button>
+              ) : null}
               <Button
                 disabled={!draft || processing}
                 onClick={() => setEditingResult(true)}

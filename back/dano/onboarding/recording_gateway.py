@@ -26,6 +26,7 @@ from dano.execution.page.recording_field_identity import bind_field_evidence
 from dano.execution.page.recording_live import LiveNotebook
 from dano.execution.page.sessions import save_session
 from dano.onboarding.recording_pipeline import CanonicalRecordingRuntime
+from dano.onboarding.recording_results import client_recording_draft
 from dano.onboarding.recording_runtime import ProductionRecordingServices, Publisher
 from dano.onboarding.recording_workflow import (
     PipelineContext,
@@ -39,6 +40,42 @@ from dano.onboarding.recording_workflow import (
 
 SendMessage = Callable[[dict[str, Any]], Awaitable[None]]
 PiFactory = Callable[[bool], Awaitable[Any]]
+_HEAVY_SNAPSHOT_STATUSES = frozenset({
+    WorkflowStatus.EDITABLE,
+    WorkflowStatus.PUBLISHED,
+    WorkflowStatus.FAILED,
+    WorkflowStatus.CANCELLED,
+})
+
+
+def workflow_snapshot_client_payload(snapshot: WorkflowSnapshot) -> dict[str, Any]:
+    """Project a workflow snapshot for the recorder UI.
+
+    Processing frames must stay cheap: ``validate_flow_spec`` / ``flow_spec_to_client``
+    compile the whole draft and would block the WebSocket until the analysis page
+    looks empty. Full check reports are only built for terminal editor states.
+    """
+
+    payload = snapshot.model_dump(mode="json", exclude={"draft"})
+    draft = snapshot.draft
+    if draft is None:
+        payload["draft"] = None
+        return payload
+    if snapshot.status not in _HEAVY_SNAPSHOT_STATUSES:
+        payload["draft"] = client_recording_draft(draft)
+        return payload
+    try:
+        spec = FlowSpec.model_validate(draft)
+        payload["draft"] = flow_spec_to_client(spec)
+        payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
+        payload["check_report"] = validate_flow_spec(spec)
+    except Exception as exc:  # noqa: BLE001 - resume must still show the draft
+        payload["draft"] = client_recording_draft(draft)
+        payload["check_report"] = {
+            "passed": False,
+            "errors": [f"草稿投影失败：{exc}"],
+        }
+    return payload
 
 
 def _safe_list(owner: Any, name: str) -> list[Any]:
@@ -917,19 +954,7 @@ class RecordingGatewaySession:
         if self.workflow is None:
             return
         current = snapshot or self.workflow.snapshot
-        payload = current.model_dump(mode="json")
-        if current.draft is not None:
-            try:
-                spec = FlowSpec.model_validate(current.draft)
-                payload["draft"] = flow_spec_to_client(spec)
-                payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
-                payload["check_report"] = validate_flow_spec(spec)
-            except Exception as exc:  # noqa: BLE001 - resume must still show the draft
-                payload["draft"] = current.draft
-                payload["check_report"] = {
-                    "passed": False,
-                    "errors": [f"草稿投影失败：{exc}"],
-                }
+        payload = workflow_snapshot_client_payload(current)
         await self._send({"type": "snapshot", "snapshot": payload})
         if current.question is not None:
             await self._send({
@@ -947,6 +972,7 @@ class RecordingGatewaySession:
         except Exception:  # noqa: BLE001 - transport loss must not stop the workflow
             if self.send is sender:
                 self.send = None
+
 
 @dataclass
 class RecordingSessionRegistry:

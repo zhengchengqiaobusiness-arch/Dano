@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
 ReplayExecutor = Callable[[dict[str, Any], FlowSpec], Awaitable[dict[str, Any]]]
 _CAPABILITY_REPAIR_BUDGET = 2
+PREFLIGHT_TIMEOUT_S = 8.0
+PREFLIGHT_PROGRESS_LABEL = "正在检查回放登录态"
 _PROTOCOL_ATTEMPTS = 3
 _SUBMISSION_TOOLS = {
     "plan": "submit_recording_plan",
@@ -533,6 +536,13 @@ class ProductionRecordingServices:
         context: PipelineContext,
     ) -> tuple[dict[str, Any], tuple[WorkflowIssue, ...]]:
         context.ensure_active()
+        await context.progress(WorkflowStep.VERIFYING, PREFLIGHT_PROGRESS_LABEL, 0)
+        await context.record(WorkflowActivity(
+            step=WorkflowStep.VERIFYING,
+            round=0,
+            status="running",
+            label=PREFLIGHT_PROGRESS_LABEL,
+        ))
         spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
         spec = assign_unassigned_internal_steps(spec)
         spec, report = finalize_verification_state(
@@ -543,6 +553,10 @@ class ProductionRecordingServices:
         spec = assign_unassigned_internal_steps(spec)
         report = verification_report(spec)
         preflight = await self._preflight_replay_health(spec)
+        if preflight.get("auth_failed"):
+            await context.progress(WorkflowStep.VERIFYING, AUTH_EXPIRED_MESSAGE, 0)
+        elif not preflight.get("skipped"):
+            await context.progress(WorkflowStep.VERIFYING, "回放登录态正常，开始检查能力", 0)
         verification_run = dict((spec.meta or {}).get("verification_run") or {})
         verification_run["preflight"] = preflight
         verification_run["summary"] = {
@@ -590,7 +604,14 @@ class ProductionRecordingServices:
             return {"skipped": True, "ok": True}
         executor = self.replay_executor or _default_replay_executor
         try:
-            result = await executor(probe, spec)
+            result = await asyncio.wait_for(executor(probe, spec), timeout=PREFLIGHT_TIMEOUT_S)
+        except TimeoutError:
+            return {
+                "ok": True,
+                "auth_failed": False,
+                "error": "TimeoutError",
+                "path": str(probe.get("path") or probe.get("url") or ""),
+            }
         except Exception as exc:  # noqa: BLE001 - network failures must not block Skill
             return {
                 "ok": True,

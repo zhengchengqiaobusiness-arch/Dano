@@ -163,20 +163,31 @@ class DraftStore:
             row = await conn.fetchrow("SELECT * FROM asset_drafts WHERE asset_draft_id=$1", asset_draft_id)
         return self._draft(row) if row else None
 
-    async def list_recording_results(self, *, tenant: str, subsystem: str) -> list[AssetDraft]:
+    async def list_recording_results(self, *, tenant: str, subsystem: str = "") -> list[AssetDraft]:
         from dano.onboarding.recording_results import RECORDING_RESULT_KEY_PREFIX
 
         async with get_pool().acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT DISTINCT ON (asset_key) *
-                   FROM asset_drafts
-                   WHERE tenant=$1 AND subsystem=$2 AND asset_type=$3 AND asset_key LIKE $4
-                   ORDER BY asset_key, created_at DESC""",
-                _postgres_safe_text(tenant),
-                _postgres_safe_text(subsystem),
-                AssetType.PAGE_SCRIPT.value,
-                RECORDING_RESULT_KEY_PREFIX + "%",
-            )
+            if subsystem:
+                rows = await conn.fetch(
+                    """SELECT DISTINCT ON (asset_key) *
+                       FROM asset_drafts
+                       WHERE tenant=$1 AND subsystem=$2 AND asset_type=$3 AND asset_key LIKE $4
+                       ORDER BY asset_key, created_at DESC""",
+                    _postgres_safe_text(tenant),
+                    _postgres_safe_text(subsystem),
+                    AssetType.PAGE_SCRIPT.value,
+                    RECORDING_RESULT_KEY_PREFIX + "%",
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT DISTINCT ON (asset_key) *
+                       FROM asset_drafts
+                       WHERE tenant=$1 AND asset_type=$2 AND asset_key LIKE $3
+                       ORDER BY asset_key, created_at DESC""",
+                    _postgres_safe_text(tenant),
+                    AssetType.PAGE_SCRIPT.value,
+                    RECORDING_RESULT_KEY_PREFIX + "%",
+                )
         drafts = [self._draft(row) for row in rows]
         drafts.sort(key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return drafts
