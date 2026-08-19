@@ -77,7 +77,7 @@ Every `/v1/*` route requires an `x-tenant-key` header. The registry (`InMemoryRe
 
 **Swagger-based** (`POST /onboarding/*`): user supplies an OpenAPI/Swagger doc. The backend classifies endpoints, generates a FlowSpec, runs sandbox tests, and publishes.
 
-**Page recording** (`WS /onboarding/page/record`): a browser recording session streams events over WebSocket. The pi agent (LLM, running in the Node sidecar) annotates the recording in real time by calling tools defined in `recording_live.py`. After recording, `CanonicalRecordingRuntime` (`onboarding/recording_pipeline.py`) runs: `prepare → check → repair → publish`.
+**Page recording** (`WS /onboarding/page/record`): a browser recording session streams events over WebSocket. The pi agent (LLM, running in the Node sidecar) annotates the recording in real time by calling tools defined in `recording_live.py`. After recording, `CanonicalRecordingRuntime` (`onboarding/recording_pipeline.py`) runs: `prepare →` persist stage-six result `→` optional `check → repair → publish`. The eight-stage Skill/code split is documented in [`doc/recording-pipeline.md`](doc/recording-pipeline.md).
 
 ### The pi agent and its tool contract
 
