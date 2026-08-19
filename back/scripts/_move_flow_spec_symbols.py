@@ -47,6 +47,20 @@ CAPTURE = {
     "_multipart_contains_file", "_pick_label_key",
 }
 
+KNOWN_MODULES = {
+    "LIVE_RECORDING_AGENT_OPS": "dano.execution.page.recording_live",
+    "apply_recording_agent_edit": "dano.execution.page.recording_live",
+    "compact_model_payload": "dano.execution.page.recording_live",
+    "recording_agent_evidence_issues": "dano.execution.page.recording_live",
+    "merge_live_agent_state": "dano.execution.page.recording_live",
+    "FieldRef": "dano.execution.page.recording_field_identity",
+    "canonical_wire_path": "dano.execution.page.recording_field_identity",
+    "resolve_field_ref": "dano.execution.page.recording_field_identity",
+    "evaluate_recording_release": "dano.onboarding.recording_release",
+    "discover_response_key_maps": "dano.execution.page.value_tracing",
+    "discover_workflow_value_links": "dano.execution.page.value_tracing",
+}
+
 
 def source_segments(lines: list[str], tree: ast.AST, names: set[str]) -> list[tuple[int, int, str, str]]:
     found: list[tuple[int, int, str, str]] = []
@@ -120,10 +134,17 @@ def strip_and_import(lines: list[str], segments: list[tuple[int, int, str, str]]
     for start, end, _t, _k in segments:
         skip.update(range(start, end + 1))
     out = [line for index, line in enumerate(lines, 1) if index not in skip]
+    bind_alias = "_" + module.replace(".", "_")
+    bind_block = (
+        f"import dano.execution.page.{module} as {bind_alias}\n"
+        f"if hasattr({bind_alias}, '_bind_flow_spec_helpers'):\n"
+        f"    {bind_alias}._bind_flow_spec_helpers()\n"
+    )
     import_block = (
         f"\nfrom dano.execution.page.{module} import (\n"
         + "".join(f"    {name},\n" for name in names)
         + ")\n"
+        + bind_block
     )
     text = "".join(out)
     if "register_sync_flow_spec_models(sync_flow_spec_models)" in text:
@@ -188,20 +209,58 @@ def build_header(free: set[str], moved: set[str], extra_imports: list[str], avai
     return "\n".join(lines) + "\n", leftover
 
 
+def defined_locally(tree: ast.AST) -> set[str]:
+    found: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    found.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+    return found
+
+
+def peer_symbol_map() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    allowed_files = {
+        "recording_facts.py",
+        "recording_analysis_state.py",
+        "recording_agent_contract.py",
+        "capability_contracts.py",
+        "flow_release.py",
+        "flow_client_projection.py",
+    }
+    for path in PAGE.rglob("*.py"):
+        if path.name == "flow_spec.py" or path.name.startswith("_"):
+            continue
+        rel = path.relative_to(PAGE)
+        if rel.parts[0] not in {"flow_spec_core", "flow_materialization"} and path.name not in allowed_files:
+            continue
+        module = "dano.execution.page." + rel.with_suffix("").as_posix().replace("/", ".")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name in defined_locally(tree):
+            mapping.setdefault(name, module)
+    return mapping
+
+
 def inject_legacy_imports(module_text: str, leftover: list[str]) -> str:
     if not leftover:
         return module_text
     listed = ", ".join(repr(item) for item in leftover)
     helper = f'''
 
-_LEGACY_HELPERS = frozenset({{{listed}}})
+_PENDING_FLOW_SPEC_HELPERS = ({listed},)
 
 
-def __getattr__(name: str):
-    if name not in _LEGACY_HELPERS:
-        raise AttributeError(name)
-    from dano.execution.page import flow_spec as _flow_spec
-    return getattr(_flow_spec, name)
+def _bind_flow_spec_helpers() -> None:
+    import dano.execution.page.flow_spec as _flow_spec
+    module_globals = globals()
+    for name in _PENDING_FLOW_SPEC_HELPERS:
+        if hasattr(_flow_spec, name):
+            module_globals[name] = getattr(_flow_spec, name)
 '''
     return module_text + helper
 
@@ -209,6 +268,8 @@ def __getattr__(name: str):
 def main() -> None:
     dest_mod = sys.argv[1]
     raw_names = sys.argv[2:]
+    use_closure = "--closure" in raw_names
+    raw_names = [item for item in raw_names if item != "--closure"]
     names: list[str] = []
     for item in raw_names:
         if item.startswith("owner:"):
@@ -220,25 +281,43 @@ def main() -> None:
     source = SRC.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     tree = ast.parse(source)
+    local = defined_locally(tree)
     available = top_level_names(tree)
-    wanted = set(names)
-    while True:
+    peers = peer_symbol_map()
+    wanted = set(names) & local
+    missing = sorted(set(names) - local)
+    if missing:
+        print("skip already-moved or absent:", ", ".join(missing))
+    if use_closure:
+        while True:
+            segments = source_segments(lines, tree, wanted)
+            free = free_names(segments)
+            extra = sorted((free - wanted) & local)
+            if not extra:
+                break
+            wanted.update(extra)
+            print("closure added", extra)
+    else:
         segments = source_segments(lines, tree, wanted)
         free = free_names(segments)
-        _header, leftover = build_header(free, wanted, [], available)
-        extra = [name for name in leftover if name in available]
-        if not extra:
-            break
-        wanted.update(extra)
-    header, leftover = build_header(free, wanted, [], available)
-    # Constants in leftover should not be wrapped as functions. Split them.
-    const_like = [name for name in leftover if name.isupper() or name.startswith("_") and name.isupper()]
-    text = header + "\n"
+    extra_imports: list[str] = []
+    leftover_peers: dict[str, list[str]] = {}
+    unresolved = []
+    for name in sorted((free - wanted) - set(STDLIB) - MODELS - CAPTURE):
+        if name in peers:
+            leftover_peers.setdefault(peers[name], []).append(name)
+        elif name in KNOWN_MODULES:
+            leftover_peers.setdefault(KNOWN_MODULES[name], []).append(name)
+        elif name in local:
+            unresolved.append(name)
+    for module, symbols in leftover_peers.items():
+        extra_imports.append(f"from {module} import (")
+        extra_imports.extend(f"    {symbol}," for symbol in symbols)
+        extra_imports.append(")")
+    header, leftover = build_header(free, wanted, extra_imports, available)
+    leftover = unresolved
     write_module(dest, header, segments, leftover)
-    moved_text = dest.read_text(encoding="utf-8")
-    dest.write_text(inject_legacy_imports(moved_text, leftover), encoding="utf-8")
-    exported = [name for _s, _e, _t, kind in segments for name in ([ast.parse(_t).body[0].name] if kind == "def" else [])]
-    # Export all requested names, including constants.
+    dest.write_text(inject_legacy_imports(dest.read_text(encoding="utf-8"), leftover), encoding="utf-8")
     SRC.write_text(strip_and_import(lines, segments, dest_mod, sorted(wanted)), encoding="utf-8")
     print(f"moved {len(wanted)} symbols to {dest}")
 
