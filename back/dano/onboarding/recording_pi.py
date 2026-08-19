@@ -624,34 +624,33 @@ class RecordingPiSession:
         )
         raw_fields = list(read_fields() or []) if callable(read_fields) else []
         page_enums = dict(read_enums() or {}) if callable(read_enums) else {}
-        last_request = captured[-1] if captured else {}
-        last_event = page_events[-1] if page_events else {}
-        semantic_digest = hashlib.sha256(json.dumps(
-            {"fields": raw_fields, "enums": page_enums},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")).hexdigest()
-        request_digest = hashlib.sha256(json.dumps([
-            {
-                key: item.get(key)
-                for key in (
-                    "request_id", "request_index", "sequence", "method", "url", "path",
-                    "query", "post_data", "response_status", "response_json", "response_schema",
-                    "trigger_action_id", "trigger_transaction_id", "trigger_op", "trigger_locator",
-                )
-            }
-            for item in captured
-            if isinstance(item, dict)
-        ], ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+        def _request_sig(item: dict) -> tuple:
+            return (
+                str(item.get("request_id") or ""),
+                item.get("sequence", item.get("index")),
+                item.get("response_status") or item.get("status"),
+                item.get("response_json") is not None,
+                str(item.get("post_data") or "")[:120],
+            )
+
+        def _field_sig(item: dict) -> str:
+            return str(
+                item.get("occurrence_id")
+                or item.get("evidence_id")
+                or item.get("event_id")
+                or ""
+            )
+
         marker = (
-            len(captured),
-            str(last_request.get("request_id") or ""),
-            last_request.get("sequence", last_request.get("index")),
-            len(page_events),
-            str(last_event.get("event_id") or last_event.get("action_id") or ""),
-            request_digest,
-            semantic_digest,
+            tuple(_request_sig(item) for item in captured if isinstance(item, dict)),
+            tuple(_field_sig(item) for item in raw_fields if isinstance(item, dict)),
+            tuple(
+                str(item.get("event_id") or "")
+                for item in page_events
+                if isinstance(item, dict)
+            ),
+            len(page_enums),
         )
         if marker == self._live_evidence_marker:
             return
@@ -679,6 +678,7 @@ class RecordingPiSession:
         async with self._state_lock:
             if marker == self._live_evidence_marker:
                 return
+            previous = self._live_evidence_marker
             current = self.current_flow_spec()
             current.meta = {
                 **(current.meta or {}),
@@ -688,12 +688,16 @@ class RecordingPiSession:
                     if isinstance(item, dict) and item.get("request_id")
                 ][-500:],
             }
-            current.request_facts.requests = [
-                RequestFact.model_validate(deepcopy(item))
-                for item in captured
-                if isinstance(item, dict)
-            ]
-            current.request_facts.page_events = deepcopy(page_events)
+            previous_request_sigs = previous[0] if isinstance(previous, tuple) and previous else None
+            if previous_request_sigs != marker[0]:
+                current.request_facts.requests = [
+                    RequestFact.model_validate(deepcopy(item))
+                    for item in captured
+                    if isinstance(item, dict)
+                ]
+            previous_event_ids = previous[2] if isinstance(previous, tuple) and len(previous) > 2 else None
+            if previous_event_ids != marker[2]:
+                current.request_facts.page_events = deepcopy(page_events)
             current.request_facts.field_evidence = deepcopy(bound_fields)
             retained_sources = [
                 deepcopy(source)

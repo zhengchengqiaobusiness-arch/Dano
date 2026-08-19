@@ -446,21 +446,106 @@ def _field_match_score(aliases: set[str], wire_path: str) -> int:
 
 
 def _is_array_row_only_ambiguity(items: list[tuple[str, str]]) -> bool:
-    """Return True when every candidate path is the same field in different array rows.
-
-    e.g. [body.items[0].productBarCode, body.items[1].productBarCode] differ only in
-    the numeric array index — they represent the same structural field repeated per row.
-    Collapsing them to the first row is safe because the DOM evidence describes one
-    interaction, not N simultaneous interactions.
-
-    ``items`` is a list of (request_id, wire_path) tuples, matching the keys
-    of the ``unique`` / ``structural_unique`` dicts.
-    """
+    """Return True when every candidate path is the same field in different array rows."""
     if len(items) < 2:
         return False
-    paths = [item[1] for item in items]  # wire_path is the second element
-    stripped = {re.sub(r"\[\d+\]", "[*]", p) for p in paths}
+    paths = [item[1] for item in items]
+    if not all(re.search(r"\[\d+\]", path) for path in paths):
+        return False
+    stripped = {re.sub(r"\[\d+\]", "[*]", path) for path in paths}
     return len(stripped) == 1
+
+
+def _array_template_path(wire_path: str) -> str:
+    return re.sub(r"\[\d+\]", "[]", str(wire_path or ""))
+
+
+def _array_indexes(wire_path: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\[(\d+)\]", str(wire_path or "")))
+
+
+def _evidence_row_index(evidence: dict[str, Any]) -> int | None:
+    for key in ("row_index", "array_index"):
+        raw = evidence.get(key)
+        if isinstance(raw, int):
+            return raw
+        text = str(raw or "").strip()
+        if text.isdigit():
+            return int(text)
+    for key in ("path", "wire_path"):
+        indexes = _array_indexes(str(evidence.get(key) or ""))
+        if indexes:
+            return indexes[-1]
+    return None
+
+
+def _collapse_retry_candidates(
+    unique: dict[tuple[str, str], dict[str, Any]],
+    request_by_id: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    if len(unique) < 2:
+        return unique
+    groups: dict[tuple[str, str, str, str], list[tuple[tuple[str, str], dict[str, Any], dict[str, Any]]]] = {}
+    for key, item in unique.items():
+        request = request_by_id.get(key[0]) or {}
+        tx = str(
+            request.get("trigger_transaction_id")
+            or item.get("transaction_id")
+            or ""
+        )
+        method = str(request.get("method") or "").upper()
+        path = urlparse(str(request.get("url") or request.get("path") or "")).path
+        groups.setdefault((tx, method, path, _array_template_path(key[1])), []).append((key, item, request))
+    collapsed: dict[tuple[str, str], dict[str, Any]] = {}
+    for group in groups.values():
+        successes = [
+            row for row in group
+            if 200 <= int(row[2].get("response_status") or row[2].get("status") or 0) < 400
+        ]
+        preferred = successes or group
+        paths = {row[0][1] for row in preferred}
+        if len(paths) == 1:
+            chosen = preferred[-1]
+            collapsed[chosen[0]] = chosen[1]
+            continue
+        for row in group:
+            collapsed[row[0]] = row[1]
+    return collapsed
+
+
+def _resolve_array_row_candidates(
+    evidence: dict[str, Any],
+    unique: dict[tuple[str, str], dict[str, Any]],
+    request_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], str]:
+    if len(unique) <= 1 or not _is_array_row_only_ambiguity(list(unique)):
+        return unique, ""
+    row_index = _evidence_row_index(evidence)
+    if row_index is not None:
+        matched = {
+            key: item for key, item in unique.items()
+            if row_index in _array_indexes(key[1])
+        }
+        if len(matched) == 1:
+            return matched, "array_row_index"
+    value = evidence.get("value")
+    if value not in (None, ""):
+        value_matched: dict[tuple[str, str], dict[str, Any]] = {}
+        for key, item in unique.items():
+            request = request_by_id.get(key[0]) or {}
+            for wire_path, field_value in _request_field_values(request):
+                if wire_path == key[1] and _same_recorded_value(value, field_value):
+                    value_matched[key] = item
+        if len(value_matched) == 1:
+            return value_matched, "array_row_unique_value"
+    templates = {_array_template_path(path) for _request_id, path in unique}
+    request_ids = {request_id for request_id, _path in unique}
+    if len(templates) == 1 and len(request_ids) == 1:
+        request_id = next(iter(request_ids))
+        template = next(iter(templates))
+        item = next(iter(unique.values()))
+        return {(request_id, template): {**item, "wire_path": template}}, "array_template"
+    return {}, "array_ambiguous"
 
 
 def _causal_match(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
@@ -656,6 +741,11 @@ def _evidence_id(evidence: dict[str, Any], index: int = 0) -> str:
         "op": evidence.get("op"),
         "surface": evidence.get("surface") or _evidence_surface(evidence),
         "in_dialog": bool(evidence.get("in_dialog")),
+        "event_id": evidence.get("event_id"),
+        "action_id": evidence.get("action_id"),
+        "transaction_id": evidence.get("transaction_id"),
+        "observed_at": evidence.get("observed_at"),
+        "request_id": evidence.get("request_id"),
     }
     digest = hashlib.sha1(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -930,29 +1020,42 @@ def bind_field_evidence(
             (item["request_id"], item["wire_path"]): item
             for item in selected
         }
-        # When every selected candidate represents the same field name repeated
-        # across array rows (e.g. body.items[0].productBarCode vs [1].productBarCode),
-        # treat it as a unique structural match and bind to the first row.  A
-        # DOM fill event describes one interaction, not N simultaneous writes.
-        if len(unique) != 1 and _is_array_row_only_ambiguity(list(unique)):
-            first_key = min(unique)
-            unique = {first_key: unique[first_key]}
-            if not binding_method:
-                binding_method = "array_row_leaf_match"
+        request_by_id = {
+            str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
+            for request in requests
+        }
+        unique = _collapse_retry_candidates(unique, request_by_id)
+        unique, array_method = _resolve_array_row_candidates(evidence, unique, request_by_id)
+        if array_method == "array_ambiguous":
+            unique = {}
+        elif array_method and not binding_method:
+            binding_method = array_method
         structural_unique = {
             (item["request_id"], item["wire_path"]): item
             for item in candidates
         }
-        # Same array-row collapse for structural_unique (used for ambiguity status)
-        if len(structural_unique) != 1 and _is_array_row_only_ambiguity(list(structural_unique)):
-            first_key = min(structural_unique)
-            structural_unique = {first_key: structural_unique[first_key]}
+        structural_unique = _collapse_retry_candidates(structural_unique, request_by_id)
+        structural_unique, structural_method = _resolve_array_row_candidates(
+            evidence, structural_unique, request_by_id,
+        )
+        if structural_method == "array_ambiguous":
+            structural_unique = {
+                (item["request_id"], _array_template_path(item["wire_path"])): item
+                for item in candidates
+            }
+            if len({key[1] for key in structural_unique}) != 1:
+                structural_unique = {
+                    (item["request_id"], item["wire_path"]): item
+                    for item in candidates
+                }
         public_candidates = [
             {"request_id": request_id, "wire_path": wire_path}
             for request_id, wire_path in sorted(structural_unique)
         ]
         evidence["binding_candidates"] = public_candidates
-        if "required" in evidence and isinstance(evidence.get("required"), bool):
+        if str(evidence.get("required_state") or "") == "unknown":
+            evidence["required_observed"] = None
+        elif "required" in evidence and isinstance(evidence.get("required"), bool):
             evidence["required_observed"] = bool(evidence["required"])
         evidence["editable"] = not bool(evidence.get("disabled") or evidence.get("read_only"))
         evidence["axes"] = [

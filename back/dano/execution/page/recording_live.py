@@ -451,7 +451,7 @@ def recording_delta(
         ],
         "page_events": compact_model_payload(_redact(related_events[-50:]), max_depth=5, max_items=50),
         "field_evidence": compact_model_payload(
-            _redact(related_fields[-40:]), max_depth=6, max_items=40, list_keep="tail",
+            _redact(related_fields), max_depth=6, max_items=40, list_keep="tail",
         ),
         "heuristic_candidates": {
             "request_roles": [

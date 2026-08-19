@@ -378,7 +378,12 @@ def test_evidence_id_is_stable_when_recorded_value_changes() -> None:
     second = {
         **first,
         "value": "3",
+    }
+    assert _evidence_id(first) == _evidence_id(second)
+    other_action = {
+        **first,
+        "value": "3",
         "action_id": "act_fill_2",
         "event_id": "ev_2",
     }
-    assert _evidence_id(first) == _evidence_id(second)
+    assert _evidence_id(first) != _evidence_id(other_action)

@@ -1070,9 +1070,13 @@ def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
         and not _read_is_entity_enrichment_lookup(read)
         and (
             _read_is_option_source(read)
-            or _list_payload_has_reference_contract(
-                read.get("json", read.get("response_json")),
-            )
+            or str(
+                read.get("role")
+                or read.get("request_role")
+                or (read.get("_request_role") or {}).get("role")
+                or ""
+            ) in {"option", "read_option", "option_source", "explicit_read_option"}
+            or _choice_control_triggered(read)
         )
     ]
 
@@ -1379,7 +1383,11 @@ def _param_source_guess(
                 "reason": "候选接口上的查询参数没有对应可编辑控件，标注未知；请求仍按录制原样携带，不影响原接口",
                 "need_human_confirm": True,
             }
-        if query_is_business_query and _caller_filter_key(key, path):
+        if query_is_business_query and _caller_filter_key(key, path) and (
+            recorded_user_input
+            or str(field.get("control_kind") or "unknown").lower() not in {"", "unknown"}
+            or bool(field.get("field_aliases"))
+        ):
             return {
                 "category": "user_param",
                 "source_kind": "user_input",
@@ -1660,9 +1668,9 @@ def _projection_path_score(source_path: str, target_path: str) -> int:
     if len(source_parts) >= 2 and "".join(source_parts[-2:]) == "".join(target_parts[-1:]):
         return 90
     if target_parts[-1] == "id" and source_parts[-1] == "id":
-        return 75
+        return 40
     if source_parts[-1] == "id" and target_parts[-1].endswith("id"):
-        return 75
+        return 40
     return 0
 
 
@@ -1877,11 +1885,17 @@ def _projection_path_score(source_path: str, target_path: str) -> int:
         target_tokens and target_tokens[-1] == "id"
         and source_tokens and source_tokens[-1] == "id"
     ):
-        return 75
+        return 40
     return 0
 
 
-def _best_option_projection_path(row: dict[str, Any], target_path: str, value: Any) -> str:
+def _best_option_projection_path(
+    row: dict[str, Any],
+    target_path: str,
+    value: Any,
+    *,
+    min_score: int = 75,
+) -> str:
     candidates = [
         (_projection_path_score(source_path, target_path), source_path)
         for source_path, _tokens, _raw_value, raw in _leaf_paths(row)
@@ -1890,7 +1904,7 @@ def _best_option_projection_path(row: dict[str, Any], target_path: str, value: A
     best_score = max((score for score, _path in candidates), default=0)
     best_paths = [
         source_path for score, source_path in candidates
-        if score == best_score and score >= 75
+        if score == best_score and score >= min_score
     ]
     return best_paths[0] if len(best_paths) == 1 else ""
 
@@ -1972,14 +1986,21 @@ def _build_step_from_capture(
     body = _parse_body(pd)
     page_enum_options = _page_enum_options_for_request(req, page_enum_options)
     field_evidence = _field_evidence_for_request(req, field_evidence)
-    if field_evidence and any("required" in item for item in field_evidence):
+    if field_evidence and any(
+        str(item.get("required_state") or "") == "required" or item.get("required") is True
+        for item in field_evidence
+        if isinstance(item, dict)
+    ):
         # A single SPA page/frame may host several business routes. Required
         # markers must follow the route that emitted this request instead of
         # leaking from the last form snapshot into an earlier query contract.
         required_labels = {
             str(item.get("label") or item.get("field") or "").strip()
             for item in field_evidence
-            if bool(item.get("required"))
+            if (
+                str(item.get("required_state") or "") == "required"
+                or item.get("required") is True
+            )
             and str(item.get("label") or item.get("field") or "").strip()
         }
 
@@ -2246,14 +2267,17 @@ def _build_step_from_capture(
                     f.get("control_disabled") or f.get("control_read_only")
                 ),
                 "request_path": path,
-                "required": bool(f.get("required")),
+                "required": (
+                    True if str(f.get("required_state") or "") == "required" or f.get("required") is True
+                    else False
+                ),
                 "binding_status": "bound",
                 "surface": str(f.get("surface") or ""),
                 "in_dialog": bool(f.get("in_dialog")),
                 "action_id": str(f.get("action_id") or ""),
                 **dict(f.get("constraints") or {}),
             })
-        if f.get("required") and f.get("required_state_grounded"):
+        if (str(f.get("required_state") or "") == "required" or f.get("required") is True) and f.get("required_state_grounded"):
             # Persist the page marker as evidence instead of only persisting the
             # resulting boolean. This lets later re-analysis distinguish an
             # actually-required search control from a filter that merely had a
@@ -2682,8 +2706,7 @@ def _params_from_get_query(
             "required_state": (
                 "required" if bool(control.get("required_observed")) else "optional"
                 if isinstance(control.get("required_observed"), bool)
-                else "unknown" if has_bound_identity_protocol
-                else "required" if required_evidence else "optional"
+                else "unknown"
             ),
             "required_state_grounded": has_bound_identity_protocol,
             "confidence": 0.9 if label != k else 0.75,
@@ -5926,6 +5949,8 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             ), None)
         if param is None:
             continue
+        if param.source_kind in {"selected_option_field", "computed"}:
+            continue
         if param.locked:
             grounded_bindings.append(binding)
             continue
@@ -7577,6 +7602,30 @@ def _discover_record_hydration_links(
     return selected
 
 
+def _samples_for_captured_request(
+    request: dict,
+    *,
+    samples: dict | None = None,
+    form_samples_by_request: dict | None = None,
+    form_samples_by_transaction: dict | None = None,
+) -> dict:
+    request_id = str(request.get("request_id") or "")
+    if form_samples_by_request and request_id:
+        extra = form_samples_by_request.get(request_id)
+        if extra:
+            return dict(extra)
+    tx = _request_transaction_id(request)
+    action = str(request.get("trigger_action_id") or "")
+    if form_samples_by_transaction:
+        extra = (
+            form_samples_by_transaction.get(tx)
+            or form_samples_by_transaction.get(action)
+        )
+        if extra:
+            return dict(extra)
+    return dict(samples or {})
+
+
 def to_flow_spec(
     captured_requests: list[dict],
     *,
@@ -7593,6 +7642,8 @@ def to_flow_spec(
     tenant: str = "",
     subsystem: str = "",
     request_role_overrides: dict[str, dict[str, Any]] | None = None,
+    form_samples_by_request: dict | None = None,
+    form_samples_by_transaction: dict | None = None,
 ) -> FlowSpec:
     """收敛：把 record_ws 现有产物 → FlowSpec（包含 GET 业务请求）。"""
     reads = reads or []
@@ -8075,7 +8126,12 @@ def to_flow_spec(
         st = _build_step_from_capture(
             _attach_request_role(req, request_role),
             reads=flow_reads,
-            samples=samples,
+            samples=_samples_for_captured_request(
+                req,
+                samples=samples,
+                form_samples_by_request=form_samples_by_request,
+                form_samples_by_transaction=form_samples_by_transaction,
+            ),
             storage_state=storage_state,
             required_labels=required_labels,
             page_enum_options=page_enum_options,
@@ -9125,6 +9181,60 @@ def _pick_arithmetic_match(
     return kind, left, right
 
 
+def _arithmetic_operand_semantic_ok(param: ParamField, *, kind: str = "") -> bool:
+    if _looks_non_quantity_formula_leaf(param.key, param.path):
+        return False
+    if (
+        _looks_count_formula_leaf(param.key, param.path)
+        or _looks_unit_price_formula_leaf(param.key, param.path)
+        or _looks_percent_formula_leaf(param.key, param.path)
+        or any(token in _field_leaf_token(param.key, param.path) for token in ("date", "time", "duration", "day"))
+    ):
+        return True
+    if kind in {"percent_of", "remainder_after_percent"} and (
+        _looks_total_formula_leaf(param.key, param.path)
+        or "price" in _field_leaf_token(param.key, param.path)
+        or "amount" in _field_leaf_token(param.key, param.path)
+    ):
+        return True
+    return False
+
+
+def _arithmetic_strong_structure(
+    target: ParamField,
+    left: ParamField,
+    right: ParamField,
+    kind: str,
+) -> bool:
+    """Single-sample formulas need a readonly/derived target and typed operands."""
+    if _param_has_editable_control_evidence(target) and not _param_control_is_readonly(target):
+        return False
+    target_leaf = _field_leaf_token(target.key, target.path)
+    derived = (
+        _looks_total_formula_leaf(target.key, target.path)
+        or _looks_percent_formula_leaf(target.key, target.path)
+        or any(token in target_leaf for token in ("duration", "payable", "subtotal"))
+    )
+    if not derived:
+        return False
+    if not (
+        _arithmetic_operand_semantic_ok(left, kind=kind)
+        and _arithmetic_operand_semantic_ok(right, kind=kind)
+    ):
+        return False
+    prefix = _param_group_prefix(target.path)
+    if _param_group_prefix(left.path) != prefix or _param_group_prefix(right.path) != prefix:
+        return False
+    if kind in {"sum", "difference"} and not (
+        _looks_percent_formula_leaf(left.key, left.path)
+        or _looks_percent_formula_leaf(right.key, right.path)
+        or _looks_total_formula_leaf(left.key, left.path)
+        or _looks_total_formula_leaf(right.key, right.path)
+    ):
+        return False
+    return True
+
+
 def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
     """Hide numeric fields that the recorded values prove are derived from siblings."""
     changed = True
@@ -9162,6 +9272,8 @@ def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
                 if picked is None:
                     continue
                 kind, left, right = picked
+                if not _arithmetic_strong_structure(target, left, right, kind):
+                    continue
                 ranked.append((
                     int(kind in {"percent_of", "remainder_after_percent"}),
                     int(
@@ -9375,6 +9487,29 @@ def _create_form_field_is_system_owned(step: FlowStep, param: ParamField) -> boo
     return False
 
 
+def _create_unknown_has_caller_evidence(param: ParamField) -> bool:
+    if _param_control_kinds(param) & {"hidden"}:
+        return False
+    if _param_control_is_readonly(param) and not _param_was_caller_typed(param):
+        return False
+    if _param_has_editable_control_evidence(param) or _param_was_caller_typed(param):
+        return True
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or item.get("kind") != "page_control":
+            continue
+        if item.get("hidden") or item.get("disabled") or item.get("read_only"):
+            continue
+        control_kind = str(item.get("control_kind") or "unknown").lower()
+        if control_kind in {"", "unknown", "hidden"}:
+            continue
+        op = str(item.get("op") or "").lower()
+        if op in {"fill", "select", "pick", "toggle"} or item.get("interacted"):
+            return True
+        if item.get("field_aliases") or control_kind not in {"", "unknown"}:
+            return True
+    return False
+
+
 def _mark_create_form_caller_input(param: ParamField, *, reason: str) -> None:
     param.category = "user_param"
     param.exposed_to_user = True
@@ -9385,8 +9520,8 @@ def _mark_create_form_caller_input(param: ParamField, *, reason: str) -> None:
     if _param_has_local_required_marker(param):
         param.required = True
         param.source = {**(param.source or {}), "required_state": "required"}
-    elif not param.required:
-        param.source = {**(param.source or {}), "required_state": "optional"}
+    elif str((param.source or {}).get("required_state") or "") not in {"required", "optional"}:
+        param.source = {**(param.source or {}), "required_state": "unknown"}
 
 
 def _param_has_local_required_marker(param: ParamField) -> bool:
@@ -9426,13 +9561,9 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
                 continue
             if param.source_kind not in {"", "unknown"}:
                 continue
-            chooser = (
-                bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
-                or (
-                    _field_leaf_token(param.key, param.path).endswith("id")
-                    and not _param_is_document_record_identity(param)
-                )
-            )
+            if not _create_unknown_has_caller_evidence(param):
+                continue
+            chooser = bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
             if chooser:
                 param.source_kind = "form_option"
                 param.source = {"kind": "form_option", "path": param.path}
@@ -9465,6 +9596,15 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
     """Project write-body siblings from the unique captured option row they share."""
     catalogs: list[tuple[str, list[dict[str, Any]]]] = []
     for fact in spec.request_facts.requests or []:
+        analysis = spec.request_facts.analysis.get(str(fact.request_id or "")) if fact.request_id else None
+        read = fact.model_dump(exclude_none=True)
+        read["role"] = str(analysis.role if analysis is not None else read.get("role") or "")
+        if not (
+            _read_is_option_source(read)
+            or read["role"] in {"option", "read_option", "option_source", "explicit_read_option"}
+            or _choice_control_triggered(read)
+        ):
+            continue
         rows = [item for item in (as_list_payload(fact.response_json) or []) if isinstance(item, dict)]
         if len(rows) >= 2:
             catalogs.append((str(fact.request_id or ""), rows))
@@ -9499,6 +9639,7 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             if len(unique_rows) != 1:
                 continue
             _count, request_id, row = winners[0]
+            projected_paths: set[str] = set()
             for sibling in members:
                 if sibling.locked or _param_has_manual_contract(sibling):
                     continue
@@ -9511,7 +9652,9 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                 if sibling_leaf.endswith("id") or sibling_leaf in {"id", "ids"}:
                     if _looks_row_identity_leaf(sibling.key, sibling.path) or _param_is_document_record_identity(sibling):
                         continue
-                    response_path = _best_option_projection_path(row, sibling.path, sibling.value)
+                    response_path = _best_option_projection_path(
+                        row, sibling.path, sibling.value, min_score=40,
+                    )
                     if (
                         response_path
                         and sibling.source_kind in {"", "unknown", "page_default"}
@@ -9567,6 +9710,13 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                 sibling.required = False
                 sibling.need_human_confirm = False
                 sibling.reason = f"该字段来自所选记录的 `{response_path}`，运行期随选择自动写入"
+                projected_paths.add(str(sibling.path or ""))
+            if projected_paths:
+                step.selects = [
+                    binding for binding in (step.selects or [])
+                    if str(binding.path or "") not in projected_paths
+                    and str(binding.id_path or "") not in projected_paths
+                ]
 
 
 def _looks_audit_system_leaf(key: str, path: str) -> bool:
@@ -9582,6 +9732,16 @@ def _looks_audit_system_leaf(key: str, path: str) -> bool:
 
 def _looks_row_identity_leaf(key: str, path: str) -> bool:
     return "[" in str(path or "") and _field_leaf_token(key, path) in {"id", "ids"}
+
+
+def _looks_catalog_attribute_leaf(key: str, path: str) -> bool:
+    leaf = _field_leaf_token(key, path)
+    if leaf.endswith("id") or leaf in {"id", "ids"}:
+        return False
+    return any(leaf.endswith(token) for token in (
+        "name", "title", "label", "barcode", "unitname", "stock", "stockcount",
+        "spec", "image", "img",
+    ))
 
 
 def _looks_display_echo_field(step: FlowStep, param: ParamField) -> bool:
@@ -9734,9 +9894,8 @@ def _mark_query_filter_caller(param: ParamField, *, reason: str) -> None:
     if _param_has_local_required_marker(param):
         param.required = True
         param.source = {**(param.source or {}), "required_state": "required"}
-    else:
-        param.required = False
-        param.source = {**(param.source or {}), "required_state": "optional"}
+    elif str((param.source or {}).get("required_state") or "") not in {"required", "optional"}:
+        param.source = {**(param.source or {}), "required_state": "unknown"}
     if reason:
         param.reason = reason
 
@@ -9777,13 +9936,9 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 continue
             if param.source_kind not in {"", "unknown"}:
                 continue
-            chooser = (
-                bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
-                or (
-                    _field_leaf_token(param.key, param.path).endswith("id")
-                    and not _param_is_document_record_identity(param)
-                )
-            )
+            if not _create_unknown_has_caller_evidence(param):
+                continue
+            chooser = bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
             if chooser:
                 param.source_kind = "form_option"
                 param.source = {"kind": "form_option", "path": param.path}
@@ -9800,7 +9955,7 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 }
                 _mark_query_filter_caller(
                     param,
-                    reason="查询页上的业务筛选由调用方提供；控件未绑定时仍按筛选条件保留",
+                    reason="查询页上的业务筛选由调用方提供",
                 )
 
 
@@ -10151,7 +10306,7 @@ def _repair_readonly_control_defaults(spec: FlowSpec) -> int:
         for step, param, _path in candidates:
             if (
                 param.locked
-                or param.source_kind == "computed"
+                or param.source_kind in {"computed", "selected_option_field"}
                 or _param_has_manual_contract(param)
                 or _param_source_agent_classified(param)
                 or _param_has_editable_control_evidence(param)
@@ -17381,7 +17536,9 @@ def _merge_enum_values(dst: ParamField, src: ParamField) -> None:
 
 def _param_quality(param: ParamField) -> tuple[int, int, float]:
     source_score = 2 if param.source_kind not in {"", "unknown"} else 0
-    if param.source_kind in {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}:
+    if param.source_kind == "selected_option_field":
+        source_score += 3
+    elif param.source_kind in {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}:
         source_score += 2
     manual_score = 1 if param.name_source in {"manual", "llm", "planner", "assignee", "sample"} else 0
     return (source_score, manual_score, float(param.confidence or 0.0))
@@ -20510,6 +20667,15 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     _looks_quantitative_option_target(param)
                     and not has_recorded_choice(param)
                 )
+                or (
+                    not has_recorded_choice(param)
+                    and (
+                        _param_is_quantity_or_formula_leaf(param.key, param.path)
+                        or _looks_unit_price_formula_leaf(param.key, param.path)
+                        or _looks_display_echo_field(target, param)
+                        or _looks_catalog_attribute_leaf(param.key, param.path)
+                    )
+                )
                 or param.category == "system_const"
             ):
                 continue
@@ -21364,6 +21530,8 @@ def _bind_option_source(
 ) -> None:
     step = _find_step(spec, target_step_id)
     param = _find_param(step, target_path)
+    if param.source_kind in {"selected_option_field", "computed"}:
+        return
     normalized_actor = str(actor or "system").strip().lower()
     automated = normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS
     if automated and (

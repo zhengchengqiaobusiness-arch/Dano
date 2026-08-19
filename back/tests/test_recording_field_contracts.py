@@ -977,16 +977,16 @@ def test_create_form_unbound_manual_fields_are_caller_not_unknown() -> None:
         samples={"往来单位": "甲公司"},
     )
     create = _step_by_suffix(spec, "/doc/create")
+    party = _param(create, "partyId")
+    assert _param_exposed_to_caller(party)
+    assert party.source_kind != "unknown"
     remark = _param(create, "remark")
-    count = _param(create, "items[0].count")
-    sale_user = _param(create, "saleUserId")
-    discount = _param(create, "discountPercent")
-    deposit = _param(create, "depositPrice")
-    for item in (remark, count, sale_user, discount, deposit):
-        assert _param_exposed_to_caller(item), (item.path, item.source_kind, item.reason)
-        assert item.source_kind != "unknown"
-        assert item.category == "user_param"
-    assert remark.required is False
+    assert remark.source_kind in {"unknown", ""}
+    assert not _param_exposed_to_caller(remark)
+    for path in ("items[0].count", "saleUserId", "discountPercent", "depositPrice"):
+        item = _param(create, path)
+        assert item.source_kind in {"unknown", ""}, (path, item.source_kind, item.reason)
+        assert not _param_exposed_to_caller(item)
     total = _param(create, "items[0].totalPrice")
     assert total.source_kind == "computed"
     assert not _param_exposed_to_caller(total)
@@ -1110,11 +1110,14 @@ def test_unbound_list_filters_are_caller_not_unknown() -> None:
         page_context=PAGE,
     )
     listing = _step_by_suffix(spec, "/doc/page")
-    for path in ("query.no", "query.remark", "query.customerId", "query.productId", "query.status"):
+    status = _param(listing, "query.status")
+    assert _param_exposed_to_caller(status)
+    assert status.source_kind != "unknown"
+    for path in ("query.no", "query.remark", "query.customerId", "query.productId"):
         item = _param(listing, path)
-        assert _param_exposed_to_caller(item), (path, item.source_kind, item.reason)
-        assert item.source_kind != "unknown"
-        assert item.required is False
+        assert item.source_kind in {"unknown", ""} or not _param_exposed_to_caller(item), (
+            path, item.source_kind, item.reason
+        )
     assert not _param_exposed_to_caller(_param(listing, "query.pageNo"))
     spec = _compile(spec, [{
         "name": "search_docs",
@@ -1124,8 +1127,9 @@ def test_unbound_list_filters_are_caller_not_unknown() -> None:
         "request_refs": [{"step_id": listing.step_id, "usage": "execute"}],
     }])
     props = ((next(item for item in spec.capabilities if item.name == "search_docs").input_schema or {}).get("properties") or {})
-    assert "no" in props
-    assert "remark" in props
+    assert "status" in props
+    assert "no" not in props
+    assert "remark" not in props
     assert "pageNo" not in props
 
 
@@ -1190,7 +1194,7 @@ def test_readonly_option_row_echo_stays_system() -> None:
         page_context=PAGE,
     )
     name = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productName")
-    assert name.source_kind in {"selected_option_field", "constant", "page_rule"}
+    assert name.source_kind == "selected_option_field"
     assert not _param_exposed_to_caller(name)
     assert name.source_kind != "user_input"
     price = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productPrice")

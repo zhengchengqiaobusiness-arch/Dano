@@ -22,6 +22,15 @@ from urllib.parse import parse_qs, urlparse
 import structlog
 
 from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
+from dano.execution.page.recording_semantic_index import (
+    SemanticFieldIndex,
+    control_item_from_step,
+    field_identity_id,
+    form_root_identity,
+    route_identity,
+    samples_from_fields,
+    stamp_field_identity,
+)
 from dano.shared.std_fields import standard_fields_for
 
 log = structlog.get_logger(__name__)
@@ -59,7 +68,14 @@ def assign_step_field_keys(steps: list[dict], *, tenant: str = "") -> dict[int, 
         page_id = str(step.get("page_id") or "").strip()
         frame_id = str(step.get("frame_id") or "").strip()
         locator_identity = locator or f"@event:{index}"
-        identity = (semantic_id, page_id, frame_id, locator_identity)
+        identity = (
+            semantic_id,
+            page_id,
+            frame_id,
+            locator_identity,
+            route_identity(step),
+            form_root_identity(step),
+        )
         key = identity_to_key.get(identity)
         if key is None:
             candidate = semantic_bases.setdefault(semantic_id, semantic)
@@ -1432,6 +1448,7 @@ class RecordSession:
         self.page_events: list[dict] = []
         self._event_counter: int = 0
         self._last_action_by_scope: dict[tuple[str, str], dict] = {}
+        self._semantic = SemanticFieldIndex()
         self._req_counter: int = 0          # 顺序号,作为 all_requests[i]["index"] 与 diagnostics 关联锚点
         self._request_fact_index: dict[int, int] = {}
         self._page_counter: int = 0
@@ -1473,6 +1490,27 @@ class RecordSession:
             self._frame_counter += 1
             self._frame_ids[key] = f"frame_{self._frame_counter}"
         return self._frame_ids[key]
+
+    def _trim_page_events(self) -> None:
+        if len(self.page_events) <= 1000:
+            return
+        for event in self.page_events[:-1000]:
+            self._semantic.archive_event(event)
+        self.page_events = self.page_events[-1000:]
+
+    def _trim_form_snapshots(self) -> None:
+        if len(self.form_snapshots) <= 20:
+            return
+        for snapshot in self.form_snapshots[:-20]:
+            self._semantic.archive_form_snapshot(snapshot)
+        self.form_snapshots = self.form_snapshots[-20:]
+
+    def _trim_enum_snapshots(self) -> None:
+        if len(self.enum_snapshots) <= 200:
+            return
+        for snapshot in self.enum_snapshots[:-200]:
+            self._semantic.archive_enum_snapshot(snapshot)
+        self.enum_snapshots = self.enum_snapshots[-200:]
 
     def _request_scope(self, request) -> dict[str, str]:  # noqa: ANN001
         """Best-effort page/frame anchors for RequestFacts."""
@@ -2128,7 +2166,7 @@ class RecordSession:
             }
             self._last_action_by_scope[scope] = action_ref
             self._last_action_by_scope[("", "")] = action_ref
-            self.page_events = self.page_events[-1000:]
+            self._trim_page_events()
             return
         if op == "dom_effect":
             self.page_events.append({
@@ -2142,7 +2180,7 @@ class RecordSession:
                 "required_fields": list(step.get("required_fields") or [])[:200],
                 "page_context": dict(step.get("page_context") or {}),
             })
-            self.page_events = self.page_events[-1000:]
+            self._trim_page_events()
             return
         if op == "enum_snapshot":
             action_id = str(step.get("action_id") or "")
@@ -2165,15 +2203,25 @@ class RecordSession:
                     "mapping_complete": bool(step.get("mapping_complete")) and len(raw_options) <= 500,
                     "snapshot_truncated": len(raw_options) > 500,
                 }
-                identity = tuple(str(snapshot.get(key) or "") for key in (
-                    "page_id", "frame_id", "locator", "field",
-                ))
+                identity = (
+                    str(snapshot.get("page_id") or ""),
+                    str(snapshot.get("frame_id") or ""),
+                    str(snapshot.get("locator") or ""),
+                    str(snapshot.get("field") or ""),
+                    route_identity(snapshot),
+                    form_root_identity(snapshot),
+                )
                 replaced = False
                 for index in range(len(self.enum_snapshots) - 1, -1, -1):
                     previous = self.enum_snapshots[index]
-                    previous_identity = tuple(str(previous.get(key) or "") for key in (
-                        "page_id", "frame_id", "locator", "field",
-                    ))
+                    previous_identity = (
+                        str(previous.get("page_id") or ""),
+                        str(previous.get("frame_id") or ""),
+                        str(previous.get("locator") or ""),
+                        str(previous.get("field") or ""),
+                        route_identity(previous),
+                        form_root_identity(previous),
+                    )
                     if previous_identity != identity:
                         continue
                     merged = {
@@ -2213,7 +2261,8 @@ class RecordSession:
                     break
                 if not replaced:
                     self.enum_snapshots.append(snapshot)
-                self.enum_snapshots = self.enum_snapshots[-200:]
+                self._semantic.archive_enum_snapshot(snapshot)
+                self._trim_enum_snapshots()
                 self.page_events.append({
                     "event_id": event_id,
                     "kind": "enum_snapshot",
@@ -2226,7 +2275,7 @@ class RecordSession:
                     "page_id": scope[0],
                     "frame_id": scope[1],
                 })
-                self.page_events = self.page_events[-1000:]
+                self._trim_page_events()
             return
         if step.get("op") == "form_snapshot":
             step["event_id"] = event_id
@@ -2254,8 +2303,9 @@ class RecordSession:
                 "page_context": dict(step.get("page_context") or {}),
             })
             # 同一表单反复点击只保留有限快照；最后一份是发布时的地面真值。
-            self.form_snapshots = self.form_snapshots[-20:]
-            self.page_events = self.page_events[-1000:]
+            self._semantic.archive_form_snapshot(step)
+            self._trim_form_snapshots()
+            self._trim_page_events()
             return
         action_id = str(step.get("action_id") or f"action_server_{self._event_counter}")
         step["action_id"] = action_id
@@ -2306,15 +2356,30 @@ class RecordSession:
         }
         self._last_action_by_scope[scope] = action_ref
         self._last_action_by_scope[("", "")] = action_ref
-        self.page_events = self.page_events[-1000:]
-        # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
-        if (self.steps and self.steps[-1].get("locator") == step.get("locator")
-                and self.steps[-1].get("page_id") == step.get("page_id")
-                and self.steps[-1].get("frame_id") == step.get("frame_id")
-                and step.get("op") in ("fill", "select", "pick")):
+        self._semantic.archive_event(self.page_events[-1])
+        self._trim_page_events()
+        stamp_field_identity(step)
+        same_locator = bool(
+            self.steps
+            and self.steps[-1].get("locator") == step.get("locator")
+            and self.steps[-1].get("page_id") == step.get("page_id")
+            and self.steps[-1].get("frame_id") == step.get("frame_id")
+            and route_identity(self.steps[-1]) == route_identity(step)
+            and step.get("op") in ("fill", "select", "pick")
+        )
+        same_action = bool(
+            self.steps
+            and (
+                str(self.steps[-1].get("action_id") or "") == str(step.get("action_id") or "")
+                or str(self.steps[-1].get("transaction_id") or "") == str(step.get("transaction_id") or "")
+            )
+        )
+        if same_locator and same_action:
             self.steps[-1] = step
         else:
             self.steps.append(step)
+        if step.get("op") in {"fill", "select", "pick", "toggle", "upload"}:
+            self._semantic.archive_control(control_item_from_step(step))
     # ── P0-1 诊断事件:console / pageerror / requestfailed ──
     def _on_console(self, msg) -> None:  # noqa: ANN001 —— context 级 console 事件
         try:
@@ -2752,19 +2817,40 @@ class RecordSession:
                 int(match.group(1)) if match else 0,
             )
 
-        evidence = sorted([*self.steps, *self.enum_snapshots], key=evidence_order)
+        evidence = sorted(
+            [*self.steps, *self.enum_snapshots, *self._semantic.enums.values()],
+            key=evidence_order,
+        )
         keymap = assign_step_field_keys(evidence, tenant=self._tenant)
         out: dict[str, dict] = {}
-        last_field_idx_by_scope: dict[tuple[str, str], int] = {}
+        last_field_idx_by_scope: dict[tuple[str, str, str, str], int] = {}
         for i, s in enumerate(evidence):
-            scope_key = (str(s.get("page_id") or ""), str(s.get("frame_id") or ""))
+            scope_key = (
+                str(s.get("page_id") or ""),
+                str(s.get("frame_id") or ""),
+                route_identity(s),
+                str(s.get("action_id") or s.get("transaction_id") or ""),
+            )
             if i in keymap:
                 last_field_idx_by_scope[scope_key] = i
+                last_field_idx_by_scope[(
+                    str(s.get("page_id") or ""),
+                    str(s.get("frame_id") or ""),
+                    route_identity(s),
+                    "",
+                )] = i
             if s.get("op") in ("pick", "select", "enum_snapshot") and s.get("options"):
                 # 自定义下拉常见事件序列是「点开输入框/选择器」→「点弹层选项」。
                 # 后一个 pick 事件有 options/selected,但 DOM 目标已经是弹层项,拿不到字段 label。
                 # 因此优先用本步字段,否则回溯最近一个可填写字段,把弹层选项归回正确业务字段。
                 owner_idx = i if i in keymap else last_field_idx_by_scope.get(scope_key)
+                if owner_idx not in keymap:
+                    owner_idx = last_field_idx_by_scope.get((
+                        str(s.get("page_id") or ""),
+                        str(s.get("frame_id") or ""),
+                        route_identity(s),
+                        "",
+                    ))
                 if owner_idx not in keymap:
                     continue
                 owner = evidence[owner_idx]
@@ -2772,13 +2858,17 @@ class RecordSession:
                 scope_key = (
                     str(s.get("page_id") or owner.get("page_id") or ""),
                     str(s.get("frame_id") or owner.get("frame_id") or ""),
+                    route_identity(s) or route_identity(owner),
                 )
                 storage_key = field_key
                 existing = out.get(storage_key)
-                if existing and (
-                    str(existing.get("page_id") or ""), str(existing.get("frame_id") or "")
-                ) != scope_key:
-                    storage_key = f"{field_key}@{scope_key[0]}:{scope_key[1]}"
+                existing_scope = (
+                    str(existing.get("page_id") or ""),
+                    str(existing.get("frame_id") or ""),
+                    route_identity(existing),
+                ) if existing else None
+                if existing and existing_scope != scope_key:
+                    storage_key = f"{field_key}@{scope_key[0]}:{scope_key[1]}:{scope_key[2]}"
                 previous = out.get(storage_key, {})
                 merged: dict[str, object] = {}
                 mapping_conflict = bool(previous.get("mapping_conflict") or s.get("mapping_conflict"))
@@ -2822,6 +2912,12 @@ class RecordSession:
                         s.get("mapping_complete")
                         and not s.get("snapshot_truncated")
                         and not mapping_conflict
+                    ),
+                    "page_id": scope_key[0],
+                    "frame_id": scope_key[1],
+                    "page_context": dict(
+                        s.get("page_context") or owner.get("page_context")
+                        or previous.get("page_context") or {}
                     ),
                 }
                 if selected_value not in (None, ""):
@@ -3393,130 +3489,14 @@ class RecordSession:
         """Return control-identity evidence scoped to the page that emitted it.
 
         Field names and types are grounded by ``name``/``data-prop``/control kind.
-        Values remain samples only; repeated values never identify a request field.
+        Values remain samples only. Cross-transaction facts are never merged.
         """
-        def route_identity(snapshot: dict) -> str:
-            context = snapshot.get("page_context") if isinstance(snapshot.get("page_context"), dict) else {}
-            path = str(context.get("path") or "").strip()
-            if path:
-                return path.rstrip("/") or "/"
-            url = str(context.get("url") or "").strip()
-            return (urlparse(url).path.rstrip("/") or "/") if url else ""
-
-        def field_surface(item: dict) -> str:
-            if item.get("in_dialog") is True:
-                return "dialog"
-            surface = str(item.get("surface") or "").strip().lower()
-            if surface in {"dialog", "modal", "drawer"}:
-                return "dialog"
-            return "page"
-
-        evidence: list[dict] = []
         for snapshot in self.form_snapshots:
-            scope = (
-                str(snapshot.get("page_id") or ""),
-                str(snapshot.get("frame_id") or ""),
-                route_identity(snapshot),
-            )
-            for field in [
-                *(snapshot.get("fields") or []),
-                *(snapshot.get("output_fields") or []),
-            ]:
-                if not isinstance(field, dict):
-                    continue
-                evidence.append({
-                    **field,
-                    "page_id": scope[0],
-                    "frame_id": scope[1],
-                    "page_context": dict(snapshot.get("page_context") or {}),
-                    "op": "snapshot",
-                    "in_dialog": bool(field.get("in_dialog")),
-                    "surface": field_surface(field),
-                })
+            self._semantic.archive_form_snapshot(snapshot)
         for step in self.steps:
-            if step.get("op") not in {"fill", "select", "pick", "toggle", "upload"}:
-                continue
-            extra = {
-                key: step.get(key)
-                for key in (
-                    "checked", "group_name", "selected_label", "options",
-                    "filename", "mime_type", "size", "multiple", "file_count", "files",
-                    "required_state", "required_observed",
-                )
-                if step.get(key) not in (None, "")
-            }
-            evidence.append({
-                "field": str(step.get("field") or ""),
-                "label": str(step.get("field") or ""),
-                "value": step.get("value"),
-                "required": bool(step.get("required")),
-                "field_aliases": list(step.get("field_aliases") or []),
-                "control_kind": str(step.get("control_kind") or "unknown"),
-                "input_type": str(step.get("input_type") or ""),
-                "minimum": step.get("minimum"),
-                "maximum": step.get("maximum"),
-                "page_id": str(step.get("page_id") or ""),
-                "frame_id": str(step.get("frame_id") or ""),
-                "page_context": dict(step.get("page_context") or {}),
-                "op": str(step.get("op") or ""),
-                "event_id": str(step.get("event_id") or ""),
-                "action_id": str(step.get("action_id") or ""),
-                "transaction_id": str(step.get("transaction_id") or ""),
-                "observed_at": step.get("observed_at"),
-                "in_dialog": bool(step.get("in_dialog")),
-                "surface": str(step.get("surface") or ("dialog" if step.get("in_dialog") else "page")),
-                **extra,
-            })
-        deduped: list[dict] = []
-        for item in evidence:
-            aliases = {
-                str(value) for value in (item.get("field_aliases") or [])
-                if str(value or "")
-            }
-            identity = (
-                str(item.get("page_id") or ""), str(item.get("frame_id") or ""),
-                route_identity(item), str(item.get("label") or item.get("field") or ""),
-                str(item.get("control_kind") or ""),
-                field_surface(item),
-            )
-            matches = []
-            for index, previous in enumerate(deduped):
-                previous_identity = (
-                    str(previous.get("page_id") or ""), str(previous.get("frame_id") or ""),
-                    route_identity(previous),
-                    str(previous.get("label") or previous.get("field") or ""),
-                    str(previous.get("control_kind") or ""),
-                    field_surface(previous),
-                )
-                if previous_identity != identity:
-                    continue
-                previous_aliases = {
-                    str(value) for value in (previous.get("field_aliases") or [])
-                    if str(value or "")
-                }
-                if not aliases or not previous_aliases or aliases.intersection(previous_aliases):
-                    matches.append(index)
-            if len(matches) != 1:
-                deduped.append(item)
-                continue
-            index = matches[0]
-            previous = deduped[index]
-            merged = {**previous, **item}
-            merged["field_aliases"] = list(dict.fromkeys([
-                *list(previous.get("field_aliases") or []),
-                *list(item.get("field_aliases") or []),
-            ]))
-            if item.get("value") in (None, "") and previous.get("value") not in (None, ""):
-                merged["value"] = previous["value"]
-            for source in (previous, item):
-                if (
-                    str(source.get("op") or "") == "snapshot"
-                    and source.get("value") not in (None, "")
-                    and merged.get("visible_default") in (None, "")
-                ):
-                    merged["visible_default"] = source.get("value")
-            deduped[index] = merged
-        return deduped[-500:]
+            if step.get("op") in {"fill", "select", "pick", "toggle", "upload"}:
+                self._semantic.archive_control(control_item_from_step(step))
+        return self._semantic.field_evidence()
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
@@ -3535,28 +3515,51 @@ class RecordSession:
         return out
 
     def recorded_form_samples(self) -> dict[str, object]:
-        """Return submit-time label/value evidence, preserving range members."""
-        out: dict[str, object] = {}
-        counters: dict[str, int] = {}
-        page_fields: list[dict] = []
-        dialog_fields: list[dict] = []
+        """Return submit-time label/value evidence from one complete snapshot."""
+        if self._semantic.tx_samples:
+            latest = next(reversed(list(self._semantic.tx_samples.values())))
+            if latest:
+                return dict(latest)
+        snapshots = list(self.form_snapshots or [])
+        if not snapshots:
+            return {}
+        fields = [item for item in (snapshots[-1].get("fields") or []) if isinstance(item, dict)]
+        return samples_from_fields(fields)
+
+    def recorded_form_samples_by_transaction(self) -> dict[str, dict]:
+        samples = {
+            key: dict(value)
+            for key, value in self._semantic.tx_samples.items()
+            if value
+        }
         for snapshot in self.form_snapshots or []:
-            fields = [item for item in (snapshot.get("fields") or []) if isinstance(item, dict)]
-            page = [item for item in fields if not item.get("in_dialog")]
-            dialog = [item for item in fields if item.get("in_dialog")]
-            if page:
-                page_fields = page
-            if dialog:
-                dialog_fields = dialog
-        for field in [*page_fields, *dialog_fields]:
-            label = str(field.get("label") or field.get("field") or "").strip()
-            value = field.get("value")
-            if not label or not has_recorded_value({"value": value}):
+            tx = str(snapshot.get("transaction_id") or snapshot.get("action_id") or "")
+            if not tx:
                 continue
-            counters[label] = counters.get(label, 0) + 1
-            key = label if counters[label] == 1 else f"{label}#{counters[label]}"
-            out[key] = value
-        return out
+            fields = [item for item in (snapshot.get("fields") or []) if isinstance(item, dict)]
+            extracted = samples_from_fields(fields)
+            if extracted:
+                samples[tx] = extracted
+                action_id = str(snapshot.get("action_id") or "")
+                if action_id:
+                    samples[action_id] = extracted
+        return samples
+
+    def recorded_form_samples_by_request(self) -> dict[str, dict]:
+        samples = {
+            key: dict(value)
+            for key, value in self._semantic.req_samples.items()
+            if value
+        }
+        for snapshot in self.form_snapshots or []:
+            request_id = str(snapshot.get("request_id") or "")
+            if not request_id:
+                continue
+            fields = [item for item in (snapshot.get("fields") or []) if isinstance(item, dict)]
+            extracted = samples_from_fields(fields)
+            if extracted:
+                samples[request_id] = extracted
+        return samples
 
     async def observed_required_labels(self) -> set[str]:
         """Scan the live page for required controls, including untouched fields."""

@@ -2515,7 +2515,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         elif strict_control_evidence:
             required_state = "unknown"
         else:
-            required_state = "required" if required else "optional"
+            required_state = "required" if required else "unknown"
         out.append({"path": path, "key": key, "value": sv, "raw_value": node,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
