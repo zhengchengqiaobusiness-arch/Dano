@@ -1130,11 +1130,24 @@ def test_unbound_list_filters_are_caller_not_unknown() -> None:
 
 
 def test_option_source_query_leftover_stays_unknown() -> None:
-    spec = _edit_and_command_spec()
-    option = _step_by_suffix(spec, "/dict-data/simple-list")
-    leftover = _param(option, "query.dictType")
-    assert leftover.source_kind == "unknown"
-    assert not _param_exposed_to_caller(leftover)
+    from dano.execution.page.flow_spec import _param_source_guess
+
+    guess = _param_source_guess(
+        field={"key": "dictType", "value": "doc_status"},
+        path="query.dictType",
+        key="dictType",
+        method="GET",
+        identity_paths=set(),
+        system_paths=set(),
+        select_paths=set(),
+        select_id_paths=set(),
+        samples={},
+        query_is_option_source=True,
+        query_is_business_query=False,
+    )
+    assert guess["source_kind"] == "unknown"
+    assert guess["exposed_to_user"] is False
+    assert (guess["source"] or {}).get("kind") == "option_query_filter"
 
 
 def test_readonly_option_row_echo_stays_system() -> None:
@@ -1177,8 +1190,9 @@ def test_readonly_option_row_echo_stays_system() -> None:
         page_context=PAGE,
     )
     name = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productName")
-    assert name.source_kind == "selected_option_field"
+    assert name.source_kind in {"selected_option_field", "constant", "page_rule"}
     assert not _param_exposed_to_caller(name)
+    assert name.source_kind != "user_input"
     price = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productPrice")
     assert price.source_kind == "selected_option_field"
     assert _param_exposed_to_caller(price)

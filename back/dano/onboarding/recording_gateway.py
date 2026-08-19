@@ -264,6 +264,17 @@ class RecordingGatewaySession:
         if self.send is send:
             self.send = None
 
+    async def _release_capture(self) -> None:
+        """Stop the recorder browser after the run is terminal so a new page can start."""
+        capture = self.capture
+        if capture is None:
+            return
+        self.capture = None
+        try:
+            await capture.stop()
+        except Exception:  # noqa: BLE001 - a leftover browser must not block the next start
+            pass
+
     async def start(self) -> None:
         if self.capture is not None:
             await self._emit_snapshot()
@@ -968,6 +979,7 @@ class RecordingGatewaySession:
                 )
             except Exception:  # noqa: BLE001 - terminal flags must not abort the snapshot
                 pass
+            await self._release_capture()
 
     async def _emit_snapshot(self, snapshot: WorkflowSnapshot | None = None) -> None:
         if self.workflow is None:
@@ -1025,6 +1037,7 @@ class RecordingSessionRegistry:
             ):
                 raise ValueError("录制 action 不属于当前租户或业务系统")
         if created:
+            await self._abort_other_live_recordings(config)
             try:
                 await session.start()
             except Exception:
@@ -1035,6 +1048,19 @@ class RecordingSessionRegistry:
         else:
             await session.attach(send)
         return session, created
+
+    async def _abort_other_live_recordings(self, config: RecordingSessionConfig) -> None:
+        """A new recording must take the browser; leftover captures block goto."""
+        async with self._lock:
+            others = [
+                action
+                for action, session in self._sessions.items()
+                if action != config.action
+                and session.config.tenant == config.tenant
+                and session.capture is not None
+            ]
+        for action in others:
+            await self.abort(action)
 
     async def attach_or_resume(
         self,

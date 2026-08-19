@@ -19,7 +19,7 @@
 与旧设计 / 用户草图的关键差异：
 
 1. 停止录制后**没有**第二次 `plan_capabilities`。只把同一实时队列再跑一遍 `final_request_tail`。
-2. 阶段六 FlowSpec 先写入历史（`recording-result:{action}`）。准备页可查看；**继续分析**进入能力页后须**手动点开始分析**。
+2. 阶段六 FlowSpec 先写入历史（`recording-result:{action}`）。停止录制后前端进入能力页展示该结果；机器验证默认关闭时直接发布。从历史打开后须**手动点开始分析**才进阶段七。
 3. 机器验证默认关闭。关闭则跳过阶段七循环，直接发布导出。
 4. 能力成员由编译器从已验证请求图重算，模型给的 `request_refs` 只是观察，不单独决定成员。
 5. 阶段七停滞退出是「指纹 + issue 签名连续 **2** 轮无进展」，不是草图里的「最多 5 轮」。
@@ -323,13 +323,13 @@ Skill 内部顺序（必须整包思考，不能只看本批新增）：
 
 1. 阶段五 `apply_to` / `merge_live_agent_state` 已经跑过 `compile_capabilities`（锚点映射、读写家族、依赖图、links）。
 2. 依赖环上的能力写入 `errors` 且**不进入** `compiled`；kind 与结构动词不一致时只 warning，读写家族不匹配才拒绝。
-3. **立刻存档**（无论机器验证开或关）：`SelfHealingPipeline` 在 `prepare` 之后、验证/发布之前调用 `persist_stage_six` → `asset_drafts`，`asset_key=recording-result:{action}`。前端收 `recording_result_saved`，准备页历史出现该条。阶段七只改内存工作副本，不回写这份阶段六存档。
+3. **立刻存档**（无论机器验证开或关）：`SelfHealingPipeline` 在 `prepare` 之后、验证/发布之前调用 `persist_stage_six` → `asset_drafts`，`asset_key=recording-result:{action}`。前端收 `recording_result_saved` 后进入能力页并刷新历史。阶段七只改内存工作副本，不回写这份阶段六存档。冻结/处理过程中 WebSocket 断开时，前端按同一 `action` 重连并继续收快照，直到 `editable` / `published` / `failed`。
 4. `draft.capabilities` 为空则停在可编辑，文案「尚未生成可发布能力」，不发布。
 
-此后准备页：
+此后能力页：
 
-- **继续分析**：进入能力页，展示阶段六 FlowSpec，**不自动开分析**。
-- **开始分析**：手动触发阶段七（机器验证恒为 true）。
+- **停止录制**：自动进入能力页，展示阶段六 FlowSpec。录制时若已打开机器验证，则继续阶段七；否则直接发布。
+- **开始分析**：从历史打开的结果须手动触发阶段七（机器验证恒为 true）。
 - **删除**：只删历史结果，不删已发布 Skill。
 
 ---
