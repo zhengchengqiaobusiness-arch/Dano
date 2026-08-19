@@ -9299,15 +9299,51 @@ def _step_is_create_or_submit_form(step: FlowStep) -> bool:
         param for param in step.params or []
         if not str(param.path or "").startswith("query.")
     ]
-    if len(body) < 2:
-        return False
-    return any(
-        _param_has_command_local_control(step, param)
-        or param.source_kind in {
-            "user_input", "form_option", "page_default", "api_option", "page_enum",
-        }
-        for param in body
-    )
+    return len(body) >= 2
+
+
+def _create_form_field_is_system_owned(step: FlowStep, param: ParamField) -> bool:
+    """Proven runtime/system origins stay off the caller list."""
+    if _looks_pagination_field(param.key, param.path):
+        return True
+    if param.source_kind in {
+        "computed", "selected_option_field", "current_user",
+        "system_time", "system_generated", "page_context", "page_rule",
+        "request_header", "session",
+    }:
+        return True
+    if param.source_kind == "constant" and str((param.source or {}).get("kind") or "") in {
+        "command_literal", "recorded_control_default",
+    }:
+        return True
+    if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
+        return True
+    if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
+        return True
+    if _looks_row_identity_leaf(param.key, param.path):
+        return True
+    if (
+        _param_is_document_record_identity(param)
+        and not _record_identity_is_caller_owned(str(step.method or ""), param.value)
+    ):
+        return True
+    if _param_control_is_readonly(param):
+        return True
+    return False
+
+
+def _mark_create_form_caller_input(param: ParamField, *, reason: str) -> None:
+    param.category = "user_param"
+    param.exposed_to_user = True
+    param.editable = True
+    param.need_human_confirm = False
+    if reason:
+        param.reason = reason
+    if _param_has_local_required_marker(param):
+        param.required = True
+        param.source = {**(param.source or {}), "required_state": "required"}
+    elif not param.required:
+        param.source = {**(param.source or {}), "required_state": "optional"}
 
 
 def _param_has_local_required_marker(param: ParamField) -> bool:
@@ -9322,43 +9358,52 @@ def _param_has_local_required_marker(param: ParamField) -> bool:
 
 
 def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
-    """Caller owns editable create/submit controls; required follows the page *."""
+    """Caller owns manual create/submit inputs; system owns proven derivations.
+
+    Bound page controls are sufficient but not required. After formulas and
+    option-row echoes are assigned, a remaining create-body unknown is a
+    handwritten form value, not a system field.
+    """
+    caller_kinds = {
+        "user_input", "form_option", "page_default", "api_option",
+        "page_enum", "static_enum", "manual_enum", "caller_input",
+    }
     for step in spec.steps or []:
         if not _step_is_create_or_submit_form(step):
             continue
         for param in step.params or []:
             if param.locked or _param_has_manual_contract(param):
                 continue
-            if _looks_pagination_field(param.key, param.path):
+            if _create_form_field_is_system_owned(step, param):
                 continue
-            if param.source_kind in {
-                "computed", "selected_option_field", "current_user",
-                "system_time", "system_generated", "page_context", "page_rule",
-            }:
+            if str(param.path or "").startswith("query.") and not _param_has_command_local_control(step, param):
                 continue
-            if not _param_has_command_local_control(step, param):
+            if param.source_kind in caller_kinds:
+                _mark_create_form_caller_input(param, reason="")
                 continue
-            if _param_control_is_readonly(param):
+            if param.source_kind not in {"", "unknown"}:
                 continue
-            if param.source_kind == "unknown":
-                if _param_control_kinds(param) & {"select", "combobox", "radio"}:
-                    param.source_kind = "form_option"
-                    param.source = {"kind": "form_option", "path": param.path}
-                    param.reason = "新建/提交表单上的可编辑选择控件，由调用方提供"
-                else:
-                    param.source_kind = "user_input"
-                    param.source = {"kind": "sample", "path": param.path, "recorded": True}
-                    param.reason = "新建/提交表单上的可编辑控件，由调用方提供"
-            param.category = "user_param"
-            param.exposed_to_user = True
-            param.editable = True
-            param.need_human_confirm = False
-            if _param_has_local_required_marker(param):
-                param.required = True
-                param.source = {**(param.source or {}), "required_state": "required"}
+            chooser = (
+                bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
+                or (
+                    _field_leaf_token(param.key, param.path).endswith("id")
+                    and not _param_is_document_record_identity(param)
+                )
+            )
+            if chooser:
+                param.source_kind = "form_option"
+                param.source = {"kind": "form_option", "path": param.path}
+                _mark_create_form_caller_input(
+                    param,
+                    reason="新建/提交表单上由调用方选择的字段",
+                )
             else:
-                param.required = False
-                param.source = {**(param.source or {}), "required_state": "optional"}
+                param.source_kind = "user_input"
+                param.source = {"kind": "sample", "path": param.path, "recorded": True}
+                _mark_create_form_caller_input(
+                    param,
+                    reason="新建/提交表单上的手工输入，由调用方提供",
+                )
 
 
 def _option_row_match_count(row: dict[str, Any], members: list[ParamField]) -> int:
@@ -9389,21 +9434,28 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
         for param in step.params or []:
             groups.setdefault(_param_group_prefix(param.path), []).append(param)
         for members in groups.values():
-            supported: list[tuple[str, dict[str, Any]]] = []
+            scored: list[tuple[int, str, dict[str, Any]]] = []
             for request_id, rows in catalogs:
                 hits = [
-                    row for row in rows
-                    if _option_row_match_count(row, members) >= 2
+                    (row, _option_row_match_count(row, members))
+                    for row in rows
                 ]
-                if len(hits) == 1:
-                    supported.append((request_id, hits[0]))
+                good = [(row, count) for row, count in hits if count >= 2]
+                if len(good) != 1:
+                    continue
+                row, count = good[0]
+                scored.append((count, request_id, row))
+            if not scored:
+                continue
+            best = max(item[0] for item in scored)
+            winners = [item for item in scored if item[0] == best]
             unique_rows = {
                 json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
-                for _request_id, row in supported
+                for _count, _request_id, row in winners
             }
             if len(unique_rows) != 1:
                 continue
-            request_id, row = supported[0]
+            _count, request_id, row = winners[0]
             for sibling in members:
                 if sibling.locked or _param_has_manual_contract(sibling):
                     continue

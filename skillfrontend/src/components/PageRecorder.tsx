@@ -350,7 +350,7 @@ function paramSourceTagColor(param: FlowParam) {
     return "gold";
   }
   if (kind === "constant") return "default";
-  if (kind === "unknown") return "orange";
+  if (kind === "unknown" || paramSourceLabel(param) === "未知") return "error";
   if (paramIsCallerInput(param)) return "blue";
   return "default";
 }

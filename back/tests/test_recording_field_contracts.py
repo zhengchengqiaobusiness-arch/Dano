@@ -947,6 +947,103 @@ def test_create_form_projects_option_row_and_computes_line_total() -> None:
     assert _param_exposed_to_caller(chooser) or chooser.source_kind in {"form_option", "user_input", "api_option"}
 
 
+def test_create_form_unbound_manual_fields_are_caller_not_unknown() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_create", method="POST",
+                url="http://example.test/admin-api/doc/create",
+                sequence=1, role="business_write", action="act_create", locator="text=确定",
+                body={
+                    "partyId": 5,
+                    "saleUserId": 3,
+                    "remark": "",
+                    "discountPercent": 10,
+                    "depositPrice": 100,
+                    "items": [{"productId": 4, "count": 2, "productPrice": 5000, "totalPrice": 10000}],
+                },
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="往来单位", aliases=["partyId"], kind="select", value="甲公司",
+                request_id="req_create", path="body.partyId", in_dialog=True, required=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+        samples={"往来单位": "甲公司"},
+    )
+    create = _step_by_suffix(spec, "/doc/create")
+    remark = _param(create, "remark")
+    count = _param(create, "items[0].count")
+    sale_user = _param(create, "saleUserId")
+    discount = _param(create, "discountPercent")
+    deposit = _param(create, "depositPrice")
+    for item in (remark, count, sale_user, discount, deposit):
+        assert _param_exposed_to_caller(item), (item.path, item.source_kind, item.reason)
+        assert item.source_kind != "unknown"
+        assert item.category == "user_param"
+    assert remark.required is False
+    total = _param(create, "items[0].totalPrice")
+    assert total.source_kind == "computed"
+    assert not _param_exposed_to_caller(total)
+
+
+def test_option_row_projection_keeps_best_catalog_when_another_list_also_matches() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_decoy", method="GET",
+                url="http://example.test/admin-api/misc/simple-list",
+                sequence=1, role="read_option",
+                response={"code": 0, "data": [
+                    {"barCode": "b1", "unitName": "件"},
+                    {"barCode": "xx", "unitName": "箱"},
+                ]},
+            ),
+            _req(
+                "req_items", method="GET",
+                url="http://example.test/admin-api/item/simple-list",
+                sequence=2, role="read_option",
+                response={"code": 0, "data": [
+                    {"id": 4, "name": "甲件", "barCode": "b1", "price": 5000, "stock": 9, "unitName": "件"},
+                    {"id": 7, "name": "乙件", "barCode": "b2", "price": 3000, "stock": 3, "unitName": "盒"},
+                ]},
+            ),
+            _req(
+                "req_create", method="POST",
+                url="http://example.test/admin-api/doc/create",
+                sequence=3, role="business_write", action="act_create", locator="text=确定",
+                body={
+                    "partyId": 5,
+                    "items": [{
+                        "productId": 4,
+                        "productName": "甲件",
+                        "productBarCode": "b1",
+                        "productPrice": 5000,
+                        "stockCount": 9,
+                        "productUnitName": "件",
+                        "count": 2,
+                        "totalPrice": 10000,
+                    }],
+                },
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="往来单位", aliases=["partyId"], kind="select", value="甲公司",
+                request_id="req_create", path="body.partyId", in_dialog=True, required=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    name = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productName")
+    assert name.source_kind == "selected_option_field"
+    assert (name.source or {}).get("response_path") == "name"
+
+
 def test_pagination_is_not_a_caller_input() -> None:
     spec = _create_form_spec()
     listing = _step_by_suffix(spec, "/doc/page")
