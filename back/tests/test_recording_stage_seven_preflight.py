@@ -16,7 +16,7 @@ from dano.infra.token_store import overlay_runtime_auth, runtime_replay_auth
 from dano.onboarding.recording_release import evaluate_recording_release
 from dano.onboarding.recording_runtime import ProductionRecordingServices
 from dano.onboarding.recording_verify import (
-    REPLAY_SKIPPED_MESSAGE,
+    AUTH_EXPIRED_MESSAGE,
     replay_auth_failed,
     select_preflight_probe,
 )
@@ -140,7 +140,7 @@ def test_runtime_auth_drops_stale_recording_cookie() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auth_failure_skips_replay_and_continues_without_pi() -> None:
+async def test_auth_failure_blocks_stage_seven_without_pi() -> None:
     spec = _spec()
     stub = _StubPi()
 
@@ -167,26 +167,24 @@ async def test_auth_failure_skips_replay_and_continues_without_pi() -> None:
     )
     activities: list[WorkflowActivity] = []
     draft, issues = await services.verify(spec.model_dump(mode="json"), _context(activities))
-    assert all(issue.code != "replay_auth" for issue in issues)
-    assert all(issue.resolver != "external_blocked" for issue in issues)
-    assert all(not issue.code.startswith("write_") for issue in issues)
+    assert any(issue.resolver == "external_blocked" for issue in issues)
+    assert any(issue.code in {"replay_auth", "write_verify", "write_readback_missing"} for issue in issues)
     blocked = [item.label for item in activities if item.status == "blocked"]
-    assert not any("登录态" in label for label in blocked)
+    assert any("登录态" in label or "阻塞" in label for label in blocked)
     preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
     assert preflight.get("auth_failed") is True
-    assert preflight.get("skip_replay") is True
+    assert preflight.get("skip_replay") is not True
+    assert preflight.get("status") == "blocked_auth"
     assert preflight.get("refresh_status") == "not_configured"
     edit_step = next(step for step in (draft.get("steps") or []) if step["step_id"] == "step_edit")
     remark = next(param for param in edit_step["params"] if param["path"] == "query.remark")
-    assert remark["source_kind"] == "user_input"
+    assert remark["source_kind"] == "unknown"
     assert stub.prompts == 0
-    assert any(REPLAY_SKIPPED_MESSAGE in item.label for item in activities)
+    assert any(AUTH_EXPIRED_MESSAGE in item.label or "阻塞" in item.label for item in activities)
     assert not any("整体流程" in item.label for item in activities)
-    unverified = (draft.get("meta") or {}).get("unverified") or []
-    assert any(item.get("target_kind") == "write_verify" for item in unverified if isinstance(item, dict))
 
 
-def test_unverified_replay_targets_do_not_block_release() -> None:
+def test_unverified_replay_targets_block_release() -> None:
     spec = _spec()
     spec.meta = {
         "unverified": [
@@ -199,7 +197,8 @@ def test_unverified_replay_targets_do_not_block_release() -> None:
         for capability in decision.capabilities
         for issue in capability.issues
     }
-    assert "write_readback_missing" not in codes
+    assert decision.status == "verification_incomplete"
+    assert "write_readback_missing" in codes or "verification_unresolved" in codes
 
 
 @pytest.mark.asyncio
@@ -245,7 +244,7 @@ async def test_auth_failure_refreshes_token_and_continues() -> None:
 
 
 @pytest.mark.asyncio
-async def test_network_error_does_not_block_repair() -> None:
+async def test_network_error_blocks_stage_seven() -> None:
     spec = _spec()
 
     async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -262,5 +261,97 @@ async def test_network_error_does_not_block_repair() -> None:
         replay_executor=replay_executor,
     )
     draft, issues = await services.verify(spec.model_dump(mode="json"), _context())
-    assert (draft.get("meta") or {}).get("verification_run", {}).get("preflight", {}).get("auth_failed") is not True
-    assert all(issue.resolver != "external_blocked" for issue in issues)
+    preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
+    assert preflight.get("status") == "blocked_network"
+    assert any(issue.resolver == "external_blocked" for issue in issues)
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_but_retry_still_unauthorized_blocks_auth() -> None:
+    spec = _spec()
+    stub = _StubPi()
+    probes = {"count": 0}
+
+    async def pi_provider(fresh: bool):  # noqa: FBT001, ARG001, ANN202
+        return stub
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    async def replay_executor(request, spec_arg):  # noqa: ANN001, ARG002
+        probes["count"] += 1
+        return {"status": 401, "response": {"code": 401, "msg": "未登录"}}
+
+    async def refresher(tenant, subsystem, *, force=False):  # noqa: ANN001, ARG001, FBT002
+        assert force is True
+        return {"ok": True, "status": "refreshed"}
+
+    services = ProductionRecordingServices(
+        recording_id="rec_retry_401",
+        materializer=unused,
+        pi_provider=pi_provider,
+        publisher=unused,
+        replay_executor=replay_executor,
+        token_refresher=refresher,
+    )
+    draft, issues = await services.verify(spec.model_dump(mode="json"), _context())
+    preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
+    assert probes["count"] == 2
+    assert preflight.get("status") == "blocked_auth"
+    assert preflight.get("refreshed") is True
+    assert any(issue.resolver == "external_blocked" for issue in issues)
+    assert stub.prompts == 0
+
+
+@pytest.mark.asyncio
+async def test_no_probe_is_not_applicable_but_verification_still_runs() -> None:
+    spec = FlowSpec(
+        tenant="tenant",
+        subsystem="oa",
+        steps=[
+            FlowStep(
+                step_id="step_edit",
+                method="PUT",
+                path="/erp/sale-order/update",
+                source_meta={"request_id": "req_update"},
+            ),
+        ],
+        capabilities=[
+            FlowCapability(
+                name="edit_sale_order",
+                title="编辑销售订单",
+                kind="update",
+                capability_id="cap_edit",
+                step_ids=["step_edit"],
+                nodes=[{
+                    "id": "call_1", "type": "call", "usage": "execute",
+                    "request_id": "req_update", "method": "PUT",
+                    "path": "/erp/sale-order/update", "step_id": "step_edit",
+                }],
+            ),
+        ],
+        request_facts=RequestFacts(
+            requests=[RequestFact(request_id="req_update", method="PUT", path="/erp/sale-order/update")],
+        ),
+    )
+    probes = {"count": 0}
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    async def replay_executor(request, spec_arg):  # noqa: ANN001, ARG002
+        probes["count"] += 1
+        return {"status": 200, "response": {"code": 0}}
+
+    services = ProductionRecordingServices(
+        recording_id="rec_noprobe",
+        materializer=unused,
+        pi_provider=unused,
+        publisher=unused,
+        replay_executor=replay_executor,
+    )
+    draft, issues = await services.verify(spec.model_dump(mode="json"), _context())
+    preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
+    assert preflight.get("status") == "not_applicable"
+    assert probes["count"] == 0
+    assert any(issue.code in {"write_verify", "write_readback_missing"} for issue in issues)

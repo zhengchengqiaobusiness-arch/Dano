@@ -66,7 +66,11 @@ class CanonicalRecordingRuntime:
     async def check(self, draft: Draft, context: PipelineContext) -> PipelineCheck:
         context.ensure_active()
         verified, verification_issues = await self.services.verify(draft, context)
-        return PipelineCheck(draft=verified, issues=verification_issues)
+        return PipelineCheck(
+            draft=verified,
+            issues=verification_issues,
+            stage_seven_verdict=context.stage_seven_verdict,
+        )
 
     async def repair(
         self,

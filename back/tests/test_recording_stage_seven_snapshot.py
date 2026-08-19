@@ -205,8 +205,8 @@ async def test_preflight_timeout_does_not_block_stage_seven_start(
     )
     assert time.perf_counter() - started < 0.5
     preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
-    assert preflight.get("auth_failed") is not True
-    assert all(issue.resolver != "external_blocked" for issue in issues)
+    assert preflight.get("status") == "blocked_network"
+    assert any(issue.resolver == "external_blocked" for issue in issues)
 
 
 @pytest.mark.asyncio

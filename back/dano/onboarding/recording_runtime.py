@@ -19,15 +19,32 @@ from dano.onboarding.recording_release import (
     ReleaseIssue,
     evaluate_recording_release,
 )
+from dano.onboarding.recording_stage_seven import (
+    AUTH_BLOCKED_MESSAGE,
+    NETWORK_BLOCKED_MESSAGE,
+    STAGE_SEVEN_PROTOCOL,
+    STAGE_SIX_CONTRACT_CHANGED,
+    StageSevenPreflightStatus,
+    StageSevenStatus,
+    StageSixContractChanged,
+    assert_stage_six_contract_preserved,
+    apply_stage_seven_recorded_evidence_fixes,
+    build_stage_seven_scope,
+    checkpoint_dict,
+    classify_preflight_error,
+    compute_publishable,
+    evaluate_stage_seven_verdict,
+    new_attempt_id,
+    normalize_stage_seven_working_copy,
+    preflight_status_of,
+    redact_external_blocker_text,
+    working_fingerprint,
+)
 from dano.onboarding.recording_verify import (
     FLOW_GROUP_KEY,
-    REPLAY_SKIPPED_MESSAGE,
-    apply_recorded_evidence_fixes,
     assign_unassigned_internal_steps,
     finalize_verification_state,
-    is_replay_issue_code,
     machine_repair_disposition,
-    mark_issues_unverified,
     select_preflight_probe,
     replay_auth_failed,
     verification_report,
@@ -511,6 +528,56 @@ def _record_capability_verification(
     spec.meta = {**(spec.meta or {}), "capability_verification": existing}
 
 
+def _external_preflight_issue(
+    status: StageSevenPreflightStatus,
+    preflight: dict[str, Any],
+) -> WorkflowIssue:
+    if status == StageSevenPreflightStatus.BLOCKED_AUTH:
+        message = AUTH_BLOCKED_MESSAGE
+        code = "replay_auth"
+    else:
+        message = NETWORK_BLOCKED_MESSAGE
+        code = "replay_network"
+    error = redact_external_blocker_text(str(preflight.get("error") or ""))
+    if error and error not in message:
+        message = f"{message}（{error}）"
+    return WorkflowIssue(
+        issue_id=f"preflight:{status.value}",
+        code=code,
+        message=message,
+        resolver="external_blocked",
+        target={"kind": "session", "preflight": status.value},
+    )
+
+
+async def _persist_stage_seven_if_needed(
+    context: PipelineContext,
+    baseline: FlowSpec,
+    spec: FlowSpec,
+    verdict,
+    preflight: dict[str, Any],
+) -> None:
+    saver = context.persist_stage_seven
+    if saver is None:
+        return
+    checkpoint = checkpoint_dict(
+        attempt_id=context.stage_seven_attempt_id or new_attempt_id(),
+        revision=context.stage_seven_revision,
+        status=verdict.status if verdict is not None else StageSevenStatus.RUNNING,
+        baseline=baseline,
+        working=spec,
+        verdict=verdict,
+        preflight=preflight,
+        capability_attempts=dict(context.capability_rounds),
+        operator_answers=dict(context.operator_answers),
+    )
+    try:
+        await saver(checkpoint)
+        context.stage_seven_revision = int(checkpoint.get("revision") or 0)
+    except Exception:  # noqa: BLE001 - checkpoint must not abort verification
+        return
+
+
 def _issues_from_spec(spec: FlowSpec) -> tuple[WorkflowIssue, ...]:
     report = verification_report(spec)
     issues = _dedupe_workflow_issues(tuple(
@@ -587,52 +654,87 @@ class ProductionRecordingServices:
             status="running",
             label=PREFLIGHT_PROGRESS_LABEL,
         ))
-        spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
-        spec = assign_unassigned_internal_steps(spec)
+        baseline = FlowSpec.model_validate(context.stage_six_baseline or draft)
+        spec = FlowSpec.model_validate(draft)
+        if not context.stage_seven_attempt_id:
+            context.stage_seven_attempt_id = new_attempt_id()
+        spec = normalize_stage_seven_working_copy(baseline, spec)
         spec, _report = finalize_verification_state(
             spec,
-            rounds=0,
+            rounds=context.current_round,
             max_rounds=0,
         )
         spec = assign_unassigned_internal_steps(spec)
+        try:
+            assert_stage_six_contract_preserved(baseline, spec)
+        except StageSixContractChanged:
+            spec = baseline.model_copy(deep=True)
+            spec.meta = {
+                **(spec.meta or {}),
+                "stage_seven_contract_changed": True,
+            }
         preflight = await self._preflight_replay_health(spec, context)
-        if preflight.get("skip_replay"):
-            await context.progress(WorkflowStep.VERIFYING, REPLAY_SKIPPED_MESSAGE, 0)
-        elif preflight.get("refreshed"):
+        preflight_status = preflight_status_of(preflight)
+        if preflight_status == StageSevenPreflightStatus.BLOCKED_AUTH:
+            await context.progress(WorkflowStep.VERIFYING, AUTH_BLOCKED_MESSAGE, 0)
+        elif preflight_status == StageSevenPreflightStatus.BLOCKED_NETWORK:
+            await context.progress(WorkflowStep.VERIFYING, NETWORK_BLOCKED_MESSAGE, 0)
+        elif preflight_status == StageSevenPreflightStatus.REFRESHED:
             await context.progress(WorkflowStep.VERIFYING, "凭证已刷新，开始检查能力", 0)
-        elif not preflight.get("skipped"):
+        elif preflight_status != StageSevenPreflightStatus.NOT_APPLICABLE:
             await context.progress(WorkflowStep.VERIFYING, "回放登录态正常，开始检查能力", 0)
         verification_run = dict((spec.meta or {}).get("verification_run") or {})
         verification_run["preflight"] = preflight
-        verification_run["summary"] = {
-            **dict(verification_run.get("summary") or {}),
-            "by_capability": dict((spec.meta or {}).get("capability_verification") or {}),
+        spec.meta = {
+            **(spec.meta or {}),
+            "verification_run": verification_run,
+            "stage_seven": {
+                **dict((spec.meta or {}).get("stage_seven") or {}),
+                "protocol": STAGE_SEVEN_PROTOCOL,
+                "attempt_id": context.stage_seven_attempt_id,
+                "revision": context.stage_seven_revision,
+            },
         }
-        spec.meta = {**(spec.meta or {}), "verification_run": verification_run}
-
-        issues = _issues_from_spec(spec)
-        if preflight.get("skip_replay"):
-            replay_issues = tuple(issue for issue in issues if is_replay_issue_code(issue.code))
-            if replay_issues:
-                mark_issues_unverified(
-                    spec,
-                    replay_issues,
-                    reason=REPLAY_SKIPPED_MESSAGE,
-                )
+        issues = list(_issues_from_spec(spec))
+        if preflight_status in {
+            StageSevenPreflightStatus.BLOCKED_AUTH,
+            StageSevenPreflightStatus.BLOCKED_NETWORK,
+        }:
+            blocked = _external_preflight_issue(preflight_status, preflight)
+            if not any(issue.issue_id == blocked.issue_id for issue in issues):
+                issues.insert(0, blocked)
             await context.record(WorkflowActivity(
                 step=WorkflowStep.VERIFYING,
                 round=0,
-                status="running",
-                label=REPLAY_SKIPPED_MESSAGE,
+                status="blocked",
+                label=blocked.message,
             ))
-            verification_run = dict((spec.meta or {}).get("verification_run") or {})
-            verification_run["preflight"] = preflight
-            spec.meta = {**(spec.meta or {}), "verification_run": verification_run}
-            issues = tuple(
-                issue for issue in _issues_from_spec(spec)
-                if not is_replay_issue_code(issue.code)
-            )
-        return spec.model_dump(mode="json"), issues
+        report = verification_report(spec)
+        scope = build_stage_seven_scope(spec, baseline=baseline)
+        decision = evaluate_recording_release(spec)
+        verdict = evaluate_stage_seven_verdict(
+            baseline=baseline,
+            working=spec,
+            scope=scope,
+            verification_report=report,
+            preflight=preflight,
+            release=decision,
+            attempt_id=context.stage_seven_attempt_id,
+            revision=context.stage_seven_revision,
+            waiting_operator=any(issue.resolver == "operator" for issue in issues),
+            budget_or_stall=context.budget_exhausted,
+            running=True,
+        )
+        context.stage_seven_verdict = verdict
+        spec.meta = {
+            **(spec.meta or {}),
+            "stage_seven": {
+                **dict((spec.meta or {}).get("stage_seven") or {}),
+                **verdict.to_dict(),
+            },
+        }
+        await _persist_stage_seven_if_needed(context, baseline, spec, verdict, preflight)
+        return spec.model_dump(mode="json"), tuple(issues)
 
     async def _refresh_runtime_token(self, tenant: str, subsystem: str) -> dict[str, Any]:
         refresher = self.token_refresher
@@ -661,15 +763,20 @@ class ProductionRecordingServices:
             result = await asyncio.wait_for(executor(probe, spec), timeout=PREFLIGHT_TIMEOUT_S)
         except TimeoutError:
             return {
-                "ok": True,
+                "ok": False,
                 "auth_failed": False,
+                "blocked_network": True,
+                "status": StageSevenPreflightStatus.BLOCKED_NETWORK.value,
                 "error": "TimeoutError",
                 "path": str(probe.get("path") or probe.get("url") or ""),
             }
-        except Exception as exc:  # noqa: BLE001 - network failures must not block Skill
+        except Exception as exc:  # noqa: BLE001 - classify network failures as blockers
+            status = classify_preflight_error(exc)
             return {
-                "ok": True,
+                "ok": False,
                 "auth_failed": False,
+                "blocked_network": status == StageSevenPreflightStatus.BLOCKED_NETWORK,
+                "status": status.value,
                 "error": type(exc).__name__,
                 "path": str(probe.get("path") or probe.get("url") or ""),
             }
@@ -679,7 +786,12 @@ class ProductionRecordingServices:
         return {
             "ok": not failed,
             "auth_failed": failed,
-            "status": status,
+            "status": (
+                StageSevenPreflightStatus.BLOCKED_AUTH.value
+                if failed
+                else StageSevenPreflightStatus.HEALTHY.value
+            ),
+            "http_status": status,
             "path": str(probe.get("path") or probe.get("url") or ""),
             "request_id": str(probe.get("request_id") or ""),
         }
@@ -691,10 +803,20 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         probe = select_preflight_probe(spec)
         if probe is None:
-            return {"skipped": True, "ok": True}
+            return {"skipped": True, "ok": True, "status": StageSevenPreflightStatus.NOT_APPLICABLE.value}
         first = await self._run_preflight_probe(probe, spec)
-        if first.get("skipped") or first.get("error") or not first.get("auth_failed"):
-            return first
+        if first.get("blocked_network") or first.get("error"):
+            return {
+                **first,
+                "status": StageSevenPreflightStatus.BLOCKED_NETWORK.value,
+                "blocked_network": True,
+                "ok": False,
+            }
+        if first.get("skipped") or not first.get("auth_failed"):
+            return {
+                **first,
+                "status": first.get("status") or StageSevenPreflightStatus.HEALTHY.value,
+            }
         await context.progress(WorkflowStep.VERIFYING, PREFLIGHT_REFRESH_LABEL, 0)
         await context.record(WorkflowActivity(
             step=WorkflowStep.VERIFYING,
@@ -706,8 +828,10 @@ class ProductionRecordingServices:
         if refresh.get("status") != "refreshed":
             return {
                 **first,
+                "ok": False,
                 "auth_failed": True,
-                "skip_replay": True,
+                "blocked_auth": True,
+                "status": StageSevenPreflightStatus.BLOCKED_AUTH.value,
                 "refreshed": False,
                 "refresh_status": refresh.get("status") or refresh.get("reason") or "failed",
             }
@@ -718,18 +842,31 @@ class ProductionRecordingServices:
             label="凭证已刷新，正在重新检查登录态",
         ))
         retry = await self._run_preflight_probe(probe, spec)
+        if retry.get("blocked_network") or retry.get("error"):
+            return {
+                **retry,
+                "ok": False,
+                "blocked_network": True,
+                "status": StageSevenPreflightStatus.BLOCKED_NETWORK.value,
+                "refreshed": True,
+                "refresh_status": "refreshed",
+            }
         if retry.get("auth_failed"):
             return {
                 **retry,
+                "ok": False,
                 "auth_failed": True,
-                "skip_replay": True,
+                "blocked_auth": True,
+                "status": StageSevenPreflightStatus.BLOCKED_AUTH.value,
                 "refreshed": True,
                 "refresh_status": "refreshed",
             }
         return {
             **retry,
+            "ok": True,
             "refreshed": True,
             "refresh_status": "refreshed",
+            "status": StageSevenPreflightStatus.REFRESHED.value,
         }
 
     async def repair(
@@ -741,7 +878,7 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         report = RepairReport()
-        spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
+        spec = apply_stage_seven_recorded_evidence_fixes(FlowSpec.model_validate(draft))
         kept_capabilities = list(spec.capabilities)
         try:
             before_fix = flow_spec_fingerprint(spec)
@@ -751,7 +888,7 @@ class ProductionRecordingServices:
                 max_rounds=1,
                 expand_requests=False,
             )
-            spec = apply_recorded_evidence_fixes(spec)
+            spec = apply_stage_seven_recorded_evidence_fixes(spec)
             if flow_spec_fingerprint(spec) != before_fix:
                 report.applied.append("deterministic_fix")
             else:
@@ -785,22 +922,6 @@ class ProductionRecordingServices:
             report.applied.append(issue.issue_id)
             report.resolved.append(issue.issue_id)
         remaining = still_open
-        preflight = dict(
-            ((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}
-        )
-        if preflight.get("skip_replay"):
-            leftover_replay = tuple(
-                issue for issue in remaining if is_replay_issue_code(issue.code)
-            )
-            if leftover_replay:
-                mark_issues_unverified(
-                    spec,
-                    leftover_replay,
-                    reason=REPLAY_SKIPPED_MESSAGE,
-                )
-            remaining = [
-                issue for issue in remaining if not is_replay_issue_code(issue.code)
-            ]
         if remaining:
             try:
                 spec = await self._repair_capability_groups(
@@ -823,6 +944,15 @@ class ProductionRecordingServices:
         context.last_repair_report = report
         if kept_capabilities and not spec.capabilities:
             spec.capabilities = kept_capabilities
+        context.operator_answers.update(operator_answers)
+        baseline = FlowSpec.model_validate(context.stage_six_baseline or draft)
+        await _persist_stage_seven_if_needed(
+            context,
+            baseline,
+            spec,
+            context.stage_seven_verdict,
+            dict(((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}),
+        )
         return spec.model_dump(mode="json")
 
     async def _repair_capability_groups(
@@ -884,16 +1014,12 @@ class ProductionRecordingServices:
                 ))
             dispatched = int((context.capability_rounds or {}).get(group_key) or 0)
             if dispatched >= _CAPABILITY_REPAIR_BUDGET:
-                mark_issues_unverified(
-                    spec,
-                    group_issues,
-                    reason="能力修复轮次已用尽",
-                )
+                context.budget_exhausted = True
                 report.still_pending.extend(issue.issue_id for issue in group_issues)
                 _record_capability_verification(
                     spec,
                     group_key,
-                    status="blocked",
+                    status="incomplete",
                     resolved=[],
                     pending=[issue.issue_id for issue in group_issues],
                     reason="能力修复轮次已用尽",
@@ -902,7 +1028,7 @@ class ProductionRecordingServices:
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
                     status="blocked",
-                    label=f"能力「{title}」已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，已标为未验证",
+                    label=f"能力「{title}」已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，问题仍保留",
                     target=cap_target,
                 ))
                 await context.record(WorkflowActivity(
@@ -954,6 +1080,7 @@ class ProductionRecordingServices:
                     remaining_group.append(issue)
             pi_issues = tuple(issue for issue in remaining_group if _dispatchable_issue(issue))
             before_pi = flow_spec_fingerprint(spec)
+            pre_pi_spec = spec.model_copy(deep=True)
             if pi_issues:
                 if pi is None:
                     pi = await self.pi_provider(False)
@@ -1040,6 +1167,31 @@ class ProductionRecordingServices:
                     ))
                     continue
                 spec = repaired
+                baseline = context.stage_six_baseline
+                if baseline is not None:
+                    try:
+                        assert_stage_six_contract_preserved(baseline, spec)
+                    except StageSixContractChanged:
+                        spec = pre_pi_spec
+                        pi.bind_flow_spec(spec)
+                        report.rejected.append(STAGE_SIX_CONTRACT_CHANGED)
+                        report.still_pending.extend(issue.issue_id for issue in remaining_group)
+                        _record_capability_verification(
+                            spec,
+                            group_key,
+                            status="incomplete",
+                            resolved=[issue.issue_id for issue in operator_resolved],
+                            pending=[issue.issue_id for issue in remaining_group],
+                            reason="阶段 7 改变了阶段 6 公开能力契约，已回滚",
+                        )
+                        await context.record(WorkflowActivity(
+                            step=WorkflowStep.RESOLVING,
+                            round=context.current_round,
+                            status="blocked",
+                            label=f"能力「{title}」的修补改变了阶段 6 公开契约，已回滚",
+                            target=cap_target,
+                        ))
+                        continue
             changed = flow_spec_fingerprint(spec) != before_pi
             open_ids, open_identities = _open_issue_tokens(spec)
             resolved_issues: list[WorkflowIssue] = list(operator_resolved)
@@ -1100,15 +1252,53 @@ class ProductionRecordingServices:
         context.ensure_active()
         spec = FlowSpec.model_validate(draft)
         if context.machine_verification:
+            baseline = FlowSpec.model_validate(context.stage_six_baseline or draft)
+            spec = normalize_stage_seven_working_copy(baseline, spec)
+            try:
+                assert_stage_six_contract_preserved(baseline, spec)
+            except StageSixContractChanged as exc:
+                raise RuntimeError("发布前阶段 6 公开能力契约已变化") from exc
+            report = verification_report(spec)
+            scope = build_stage_seven_scope(spec, baseline=baseline)
             decision = evaluate_recording_release(spec)
-            if decision.callable_spec is None:
-                raise RuntimeError("发布边界前能力契约已变化")
+            checked_fp = (
+                str(context.stage_seven_verdict.working_fingerprint)
+                if context.stage_seven_verdict is not None
+                else working_fingerprint(spec)
+            )
+            rechecked_fp = working_fingerprint(spec)
+            verdict = evaluate_stage_seven_verdict(
+                baseline=baseline,
+                working=spec,
+                scope=scope,
+                verification_report=report,
+                preflight=dict(((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}),
+                release=decision,
+                attempt_id=context.stage_seven_attempt_id,
+                revision=context.stage_seven_revision,
+            )
+            publishable = compute_publishable(
+                status=verdict.status,
+                all_verified=verdict.all_verified,
+                unverified=verdict.unverified,
+                preflight=preflight_status_of(verdict.preflight),
+                release_status=decision.status,
+                callable_spec=decision.callable_spec,
+                baseline=baseline,
+                working=spec,
+                working_fp=checked_fp,
+                rechecked_fp=rechecked_fp,
+            )
+            if not publishable or decision.callable_spec is None:
+                raise RuntimeError("发布边界前机器验证未全部通过")
             publishable_spec = decision.callable_spec
+            verification_status = "passed"
         else:
             publishable_spec = spec
+            verification_status = "skipped_by_operator"
         verification = {
             "enabled": context.machine_verification,
-            "status": "passed" if context.machine_verification else "skipped_by_operator",
+            "status": verification_status,
             "capability_verification": dict((spec.meta or {}).get("capability_verification") or {}),
         }
         publishable_spec.meta = {
@@ -1118,10 +1308,21 @@ class ProductionRecordingServices:
         release_spec, candidate = prepare_flow_release_candidate(publishable_spec)
         candidate["machine_verification"] = verification
         context.remember_draft(release_spec.model_dump(mode="json"))
-        # Publishing is deterministic after the repair/verification loop has
-        # no remaining issues.  Bind the exact frozen candidate to the active
-        # session for the database boundary fingerprint check; no model call is
-        # made here.
-        pi = await self.pi_provider(False)
-        pi.bind_flow_spec(release_spec)
-        return await self.publisher(release_spec, candidate, context)
+        bind_flow_spec = None
+        try:
+            pi = await self.pi_provider(False)
+            bind_flow_spec = getattr(pi, "bind_flow_spec", None)
+        except Exception:  # noqa: BLE001 - Pi unavailability must not block evidence-backed publish
+            pi = None
+        if callable(bind_flow_spec):
+            bind_flow_spec(release_spec)
+        released = await self.publisher(release_spec, candidate, context)
+        if context.machine_verification:
+            await _persist_stage_seven_if_needed(
+                context,
+                baseline,
+                spec,
+                context.stage_seven_verdict,
+                dict(((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}),
+            )
+        return released

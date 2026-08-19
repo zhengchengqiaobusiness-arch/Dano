@@ -217,30 +217,9 @@ def _passed_verification(spec: FlowSpec, verification_id: str, *, kind: str) -> 
     return bool(record and record.get("status") == "passed" and record.get("kind") == kind)
 
 
-def _unverified_target_ids(spec: FlowSpec, *kinds: str) -> set[str]:
-    return {
-        str(item.get("target_id") or "")
-        for item in (spec.meta or {}).get("unverified") or []
-        if isinstance(item, dict) and str(item.get("target_kind") or "") in kinds
-    }
-
-
-def _enum_marked_unverified(spec: FlowSpec, step_id: str, path: str) -> bool:
-    skipped = _unverified_target_ids(spec, "enum")
-    wire = str(path or "")
-    return bool(skipped & {
-        f"{step_id}:{wire}",
-        f"{step_id}:{wire.removeprefix('body.')}",
-        wire,
-    })
-
-
 def _active_link_issues(spec: FlowSpec, capability_id: str = "") -> list[ReleaseIssue]:
     issues: list[ReleaseIssue] = []
-    skipped = _unverified_target_ids(spec, "dependency", "dependency_candidate")
     for link in spec.links:
-        if link.link_id in skipped:
-            continue
         verification_id = str((link.meta or {}).get("verification_id") or "")
         if not (
             link.confirmed
@@ -450,7 +429,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                         suggested_operations=("set_param_required",),
                     ))
             enum_issue = _capability_param_enum_issue(param)
-            if enum_issue and not _enum_marked_unverified(spec, step_id, str(param.path or "")):
+            if enum_issue:
                 issues.append(ReleaseIssue(
                     check_code="enum_options_unverified",
                     message=f"枚举字段 `{step_id}:{param.path}` {enum_issue}",
@@ -480,10 +459,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
 def _write_verification_issues(spec: FlowSpec, capability: FlowCapability) -> list[ReleaseIssue]:
     steps = {step.step_id: step for step in spec.steps}
     issues: list[ReleaseIssue] = []
-    skipped = _unverified_target_ids(spec, "write_verify")
     for step_id in _member_step_ids(capability):
-        if step_id in skipped:
-            continue
         step = steps.get(step_id)
         if step is None or (step.method or "GET").upper() in _READ_METHODS:
             continue
@@ -617,6 +593,48 @@ def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
     # normalized that same field for execution.
     source = prepare_flow_spec_for_publish(spec)
     decisions = tuple(_evaluate_capability(source, cap) for cap in source.capabilities)
+    from dano.onboarding.recording_stage_seven import (
+        VERIFICATION_UNRESOLVED,
+        build_stage_seven_scope,
+        in_scope_unverified,
+    )
+
+    unresolved = in_scope_unverified(source, build_stage_seven_scope(source))
+    extra_unverified = tuple(
+        ReleaseIssue(
+            check_code=VERIFICATION_UNRESOLVED,
+            message=(
+                f"范围内仍有未证明项 `{item.get('target_kind')}:{item.get('target_id')}`，不能发布"
+            ),
+            resolver="collect_evidence",
+            capability_id="",
+        )
+        for item in unresolved
+    )
+    if extra_unverified:
+        if decisions:
+            first = decisions[0]
+            decisions = (
+                CapabilityReleaseDecision(
+                    capability_id=first.capability_id,
+                    name=first.name,
+                    passed=False,
+                    reasons=first.reasons + tuple(item.message for item in extra_unverified),
+                    checks=dict(first.checks),
+                    issues=first.issues + extra_unverified,
+                ),
+                *decisions[1:],
+            )
+        else:
+            decisions = (
+                CapabilityReleaseDecision(
+                    capability_id="",
+                    name="",
+                    passed=False,
+                    reasons=tuple(item.message for item in extra_unverified),
+                    issues=extra_unverified,
+                ),
+            )
     failed = [item for item in decisions if not item.passed]
     if not decisions or failed:
         return ReleaseDecision(

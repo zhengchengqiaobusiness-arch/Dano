@@ -19,7 +19,6 @@ from dano.execution.page.flow_spec import (
 from dano.onboarding.recording_release import evaluate_recording_release
 from dano.onboarding.recording_verify import (
     MACHINE_REPAIR_DISPOSITION,
-    apply_recorded_evidence_fixes,
     assign_unassigned_internal_steps,
     candidate_read_request_ids,
 )
@@ -201,7 +200,7 @@ def test_assign_unassigned_orphan_write_marked_internal() -> None:
     assert assigned.capabilities[0].step_ids == ["step_edit"]
 
 
-def test_empty_recorded_value_becomes_user_input_not_caller_input() -> None:
+def test_empty_recorded_value_without_evidence_stays_unknown() -> None:
     spec = FlowSpec(
         tenant="tenant",
         subsystem="oa",
@@ -216,12 +215,11 @@ def test_empty_recorded_value_becomes_user_input_not_caller_input() -> None:
             ),
         ],
     )
-    fixed = apply_recorded_evidence_fixes(spec)
+    from dano.onboarding.recording_stage_seven import apply_stage_seven_recorded_evidence_fixes
+
+    fixed = apply_stage_seven_recorded_evidence_fixes(spec)
     param = fixed.steps[0].params[0]
-    assert param.source_kind == "user_input"
-    assert param.source_kind != "caller_input"
-    assert param.required is False
-    assert "录制值为空" in param.reason
+    assert param.source_kind == "unknown"
 
 
 def test_update_record_id_is_not_internal_field_error() -> None:

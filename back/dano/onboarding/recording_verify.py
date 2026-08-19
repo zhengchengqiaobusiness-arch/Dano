@@ -28,7 +28,7 @@ _REPLAY_ISSUE_CODES = frozenset({
     "enum_options_unverified",
 })
 FLOW_GROUP_KEY = "__flow__"
-AUTH_EXPIRED_MESSAGE = "录制登录态已过期，已跳过回放取证；Skill 仍可使用运行期凭证调用"
+AUTH_EXPIRED_MESSAGE = "录制登录态已失效，机器验证已阻塞，当前结果不会发布"
 REPLAY_SKIPPED_MESSAGE = AUTH_EXPIRED_MESSAGE
 _NOISE_PATH_MARKERS = (
     "/tenant/",
@@ -325,12 +325,6 @@ def assign_unassigned_internal_steps(spec):  # noqa: ANN001, ANN202
             owned.add(step.step_id)
         else:
             internal_ids.add(step.step_id)
-            _append_unverified(
-                current,
-                target_kind="release_issue",
-                target_id=f"unassigned:{step.step_id}",
-                reason="步骤未归属公开能力，已标为内部用途",
-            )
     if internal_ids:
         current.meta = {**(current.meta or {}), "internal_step_ids": sorted(internal_ids)}
     return current
@@ -476,21 +470,7 @@ def apply_recorded_evidence_fixes(spec):  # noqa: ANN001, ANN202
                     None,
                 )
             if param.source_kind == "unknown":
-                empty_recorded = param.value in (None, "") and param.default_value in (None, "")
-                if empty_recorded and binding is None and not _evidence_is_caller_edit(evidence):
-                    _set_param_from_evidence(
-                        param,
-                        "user_input",
-                        exposed=True,
-                        editable=True,
-                        reason="录制值为空，调用方可选提供，默认空",
-                    )
-                    param.required = False
-                    param.source = {
-                        **(param.source or {}),
-                        "required_state": "optional",
-                    }
-                elif binding is not None or _evidence_is_caller_edit(evidence):
+                if binding is not None or _evidence_is_caller_edit(evidence):
                     _set_param_from_evidence(
                         param,
                         "user_input",
@@ -567,8 +547,8 @@ def _candidate_link_id(candidate: dict[str, Any]) -> str:
     return f"candidate-{hashlib.sha256(signature.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dict[str, Any]]:  # noqa: ANN001
-    """Promote strong captured value links when no agent-authored link exists yet."""
+def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]] | None = None) -> list[dict[str, Any]]:  # noqa: ANN001
+    """Promote exact captured value links when no agent-authored link exists yet."""
     rows = [fact.model_dump(mode="json") for fact in spec.request_facts.requests]
     todos: list[dict[str, Any]] = []
     candidates = [
@@ -581,6 +561,17 @@ def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dic
         source_step_id = _request_step_id(spec, source_request_id)
         target_step_id = _request_step_id(spec, target_request_id)
         if not source_step_id or not target_step_id:
+            continue
+        if not (
+            candidate.get("source_path")
+            or candidate.get("source_collection_path")
+            or candidate.get("source_key_path")
+        ):
+            continue
+        if not (
+            candidate.get("target_path")
+            or candidate.get("target_container_path")
+        ):
             continue
         reported_source_path = str(
             candidate.get("source_path") or candidate.get("source_collection_path") or ""
@@ -605,7 +596,7 @@ def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dic
         ):
             continue
         link_id = _candidate_link_id(candidate)
-        if ("dependency_candidate", link_id) in skipped:
+        if skipped and ("dependency_candidate", link_id) in skipped:
             continue
         todo = {
             "kind": "dependency_candidate",
@@ -639,54 +630,145 @@ def _dependency_candidate_todos(spec, skipped: set[tuple[str, str]]) -> list[dic
     return todos
 
 
-def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
-    """Return the deterministic dependency/write/enum work queue."""
-    skipped = _unverified_targets(spec)
+def _annotate_stage_seven_todo(todo: dict[str, Any], spec, scope) -> dict[str, Any]:  # noqa: ANN001
+    from dano.onboarding.recording_stage_seven import target_signature_for_todo, verification_task_id
+
+    capability_id = str(todo.get("capability_id") or "")
+    step_id = str(todo.get("step_id") or todo.get("target_step_id") or "")
+    if not capability_id and scope is not None:
+        capability_id = scope.capability_for_step(step_id)
+    todo["capability_id"] = capability_id
+    todo["issue_id"] = str(todo.get("issue_id") or f"{todo.get('kind')}:{todo.get('target_id')}")
+    todo["target_signature"] = str(todo.get("target_signature") or target_signature_for_todo(todo))
+    todo["suggested_tool"] = str(todo.get("suggested_tool") or todo.get("suggested_executor") or "")
+    todo["suggested_executor"] = str(todo.get("suggested_executor") or todo.get("suggested_tool") or "")
+    todo["completion_operation"] = str(
+        todo.get("completion_operation") or todo.get("completion_op") or ""
+    )
+    todo["evidence_refs"] = list(todo.get("evidence_refs") or [])
+    todo["task_id"] = str(
+        todo.get("task_id")
+        or verification_task_id(
+            attempt_id=str(((spec.meta or {}).get("stage_seven") or {}).get("attempt_id") or ""),
+            capability_id=capability_id,
+            kind=str(todo.get("kind") or ""),
+            target_id=str(todo.get("target_id") or ""),
+            target_signature=str(todo["target_signature"]),
+        )
+    )
+    return todo
+
+
+def _capabilities_are_related(spec, source_cap: str, target_cap: str) -> bool:  # noqa: ANN001
+    if not source_cap or not target_cap:
+        return False
+    if source_cap == target_cap:
+        return True
+    by_id = {capability.capability_id: capability for capability in spec.capabilities}
+    source_name = str(getattr(by_id.get(source_cap), "name", "") or "")
+    target_name = str(getattr(by_id.get(target_cap), "name", "") or "")
+    source_keys = {source_cap, source_name} - {""}
+    target_keys = {target_cap, target_name} - {""}
+    for relation in spec.capability_relations or []:
+        ends = {
+            str(getattr(relation, "from_capability", "") or ""),
+            str(getattr(relation, "to_capability", "") or ""),
+        } - {""}
+        if source_keys & ends and target_keys & ends:
+            return True
+    return False
+
+
+def verification_todos(spec, scope=None) -> list[dict[str, Any]]:  # noqa: ANN001
+    """Return the Stage 7 work queue for the Stage 6 capability closures."""
+    from dano.onboarding.recording_stage_seven import build_stage_seven_scope
+
+    current_scope = scope or build_stage_seven_scope(spec)
+    internal_ids = {
+        str(item) for item in (spec.meta or {}).get("internal_step_ids") or [] if item
+    }
     todos: list[dict[str, Any]] = []
     for link in spec.links:
-        if ("dependency", link.link_id) in skipped or (link.meta or {}).get("verified") is True:
+        if (link.meta or {}).get("verified") is True:
+            continue
+        if link.link_id not in current_scope.link_ids:
+            continue
+        source_cap = current_scope.capability_for_step(str(link.source_step_id or ""))
+        target_cap = current_scope.capability_for_step(str(link.target_step_id or ""))
+        if not _capabilities_are_related(spec, source_cap, target_cap):
             continue
         todos.append(
-            {
-                "kind": "dependency",
-                "dependency_kind": str(link.kind or "value"),
-                "target_id": link.link_id,
-                "source_step_id": link.source_step_id,
-                "source_request_id": str((link.evidence or {}).get("source_request_id") or ""),
-                "source_path": link.source_path,
-                "target_step_id": link.target_step_id,
-                "target_request_id": str((link.evidence or {}).get("target_request_id") or ""),
-                "target_path": link.target_path,
-                "suggested_tool": "verify_dependency",
-                "completion_op": "confirm_dependency",
-            }
+            _annotate_stage_seven_todo(
+                {
+                    "kind": "dependency",
+                    "dependency_kind": str(link.kind or "value"),
+                    "target_id": link.link_id,
+                    "link_id": link.link_id,
+                    "source_step_id": link.source_step_id,
+                    "source_request_id": str((link.evidence or {}).get("source_request_id") or ""),
+                    "source_path": link.source_path,
+                    "target_step_id": link.target_step_id,
+                    "target_request_id": str((link.evidence or {}).get("target_request_id") or ""),
+                    "target_path": link.target_path,
+                    "suggested_tool": "verify_dependency",
+                    "suggested_executor": "verify_dependency",
+                    "completion_op": "confirm_dependency",
+                    "evidence_refs": [
+                        value for value in (
+                            str((link.meta or {}).get("verification_id") or ""),
+                            str((link.evidence or {}).get("source_request_id") or ""),
+                        ) if value
+                    ],
+                },
+                spec,
+                current_scope,
+            )
         )
-    todos.extend(_dependency_candidate_todos(spec, skipped))
+    for candidate in _dependency_candidate_todos(spec, set()):
+        source_id = str(candidate.get("source_step_id") or "")
+        target_id = str(candidate.get("target_step_id") or "")
+        if source_id not in current_scope.member_step_ids or target_id not in current_scope.member_step_ids:
+            continue
+        source_cap = current_scope.capability_for_step(source_id)
+        target_cap = current_scope.capability_for_step(target_id)
+        if not _capabilities_are_related(spec, source_cap, target_cap):
+            continue
+        todos.append(_annotate_stage_seven_todo(candidate, spec, current_scope))
     for step in spec.steps:
         if (step.method or "").upper() not in _WRITE_METHODS:
             continue
-        if ("write_verify", step.step_id) in skipped:
+        if step.step_id in internal_ids and step.step_id not in current_scope.member_step_ids:
+            continue
+        if step.step_id not in current_scope.write_step_ids:
             continue
         fact_check = step.fact_check or {}
         if fact_check.get("verified") is True and fact_check.get("verification_id"):
             continue
         todos.append(
-            {
-                "kind": "write_verify",
-                "target_id": step.step_id,
-                "issue_id": f"write_verify:{step.step_id}",
-                "check_code": "write_verify",
-                "step_id": step.step_id,
-                "message": f"写操作 `{step.step_id}` 还没有回读校验，不能证明提交已生效",
-                "write_request_id": str((step.source_meta or {}).get("request_id") or ""),
-                "candidate_read_request_ids": candidate_read_request_ids(spec, step),
-                "suggested_tool": "execute_write_with_verify",
-                "completion_op": "bind_verify_read",
-            }
+            _annotate_stage_seven_todo(
+                {
+                    "kind": "write_verify",
+                    "target_id": step.step_id,
+                    "issue_id": f"write_verify:{step.step_id}",
+                    "check_code": "write_verify",
+                    "step_id": step.step_id,
+                    "message": f"写操作 `{step.step_id}` 还没有回读校验，不能证明提交已生效",
+                    "write_request_id": str((step.source_meta or {}).get("request_id") or ""),
+                    "candidate_read_request_ids": candidate_read_request_ids(spec, step),
+                    "candidate_request_ids": candidate_read_request_ids(spec, step),
+                    "suggested_tool": "execute_write_with_verify",
+                    "suggested_executor": "execute_write_with_verify",
+                    "completion_op": "bind_verify_read",
+                },
+                spec,
+                current_scope,
+            )
         )
     from dano.execution.page.flow_spec import _capability_param_enum_issue
 
     for step in spec.steps:
+        if step.step_id not in current_scope.member_step_ids:
+            continue
         bindings: dict[str, Any] = {}
         for binding in step.selects:
             stored = str(binding.path or binding.id_path or "")
@@ -745,39 +827,42 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
                 )
             )
             target_id = f"{step.step_id}:{wire}"
-            if (
-                not verification_id
-                and (binding_incomplete or param_incomplete)
-                and ("enum", target_id) not in skipped
-            ):
+            if not verification_id and (binding_incomplete or param_incomplete):
                 completion_op = "attach_enum_options" if binding is not None else "set_param_enum"
                 label = str((param.label if param is not None else "") or (param.key if param is not None else "") or path)
                 todos.append(
-                    {
-                        "kind": "enum",
-                        "target_id": target_id,
-                        "issue_id": f"enum:{target_id}",
-                        "check_code": "enum",
-                        "step_id": step.step_id,
-                        "field_id": str(param.field_id or "") if param is not None else "",
-                        "wire_path": wire,
-                        "path": str(param.path if param is not None else path),
-                        "field_label": label,
-                        "message": f"字段 `{step.step_id}:{wire}` 的枚举选项还不完整",
-                        "source_request_id": str(binding.source_request_id or "")
-                        if binding is not None
-                        else "",
-                        "known_count": len(binding.options or [])
-                        if binding is not None
-                        else len((param.enum_options if param is not None else None) or []),
-                        "expected_count": binding.count if binding is not None else 0,
-                        "suggested_tools": (
-                            ["browser_snapshot", "browser_click", "replay_request"]
+                    _annotate_stage_seven_todo(
+                        {
+                            "kind": "enum",
+                            "target_id": target_id,
+                            "issue_id": f"enum:{target_id}",
+                            "check_code": "enum",
+                            "step_id": step.step_id,
+                            "field_id": str(param.field_id or "") if param is not None else "",
+                            "wire_path": wire,
+                            "path": str(param.path if param is not None else path),
+                            "field_label": label,
+                            "message": f"字段 `{step.step_id}:{wire}` 的枚举选项还不完整",
+                            "source_request_id": str(binding.source_request_id or "")
                             if binding is not None
-                            else ["get_recording_state", "submit_recording_repair"]
-                        ),
-                        "completion_op": completion_op,
-                    }
+                            else "",
+                            "known_count": len(binding.options or [])
+                            if binding is not None
+                            else len((param.enum_options if param is not None else None) or []),
+                            "expected_count": binding.count if binding is not None else 0,
+                            "suggested_tools": (
+                                ["browser_snapshot", "browser_click", "replay_request"]
+                                if binding is not None
+                                else ["get_recording_state", "submit_recording_repair"]
+                            ),
+                            "suggested_executor": (
+                                "replay_request" if binding is not None else "submit_recording_repair"
+                            ),
+                            "completion_op": completion_op,
+                        },
+                        spec,
+                        current_scope,
+                    )
                 )
     return todos
 
@@ -887,12 +972,17 @@ def _release_issue_todos(
 
 
 def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001
-    todos = verification_todos(spec)
+    from dano.onboarding.recording_stage_seven import build_stage_seven_scope, in_scope_unverified
+
+    scope = build_stage_seven_scope(spec)
+    todos = verification_todos(spec, scope)
     release_issues, release_todos = _release_issue_todos(spec, todos)
-    todos.extend(release_todos)
-    unverified = [
-        dict(item) for item in (spec.meta or {}).get("unverified") or [] if isinstance(item, dict)
-    ]
+    todos.extend(
+        _annotate_stage_seven_todo(item, spec, scope)
+        if "target_signature" not in item else item
+        for item in release_todos
+    )
+    unverified = in_scope_unverified(spec, scope)
     confirmed_links = sum(1 for link in spec.links if (link.meta or {}).get("verified") is True)
     writes = [step for step in spec.steps if (step.method or "").upper() in _WRITE_METHODS]
     verified_writes = sum(

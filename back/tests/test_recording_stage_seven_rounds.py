@@ -304,7 +304,7 @@ class _NoopPi(_FakePi):
 
 
 @pytest.mark.asyncio
-async def test_capability_repair_budget_marks_unverified() -> None:
+async def test_capability_repair_budget_keeps_issues_incomplete() -> None:
     spec = _spec()
     pi = _NoopPi()
 
@@ -329,15 +329,10 @@ async def test_capability_repair_budget_marks_unverified() -> None:
     repaired = await services.repair(payload, issues, {}, context)
 
     assert len(pi.prompts) == 2
-    unverified = repaired["meta"]["unverified"]
-    assert any(
-        item["target_kind"] == "write_verify"
-        and item["target_id"] == "step_edit"
-        and item["actor"] == "orchestrator"
-        for item in unverified
-    )
-    assert repaired["meta"]["capability_verification"]["cap_edit"]["status"] == "blocked"
+    assert repaired["meta"]["capability_verification"]["cap_edit"]["status"] == "incomplete"
+    assert "write_verify:step_edit" in repaired["meta"]["capability_verification"]["cap_edit"]["pending"]
     assert any("修复预算" in activity.label for activity in activities)
+    assert context.budget_exhausted is True
 
 
 @pytest.mark.asyncio
@@ -366,9 +361,8 @@ async def test_repair_records_capability_verification_and_flow_group_key() -> No
     repaired = await services.repair(spec.model_dump(mode="json"), issues, {}, context)
     verification = repaired["meta"]["capability_verification"]
     assert verification["cap_edit"]["status"] == "verified"
-    assert "__flow__" in verification
+    assert "write_verify:step_orphan" not in str(verification)
     assert context.capability_rounds["cap_edit"] == 1
-    assert context.capability_rounds["__flow__"] == 1
 
 
 def test_issue_detail_lists_where_and_how_to_fix() -> None:

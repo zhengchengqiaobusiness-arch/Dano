@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from dano.infra.run_logging import emit_run_event, note_run_fact
+from dano.onboarding.recording_stage_seven import StageSevenStatus, StageSevenVerdict
 
 
 class WorkflowStatus(StrEnum):
@@ -97,6 +98,11 @@ class WorkflowSnapshot(BaseModel):
     question: WorkflowQuestion | None = None
     release: dict[str, Any] | None = None
     error: str = ""
+    stage_seven_attempt_id: str = ""
+    machine_verification_status: str = ""
+    stage_seven_revision: int = 0
+    capability_attempts: dict[str, int] = Field(default_factory=dict)
+    operator_answers: dict[str, str] = Field(default_factory=dict)
 
 
 CANONICAL_RECORDING_COMMANDS = frozenset({
@@ -203,11 +209,18 @@ class PipelineContext:
     cancelled: Callable[[], bool]
     activity: Callable[[WorkflowActivity], Awaitable[None]] | None = None
     persist_stage_six: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    persist_stage_seven: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     latest_draft: dict[str, Any] | None = None
     machine_verification: bool = False
     last_repair_report: RepairReport | None = None
     current_round: int = 0
     capability_rounds: dict[str, int] = field(default_factory=dict)
+    stage_six_baseline: dict[str, Any] | None = None
+    stage_seven_attempt_id: str = ""
+    stage_seven_revision: int = 0
+    stage_seven_verdict: StageSevenVerdict | None = None
+    operator_answers: dict[str, str] = field(default_factory=dict)
+    budget_exhausted: bool = False
 
     def ensure_active(self) -> None:
         if self.cancelled():
@@ -229,6 +242,7 @@ class WorkflowPipeline(Protocol):
 class PipelineCheck:
     draft: dict[str, Any]
     issues: tuple[WorkflowIssue, ...] = ()
+    stage_seven_verdict: StageSevenVerdict | None = None
 
 
 class PipelineRuntime(Protocol):
@@ -332,6 +346,8 @@ class SelfHealingPipeline:
         previous_issue_map: dict[str, WorkflowIssue] = {}
         last_applied = False
         round_number = 0
+        if context.stage_six_baseline is None:
+            context.stage_six_baseline = dict(draft)
 
         while True:
             context.ensure_active()
@@ -341,7 +357,10 @@ class SelfHealingPipeline:
             checked = await self._bounded(self.runtime.check(draft, context))
             draft = checked.draft
             context.remember_draft(draft)
-            if not checked.issues:
+            verdict = checked.stage_seven_verdict or context.stage_seven_verdict
+            issues = tuple(checked.issues)
+
+            if verdict is not None and verdict.publishable:
                 for capability_id, title, members in _issues_grouped_by_capability(
                     draft, tuple(previous_issue_map.values()),
                 ):
@@ -356,14 +375,33 @@ class SelfHealingPipeline:
                         label=f"能力「{title}」验证通过",
                     ))
                 await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
-                release = await self._bounded(self.runtime.publish(draft, context))
+                try:
+                    release = await self._bounded(self.runtime.publish(draft, context))
+                except RuntimeError as exc:
+                    return PipelineOutcome(
+                        status=WorkflowStatus.EDITABLE,
+                        draft=context.latest_draft or draft,
+                        issues=issues or (_verification_unresolved_issue(verdict),),
+                        error=str(exc) or "发布前机器验证未全部通过",
+                    )
                 return PipelineOutcome(
                     status=WorkflowStatus.PUBLISHED,
                     draft=context.latest_draft or draft,
                     release=release,
                 )
 
-            current_issue_map = {issue.issue_id: issue for issue in checked.issues}
+            if not issues and (verdict is None or not verdict.all_verified or not (verdict and verdict.publishable)):
+                issues = (_verification_unresolved_issue(verdict),)
+                if verdict is not None and verdict.status == StageSevenStatus.VERIFIED:
+                    pass
+                return PipelineOutcome(
+                    status=WorkflowStatus.EDITABLE,
+                    draft=draft,
+                    issues=issues,
+                    error="机器验证未全部通过，当前结果不会发布",
+                )
+
+            current_issue_map = {issue.issue_id: issue for issue in issues}
             resolved_ids = set(previous_issue_map) - set(current_issue_map)
             for capability_id, title, members in _issues_grouped_by_capability(
                 draft, tuple(previous_issue_map.values()),
@@ -388,12 +426,14 @@ class SelfHealingPipeline:
                 ))
             previous_issue_map = current_issue_map
 
-            external = tuple(
-                issue for issue in checked.issues if issue.resolver == "external_blocked"
-            )
-            if external:
+            blocked_external = (
+                verdict is not None and verdict.status == StageSevenStatus.BLOCKED_EXTERNAL
+            ) or any(issue.resolver == "external_blocked" for issue in issues)
+            if blocked_external:
                 seen_blocked: set[str] = set()
-                for issue in external:
+                for issue in issues:
+                    if issue.resolver != "external_blocked":
+                        continue
                     label = str(issue.message or "").strip()
                     if label in seen_blocked:
                         continue
@@ -408,12 +448,21 @@ class SelfHealingPipeline:
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
-                    issues=external,
+                    issues=issues,
+                    error="外部登录态或网络阻塞，当前结果不会发布",
                 )
 
-            current_issues = _issue_signature(checked.issues)
+            if verdict is not None and verdict.status == StageSevenStatus.INCOMPLETE and context.budget_exhausted:
+                return PipelineOutcome(
+                    status=WorkflowStatus.EDITABLE,
+                    draft=draft,
+                    issues=issues,
+                    error="能力修复预算已用尽，当前结果不会发布",
+                )
+
+            current_issues = _issue_signature(issues)
             current_fingerprint = _draft_fingerprint(draft)
-            unresolved = len(checked.issues)
+            unresolved = len(issues)
             stalled = (
                 previous_issues is not None
                 and current_fingerprint == previous_fingerprint
@@ -426,7 +475,7 @@ class SelfHealingPipeline:
             previous_fingerprint = current_fingerprint
             previous_unresolved = unresolved
             if unchanged >= self.max_unchanged_rounds:
-                for capability_id, title, members in _issues_grouped_by_capability(draft, checked.issues):
+                for capability_id, title, members in _issues_grouped_by_capability(draft, issues):
                     await context.record(_capability_activity(
                         title=title,
                         capability_id=capability_id,
@@ -438,15 +487,15 @@ class SelfHealingPipeline:
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
-                    issues=checked.issues,
+                    issues=issues,
                     error="自动处理连续没有产生有效变化",
                 )
 
-            answers: dict[str, str] = {}
+            answers: dict[str, str] = dict(context.operator_answers)
             await context.progress(WorkflowStep.RESOLVING, "正在按能力逐个处理问题", round_number)
             repaired = await self._bounded(self.runtime.repair(
                 draft,
-                checked.issues,
+                issues,
                 answers,
                 context,
             ))
@@ -458,8 +507,10 @@ class SelfHealingPipeline:
                 step=WorkflowStep.RESOLVING,
                 round=round_number,
                 status="running",
-                label=_result_thought(report, applied=last_applied, remaining=len(checked.issues)),
+                label=_result_thought(report, applied=last_applied, remaining=len(issues)),
             ))
+            if context.budget_exhausted:
+                continue
 
     async def _bounded(self, operation: Awaitable[Any]) -> Any:
         try:
@@ -473,7 +524,19 @@ class _OperationTimeout(Exception):
     """Distinguish a bounded stage timeout from the whole-run deadline."""
 
 
+def _verification_unresolved_issue(verdict: StageSevenVerdict | None) -> WorkflowIssue:
+    return WorkflowIssue(
+        issue_id="verification_unresolved",
+        code="verification_unresolved",
+        message="仍有范围内未证明项，不能发布",
+        resolver="collect_evidence",
+        target={"status": str(verdict.status) if verdict is not None else "incomplete"},
+    )
+
+
 def _draft_fingerprint(draft: dict[str, Any] | None) -> str:
+    payload = json.dumps(draft or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
     payload = json.dumps(draft or {}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -790,6 +853,8 @@ class RecordingWorkflow:
     listener: SnapshotListener | None = None
     cancel_listener: CancelListener | None = None
     persist_stage_six: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    persist_stage_seven: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    stage_six_baseline: dict[str, Any] | None = None
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
@@ -1003,6 +1068,12 @@ class RecordingWorkflow:
             cancelled=lambda: self._cancelled,
             activity=self._record_activity,
             persist_stage_six=self.persist_stage_six,
+            persist_stage_seven=self.persist_stage_seven,
+            stage_six_baseline=dict(self.stage_six_baseline or self.snapshot.draft or {}),
+            stage_seven_attempt_id=str(self.snapshot.stage_seven_attempt_id or ""),
+            stage_seven_revision=int(self.snapshot.stage_seven_revision or 0),
+            capability_rounds=dict(self.snapshot.capability_attempts or {}),
+            operator_answers=dict(self.snapshot.operator_answers or {}),
         )
         remember = context.remember_draft
 
