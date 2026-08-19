@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import hashlib
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from dano.execution.page.flow_spec import (
     CapabilityRequestRef,
@@ -151,6 +151,140 @@ def _step_by_request_id(spec: FlowSpec) -> dict[str, FlowStep]:
     return out
 
 
+def _normalized_request_path(url_or_path: str) -> str:
+    raw = str(url_or_path or "").strip()
+    if not raw:
+        return ""
+    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
+    path = (path or raw.split("?", 1)[0]).strip()
+    if path and not path.startswith("/"):
+        path = "/" + path
+    return path.rstrip("/") or path
+
+
+def _step_host(step: FlowStep) -> str:
+    raw = str(step.url or "")
+    if "://" in raw:
+        return urlparse(raw).netloc.casefold()
+    return str((step.source_meta or {}).get("host") or "").casefold()
+
+
+def _step_transaction_id(step: FlowStep) -> str:
+    meta = step.source_meta or {}
+    return str(
+        meta.get("trigger_transaction_id")
+        or meta.get("transaction_id")
+        or ""
+    )
+
+
+def _query_signature(url_or_query: str | dict | None) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if isinstance(url_or_query, dict):
+        items = {
+            str(key): tuple(str(item) for item in (value if isinstance(value, list) else [value]))
+            for key, value in url_or_query.items()
+        }
+        return tuple(sorted((key, items[key]) for key in items))
+    raw = str(url_or_query or "")
+    query = raw.split("?", 1)[1] if "?" in raw else (urlparse(raw).query if "://" in raw else "")
+    parsed = parse_qs(query, keep_blank_values=True) if query else {}
+    return tuple(sorted((key, tuple(values)) for key, values in parsed.items()))
+
+
+def _body_signature(value: Any) -> str:
+    if value in (None, "", {}, []):
+        return ""
+    return _stable_json_hash(value)
+
+
+def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowStep | None:
+    """Resolve one option-source step; return None instead of guessing."""
+    request_id = str(source.get("request_id") or source.get("source_request_id") or "")
+    if request_id:
+        step = next(
+            (item for item in spec.steps if _request_id_for_step(spec, item) == request_id),
+            None,
+        )
+        if step is not None:
+            return step
+    step_id = str(source.get("step_id") or source.get("source_step_id") or "")
+    if step_id:
+        step = next((item for item in spec.steps if item.step_id == step_id), None)
+        if step is not None:
+            return step
+    source_url = str(source.get("source_url") or source.get("url") or source.get("path") or "")
+    if not source_url:
+        return None
+    source_path = _normalized_request_path(source_url)
+    if not source_path:
+        return None
+    parsed = urlparse(source_url) if "://" in source_url else None
+    source_host = (parsed.netloc.casefold() if parsed is not None else str(source.get("host") or "").casefold())
+    source_method = str(source.get("source_method") or source.get("method") or "").upper()
+    source_page = str(source.get("page_id") or "")
+    source_frame = str(source.get("frame_id") or "")
+    source_tx = str(
+        source.get("transaction_id")
+        or source.get("trigger_transaction_id")
+        or source.get("source_transaction_id")
+        or ""
+    )
+    source_query = _query_signature(source_url if "?" in source_url else source.get("query"))
+    source_body = _body_signature(source.get("source_body") or source.get("body"))
+    candidates = [
+        step for step in spec.steps
+        if _normalized_request_path(step.path or step.url) == source_path
+    ]
+    if source_host:
+        candidates = [step for step in candidates if _step_host(step) == source_host]
+    if source_method:
+        candidates = [
+            step for step in candidates
+            if (step.method or "GET").upper() == source_method
+        ]
+    if source_page:
+        narrowed = [
+            step for step in candidates
+            if str((step.source_meta or {}).get("page_id") or "") == source_page
+        ]
+        if narrowed:
+            candidates = narrowed
+    if source_frame:
+        narrowed = [
+            step for step in candidates
+            if str((step.source_meta or {}).get("frame_id") or "") == source_frame
+        ]
+        if narrowed:
+            candidates = narrowed
+    if source_tx:
+        narrowed = [step for step in candidates if _step_transaction_id(step) == source_tx]
+        if narrowed:
+            candidates = narrowed
+    if len(candidates) > 1 and source_query:
+        narrowed = [step for step in candidates if _query_signature(step.url) == source_query]
+        if len(narrowed) == 1:
+            candidates = narrowed
+        elif narrowed:
+            candidates = narrowed
+        else:
+            return None
+    if len(candidates) > 1 and source_body:
+        narrowed = [
+            step for step in candidates
+            if _body_signature(getattr(step, "body_source", None) or (step.source_meta or {}).get("post_data"))
+            == source_body
+        ]
+        if len(narrowed) == 1:
+            candidates = narrowed
+        elif not narrowed:
+            return None
+        else:
+            candidates = narrowed
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
 def _option_source_request_ids(
     spec: FlowSpec,
     member_steps: list[FlowStep],
@@ -169,7 +303,6 @@ def _option_source_request_ids(
         request_id = str(source.get("request_id") or source.get("source_request_id") or "")
         step_id = str(source.get("step_id") or source.get("source_step_id") or "")
         capability_name = str(source.get("capability") or "")
-        source_url = str(source.get("source_url") or source.get("url") or source.get("path") or "")
         if not request_id and step_id:
             step = next((item for item in spec.steps if item.step_id == step_id), None)
             request_id = _request_id_for_step(spec, step) if step is not None else ""
@@ -177,13 +310,8 @@ def _option_source_request_ids(
             anchor = str(plan_by_name[capability_name].get("anchor_step_id") or "")
             step = next((item for item in spec.steps if item.step_id == anchor), None)
             request_id = _request_id_for_step(spec, step) if step is not None else ""
-        if not request_id and source_url:
-            source_path = urlparse(source_url).path or source_url.split("?", 1)[0]
-            step = next((
-                item for item in spec.steps
-                if (urlparse(str(item.path or item.url or "")).path or str(item.path or item.url or "").split("?", 1)[0])
-                == source_path
-            ), None)
+        if not request_id:
+            step = _match_option_source_step(spec, source)
             if step is not None:
                 request_id = _request_id_for_step(spec, step) or f"__step__:{step.step_id}"
         if request_id and request_id not in ids:
@@ -191,13 +319,21 @@ def _option_source_request_ids(
 
     for step in member_steps:
         for binding in step.selects or []:
-            add_source({"request_id": binding.source_request_id})
+            add_source({
+                "request_id": binding.source_request_id,
+                "source_url": binding.source_url,
+                "source_method": binding.source_method,
+                "source_body": binding.source_body,
+            })
         for param in step.params or []:
             source = dict(param.source or {})
             if param.source_kind == "api_option":
                 add_source(source)
-            add_source(source.get("option_source"))
+            add_source(source.get("option_source") if isinstance(source.get("option_source"), dict) else None)
     member_ids = {step.step_id for step in member_steps}
+    for link in spec.links or []:
+        if link.confirmed and link.target_step_id in member_ids:
+            add_source((link.value_binding or {}).get("option_source"))
     for link in _executable_links(spec):
         if link.target_step_id in member_ids:
             add_source((link.value_binding or {}).get("option_source"))
@@ -213,15 +349,6 @@ def _verified_fact_check_request_id(spec: FlowSpec, anchor: FlowStep) -> str:
     ):
         return str(fact_check.get("source_request_id") or "")
     return ""
-
-
-def _normalized_request_path(url_or_path: str) -> str:
-    raw = str(url_or_path or "").strip()
-    if not raw:
-        return ""
-    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
-    path = (path or raw.split("?", 1)[0]).strip()
-    return path.rstrip("/") or path
 
 
 def _step_matching_request(
@@ -244,16 +371,14 @@ def _step_matching_request(
     )
     if fact is None:
         return None
-    method = (fact.method or "GET").upper()
-    path = _normalized_request_path(fact.path or fact.url)
-    return next(
-        (
-            item for item in spec.steps
-            if (item.method or "").upper() == method
-            and _normalized_request_path(item.path or item.url) == path
-        ),
-        None,
-    )
+    return _match_option_source_step(spec, {
+        "source_url": fact.url or fact.path,
+        "method": fact.method,
+        "page_id": fact.page_id or "",
+        "frame_id": fact.frame_id or "",
+        "query": fact.query,
+        "transaction_id": str(getattr(fact, "trigger_transaction_id", "") or ""),
+    })
 
 
 def _compiled_nodes_from_refs(
