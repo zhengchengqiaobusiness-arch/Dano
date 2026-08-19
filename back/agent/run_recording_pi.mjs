@@ -121,7 +121,7 @@ async function resolveModel() {
         reasoning: false,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: envInt("DANO_PI_CONTEXT_WINDOW", 128000, 1024),
+        contextWindow: envInt("DANO_PI_CONTEXT_WINDOW", 198000, 1024),
         maxTokens: envInt("DANO_PI_MAX_TOKENS", 32768, 1),
       }],
     });
