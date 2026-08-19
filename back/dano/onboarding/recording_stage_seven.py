@@ -16,7 +16,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep
+from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec, FlowStep
 
 
 STAGE_SEVEN_PROTOCOL = "dano.recording.stage7.v2"

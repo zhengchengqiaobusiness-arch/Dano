@@ -334,7 +334,7 @@ def _attach_capability_step(capability, step, request_id: str, *, usage: str) ->
     if step.step_id not in capability.step_ids:
         capability.step_ids = [*capability.step_ids, step.step_id]
     if not any(str(ref.step_id or "") == step.step_id for ref in capability.request_refs):
-        from dano.execution.page.flow_spec import CapabilityRequestRef
+        from dano.execution.page.flow_spec_core.models import CapabilityRequestRef
 
         capability.request_refs = [
             *capability.request_refs,
@@ -764,7 +764,7 @@ def verification_todos(spec, scope=None) -> list[dict[str, Any]]:  # noqa: ANN00
                 current_scope,
             )
         )
-    from dano.execution.page.flow_spec import _capability_param_enum_issue
+    from dano.execution.page.capability_validation import _capability_param_enum_issue
 
     for step in spec.steps:
         if step.step_id not in current_scope.member_step_ids:
@@ -879,7 +879,7 @@ def _release_issue_todos(
     if not any(cap.nodes and cap.request_refs for cap in spec.capabilities):
         return [], []
 
-    from dano.execution.page.flow_spec import flow_spec_fingerprint
+    from dano.execution.page.flow_spec_core.fingerprints import flow_spec_fingerprint
     from dano.onboarding.recording_release import evaluate_recording_release
 
     decision = evaluate_recording_release(spec)
@@ -1013,7 +1013,7 @@ def finalize_verification_state(
     stop_reason: str = "",
 ):  # noqa: ANN001, ANN202
     """Checkpoint verification without converting blockers into publishable state."""
-    from dano.execution.page.flow_spec import _auto_confirm_ready_capabilities
+    from dano.execution.page.capability_repair import _auto_confirm_ready_capabilities
 
     current = _consume_dependency_executor_evidence(spec)
     report = verification_report(current)
