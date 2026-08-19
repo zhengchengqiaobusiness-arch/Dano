@@ -38,3 +38,4 @@ back/_e2e_leave2.log
 back/.dano/
 /.claude
 .codex/environments/environment.toml
+recording-pipeline.md
