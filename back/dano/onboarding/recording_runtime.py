@@ -28,11 +28,11 @@ from dano.onboarding.recording_stage_seven import (
     StageSevenStatus,
     StageSixContractChanged,
     assert_stage_six_contract_preserved,
-    apply_stage_seven_recorded_evidence_fixes,
     build_stage_seven_scope,
     checkpoint_dict,
     classify_preflight_error,
     compute_publishable,
+    callable_covers_stage_six,
     evaluate_stage_seven_verdict,
     new_attempt_id,
     normalize_stage_seven_working_copy,
@@ -578,6 +578,24 @@ async def _persist_stage_seven_if_needed(
         return
 
 
+def _preflight_from_spec(spec: FlowSpec) -> dict[str, Any]:
+    return dict(((spec.meta or {}).get("verification_run") or {}).get("preflight") or {})
+
+
+async def _persist_working_copy(
+    context: PipelineContext,
+    baseline: FlowSpec,
+    spec: FlowSpec,
+) -> None:
+    await _persist_stage_seven_if_needed(
+        context,
+        baseline,
+        spec,
+        context.stage_seven_verdict,
+        _preflight_from_spec(spec),
+    )
+
+
 def _issues_from_spec(spec: FlowSpec) -> tuple[WorkflowIssue, ...]:
     report = verification_report(spec)
     issues = _dedupe_workflow_issues(tuple(
@@ -665,6 +683,7 @@ class ProductionRecordingServices:
             max_rounds=0,
         )
         spec = assign_unassigned_internal_steps(spec)
+        contract_changed = False
         try:
             assert_stage_six_contract_preserved(baseline, spec)
         except StageSixContractChanged:
@@ -673,6 +692,7 @@ class ProductionRecordingServices:
                 **(spec.meta or {}),
                 "stage_seven_contract_changed": True,
             }
+            contract_changed = True
         preflight = await self._preflight_replay_health(spec, context)
         preflight_status = preflight_status_of(preflight)
         if preflight_status == StageSevenPreflightStatus.BLOCKED_AUTH:
@@ -696,6 +716,14 @@ class ProductionRecordingServices:
             },
         }
         issues = list(_issues_from_spec(spec))
+        if contract_changed:
+            contract_issue = WorkflowIssue(
+                issue_id=STAGE_SIX_CONTRACT_CHANGED,
+                code=STAGE_SIX_CONTRACT_CHANGED,
+                message="阶段 7 改变了阶段 6 公开能力契约，已回滚该修补并阻塞发布",
+                resolver="machine_repair",
+            )
+            issues.insert(0, contract_issue)
         if preflight_status in {
             StageSevenPreflightStatus.BLOCKED_AUTH,
             StageSevenPreflightStatus.BLOCKED_NETWORK,
@@ -722,8 +750,17 @@ class ProductionRecordingServices:
             attempt_id=context.stage_seven_attempt_id,
             revision=context.stage_seven_revision,
             waiting_operator=any(issue.resolver == "operator" for issue in issues),
-            budget_or_stall=context.budget_exhausted,
+            budget_or_stall=context.budget_exhausted or contract_changed,
             running=True,
+            extra_issues=(
+                [{
+                    "issue_id": STAGE_SIX_CONTRACT_CHANGED,
+                    "check_code": STAGE_SIX_CONTRACT_CHANGED,
+                    "message": "阶段 7 改变了阶段 6 公开能力契约，已回滚该修补并阻塞发布",
+                    "resolver": "machine_repair",
+                }]
+                if contract_changed else None
+            ),
         )
         context.stage_seven_verdict = verdict
         spec.meta = {
@@ -878,7 +915,8 @@ class ProductionRecordingServices:
     ) -> dict[str, Any]:
         context.ensure_active()
         report = RepairReport()
-        spec = apply_stage_seven_recorded_evidence_fixes(FlowSpec.model_validate(draft))
+        baseline = FlowSpec.model_validate(context.stage_six_baseline or draft)
+        spec = normalize_stage_seven_working_copy(baseline, FlowSpec.model_validate(draft))
         kept_capabilities = list(spec.capabilities)
         try:
             before_fix = flow_spec_fingerprint(spec)
@@ -888,7 +926,7 @@ class ProductionRecordingServices:
                 max_rounds=1,
                 expand_requests=False,
             )
-            spec = apply_stage_seven_recorded_evidence_fixes(spec)
+            spec = normalize_stage_seven_working_copy(baseline, spec)
             if flow_spec_fingerprint(spec) != before_fix:
                 report.applied.append("deterministic_fix")
             else:
@@ -930,6 +968,7 @@ class ProductionRecordingServices:
                     kept_capabilities,
                     report,
                     context,
+                    baseline=baseline,
                     operator_answers=operator_answers,
                 )
             except WorkflowCancelled:
@@ -945,14 +984,8 @@ class ProductionRecordingServices:
         if kept_capabilities and not spec.capabilities:
             spec.capabilities = kept_capabilities
         context.operator_answers.update(operator_answers)
-        baseline = FlowSpec.model_validate(context.stage_six_baseline or draft)
-        await _persist_stage_seven_if_needed(
-            context,
-            baseline,
-            spec,
-            context.stage_seven_verdict,
-            dict(((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}),
-        )
+        spec = normalize_stage_seven_working_copy(baseline, spec)
+        await _persist_working_copy(context, baseline, spec)
         return spec.model_dump(mode="json")
 
     async def _repair_capability_groups(
@@ -962,6 +995,8 @@ class ProductionRecordingServices:
         kept_capabilities: list[Any],
         report: RepairReport,
         context: PipelineContext,
+        *,
+        baseline: FlowSpec,
         operator_answers: dict[str, str] | None = None,
     ) -> FlowSpec:
         """List each capability's problems, apply that group's edits, then feedback.
@@ -1043,6 +1078,7 @@ class ProductionRecordingServices:
                     ),
                     target=cap_target,
                 ))
+                await _persist_working_copy(context, baseline, spec)
                 continue
             context.capability_rounds[group_key] = dispatched + 1
             remaining_group: list[WorkflowIssue] = []
@@ -1062,6 +1098,7 @@ class ProductionRecordingServices:
                         code=issue.code,
                         target={**issue.target, **cap_target},
                     ))
+                    await _persist_working_copy(context, baseline, spec)
                     answer = str(await context.ask_operator(_operator_question(issue)) or "").strip()
                     answers[issue.issue_id] = answer
                 applied = False
@@ -1078,12 +1115,25 @@ class ProductionRecordingServices:
                     if answer:
                         report.rejected.append(issue.issue_id)
                     remaining_group.append(issue)
+            if operator_resolved:
+                spec = normalize_stage_seven_working_copy(baseline, spec)
+                await _persist_working_copy(context, baseline, spec)
             pi_issues = tuple(issue for issue in remaining_group if _dispatchable_issue(issue))
             before_pi = flow_spec_fingerprint(spec)
             pre_pi_spec = spec.model_copy(deep=True)
             if pi_issues:
                 if pi is None:
                     pi = await self.pi_provider(False)
+                bind_sink = getattr(pi, "bind_stage_seven_evidence_sink", None)
+                if callable(bind_sink):
+                    bind_sink(
+                        baseline=baseline,
+                        on_evidence=lambda working: _persist_working_copy(
+                            context,
+                            baseline,
+                            working,
+                        ),
+                    )
                 pi.bind_flow_spec(spec)
                 await context.record(WorkflowActivity(
                     step=WorkflowStep.RESOLVING,
@@ -1112,6 +1162,21 @@ class ProductionRecordingServices:
                 except WorkflowCancelled:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one capability must not sink the rest
+                    harvested = None
+                    try:
+                        harvested = pi.current_flow_spec()
+                    except Exception:  # noqa: BLE001 - keep the pre-Pi spec if harvest fails
+                        harvested = None
+                    if harvested is not None:
+                        current = normalize_stage_seven_working_copy(baseline, harvested)
+                        try:
+                            assert_stage_six_contract_preserved(baseline, current)
+                            spec = current
+                            pi.bind_flow_spec(spec)
+                        except StageSixContractChanged:
+                            spec = pre_pi_spec
+                            pi.bind_flow_spec(spec)
+                    await _persist_working_copy(context, baseline, spec)
                     report.still_pending.extend(issue.issue_id for issue in remaining_group)
                     _record_capability_verification(
                         spec,
@@ -1146,6 +1211,7 @@ class ProductionRecordingServices:
                     report.rejected.append("pi_cleared_capabilities")
                     report.still_pending.extend(issue.issue_id for issue in remaining_group)
                     pi.bind_flow_spec(spec)
+                    await _persist_working_copy(context, baseline, spec)
                     await context.record(WorkflowActivity(
                         step=WorkflowStep.RESOLVING,
                         round=context.current_round,
@@ -1166,32 +1232,33 @@ class ProductionRecordingServices:
                         target=cap_target,
                     ))
                     continue
-                spec = repaired
-                baseline = context.stage_six_baseline
-                if baseline is not None:
-                    try:
-                        assert_stage_six_contract_preserved(baseline, spec)
-                    except StageSixContractChanged:
-                        spec = pre_pi_spec
-                        pi.bind_flow_spec(spec)
-                        report.rejected.append(STAGE_SIX_CONTRACT_CHANGED)
-                        report.still_pending.extend(issue.issue_id for issue in remaining_group)
-                        _record_capability_verification(
-                            spec,
-                            group_key,
-                            status="incomplete",
-                            resolved=[issue.issue_id for issue in operator_resolved],
-                            pending=[issue.issue_id for issue in remaining_group],
-                            reason="阶段 7 改变了阶段 6 公开能力契约，已回滚",
-                        )
-                        await context.record(WorkflowActivity(
-                            step=WorkflowStep.RESOLVING,
-                            round=context.current_round,
-                            status="blocked",
-                            label=f"能力「{title}」的修补改变了阶段 6 公开契约，已回滚",
-                            target=cap_target,
-                        ))
-                        continue
+                spec = normalize_stage_seven_working_copy(baseline, repaired)
+                try:
+                    assert_stage_six_contract_preserved(baseline, spec)
+                except StageSixContractChanged:
+                    spec = pre_pi_spec
+                    pi.bind_flow_spec(spec)
+                    report.rejected.append(STAGE_SIX_CONTRACT_CHANGED)
+                    report.still_pending.extend(issue.issue_id for issue in remaining_group)
+                    _record_capability_verification(
+                        spec,
+                        group_key,
+                        status="incomplete",
+                        resolved=[issue.issue_id for issue in operator_resolved],
+                        pending=[issue.issue_id for issue in remaining_group],
+                        reason="阶段 7 改变了阶段 6 公开能力契约，已回滚",
+                    )
+                    await _persist_working_copy(context, baseline, spec)
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="blocked",
+                        label=f"能力「{title}」的修补改变了阶段 6 公开契约，已回滚",
+                        target=cap_target,
+                    ))
+                    continue
+                pi.bind_flow_spec(spec)
+                await _persist_working_copy(context, baseline, spec)
             changed = flow_spec_fingerprint(spec) != before_pi
             open_ids, open_identities = _open_issue_tokens(spec)
             resolved_issues: list[WorkflowIssue] = list(operator_resolved)
@@ -1242,6 +1309,8 @@ class ProductionRecordingServices:
                 ),
                 target=cap_target,
             ))
+            spec = normalize_stage_seven_working_copy(baseline, spec)
+            await _persist_working_copy(context, baseline, spec)
         return spec
 
     async def publish(
@@ -1292,6 +1361,12 @@ class ProductionRecordingServices:
             if not publishable or decision.callable_spec is None:
                 raise RuntimeError("发布边界前机器验证未全部通过")
             publishable_spec = decision.callable_spec
+            try:
+                assert_stage_six_contract_preserved(baseline, publishable_spec)
+            except StageSixContractChanged as exc:
+                raise RuntimeError("发布前阶段 6 公开能力契约已变化") from exc
+            if not callable_covers_stage_six(baseline, publishable_spec):
+                raise RuntimeError("发布候选未覆盖阶段 6 的全部能力")
             verification_status = "passed"
         else:
             publishable_spec = spec

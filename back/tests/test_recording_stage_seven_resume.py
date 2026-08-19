@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep
@@ -424,3 +426,169 @@ async def test_resume_restores_checkpoint_revision() -> None:
     assert snapshot.capability_attempts == {"cap_list": 2}
     assert snapshot.operator_answers == {"q1": "用户参数"}
     assert captured.get("republish") is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_persists_stage_seven_checkpoint() -> None:
+    from dano.onboarding.recording_workflow import (
+        PipelineCheck,
+        RecordingWorkflow,
+        SelfHealingPipeline,
+        WorkflowSnapshot,
+        WorkflowStatus,
+    )
+
+    saved: list[dict] = []
+
+    async def persist(checkpoint):  # noqa: ANN001
+        saved.append(dict(checkpoint))
+
+    class _HangRuntime:
+        async def prepare(self, seed, context):  # noqa: ANN001, ARG002
+            return dict(seed.draft or {})
+
+        async def check(self, draft, context):  # noqa: ANN001, ARG002
+            await asyncio.sleep(30)
+            return PipelineCheck(draft=draft, issues=())
+
+        async def repair(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("repair must not run after cancel")
+
+        async def publish(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("publish must not run after cancel")
+
+    spec = _spec()
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="recording_cancel",
+            action="action_cancel",
+            status=WorkflowStatus.EDITABLE,
+            draft=spec.model_dump(mode="json"),
+            stage_seven_attempt_id="attempt-cancel",
+        ),
+        SelfHealingPipeline(_HangRuntime()),
+        persist_stage_seven=persist,
+        stage_six_baseline=spec.model_dump(mode="json"),
+    )
+    await workflow.republish(machine_verification=True)
+    await asyncio.sleep(0.05)
+    await workflow.cancel()
+    await workflow.wait()
+    assert saved
+    assert saved[-1]["status"] == "cancelled"
+    assert saved[-1]["working_flow_spec"]["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_add_verifications_consumes_evidence_and_persists() -> None:
+    from dano.execution.page.verification_log import record_verification
+    from dano.onboarding.recording_pi import RecordingPiSession
+
+    spec = _spec()
+    spec.meta = {"stage_seven": {"attempt_id": "attempt-ev"}}
+    persisted: list[object] = []
+
+    async def on_evidence(working):  # noqa: ANN001
+        persisted.append(working)
+
+    session = RecordingPiSession(
+        tenant="tenant",
+        subsystem="oa",
+        recording_id="recording_" + ("b" * 32),
+        resume_history=False,
+    )
+    session.bind_flow_spec(spec)
+    session.bind_stage_seven_evidence_sink(baseline=spec, on_evidence=on_evidence)
+    verification_id = record_verification(
+        kind="dependency_execute",
+        subject={"link_id": "link_missing"},
+        status="passed",
+        evidence={"ok": True},
+    )
+    added = await session.add_verifications([verification_id])
+    assert added
+    assert persisted
+    log = list((persisted[0].meta or {}).get("verification_log") or [])
+    assert any(item.get("verification_id") == verification_id for item in log)
+
+
+@pytest.mark.asyncio
+async def test_execute_write_skips_passed_and_unknown_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dano.agent_tools import tools as agent_tools
+    from dano.execution.page.flow_spec import ParamField
+
+    spec = FlowSpec(
+        tenant="tenant",
+        subsystem="oa",
+        steps=[
+            FlowStep(
+                step_id="step_edit",
+                method="PUT",
+                path="/erp/sale-order/update",
+                source_meta={"request_id": "req_update"},
+                params=[ParamField(path="query.remark", key="remark", value="x")],
+            ),
+        ],
+    )
+    executed: list[int] = []
+
+    class _Session:
+        def current_flow_spec(self) -> FlowSpec:
+            return spec
+
+    def fake_session(run_id, params):  # noqa: ANN001, ARG001
+        return _Session()
+
+    async def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        executed.append(1)
+        raise AssertionError("write must not be re-executed")
+
+    monkeypatch.setattr(agent_tools, "_recording_session", fake_session)
+    monkeypatch.setattr("dano.execution.page.replay.execute_write_with_verify", boom)
+    spec.meta = {
+        "verification_log": [
+            {
+                "kind": "write_execute",
+                "status": "passed",
+                "verification_id": "v-write",
+                "subject": {"write_step_id": "step_edit"},
+                "evidence": {"write": {"ok": True}, "verify": {"ok": True}},
+            }
+        ],
+    }
+    passed = await agent_tools.execute_recording_write_with_verify(
+        "run",
+        {
+            "write_step_id": "step_edit",
+            "verify_request_id": "req_get",
+            "assertion": {"operator": "exists", "path": "id"},
+        },
+    )
+    assert passed["duplicate"] is True
+    assert passed["write_executed"] is False
+    assert executed == []
+
+    spec.meta = {
+        "verification_log": [
+            {
+                "kind": "write_execute",
+                "status": "inconclusive",
+                "verification_id": "v-unknown",
+                "subject": {
+                    "write_step_id": "step_edit",
+                    "outcome": "write_outcome_unknown",
+                },
+            }
+        ],
+    }
+    unknown = await agent_tools.execute_recording_write_with_verify(
+        "run",
+        {
+            "write_step_id": "step_edit",
+            "verify_request_id": "req_get",
+            "assertion": {"operator": "exists", "path": "id"},
+        },
+    )
+    assert unknown["ok"] is False
+    assert unknown["status"] == "write_outcome_unknown"
+    assert executed == []

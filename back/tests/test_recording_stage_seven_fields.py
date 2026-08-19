@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField, SelectBinding
+from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep, ParamField, SelectBinding
 from dano.onboarding.recording_stage_seven import apply_stage_seven_recorded_evidence_fixes
-from dano.onboarding.recording_verify import apply_recorded_evidence_fixes
+from dano.onboarding.recording_verify import apply_recorded_evidence_fixes, verification_report
 
 
 def _step(**kwargs) -> FlowStep:  # noqa: ANN003
@@ -96,3 +96,39 @@ def test_session_and_audit_fields_are_not_exposed() -> None:
     kinds = [param.source_kind for param in fixed.steps[0].params]
     assert kinds == ["unknown", "unknown", "unknown"]
     assert all(param.exposed_to_user is not True for param in fixed.steps[0].params)
+
+
+def test_mark_unverified_does_not_make_report_complete() -> None:
+    spec = FlowSpec(
+        tenant="tenant",
+        subsystem="oa",
+        steps=[
+            _step(params=[ParamField(path="query.remark", key="remark", value="", source_kind="unknown")]),
+        ],
+        capabilities=[
+            FlowCapability(
+                name="edit_sale_order",
+                title="编辑销售订单",
+                kind="update",
+                capability_id="cap_edit",
+                step_ids=["step_edit"],
+                nodes=[{
+                    "id": "call_1",
+                    "type": "call",
+                    "usage": "execute",
+                    "step_id": "step_edit",
+                    "method": "PUT",
+                    "path": "/erp/sale-order/update",
+                }],
+            ),
+        ],
+        meta={
+            "unverified": [
+                {"target_kind": "write_verify", "target_id": "step_edit", "reason": "budget"},
+            ],
+        },
+    )
+    report = verification_report(spec)
+    assert report["complete"] is False
+    assert report["all_verified"] is False
+    assert report["unverified"]

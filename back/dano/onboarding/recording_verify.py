@@ -514,14 +514,6 @@ def apply_recorded_evidence_fixes(spec):  # noqa: ANN001, ANN202
     return current
 
 
-def _unverified_targets(spec) -> set[tuple[str, str]]:  # noqa: ANN001
-    return {
-        (str(item.get("target_kind") or ""), str(item.get("target_id") or ""))
-        for item in (spec.meta or {}).get("unverified") or []
-        if isinstance(item, dict)
-    }
-
-
 def _request_step_id(spec, request_id: str) -> str:  # noqa: ANN001
     for step in spec.steps:
         if str((step.source_meta or {}).get("request_id") or "") == request_id:
@@ -646,6 +638,14 @@ def _annotate_stage_seven_todo(todo: dict[str, Any], spec, scope) -> dict[str, A
         todo.get("completion_operation") or todo.get("completion_op") or ""
     )
     todo["evidence_refs"] = list(todo.get("evidence_refs") or [])
+    todo["candidate_request_ids"] = list(
+        todo.get("candidate_request_ids")
+        or todo.get("candidate_read_request_ids")
+        or todo.get("chain_request_ids")
+        or []
+    )
+    if not todo.get("wire_path"):
+        todo["wire_path"] = str(todo.get("target_path") or todo.get("path") or "")
     todo["task_id"] = str(
         todo.get("task_id")
         or verification_task_id(
@@ -992,7 +992,7 @@ def verification_report(spec) -> dict[str, Any]:  # noqa: ANN001
         and (step.fact_check or {}).get("verification_id")
     )
     return {
-        "complete": not todos,
+        "complete": not todos and not unverified,
         "all_verified": not todos and not unverified,
         "todos": todos,
         "release_issues": release_issues,

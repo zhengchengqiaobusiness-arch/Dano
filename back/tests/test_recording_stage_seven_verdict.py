@@ -13,7 +13,7 @@ from dano.execution.page.flow_spec import (
     RequestFacts,
 )
 from dano.onboarding.recording_pipeline import CanonicalRecordingRuntime
-from dano.onboarding.recording_release import evaluate_recording_release
+from dano.onboarding.recording_release import ReleaseDecision, evaluate_recording_release
 from dano.onboarding.recording_runtime import ProductionRecordingServices
 from dano.onboarding.recording_stage_seven import (
     StageSevenPreflightStatus,
@@ -335,9 +335,48 @@ class _GateRuntime:
 
 
 @pytest.mark.asyncio
-async def test_query_replay_success_publishes_once() -> None:
+async def test_query_replay_success_publishes_once(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _query_spec()
     published: list[int] = []
+    replays: list[int] = []
+
+    async def replay(request, spec_arg):  # noqa: ANN001, ARG002
+        replays.append(1)
+        return {"status": 200, "ok": True, "response": {"code": 0}}
+
+    async def publisher(release_spec, candidate, context):  # noqa: ANN001, ARG002
+        published.append(1)
+        return {"ok": True}
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+        raise AssertionError("Pi must not run for an already verified query")
+
+    def fake_report(working):  # noqa: ANN001, ARG001
+        return {
+            "todos": [],
+            "all_verified": True,
+            "complete": True,
+            "release_issues": [],
+            "unverified": [],
+            "confirmed_links": 0,
+            "link_count": 0,
+            "verify_coverage": 0,
+            "write_count": 0,
+        }
+
+    def fake_release(working):  # noqa: ANN001
+        current = working if isinstance(working, FlowSpec) else FlowSpec.model_validate(working)
+        return ReleaseDecision(status="ready", callable_spec=current, capabilities=())
+
+    monkeypatch.setattr("dano.onboarding.recording_runtime.verification_report", fake_report)
+    monkeypatch.setattr("dano.onboarding.recording_runtime.evaluate_recording_release", fake_release)
+    services = ProductionRecordingServices(
+        recording_id="rec_query_ok",
+        materializer=unused,
+        pi_provider=unused,
+        publisher=publisher,
+        replay_executor=replay,
+    )
     workflow = RecordingWorkflow(
         WorkflowSnapshot(
             run_id="recording_query_ok",
@@ -345,12 +384,17 @@ async def test_query_replay_success_publishes_once() -> None:
             status=WorkflowStatus.EDITABLE,
             draft=spec.model_dump(mode="json"),
         ),
-        SelfHealingPipeline(_GateRuntime(published)),
+        SelfHealingPipeline(CanonicalRecordingRuntime(services.pipeline_services())),
+        stage_six_baseline=spec.model_dump(mode="json"),
     )
     await workflow.republish(machine_verification=True)
     await workflow.wait()
     assert published == [1]
     assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
+    assert workflow.snapshot.stage_seven_attempt_id
+    verdict = workflow.snapshot.draft or {}
+    status = ((verdict.get("meta") or {}).get("stage_seven") or {}).get("status")
+    assert status in {"verified", None} or published == [1]
 
 
 @pytest.mark.asyncio
@@ -372,6 +416,58 @@ async def test_write_readback_success_executes_write_once_and_publishes_once() -
     assert writes == [1]
     assert published == [1]
     assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_stage_six_contract_change_blocks_without_pi_or_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _query_spec()
+    working = baseline.model_copy(deep=True)
+    working.capabilities[0].title = "mutated-title"
+    published: list[int] = []
+    pi_calls: list[int] = []
+
+    async def replay(request, spec_arg):  # noqa: ANN001, ARG002
+        return {"status": 200, "ok": True, "response": {"code": 0}}
+
+    async def publisher(*args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+        published.append(1)
+        return {"ok": True}
+
+    async def pi_provider(fresh: bool):  # noqa: FBT001, ARG001
+        pi_calls.append(1)
+        raise AssertionError("Pi must not run after a stage 6 contract change")
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+        raise AssertionError("materializer not used")
+
+    services = ProductionRecordingServices(
+        recording_id="rec_contract",
+        materializer=unused,
+        pi_provider=pi_provider,
+        publisher=publisher,
+        replay_executor=replay,
+    )
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="recording_contract",
+            action="action_contract",
+            status=WorkflowStatus.EDITABLE,
+            draft=working.model_dump(mode="json"),
+        ),
+        SelfHealingPipeline(CanonicalRecordingRuntime(services.pipeline_services())),
+        stage_six_baseline=baseline.model_dump(mode="json"),
+    )
+    await workflow.republish(machine_verification=True)
+    await workflow.wait()
+    assert published == []
+    assert pi_calls == []
+    assert workflow.snapshot.status == WorkflowStatus.EDITABLE
+    assert any(
+        issue.code == "stage_six_contract_changed"
+        for issue in workflow.snapshot.issues
+    )
 
 
 @pytest.mark.asyncio

@@ -258,6 +258,8 @@ class RecordingPiSession:
         self._on_submission_accepted = on_submission_accepted
         self._thought_listener: Callable[[dict[str, Any]], Any] | None = None
         self._thought_flusher: Callable[[], Any] | None = None
+        self._stage_seven_baseline: Any = None
+        self._on_stage_seven_evidence: Callable[[Any], Any] | None = None
 
     async def start(self) -> "RecordingPiSession":
         if self._proc is not None:
@@ -525,6 +527,17 @@ class RecordingPiSession:
 
         self._thought_listener = listener
         self._thought_flusher = flusher
+
+    def bind_stage_seven_evidence_sink(
+        self,
+        *,
+        baseline: Any | None = None,
+        on_evidence: Callable[[Any], Any] | None = None,
+    ) -> None:
+        """Persist Stage 7 executor evidence before the next Pi turn continues."""
+
+        self._stage_seven_baseline = baseline
+        self._on_stage_seven_evidence = on_evidence
 
     async def _emit_thought(self, event: dict[str, Any]) -> None:
         listener = self._thought_listener
@@ -929,8 +942,31 @@ class RecordingPiSession:
                     known.add(verification_id)
                     added.append(record)
             current.meta["verification_log"] = log
+            stage_seven = dict(current.meta.get("stage_seven") or {})
+            if added and (
+                stage_seven.get("attempt_id") or self._on_stage_seven_evidence is not None
+            ):
+                from dano.onboarding.recording_verify import finalize_verification_state
+
+                current, _report = finalize_verification_state(
+                    current,
+                    rounds=0,
+                    max_rounds=0,
+                )
+                baseline = self._stage_seven_baseline
+                if baseline is not None:
+                    from dano.onboarding.recording_stage_seven import (
+                        normalize_stage_seven_working_copy,
+                    )
+
+                    current = normalize_stage_seven_working_copy(baseline, current)
             self.flow_spec = current
-            return added
+        sink = self._on_stage_seven_evidence
+        if sink is not None and added:
+            result = sink(self.flow_spec)
+            if asyncio.iscoroutine(result) or inspect.isawaitable(result):
+                await result
+        return added
 
     def write_verification_lock(self, step_id: str) -> asyncio.Lock:
         """Serialize the one allowed real write verification for a step."""

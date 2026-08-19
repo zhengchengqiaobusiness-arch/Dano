@@ -8,7 +8,6 @@ represented by ``progress.step`` rather than separate externally visible states.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -18,7 +17,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from dano.infra.run_logging import emit_run_event, note_run_fact
-from dano.onboarding.recording_stage_seven import StageSevenStatus, StageSevenVerdict
+from dano.onboarding.recording_stage_seven import (
+    STAGE_SIX_CONTRACT_CHANGED,
+    StageSevenStatus,
+    StageSevenVerdict,
+)
 
 
 class WorkflowStatus(StrEnum):
@@ -452,6 +455,14 @@ class SelfHealingPipeline:
                     error="外部登录态或网络阻塞，当前结果不会发布",
                 )
 
+            if any(issue.code == STAGE_SIX_CONTRACT_CHANGED for issue in issues):
+                return PipelineOutcome(
+                    status=WorkflowStatus.EDITABLE,
+                    draft=draft,
+                    issues=issues,
+                    error="阶段 6 公开能力契约被改变，当前结果不会发布",
+                )
+
             if verdict is not None and verdict.status == StageSevenStatus.INCOMPLETE and context.budget_exhausted:
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
@@ -484,6 +495,26 @@ class SelfHealingPipeline:
                         status="blocked",
                         label=f"能力「{title}」连续验证未取得进展，仍有 {len(members)} 个问题",
                     ))
+                saver = context.persist_stage_seven
+                if saver is not None and draft:
+                    from dano.onboarding.recording_stage_seven import checkpoint_dict
+
+                    baseline = context.stage_six_baseline or draft
+                    try:
+                        checkpoint = checkpoint_dict(
+                            attempt_id=context.stage_seven_attempt_id,
+                            revision=context.stage_seven_revision,
+                            status=StageSevenStatus.INCOMPLETE,
+                            baseline=baseline,
+                            working=draft,
+                            verdict=verdict,
+                            capability_attempts=dict(context.capability_rounds),
+                            operator_answers=dict(context.operator_answers),
+                        )
+                        await saver(checkpoint)
+                        context.stage_seven_revision = int(checkpoint.get("revision") or 0)
+                    except Exception:  # noqa: BLE001 - stall persist must not hide the outcome
+                        pass
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
@@ -535,10 +566,13 @@ def _verification_unresolved_issue(verdict: StageSevenVerdict | None) -> Workflo
 
 
 def _draft_fingerprint(draft: dict[str, Any] | None) -> str:
-    payload = json.dumps(draft or {}, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    payload = json.dumps(draft or {}, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    """Progress fingerprint ignores Stage 7 volatile metadata and flow_version."""
+
+    from dano.onboarding.recording_stage_seven import working_fingerprint
+
+    if not draft:
+        return ""
+    return working_fingerprint(draft)
 
 
 def _issue_signature(issues: tuple[WorkflowIssue, ...]) -> tuple[str, ...]:
@@ -859,6 +893,9 @@ class RecordingWorkflow:
     _cancelled: bool = field(default=False, init=False, repr=False)
     _answer: asyncio.Future[str] | None = field(default=None, init=False, repr=False)
     _latest_draft: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _active_persist_stage_seven: Callable[[dict[str, Any]], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False,
+    )
 
     async def start(self) -> WorkflowSnapshot:
         if self.snapshot.status == WorkflowStatus.IDLE:
@@ -998,6 +1035,29 @@ class RecordingWorkflow:
         self._answer.set_result(answer)
         return self.snapshot
 
+    async def _persist_stage_seven_status(self, status: StageSevenStatus) -> None:
+        saver = self._active_persist_stage_seven or self.persist_stage_seven
+        draft = self._latest_draft if self._latest_draft is not None else self.snapshot.draft
+        baseline = self.stage_six_baseline or draft
+        if saver is None or not draft or not baseline:
+            return
+        from dano.onboarding.recording_stage_seven import checkpoint_dict
+
+        checkpoint = checkpoint_dict(
+            attempt_id=str(self.snapshot.stage_seven_attempt_id or ""),
+            revision=int(self.snapshot.stage_seven_revision or 0),
+            status=status,
+            baseline=baseline,
+            working=draft,
+            capability_attempts=dict(self.snapshot.capability_attempts or {}),
+            operator_answers=dict(self.snapshot.operator_answers or {}),
+        )
+        try:
+            await saver(checkpoint)
+            self.snapshot.stage_seven_revision = int(checkpoint.get("revision") or 0)
+        except Exception:  # noqa: BLE001 - terminal checkpoint must not block cancel/fail
+            return
+
     async def cancel(self) -> WorkflowSnapshot:
         self._cancelled = True
         await self._stop_running_work()
@@ -1005,6 +1065,7 @@ class RecordingWorkflow:
             WorkflowStatus.PUBLISHED,
             WorkflowStatus.CANCELLED,
         }:
+            await self._persist_stage_seven_status(StageSevenStatus.CANCELLED)
             await self._set(
                 WorkflowStatus.CANCELLED,
                 draft=(
@@ -1082,6 +1143,32 @@ class RecordingWorkflow:
             self._latest_draft = draft
 
         context.remember_draft = remember_latest  # type: ignore[method-assign]
+        original_persist = context.persist_stage_seven
+
+        async def persist_and_track(checkpoint: dict[str, Any]) -> None:
+            if original_persist is not None:
+                await original_persist(checkpoint)
+            self.snapshot.stage_seven_revision = int(checkpoint.get("revision") or 0)
+            attempt_id = str(checkpoint.get("attempt_id") or "")
+            if attempt_id:
+                self.snapshot.stage_seven_attempt_id = attempt_id
+                context.stage_seven_attempt_id = attempt_id
+            context.stage_seven_revision = self.snapshot.stage_seven_revision
+            attempts = checkpoint.get("capability_attempts")
+            if isinstance(attempts, dict):
+                self.snapshot.capability_attempts = {
+                    str(key): int(value)
+                    for key, value in attempts.items()
+                    if str(key)
+                }
+            answers = checkpoint.get("operator_answers")
+            if isinstance(answers, dict):
+                self.snapshot.operator_answers = {
+                    str(key): str(value) for key, value in answers.items()
+                }
+
+        context.persist_stage_seven = persist_and_track  # type: ignore[method-assign]
+        self._active_persist_stage_seven = persist_and_track
         try:
             outcome = await self.pipeline.run(seed, context)
             context.ensure_active()
@@ -1115,6 +1202,7 @@ class RecordingWorkflow:
             return
         except Exception as exc:  # noqa: BLE001 - the authoritative draft must survive
             if not self._cancelled:
+                await self._persist_stage_seven_status(StageSevenStatus.FAILED)
                 await self._set(
                     WorkflowStatus.FAILED,
                     draft=(
@@ -1145,6 +1233,7 @@ class RecordingWorkflow:
             raise WorkflowCancelled
         loop = asyncio.get_running_loop()
         self._answer = loop.create_future()
+        await self._persist_stage_seven_status(StageSevenStatus.WAITING_OPERATOR)
         await self._set(
             WorkflowStatus.WAITING_OPERATOR,
             question=question,

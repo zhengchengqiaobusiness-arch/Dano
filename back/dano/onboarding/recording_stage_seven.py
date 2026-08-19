@@ -617,6 +617,13 @@ def evaluate_stage_seven_verdict(
     except StageSixContractChanged:
         contract_changed = True
         all_verified = False
+    extra = [dict(item) for item in extra_issues or [] if isinstance(item, dict)]
+    if any(
+        str(item.get("check_code") or item.get("issue_id") or "") == STAGE_SIX_CONTRACT_CHANGED
+        for item in extra
+    ):
+        contract_changed = True
+        all_verified = False
     decision: ReleaseDecision | None = release if isinstance(release, ReleaseDecision) else None
     release_status = str(getattr(decision, "status", "") or (release or {}).get("status") or "")
     callable_spec = getattr(decision, "callable_spec", None)
@@ -653,14 +660,16 @@ def evaluate_stage_seven_verdict(
     )
     issues = [
         dict(item)
-        for item in (report.get("release_issues") or extra_issues or [])
+        for item in (report.get("release_issues") or [])
         if isinstance(item, dict)
     ]
-    if extra_issues:
-        for item in extra_issues:
-            if isinstance(item, dict) and item not in issues:
-                issues.append(dict(item))
-    if contract_changed:
+    for item in extra:
+        if item not in issues:
+            issues.append(item)
+    if contract_changed and not any(
+        str(item.get("check_code") or item.get("issue_id") or "") == STAGE_SIX_CONTRACT_CHANGED
+        for item in issues
+    ):
         issues.append({
             "issue_id": STAGE_SIX_CONTRACT_CHANGED,
             "check_code": STAGE_SIX_CONTRACT_CHANGED,
