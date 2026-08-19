@@ -28,10 +28,6 @@ from dano.execution.page.flow_materialization.field_contracts.edit_form import (
     _looks_catalog_attribute_leaf,
     _looks_display_echo_field,
 )
-from dano.execution.page.flow_materialization.field_contracts.computed import (
-    _looks_unit_price_formula_leaf,
-    _param_is_quantity_or_formula_leaf,
-)
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_user_entered_business_field,
     _param_has_grounded_direct_input_contract,
@@ -843,11 +839,14 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     return repaired
 
 
-_PENDING_FLOW_SPEC_HELPERS = ('_OPTION_SOURCE_KINDS', '_best_option_projection_path', '_bind_option_source', '_enum_label_value', '_find_select_binding', '_flow_path_lookup', '_incomplete_page_enum_is_executable', '_option_source_contract_endpoint', '_read_is_business_entity_collection', '_read_is_option_source', '_read_transport_can_supply_options', '_recorded_scalar_values_match', '_refresh_param_enum_description', '_strip_body_prefix',)
+_PENDING_FLOW_SPEC_HELPERS = ('_OPTION_SOURCE_KINDS', '_best_option_projection_path', '_bind_option_source', '_enum_label_value', '_find_select_binding', '_flow_path_lookup', '_incomplete_page_enum_is_executable', '_looks_unit_price_formula_leaf', '_option_source_contract_endpoint', '_param_is_quantity_or_formula_leaf', '_read_is_business_entity_collection', '_read_is_option_source', '_read_transport_can_supply_options', '_recorded_scalar_values_match', '_refresh_param_enum_description', '_strip_body_prefix',)
 
 
 def _bind_flow_spec_helpers() -> None:
-    import dano.execution.page.flow_spec as _flow_spec
+    import sys
+    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
+    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
+        return
     module_globals = globals()
     for name in _PENDING_FLOW_SPEC_HELPERS:
         if hasattr(_flow_spec, name):

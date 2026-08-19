@@ -58,6 +58,7 @@ KNOWN_MODULES = {
     "resolve_field_ref": "dano.execution.page.recording_field_identity",
     "discover_response_key_maps": "dano.execution.page.value_tracing",
     "discover_workflow_value_links": "dano.execution.page.value_tracing",
+    "_recording_goal_contract": "dano.execution.page.recording_live",
 }
 
 
@@ -269,7 +270,10 @@ _PENDING_FLOW_SPEC_HELPERS = ({listed},)
 
 
 def _bind_flow_spec_helpers() -> None:
-    import dano.execution.page.flow_spec as _flow_spec
+    import sys
+    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
+    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
+        return
     module_globals = globals()
     for name in _PENDING_FLOW_SPEC_HELPERS:
         if hasattr(_flow_spec, name):

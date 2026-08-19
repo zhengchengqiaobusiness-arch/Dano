@@ -1050,7 +1050,10 @@ _PENDING_FLOW_SPEC_HELPERS = ('_AUTOMATED_FIELD_EDIT_ACTORS', '_ENUM_PARAM_TYPES
 
 
 def _bind_flow_spec_helpers() -> None:
-    import dano.execution.page.flow_spec as _flow_spec
+    import sys
+    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
+    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
+        return
     module_globals = globals()
     for name in _PENDING_FLOW_SPEC_HELPERS:
         if hasattr(_flow_spec, name):

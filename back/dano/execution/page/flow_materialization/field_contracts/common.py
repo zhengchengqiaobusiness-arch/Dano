@@ -1157,7 +1157,10 @@ _PENDING_FLOW_SPEC_HELPERS = ('_ENUM_PARAM_TYPES', '_ENUM_SOURCE_KINDS', '_compu
 
 
 def _bind_flow_spec_helpers() -> None:
-    import dano.execution.page.flow_spec as _flow_spec
+    import sys
+    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
+    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
+        return
     module_globals = globals()
     for name in _PENDING_FLOW_SPEC_HELPERS:
         if hasattr(_flow_spec, name):
