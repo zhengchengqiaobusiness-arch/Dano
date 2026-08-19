@@ -654,3 +654,147 @@ def test_unknown_request_leaves_do_not_block_stage_six_compile_or_publish() -> N
     body = api_request.get("body_template") or {}
     assert str(body.get("hiddenToken") or "") == "tok-1"
     assert body.get("qty") == 1
+
+
+def _live_plan(*capabilities: tuple[str, str, str, str]) -> FlowSpec:
+    return FlowSpec(meta={
+        "capability_model": {
+            "status": "awaiting_materialization",
+            "semantic_plan": {
+                "business_understanding": {
+                    "intent": "销售订单",
+                    "business_name": "销售订单",
+                },
+                "capabilities": [
+                    {
+                        "name": name,
+                        "title": title,
+                        "kind": kind,
+                        "anchor_step_id": request_id,
+                        "request_refs": [{"step_id": request_id, "usage": "execute"}],
+                    }
+                    for name, title, kind, request_id in capabilities
+                ],
+                "unresolved_items": [],
+            },
+        },
+    })
+
+
+def _finalize_step(
+    step_id: str,
+    request_id: str,
+    method: str,
+    path: str,
+    *,
+    role: str,
+    query: dict | None = None,
+) -> FlowStep:
+    url = path if not query else path + "?" + "&".join(
+        f"{key}={value}" for key, value in query.items()
+    )
+    return FlowStep(
+        step_id=step_id,
+        method=method,
+        path=url,
+        url=f"http://example.test{url}",
+        source_meta={
+            "request_id": request_id,
+            "role": role,
+            "query": dict(query or {}),
+        },
+    )
+
+
+def test_finalize_keeps_other_capabilities_when_one_anchor_is_missing() -> None:
+    live = _live_plan(
+        ("sale-order-query", "查询销售订单", "query", "req_86"),
+        ("sale-order-detail", "查看销售订单", "inspect", "req_88"),
+        ("sale-order-update", "编辑销售订单", "update", "req_98"),
+        ("sale-order-delete", "删除销售订单", "delete", "req_100"),
+    )
+    finalized = FlowSpec(
+        title="销售订单",
+        steps=[
+            _finalize_step("query", "req_86", "GET", "/admin-api/erp/sale-order/page", role="business_get"),
+            _finalize_step("update", "req_98", "PUT", "/admin-api/erp/sale-order/update", role="business_write"),
+            _finalize_step("delete", "req_100", "DELETE", "/admin-api/erp/sale-order/delete", role="business_write"),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_86", method="GET", path="/admin-api/erp/sale-order/page"),
+            RequestFact(request_id="req_88", method="GET", path="/admin-api/erp/sale-order/get", query={"id": "32"}),
+            RequestFact(request_id="req_98", method="PUT", path="/admin-api/erp/sale-order/update"),
+            RequestFact(request_id="req_100", method="DELETE", path="/admin-api/erp/sale-order/delete"),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.name for capability in merged.capabilities] == [
+        "sale-order-query", "sale-order-update", "sale-order-delete",
+    ]
+    unresolved = merged.meta.get("unresolved_live_agent_ops") or []
+    assert any(
+        item.get("reason") == "live capability anchors were not materialized at finalize"
+        and "req_88" in ((item.get("requested_target") or {}).get("anchor_step_ids") or [])
+        for item in unresolved
+    )
+
+
+def test_finalize_remaps_collapsed_detail_anchor_to_equivalent_get() -> None:
+    live = _live_plan(
+        ("sale-order-query", "查询销售订单", "query", "req_86"),
+        ("sale-order-detail", "查看销售订单", "inspect", "req_88"),
+        ("sale-order-update", "编辑销售订单", "update", "req_98"),
+        ("sale-order-delete", "删除销售订单", "delete", "req_100"),
+        ("sale-order-reject", "反审批销售订单", "reject", "req_101"),
+    )
+    finalized = FlowSpec(
+        title="销售订单",
+        steps=[
+            _finalize_step("query", "req_86", "GET", "/admin-api/erp/sale-order/page", role="business_get"),
+            _finalize_step(
+                "hydrate", "req_93", "GET", "/admin-api/erp/sale-order/get",
+                role="read_context", query={"id": "32"},
+            ),
+            _finalize_step(
+                "inspect-later", "req_103", "GET", "/admin-api/erp/sale-order/get",
+                role="business_get", query={"id": "37"},
+            ),
+            _finalize_step("update", "req_98", "PUT", "/admin-api/erp/sale-order/update", role="business_write"),
+            _finalize_step("delete", "req_100", "DELETE", "/admin-api/erp/sale-order/delete", role="business_write"),
+            _finalize_step(
+                "reject", "req_101", "PUT", "/admin-api/erp/sale-order/update-status",
+                role="business_write", query={"id": "36", "status": "10"},
+            ),
+        ],
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_86", method="GET", path="/admin-api/erp/sale-order/page"),
+            RequestFact(request_id="req_88", method="GET", path="/admin-api/erp/sale-order/get", query={"id": "32"}),
+            RequestFact(request_id="req_93", method="GET", path="/admin-api/erp/sale-order/get", query={"id": "32"}),
+            RequestFact(request_id="req_98", method="PUT", path="/admin-api/erp/sale-order/update"),
+            RequestFact(request_id="req_100", method="DELETE", path="/admin-api/erp/sale-order/delete"),
+            RequestFact(
+                request_id="req_101", method="PUT", path="/admin-api/erp/sale-order/update-status",
+                query={"id": "36", "status": "10"},
+            ),
+            RequestFact(request_id="req_103", method="GET", path="/admin-api/erp/sale-order/get", query={"id": "37"}),
+        ]),
+    )
+
+    merged = merge_live_agent_state(live, finalized)
+
+    assert [capability.name for capability in merged.capabilities] == [
+        "sale-order-query",
+        "sale-order-detail",
+        "sale-order-update",
+        "sale-order-delete",
+        "sale-order-reject",
+    ]
+    detail = next(item for item in merged.capabilities if item.name == "sale-order-detail")
+    execute = next(ref for ref in detail.request_refs if ref.usage == "execute")
+    assert execute.step_id == "hydrate"
+    assert not any(
+        item.get("reason") == "live capability anchors were not materialized at finalize"
+        for item in (merged.meta.get("unresolved_live_agent_ops") or [])
+    )

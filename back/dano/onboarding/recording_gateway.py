@@ -440,14 +440,20 @@ class RecordingGatewaySession:
             spec = self._live_notebook.apply_to(spec)
         if not spec.capabilities:
             capability_model = dict((spec.meta or {}).get("capability_model") or {})
-            spec.meta = {
-                **(spec.meta or {}),
-                "capability_model": {
-                    **capability_model,
-                    "status": "missing_semantic_plan",
-                    "source": "skill_required",
-                },
-            }
+            plan = (
+                capability_model.get("semantic_plan")
+                if isinstance(capability_model.get("semantic_plan"), dict)
+                else {}
+            )
+            if not plan.get("capabilities"):
+                spec.meta = {
+                    **(spec.meta or {}),
+                    "capability_model": {
+                        **capability_model,
+                        "status": "missing_semantic_plan",
+                        "source": "skill_required",
+                    },
+                }
         return spec
 
     async def _freeze_capture(self) -> None:
