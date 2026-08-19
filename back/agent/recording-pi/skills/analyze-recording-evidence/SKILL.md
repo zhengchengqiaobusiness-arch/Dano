@@ -15,14 +15,23 @@ You own business semantics. Python owns capture, evidence, and compilation. The 
 collaborate, not compete.
 
 - You decide capability boundaries, public `name` / `title` / `intent` / `kind`, request roles,
-  field sources, requiredness, enum conclusions, and interface relations.
+  who supplies a field (`set_param_source` 7-kind contract), requiredness, enum conclusions,
+  and interface relations.
 - Python captures requests and page facts, freezes the session, checks that every reference
-  exists, and compiles only the plan you submit. It may apply evidence-backed mechanical rules
-  that do not name a business: recorded fill/select, pagination, header tokens, document
-  identity leaves, arithmetic computed fields, and observed option-map binding.
-- Python must never invent, relabel, or supplement capabilities, titles, kinds, or field
-  sources after you submit. If a later recording needs different business meaning, change this
-  Skill. Do not expect another Python special case.
+  exists, and compiles only the plan you submit. It also keeps the evidence-backed *origin*
+  of each field — how the page produced it — using mechanical rules that do not name a
+  business: recorded fill/select, live option APIs, page-enum snapshots, unedited page
+  defaults, readonly frontend rules, option-row projections, pagination, header tokens,
+  document identity leaves, and sample-proven arithmetic or date-span formulas.
+- Do not overwrite a grounded origin with a coarser public kind. `caller_input` means the
+  caller supplies the value; it must not erase `api_option`, `page_enum`, or `form_option`.
+  `constant` is a stable business discriminator proved by evidence, not a name guess and not
+  an editable page prefill. If Python already bound `page_default` (caller-overridable
+  prefill), `page_rule`, `selected_option_field`, `computed`, `previous_response`, or
+  `unknown`, leave that origin in place unless the evidence changed.
+- Python must never invent, relabel, or supplement capabilities, titles, or kinds after you
+  submit. If a later recording needs different business meaning, change this Skill. Do not
+  expect another Python special case.
 - If evidence is missing, keep the item in `unresolved_items` or `ask_operator`. An empty
   capability list stays empty until you submit a grounded plan.
 
@@ -115,35 +124,52 @@ Use only `auth`, `support`, `option`, `context`, `business_read`, and `business_
 ## Analyze field axes independently
 
 For every field used by a goal-matching capability, assess name, observed wire path, recorded
-value/default, business type and wire format, source, requiredness, and enum/constraints
-independently. Do not infer one axis only because another axis looks plausible. `category` is not
-an editable field axis and must not be submitted.
+value/default, business type and wire format, source, requiredness, caller-vs-system ownership,
+and enum/constraints independently. Do not infer one axis only because another axis looks
+plausible. `category` is not an editable field axis and must not be submitted.
 
-- Preserve the captured wire path and recorded value. Use `rename_field` only for a grounded
-  business label.
-- Use `set_param_type` only when request shape, response shape, exact control evidence, dictionary,
-  or repeated samples support the business type. Do not change the captured wire type.
+- Name and wire key are different axes. Preserve the captured wire path and recorded value.
+  Use `rename_field` only for a grounded page/business label; never copy the label onto the
+  invocation key.
+- Type and wire format are different axes. Use `set_param_type` only when request shape,
+  response shape, exact control evidence, dictionary, or repeated samples support the
+  business type (`date` / `datetime` / `enum` / `number` / `string` / ...). Do not change
+  the captured wire type. A 13-digit timestamp on a date control is still a date.
+- Source origin (how the page produced the value) is different from caller ownership (who
+  must supply it at invocation). Judge them separately. Python already distinguishes live
+  option APIs, page-fixed enums, unedited page defaults, readonly frontend rules, selected
+  row projections, arithmetic/date-span formulas, session values, and upstream responses.
+  Submit `set_param_source` only when you can add a *new* executable fact Python cannot
+  prove, or when you must correct a wrong origin with cited evidence.
 - Use `set_param_required` only when required markers, successful/failed request evidence, API
   contract evidence, or an equivalent strong fact proves the value. Missing a DOM marker does not
-  prove optional.
+  prove optional. A system-owned field is never caller-required.
 - Use `set_param_enum` only when the field is an observed enumerable control or dictionary.
   Cite the control or dictionary fact. Do not invent options or confuse labels with values.
   Python binds the observed label/value map from page evidence; you do not need to transcribe
   every pair if the captured mapping is already complete.
 - Cite the field fact and the control/dictionary fact for conclusions derived from page controls.
-- A non-pagination filter carried by an observed business search/list action remains an optional
-  caller input even when the response is an array of objects. A list-shaped business result is not
-  evidence that the request is an option endpoint. Conversely, fixed filters on a demonstrated
-  option/workflow-preparation request remain internal unless a field-local editable control proves
-  caller ownership.
-- Disabled or read-only display values are not caller inputs. Keep a captured stable control
-  default internal, or bind it to its observed runtime/API source; do not require the caller to
-  reproduce a value the page itself supplied.
+- A non-pagination filter with field-local editable control evidence remains an optional caller
+  input even when the response is an array of objects. A list-shaped business result is not
+  evidence that the request is an option endpoint. A search click alone does not prove every
+  leftover query leaf is caller-owned. Extra leaves without a control, upstream, or formula stay
+  `unknown` and keep their recorded wire value.
+- Disabled or read-only display values are not caller inputs. Bind them to the observed
+  runtime/API source, or leave them unknown.
+- An editable control that the page prefilled is still a caller field. The recorded value is
+  only a default the caller may keep or change — create, edit, numeric defaults, dates, and
+  selects all follow this judgment. Do not hide it as a system-owned default merely because
+  the operator did not overwrite it during recording.
+- Extra request leaves with no control, no upstream, and no formula stay `unknown`. Show them
+  as 未知. Keep the recorded wire value so the original request still works. Do not invent
+  `constant`, `session`, or `page_default` from a field name.
 
 ## Assign executable sources
 
-Use exactly `caller_input`, `constant`, `session`, `context`, `response_binding`, `computed`, and
-`generated`. Judge each field independently in this order:
+Your tool contract uses exactly `caller_input`, `constant`, `session`, `context`,
+`response_binding`, `computed`, and `generated`. That answers *who supplies the value*.
+Python keeps a finer origin for *how the page produced it*. Judge each field independently
+in this order:
 
 1. Is there a real editable control and user input action?
 2. Does the value come from an observed upstream response?
@@ -243,8 +269,10 @@ new dependency types.
    `unresolved_items` in `semantic_plan`.
 4. Every capability must provide `name`, `title`, `kind`, `anchor_step_id`, and non-empty
    `request_refs`. Mark exactly one request `execute`; use `preflight`, `option_source`, or
-   `fact_check` only for observed supporting members. In live request-fact state, use exact observed
-   request IDs without adding `step_`; the single `execute` member must equal `anchor_step_id`.
+   `fact_check` only for observed supporting members. List option sources and other supporting
+   members before the execute anchor, in recorded sequence, so the compiled graph is complete.
+   In live request-fact state, use exact observed request IDs without adding `step_`; the single
+   `execute` member must equal `anchor_step_id`.
 5. Submit all currently grounded capabilities on every turn. This array is a full replacement,
    not the current batch delta.
 6. Pass `plan` as a structured object, never as JSON-encoded text. Call

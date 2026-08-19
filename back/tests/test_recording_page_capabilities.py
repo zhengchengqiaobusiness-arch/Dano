@@ -10,6 +10,7 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     ParamField,
     _step_has_stable_record_identity,
+    flow_spec_to_client,
     to_flow_spec,
 )
 from dano.execution.page.recording_live import merge_live_agent_state
@@ -617,6 +618,43 @@ def test_sale_order_page_compiles_query_export_and_create() -> None:
     assert all("tenant/simple-list" not in path for path in option_paths)
     assert all(ref.usage != "execute" for ref in create.request_refs if "simple-list" in str(ref.path or ""))
 
+    usages = [ref.usage for ref in create.request_refs]
+    option_indexes = [index for index, usage in enumerate(usages) if usage == "option_source"]
+    execute_indexes = [index for index, usage in enumerate(usages) if usage == "execute"]
+    assert option_indexes
+    assert execute_indexes
+    assert max(option_indexes) < min(execute_indexes)
+    option_nodes = [
+        node for node in (create.nodes or [])
+        if isinstance(node, dict) and node.get("usage") == "option_source"
+    ]
+    execute_nodes = [
+        node for node in (create.nodes or [])
+        if isinstance(node, dict) and (
+            node.get("usage") == "execute" or node.get("step_id") == create.request_refs[-1].step_id
+        )
+    ]
+    assert option_nodes
+    assert execute_nodes
+
+    client = flow_spec_to_client(spec)
+    client_create = next(item for item in client["capabilities"] if item.get("kind") == "create")
+    client_write = next(
+        step for step in client["steps"] if (step.get("method") or "").upper() == "POST"
+    )
+    client_params = {item["path"]: item for item in client_write.get("params") or []}
+    assert client_params["customerId"]["source_kind"] == "api_option"
+    assert client_params["customerId"]["label"] == "客户"
+    assert client_params["customerId"]["key"] == "customerId"
+    assert client_params["orderTime"]["type"] == "datetime"
+    assert client_params["items[0].productBarCode"]["source_kind"] == "selected_option_field"
+    assert client_params["discountPrice"]["source_kind"] == "computed"
+    assert client_params["items[0].productPrice"]["source_kind"] == "page_default"
+    assert client_params["items[0].productPrice"]["exposed_to_user"] is True
+    client_usages = [ref.get("usage") for ref in client_create.get("request_refs") or []]
+    assert "option_source" in client_usages
+    assert client_usages.index("option_source") < client_usages.index("execute")
+
 
 def test_sale_order_query_schema_keeps_filters_not_pagination() -> None:
     raw = _sale_order_spec()
@@ -660,7 +698,9 @@ def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
         assert params[path].exposed_to_user is False
         assert params[path].key == path.split(".")[-1]
     assert params["items[0].productPrice"].source_kind == "page_default"
-    assert params["items[0].productPrice"].exposed_to_user is False
+    assert params["items[0].productPrice"].exposed_to_user is True
+    assert params["items[0].productPrice"].editable is True
+    assert params["items[0].productPrice"].required is False
     for path in ("discountPrice", "totalPrice", "items[0].totalProductPrice", "items[0].totalPrice"):
         assert params[path].source_kind == "computed"
         assert params[path].exposed_to_user is False
@@ -670,7 +710,7 @@ def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
 
     assert set(props) == {
         "customerId", "accountId", "saleUserId", "orderTime",
-        "remark", "discountPercent", "depositPrice", "productId", "count",
+        "remark", "discountPercent", "depositPrice", "productId", "productPrice", "count",
     }
     assert props["customerId"]["label"] == "客户"
     assert props["saleUserId"]["label"] == "销售人员"
@@ -678,7 +718,7 @@ def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
     assert props["count"]["label"] == "数量"
     assert set(required) == {"customerId", "orderTime", "productId", "count"}
     for hidden in (
-        "productBarCode", "productUnitName", "stockCount", "productPrice",
+        "productBarCode", "productUnitName", "stockCount",
         "discountPrice", "totalPrice", "totalProductPrice", "taxPrice",
     ):
         assert hidden not in props

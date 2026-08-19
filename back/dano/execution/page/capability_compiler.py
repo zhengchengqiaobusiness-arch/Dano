@@ -18,6 +18,7 @@ from dano.execution.page.flow_spec import (
     _capability_operation_kind,
     _default_capability_nodes,
     executable_flow_links,
+    _ordered_capability_request_refs,
     _step_has_stable_record_identity,
     _write_contract_is_batch,
     _semantic_plan_coverage,
@@ -214,12 +215,29 @@ def _verified_fact_check_request_id(spec: FlowSpec, anchor: FlowStep) -> str:
     return ""
 
 
-def _compiled_nodes(step_ids: list[str], anchor_step_id: str) -> list[dict[str, Any]]:
-    nodes = [
-        {"id": f"call_{index}", "type": "call", "step_id": step_id}
-        for index, step_id in enumerate(step_ids, 1)
-    ]
-    nodes.append({"id": "return_final", "type": "return", "from": anchor_step_id, "path": "response"})
+def _compiled_nodes_from_refs(
+    refs: list[CapabilityRequestRef],
+    anchor_step_id: str,
+) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for index, ref in enumerate(refs, 1):
+        node = {
+            "id": f"call_{index}",
+            "type": "call",
+            "usage": ref.usage,
+            "request_id": ref.request_id,
+            "method": ref.method,
+            "path": ref.path,
+        }
+        if ref.step_id:
+            node["step_id"] = ref.step_id
+        nodes.append(node)
+    nodes.append({
+        "id": "return_final",
+        "type": "return",
+        "from": anchor_step_id,
+        "path": "response",
+    })
     return nodes
 
 
@@ -425,6 +443,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
                 usage="fact_check",
                 request_id=fact_check_request_id,
             ))
+        refs = _ordered_capability_request_refs(refs)
 
         compiled.append(FlowCapability(
             name=name,
@@ -437,7 +456,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             nodes=(
                 _default_capability_nodes(member_steps, kind="submit_batch")
                 if kind == "submit_batch"
-                else _compiled_nodes(step_ids, anchor_step_id)
+                else _compiled_nodes_from_refs(refs, anchor_step_id)
             ),
             confirmed=False,
             confidence=1.0,

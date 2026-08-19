@@ -91,7 +91,7 @@ class ParamField(BaseModel):
     # system_const: 系统常量(流程定义 ID/表单类型/固定状态码,不能让 agent 改)
     # runtime_var: 运行期变量(录制时有值,但不能冻结,运行期自动填)
     category: str = "user_param"  # user_param / system_const / runtime_var
-    source_kind: str = "unknown"   # user_input / previous_response / current_user / storage / cookie / page_context / system_time / constant / api_option / page_enum / static_enum / manual_enum / form_option / unknown
+    source_kind: str = "unknown"   # user_input / previous_response / current_user / storage / cookie / page_context / system_time / constant / page_default / page_rule / api_option / page_enum / static_enum / manual_enum / form_option / selected_option_field / computed / unknown
     # 线上取值格式（与业务类型正交）：epoch_ms / epoch_s / datetime_text / date_text / ""。
     # 从录制样例值推断，写进输入 schema，调用方据此传对格式（例如 datetime 业务类型但线上要毫秒时间戳）。
     wire_format: str = ""
@@ -1309,12 +1309,16 @@ def _param_source_guess(
         if control_locked:
             return {
                 "category": "runtime_var",
-                "source_kind": "unknown",
-                "source": {"kind": "readonly_control", "path": path},
+                "source_kind": "page_rule",
+                "source": {
+                    "kind": "page_rule",
+                    "path": path,
+                    "control_kind": control_kind,
+                },
                 "editable": False,
                 "exposed_to_user": False,
-                "reason": "页面控件为禁用或只读，值应由上游接口或运行上下文提供，不能当作用户输入",
-                "need_human_confirm": True,
+                "reason": "页面只读或禁用控件上的值由前端规则写入，运行期沿用页面结果，不作为调用方输入",
+                "need_human_confirm": False,
             }
         if method == "GET" and path.startswith("query."):
             return {
@@ -1330,7 +1334,7 @@ def _param_source_guess(
         if default_value in (None, ""):
             default_value = field.get("raw_value", field.get("value"))
         return {
-            "category": "system_const",
+            "category": "user_param",
             "source_kind": "page_default",
             "source": {
                 "kind": "page_default",
@@ -1338,67 +1342,21 @@ def _param_source_guess(
                 "default_value": default_value,
                 "caller_override": True,
             },
-            "editable": False,
-            "exposed_to_user": False,
-            "reason": "页面已带出该默认值，录制中没有改动证据；运行期沿用页面默认，不作为调用方必填",
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "页面预填了该值，但控件可改；调用方可沿用或覆盖，不能因为录制时没改就改成系统包办",
             "need_human_confirm": False,
         }
 
     if method == "GET" and path.startswith("query."):
         if query_is_option_source:
-            query_key = path.split(".")[-1].lower()
-            if re.fullmatch(r"(?:q|kw|keyword|search|searchtext|query|name|text)", query_key):
-                return {
-                    "category": "user_param",
-                    "source_kind": "user_input",
-                    "source": {"kind": "option_search", "path": path},
-                    "editable": True,
-                    "exposed_to_user": True,
-                    "reason": "该参数是候选接口的搜索条件，保留为调用方可选输入",
-                    "need_human_confirm": False,
-                }
-            return {
-                "category": "system_const",
-                "source_kind": "constant",
-                "source": {"kind": "option_query_filter", "path": path},
-                "editable": True,
-                "exposed_to_user": False,
-                "reason": "该参数是候选接口录制时的固定筛选条件，未匹配到用户操作，作为接口内部常量保留",
-                "need_human_confirm": False,
-            }
-        if query_is_business_query:
-            return {
-                "category": "user_param",
-                "source_kind": "user_input",
-                "source": {
-                    "kind": "business_query_filter",
-                    "path": path,
-                    "required_state": "optional",
-                },
-                "editable": True,
-                "exposed_to_user": True,
-                "reason": "录制的业务查询携带该非分页筛选字段；调用方可省略或传入新的筛选条件",
-                "need_human_confirm": False,
-            }
-        if _looks_system_const_field(key, path) or _is_const_value(value):
-            return {
-                "category": "system_const",
-                "source_kind": "constant",
-                "source": {"kind": "query_constant", "path": path},
-                "editable": True,
-                "exposed_to_user": False,
-                "reason": "该 GET 查询参数是稳定流程键、节点键或内部标识，默认作为接口常量；若有上游依赖会自动改为运行期来源",
-                "need_human_confirm": False,
-            }
-        if _looks_page_context_field(key, path):
-            context_key = key or path.split(".")[-1]
             return {
                 "category": "runtime_var",
-                "source_kind": "page_context",
-                "source": {"kind": "page_context", "context_key": context_key, "path": path},
-                "editable": True,
+                "source_kind": "unknown",
+                "source": {"kind": "option_query_filter", "path": path},
+                "editable": False,
                 "exposed_to_user": False,
-                "reason": "该查询字段来自显式调用上下文；运行期按 context_key 注入，不使用录制旧值",
+                "reason": "候选接口上的查询参数没有对应可编辑控件，标注未知；请求仍按录制原样携带，不影响原接口",
                 "need_human_confirm": True,
             }
         return {
@@ -1407,7 +1365,7 @@ def _param_source_guess(
             "source": {"kind": "unresolved_query", "path": path},
             "editable": False,
             "exposed_to_user": False,
-            "reason": "该查询字段没有控件或候选证据，保持内部未决，不暴露给调用方",
+            "reason": "该查询字段没有控件或候选证据，标注未知；请求仍按录制原样携带",
             "need_human_confirm": True,
         }
 
@@ -1416,57 +1374,12 @@ def _param_source_guess(
     # 命名像 ID/状态码就会被错误改成运行期变量或系统常量。
     if value == "" and value not in _sample_value_set(samples):
         return {
-            "category": "system_const",
-            "source_kind": "constant",
-            "source": {"kind": "empty_field", "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "该字段录制值为空且未匹配到用户输入，默认保留为空值结构，不暴露给用户手填",
-            "need_human_confirm": False,
-        }
-
-    if _looks_current_user_field(key, path):
-        return {
-            "category": "runtime_var",
-            "source_kind": "current_user",
-            "source": {"kind": "heuristic", "path": path},
-            "editable": False,
-            "exposed_to_user": False,
-            "reason": "字段名像当前用户标识，运行期应从当前登录态获取，需确认具体来源",
-            "need_human_confirm": True,
-        }
-
-    if _looks_runtime_field(key, path):
-        return {
             "category": "runtime_var",
             "source_kind": "unknown",
-            "source": {"kind": "heuristic", "path": path},
+            "source": {"kind": "empty_field", "path": path},
             "editable": False,
             "exposed_to_user": False,
-            "reason": "字段名像 taskId/conversation_id/token/appCode 等运行期变量，不能直接固化录制值",
-            "need_human_confirm": True,
-        }
-
-    if _looks_system_const_field(key, path):
-        return {
-            "category": "system_const",
-            "source_kind": "constant",
-            "source": {"kind": "heuristic", "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "字段名像流程定义、表单类型、应用 ID 或固定状态，默认作为系统常量",
-            "need_human_confirm": False,
-        }
-
-    if _looks_page_context_field(key, path) and value not in _sample_value_set(samples):
-        context_key = key or path.split(".")[-1]
-        return {
-            "category": "runtime_var",
-            "source_kind": "page_context",
-            "source": {"kind": "page_context", "context_key": context_key, "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "字段名像部门/组织/租户等调用上下文；运行期需按 context_key 注入或改绑上游响应",
+            "reason": "该字段没有可编辑控件或填写证据，标注未知；请求仍按录制空值携带",
             "need_human_confirm": True,
         }
 
@@ -1488,52 +1401,13 @@ def _param_source_guess(
     # 系统化:datetime 字段(用户填的具体时间)即使值是 13 位毫秒,也不当 session_literal。
     # 同时若字段名像「具体时间字段」(start* / end* 等),放行 user_input。
     if _looks_session_literal_after_key_check(value, key, path) and value not in _sample_value_set(samples):
-        # 系统化:datetime/具体时间字段 → 当 user_input,不是 session_literal;
-        # 只有真正像 ID/uuid 的「session 字面」才升级 runtime_var。
-        # caller 已经用 _looks_session_literal_after_key_check 二次把关,
-        # 这里如果过了那关且字段名是时间类的,转 user_input。
-        if any(x in _norm_field_name(key, path) for x in ("start", "end", "begin", "createdate",
-                                                              "begindate",
-                                                              "starttime", "endtime", "startdate", "enddate")):
-            return {
-                "category": "user_param",
-                "source_kind": "user_input",
-                "source": {"kind": "sample", "path": path},
-                "editable": True,
-                "exposed_to_user": True,
-                "reason": "字段名像具体时间字段（startTime/endTime 等），录到的 13 位毫秒是用户亲手填的时间，调用 Skill 时由用户填写",
-                "need_human_confirm": False,
-            }
         return {
             "category": "runtime_var",
             "source_kind": "unknown",
             "source": {"kind": "session_literal", "path": path},
             "editable": False,
             "exposed_to_user": False,
-            "reason": "该值像一次性会话值/运行期 ID，不能直接固化录制值；需要绑定上游响应、页面上下文或改为用户参数",
-            "need_human_confirm": True,
-        }
-
-    raw_leaf = re.sub(r"[^a-z0-9]+", "", str(path or key).split(".")[-1].lower())
-    if raw_leaf.endswith("id") and _is_const_value(value):
-        return {
-            "category": "runtime_var",
-            "source_kind": "unknown",
-            "source": {"kind": "selected_entity_id", "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "该字段像用户选择项对应的内部 ID；必须绑定页面/API 候选或明确改为系统常量，不能直接把录制 ID 暴露给调用方",
-            "need_human_confirm": True,
-        }
-
-    if value == "" or _is_const_value(value):
-        return {
-            "category": "system_const",
-            "source_kind": "constant",
-            "source": {"kind": "recorded_constant", "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "该字段未匹配到用户输入或可编辑控件，且为空值或内部标识形态，保留为内部常量",
+            "reason": "没有控件或上游证据证明该值的来源，标注未知；请求仍按录制原样携带",
             "need_human_confirm": True,
         }
 
@@ -1543,7 +1417,7 @@ def _param_source_guess(
         "source": {"kind": "unresolved", "path": path},
         "editable": False,
         "exposed_to_user": False,
-        "reason": "没有可编辑控件、上游响应或计算公式证明来源，保持内部未决，不暴露给调用方",
+        "reason": "没有可编辑控件、上游响应或计算公式证明来源，标注未知；请求仍按录制原样携带",
         "need_human_confirm": True,
     }
 
@@ -2305,7 +2179,6 @@ def _build_step_from_capture(
                 "previous_response", "current_user", "storage", "cookie",
                 "page_context", "request_header", "system_time",
                 "system_generated", "computed", "constant", "loop_item",
-                "page_default",
             }
         )
         params.append(ParamField(
@@ -6916,11 +6789,7 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 continue
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
-            caller_editable = bool(
-                _param_has_editable_control_evidence(p)
-                and p.category == "user_param"
-                and p.exposed_to_user
-            )
+            caller_editable = _param_has_editable_control_evidence(p)
             p.category = "user_param" if caller_editable else "runtime_var"
             p.source_kind = "previous_response"
             p.source = {
@@ -8684,7 +8553,7 @@ _INPUT_OPERAND_KINDS = frozenset({
     "selected_option_field", "user_input", "api_option", "form_option", "page_enum",
 })
 _STABLE_OPERAND_KINDS = _INPUT_OPERAND_KINDS | frozenset({
-    "computed", "previous_response", "page_default",
+    "computed", "previous_response", "page_default", "page_rule", "constant",
 })
 
 
@@ -9214,7 +9083,7 @@ def _business_type_for_param(param: ParamField) -> str:
 _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
     "previous_response", "current_user", "storage", "cookie", "page_context",
     "request_header", "system_time", "system_generated", "computed",
-    "constant", "page_default", "loop_item", "selected_option_field",
+    "constant", "page_rule", "loop_item", "selected_option_field",
     "dynamic_structure",
 })
 
@@ -10901,7 +10770,12 @@ def _sanitize_capability_nodes(spec: FlowSpec, cap: FlowCapability) -> list[dict
                 if isinstance(node.get(child_key), list):
                     node[child_key] = clean(node[child_key])
             if node_type == "call":
-                if str(node.get("step_id") or "") not in cap_step_ids:
+                step_id = str(node.get("step_id") or "")
+                usage = str(node.get("usage") or "")
+                if step_id not in cap_step_ids and not (
+                    usage in {"option_source", "fact_check"}
+                    and (node.get("request_id") or node.get("path"))
+                ):
                     continue
             elif node_type == "map":
                 source = str(node.get("source") or "")
@@ -13335,7 +13209,14 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
             copied = dict(node)
             if node_type == "call":
                 sid = valid_step_id(copied.get("step_id"))
+                usage = str(copied.get("usage") or "")
                 if not sid:
+                    if (
+                        usage in {"option_source", "fact_check"}
+                        and (copied.get("request_id") or copied.get("path"))
+                    ):
+                        cleaned.append(copied)
+                        node_ids.add(str(copied.get("id") or ""))
                     continue
                 copied["step_id"] = sid
                 if sid not in local_call_step_ids:
@@ -13570,7 +13451,7 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
             ref.origin = legacy_ref.origin
             ref.confirmed = legacy_ref.confirmed
         execute_refs.append(ref)
-    cap.request_refs = execute_refs + auxiliary_refs
+    cap.request_refs = _ordered_capability_request_refs(execute_refs + auxiliary_refs)
 
 
 def _sync_capability_output_after_step_removal(cap: FlowCapability) -> None:
@@ -18502,6 +18383,8 @@ _PUBLIC_SOURCE_BY_INTERNAL = {
     "manual_enum": "caller_input",
     "form_option": "caller_input",
     "constant": "constant",
+    "page_default": "caller_input",
+    "page_rule": "constant",
     "request_header": "session",
     "current_user": "session",
     "storage": "session",
@@ -18509,9 +18392,19 @@ _PUBLIC_SOURCE_BY_INTERNAL = {
     "page_context": "context",
     "previous_response": "response_binding",
     "dynamic_structure": "response_binding",
+    "selected_option_field": "computed",
     "computed": "computed",
     "system_time": "generated",
     "system_generated": "generated",
+    "generated": "generated",
+    "unknown": "unknown",
+}
+
+_CAPABILITY_REF_USAGE_ORDER = {
+    "option_source": 0,
+    "preflight": 1,
+    "execute": 2,
+    "fact_check": 3,
 }
 
 _PUBLIC_ROLE_BY_INTERNAL = {
@@ -18534,7 +18427,22 @@ def _public_source_kind(param: dict[str, Any]) -> str:
     internal = str(param.get("source_kind") or "")
     if internal in _PUBLIC_SOURCE_BY_INTERNAL:
         return _PUBLIC_SOURCE_BY_INTERNAL[internal]
+    if internal == "unknown":
+        return "unknown"
     return "caller_input" if param.get("exposed_to_user") else "constant"
+
+
+def _ordered_capability_request_refs(refs: list[Any]) -> list[Any]:
+    return sorted(
+        list(refs or []),
+        key=lambda ref: (
+            _CAPABILITY_REF_USAGE_ORDER.get(str(getattr(ref, "usage", None) or "execute"), 9),
+            getattr(ref, "sequence", None) if getattr(ref, "sequence", None) is not None else 10**9,
+            str(getattr(ref, "path", "") or ""),
+            str(getattr(ref, "step_id", "") or ""),
+            str(getattr(ref, "request_id", "") or ""),
+        ),
+    )
 
 
 def _public_request_role(role: Any) -> str:
@@ -18579,12 +18487,15 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
         for param in st.get("params") or []:
             if not isinstance(param, dict):
                 continue
-            param["source_kind"] = _public_source_kind(param)
+            # Keep the evidence-backed origin (api_option / page_enum /
+            # page_default / page_rule / ...). The 7-kind public contract is
+            # only a grouping of who supplies the value.
+            param["public_source_kind"] = _public_source_kind(param)
             # ``category`` is an internal compatibility value derived from
             # source_kind.  Exposing both axes lets clients create impossible
             # combinations, so the workbench owns only the executable source.
             param.pop("category", None)
-            if isinstance(param.get("source"), dict):
+            if isinstance(param.get("source"), dict) and not param["source"].get("kind"):
                 param["source"] = {**param["source"], "kind": param["source_kind"]}
         if st.get("response_json") is not None:
             projected, projection = _client_response_projection(st.get("response_json"))
@@ -21859,6 +21770,33 @@ _CLIENT_SOURCE_KINDS = frozenset({
     "generated",
 })
 
+_INTERNAL_SOURCE_CONTRACT = {
+    "user_input": ("user_param", True),
+    "api_option": ("user_param", True),
+    "page_enum": ("user_param", True),
+    "static_enum": ("user_param", True),
+    "manual_enum": ("user_param", True),
+    "form_option": ("user_param", True),
+    "constant": ("system_const", False),
+    "page_default": ("user_param", True),
+    "page_rule": ("runtime_var", False),
+    "request_header": ("runtime_var", False),
+    "current_user": ("runtime_var", False),
+    "storage": ("runtime_var", False),
+    "cookie": ("runtime_var", False),
+    "session": ("runtime_var", False),
+    "page_context": ("runtime_var", False),
+    "context": ("runtime_var", False),
+    "previous_response": ("runtime_var", False),
+    "dynamic_structure": ("runtime_var", False),
+    "selected_option_field": ("runtime_var", False),
+    "computed": ("runtime_var", False),
+    "generated": ("runtime_var", False),
+    "system_time": ("runtime_var", False),
+    "system_generated": ("runtime_var", False),
+    "unknown": ("runtime_var", False),
+}
+
 
 def _client_source_patch(spec: FlowSpec, edit: dict[str, Any]) -> list[dict[str, Any]]:
     step = _find_step(spec, str(edit.get("step_id") or ""))
@@ -21870,11 +21808,27 @@ def _client_source_patch(spec: FlowSpec, edit: dict[str, Any]) -> list[dict[str,
         param_label=str(edit.get("param_label") or ""),
     )
     public_kind = str(edit.get("value") or "")
-    if public_kind not in _CLIENT_SOURCE_KINDS:
+    if public_kind not in _CLIENT_SOURCE_KINDS and public_kind not in _INTERNAL_SOURCE_CONTRACT:
         raise ValueError(f"unsupported parameter source: {public_kind}")
     current_kind = str(param.source_kind or "")
     current_public = _PUBLIC_SOURCE_BY_INTERNAL.get(current_kind, "")
     source = dict(param.source or {})
+    if public_kind in _INTERNAL_SOURCE_CONTRACT and public_kind not in _CLIENT_SOURCE_KINDS:
+        internal_kind = public_kind
+        category, exposed = _INTERNAL_SOURCE_CONTRACT[public_kind]
+        source = {**source, "kind": internal_kind, "path": param.path}
+        base = {
+            "op": "update",
+            "actor": "user",
+            "step_id": step.step_id,
+            "param_path": param.path,
+        }
+        return [
+            {**base, "field": "source_kind", "value": internal_kind},
+            {**base, "field": "source", "value": source},
+            {**base, "field": "category", "value": category},
+            {**base, "field": "exposed_to_user", "value": exposed},
+        ]
 
     if public_kind == "caller_input":
         internal_kind = current_kind if current_public == public_kind else "user_input"

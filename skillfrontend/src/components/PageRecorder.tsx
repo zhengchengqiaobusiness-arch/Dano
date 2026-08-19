@@ -224,12 +224,24 @@ const TYPE_OPTIONS = Object.entries(TYPE_LABELS).map(([value, label]) => ({ valu
 
 const SOURCE_OPTIONS = [
   ["caller_input", "调用方输入"],
+  ["user_input", "调用方输入"],
+  ["api_option", "实时接口取值"],
+  ["page_enum", "页面枚举"],
+  ["static_enum", "固定选项"],
+  ["form_option", "页面选项"],
   ["constant", "固定值"],
+  ["page_default", "页面预填，可修改"],
+  ["page_rule", "前端页面规则"],
+  ["selected_option_field", "所选记录自动带入"],
   ["session", "登录会话"],
+  ["current_user", "当前登录用户"],
   ["context", "调用上下文"],
+  ["page_context", "页面上下文"],
   ["response_binding", "上游响应"],
-  ["computed", "明确计算"],
+  ["previous_response", "上游接口响应"],
+  ["computed", "自动计算"],
   ["generated", "运行时生成"],
+  ["unknown", "未知"],
 ].map(([value, label]) => ({ value, label }));
 
 function sourceKindLabel(value?: string) {
@@ -237,11 +249,13 @@ function sourceKindLabel(value?: string) {
     caller_input: "调用方输入",
     user_input: "调用方输入",
     api_option: "实时接口取值",
-    page_enum: "页面固定选项",
+    page_enum: "页面枚举",
     static_enum: "固定选项",
     manual_enum: "人工确认选项",
     form_option: "页面选项",
     constant: "固定值",
+    page_default: "页面预填，可修改",
+    page_rule: "前端页面规则",
     session: "登录会话",
     current_user: "当前登录用户",
     storage: "登录存储",
@@ -252,13 +266,13 @@ function sourceKindLabel(value?: string) {
     previous_response: "上游接口响应",
     dynamic_structure: "上游接口动态结构",
     selected_option_field: "所选记录自动带入",
-    computed: "运行时计算",
+    computed: "自动计算",
     generated: "运行时生成",
     system_generated: "运行时生成",
     system_time: "系统时间",
-    unknown: "来源待确认",
+    unknown: "未知",
   };
-  return labels[value || ""] || value || "来源待确认";
+  return labels[value || ""] || value || "未知";
 }
 
 function paramSourceLabel(param: FlowParam) {
@@ -269,12 +283,18 @@ function paramSourceLabel(param: FlowParam) {
   ) {
     return "上游默认值，可修改";
   }
+  if (param.source_kind === "page_default") {
+    return paramIsCallerInput(param) ? "页面预填，可修改" : "页面预填";
+  }
+  if (param.source_kind === "unknown") {
+    return "未知";
+  }
   if (param.source_kind === "constant") {
     const kind = safeString(source.kind);
     if (kind === "recorded_control_default") return "页面只读默认值";
-    if (kind === "empty_field") return "接口空值";
+    if (kind === "empty_field") return "未知";
     if (["option_query_filter", "query_constant", "recorded_command_state"].includes(kind)) {
-      return "接口固定条件";
+      return "未知";
     }
   }
   return sourceKindLabel(param.source_kind);
@@ -289,6 +309,7 @@ function constantValueCaption(param: FlowParam) {
 
 const CALLER_SOURCE_KINDS = new Set([
   "caller_input", "user_input", "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+  "page_default",
 ]);
 
 function paramIsCallerInput(param: FlowParam) {
@@ -1782,6 +1803,30 @@ export default function PageRecorder({
     return ids.map((stepId) => stepById.get(stepId)).filter(Boolean) as FlowStep[];
   }
 
+  function capabilityOrchestration(capability: FlowCapability) {
+    const usageRank: Record<string, number> = {
+      option_source: 0, preflight: 1, execute: 2, fact_check: 3,
+    };
+    const stepById = new Map(steps.map((step) => [step.step_id, step]));
+    const refs = [...(capability.request_refs || [])].sort((left, right) => {
+      const rank = (usageRank[left.usage || "execute"] ?? 9) - (usageRank[right.usage || "execute"] ?? 9);
+      if (rank !== 0) return rank;
+      return Number(left.sequence || 0) - Number(right.sequence || 0);
+    });
+    return refs.map((ref) => {
+      const step = stepById.get(String(ref.step_id || ""));
+      return {
+        ref,
+        step: step || {
+          step_id: String(ref.step_id || ref.request_id || ref.path || ""),
+          name: String(ref.path || ref.request_id || "关联请求"),
+          method: String(ref.method || ""),
+          path: String(ref.path || ""),
+        } as FlowStep,
+      };
+    });
+  }
+
   function capabilityParams(capabilitySteps: FlowStep[]) {
     const unique = new Map<string, { step: FlowStep; param: FlowParam }>();
     capabilitySteps.forEach((step) => (step.params || []).forEach((param) => {
@@ -1816,6 +1861,28 @@ export default function PageRecorder({
       else if (businessType === "multi_enum") type = "list-enum";
       else if (format === "date") type = "date";
       else if (format === "date-time") type = "datetime";
+      const flowPath = safeString(schema["x-flow-path"]) || key;
+      const matched = capabilitySteps
+        .flatMap((step) => (step.params || []).map((param) => ({ step, param })))
+        .find(({ param }) => (
+          safeString(param.key) === key
+          || safeString(param.path) === flowPath
+          || safeString(param.path).endsWith(`.${key}`)
+        ));
+      if (matched) {
+        return {
+          step: matched.step,
+          param: {
+            ...matched.param,
+            key,
+            path: flowPath || matched.param.path,
+            label: safeString(schema.label || schema.title) || matched.param.label || key,
+            type: type || matched.param.type,
+            required: required.has(key),
+            exposed_to_user: true,
+          } satisfies FlowParam,
+        };
+      }
       const hasOptionSource = Boolean(optionSource.source_url);
       const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
       const sourceKind = hasOptionSource
@@ -1824,7 +1891,7 @@ export default function PageRecorder({
       return {
         step: anchor,
         param: {
-          path: safeString(schema["x-flow-path"]) || key,
+          path: flowPath,
           key,
           label: safeString(schema.label || schema.title) || key,
           type,
@@ -1935,6 +2002,7 @@ export default function PageRecorder({
       ...((capability.dependencies || []) as FlowLink[]),
     ];
     const evidence = params.filter(({ param }) => Boolean(param.reason));
+    const orchestration = capabilityOrchestration(capability);
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         {capability.intent ? <Text>{capability.intent}</Text> : null}
@@ -1942,14 +2010,13 @@ export default function PageRecorder({
           {renderFieldSummary("调用方提供", callerInputs, "调用方无需提供业务参数")}
           {renderFieldSummary("系统自动处理", automaticInputs, "没有自动注入字段")}
         </div>
-        <Card size="small" title={`执行编排 ${capabilitySteps.length}`}>
-          {capabilitySteps.length ? (
+        <Card size="small" title={`执行编排 ${orchestration.length}`}>
+          {orchestration.length ? (
             <List
               size="small"
-              dataSource={capabilitySteps}
-              renderItem={(step, stepIndex) => {
-                const ref = (capability.request_refs || []).find((item) => item.step_id === step.step_id);
-                const usage = executeIds.includes(step.step_id) ? "execute" : ref?.usage;
+              dataSource={orchestration}
+              renderItem={({ step, ref }, stepIndex) => {
+                const usage = ref.usage || (executeIds.includes(step.step_id) ? "execute" : undefined);
                 return (
                   <List.Item>
                     <Space align="start" style={{ width: "100%" }}>

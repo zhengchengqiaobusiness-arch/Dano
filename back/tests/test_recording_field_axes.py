@@ -7,6 +7,7 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     ParamField,
     _infer_arithmetic_computed_fields,
+    flow_spec_to_client,
     to_flow_spec,
 )
 
@@ -104,10 +105,17 @@ def test_sample_value_alone_does_not_expose_a_caller_field() -> None:
         samples={"备注": "hello"},
     )
 
-    note = _params(spec)["note"]
+    params = _params(spec)
+    note = params["note"]
     assert note.key == "note"
+    assert note.source_kind == "unknown"
     assert note.exposed_to_user is False
     assert note.category != "user_param"
+    assert note.value == "hello"
+    hidden = params["hiddenToken"]
+    assert hidden.source_kind == "unknown"
+    assert hidden.exposed_to_user is False
+    assert hidden.value == "tok-1"
 
 
 def test_unknown_source_stays_internal_until_evidence_exists() -> None:
@@ -127,9 +135,13 @@ def test_unknown_source_stays_internal_until_evidence_exists() -> None:
     )
 
     params = _params(spec)
+    assert params["refCode"].source_kind == "unknown"
+    assert params["qty"].source_kind == "unknown"
     assert params["refCode"].exposed_to_user is False
     assert params["qty"].exposed_to_user is False
     assert params["refCode"].need_human_confirm is True
+    assert params["refCode"].value == "AB-9"
+    assert str(params["qty"].value) == "3"
 
 
 def test_assign_user_leaf_is_not_current_user_without_identity() -> None:
@@ -533,6 +545,11 @@ def test_leave_style_page_uses_the_same_evidence_axes() -> None:
     assert params["applicantId"].source_kind == "current_user"
     assert params["applicantId"].exposed_to_user is False
     assert params["submitTime"].exposed_to_user is False
+    assert params["beginAt"].type == "date"
+    assert params["beginAt"].wire_type in {"number", "integer"}
+    assert params["finishAt"].type == "date"
+    assert params["kindId"].type == "enum"
+    assert params["comment"].type == "string"
 
 
 def test_meeting_style_page_projects_chosen_row_and_computes_fee() -> None:
@@ -596,7 +613,7 @@ def test_meeting_style_page_projects_chosen_row_and_computes_fee() -> None:
     assert params["memo"].required is False
 
 
-def test_page_default_keeps_page_name_and_is_not_caller_required() -> None:
+def test_editable_page_prefill_stays_caller_overridable() -> None:
     spec = to_flow_spec(
         captured_requests=[{
             "request_id": "req_write",
@@ -651,14 +668,17 @@ def test_page_default_keeps_page_name_and_is_not_caller_required() -> None:
     assert booked.key == "bookedAt"
     assert booked.label == "单据时间"
     assert booked.source_kind == "page_default"
-    assert booked.exposed_to_user is False
-    assert booked.required is False
+    assert booked.exposed_to_user is True
+    assert booked.editable is True
+    assert booked.required is True
+    assert booked.source.get("caller_override") is True
 
     rate = params["ratePercent"]
     assert rate.key == "ratePercent"
     assert rate.label == "优惠率"
     assert rate.source_kind == "page_default"
-    assert rate.exposed_to_user is False
+    assert rate.exposed_to_user is True
+    assert rate.editable is True
     assert rate.required is False
     assert rate.default_value in {0, "0", 0.0}
 
@@ -713,7 +733,7 @@ def test_query_filter_is_not_computed_from_numeric_coincidence() -> None:
     assert params["query.status"].required is False
 
 
-def test_detail_hydration_is_system_brought_not_caller_or_page_default() -> None:
+def test_detail_hydration_keeps_editable_fields_caller_overridable() -> None:
     spec = to_flow_spec(
         captured_requests=[
             {
@@ -771,12 +791,16 @@ def test_detail_hydration_is_system_brought_not_caller_or_page_default() -> None
     )
 
     params = _params(spec)
-    for path in ("id", "title", "remark", "amount"):
+    assert params["id"].source_kind == "previous_response"
+    assert params["id"].exposed_to_user is False
+    for path in ("title", "remark", "amount"):
         brought = params[path]
         assert brought.key == path
         assert brought.source_kind == "previous_response"
-        assert brought.exposed_to_user is False
+        assert brought.exposed_to_user is True
+        assert brought.editable is True
         assert brought.required is False
+        assert brought.source.get("allow_caller_override") is True
     assert params["title"].label == "标题"
     assert params["remark"].label == "备注"
     assert params["note"].key == "note"
@@ -835,6 +859,7 @@ def test_required_star_and_label_stay_on_the_bound_caller_field() -> None:
     assert params["prepaid"].key == "prepaid"
     assert params["prepaid"].label == "预收"
     assert params["prepaid"].source_kind == "page_default"
+    assert params["prepaid"].exposed_to_user is True
     assert params["prepaid"].required is False
     assert params["itemCode"].key == "itemCode"
     assert params["itemCode"].label == "编码"
@@ -891,3 +916,160 @@ def test_standalone_delete_ids_are_required_caller_input() -> None:
     assert ids.exposed_to_user is True
     assert ids.required is True
     assert ids.source.get("kind") == "record_identity"
+
+
+def test_client_projection_keeps_evidence_source_and_type_axes() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _option_get("req_party", "/catalog/party/simple-list", [
+                {"id": 5, "name": "甲公司"},
+                {"id": 6, "name": "乙公司"},
+            ], 1),
+            {
+                "request_id": "req_write",
+                "sequence": 2,
+                "method": "POST",
+                "url": "http://example.test/api/doc/create",
+                "post_data": json.dumps({
+                    "partyId": 5,
+                    "status": "草稿",
+                    "bookedAt": 1785513600000,
+                    "unitPrice": 80,
+                    "qty": 2,
+                    "lineAmount": 160,
+                    "previewTitle": "新建单据",
+                    "note": "ok",
+                }),
+                "response_status": 200,
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+        ],
+        field_evidence=[
+            _control(
+                request_id="req_write", path="body.partyId", label="往来方",
+                aliases=["partyId"], kind="select", value="甲公司", op="select", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.status", label="单据状态",
+                aliases=["status"], kind="select", value="草稿", op="select",
+            ),
+            _control(
+                request_id="req_write", path="body.bookedAt", label="单据时间",
+                aliases=["bookedAt"], kind="datetime", value="2026-08-01", op="fill", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.unitPrice", label="单价",
+                aliases=["unitPrice"], kind="number", value="80",
+            ),
+            _control(
+                request_id="req_write", path="body.qty", label="数量",
+                aliases=["qty"], kind="number", value="2", op="fill", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.previewTitle", label="页面标题",
+                aliases=["previewTitle"], kind="text", value="新建单据", read_only=True,
+            ),
+            _control(
+                request_id="req_write", path="body.note", label="备注",
+                aliases=["note"], kind="text", value="ok", op="fill",
+            ),
+        ],
+        page_enum_options={"单据状态": _enum("单据状态", ["status"], "草稿")},
+        samples={"往来方": "甲公司", "单据状态": "草稿", "备注": "ok"},
+    )
+
+    params = _params(spec)
+    assert params["partyId"].source_kind == "api_option"
+    assert params["partyId"].key == "partyId"
+    assert params["partyId"].label == "往来方"
+    assert params["partyId"].type == "enum"
+    assert params["partyId"].required is True
+    assert params["partyId"].exposed_to_user is True
+    assert params["status"].source_kind == "page_enum"
+    assert params["status"].label == "单据状态"
+    assert params["bookedAt"].type == "datetime"
+    assert params["bookedAt"].wire_type in {"number", "integer"}
+    assert params["bookedAt"].required is True
+    assert params["qty"].type == "number"
+    assert params["unitPrice"].source_kind == "page_default"
+    assert params["unitPrice"].exposed_to_user is True
+    assert params["unitPrice"].editable is True
+    assert params["lineAmount"].source_kind == "computed"
+    assert params["lineAmount"].exposed_to_user is False
+    assert params["previewTitle"].source_kind == "page_rule"
+    assert params["previewTitle"].exposed_to_user is False
+    assert params["previewTitle"].required is False
+    assert params["note"].source_kind == "user_input"
+    assert params["note"].required is False
+
+    client = flow_spec_to_client(spec)
+    client_write = next(
+        step for step in client["steps"] if (step.get("method") or "").upper() == "POST"
+    )
+    client_params = {item["path"]: item for item in client_write.get("params") or []}
+    assert client_params["partyId"]["source_kind"] == "api_option"
+    assert client_params["partyId"]["source"]["kind"] == "api_option"
+    assert client_params["partyId"]["label"] == "往来方"
+    assert client_params["partyId"]["key"] == "partyId"
+    assert client_params["status"]["source_kind"] == "page_enum"
+    assert client_params["bookedAt"]["type"] == "datetime"
+    assert client_params["lineAmount"]["source_kind"] == "computed"
+    assert client_params["previewTitle"]["source_kind"] == "page_rule"
+    assert client_params["note"]["source_kind"] == "user_input"
+    assert client_params["note"]["exposed_to_user"] is True
+    assert client_params["previewTitle"]["exposed_to_user"] is False
+    assert client_params["lineAmount"]["exposed_to_user"] is False
+
+
+def test_page_rule_does_not_steal_option_projection_or_formula() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _option_get("req_item", "/catalog/item/simple-list", [
+                {"id": 7, "name": "零件A", "itemCode": "SKU-7", "unitPrice": 80},
+                {"id": 8, "name": "零件B", "itemCode": "SKU-8", "unitPrice": 15},
+            ], 1),
+            {
+                "request_id": "req_write",
+                "sequence": 2,
+                "method": "POST",
+                "url": "http://example.test/api/doc/create",
+                "post_data": json.dumps({
+                    "itemId": 7,
+                    "itemCode": "SKU-7",
+                    "unitPrice": 80,
+                    "qty": 2,
+                    "lineAmount": 160,
+                }),
+                "response_status": 200,
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+        ],
+        field_evidence=[
+            _control(
+                request_id="req_write", path="body.itemId", label="商品",
+                aliases=["itemId"], kind="select", value="零件A", op="select", required=True,
+            ),
+            _control(
+                request_id="req_write", path="body.itemCode", label="编码",
+                aliases=["itemCode"], kind="text", value="SKU-7", read_only=True,
+            ),
+            _control(
+                request_id="req_write", path="body.lineAmount", label="金额",
+                aliases=["lineAmount"], kind="number", value="160", read_only=True,
+            ),
+            _control(
+                request_id="req_write", path="body.qty", label="数量",
+                aliases=["qty"], kind="number", value="2", op="fill", required=True,
+            ),
+        ],
+    )
+    params = _params(spec)
+    assert params["itemCode"].source_kind == "selected_option_field"
+    assert params["lineAmount"].source_kind == "computed"
+    assert params["qty"].source_kind == "user_input"

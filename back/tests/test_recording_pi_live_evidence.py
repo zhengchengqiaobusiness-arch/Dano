@@ -158,8 +158,10 @@ def test_business_query_keeps_pagination_in_runtime_context() -> None:
     assert params["query.pageNo"].exposed_to_user is False
     assert params["query.pageSize"].category == "runtime_var"
     assert params["query.pageSize"].exposed_to_user is False
-    assert params["query.no"].category == "user_param"
-    assert params["query.no"].exposed_to_user is True
+    assert params["query.no"].source_kind == "unknown"
+    assert params["query.no"].category == "runtime_var"
+    assert params["query.no"].exposed_to_user is False
+    assert str(params["query.no"].value) == "XSDD001"
 
 
 def test_recorded_select_uses_the_matching_option_api_without_losing_caller_ownership() -> None:
