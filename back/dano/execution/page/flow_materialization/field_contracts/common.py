@@ -1152,16 +1152,17 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
                 })
     return current, changes
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_ENUM_PARAM_TYPES', '_ENUM_SOURCE_KINDS', '_computed_formula_is_complete', '_date_like_epoch_seconds', '_infer_type_from_value', '_norm_field_name', '_param_exposed_to_caller', '_param_has_option_control_evidence', '_param_has_page_required_evidence', '_param_required_agent_classified', '_record_identity_is_caller_owned', '_refresh_param_enum_description', '_rename_param_public_key', '_sample_value_set', '_select_has_executable_options', '_select_source_kind', '_select_source_reason', '_strip_option_descriptions',)
+_PENDING_FLOW_SPEC_HELPERS = {'_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_computed_formula_is_complete': 'dano.execution.page.flow_materialization.field_contracts.computed', '_date_like_epoch_seconds': 'dano.execution.page.flow_materialization.field_contracts.computed', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_norm_field_name': 'dano.execution.page.flow_spec_core.normalization', '_param_exposed_to_caller': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_param_has_option_control_evidence': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_has_page_required_evidence': 'dano.execution.page.flow_materialization.field_contracts.required', '_param_required_agent_classified': 'dano.execution.page.flow_materialization.field_contracts.required', '_record_identity_is_caller_owned': 'dano.execution.page.flow_materialization.field_contracts.record_identity', '_refresh_param_enum_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_rename_param_public_key': 'dano.execution.page.flow_spec_core.controlled_edits', '_sample_value_set': 'dano.execution.page.flow_spec_core.normalization', '_select_has_executable_options': 'dano.execution.page.flow_release', '_select_source_kind': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_select_source_reason': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_strip_option_descriptions': 'dano.execution.page.flow_materialization.field_contracts.option_projection'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

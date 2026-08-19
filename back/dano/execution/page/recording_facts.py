@@ -5,7 +5,7 @@ from typing import Any
 import copy
 import hashlib
 import json
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse, parse_qs
 import re
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
@@ -1854,3 +1854,18 @@ def _request_sequence_value(value: Any) -> float | None:
         return float(value)
     except Exception:  # noqa: BLE001
         return None
+
+_PENDING_FLOW_SPEC_HELPERS = {'route_identity': 'dano.execution.page.recording_semantic_index'}
+
+
+def _bind_flow_spec_helpers() -> None:
+    import sys
+    module_globals = globals()
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

@@ -190,7 +190,7 @@ async def test_refresh_live_evidence_only_binds_new_occurrences(monkeypatch) -> 
         fake_bind,
     )
     monkeypatch.setattr(
-        "dano.execution.page.flow_spec._option_sources_from_page_enum_options",
+        "dano.execution.page.recording_facts._option_sources_from_page_enum_options",
         lambda *_args, **_kwargs: [],
     )
     session = RecordingPiSession(

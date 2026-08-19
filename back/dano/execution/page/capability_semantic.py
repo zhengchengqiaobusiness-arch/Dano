@@ -22,9 +22,6 @@ from dano.execution.page.recording_facts import (
 from dano.execution.page.flow_spec_core.fingerprints import (
     _stable_json_hash,
 )
-from dano.execution.page.recording_live import (
-    _recording_goal_contract,
-)
 
 
 def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str, Any]:
@@ -496,16 +493,17 @@ def _semantic_candidate_gate(
     }
     return not reasons, audit
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_capability_node_step_ids', '_clean_page_business_candidate', '_eligible_business_write_fact', '_ensure_capability_explanations', '_is_technical_business_title', '_only_grounded_screenshot_query_params_added', '_orchestration_context', '_page_context_business_name', '_planned_capability_has_public_anchor', 'ALLOWED_CAPABILITY_KINDS', 'dry_run_flow_spec', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_capability_node_step_ids': 'dano.execution.page.capability_refs', '_clean_page_business_candidate': 'dano.execution.page.capability_contracts', '_eligible_business_write_fact': 'dano.execution.page.capability_contracts', '_ensure_capability_explanations': 'dano.execution.page.capability_contracts', '_is_technical_business_title': 'dano.execution.page.capability_contracts', '_only_grounded_screenshot_query_params_added': 'dano.execution.page.capability_contracts', '_orchestration_context': 'dano.execution.page.capability_orchestration', '_page_context_business_name': 'dano.execution.page.capability_contracts', '_planned_capability_has_public_anchor': 'dano.execution.page.capability_contracts', 'ALLOWED_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'dry_run_flow_spec': 'dano.execution.page.flow_spec_core.request_contract', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

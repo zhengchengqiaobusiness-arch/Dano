@@ -78,7 +78,11 @@ def test_symbol_owner_map_covers_current_flow_spec_definitions() -> None:
     allowed = {"shared", "stage2", "stage3", "stage4", "stage5", "stage6", "stage7", "stage8", "compatibility-only"}
     mapped_names = {row["name"] for row in owners["symbols"].values()}
     defined = _top_level_definitions(FLOW_SPEC)
-    unmapped = sorted(name for name in defined if name not in mapped_names)
+    unmapped = sorted(
+        name
+        for name in defined
+        if name not in mapped_names and name not in {"__all__", "_OWNER_MODULES"}
+    )
     assert unmapped == [], unmapped
     bad_owners = sorted(
         {

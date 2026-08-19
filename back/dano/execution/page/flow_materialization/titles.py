@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowStep,
 )
@@ -94,16 +94,17 @@ def _derive_step_name(step: FlowStep) -> str:
         return f"{method}_{last}(含{len(step.params)}字段)"
     return f"{method}_{last}"
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_page_context_business_name_from_contexts',)
+_PENDING_FLOW_SPEC_HELPERS = {'_page_context_business_name_from_contexts': 'dano.execution.page.capability_contracts'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

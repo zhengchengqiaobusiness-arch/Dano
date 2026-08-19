@@ -8,10 +8,10 @@ from dano.execution.page.flow_spec import (
     FlowSpec,
     FlowStep,
     ParamField,
-    _apply_create_form_field_contracts,
-    _infer_arithmetic_computed_fields,
     to_flow_spec,
 )
+from dano.execution.page.flow_materialization.field_contracts.create_form import _apply_create_form_field_contracts
+from dano.execution.page.flow_materialization.field_contracts.computed import _infer_arithmetic_computed_fields
 from dano.execution.page.recorder import RecordSession, assign_step_field_keys
 from dano.execution.page.recording_field_evidence import bind_field_evidence
 

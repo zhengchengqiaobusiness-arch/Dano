@@ -10,9 +10,6 @@ from dano.execution.page.recording_facts import (
     _request_fact_has_record_identity,
     _request_order_value,
 )
-from dano.execution.page.recording_live import (
-    compact_model_payload,
-)
 
 
 def _model_visible_request_facts(
@@ -71,16 +68,17 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
         },
     }
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_semantic_fact_snapshot', '_semantic_mutable_context', '_sync_capability_io_schemas', 'refresh_review_items', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_semantic_fact_snapshot': 'dano.execution.page.recording_agent_contract', '_semantic_mutable_context': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

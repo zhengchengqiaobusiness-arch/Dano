@@ -363,16 +363,17 @@ def flow_spec_capability_contracts(
         capability_name=capability_name,
     )
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_capability_dependency_summary', '_capability_field_summary', '_capability_input_schema', '_capability_is_batch', '_capability_node_step_ids', '_capability_step_summary', '_find_capability_by_ref', '_iter_capability_nodes', '_normalize_capability_references', '_resolve_param_reference', '_select_flow_capability', '_sync_capability_io_schemas', '_sync_capability_order', 'sync_capability_scoped_views', 'ensure_recorded_goal', 'prepare_flow_spec_for_publish', 'sync_flow_spec_models',)
+_PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

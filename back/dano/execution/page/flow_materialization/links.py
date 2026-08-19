@@ -585,16 +585,17 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
     _sync_link_sources(spec.steps, spec.links)
     return added
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_FLOW_PATH_MISSING', '_OPTION_SOURCE_KINDS', '_apply_link_sources', '_composite_values_match', '_flow_path_lookup', '_looks_system_const_field', '_looks_user_entered_business_field', '_param_has_editable_control_evidence', '_recorded_scalar_values_match', '_reset_param_source', '_resolve_param_reference',)
+_PENDING_FLOW_SPEC_HELPERS = {'_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_OPTION_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_apply_link_sources': 'dano.execution.page.flow_spec_core.controlled_edits', '_composite_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_looks_system_const_field': 'dano.execution.page.flow_materialization.field_contracts.common', '_looks_user_entered_business_field': 'dano.execution.page.flow_materialization.field_contracts.common', '_param_has_editable_control_evidence': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_reset_param_source': 'dano.execution.page.flow_spec_core.controlled_edits', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

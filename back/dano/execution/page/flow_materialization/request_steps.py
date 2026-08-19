@@ -1253,16 +1253,17 @@ def promote_request_to_step(spec: FlowSpec, *, request_index: Any = None, reques
         raise ValueError(f"captured request not found: {request_index or request_id}")
     return _add_request_step_from_fact(spec, entry)
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_BORING_COMPOSITE_VALUES', '_ENUM_PARAM_TYPES', '_OPTION_SOURCE_KINDS', '_append_reason_detail', '_attach_select_field_projections', '_composite_values_match', '_enum_label_value', '_enum_options_description', '_enum_options_for_param', '_enum_value_map_for_param', '_field_has_unlocked_editable_control', '_infer_type_from_value', '_is_missing_wire_placeholder', '_looks_internal', '_mark_request_materialized', '_merge_enum_values', '_option_binding_tokens', '_option_candidate_reads', '_page_enum_options_for_request', '_param_has_editable_control_evidence', '_param_source_guess', '_projection_path_score', '_read_is_option_source', '_response_shape_evidence_score', '_strip_body_prefix', '_timestamp_is_near_request',)
+_PENDING_FLOW_SPEC_HELPERS = {'_BORING_COMPOSITE_VALUES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_OPTION_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_append_reason_detail': 'dano.execution.page.flow_materialization.field_contracts.common', '_attach_select_field_projections': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_composite_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_options_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_options_for_param': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_value_map_for_param': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_field_has_unlocked_editable_control': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_is_missing_wire_placeholder': 'dano.execution.page.flow_materialization.field_contracts.common', '_looks_internal': 'dano.execution.page.flow_spec_core.normalization', '_mark_request_materialized': 'dano.execution.page.flow_materialization.request_usage', '_merge_enum_values': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_option_binding_tokens': 'dano.execution.page.flow_materialization.field_contracts.option_repair', '_option_candidate_reads': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_page_enum_options_for_request': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_has_editable_control_evidence': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_param_source_guess': 'dano.execution.page.flow_materialization.field_contracts.common', '_projection_path_score': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_read_is_option_source': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_response_shape_evidence_score': 'dano.execution.page.flow_materialization.response_maps', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_timestamp_is_near_request': 'dano.execution.page.flow_materialization.field_contracts.computed'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

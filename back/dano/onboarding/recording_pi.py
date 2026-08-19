@@ -692,10 +692,8 @@ class RecordingPiSession:
         events_changed = previous_event_ids != event_ids
         enums_changed = previous_enum_len != len(page_enums)
 
-        from dano.execution.page.flow_spec import (
-            RequestFact,
-            _option_sources_from_page_enum_options,
-        )
+        from dano.execution.page.flow_spec import RequestFact
+        from dano.execution.page.recording_facts import _option_sources_from_page_enum_options
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
         current = self.flow_spec
@@ -1025,9 +1023,9 @@ class RecordingPiSession:
         base_flow_version: int,
     ) -> dict[str, Any]:
         from dano.execution.page.flow_spec import (
-            apply_recording_agent_submission,
-            recording_agent_validation,
-        )
+    apply_recording_agent_submission,
+    recording_agent_validation,
+)
 
         async with self._state_lock:
             current = self.current_flow_spec()

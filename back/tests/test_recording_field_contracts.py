@@ -6,10 +6,8 @@ import json
 from urllib.parse import parse_qs, urlsplit
 
 from dano.execution.page.capability_compiler import compile_capabilities
-from dano.execution.page.flow_spec import (
-    _param_exposed_to_caller,
-    to_flow_spec,
-)
+from dano.execution.page.flow_materialization.field_contracts.caller_ownership import _param_exposed_to_caller
+from dano.execution.page.flow_spec import to_flow_spec
 
 
 PAGE = {
@@ -762,7 +760,8 @@ def test_null_detail_and_zero_write_still_hydrate_line_tax() -> None:
 
 
 def test_computed_arithmetic_formula_is_a_complete_contract() -> None:
-    from dano.execution.page.flow_spec import ParamField, _field_source_configuration_advice
+    from dano.execution.page.flow_spec import ParamField
+    from dano.execution.page.flow_materialization.field_contracts.common import _field_source_configuration_advice
 
     param = ParamField(
         key="lineTotal",
@@ -1067,7 +1066,10 @@ def test_pagination_is_not_a_caller_input() -> None:
 
 
 def test_write_locator_with_inspect_text_stays_write_family() -> None:
-    from dano.execution.page.flow_spec import _capability_operation_kind, _is_write_step
+    from dano.execution.page.capability_kinds import (
+    _capability_operation_kind,
+    _is_write_step,
+)
 
     spec = to_flow_spec(
         captured_requests=[
@@ -1134,7 +1136,7 @@ def test_unbound_list_filters_are_caller_not_unknown() -> None:
 
 
 def test_option_source_query_leftover_stays_unknown() -> None:
-    from dano.execution.page.flow_spec import _param_source_guess
+    from dano.execution.page.flow_materialization.field_contracts.common import _param_source_guess
 
     guess = _param_source_guess(
         field={"key": "dictType", "value": "doc_status"},

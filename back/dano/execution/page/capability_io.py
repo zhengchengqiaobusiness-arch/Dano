@@ -5,7 +5,7 @@ from typing import Any
 import copy
 from datetime import datetime, timezone
 import re
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     CapabilityField,
     FlowCapability,
@@ -1108,16 +1108,17 @@ def _capability_schema_field(field: CapabilityField) -> dict[str, Any]:
         schema["title"] = field.display_name
     return schema
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_CAPABILITY_PATH_PREFIXES', '_FLOW_PATH_MISSING', '_apply_link_sources', '_apply_mechanical_field_contracts', '_capability_is_batch', '_capability_operation_kind', '_capability_scoped_step_ids', '_disambiguate_capability_param_keys', '_expand_response_key_map_inputs', '_flow_path_lookup', '_ground_recorded_identifier_relations', '_identifier_role_for_field', '_infer_type_from_value', '_is_business_query_step', '_iter_capability_nodes', '_normalize_actionable_placeholder_param_names', '_normalize_capability_references', '_option_source_step_ids', '_remove_capability_step_nodes', '_reset_param_source', '_sanitize_capability_nodes', '_step_body_is_array', '_sync_capability_order', 'executable_flow_links', 'sync_capability_scoped_views',)
+_PENDING_FLOW_SPEC_HELPERS = {'_CAPABILITY_PATH_PREFIXES': 'dano.execution.page.capability_kinds', '_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_apply_link_sources': 'dano.execution.page.flow_spec_core.controlled_edits', '_apply_mechanical_field_contracts': 'dano.execution.page.flow_materialization.builder', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_operation_kind': 'dano.execution.page.capability_kinds', '_capability_scoped_step_ids': 'dano.execution.page.capability_refs', '_disambiguate_capability_param_keys': 'dano.execution.page.capability_contracts', '_expand_response_key_map_inputs': 'dano.execution.page.capability_refs', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_ground_recorded_identifier_relations': 'dano.execution.page.capability_identity', '_identifier_role_for_field': 'dano.execution.page.capability_identity', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_is_business_query_step': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_actionable_placeholder_param_names': 'dano.execution.page.capability_contracts', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_option_source_step_ids': 'dano.execution.page.capability_refs', '_remove_capability_step_nodes': 'dano.execution.page.capability_nodes', '_reset_param_source': 'dano.execution.page.flow_spec_core.controlled_edits', '_sanitize_capability_nodes': 'dano.execution.page.capability_nodes', '_step_body_is_array': 'dano.execution.page.capability_contracts', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'executable_flow_links': 'dano.execution.page.capability_views', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

@@ -838,16 +838,17 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
 
     return repaired
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_OPTION_SOURCE_KINDS', '_best_option_projection_path', '_bind_option_source', '_enum_label_value', '_find_select_binding', '_flow_path_lookup', '_incomplete_page_enum_is_executable', '_looks_unit_price_formula_leaf', '_option_source_contract_endpoint', '_param_is_quantity_or_formula_leaf', '_read_is_business_entity_collection', '_read_is_option_source', '_read_transport_can_supply_options', '_recorded_scalar_values_match', '_refresh_param_enum_description', '_strip_body_prefix',)
+_PENDING_FLOW_SPEC_HELPERS = {'_OPTION_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_best_option_projection_path': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_bind_option_source': 'dano.execution.page.flow_materialization.field_contracts.option_sync', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_find_select_binding': 'dano.execution.page.flow_materialization.field_contracts.option_sync', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_looks_unit_price_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_option_source_contract_endpoint': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_is_quantity_or_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_read_is_business_entity_collection': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_read_is_option_source': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_read_transport_can_supply_options': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_refresh_param_enum_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

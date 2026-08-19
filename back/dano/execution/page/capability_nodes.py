@@ -16,10 +16,6 @@ from dano.execution.page.flow_spec_core.models import (
 from dano.execution.page.request_capture import (
     normalized_leaf_paths,
 )
-from dano.execution.page.recording_field_identity import (
-    FieldRef,
-    resolve_field_ref,
-)
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _SCREENSHOT_INTERNAL_SOURCE_KINDS,
     _grounded_control_evidence,
@@ -1031,16 +1027,17 @@ def _upsert_capability_relation(spec: FlowSpec, data: dict[str, Any]) -> Capabil
     spec.capability_relations.append(rel)
     return rel
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_AUTOMATED_FIELD_EDIT_ACTORS', '_batch_capability_input_schema', '_capability_call_nodes', '_capability_call_step_ids_from_nodes', '_capability_input_schema', '_capability_inputs_from_top_level_schema', '_capability_is_batch', '_capability_node_step_ids', '_capability_request_ref_from_step', '_capability_schema_array_item_props', '_capability_schema_field', '_capability_step_param_exists', '_find_param', '_is_write_step', '_looks_batch_step', '_rename_param_public_key', '_same_capability_computed_field', '_strip_body_prefix', '_sync_capability_order', '_transition_param_type',)
+_PENDING_FLOW_SPEC_HELPERS = {'_AUTOMATED_FIELD_EDIT_ACTORS': 'dano.execution.page.flow_spec_core.controlled_edits', '_batch_capability_input_schema': 'dano.execution.page.capability_io', '_capability_call_nodes': 'dano.execution.page.capability_refs', '_capability_call_step_ids_from_nodes': 'dano.execution.page.capability_refs', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_inputs_from_top_level_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_request_ref_from_step': 'dano.execution.page.capability_refs', '_capability_schema_array_item_props': 'dano.execution.page.capability_io', '_capability_schema_field': 'dano.execution.page.capability_io', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_find_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_is_write_step': 'dano.execution.page.capability_kinds', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_rename_param_public_key': 'dano.execution.page.flow_spec_core.controlled_edits', '_same_capability_computed_field': 'dano.execution.page.capability_contracts', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_order': 'dano.execution.page.capability_orchestration', '_transition_param_type': 'dano.execution.page.flow_spec_core.controlled_edits'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

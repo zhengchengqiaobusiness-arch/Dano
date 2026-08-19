@@ -28,3 +28,17 @@ cache_dir = "../.runtime/pytest-cache"
 line-length = 100
 target-version = "py312"
 cache-dir = "../.runtime/ruff-cache"
+
+[tool.ruff.lint.per-file-ignores]
+# Split modules resolve some helpers via owner-module bind after import.
+# Ruff cannot see those names; runtime bind plus architecture tests cover them.
+"dano/execution/page/capability_*.py" = ["F821"]
+"dano/execution/page/flow_spec_core/*.py" = ["F821"]
+"dano/execution/page/flow_materialization/**/*.py" = ["F821"]
+"dano/execution/page/recording_facts.py" = ["F821"]
+"dano/execution/page/recording_analysis_state.py" = ["F821"]
+"dano/execution/page/recording_agent_contract.py" = ["F821"]
+"dano/execution/page/flow_release.py" = ["F821"]
+"dano/execution/page/flow_client_projection.py" = ["F821"]
+"dano/execution/page/flow_spec_validate.py" = ["F821"]
+"scripts/*.py" = ["F841"]

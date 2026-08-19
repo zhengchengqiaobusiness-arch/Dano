@@ -810,12 +810,12 @@ async def _publish_canonical_recording(
         },
     )
     from dano.execution.page.flow_spec import (
-        flow_spec_release_payload,
-        flow_spec_required_params,
-        flow_spec_to_api_request,
-        flow_spec_to_summary,
-        validate_flow_spec,
-    )
+    flow_spec_release_payload,
+    flow_spec_required_params,
+    flow_spec_to_api_request,
+    flow_spec_to_summary,
+    validate_flow_spec,
+)
     from dano.execution.page.sessions import save_session
     from dano.infra.token_store import headers_from_api_request, save_token
     from dano.onboarding.page_onboard import run_request_onboarding

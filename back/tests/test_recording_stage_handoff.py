@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from urllib.parse import parse_qs, urlsplit
 
+from dano.execution.page.recording_facts import _preread_dedupe_key
 from dano.execution.page.flow_spec import (
-    _preread_dedupe_key,
     recording_agent_state,
     to_flow_spec,
 )
@@ -336,7 +336,7 @@ def test_spec_fields_count_semantic_plan_before_materialization() -> None:
 
 
 def test_compact_keeps_same_path_with_different_record_query_values() -> None:
-    from dano.execution.page.flow_spec import _compact_repeated_endpoint_observations
+    from dano.execution.page.recording_facts import _compact_repeated_endpoint_observations
 
     first = {
         "request_id": "req_36",

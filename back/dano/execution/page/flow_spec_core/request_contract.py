@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 import copy
 import hashlib
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
     FlowSpec,
@@ -793,16 +793,17 @@ def dry_run_flow_spec(
         "fact_check": fact,
     }
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_ENUM_PARAM_TYPES', '_ENUM_SOURCE_KINDS', '_enum_label_value', '_enum_option_map_from_options', '_param_exposed_to_caller', '_param_field_manually_edited', '_param_requires_caller_input', '_query_key_from_param', '_request_path', '_runtime_param_publish_error', 'flow_spec_to_summary', 'prepare_flow_spec_for_publish', '_active_capability_step_ids', '_capability_execution_contract', '_capability_to_api_dict', '_validate_assertion_contract', 'capability_to_flow_spec_view', 'flow_spec_capability_contracts',)
+_PENDING_FLOW_SPEC_HELPERS = {'_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_option_map_from_options': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_exposed_to_caller': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_param_field_manually_edited': 'dano.execution.page.flow_materialization.field_contracts.common', '_param_requires_caller_input': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_query_key_from_param': 'dano.execution.page.flow_materialization.request_steps', '_request_path': 'dano.execution.page.recording_facts', '_runtime_param_publish_error': 'dano.execution.page.flow_release', 'flow_spec_to_summary': 'dano.execution.page.flow_client_projection', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', '_active_capability_step_ids': 'dano.execution.page.capability_refs', '_capability_execution_contract': 'dano.execution.page.capability_views', '_capability_to_api_dict': 'dano.execution.page.capability_views', '_validate_assertion_contract': 'dano.execution.page.replay', 'capability_to_flow_spec_view': 'dano.execution.page.capability_views', 'flow_spec_capability_contracts': 'dano.execution.page.capability_views'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

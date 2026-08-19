@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep, ParamField, SelectBinding
+from dano.execution.page.flow_spec import (
+    FlowCapability,
+    FlowSpec,
+    FlowStep,
+    ParamField,
+    SelectBinding,
+)
 from dano.onboarding.recording_stage_seven import apply_stage_seven_recorded_evidence_fixes
 from dano.onboarding.recording_verify import apply_recorded_evidence_fixes, verification_report
 

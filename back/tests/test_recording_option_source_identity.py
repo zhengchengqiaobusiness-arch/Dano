@@ -14,7 +14,6 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     ParamField,
     RequestFact,
-    SelectBinding,
 )
 
 

@@ -5,7 +5,7 @@ from typing import Any
 import copy
 import json
 import re
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
     FlowStep,
@@ -1045,16 +1045,17 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     binding.count = len(items)
     binding.enum_confirmed = True
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_AUTOMATED_FIELD_EDIT_ACTORS', '_ENUM_PARAM_TYPES', '_ENUM_SOURCE_KINDS', '_FLOW_PATH_MISSING', '_enum_label_value', '_enum_options_description', '_enum_options_for_param', '_enum_value_map_for_param', '_find_param', '_find_step', '_flow_path_lookup', '_infer_type_from_value', '_option_source_contract_endpoint', '_record_param_manual_contract', '_recorded_scalar_values_match', '_strip_body_prefix', '_strip_option_descriptions', '_upsert_option_description',)
+_PENDING_FLOW_SPEC_HELPERS = {'_AUTOMATED_FIELD_EDIT_ACTORS': 'dano.execution.page.flow_spec_core.controlled_edits', '_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_options_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_options_for_param': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_value_map_for_param': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_find_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_find_step': 'dano.execution.page.flow_spec_core.controlled_edits', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_option_source_contract_endpoint': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_record_param_manual_contract': 'dano.execution.page.flow_spec_core.controlled_edits', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_strip_option_descriptions': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_upsert_option_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

@@ -8,7 +8,7 @@ import re
 from time import perf_counter
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from dano.execution.page.flow_spec import _client_redact_sensitive
+from dano.execution.page.flow_client_projection import _client_redact_sensitive
 from dano.execution.page.request_capture import execute_api_request, extract_auth_headers
 from dano.execution.page.verification_log import record_verification
 from dano.infra.token_store import normalize_headers

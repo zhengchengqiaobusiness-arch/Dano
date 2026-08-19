@@ -53,16 +53,17 @@ def ensure_flow_version(spec: FlowSpec, action: str, *, reason: str = "") -> Flo
         return spec
     return append_flow_version(spec, action, reason=reason)
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('flow_spec_user_params', 'sync_flow_spec_models',)
+_PENDING_FLOW_SPEC_HELPERS = {'flow_spec_user_params': 'dano.execution.page.flow_spec_core.request_contract', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

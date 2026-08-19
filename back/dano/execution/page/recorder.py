@@ -25,7 +25,6 @@ from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 from dano.execution.page.recording_semantic_index import (
     SemanticFieldIndex,
     control_item_from_step,
-    field_identity_id,
     form_root_identity,
     route_identity,
     samples_from_fields,

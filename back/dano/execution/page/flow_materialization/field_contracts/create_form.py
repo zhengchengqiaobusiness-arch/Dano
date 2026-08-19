@@ -191,16 +191,17 @@ def _repair_uncontrolled_write_state_fields(spec: FlowSpec) -> int:
             repaired += 1
     return repaired
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_is_write_step', '_param_has_command_local_control', '_step_is_record_edit_form', '_step_is_row_command',)
+_PENDING_FLOW_SPEC_HELPERS = {'_is_write_step': 'dano.execution.page.capability_kinds', '_param_has_command_local_control': 'dano.execution.page.flow_materialization.field_contracts.row_command', '_step_is_record_edit_form': 'dano.execution.page.flow_materialization.field_contracts.edit_form', '_step_is_row_command': 'dano.execution.page.flow_materialization.field_contracts.row_command'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

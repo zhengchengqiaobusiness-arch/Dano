@@ -13,13 +13,6 @@ from dano.execution.page.request_capture import (
     as_list_payload,
     normalized_leaf_paths,
 )
-from dano.execution.page.recording_field_identity import (
-    FieldRef,
-    resolve_field_ref,
-)
-from dano.execution.page.recording_live import (
-    LIVE_RECORDING_AGENT_OPS,
-)
 from dano.execution.page.recording_facts import (
     _WRITE_METHODS,
     _request_fact_items,
@@ -918,16 +911,17 @@ def _auto_confirm_ready_capabilities(
         cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
     return spec
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_apply_mechanical_field_contracts', '_attach_option_source_memberships', '_canonicalize_public_capability_identities', '_capability_confirmation_hash', '_capability_execution_contract', '_capability_is_batch', '_capability_node_step_ids', '_capability_response_path_exists', '_capability_sequence_window', '_capability_step_was_removed', '_client_redact_sensitive', '_iter_capability_nodes', '_looks_batch_step', '_normalize_capability_references', '_normalize_generated_capability_semantics', '_prune_empty_capabilities', '_query_output_mappings', '_removed_capability_names', '_sanitize_capability_nodes', '_semantic_candidate_gate', '_strip_body_prefix', '_sync_capability_io_schemas', 'append_flow_version', 'apply_flow_edits', 'refresh_review_items', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_apply_mechanical_field_contracts': 'dano.execution.page.flow_materialization.builder', '_attach_option_source_memberships': 'dano.execution.page.capability_refs', '_canonicalize_public_capability_identities': 'dano.execution.page.capability_orchestration', '_capability_confirmation_hash': 'dano.execution.page.capability_views', '_capability_execution_contract': 'dano.execution.page.capability_views', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_sequence_window': 'dano.execution.page.capability_refs', '_capability_step_was_removed': 'dano.execution.page.capability_contracts', '_client_redact_sensitive': 'dano.execution.page.flow_client_projection', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_normalize_generated_capability_semantics': 'dano.execution.page.capability_contracts', '_prune_empty_capabilities': 'dano.execution.page.capability_orchestration', '_query_output_mappings': 'dano.execution.page.capability_io', '_removed_capability_names': 'dano.execution.page.capability_refs', '_sanitize_capability_nodes': 'dano.execution.page.capability_nodes', '_semantic_candidate_gate': 'dano.execution.page.capability_semantic', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'apply_flow_edits': 'dano.execution.page.flow_spec_core.controlled_edits', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

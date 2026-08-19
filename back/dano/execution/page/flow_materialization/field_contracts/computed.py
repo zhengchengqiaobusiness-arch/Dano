@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import re
 from dano.execution.page.flow_spec_core.models import (
@@ -685,16 +685,17 @@ def _computed_formula_is_complete(source: dict | None) -> bool:
         return bool(source.get("left_field") and source.get("right_field"))
     return False
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_apply_date_range_companions', '_capability_node_step_ids',)
+_PENDING_FLOW_SPEC_HELPERS = {'_apply_date_range_companions': 'dano.execution.page.flow_materialization.field_contracts.page_rules', '_capability_node_step_ids': 'dano.execution.page.capability_refs'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

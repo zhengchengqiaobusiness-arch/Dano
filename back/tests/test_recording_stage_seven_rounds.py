@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from dano.execution.page.flow_spec import FlowCapability, FlowLink, FlowSpec, FlowStep
+from dano.execution.page.flow_spec import (
+    FlowCapability,
+    FlowLink,
+    FlowSpec,
+    FlowStep,
+)
 from dano.onboarding.recording_runtime import (
     ProductionRecordingServices,
     _capability_brief,

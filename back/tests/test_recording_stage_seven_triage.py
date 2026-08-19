@@ -13,9 +13,9 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
     SelectBinding,
-    _capability_execute_record_selector,
     validate_flow_spec,
 )
+from dano.execution.page.capability_contracts import _capability_execute_record_selector
 from dano.onboarding.recording_release import evaluate_recording_release
 from dano.onboarding.recording_verify import (
     MACHINE_REPAIR_DISPOSITION,

@@ -2,23 +2,17 @@
 from __future__ import annotations
 
 from typing import Any
-import copy
 import json
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse, parse_qs, urlencode
 import re
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
-    FlowStep,
     ParamField,
-    RequestFacts,
     SelectBinding,
 )
 from dano.execution.page.request_capture import (
-    _is_idlike,
     _leaf_paths,
-    _pick_label_key,
     as_list_payload,
-    looks_internal_param_name,
     looks_like_read_request,
 )
 from dano.execution.page.recording_facts import (
@@ -27,15 +21,12 @@ from dano.execution.page.recording_facts import (
     _field_leaf_token,
     _list_payload_has_reference_contract,
     _looks_pagination_field,
-    _page_enum_options_from_request_facts,
     _read_is_entity_enrichment_lookup,
     _recording_evidence_matches_request,
-    _recording_evidence_matches_scope,
     _request_has_business_query_evidence,
     _request_has_option_endpoint_hint,
     _request_has_reference_entity_hint,
     _request_path,
-    _request_sequence_value,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _field_has_unlocked_editable_control,
@@ -44,23 +35,14 @@ from dano.execution.page.flow_materialization.field_contracts.caller_ownership i
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_audit_system_leaf,
     _looks_page_context_field,
-    _looks_user_entered_business_field,
-    _param_axis_manually_edited,
     _param_control_is_readonly,
     _param_control_kinds,
-    _param_field_manually_edited,
     _param_group_prefix,
-    _param_has_grounded_direct_input_contract,
     _param_has_manual_contract,
-    _screenshot_control_evidence,
-    _screenshot_control_supports_axis,
 )
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _looks_row_identity_leaf,
     _param_is_document_record_identity,
-)
-from dano.execution.page.flow_materialization.request_steps import (
-    _step_sequence,
 )
 
 
@@ -798,58 +780,17 @@ def _merge_enum_values(dst: ParamField, src: ParamField) -> None:
         dst.enum_value_map = {**src.enum_value_map, **dst.enum_value_map}
     _refresh_param_enum_description(dst)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-_PENDING_FLOW_SPEC_HELPERS = ('_AUTOMATED_FIELD_EDIT_ACTORS', '_FLOW_PATH_MISSING', '_find_param', '_find_step', '_flow_path_lookup', '_incomplete_page_enum_is_executable', '_infer_type_from_value', '_looks_catalog_attribute_leaf', '_looks_display_echo_field', '_looks_unit_price_formula_leaf', '_param_is_quantity_or_formula_leaf', '_record_param_manual_contract', '_strip_body_prefix',)
+_PENDING_FLOW_SPEC_HELPERS = {'_AUTOMATED_FIELD_EDIT_ACTORS': 'dano.execution.page.flow_spec_core.controlled_edits', '_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_find_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_find_step': 'dano.execution.page.flow_spec_core.controlled_edits', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_looks_catalog_attribute_leaf': 'dano.execution.page.flow_materialization.field_contracts.edit_form', '_looks_display_echo_field': 'dano.execution.page.flow_materialization.field_contracts.edit_form', '_looks_unit_price_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_param_is_quantity_or_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_record_param_manual_contract': 'dano.execution.page.flow_spec_core.controlled_edits', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
 
-from dano.execution.page.flow_materialization.field_contracts.option_repair import (
-    _looks_quantitative_option_target,
-    _option_binding_semantic_families,
-    _option_binding_tokens,
-    _repair_structural_option_bindings,
-    _weak_automatic_text_option_binding,
-)
-import dano.execution.page.flow_materialization.field_contracts.option_repair as _flow_materialization_field_contracts_option_repair
-if hasattr(_flow_materialization_field_contracts_option_repair, '_bind_flow_spec_helpers'):
-    _flow_materialization_field_contracts_option_repair._bind_flow_spec_helpers()
 
-from dano.execution.page.flow_materialization.field_contracts.option_sync import (
-    _bind_option_source,
-    _find_select_binding,
-    _ground_saved_page_enums,
-    _hydrate_select_source_contract,
-    _page_enum_contract_for_param,
-    _refresh_api_option_display_labels,
-    _sync_step_option_contracts,
-)
-import dano.execution.page.flow_materialization.field_contracts.option_sync as _flow_materialization_field_contracts_option_sync
-if hasattr(_flow_materialization_field_contracts_option_sync, '_bind_flow_spec_helpers'):
-    _flow_materialization_field_contracts_option_sync._bind_flow_spec_helpers()
+_bind_flow_spec_helpers()

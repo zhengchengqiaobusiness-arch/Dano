@@ -631,16 +631,17 @@ def render_business_description(spec: FlowSpec) -> str:
 
     return "\n".join(lines)
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_INTERNAL_SOURCE_CONTRACT', '_find_param', '_find_step', '_reference_targets_param', '_resolve_param_reference', 'refresh_review_items', 'sync_flow_spec_models', '_normalize_capability_references', '_sync_capability_io_schemas',)
+_PENDING_FLOW_SPEC_HELPERS = {'_INTERNAL_SOURCE_CONTRACT': 'dano.execution.page.flow_spec_core.controlled_edits', '_find_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_find_step': 'dano.execution.page.flow_spec_core.controlled_edits', '_reference_targets_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

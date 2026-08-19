@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 import hashlib
 import json
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import urlparse, parse_qs
 import re
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
@@ -266,16 +266,17 @@ def _capability_operation_kind(step: FlowStep) -> str:
 
 _MUTATING_RECORD_KINDS = frozenset({"update", "approve", "reject", "delete", "withdraw"})
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_capability_has_explicit_batch_intent', '_locator_action_name',)
+_PENDING_FLOW_SPEC_HELPERS = {'_capability_has_explicit_batch_intent': 'dano.execution.page.capability_contracts', '_locator_action_name': 'dano.execution.page.capability_contracts'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

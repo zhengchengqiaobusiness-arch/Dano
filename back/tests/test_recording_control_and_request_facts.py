@@ -13,7 +13,6 @@ from dano.execution.page.recorder import (
 from dano.execution.page.recording_field_evidence import (
     _parse_body as evidence_parse_body,
     _request_fields,
-    _request_field_values,
     bind_field_evidence,
 )
 from dano.execution.page.request_capture import _parse_body as capture_parse_body

@@ -849,7 +849,10 @@ async def request_review(run_id: str, params: dict) -> dict:
 
 def _recording_release_snapshot_matches(session, draft) -> tuple[bool, str]:  # noqa: ANN001
     """Bind a recording publish to the exact machine-validated frozen graph."""
-    from dano.execution.page.flow_spec import FlowSpec, flow_spec_fingerprint
+    from dano.execution.page.flow_spec import (
+    FlowSpec,
+    flow_spec_fingerprint,
+)
 
     if draft is None:
         return False, "录制发布草案不存在"

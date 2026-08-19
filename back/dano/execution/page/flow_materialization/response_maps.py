@@ -352,16 +352,17 @@ def _materialize_captured_response_key_maps(
             meta={"actor": "heuristic", "captured_structure_match": True},
         ))
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_flow_path_lookup', '_strip_body_prefix',)
+_PENDING_FLOW_SPEC_HELPERS = {'_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

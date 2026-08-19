@@ -28,7 +28,7 @@ STAGE_MODULES = {
 
 
 def _parse(path: Path) -> ast.AST:
-    return ast.parse(path.read_text(encoding="utf-8"))
+    return ast.parse(path.read_text(encoding="utf-8-sig"))
 
 
 def _module_imports(path: Path) -> list[str]:
@@ -171,8 +171,20 @@ def test_new_internal_modules_do_not_import_flow_spec_facade() -> None:
             "recording_analysis_state.py",
             "recording_agent_contract.py",
             "capability_contracts.py",
+            "capability_compiler.py",
+            "capability_kinds.py",
+            "capability_identity.py",
+            "capability_semantic.py",
+            "capability_nodes.py",
+            "capability_refs.py",
+            "capability_io.py",
+            "capability_views.py",
+            "capability_validation.py",
+            "capability_repair.py",
+            "capability_orchestration.py",
             "flow_release.py",
             "flow_client_projection.py",
+            "flow_spec_validate.py",
         }:
             continue
         tree = _parse(path)
@@ -213,8 +225,19 @@ def test_no_duplicate_top_level_function_definitions_across_new_modules() -> Non
         PAGE / "recording_analysis_state.py",
         PAGE / "recording_agent_contract.py",
         PAGE / "capability_contracts.py",
+        PAGE / "capability_kinds.py",
+        PAGE / "capability_identity.py",
+        PAGE / "capability_semantic.py",
+        PAGE / "capability_nodes.py",
+        PAGE / "capability_refs.py",
+        PAGE / "capability_io.py",
+        PAGE / "capability_views.py",
+        PAGE / "capability_validation.py",
+        PAGE / "capability_repair.py",
+        PAGE / "capability_orchestration.py",
         PAGE / "flow_release.py",
         PAGE / "flow_client_projection.py",
+        PAGE / "flow_spec_validate.py",
     }
     for path in _python_files(PAGE):
         if path.name == "flow_spec.py":
@@ -241,3 +264,49 @@ def test_stage_seven_authority_stays_in_onboarding() -> None:
     text = (PAGE / "flow_spec.py").read_text(encoding="utf-8")
     assert "class StageSevenStatus" not in text
     assert "class StageSevenVerdict" not in text
+
+
+def test_flow_spec_facade_is_explicit_reexport_only() -> None:
+    source = PAGE / "flow_spec.py"
+    text = source.read_text(encoding="utf-8")
+    tree = _parse(source)
+    assert len(text.splitlines()) <= 400
+    assert "__all__" in {node.targets[0].id for node in tree.body if isinstance(node, ast.Assign) and node.targets and isinstance(node.targets[0], ast.Name)}
+    business = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name not in {"_bind_flow_spec_helpers"}
+    ]
+    assert business == [], business
+    assert "def __getattr__" not in text
+    assert "import *" not in text
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            body_lines = (node.end_lineno or node.lineno) - node.lineno + 1
+            assert body_lines <= 30, node.name
+
+
+def test_production_code_does_not_import_private_flow_spec_symbols() -> None:
+    offenders: list[str] = []
+    for path in _python_files(BACK / "dano"):
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "dano.execution.page.flow_spec"
+            ):
+                privates = [alias.name for alias in node.names if alias.name.startswith("_")]
+                if privates:
+                    offenders.append(f"{path.relative_to(BACK)}:{privates}")
+    assert offenders == [], offenders
+
+
+def test_flow_spec_facade_import_has_no_cycle() -> None:
+    import importlib
+    importlib.invalidate_caches()
+    module = importlib.import_module("dano.execution.page.flow_spec")
+    assert hasattr(module, "FlowSpec")
+    assert hasattr(module, "to_flow_spec")
+    assert module.to_flow_spec.__module__ != "dano.execution.page.flow_spec"
+    assert module.FlowSpec.__module__ == "dano.execution.page.flow_spec_core.models"

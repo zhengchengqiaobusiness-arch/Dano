@@ -1072,7 +1072,7 @@ def _consume_write_executor_evidence(spec):  # noqa: ANN001, ANN202
     the exact executed subject (step, read request, assertion), so the guarded
     apply path still validates everything.
     """
-    from dano.execution.page.flow_spec import apply_flow_edits
+    from dano.execution.page.flow_spec_core.controlled_edits import apply_flow_edits
 
     current = spec
     latest_by_step: dict[str, dict[str, Any]] = {}
@@ -1119,7 +1119,7 @@ def _consume_write_executor_evidence(spec):  # noqa: ANN001, ANN202
 
 def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
     """Apply the latest current-signature dependency execution result."""
-    from dano.execution.page.flow_spec import apply_flow_edits
+    from dano.execution.page.flow_spec_core.controlled_edits import apply_flow_edits
 
     current = spec.model_copy(deep=True)
     # Executor evidence is authoritative even when the Pi turn times out after

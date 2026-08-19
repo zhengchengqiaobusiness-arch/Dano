@@ -2211,7 +2211,7 @@ def classify_request_role(req: dict) -> dict:
 def classify_network_request(req: dict, trace: list[dict] | None = None,
                              samples: dict | None = None) -> dict:
     """Compatibility entry point backed by the canonical evidence classifier."""
-    from dano.execution.page.flow_spec import classify_network_request as classify
+    from dano.execution.page.recording_facts import classify_network_request as classify
 
     return classify(req, trace, samples)
 

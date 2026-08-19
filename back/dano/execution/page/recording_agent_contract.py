@@ -12,17 +12,6 @@ from dano.execution.page.flow_spec_core.models import (
 from dano.execution.page.request_capture import (
     normalized_leaf_paths,
 )
-from dano.execution.page.recording_field_identity import (
-    FieldRef,
-    canonical_wire_path,
-    resolve_field_ref,
-)
-from dano.execution.page.recording_live import (
-    LIVE_RECORDING_AGENT_OPS,
-    apply_recording_agent_edit,
-    compact_model_payload,
-    recording_agent_evidence_issues,
-)
 from dano.execution.page.recording_facts import (
     _compact_repeated_endpoint_observations,
     _request_fact_items,
@@ -778,16 +767,17 @@ async def apply_recording_agent_submission(
         actor="planner",
     )
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_apply_grounded_indexed_range_names', '_auto_confirm_ready_capabilities', '_client_redact_sensitive', '_ensure_capability_explanations', '_flow_autofix_context', '_normalize_capability_references', '_param_requires_caller_input', '_pre_materialization_semantic_plan_coverage', '_semantic_candidate_gate', '_step_page_id_from_facts', '_sync_capability_io_schemas', 'append_flow_version', 'auto_fix_flow_spec', 'ensure_recorded_goal', 'orchestrate_flow_capabilities', 'refresh_review_items', 'render_business_description', 'sync_flow_spec_models', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_apply_grounded_indexed_range_names': 'dano.execution.page.flow_materialization.field_contracts.common', '_auto_confirm_ready_capabilities': 'dano.execution.page.capability_repair', '_client_redact_sensitive': 'dano.execution.page.flow_client_projection', '_ensure_capability_explanations': 'dano.execution.page.capability_contracts', '_flow_autofix_context': 'dano.execution.page.capability_repair', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_param_requires_caller_input': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_pre_materialization_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_semantic_candidate_gate': 'dano.execution.page.capability_semantic', '_step_page_id_from_facts': 'dano.execution.page.capability_refs', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'auto_fix_flow_spec': 'dano.execution.page.capability_repair', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'orchestrate_flow_capabilities': 'dano.execution.page.capability_orchestration', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'render_business_description': 'dano.execution.page.flow_client_projection', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

@@ -26,7 +26,7 @@ _BATCH_KINDS = {"validate_batch", "submit_batch"}
 def _capability_kinds() -> set[str]:
     # Keep the compiled-contract repair gate on the same vocabulary as FlowSpec.
     # A second hand-maintained list previously rejected valid draft/withdraw/delete abilities.
-    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
+    from dano.execution.page.capability_kinds import ALLOWED_CAPABILITY_KINDS
 
     return set(ALLOWED_CAPABILITY_KINDS)
 

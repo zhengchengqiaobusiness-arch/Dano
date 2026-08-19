@@ -945,16 +945,17 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         "materialization_integrity": materialization_integrity,
     }
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_ROUTING_FIELD_RE', '_capability_child_nodes', '_capability_confirmation_hash', '_capability_execute_record_selector', '_capability_field_has_valid_source', '_capability_field_looks_internal', '_capability_field_type', '_capability_input_refs', '_capability_is_batch', '_capability_node_step_ids', '_capability_ref_key', '_capability_relation_requires_fields', '_capability_request_indexes', '_capability_response_path_exists', '_capability_schema_array_item_props', '_capability_step_param_exists', '_capability_types_compatible', '_capability_value_ref_exists', '_eligible_business_write_fact', '_enum_map_covers_recorded_value', '_enum_options_look_value_only', '_incomplete_page_enum_is_executable', '_iter_capability_nodes', '_looks_batch_step', '_manual_enum_mapping_complete', '_normalize_capability_references', '_retired_capability_step_ids', '_schema_path_exists', '_step_request_key', '_step_request_signature_key', '_strip_body_prefix', '_sync_capability_io_schemas', 'ALLOWED_CAPABILITY_KINDS', 'ensure_recorded_goal',)
+_PENDING_FLOW_SPEC_HELPERS = {'_ROUTING_FIELD_RE': 'dano.execution.page.capability_contracts', '_capability_child_nodes': 'dano.execution.page.capability_refs', '_capability_confirmation_hash': 'dano.execution.page.capability_views', '_capability_execute_record_selector': 'dano.execution.page.capability_contracts', '_capability_field_has_valid_source': 'dano.execution.page.capability_contracts', '_capability_field_looks_internal': 'dano.execution.page.capability_contracts', '_capability_field_type': 'dano.execution.page.capability_contracts', '_capability_input_refs': 'dano.execution.page.capability_contracts', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_ref_key': 'dano.execution.page.capability_contracts', '_capability_relation_requires_fields': 'dano.execution.page.capability_contracts', '_capability_request_indexes': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_schema_array_item_props': 'dano.execution.page.capability_io', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_types_compatible': 'dano.execution.page.capability_contracts', '_capability_value_ref_exists': 'dano.execution.page.capability_contracts', '_eligible_business_write_fact': 'dano.execution.page.capability_contracts', '_enum_map_covers_recorded_value': 'dano.execution.page.flow_release', '_enum_options_look_value_only': 'dano.execution.page.flow_release', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_manual_enum_mapping_complete': 'dano.execution.page.flow_release', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_retired_capability_step_ids': 'dano.execution.page.capability_refs', '_schema_path_exists': 'dano.execution.page.capability_io', '_step_request_key': 'dano.execution.page.capability_refs', '_step_request_signature_key': 'dano.execution.page.capability_contracts', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'ALLOWED_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

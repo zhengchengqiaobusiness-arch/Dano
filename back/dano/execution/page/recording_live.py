@@ -283,7 +283,7 @@ def _redact_url(url: str) -> str:
 
 
 def _redact(node):  # noqa: ANN001, ANN202
-    from dano.execution.page.flow_spec import _client_redact_sensitive
+    from dano.execution.page.flow_client_projection import _client_redact_sensitive
 
     projected = _client_redact_sensitive(node)
     if isinstance(projected, dict):
@@ -1052,7 +1052,7 @@ def _reject_source_that_contradicts_cited_page_action(
 def _recorded_enum_contract(  # noqa: ANN001
     spec, step, param, dictionary_source: str = "",
 ) -> dict | None:
-    from dano.execution.page.flow_spec import _page_enum_options_from_request_facts
+    from dano.execution.page.recording_facts import _page_enum_options_from_request_facts
 
     candidates = _field_evidence_candidates(spec, step, param)
     param_aliases = {
@@ -1221,7 +1221,8 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
     message that tells the model how to reclassify (hypothesis → verification,
     never a silent tag).
     """
-    from dano.execution.page.flow_spec import FlowLink, _field_source_configuration_advice
+    from dano.execution.page.flow_spec_core.models import FlowLink
+    from dano.execution.page.flow_materialization.field_contracts.common import _field_source_configuration_advice
 
     origin_request_id = str(edit.get("origin_request_id") or "")
     origin_path = str(edit.get("origin_path") or "").removeprefix("response.")
@@ -1259,7 +1260,7 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             and (param.source or {}).get("enum_confirmed") is True
             and param.enum_options
         )
-        from dano.execution.page.flow_spec import _param_control_kinds
+        from dano.execution.page.flow_materialization.field_contracts.common import _param_control_kinds
 
         keep_option = (
             (recorded_option is not None or explicitly_confirmed_option)
@@ -1409,10 +1410,8 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                 **(link.meta or {}),
                 "captured_value_match": True,
             }
-        from dano.execution.page.flow_spec import (
-            _param_control_is_readonly,
-            _param_has_editable_control_evidence,
-        )
+        from dano.execution.page.flow_materialization.field_contracts.common import _param_control_is_readonly
+        from dano.execution.page.flow_materialization.field_contracts.caller_ownership import _param_has_editable_control_evidence
 
         caller_override = (
             not _param_control_is_readonly(param)
@@ -1489,11 +1488,11 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.exposed_to_user = False
 
     elif source_kind == "computed":
-        from dano.execution.page.flow_spec import (
-            _COMPUTED_ARITHMETIC_STRATEGIES,
-            _COMPUTED_DATE_STRATEGIES,
-            _as_finite_number,
-        )
+        from dano.execution.page.flow_materialization.field_contracts.computed import (
+    _COMPUTED_ARITHMETIC_STRATEGIES,
+    _COMPUTED_DATE_STRATEGIES,
+    _as_finite_number,
+)
 
         raw_source = edit.get("source") if isinstance(edit.get("source"), dict) else {}
         strategy = str(edit.get("strategy") or raw_source.get("strategy") or "")
@@ -1653,7 +1652,12 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
 
 def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict:  # noqa: ANN001
     """Apply one live-only op; unresolved early endpoints remain replayable at finalize."""
-    from dano.execution.page.flow_spec import FlowLink, ParamField, RecordedGoal, RequestAnalysis
+    from dano.execution.page.flow_spec_core.models import (
+    FlowLink,
+    ParamField,
+    RecordedGoal,
+    RequestAnalysis,
+)
 
     kind = str(edit.get("op") or "")
     if kind not in LIVE_RECORDING_AGENT_OPS:
@@ -1912,7 +1916,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_required target is locked: {step_id}:{path}")
-            from dano.execution.page.flow_spec import _param_has_page_required_evidence
+            from dano.execution.page.flow_materialization.field_contracts.required import _param_has_page_required_evidence
 
             if not required and _param_has_page_required_evidence(param):
                 raise ValueError(
@@ -2426,7 +2430,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             }
 
     elif kind == "attach_enum_options":
-        from dano.execution.page.flow_spec import _bind_option_source
+        from dano.execution.page.flow_materialization.field_contracts.option_sync import _bind_option_source
 
         step_id = str(edit.get("step_id") or edit.get("request_id") or "")
         path = str(edit.get("path") or edit.get("wire_path") or "")
@@ -2736,12 +2740,10 @@ def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
     later request without being a runtime dependency.  Finalize has the frozen
     facts, so it is the one place that can resolve both cases deterministically.
     """
-    from dano.execution.page.flow_spec import (
-        FlowLink,
-        _apply_link_sources,
-        _dependency_match_score,
-        _param_has_editable_control_evidence,
-    )
+    from dano.execution.page.flow_spec_core.models import FlowLink
+    from dano.execution.page.flow_spec_core.controlled_edits import _apply_link_sources
+    from dano.execution.page.flow_materialization.links import _dependency_match_score
+    from dano.execution.page.flow_materialization.field_contracts.caller_ownership import _param_has_editable_control_evidence
 
     facts = {
         str(item.request_id or ""): item
@@ -2917,7 +2919,7 @@ def _finalize_request_signature(method: str, path: str) -> tuple[str, str]:
 def _finalize_identity_pairs(query: Any) -> tuple[tuple[str, str], ...]:
     if not isinstance(query, dict):
         return ()
-    from dano.execution.page.flow_spec import _looks_pagination_field
+    from dano.execution.page.recording_facts import _looks_pagination_field
 
     pairs: list[tuple[str, str]] = []
     for key, raw in query.items():
@@ -3075,7 +3077,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             else:
                 unresolved.append(rejected)
     _reconcile_captured_value_dependencies(merged)
-    from dano.execution.page.flow_spec import _apply_grounded_indexed_range_names
+    from dano.execution.page.flow_materialization.field_contracts.common import _apply_grounded_indexed_range_names
 
     range_candidate, range_changes = _apply_grounded_indexed_range_names(merged)
     if range_changes:
@@ -3084,13 +3086,11 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             **(merged.meta or {}),
             "indexed_range_changes": range_changes,
         }
-    from dano.execution.page.flow_spec import (
-        _apply_create_form_field_contracts,
-        _apply_edit_form_field_contracts,
-        _apply_row_command_field_contracts,
-        _infer_computed_runtime_fields,
-        _infer_selected_option_row_fields,
-    )
+    from dano.execution.page.flow_materialization.field_contracts.create_form import _apply_create_form_field_contracts
+    from dano.execution.page.flow_materialization.field_contracts.edit_form import _apply_edit_form_field_contracts
+    from dano.execution.page.flow_materialization.field_contracts.row_command import _apply_row_command_field_contracts
+    from dano.execution.page.flow_materialization.field_contracts.computed import _infer_computed_runtime_fields
+    from dano.execution.page.flow_materialization.field_contracts.option_projection import _infer_selected_option_row_fields
 
     _infer_computed_runtime_fields(merged)
     _infer_selected_option_row_fields(merged)
@@ -3265,7 +3265,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         merged.meta["discarded_live_agent_hypotheses"] = discarded_hypotheses
     else:
         merged.meta.pop("discarded_live_agent_hypotheses", None)
-    from dano.execution.page.flow_spec import append_flow_version
+    from dano.execution.page.flow_spec_core.versioning import append_flow_version
 
     return append_flow_version(
         merged,

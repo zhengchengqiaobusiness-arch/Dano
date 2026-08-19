@@ -6,7 +6,11 @@ import asyncio
 
 import pytest
 
-from dano.execution.page.flow_spec import FlowCapability, FlowSpec, FlowStep
+from dano.execution.page.flow_spec import (
+    FlowCapability,
+    FlowSpec,
+    FlowStep,
+)
 from dano.onboarding.recording_gateway import RecordingSessionRegistry, RecordingSessionConfig
 from dano.onboarding.recording_stage_seven import (
     apply_stage_seven_checkpoint_patch,

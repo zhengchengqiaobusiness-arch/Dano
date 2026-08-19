@@ -2,112 +2,37 @@
 from __future__ import annotations
 
 from typing import Any
-import copy
-from datetime import datetime, timezone
 import hashlib
 import json
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
 import re
 from dano.execution.page.flow_spec_core.models import (
     CapabilityDependency,
     CapabilityField,
     CapabilityRelation,
-    CapabilityRequestRef,
     FlowCapability,
     FlowLink,
     FlowSpec,
     FlowStep,
     ParamField,
-    RequestAnalysis,
-    RequestFact,
-    RequestFacts,
-    RequestUsage,
-)
-from dano.execution.page.request_capture import (
-    _parse_body,
-    as_list_payload,
-    looks_like_auth_write,
-    normalized_leaf_paths,
-)
-from dano.execution.page.recording_field_identity import (
-    FieldRef,
-    resolve_field_ref,
-)
-from dano.execution.page.recording_live import (
-    LIVE_RECORDING_AGENT_OPS,
 )
 from dano.execution.page.recording_facts import (
-    _BORING_LINK_VALUES,
     _BUSINESS_QUERY_PATH_RE,
     _INTERNAL_WORKFLOW_READ_RE,
-    _REQUEST_OBSERVER_KEYS,
-    _SCREENSHOT_OPTION_CONTROL_KINDS,
     _WRITE_METHODS,
     _has_query_action_evidence,
-    _looks_pagination_field,
-    _read_is_entity_enrichment_lookup,
-    _recording_evidence_matches_request,
-    _request_fact_items,
-    _request_fact_key_from_entry,
-    _request_fact_signature_key,
     _request_path,
-    _schema_from_response_value,
 )
 from dano.execution.page.flow_materialization.field_contracts.option_projection import (
     _OPTION_SOURCE_KINDS,
-    _enum_label_value,
-    _enum_option_map_from_options,
-    _is_option_source_url,
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
-    _SCREENSHOT_INTERNAL_SOURCE_KINDS,
-    _field_source_configuration_advice,
-    _grounded_control_evidence,
-    _grounded_screenshot_query_path,
-    _is_missing_wire_placeholder,
-    _looks_user_entered_business_field,
-    _param_axis_manually_edited,
-    _param_field_manually_edited,
-    _param_has_executable_source,
-    _param_has_full_lock,
-    _param_has_grounded_public_name,
-    _param_has_grounded_type,
     _screenshot_control_evidence,
-    _screenshot_control_supports_axis,
-)
-from dano.execution.page.flow_materialization.links import (
-    _auto_dependency_link_allowed,
-    _auto_dependency_target_allowed,
-    _auto_link_has_grounded_contract,
-    _dependency_closure_step_ids,
-    _flow_link_kind,
-    _link_is_auto_generated,
-    _previous_response_source_step_id,
-    rebuild_flow_dependencies,
 )
 from dano.execution.page.flow_materialization.request_steps import (
-    _entry_sequence,
     _infer_wire_format,
-    _step_sequence,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
-    _external_capability_input,
     _param_exposed_to_caller,
-    _param_requires_caller_input,
-)
-from dano.execution.page.flow_spec_core.fingerprints import (
-    _flow_fingerprint,
-    _stable_json_hash,
-)
-from dano.execution.page.flow_materialization.request_usage import (
-    _materialized_step_id_for_request,
-)
-from dano.execution.page.flow_materialization.field_contracts.option_repair import (
-    _repair_structural_option_bindings,
-    _weak_automatic_text_option_binding,
-)
-from dano.execution.page.recording_agent_contract import (
-    _validate_recording_agent_ops,
 )
 
 
@@ -1570,233 +1495,17 @@ _CAPABILITY_ALLOWED_FIELDS = frozenset({
     "nodes", "status", "locked", "updated_by",
 })
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-_PENDING_FLOW_SPEC_HELPERS = ('_AUTOMATED_FIELD_EDIT_ACTORS', '_FLOW_PATH_MISSING', '_INTERNAL_EXPOSED_PATH_RE', '_apply_link_sources', '_apply_mechanical_field_contracts', '_client_redact_sensitive', '_enum_map_covers_recorded_value', '_enum_options_look_value_only', '_find_param', '_find_step', '_flow_path_lookup', '_incomplete_page_enum_is_executable', '_infer_type_from_value', '_manual_enum_mapping_complete', '_rename_param_public_key', '_reset_param_source', '_resolve_param_reference', '_strip_body_prefix', '_transition_param_type', 'append_flow_version', 'apply_flow_edits', 'dry_run_flow_spec', 'ensure_recorded_goal', 'prepare_flow_spec_for_publish', 'refresh_review_items', 'sync_flow_spec_models', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_AUTOMATED_FIELD_EDIT_ACTORS': 'dano.execution.page.flow_spec_core.controlled_edits', '_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_INTERNAL_EXPOSED_PATH_RE': 'dano.execution.page.flow_release', '_apply_link_sources': 'dano.execution.page.flow_spec_core.controlled_edits', '_apply_mechanical_field_contracts': 'dano.execution.page.flow_materialization.builder', '_client_redact_sensitive': 'dano.execution.page.flow_client_projection', '_enum_map_covers_recorded_value': 'dano.execution.page.flow_release', '_enum_options_look_value_only': 'dano.execution.page.flow_release', '_find_param': 'dano.execution.page.flow_spec_core.controlled_edits', '_find_step': 'dano.execution.page.flow_spec_core.controlled_edits', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_infer_type_from_value': 'dano.execution.page.flow_spec_core.normalization', '_manual_enum_mapping_complete': 'dano.execution.page.flow_release', '_rename_param_public_key': 'dano.execution.page.flow_spec_core.controlled_edits', '_reset_param_source': 'dano.execution.page.flow_spec_core.controlled_edits', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_transition_param_type': 'dano.execution.page.flow_spec_core.controlled_edits', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'apply_flow_edits': 'dano.execution.page.flow_spec_core.controlled_edits', 'dry_run_flow_spec': 'dano.execution.page.flow_spec_core.request_contract', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate', 'ALLOWED_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'READ_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'WRITE_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', '_ACTION_LABELS': 'dano.execution.page.capability_kinds', '_CAPABILITY_PATH_PREFIXES': 'dano.execution.page.capability_kinds', '_MUTATING_RECORD_KINDS': 'dano.execution.page.capability_kinds', '_business_type_for_param': 'dano.execution.page.capability_io', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_operation_kind': 'dano.execution.page.capability_kinds', '_capability_schema_field_type': 'dano.execution.page.capability_io', '_capability_scoped_step_ids': 'dano.execution.page.capability_refs', '_is_write_step': 'dano.execution.page.capability_kinds', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_relation_semantics': 'dano.execution.page.capability_nodes', '_option_source_step_ids': 'dano.execution.page.capability_refs', '_read_status_steps': 'dano.execution.page.capability_refs', '_remove_capability_step_nodes': 'dano.execution.page.capability_nodes', '_repeated_write_command_signature': 'dano.execution.page.capability_kinds', '_response_identity_match_count': 'dano.execution.page.capability_refs', '_schema_node_at_path': 'dano.execution.page.capability_io', '_step_page_id_from_facts': 'dano.execution.page.capability_refs', '_sync_capability_order': 'dano.execution.page.capability_orchestration', '_write_contract_is_batch': 'dano.execution.page.capability_kinds'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
 
-from dano.execution.page.capability_kinds import (
-    ALLOWED_CAPABILITY_KINDS,
-    READ_CAPABILITY_KINDS,
-    WRITE_CAPABILITY_KINDS,
-    _ACTION_LABELS,
-    _CAPABILITY_PATH_PREFIXES,
-    _MUTATING_RECORD_KINDS,
-    _WRITE_COMMAND_DISCRIMINATOR_RE,
-    _capability_kind_family,
-    _capability_operation_kind,
-    _is_write_step,
-    _looks_batch_step,
-    _repeated_write_command_signature,
-    _write_command_discriminators,
-    _write_contract_is_batch,
-    _write_operation_key,
-    _write_steps,
-)
-import dano.execution.page.capability_kinds as _capability_kinds
-if hasattr(_capability_kinds, '_bind_flow_spec_helpers'):
-    _capability_kinds._bind_flow_spec_helpers()
 
-from dano.execution.page.capability_identity import (
-    _IDENTIFIER_RELATION_TARGET_KINDS,
-    _IDENTIFIER_ROLE_BY_FIELD,
-    _IDENTIFIER_ROLE_TITLE,
-    _annotate_identifier_sources,
-    _ground_recorded_identifier_relations,
-    _identifier_role_for_field,
-    _identifier_value_is_grounding_evidence,
-    _target_input_values,
-)
-import dano.execution.page.capability_identity as _capability_identity
-if hasattr(_capability_identity, '_bind_flow_spec_helpers'):
-    _capability_identity._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_semantic import (
-    _apply_semantic_business_understanding,
-    _complete_semantic_plan_from_spec,
-    _pre_materialization_semantic_plan_coverage,
-    _semantic_candidate_gate,
-    _semantic_mutable_context,
-    _semantic_plan_coverage,
-    _semantic_wire_hash,
-)
-import dano.execution.page.capability_semantic as _capability_semantic
-if hasattr(_capability_semantic, '_bind_flow_spec_helpers'):
-    _capability_semantic._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_validation import (
-    _capability_error,
-    _capability_param_enum_issue,
-    _capability_param_enum_warning,
-    _capability_validation_report,
-    _capability_warning,
-)
-import dano.execution.page.capability_validation as _capability_validation
-if hasattr(_capability_validation, '_bind_flow_spec_helpers'):
-    _capability_validation._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_io import (
-    _NO_SCHEMA_DEFAULT,
-    _apply_output_presentation_evidence,
-    _apply_param_schema_default,
-    _batch_capability_input_schema,
-    _business_type_for_param,
-    _capability_input_schema,
-    _capability_inputs_from_top_level_schema,
-    _capability_output_fields,
-    _capability_output_name,
-    _capability_output_samples,
-    _capability_schema_array_item_props,
-    _capability_schema_field,
-    _capability_schema_field_type,
-    _output_field_is_transport_only,
-    _query_output_mappings,
-    _schema_default_for_param,
-    _schema_for_param_type,
-    _schema_node_at_path,
-    _schema_path_exists,
-    _sync_capability_io_schemas,
-    _sync_capability_output_after_step_removal,
-)
-import dano.execution.page.capability_io as _capability_io
-if hasattr(_capability_io, '_bind_flow_spec_helpers'):
-    _capability_io._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_nodes import (
-    _add_step_id_to_capability,
-    _apply_capability_field_to_param,
-    _default_capability_nodes,
-    _invalidate_capabilities_for_steps,
-    _invalidate_capability_contract,
-    _iter_capability_nodes,
-    _normalize_capability_references,
-    _normalize_capability_relation_semantics,
-    _remove_capability_step_nodes,
-    _reorder_capability_call_nodes,
-    _sanitize_capability_nodes,
-    _select_flow_capability,
-    _set_capability_loop_source,
-    _set_capability_request_membership,
-    _set_capability_return,
-    _transition_capability_kind,
-    _upsert_capability_dependency,
-    _upsert_capability_field,
-    _upsert_capability_node,
-    _upsert_capability_relation,
-)
-import dano.execution.page.capability_nodes as _capability_nodes
-if hasattr(_capability_nodes, '_bind_flow_spec_helpers'):
-    _capability_nodes._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_refs import (
-    _active_capability_step_ids,
-    _attach_option_source_memberships,
-    _canonical_step_summary,
-    _capability_call_nodes,
-    _capability_call_step_ids_from_nodes,
-    _capability_child_nodes,
-    _capability_node_step_ids,
-    _capability_request_indexes,
-    _capability_request_ref_from_step,
-    _capability_scoped_node_step_ids,
-    _capability_scoped_step_ids,
-    _capability_sequence_window,
-    _capability_step_allowed,
-    _capability_step_summary,
-    _expand_response_key_map_inputs,
-    _forget_removed_capability,
-    _forget_removed_capability_step,
-    _grounded_read_operation_steps,
-    _option_source_step_ids,
-    _ordered_capability_request_refs,
-    _ordered_steps_by_ids,
-    _primary_read_operation_step,
-    _public_capability_anchor_step_ids,
-    _query_operation_key,
-    _read_status_steps,
-    _remember_removed_capability,
-    _remember_removed_capability_step,
-    _removed_capability_names,
-    _response_identity_match_count,
-    _retired_capability_step_ids,
-    _step_evidence,
-    _step_page_id_from_facts,
-    _step_request_fact_for_capability,
-    _step_request_key,
-    _submit_capability_steps,
-)
-import dano.execution.page.capability_refs as _capability_refs
-if hasattr(_capability_refs, '_bind_flow_spec_helpers'):
-    _capability_refs._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_views import (
-    _capability_confirmation_hash,
-    _capability_contract_view,
-    _capability_contract_views,
-    _capability_execution_contract,
-    _capability_to_api_dict,
-    capability_to_flow_spec_view,
-    executable_flow_links,
-    flow_spec_capability_contracts,
-)
-import dano.execution.page.capability_views as _capability_views
-if hasattr(_capability_views, '_bind_flow_spec_helpers'):
-    _capability_views._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_repair import (
-    _auto_confirm_ready_capabilities,
-    _auto_fix_target_capability_for_request,
-    _auto_fix_target_capability_name,
-    _autofix_ops_to_edits,
-    _deterministic_capability_repair_edits,
-    _flow_autofix_context,
-    _planner_patch_edits,
-    _repair_generated_capability_contracts,
-    auto_fix_flow_spec,
-)
-import dano.execution.page.capability_repair as _capability_repair
-if hasattr(_capability_repair, '_bind_flow_spec_helpers'):
-    _capability_repair._bind_flow_spec_helpers()
-
-from dano.execution.page.capability_orchestration import (
-    _canonicalize_public_capability_identities,
-    _collapse_duplicate_generated_capabilities,
-    _generated_capability_is_protected,
-    _merge_capability_lists_impl,
-    _orchestration_context,
-    _prune_auth_materializations,
-    _prune_empty_capabilities,
-    _sync_capability_order,
-    orchestrate_flow_capabilities,
-    sync_capability_scoped_views,
-)
-import dano.execution.page.capability_orchestration as _capability_orchestration
-if hasattr(_capability_orchestration, '_bind_flow_spec_helpers'):
-    _capability_orchestration._bind_flow_spec_helpers()
+_bind_flow_spec_helpers()

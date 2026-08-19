@@ -1160,16 +1160,17 @@ async def orchestrate_flow_capabilities(
     }
     return append_flow_version(refresh_review_items(current), "orchestrate_flow", reason=f"生成能力编排: {source}")
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_apply_semantic_business_understanding', '_capability_call_step_ids_from_nodes', '_capability_dependency_from_link', '_capability_field_from_param', '_capability_field_summary', '_capability_inputs_from_top_level_schema', '_capability_is_batch', '_capability_kind_family', '_capability_node_step_ids', '_capability_output_fields', '_capability_request_ref_from_step', '_capability_response_path_exists', '_capability_scoped_step_ids', '_capability_step_allowed', '_capability_step_param_exists', '_capability_step_was_removed', '_complete_semantic_plan_from_spec', '_ensure_external_transform_relations', '_iter_capability_nodes', '_mark_repeated_write_observations', '_merge_capability_scoped_dependencies', '_normalize_capability_references', '_ordered_capability_request_refs', '_planned_capability_has_public_anchor', '_pre_materialization_semantic_plan_coverage', '_remove_capability_step_nodes', '_removed_capability_names', '_repair_generated_capability_contracts', '_semantic_plan_coverage', '_sync_capability_io_schemas', '_upsert_capability_relation', 'append_flow_version', 'refresh_review_items', 'sync_flow_spec_models', 'validate_flow_spec',)
+_PENDING_FLOW_SPEC_HELPERS = {'_apply_semantic_business_understanding': 'dano.execution.page.capability_semantic', '_capability_call_step_ids_from_nodes': 'dano.execution.page.capability_refs', '_capability_dependency_from_link': 'dano.execution.page.capability_contracts', '_capability_field_from_param': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_inputs_from_top_level_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_kind_family': 'dano.execution.page.capability_kinds', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_output_fields': 'dano.execution.page.capability_io', '_capability_request_ref_from_step': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_scoped_step_ids': 'dano.execution.page.capability_refs', '_capability_step_allowed': 'dano.execution.page.capability_refs', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_step_was_removed': 'dano.execution.page.capability_contracts', '_complete_semantic_plan_from_spec': 'dano.execution.page.capability_semantic', '_ensure_external_transform_relations': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_mark_repeated_write_observations': 'dano.execution.page.capability_contracts', '_merge_capability_scoped_dependencies': 'dano.execution.page.capability_contracts', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_ordered_capability_request_refs': 'dano.execution.page.capability_refs', '_planned_capability_has_public_anchor': 'dano.execution.page.capability_contracts', '_pre_materialization_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_remove_capability_step_nodes': 'dano.execution.page.capability_nodes', '_removed_capability_names': 'dano.execution.page.capability_refs', '_repair_generated_capability_contracts': 'dano.execution.page.capability_repair', '_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_upsert_capability_relation': 'dano.execution.page.capability_nodes', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

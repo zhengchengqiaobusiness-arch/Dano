@@ -309,16 +309,17 @@ def _materialized_step_id_for_request(spec: FlowSpec, entry: dict[str, Any]) -> 
     ]
     return matches[0] if len(matches) == 1 else ""
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_collapse_duplicate_generated_capabilities', '_param_has_manual_contract', '_step_request_key', '_step_request_signature_key',)
+_PENDING_FLOW_SPEC_HELPERS = {'_collapse_duplicate_generated_capabilities': 'dano.execution.page.capability_orchestration', '_param_has_manual_contract': 'dano.execution.page.flow_materialization.field_contracts.common', '_step_request_key': 'dano.execution.page.capability_refs', '_step_request_signature_key': 'dano.execution.page.capability_contracts'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()

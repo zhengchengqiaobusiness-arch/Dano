@@ -1,5 +1,16 @@
-"""Stage 5 FlowSpec materialization package.
+"""Stage 5 FlowSpec materialization package."""
+from dano.execution.page.flow_materialization.builder import (
+    to_flow_spec,
+    sync_flow_spec_models,
+)
+from dano.execution.page.flow_materialization.review_items import (
+    build_review_items,
+    refresh_review_items,
+)
 
-Public entry points are re-exported after builder extraction.
-This package must not import stage 7 or stage 8 modules.
-"""
+__all__ = [
+    "to_flow_spec",
+    "sync_flow_spec_models",
+    "build_review_items",
+    "refresh_review_items",
+]

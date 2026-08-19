@@ -112,16 +112,17 @@ def _discover_record_hydration_links(
         ))
     return selected
 
-
-_PENDING_FLOW_SPEC_HELPERS = ('_composite_values_match', '_recorded_scalar_values_match',)
+_PENDING_FLOW_SPEC_HELPERS = {'_composite_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection'}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
-    _flow_spec = sys.modules.get("dano.execution.page.flow_spec")
-    if _flow_spec is None or not hasattr(_flow_spec, "to_flow_spec"):
-        return
     module_globals = globals()
-    for name in _PENDING_FLOW_SPEC_HELPERS:
-        if hasattr(_flow_spec, name):
-            module_globals[name] = getattr(_flow_spec, name)
+    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
+        mod = sys.modules.get(owner)
+        if mod is None or not hasattr(mod, name):
+            continue
+        module_globals[name] = getattr(mod, name)
+
+
+_bind_flow_spec_helpers()
