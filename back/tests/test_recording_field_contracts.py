@@ -835,3 +835,154 @@ def test_hydration_detail_id_stays_required_caller_selected_record() -> None:
     assert (record_id.source or {}).get("kind") == "selected_record_identity"
     assert record_id.required is True
     assert _param_exposed_to_caller(record_id)
+
+
+def _create_form_spec():
+    catalog_url = "http://example.test/admin-api/item/simple-list"
+    catalog = [
+        {"id": 4, "name": "甲件", "barCode": "b1", "price": 5000, "stock": 9, "unitName": "件"},
+        {"id": 7, "name": "乙件", "barCode": "b2", "price": 3000, "stock": 3, "unitName": "盒"},
+    ]
+    create_body = {
+        "partyId": 5,
+        "accountId": 2,
+        "remark": "",
+        "items": [{
+            "productId": 4,
+            "productName": "甲件",
+            "productBarCode": "b1",
+            "productPrice": 5000,
+            "stockCount": 9,
+            "productUnitName": "件",
+            "count": 2,
+            "totalPrice": 10000,
+        }],
+    }
+    return to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_items", method="GET", url=catalog_url, sequence=1, role="read_option",
+                response={"code": 0, "data": catalog},
+            ),
+            _req(
+                "req_list", method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1&pageSize=10",
+                sequence=2, role="business_get", action="act_search", locator="text=搜索",
+                response={"code": 0, "data": {"list": [{"id": 1}]}},
+            ),
+            _req(
+                "req_create", method="POST",
+                url="http://example.test/admin-api/doc/create",
+                sequence=3, role="business_write", action="act_create", locator="text=确定",
+                body=create_body, response={"code": 0, "data": 88},
+            ),
+        ],
+        reads=[{
+            "request_id": "req_items",
+            "method": "GET",
+            "url": catalog_url,
+            "json": catalog,
+            "role": "explicit_read_option",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=[
+            _control(
+                label="往来单位", aliases=["partyId"], kind="select", value="甲公司",
+                request_id="req_create", path="body.partyId", in_dialog=True, required=True,
+            ),
+            _control(
+                label="结算账户", aliases=["accountId"], kind="select", value="现金",
+                request_id="req_create", path="body.accountId", in_dialog=True, required=True,
+            ),
+            _control(
+                label="数量", aliases=["count"], kind="number", value="2",
+                request_id="req_create", path="body.items[0].count", in_dialog=True, required=True,
+            ),
+            _control(
+                label="备注", aliases=["remark"], kind="textarea", value="",
+                request_id="req_create", path="body.remark", in_dialog=True, required=False,
+            ),
+        ],
+        page_events=[
+            {"event_id": "ev_search", "kind": "click", "action_id": "act_search"},
+            {"event_id": "ev_create", "kind": "click", "action_id": "act_create"},
+        ],
+        page_context=PAGE,
+        samples={"往来单位": "甲公司", "结算账户": "现金", "数量": "2"},
+    )
+
+
+def test_create_form_projects_option_row_and_computes_line_total() -> None:
+    spec = _create_form_spec()
+    create = _step_by_suffix(spec, "/doc/create")
+    party = _param(create, "partyId")
+    assert _param_exposed_to_caller(party)
+    assert party.required is True
+    remark = _param(create, "remark")
+    assert _param_exposed_to_caller(remark)
+    assert remark.required is False
+    count = _param(create, "items[0].count")
+    assert _param_exposed_to_caller(count)
+    assert count.required is True
+    assert count.source_kind != "selected_option_field"
+    for path, catalog_leaf in (
+        ("items[0].productName", "name"),
+        ("items[0].productBarCode", "barCode"),
+        ("items[0].productPrice", "price"),
+        ("items[0].stockCount", "stock"),
+        ("items[0].productUnitName", "unitName"),
+    ):
+        item = _param(create, path)
+        assert item.source_kind == "selected_option_field", (path, item.source_kind, item.reason)
+        assert not _param_exposed_to_caller(item)
+        assert (item.source or {}).get("response_path") == catalog_leaf
+        assert item.source_kind != "unknown"
+    total = _param(create, "items[0].totalPrice")
+    assert total.source_kind == "computed", (total.source_kind, total.reason)
+    assert not _param_exposed_to_caller(total)
+    chooser = _param(create, "items[0].productId")
+    assert chooser.source_kind != "unknown"
+    assert _param_exposed_to_caller(chooser) or chooser.source_kind in {"form_option", "user_input", "api_option"}
+
+
+def test_pagination_is_not_a_caller_input() -> None:
+    spec = _create_form_spec()
+    listing = _step_by_suffix(spec, "/doc/page")
+    page_no = _param(listing, "query.pageNo")
+    page_size = _param(listing, "query.pageSize")
+    assert not _param_exposed_to_caller(page_no)
+    assert not _param_exposed_to_caller(page_size)
+    spec = _compile(spec, [{
+        "name": "query_docs",
+        "title": "查询单据",
+        "kind": "query",
+        "anchor_step_id": listing.step_id,
+        "request_refs": [{"step_id": listing.step_id, "usage": "execute"}],
+    }])
+    cap = next(item for item in spec.capabilities if item.name == "query_docs")
+    props = (cap.input_schema or {}).get("properties") or {}
+    assert "pageNo" not in props
+    assert "pageSize" not in props
+
+
+def test_write_locator_with_inspect_text_stays_write_family() -> None:
+    from dano.execution.page.flow_spec import _capability_operation_kind, _is_write_step
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=1, role="business_write", action="act_save",
+                locator="text=详情",
+                body={"id": 36, "remark": "keep"},
+            ),
+        ],
+        page_events=[{"event_id": "ev_save", "kind": "click", "action_id": "act_save"}],
+        page_context=PAGE,
+    )
+    step = _step_by_suffix(spec, "/doc/update")
+    assert _is_write_step(step)
+    assert _capability_operation_kind(step) not in {"inspect", "query_status", "preview"}

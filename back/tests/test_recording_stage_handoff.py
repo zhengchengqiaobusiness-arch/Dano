@@ -333,3 +333,52 @@ def test_spec_fields_count_semantic_plan_before_materialization() -> None:
     fields = _spec_fields(spec)
     assert fields["capability_count"] == 2
     assert fields["capability_names"] == ["edit_doc", "approve_doc"]
+
+
+def test_compact_keeps_same_path_with_different_record_query_values() -> None:
+    from dano.execution.page.flow_spec import _compact_repeated_endpoint_observations
+
+    first = {
+        "request_id": "req_36",
+        "method": "GET",
+        "path": "/admin-api/doc/get",
+        "role": "read_context",
+        "keep": False,
+        "query": {"id": "36"},
+        "query_paths": ["id"],
+    }
+    second = {
+        "request_id": "req_37",
+        "method": "GET",
+        "path": "/admin-api/doc/get",
+        "role": "read_context",
+        "keep": False,
+        "query": {"id": "37"},
+        "query_paths": ["id"],
+    }
+    compacted = _compact_repeated_endpoint_observations([first, second])
+    request_ids = {str(item.get("request_id") or "") for item in compacted}
+    assert request_ids == {"req_36", "req_37"}
+
+
+def test_evidence_id_is_stable_when_recorded_value_changes() -> None:
+    first = {
+        "label": "数量",
+        "field": "count",
+        "field_aliases": ["count"],
+        "value": "1",
+        "op": "fill",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "in_dialog": True,
+        "page_context": PAGE,
+        "action_id": "act_fill",
+        "event_id": "ev_1",
+    }
+    second = {
+        **first,
+        "value": "3",
+        "action_id": "act_fill_2",
+        "event_id": "ev_2",
+    }
+    assert _evidence_id(first) == _evidence_id(second)

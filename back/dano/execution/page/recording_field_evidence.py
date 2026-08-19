@@ -577,6 +577,9 @@ def _prefer_one_surface_candidate(candidates: list[dict[str, Any]]) -> list[dict
         if len({(item.get("request_id"), item.get("wire_path")) for item in timed}) == 1:
             return timed
         pool = timed
+    keys = {(item.get("request_id"), item.get("wire_path")) for item in pool}
+    if len(keys) > 1:
+        return pool
     return pool[-1:]
 
 
@@ -619,9 +622,6 @@ def _evidence_id(evidence: dict[str, Any], index: int = 0) -> str:
         "op": evidence.get("op"),
         "surface": evidence.get("surface") or _evidence_surface(evidence),
         "in_dialog": bool(evidence.get("in_dialog")),
-        "value": evidence.get("value"),
-        "action_id": evidence.get("action_id"),
-        "event_id": evidence.get("event_id"),
     }
     digest = hashlib.sha1(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")

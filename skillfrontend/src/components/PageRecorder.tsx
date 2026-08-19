@@ -397,6 +397,96 @@ function activityDisplay(item: { status: string; label: string }) {
   return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
 }
 
+function parseCapabilityActivity(label: string): { capability: string } | null {
+  const named = label.match(/能力[「"]([^」"]+)[」"]/);
+  if (named) return { capability: named[1] };
+  if (label.includes("整体流程")) return { capability: "整体流程" };
+  return null;
+}
+
+type CapabilityActivityGroup = {
+  round: number;
+  capability: string;
+  items: WorkflowActivity[];
+};
+
+function groupActivitiesByCapability(activities: WorkflowActivity[]): CapabilityActivityGroup[] {
+  const groups: CapabilityActivityGroup[] = [];
+  let current: CapabilityActivityGroup | null = null;
+  for (const act of activities) {
+    const parsed = parseCapabilityActivity(act.label);
+    const round = act.round || current?.round || 0;
+    const startNew = Boolean(
+      parsed
+      && (
+        !current
+        || current.round !== round
+        || current.capability !== parsed.capability
+        || /开始处理能力/.test(act.label)
+      ),
+    );
+    if (startNew && parsed) {
+      current = { round, capability: parsed.capability, items: [act] };
+      groups.push(current);
+      continue;
+    }
+    if (!current || current.round !== round) {
+      current = { round, capability: current?.capability || "流程", items: [act] };
+      groups.push(current);
+      continue;
+    }
+    current.items.push(act);
+  }
+  return groups;
+}
+
+function renderGroupedActivities(activities: WorkflowActivity[]) {
+  const groups = groupActivitiesByCapability(activities);
+  const rounds = [...new Set(groups.map((group) => group.round))];
+  return (
+    <Collapse
+      size="small"
+      defaultActiveKey={rounds.map((round) => `round-${round}`)}
+      items={rounds.map((round) => {
+        const capGroups = groups.filter((group) => group.round === round);
+        return {
+          key: `round-${round}`,
+          label: round ? `第 ${round} 轮` : "处理进展",
+          children: (
+            <Collapse
+              size="small"
+              defaultActiveKey={capGroups.map((group, index) => `${round}-${group.capability}-${index}`)}
+              items={capGroups.map((group, index) => ({
+                key: `${round}-${group.capability}-${index}`,
+                label: group.capability,
+                children: (
+                  <List
+                    size="small"
+                    dataSource={group.items}
+                    renderItem={(item) => {
+                      const display = activityDisplay(item);
+                      return (
+                        <List.Item>
+                          <Space align="start" style={{ width: "100%" }}>
+                            <Tag color={display.color}>{display.label}</Tag>
+                            <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+                              <Text>{item.label}</Text>
+                            </Space>
+                          </Space>
+                        </List.Item>
+                      );
+                    }}
+                  />
+                ),
+              }))}
+            />
+          ),
+        };
+      })}
+    />
+  );
+}
+
 function isStageSevenProgress(progress?: { step?: string; round?: number } | null) {
   const step = String(progress?.step || "");
   return (Number(progress?.round || 0) > 0) || ["verifying", "resolving"].includes(step);
@@ -1857,7 +1947,7 @@ export default function PageRecorder({
       step_id: String(capability.capability_id || capability.name || "capability"),
       name: String(capability.title || capability.name || "能力输入"),
     };
-    return Object.entries(properties).map(([key, rawSchema]) => {
+    return Object.entries(properties).flatMap(([key, rawSchema]) => {
       const schema = asRecord(rawSchema);
       const optionSource = asRecord(schema["x-dano-option-source"]);
       const externalSource = asRecord(schema["x-dano-external-source"]);
@@ -1872,6 +1962,7 @@ export default function PageRecorder({
       else if (format === "date") type = "date";
       else if (format === "date-time") type = "datetime";
       const flowPath = safeString(schema["x-flow-path"]) || key;
+      if (looksPaginationField({ key, path: flowPath })) return [];
       const matched = capabilitySteps
         .flatMap((step) => (step.params || []).map((param) => ({ step, param })))
         .find(({ param }) => (
@@ -1880,7 +1971,10 @@ export default function PageRecorder({
           || safeString(param.path).endsWith(`.${key}`)
         ));
       if (matched) {
-        return {
+        if (looksPaginationField(matched.param) || matched.param.exposed_to_user === false) {
+          return [];
+        }
+        return [{
           step: matched.step,
           param: {
             ...matched.param,
@@ -1888,17 +1982,19 @@ export default function PageRecorder({
             path: flowPath || matched.param.path,
             label: safeString(schema.label || schema.title) || matched.param.label || key,
             type: type || matched.param.type,
-            required: required.has(key),
-            exposed_to_user: true,
+            required: typeof matched.param.required === "boolean"
+              ? matched.param.required
+              : required.has(key),
+            exposed_to_user: matched.param.exposed_to_user !== false,
           } satisfies FlowParam,
-        };
+        }];
       }
       const hasOptionSource = Boolean(optionSource.source_url);
       const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
       const sourceKind = hasOptionSource
         ? "api_option"
         : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "user_input";
-      return {
+      return [{
         step: anchor,
         param: {
           path: flowPath,
@@ -1914,7 +2010,7 @@ export default function PageRecorder({
             ? snapshot
             : Array.isArray(enumValues) ? enumValues : undefined,
         } satisfies FlowParam,
-      };
+      }];
     });
   }
 
@@ -1950,7 +2046,7 @@ export default function PageRecorder({
                       <Text strong>{paramDisplayName(param)}</Text>
                       <Tag>{paramTypeLabel(param)}</Tag>
                       {param.required ? <Tag color="error">必填</Tag> : <Tag>可选</Tag>}
-                      <Tag color={paramIsCallerInput(param) ? "blue" : "cyan"}>
+                      <Tag color={paramSourceTagColor(param)}>
                         {paramSourceLabel(param)}
                       </Tag>
                     </Space>
@@ -2356,19 +2452,6 @@ export default function PageRecorder({
 
     const entries: TLEntry[] = [];
 
-    // Activities first (they carry round numbers and are authoritative events)
-    const seenRounds = new Set<number>();
-    for (let i = 0; i < activities.length; i++) {
-      const act = activities[i];
-      const round = act.round || 0;
-      if (round > 0 && !seenRounds.has(round)) {
-        seenRounds.add(round);
-        entries.push({ kind: "round_divider", round });
-      }
-      entries.push({ kind: "activity", item: act, idx: i });
-    }
-
-    // Thought stream appended after — if present they represent the CURRENT turn
     for (let i = 0; i < thoughts.length; i++) {
       entries.push({ kind: "thought", item: thoughts[i], idx: i });
     }
@@ -2542,7 +2625,7 @@ export default function PageRecorder({
       });
     }
 
-    const isEmpty = entries.length === 0 && !processing && !connecting;
+    const isEmpty = activities.length === 0 && entries.length === 0 && !processing && !connecting;
 
     return (
       <Card
@@ -2579,10 +2662,17 @@ export default function PageRecorder({
               style={{ marginTop: 24 }}
             />
           ) : (
-            <Timeline
-              style={{ paddingTop: 8 }}
-              items={tlItems}
-            />
+            <>
+              {activities.length ? (
+                <div style={{ marginBottom: 8 }}>{renderGroupedActivities(activities)}</div>
+              ) : null}
+              {tlItems.length ? (
+                <Timeline
+                  style={{ paddingTop: 8 }}
+                  items={tlItems}
+                />
+              ) : null}
+            </>
           )}
         </div>
       </Card>
@@ -2699,24 +2789,7 @@ export default function PageRecorder({
       ) : null}
       {(snapshot?.activity || []).length ? (
         <Card size="small" title="处理进展" styles={{ body: { padding: 0 } }}>
-          <List
-            size="small"
-            dataSource={snapshot?.activity || []}
-            renderItem={(item) => {
-              const display = activityDisplay(item);
-              return (
-                <List.Item>
-                  <Space align="start" style={{ width: "100%" }}>
-                    <Tag color={display.color}>{display.label}</Tag>
-                    <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
-                      <Text>{item.label}</Text>
-                      {item.round ? <Text type="secondary">第 {item.round} 轮</Text> : null}
-                    </Space>
-                  </Space>
-                </List.Item>
-              );
-            }}
-          />
+          {renderGroupedActivities(snapshot?.activity || [])}
         </Card>
       ) : null}
       {(snapshot?.insights || []).length ? (

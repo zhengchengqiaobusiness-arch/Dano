@@ -56,6 +56,15 @@ _PARAM_SOURCE_KINDS = frozenset({
     "caller_input", "constant", "session", "context", "response_binding", "computed",
     "generated",
 })
+
+
+class RecordingAgentOpError(ValueError):
+    """Rejected live op with structured allowed_values for the Skill retry."""
+
+    def __init__(self, message: str, *, field: str = "", allowed: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.allowed = list(allowed or [])
 _PARAM_BUSINESS_TYPES = frozenset({
     "string", "email", "url", "number", "integer", "boolean", "date",
     "datetime", "time", "array", "object", "enum", "list-enum",
@@ -417,8 +426,6 @@ def recording_delta(
             or str(item.get("transaction_id") or "") in transaction_ids
         )
     ] if fresh else []
-    if not related_fields and bound_fields:
-        related_fields = [item for item in bound_fields if isinstance(item, dict)][-40:]
     return {
         "since_seq": start,
         "next_seq": next_seq,
@@ -1262,9 +1269,11 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
 
     elif source_kind == "constant":
         if param.value in (None, "") and param.default_value in (None, ""):
-            raise ValueError(
+            raise RecordingAgentOpError(
                 f"constant classification for {param.path} requires a recorded value; "
-                "use user_input when the caller must supply it"
+                "use caller_input when the caller must supply it",
+                field="source_kind",
+                allowed=sorted(_PARAM_SOURCE_KINDS),
             )
         param.source_kind = "constant"
         param.source = {"kind": "constant", "path": param.path, "reason": reason, "actor": "agent"}
@@ -1313,13 +1322,13 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             "context_key": context_key,
             "path": param.path,
             "default_value": param.value if param.value not in (None, "") else param.default_value,
-            "caller_override": pagination,
+            "caller_override": False,
             "reason": reason,
             "actor": "agent",
         }
-        param.category = "user_param" if pagination else "runtime_var"
-        param.exposed_to_user = pagination
-        param.editable = pagination
+        param.category = "runtime_var"
+        param.exposed_to_user = False
+        param.editable = False
         if pagination:
             param.required = False
             required_state = "optional"
@@ -1758,9 +1767,11 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if not step_id or not path or not reason:
             raise ValueError("set_param_source requires step_id, path, source_kind and reason")
         if source_kind not in _PARAM_SOURCE_KINDS:
-            raise ValueError(
+            raise RecordingAgentOpError(
                 "set_param_source source_kind must be one of "
-                f"{sorted(_PARAM_SOURCE_KINDS)}; got {source_kind!r}"
+                f"{sorted(_PARAM_SOURCE_KINDS)}; got {source_kind!r}",
+                field="source_kind",
+                allowed=sorted(_PARAM_SOURCE_KINDS),
             )
         step, param = _field_target(spec, step_id, path)
         if param is not None:
@@ -1890,6 +1901,13 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         if param is not None:
             if param.locked:
                 raise ValueError(f"set_param_required target is locked: {step_id}:{path}")
+            from dano.execution.page.flow_spec import _param_has_page_required_evidence
+
+            if not required and _param_has_page_required_evidence(param):
+                raise ValueError(
+                    f"required=False contradicts field_evidence for {param.path}: "
+                    "the page captured a required marker"
+                )
             _require_required_grounding(
                 spec, step, param, required, evidence_refs=evidence_refs,
             )
@@ -2442,7 +2460,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
         target_id = str(edit.get("target_id") or "")
         reason = str(edit.get("reason") or "").strip()
         if target_kind not in {
-            "dependency", "dependency_candidate", "write_verify", "enum",
+            "dependency", "dependency_candidate", "write_verify", "enum", "release_issue",
         } or not target_id or not reason:
             raise ValueError("mark_unverified requires target_kind, target_id and reason")
         _append_meta_list(spec, "unverified", {
@@ -2471,6 +2489,8 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
                 raise ValueError("mark_unverified enum target does not exist") from exc
             if step is None or param is None:
                 raise ValueError("mark_unverified enum target does not exist")
+        elif target_kind == "release_issue":
+            pass
 
     if record:
         recorded = deepcopy(stored)
@@ -2975,6 +2995,8 @@ def _resolve_live_plan_step_id(
             same_identity.append(step)
     if len(same_identity) == 1:
         return str(same_identity[0].step_id)
+    if identity:
+        return ""
     if not same_identity and len(same_path) == 1:
         return str(same_path[0].step_id)
     return ""
@@ -3034,6 +3056,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 and any(marker in str(exc) for marker in (
                     "contradicts cited editable page control",
                     "contradicts field_evidence",
+                    "the page captured a required marker",
                     "has no matching select field_evidence and dictionary source",
                 ))
             ):
@@ -3051,12 +3074,16 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             "indexed_range_changes": range_changes,
         }
     from dano.execution.page.flow_spec import (
+        _apply_create_form_field_contracts,
         _apply_edit_form_field_contracts,
         _apply_row_command_field_contracts,
         _infer_computed_runtime_fields,
+        _infer_selected_option_row_fields,
     )
 
     _infer_computed_runtime_fields(merged)
+    _infer_selected_option_row_fields(merged)
+    _apply_create_form_field_contracts(merged)
     _apply_edit_form_field_contracts(merged)
     _apply_row_command_field_contracts(merged)
     live_capability_model = live_meta.get("capability_model")

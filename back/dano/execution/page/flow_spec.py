@@ -723,7 +723,8 @@ _PAGE_CONTEXT_LEAVES = frozenset({
 
 _RECORD_IDENTITY_LEAVES = frozenset({
     "id", "ids", "recordid", "requestid", "applicationid",
-    "businessid", "entityid",
+    "businessid", "entityid", "orderid", "billid", "billno",
+    "docid", "documentid",
 })
 
 
@@ -1769,6 +1770,98 @@ def _field_has_unlocked_editable_control(field: dict | None) -> bool:
     }
 
 
+def _projection_path_parts(value: Any) -> list[str]:
+    raw_parts = [part for part in re.split(r"\.|\[\d+\]", str(value or "")) if part]
+    return raw_parts
+
+
+def _projection_leaf_norm(value: str) -> str:
+    return re.sub(r"[^\w]+", "", str(value or ""), flags=re.UNICODE).replace("_", "").casefold()
+
+
+def _projection_path_tokens(value: Any) -> list[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    return [token.casefold() for token in re.findall(r"[A-Za-z]+|\d+|[\u4e00-\u9fff]+", text)]
+
+
+def _projection_path_score(source_path: str, target_path: str) -> int:
+    """Score a catalog leaf against a write-body sibling by structure, not vendor names.
+
+    Exact leaves win.  A write leaf may carry an entity prefix
+    (``productName`` ← ``name``, ``productId`` ← ``id``); a catalog path may
+    also be more specific than the write leaf.  Quantity and total leaves are
+    filtered by the caller so ``price`` cannot claim ``totalPrice``.
+    """
+    source_parts = _projection_path_parts(source_path)
+    target_parts = _projection_path_parts(target_path)
+    if not source_parts or not target_parts:
+        return 0
+    source_leaf_raw = source_parts[-1]
+    target_leaf_raw = target_parts[-1]
+    source_leaf = _projection_leaf_norm(source_leaf_raw)
+    target_leaf = _projection_leaf_norm(target_leaf_raw)
+    if source_leaf == target_leaf:
+        return 100
+    if len(source_parts) >= 2 and _projection_leaf_norm("".join(source_parts[-2:])) == target_leaf:
+        return 90
+    if len(target_parts) >= 2 and _projection_leaf_norm("".join(target_parts[-2:])) == source_leaf:
+        return 90
+    source_tokens = _projection_path_tokens(source_leaf_raw)
+    target_tokens = _projection_path_tokens(target_leaf_raw)
+    if source_tokens == target_tokens:
+        return 100
+    if (
+        source_tokens
+        and target_tokens
+        and len(source_leaf) >= 3
+        and target_leaf.endswith(source_leaf)
+        and target_tokens[-len(source_tokens):] == source_tokens
+    ):
+        return 80
+    if (
+        source_tokens
+        and target_tokens
+        and len(target_leaf) >= 3
+        and source_leaf.endswith(target_leaf)
+        and source_tokens[-len(target_tokens):] == target_tokens
+    ):
+        return 80
+    if (
+        source_tokens
+        and target_tokens
+        and len(source_leaf) >= 3
+        and target_tokens[:len(source_tokens)] == source_tokens
+    ):
+        return 78
+    if (
+        source_tokens
+        and target_tokens
+        and len(target_leaf) >= 3
+        and source_tokens[:len(target_tokens)] == target_tokens
+    ):
+        return 78
+    if (
+        target_tokens and target_tokens[-1] == "id"
+        and source_tokens and source_tokens[-1] == "id"
+    ):
+        return 75
+    return 0
+
+
+def _best_option_projection_path(row: dict[str, Any], target_path: str, value: Any) -> str:
+    candidates = [
+        (_projection_path_score(source_path, target_path), source_path)
+        for source_path, _tokens, _raw_value, raw in _leaf_paths(row)
+        if _composite_values_match(value, raw)
+    ]
+    best_score = max((score for score, _path in candidates), default=0)
+    best_paths = [
+        source_path for score, source_path in candidates
+        if score == best_score and score >= 75
+    ]
+    return best_paths[0] if len(best_paths) == 1 else ""
+
+
 def _attach_select_field_projections(
     selects: list[dict],
     fields: list[dict],
@@ -1784,37 +1877,6 @@ def _attach_select_field_projections(
         _request_path({"url": str(read.get("url") or read.get("path") or "")}): read
         for read in reads or [] if isinstance(read, dict)
     }
-
-    def path_parts(value: Any) -> list[str]:
-        raw_parts = [part for part in re.split(r"\.|\[\d+\]", str(value or "")) if part]
-        return [re.sub(r"[^\w]+", "", part, flags=re.UNICODE).replace("_", "").casefold() for part in raw_parts]
-
-    def path_tokens(value: Any) -> list[str]:
-        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
-        return [token.casefold() for token in re.findall(r"[A-Za-z]+|\d+|[\u4e00-\u9fff]+", text)]
-
-    def projection_path_score(source_path: str, target_path: str) -> int:
-        source_parts = path_parts(source_path)
-        target_parts = path_parts(target_path)
-        if not source_parts or not target_parts:
-            return 0
-        source_leaf = source_parts[-1]
-        target_leaf = target_parts[-1]
-        if source_leaf == target_leaf:
-            return 100
-        if len(source_parts) >= 2 and "".join(source_parts[-2:]) == target_leaf:
-            return 90
-        source_tokens = path_tokens(source_path)
-        target_tokens = path_tokens(target_path)
-        if source_tokens and target_tokens and source_tokens[-len(target_tokens):] == target_tokens:
-            return 85
-        if (
-            target_tokens and target_tokens[-1] == "id"
-            and source_tokens and source_tokens[-1] == "id"
-            and set(target_tokens[:-1]).issubset(set(source_tokens[:-1]))
-        ):
-            return 75
-        return 0
 
     for select in selects or []:
         source_url = str(select.get("source_url") or "")
@@ -1847,19 +1909,16 @@ def _attach_select_field_projections(
                 or target_path in excluded
                 or field.get("recorded_user_input")
                 or _field_has_unlocked_editable_control(field)
+                or _param_is_quantity_or_formula_leaf(str(field.get("key") or ""), target_path)
             ):
                 continue
-            candidates = [
-                (projection_path_score(source_path, target_path), source_path)
-                for source_path, _tokens, _raw_value, raw in _leaf_paths(selected_item)
-                if _recorded_scalar_values_match(
-                    field.get("raw_value", field.get("value")), raw,
-                )
-            ]
-            best_score = max((score for score, _path in candidates), default=0)
-            best_paths = [source_path for score, source_path in candidates if score == best_score and score >= 75]
-            if len(best_paths) == 1:
-                projections[target_path] = best_paths[0]
+            response_path = _best_option_projection_path(
+                selected_item,
+                target_path,
+                field.get("raw_value", field.get("value")),
+            )
+            if response_path:
+                projections[target_path] = response_path
         if projections:
             select["field_projections"] = projections
 
@@ -2154,6 +2213,11 @@ def _build_step_from_capture(
                     f.get("control_disabled") or f.get("control_read_only")
                 ),
                 "request_path": path,
+                "required": bool(f.get("required")),
+                "binding_status": "bound",
+                "surface": str(f.get("surface") or ""),
+                "in_dialog": bool(f.get("in_dialog")),
+                "action_id": str(f.get("action_id") or ""),
                 **dict(f.get("constraints") or {}),
             })
         if f.get("required") and f.get("required_state_grounded"):
@@ -5074,6 +5138,10 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                         "interacted": str(control.get("op") or "").lower() in {"fill", "select", "pick"},
                         "request_path": param.path,
                         "binding_status": "bound",
+                        "required": bool(control.get("required") or control.get("required_observed")),
+                        "surface": str(control.get("surface") or ""),
+                        "in_dialog": bool(control.get("in_dialog")),
+                        "action_id": str(control.get("action_id") or ""),
                     },
                 ]
             if isinstance(control.get("required_observed"), bool):
@@ -5547,14 +5615,11 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
         required_state = str((param.source or {}).get("required_state") or "")
         if (
             not _param_field_manually_edited(param, "required")
-            and not _param_required_agent_classified(param)
-            and required_state not in {"required", "optional"}
             and _param_has_page_required_evidence(param)
             and _param_exposed_to_caller(param)
         ):
             # A bound DOM required marker is already machine-grounded evidence.
-            # Do not leave the persisted write contract at ``unknown`` merely
-            # because the Pi turn did not repeat that captured fact.
+            # Skill may raise optional→required, but cannot erase a captured *.
             param.required = True
             param.source = {**(param.source or {}), "required_state": "required"}
         if (
@@ -5589,7 +5654,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 param.required = False
             if not _param_axis_manually_edited(
                 param, "category", "source_kind", "source", "exposed_to_user", "editable",
-            ) and not _param_source_agent_classified(param):
+            ):
                 existing_source = dict(param.source or {})
                 context_key = str(existing_source.get("context_key") or "")
                 if not context_key:
@@ -5619,7 +5684,7 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 param.enum_value_map = None
             if not _param_field_manually_edited(param, "description"):
                 param.description = _strip_option_descriptions(param.description) or None
-            if not _param_field_manually_edited(param, "reason") and not _param_source_agent_classified(param):
+            if not _param_field_manually_edited(param, "reason"):
                 param.reason = "分页参数由运行上下文使用录制默认值自动注入，不作为业务筛选字段暴露给调用方"
             continue
         if param.source_kind == "api_option":
@@ -8343,6 +8408,8 @@ def to_flow_spec(
     _infer_computed_runtime_fields(spec)
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
+    _infer_selected_option_row_fields(spec)
+    _apply_create_form_field_contracts(spec)
     _apply_edit_form_field_contracts(spec)
     _apply_row_command_field_contracts(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
@@ -8751,12 +8818,23 @@ def _looks_count_formula_leaf(key: str, path: str) -> bool:
 
 def _looks_total_formula_leaf(key: str, path: str) -> bool:
     leaf = _field_leaf_token(key, path)
-    return any(token in leaf for token in ("total", "amount", "subtotal", "payable", "linetotal"))
+    return any(token in leaf for token in (
+        "total", "amount", "subtotal", "payable", "linetotal", "discountprice",
+    ))
 
 
 def _looks_percent_formula_leaf(key: str, path: str) -> bool:
     leaf = _field_leaf_token(key, path)
     return any(token in leaf for token in ("percent", "rate", "ratio"))
+
+
+def _param_is_quantity_or_formula_leaf(key: str, path: str) -> bool:
+    """Qty/totals/rates are typed or computed, never option-row echoes."""
+    return (
+        _looks_count_formula_leaf(key, path)
+        or _looks_total_formula_leaf(key, path)
+        or _looks_percent_formula_leaf(key, path)
+    )
 
 
 def _is_numeric_formula_operand(param: ParamField) -> bool:
@@ -8782,6 +8860,11 @@ def _is_stable_operand(param: ParamField) -> bool:
     if "number" in _param_control_kinds(param):
         return True
     if _param_was_caller_typed(param) or param.source_kind in _STABLE_OPERAND_KINDS:
+        return True
+    if (
+        param.source_kind in {"", "unknown", "page_default"}
+        and _as_finite_number(param.value) is not None
+    ):
         return True
     return False
 
@@ -8865,6 +8948,7 @@ def _operand_quality(param: ParamField) -> int:
         "previous_response": 2,
         "page_default": 2,
         "page_rule": 2,
+        "unknown": 1,
     }.get(param.source_kind, 0)
 
 
@@ -9203,6 +9287,191 @@ def _apply_row_command_field_contracts(spec: FlowSpec) -> None:
             ]
             if param.key:
                 step.sample_inputs.pop(param.key, None)
+
+
+def _step_is_create_or_submit_form(step: FlowStep) -> bool:
+    """A write that collected a form, not a list-row command or hydrated edit."""
+    if str(step.method or "").upper() not in {"POST", "PUT", "PATCH"}:
+        return False
+    if _step_is_row_command(step) or _step_is_record_edit_form(step):
+        return False
+    body = [
+        param for param in step.params or []
+        if not str(param.path or "").startswith("query.")
+    ]
+    if len(body) < 2:
+        return False
+    return any(
+        _param_has_command_local_control(step, param)
+        or param.source_kind in {
+            "user_input", "form_option", "page_default", "api_option", "page_enum",
+        }
+        for param in body
+    )
+
+
+def _param_has_local_required_marker(param: ParamField) -> bool:
+    if _param_has_page_required_evidence(param):
+        return True
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "page_control"
+        and item.get("required") is True
+        for item in (param.evidence or [])
+    )
+
+
+def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
+    """Caller owns editable create/submit controls; required follows the page *."""
+    for step in spec.steps or []:
+        if not _step_is_create_or_submit_form(step):
+            continue
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param):
+                continue
+            if _looks_pagination_field(param.key, param.path):
+                continue
+            if param.source_kind in {
+                "computed", "selected_option_field", "current_user",
+                "system_time", "system_generated", "page_context", "page_rule",
+            }:
+                continue
+            if not _param_has_command_local_control(step, param):
+                continue
+            if _param_control_is_readonly(param):
+                continue
+            if param.source_kind == "unknown":
+                if _param_control_kinds(param) & {"select", "combobox", "radio"}:
+                    param.source_kind = "form_option"
+                    param.source = {"kind": "form_option", "path": param.path}
+                    param.reason = "新建/提交表单上的可编辑选择控件，由调用方提供"
+                else:
+                    param.source_kind = "user_input"
+                    param.source = {"kind": "sample", "path": param.path, "recorded": True}
+                    param.reason = "新建/提交表单上的可编辑控件，由调用方提供"
+            param.category = "user_param"
+            param.exposed_to_user = True
+            param.editable = True
+            param.need_human_confirm = False
+            if _param_has_local_required_marker(param):
+                param.required = True
+                param.source = {**(param.source or {}), "required_state": "required"}
+            else:
+                param.required = False
+                param.source = {**(param.source or {}), "required_state": "optional"}
+
+
+def _option_row_match_count(row: dict[str, Any], members: list[ParamField]) -> int:
+    matched = 0
+    for param in members:
+        if param.value in (None, ""):
+            continue
+        if _param_is_quantity_or_formula_leaf(param.key, param.path):
+            continue
+        if _best_option_projection_path(row, param.path, param.value):
+            matched += 1
+    return matched
+
+
+def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
+    """Project write-body siblings from the unique captured option row they share."""
+    catalogs: list[tuple[str, list[dict[str, Any]]]] = []
+    for fact in spec.request_facts.requests or []:
+        rows = [item for item in (as_list_payload(fact.response_json) or []) if isinstance(item, dict)]
+        if len(rows) >= 2:
+            catalogs.append((str(fact.request_id or ""), rows))
+    if not catalogs:
+        return
+    for step in spec.steps or []:
+        if str(step.method or "").upper() not in {"POST", "PUT", "PATCH"}:
+            continue
+        groups: dict[str, list[ParamField]] = {}
+        for param in step.params or []:
+            groups.setdefault(_param_group_prefix(param.path), []).append(param)
+        for members in groups.values():
+            supported: list[tuple[str, dict[str, Any]]] = []
+            for request_id, rows in catalogs:
+                hits = [
+                    row for row in rows
+                    if _option_row_match_count(row, members) >= 2
+                ]
+                if len(hits) == 1:
+                    supported.append((request_id, hits[0]))
+            unique_rows = {
+                json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+                for _request_id, row in supported
+            }
+            if len(unique_rows) != 1:
+                continue
+            request_id, row = supported[0]
+            for sibling in members:
+                if sibling.locked or _param_has_manual_contract(sibling):
+                    continue
+                if sibling.source_kind in {
+                    "computed", "current_user", "system_time", "system_generated",
+                    "page_context", "request_header",
+                }:
+                    continue
+                sibling_leaf = _field_leaf_token(sibling.key, sibling.path)
+                if sibling_leaf.endswith("id") or sibling_leaf in {"id", "ids"}:
+                    if _looks_row_identity_leaf(sibling.key, sibling.path) or _param_is_document_record_identity(sibling):
+                        continue
+                    response_path = _best_option_projection_path(row, sibling.path, sibling.value)
+                    if (
+                        response_path
+                        and sibling.source_kind in {"", "unknown", "page_default"}
+                        and not _param_has_manual_contract(sibling)
+                    ):
+                        sibling.category = "user_param"
+                        sibling.source_kind = "form_option"
+                        sibling.source = {
+                            "kind": "form_option",
+                            "path": sibling.path,
+                            "source_request_id": request_id,
+                            "response_path": response_path,
+                        }
+                        sibling.exposed_to_user = True
+                        sibling.editable = True
+                        sibling.need_human_confirm = False
+                        sibling.reason = "所选目录行的标识由调用方选择，运行期再带出同行字段"
+                    continue
+                if _param_is_quantity_or_formula_leaf(sibling.key, sibling.path):
+                    continue
+                if (
+                    _param_has_editable_control_evidence(sibling)
+                    and not _param_control_is_readonly(sibling)
+                    and sibling.source_kind not in {"unknown", "page_default"}
+                ):
+                    continue
+                response_path = _best_option_projection_path(row, sibling.path, sibling.value)
+                if not response_path:
+                    continue
+                selector = next(
+                    (
+                        item for item in members
+                        if item is not sibling
+                        and (
+                            _field_leaf_token(item.key, item.path).endswith("id")
+                            or _field_leaf_token(item.key, item.path) in {"id", "ids"}
+                        )
+                    ),
+                    None,
+                )
+                sibling.category = "runtime_var"
+                sibling.source_kind = "selected_option_field"
+                sibling.source = {
+                    "kind": "selected_option_field",
+                    "selector_path": selector.path if selector is not None else "",
+                    "selector_param": selector.key if selector is not None else "",
+                    "source_request_id": request_id,
+                    "response_path": response_path,
+                    "target_path": sibling.path,
+                }
+                sibling.exposed_to_user = False
+                sibling.editable = False
+                sibling.required = False
+                sibling.need_human_confirm = False
+                sibling.reason = f"该字段来自所选记录的 `{response_path}`，运行期随选择自动写入"
 
 
 def _looks_audit_system_leaf(key: str, path: str) -> bool:
@@ -9702,6 +9971,8 @@ def _param_exposed_to_caller(
     capability_step_ids: set[str] | None = None,
 ) -> bool:
     """Whether the caller, rather than the workflow runtime, supplies a value."""
+    if _looks_pagination_field(param.key, param.path):
+        return False
     if _external_capability_input(param, capability_step_ids):
         return True
     if (
@@ -10428,6 +10699,8 @@ def _repair_generated_capability_contracts(
     """Deterministically repair only Planner-generated capability contracts."""
     _normalize_capability_references(spec)
     _infer_computed_runtime_fields(spec)
+    _infer_selected_option_row_fields(spec)
+    _apply_create_form_field_contracts(spec)
     _apply_edit_form_field_contracts(spec)
     _apply_row_command_field_contracts(spec)
     rebuild_flow_dependencies(spec)
@@ -11068,6 +11341,8 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         return spec
 
     _infer_computed_runtime_fields(spec)
+    _infer_selected_option_row_fields(spec)
+    _apply_create_form_field_contracts(spec)
     _apply_edit_form_field_contracts(spec)
     _apply_row_command_field_contracts(spec)
     # Capability compilation happens after live semantic edits. Apply only the
@@ -11430,8 +11705,6 @@ def _step_evidence(step: FlowStep) -> dict[str, Any]:
 
 def _is_write_step(step: FlowStep) -> bool:
     meta = step.source_meta or {}
-    if _has_query_action_evidence(meta.get("trigger_op"), meta.get("trigger_locator")):
-        return False
     role = str(meta.get("role") or step.semantic_role or "").strip().lower()
     if role in {"business_get", "read_context", "read_option", "option_source", "explicit_read_option"}:
         return False
@@ -12447,11 +12720,18 @@ def _compact_repeated_endpoint_observations(
             separators=(",", ":"),
             default=str,
         )
+        query = item.get("query") if isinstance(item.get("query"), dict) else {}
+        query_identity = {
+            str(key): (value[0] if isinstance(value, list) and len(value) == 1 else value)
+            for key, value in query.items()
+            if not _looks_pagination_field(str(key), f"query.{key}")
+        }
         signature = (
             kind or role,
             str(item.get("method") or "GET").upper(),
             path,
             json.dumps(item.get("query_paths") or [], ensure_ascii=False, sort_keys=True),
+            json.dumps(query_identity, ensure_ascii=False, sort_keys=True, default=str),
             json.dumps(item.get("body_paths") or [], ensure_ascii=False, sort_keys=True),
             schema,
         )
@@ -13394,7 +13674,6 @@ def _capability_operation_kind(step: FlowStep) -> str:
     )
     if (
         method in {"GET", "HEAD"}
-        or is_query_action
         or str(meta.get("role") or step.semantic_role or "") == "business_get"
     ):
         if re.search(r"(?:^|[/_.\s-])(?:export|download|excel)(?:$|[/_.\s-])|导出|下载", signature):
@@ -15387,6 +15666,9 @@ def _capability_step_param_exists(step: FlowStep | None, path: str) -> bool:
 
 
 
+_MUTATING_RECORD_KINDS = frozenset({"update", "approve", "reject", "delete", "withdraw"})
+
+
 def _capability_field_looks_internal(field: CapabilityField) -> bool:
     text = f"{field.path}.{field.key}.{field.display_name}"
     if not _INTERNAL_EXPOSED_PATH_RE.search(text):
@@ -15399,6 +15681,14 @@ def _capability_field_looks_internal(field: CapabilityField) -> bool:
     ):
         return False
     return True
+
+
+def _capability_execute_record_selector(cap: FlowCapability, field: CapabilityField) -> bool:
+    """Update/delete-family execute anchors may expose the record id/ids selector."""
+    if str(cap.kind or "") not in _MUTATING_RECORD_KINDS:
+        return False
+    text = f"{field.path}.{field.key}"
+    return bool(re.search(r"(^|[.\]])(id|ids)(\]|$)", text, re.I))
 
 
 def _capability_schema_array_item_props(schema: dict[str, Any], field_name: str) -> tuple[set[str], set[str]]:
@@ -15630,6 +15920,11 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
 
     memberships_by_step: dict[str, set[str]] = {}
     removed_capability_step_ids = _retired_capability_step_ids(spec)
+    internal_step_ids = {
+        str(item)
+        for item in (spec.meta or {}).get("internal_step_ids") or []
+        if item
+    }
     for capability in caps:
         capability_name = capability.name or capability.capability_id or "<unnamed>"
         for step_id in _capability_node_step_ids(capability):
@@ -15657,6 +15952,8 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
             "path": item.get("path") or item.get("url"),
         }
         if not memberships:
+            if step_id in internal_step_ids:
+                continue
             is_public_business = role in {"business_write", "submit_anchor", "business_get"}
             bucket = "unassigned_business_steps" if is_public_business else "unassigned_materialized_steps"
             materialization_integrity[bucket].append(target)
@@ -15931,7 +16228,15 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
             ):
                 msg = f"Capability `{label}` 字段 `{field_name}` 看起来是内部 ID/短码/状态码，不能直接暴露给调用方"
                 target = {"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path}
-                if cap.confirmed:
+                if _capability_execute_record_selector(cap, field):
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_internal_field_exposed",
+                        message=msg,
+                        target=target,
+                    )
+                elif cap.confirmed:
                     cap_errors.append(msg)
                     _capability_error(internal_section, code="capability_internal_field_exposed", message=msg, target=target)
                 else:
@@ -16065,8 +16370,13 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
             node_id = str(node.get("id") or node_type or "<node>")
             if node_type not in allowed_nodes:
                 cap_errors.append(f"Capability `{label}` 节点 `{node_id}` 类型 `{node_type}` 不支持")
-            if node_type == "call" and str(node.get("step_id") or "") not in step_by_id:
-                cap_errors.append(f"Capability `{label}` call 节点 `{node_id}` 未绑定有效接口步骤")
+            if node_type == "call":
+                call_step_id = str(node.get("step_id") or "")
+                call_usage = str(node.get("usage") or "")
+                if call_usage == "option_source" and not call_step_id:
+                    pass
+                elif call_step_id not in step_by_id:
+                    cap_errors.append(f"Capability `{label}` call 节点 `{node_id}` 未绑定有效接口步骤")
             if node_type == "condition":
                 expr = str(node.get("condition") or node.get("check") or node.get("expr") or "")
                 if not expr:
@@ -18627,6 +18937,8 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     _repair_structural_option_bindings(current)
     _refresh_api_option_display_labels(current)
     _infer_computed_runtime_fields(current)
+    _infer_selected_option_row_fields(current)
+    _apply_create_form_field_contracts(current)
     _apply_edit_form_field_contracts(current)
     _apply_row_command_field_contracts(current)
     _repair_readonly_control_defaults(current)
@@ -20113,24 +20425,14 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             or _looks_user_entered_business_field(
                                 sibling.key, sibling.path,
                             )
+                            or _param_is_quantity_or_formula_leaf(sibling.key, sibling.path)
                         ):
                             continue
-                        target_leaf = re.sub(
-                            r"[^a-z0-9]+", "",
-                            str(sibling.path or sibling.key).split(".")[-1].casefold(),
+                        response_path = _best_option_projection_path(
+                            selected_row, sibling.path, sibling.value,
                         )
-                        response_paths = [
-                            source_path
-                            for source_path, _tokens, _raw_value, raw in _leaf_paths(selected_row)
-                            if re.sub(
-                                r"[^a-z0-9]+", "",
-                                str(source_path).split(".")[-1].casefold(),
-                            ) == target_leaf
-                            and _recorded_scalar_values_match(sibling.value, raw)
-                        ]
-                        if len(response_paths) != 1:
+                        if not response_path:
                             continue
-                        response_path = response_paths[0]
                         selector.field_projections[sibling.path] = response_path
                         sibling.category = "runtime_var"
                         sibling.source_kind = "selected_option_field"
@@ -23129,6 +23431,9 @@ async def auto_fix_flow_spec(
     if allow_scope_changes is None:
         allow_scope_changes = expand_requests
     _normalize_capability_references(current)
+    from dano.onboarding.recording_verify import assign_unassigned_internal_steps
+
+    current = assign_unassigned_internal_steps(current)
     history: list[dict[str, Any]] = []
     for round_idx in range(max_rounds):
         report = validate_flow_spec(current)
@@ -23520,10 +23825,11 @@ def _recording_operation_result(
     reason: str = "",
     flow_version_before: int,
     flow_version_after: int = 0,
+    allowed_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if status not in {"applied", "deferred", "rejected", "rolled_back"}:
         status = "rejected"
-    return {
+    result = {
         "index": index,
         "op": str(operation.get("op") or ""),
         "status": status,
@@ -23533,6 +23839,20 @@ def _recording_operation_result(
         "flow_version_before": flow_version_before,
         "flow_version_after": flow_version_after,
     }
+    if allowed_values:
+        result["allowed_values"] = allowed_values
+    return result
+
+
+_META_ONLY_REPAIR_OPS = frozenset({"mark_unverified", "add_pitfall"})
+
+
+def _allowed_values_from_exc(exc: BaseException) -> dict[str, Any] | None:
+    allowed = getattr(exc, "allowed", None)
+    field = str(getattr(exc, "field", "") or "")
+    if not allowed:
+        return None
+    return {"field": field, "allowed": list(allowed)}
 
 
 async def apply_recording_agent_submission(
@@ -23596,6 +23916,7 @@ async def apply_recording_agent_submission(
                     status="rejected",
                     reason=str(exc),
                     flow_version_before=flow_version_before,
+                    allowed_values=_allowed_values_from_exc(exc),
                 ))
         submission = copy.deepcopy(submission)
         submission["ops"] = [operation for _index, operation in residual_ops]
@@ -23609,25 +23930,28 @@ async def apply_recording_agent_submission(
                 status = str(outcome.get("status") or "applied")
                 reason = str(outcome.get("reason") or "")
                 if status == "applied":
-                    candidate = _auto_confirm_ready_capabilities(
-                        refresh_review_items(_sync_capability_io_schemas(candidate)),
-                        refresh_machine_owned=True,
-                    )
-                    expected_grounded_wire_change = bool(
-                        str(operation.get("op") or "") == "propose_dependency"
-                        and str(operation.get("kind") or operation.get("link_kind") or "")
-                        in {"structure", "response_key_map"}
-                    )
-                    accepted, gate = _semantic_candidate_gate(
-                        current,
-                        candidate,
-                        allow_grounded_wire_change=expected_grounded_wire_change,
-                    )
-                    if accepted:
+                    if str(operation.get("op") or "") in _META_ONLY_REPAIR_OPS:
                         current = candidate
                     else:
-                        status = "rolled_back"
-                        reason = ",".join(gate.get("reasons") or []) or "quality gate rejected operation"
+                        candidate = _auto_confirm_ready_capabilities(
+                            refresh_review_items(_sync_capability_io_schemas(candidate)),
+                            refresh_machine_owned=True,
+                        )
+                        expected_grounded_wire_change = bool(
+                            str(operation.get("op") or "") == "propose_dependency"
+                            and str(operation.get("kind") or operation.get("link_kind") or "")
+                            in {"structure", "response_key_map"}
+                        )
+                        accepted, gate = _semantic_candidate_gate(
+                            current,
+                            candidate,
+                            allow_grounded_wire_change=expected_grounded_wire_change,
+                        )
+                        if accepted:
+                            current = candidate
+                        else:
+                            status = "rolled_back"
+                            reason = ",".join(gate.get("reasons") or []) or "quality gate rejected operation"
                 elif status == "deferred":
                     current = candidate
                 op_results.append(_recording_operation_result(
@@ -23646,6 +23970,7 @@ async def apply_recording_agent_submission(
                     status="rejected",
                     reason=str(exc),
                     flow_version_before=flow_version_before,
+                    allowed_values=_allowed_values_from_exc(exc),
                 ))
         submission = copy.deepcopy(submission)
         submission["ops"] = []
@@ -23741,6 +24066,7 @@ async def apply_recording_agent_submission(
                     status="rejected",
                     reason=str(exc),
                     flow_version_before=flow_version_before,
+                    allowed_values=_allowed_values_from_exc(exc),
                 ))
         proposal_gate = ((current.meta or {}).get("capability_model") or {}).get("proposal_gate") or {}
         for index, operation in residual_ops:
