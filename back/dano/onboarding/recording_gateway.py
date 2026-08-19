@@ -1005,6 +1005,24 @@ class RecordingGatewaySession:
                 self.send = None
 
 
+_TERMINAL_WORKFLOW_STATUSES = frozenset({
+    WorkflowStatus.PUBLISHED,
+    WorkflowStatus.EDITABLE,
+    WorkflowStatus.FAILED,
+    WorkflowStatus.CANCELLED,
+})
+
+
+def _session_capture_is_stale(session: RecordingGatewaySession) -> bool:
+    """True when a finished run still holds a Playwright capture."""
+    if session.capture is None:
+        return False
+    workflow = session.workflow
+    if workflow is None:
+        return False
+    return workflow.snapshot.status in _TERMINAL_WORKFLOW_STATUSES
+
+
 @dataclass
 class RecordingSessionRegistry:
     """Keep one backend-owned recording session per action across socket reconnects."""
@@ -1037,7 +1055,7 @@ class RecordingSessionRegistry:
             ):
                 raise ValueError("录制 action 不属于当前租户或业务系统")
         if created:
-            await self._abort_other_live_recordings(config)
+            await self._release_stale_captures(config)
             try:
                 await session.start()
             except Exception:
@@ -1049,18 +1067,18 @@ class RecordingSessionRegistry:
             await session.attach(send)
         return session, created
 
-    async def _abort_other_live_recordings(self, config: RecordingSessionConfig) -> None:
-        """A new recording must take the browser; leftover captures block goto."""
+    async def _release_stale_captures(self, config: RecordingSessionConfig) -> None:
+        """Release leftover terminal browsers; never abort another live recording."""
         async with self._lock:
-            others = [
-                action
+            leftovers = [
+                session
                 for action, session in self._sessions.items()
                 if action != config.action
                 and session.config.tenant == config.tenant
-                and session.capture is not None
+                and _session_capture_is_stale(session)
             ]
-        for action in others:
-            await self.abort(action)
+        for session in leftovers:
+            await session._release_capture()
 
     async def attach_or_resume(
         self,
