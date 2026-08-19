@@ -23,6 +23,11 @@ from dano.execution.page.flow_spec import (
     apply_recording_agent_submission,
     flow_spec_to_api_request,
     recording_agent_validation,
+    recording_capability_plan_complete,
+)
+from dano.onboarding.recording_pi import (
+    RecordingPiSession,
+    recover_recording_analysis_submission,
 )
 from dano.execution.page.recording_live import merge_live_agent_state
 
@@ -150,6 +155,91 @@ def test_complete_pre_materialization_plan_is_terminal_for_the_live_turn() -> No
     assert updated.meta["capability_model"]["status"] == "awaiting_materialization"
     assert validation["capability_plan_complete"] is True
     assert validation["submission_complete"] is True
+
+
+def _accepted_live_plan_pending_compile() -> FlowSpec:
+    """Reproduce call-c5e317c0: plan stored, compile/generation still incomplete."""
+    plan = _two_capability_plan()["semantic_plan"]
+    return FlowSpec(
+        request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_86", method="GET", path="/purchase-order/page"),
+            RequestFact(request_id="req_93", method="POST", path="/purchase-order/create"),
+        ]),
+        meta={
+            "current_version": 4,
+            "capability_model": {
+                "status": "needs_review",
+                "semantic_plan": plan,
+                "semantic_coverage": {
+                    "complete": False,
+                    "missing": ["request_materialization", "field_axis_contract"],
+                },
+                "proposal_gate": {
+                    "accepted": False,
+                    "reasons": ["strict_semantic_plan_required"],
+                },
+            },
+            "capability_generation": {
+                "initial_completed": False,
+                "status": "incomplete_agent_plan",
+            },
+        },
+    )
+
+
+def test_accepted_live_plan_is_complete_before_materialization() -> None:
+    spec = _accepted_live_plan_pending_compile()
+
+    assert recording_capability_plan_complete(spec) is True
+    assert recording_agent_validation(spec)["capability_plan_complete"] is True
+    assert recording_agent_validation(spec)["submission_complete"] is True
+
+
+def test_missing_submission_adopts_already_stored_live_plan() -> None:
+    recovered = recover_recording_analysis_submission(
+        {
+            "status": "missing_submission",
+            "error": "recording analysis completed without submit_recording_plan",
+        },
+        _accepted_live_plan_pending_compile(),
+    )
+
+    assert recovered["status"] == "submitted"
+    assert recovered["accepted_submission"] == "submit_recording_plan"
+    assert "error" not in recovered
+
+
+def test_missing_submission_still_fails_without_a_stored_plan() -> None:
+    recovered = recover_recording_analysis_submission(
+        {"status": "missing_submission"},
+        FlowSpec(request_facts=RequestFacts(requests=[
+            RequestFact(request_id="req_86", method="GET", path="/purchase-order/page"),
+        ])),
+    )
+
+    assert recovered["status"] == "missing_submission"
+
+
+@pytest.mark.asyncio
+async def test_apply_submission_marks_live_plan_turn_complete() -> None:
+    session = RecordingPiSession(
+        tenant="tenant-1",
+        subsystem="sales",
+        recording_id="recording_" + "e" * 32,
+    )
+    session.bind_flow_spec(_live_spec_with_goal_count(2))
+    spec = session.current_flow_spec()
+    version = int((spec.meta or {}).get("current_version") or 0)
+
+    validation = await session.apply_submission(
+        _two_capability_plan(),
+        mode="plan",
+        base_flow_version=version,
+    )
+
+    assert validation["capability_plan_complete"] is True
+    assert validation["submission_complete"] is True
+    assert session.last_submission_kind == "plan"
 
 
 def test_pre_materialization_plan_cannot_drop_a_goal_capability() -> None:

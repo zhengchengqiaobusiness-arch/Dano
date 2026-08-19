@@ -77,6 +77,34 @@ class RecordingPiError(RuntimeError):
     """The recording Pi runtime failed or returned an invalid protocol event."""
 
 
+def recover_recording_analysis_submission(
+    event: dict[str, Any],
+    spec: Any,
+) -> dict[str, Any]:
+    """Keep an already persisted Skill plan even if the sidecar missed it.
+
+    Live analysis used to treat ``capability_plan_complete=false`` as "no
+    submission". The tool had already accepted and stored the plan, so the
+    sidecar retried, then reported ``missing_submission``. That became
+    ``UNEXPECTED_ERROR`` / 「本轮分析结果未被采纳」 even though the plan was
+    adopted. A stored live plan is authoritative.
+    """
+    recovered = dict(event or {})
+    if recovered.get("accepted_submission"):
+        recovered["status"] = "submitted"
+        recovered.pop("error", None)
+        return recovered
+    if recovered.get("status") != "missing_submission":
+        return recovered
+    from dano.execution.page.flow_spec import recording_capability_plan_complete
+
+    if spec is not None and recording_capability_plan_complete(spec):
+        recovered["status"] = "submitted"
+        recovered["accepted_submission"] = "submit_recording_plan"
+        recovered.pop("error", None)
+    return recovered
+
+
 def _acquire_scope_file_lock(path: Path) -> BinaryIO:
     """Hold a cross-process lock for one persisted Pi JSONL scope."""
     handle = path.open("a+b")
@@ -353,6 +381,8 @@ class RecordingPiSession:
                 # A terminal tool submission has already been persisted by the
                 # Python bridge. It is authoritative even if an older sidecar
                 # also reports a late limiter/cancel status in the same event.
+                if prompt_mode == "recording_analysis":
+                    event = recover_recording_analysis_submission(event, self.flow_spec)
                 if event.get("accepted_submission"):
                     event["status"] = "submitted"
                     event.pop("error", None)
@@ -877,6 +907,10 @@ class RecordingPiSession:
             # must not erase a grounded capability plan that compiled safely.
             # Repairs remain strict because their sole purpose is to resolve
             # those outstanding findings.
+            # Live plans are complete once the Skill boundary set is stored;
+            # compile/materialize happens at freeze. Forcing this flag to the
+            # compile-time generation bit made sidecar treat an accepted plan
+            # as missing_submission and raise UNEXPECTED_ERROR.
             submission_complete = bool(validation.get("submission_complete", True))
             if mode == "plan" and (
                 submitted_capabilities or validation.get("capability_plan_complete")

@@ -22742,16 +22742,53 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     }
 
 
+_LIVE_PLAN_BLOCKING_GAPS = frozenset({
+    "capability_contracts", "capabilities", "goal_capability_count", "unresolved_blockers",
+})
+
+
+def _live_capability_plan_is_terminal(spec: FlowSpec) -> bool:
+    """A stored live Skill plan is complete before request facts become steps.
+
+    Compile-time gaps such as ``request_materialization`` or
+    ``field_axis_contract`` belong to freeze, not the live analysis turn.
+    ``capability_generation.initial_completed`` is also compile-owned and must
+    not discard an already accepted boundary set.
+    """
+    if spec.steps:
+        return False
+    model = dict((spec.meta or {}).get("capability_model") or {})
+    plan = model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    capabilities = [
+        item for item in (plan.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    if not capabilities:
+        return False
+    fact_request_ids = {
+        str(item.get("request_id") or "")
+        for item in _request_fact_items(spec)
+        if str(item.get("request_id") or "")
+    }
+    if not fact_request_ids:
+        return False
+    coverage = _pre_materialization_semantic_plan_coverage(spec, plan, fact_request_ids)
+    return not (set(coverage.get("missing") or []) & _LIVE_PLAN_BLOCKING_GAPS)
+
+
 def recording_capability_plan_complete(spec: FlowSpec) -> bool:
     """Whether the authoritative semantic boundary plan reached a safe terminal state."""
     meta = spec.meta or {}
     generation = dict(meta.get("capability_generation") or {})
     model = dict(meta.get("capability_model") or {})
-    if str(model.get("status") or "") == "awaiting_materialization":
+    status = str(model.get("status") or "")
+    if status in {"awaiting_materialization", "ready"}:
+        return True
+    if _live_capability_plan_is_terminal(spec):
         return True
     if generation:
         return bool(generation.get("initial_completed"))
-    return str(model.get("status") or "") in {"ready", "awaiting_materialization"}
+    return False
 
 
 _RECORDING_FIELD_OPS = frozenset({
