@@ -935,22 +935,9 @@ class RecordingPiSession:
                 # not a best-effort action after the Pi prompt response.
                 self._on_submission_accepted(updated.model_copy(deep=True), mode)
             validation = recording_agent_validation(updated)
-            # A plan can contain independently guarded field hypotheses.  A
-            # rejected optional hypothesis stays visible in must_retry, but it
-            # must not erase a grounded capability plan that compiled safely.
-            # Repairs remain strict because their sole purpose is to resolve
-            # those outstanding findings.
-            # Live plans are complete once the Skill boundary set is stored;
-            # compile/materialize happens at freeze. Forcing this flag to the
-            # compile-time generation bit made sidecar treat an accepted plan
-            # as missing_submission and raise UNEXPECTED_ERROR.
+            if submitted_capabilities or validation.get("capability_plan_complete"):
+                validation["capability_plan_received"] = True
             submission_complete = bool(validation.get("submission_complete", True))
-            if mode == "plan" and (
-                submitted_capabilities or validation.get("capability_plan_complete")
-            ):
-                # A stored live boundary is a successful submission. Field-axis
-                # retries and compile-owned gaps belong to freeze / later batches.
-                submission_complete = True
             if mode == "repair":
                 submission_complete = bool(validation.get("all_applied", True))
             validation["submission_complete"] = submission_complete

@@ -23919,7 +23919,9 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     must_retry = [
         int(item.get("index") or 0)
         for item in op_results
-        if str(item.get("status") or "") in {"rejected", "rolled_back"}
+        if str(item.get("status") or "") in {
+            "rejected", "rolled_back", "must_retry", "conflict", "version_conflict",
+        }
     ]
     unresolved_targets = [
         dict(item.get("requested_target") or {})
@@ -23937,6 +23939,14 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
     release_ready = evaluate_recording_release(current).callable_spec is not None
     capability_plan_complete = recording_capability_plan_complete(current)
     capability_model = dict((current.meta or {}).get("capability_model") or {})
+    semantic_plan = (
+        capability_model.get("semantic_plan")
+        if isinstance(capability_model.get("semantic_plan"), dict)
+        else {}
+    )
+    capability_plan_received = capability_plan_complete or bool(current.capabilities) or any(
+        isinstance(item, dict) for item in (semantic_plan.get("capabilities") or [])
+    )
     capability_retry_reasons = [] if capability_plan_complete else list(dict.fromkeys([
         *list((capability_model.get("proposal_gate") or {}).get("reasons") or []),
         *list((capability_model.get("semantic_coverage") or {}).get("missing") or []),
@@ -23956,16 +23966,13 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
             str(item.get("status") or "") == "applied"
             for item in op_results
         ),
+        "capability_plan_received": capability_plan_received,
         "capability_plan_complete": capability_plan_complete,
         "capability_retry_reasons": capability_retry_reasons,
-        # A deferred live field conclusion is durably staged in
-        # recording_agent_ops and is replayed after request materialization.
-        # It must not consume another Pi submission attempt.
-        # Rejected optional field hypotheses stay visible in must_retry, but a
-        # stored live capability plan is already a successful submission.
-        # Compile-owned field replay happens at freeze and must not consume
-        # another Pi attempt.
-        "submission_complete": (not must_retry) or capability_plan_complete,
+        # capability_plan_received means the Skill boundary was stored.
+        # submission_complete is only about the current op batch: rejected /
+        # must_retry / rolled_back / version conflict still need a Skill retry.
+        "submission_complete": not must_retry,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }
