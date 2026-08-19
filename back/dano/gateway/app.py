@@ -1037,6 +1037,10 @@ async def record_ws(ws: WebSocket) -> None:
         resume_draft: dict | None = None
         resume_title = ""
         resume_result_id = None
+        resume_baseline: dict | None = None
+        resume_checkpoint: dict | None = None
+        resume_attempt_id = ""
+        reset_stage_seven = False
         if command == "resume_verification":
             from dano.assets.drafts import DraftStore
             from dano.onboarding.recording_results import is_recording_result_key
@@ -1063,6 +1067,23 @@ async def record_ws(ws: WebSocket) -> None:
                 await sender.send_json({"type": "error", "detail": detail})
                 return
             resume_draft = saved.body["flow_spec"]
+            resume_baseline = dict(saved.body["flow_spec"])
+            resume_checkpoint = None
+            resume_attempt_id = str(init.get("attempt_id") or "")
+            reset_stage_seven = init.get("reset_stage_seven") is True
+            from dano.onboarding.recording_stage_seven import load_resumable_working_spec
+
+            working, checkpoint, block_reason = load_resumable_working_spec(
+                dict(saved.body or {}),
+                reset_stage_seven=reset_stage_seven,
+            )
+            if block_reason:
+                await sender.send_json({"type": "error", "detail": block_reason})
+                return
+            resume_draft = working
+            resume_checkpoint = None if reset_stage_seven else checkpoint
+            if not resume_attempt_id and isinstance(checkpoint, dict):
+                resume_attempt_id = str(checkpoint.get("attempt_id") or "")
             resume_title = str(saved.body.get("title") or "")
             resume_result_id = saved.asset_draft_id
             action = str(saved.body.get("action") or "")
@@ -1165,7 +1186,11 @@ async def record_ws(ws: WebSocket) -> None:
                 draft=resume_draft,
                 title=resume_title,
                 result_id=resume_result_id,
-                restart=init.get("restart") is True,
+                restart=False,
+                reset_stage_seven=reset_stage_seven,
+                attempt_id=resume_attempt_id,
+                baseline=resume_baseline,
+                checkpoint=resume_checkpoint,
             )
         else:
             session, _created = await _recording_session_registry.attach_or_create(

@@ -1242,6 +1242,40 @@ async def verify_recording_dependency(run_id: str, params: dict) -> dict:
     session = _recording_session(run_id, params)
     spec = session.current_flow_spec()
     link_id = str(params["link_id"])
+    from dano.execution.page.recording_live import dependency_link_signature
+    from dano.onboarding.recording_stage_seven import should_skip_passed_task, verification_task_id
+
+    link = next((item for item in spec.links if str(item.link_id or "") == link_id), None)
+    stage_seven = dict((spec.meta or {}).get("stage_seven") or {})
+    if link is not None and stage_seven.get("attempt_id"):
+        signature = dependency_link_signature(link)
+        task_id = verification_task_id(
+            attempt_id=str(stage_seven.get("attempt_id") or ""),
+            capability_id="",
+            kind="dependency",
+            target_id=link_id,
+            target_signature=signature,
+        )
+        skipped = should_skip_passed_task(spec, task_id=task_id, target_signature=signature)
+        if skipped is None:
+            skipped = next((
+                dict(item)
+                for item in reversed(list((spec.meta or {}).get("verification_log") or []))
+                if isinstance(item, dict)
+                and item.get("kind") == "dependency_execute"
+                and item.get("status") == "passed"
+                and str((item.get("subject") or {}).get("link_id") or "") == link_id
+                and str((item.get("subject") or {}).get("signature") or "") == signature
+            ), None)
+        if skipped is not None:
+            verification_id = str(skipped.get("verification_id") or "")
+            return {
+                "ok": True,
+                "duplicate": True,
+                "link_id": link_id,
+                "verification_id": verification_id,
+                "verification_ids": [verification_id] if verification_id else [],
+            }
     if not any(str(link.link_id or "") == link_id for link in spec.links):
         # A prior repair may have rejected or replaced the proposed link while
         # the model still holds an older todo. This is a stale task, not an
@@ -1298,6 +1332,41 @@ async def execute_recording_write_with_verify(run_id: str, params: dict) -> dict
     step = next((item for item in spec.steps if item.step_id == str(params["write_step_id"])), None)
     if step is None or (step.method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
         raise ToolError("write_step_id 必须指向当前 FlowSpec 的写步骤")
+    from dano.onboarding.recording_stage_seven import WRITE_OUTCOME_UNKNOWN, write_outcome_unknown
+
+    latest_write = next((
+        dict(item)
+        for item in reversed(list((spec.meta or {}).get("verification_log") or []))
+        if isinstance(item, dict)
+        and item.get("kind") == "write_execute"
+        and str((item.get("subject") or {}).get("write_step_id") or "") == step.step_id
+    ), None)
+    if latest_write and latest_write.get("status") == "passed":
+        evidence = dict(latest_write.get("evidence") or {})
+        verification_id = str(latest_write.get("verification_id") or "")
+        return {
+            "ok": True,
+            "write": deepcopy(evidence.get("write")),
+            "verify": deepcopy(evidence.get("verify")),
+            "assertion": deepcopy(evidence.get("assertion")),
+            "cleanup": deepcopy(evidence.get("cleanup")),
+            "verification_id": verification_id,
+            "verification_ids": [verification_id] if verification_id else [],
+            "verify_verification_id": verification_id,
+            "duplicate": True,
+            "write_executed": False,
+            "readback_retried": False,
+        }
+    if write_outcome_unknown(latest_write) or (latest_write and latest_write.get("status") == "inconclusive"):
+        return {
+            "ok": False,
+            "status": WRITE_OUTCOME_UNKNOWN,
+            "write_executed": False,
+            "duplicate": True,
+            "verification_id": str((latest_write or {}).get("verification_id") or ""),
+            "verification_ids": [],
+            "reason": "写操作结果不确定，禁止自动再次执行",
+        }
     write_request_id = str((step.source_meta or {}).get("request_id") or "")
     request_ids = [write_request_id, str(params["verify_request_id"])]
     cleanup_request_id = str(params.get("cleanup_request_id") or "")

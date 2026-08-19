@@ -154,6 +154,9 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "created_at": created,
         "published": bool(body.get("published")) and bool(body.get("machine_verification_ran")),
         "machine_verification_ran": bool(body.get("machine_verification_ran")),
+        "machine_verification_status": str(body.get("machine_verification_status") or ""),
+        "stage_seven_attempt_id": str(body.get("stage_seven_attempt_id") or ""),
+        "stage_seven_updated_at": str(body.get("stage_seven_updated_at") or ""),
     }
 
 
@@ -161,7 +164,10 @@ def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
     """Return one saved result plus its client FlowSpec for the capability page."""
 
     payload = recording_result_summary(draft)
-    spec = draft.body.get("flow_spec") if isinstance(draft.body, dict) else None
+    body = draft.body if isinstance(draft.body, dict) else {}
+    checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else None
+    working = checkpoint.get("working_flow_spec") if isinstance(checkpoint, dict) else None
+    spec = working if isinstance(working, dict) and working else body.get("flow_spec")
     if not isinstance(spec, dict):
         payload["draft"] = None
         return payload
@@ -207,3 +213,17 @@ async def load_stage_six_flow_spec(store: DraftStore, result_id: UUID) -> dict[s
     if not isinstance(flow_spec, dict):
         raise ValueError("录制结果没有完整 FlowSpec")
     return flow_spec
+
+
+async def load_stage_seven_resume(
+    store: DraftStore,
+    result_id: UUID,
+    *,
+    reset_stage_seven: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
+    from dano.onboarding.recording_stage_seven import load_resumable_working_spec
+
+    draft = await store.get_draft(result_id)
+    if draft is None or not is_recording_result_key(draft.asset_key):
+        raise ValueError("录制结果不存在")
+    return load_resumable_working_spec(dict(draft.body or {}), reset_stage_seven=reset_stage_seven)

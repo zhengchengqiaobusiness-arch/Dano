@@ -122,6 +122,8 @@ interface WorkflowSnapshot {
   question?: WorkflowQuestion | null;
   release?: Record<string, unknown> | null;
   error?: string;
+  stage_seven_attempt_id?: string;
+  machine_verification_status?: string;
 }
 
 interface FlowParam {
@@ -628,6 +630,7 @@ export default function PageRecorder({
   const cancellingRef = useRef(false);
   const machineVerificationRef = useRef(setup.machineVerification);
   const socketInitRef = useRef<Record<string, unknown> | null>(null);
+  const stageSevenAttemptIdRef = useRef("");
   const activeResultIdRef = useRef("");
   const deletingIdRef = useRef("");
   const acceptNextSnapshotRef = useRef(false);
@@ -947,6 +950,19 @@ export default function PageRecorder({
     snapshotRef.current = next;
     setSnapshot(next);
     actionRef.current = next.action;
+    if (next.stage_seven_attempt_id) {
+      stageSevenAttemptIdRef.current = next.stage_seven_attempt_id;
+    }
+    const init = socketInitRef.current;
+    if (init?.type === "resume_verification") {
+      socketInitRef.current = {
+        ...init,
+        restart: false,
+        reset_stage_seven: false,
+        attempt_id: next.stage_seven_attempt_id || stageSevenAttemptIdRef.current || init.attempt_id,
+        result_id: init.result_id || activeResultIdRef.current,
+      };
+    }
     if (next.title !== undefined) setTitle(next.title);
     if (
       ["published", "editable", "failed", "cancelled"].includes(next.status)
@@ -998,6 +1014,13 @@ export default function PageRecorder({
       const init = socketInitRef.current;
       if (!init) return;
       socket.send(JSON.stringify(init));
+      if (init.type === "resume_verification") {
+        socketInitRef.current = {
+          ...init,
+          restart: false,
+          reset_stage_seven: false,
+        };
+      }
       // A disconnected finish command is safe to repeat: the authoritative
       // workflow deduplicates it and returns the current snapshot.
       if (init.type === "start" && finishRequestedRef.current) {
@@ -1294,7 +1317,9 @@ export default function PageRecorder({
       result_id: resultId,
       tenant,
       subsystem,
-      restart: true,
+      restart: false,
+      reset_stage_seven: false,
+      attempt_id: stageSevenAttemptIdRef.current || undefined,
     };
     openRecordingSocket(actionRef.current);
     if (draft) return;

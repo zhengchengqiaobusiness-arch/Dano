@@ -264,6 +264,45 @@ class DraftStore:
             )
         return self._draft(row) if row else None
 
+    async def patch_recording_result_stage_seven(
+        self,
+        asset_draft_id: UUID,
+        expected_attempt_id: str,
+        expected_revision: int,
+        checkpoint: dict[str, Any],
+    ) -> AssetDraft | None:
+        from dano.onboarding.recording_results import is_recording_result_key
+        from dano.onboarding.recording_stage_seven import apply_stage_seven_checkpoint_patch
+
+        draft = await self.get_draft(asset_draft_id)
+        if draft is None or not is_recording_result_key(draft.asset_key):
+            return None
+        body = apply_stage_seven_checkpoint_patch(
+            dict(draft.body or {}),
+            expected_attempt_id=expected_attempt_id,
+            expected_revision=expected_revision,
+            checkpoint=checkpoint,
+        )
+        if body is None:
+            return None
+        body = _postgres_safe_json(body)
+        scope = Scope(tenant=draft.tenant, subsystem=draft.subsystem)
+        h = content_hash(
+            asset_type=draft.asset_type,
+            scope=scope,
+            asset_key=draft.asset_key,
+            body=body,
+        )
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE asset_drafts SET body=$2, content_hash=$3
+                   WHERE asset_draft_id=$1 RETURNING *""",
+                asset_draft_id,
+                json.dumps(body),
+                h,
+            )
+        return self._draft(row) if row else None
+
     async def record_validation(self, *, asset_draft_id: UUID, kind: ValidationKind, passed: bool,
                                 environment: str = "sandbox", credential_type: str = "test",
                                 request: dict | None = None, response: dict | None = None,

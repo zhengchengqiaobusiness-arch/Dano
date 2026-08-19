@@ -56,8 +56,17 @@ def workflow_snapshot_client_payload(snapshot: WorkflowSnapshot) -> dict[str, An
     looks empty. Full check reports are only built for terminal editor states.
     """
 
-    payload = snapshot.model_dump(mode="json", exclude={"draft"})
+    payload = snapshot.model_dump(mode="json", exclude={"draft", "operator_answers"})
     draft = snapshot.draft
+    if isinstance(draft, dict):
+        stage_seven = (draft.get("meta") or {}).get("stage_seven") if isinstance(draft.get("meta"), dict) else None
+        if isinstance(stage_seven, dict):
+            payload["stage_seven_attempt_id"] = str(
+                stage_seven.get("attempt_id") or payload.get("stage_seven_attempt_id") or ""
+            )
+            payload["machine_verification_status"] = str(
+                stage_seven.get("status") or payload.get("machine_verification_status") or ""
+            )
     if draft is None:
         payload["draft"] = None
         return payload
@@ -248,6 +257,8 @@ class RecordingGatewaySession:
     _closed: bool = field(default=False, init=False)
     _stage_six_result_id: Any = field(default=None, init=False)
     _machine_verification: bool = field(default=False, init=False)
+    _stage_seven_attempt_id: str = field(default="", init=False)
+    _stage_six_baseline: dict[str, Any] | None = field(default=None, init=False)
     _thoughts: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -308,6 +319,9 @@ class RecordingGatewaySession:
         *,
         title: str = "",
         result_id: Any = None,
+        baseline: dict[str, Any] | None = None,
+        attempt_id: str = "",
+        checkpoint: dict[str, Any] | None = None,
     ) -> None:
         if self.workflow is not None:
             if self.workflow._active():
@@ -319,6 +333,15 @@ class RecordingGatewaySession:
         self._capture_frozen = True
         self._machine_verification = True
         self._stage_six_result_id = result_id
+        self._stage_six_baseline = dict(baseline or draft)
+        self._stage_seven_attempt_id = str(
+            attempt_id
+            or (checkpoint or {}).get("attempt_id")
+            or ""
+        )
+        capability_attempts = dict((checkpoint or {}).get("capability_attempts") or {})
+        operator_answers = dict((checkpoint or {}).get("operator_answers") or {})
+        stage_seven_revision = int((checkpoint or {}).get("revision") or 0)
         self.workflow = self._new_workflow(WorkflowSnapshot(
             run_id=self.config.recording_id,
             action=self.config.action,
@@ -326,6 +349,10 @@ class RecordingGatewaySession:
             status=WorkflowStatus.EDITABLE,
             draft=draft,
             capture_frozen=True,
+            stage_seven_attempt_id=self._stage_seven_attempt_id,
+            stage_seven_revision=stage_seven_revision,
+            capability_attempts={str(key): int(value) for key, value in capability_attempts.items()},
+            operator_answers={str(key): str(value) for key, value in operator_answers.items()},
         ))
         await self.workflow.republish(machine_verification=True)
 
@@ -344,6 +371,8 @@ class RecordingGatewaySession:
             listener=self._on_snapshot,
             cancel_listener=self._cancel_analysis,
             persist_stage_six=persist,
+            persist_stage_seven=self._persist_stage_seven,
+            stage_six_baseline=self._stage_six_baseline,
         )
 
     async def dispatch(self, message: dict[str, Any]) -> None:
@@ -481,6 +510,12 @@ class RecordingGatewaySession:
         _steps, samples = self.capture.recorded_steps()
         for key, value in self.capture.recorded_form_samples().items():
             samples.setdefault(key, value)
+        form_samples_by_request = {}
+        form_samples_by_transaction = {}
+        if hasattr(self.capture, "recorded_form_samples_by_request"):
+            form_samples_by_request = self.capture.recorded_form_samples_by_request()
+        if hasattr(self.capture, "recorded_form_samples_by_transaction"):
+            form_samples_by_transaction = self.capture.recorded_form_samples_by_transaction()
         all_requests = self.capture.captured_all_requests()
         if not all_requests:
             raise ValueError("未捕获到业务接口请求，请在页面完成目标操作后重试")
@@ -520,6 +555,8 @@ class RecordingGatewaySession:
             tenant=self.config.tenant,
             subsystem=self.config.subsystem,
             request_role_overrides=role_overrides,
+            form_samples_by_request=form_samples_by_request,
+            form_samples_by_transaction=form_samples_by_transaction,
         )
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
@@ -951,6 +988,7 @@ class RecordingGatewaySession:
             draft=draft,
         )
         self._stage_six_result_id = saved.asset_draft_id
+        self._stage_six_baseline = dict(draft)
         await self._notify_recording_result(saved)
 
     async def _mark_stage_six_terminal(self, *, published: bool) -> None:
@@ -965,6 +1003,27 @@ class RecordingGatewaySession:
         )
         if updated is not None:
             await self._notify_recording_result(updated)
+
+    async def _persist_stage_seven(self, checkpoint: dict[str, Any]) -> None:
+        if self._stage_six_result_id is None:
+            return
+        from dano.assets.drafts import DraftStore
+
+        attempt_id = str(checkpoint.get("attempt_id") or self._stage_seven_attempt_id or "")
+        expected_revision = int(checkpoint.get("revision") or 0)
+        updated = await DraftStore().patch_recording_result_stage_seven(
+            self._stage_six_result_id,
+            expected_attempt_id=attempt_id,
+            expected_revision=expected_revision,
+            checkpoint=checkpoint,
+        )
+        if updated is None:
+            return
+        stored = (updated.body or {}).get("stage_seven") if isinstance(updated.body, dict) else None
+        if isinstance(stored, dict):
+            checkpoint["revision"] = int(stored.get("revision") or 0)
+            self._stage_seven_attempt_id = str(stored.get("attempt_id") or attempt_id)
+        await self._notify_recording_result(updated)
 
     async def _notify_recording_result(self, saved: Any) -> None:
         from dano.onboarding.recording_results import recording_result_summary
@@ -1100,6 +1159,10 @@ class RecordingSessionRegistry:
         title: str = "",
         result_id: Any = None,
         restart: bool = False,
+        reset_stage_seven: bool = False,
+        attempt_id: str = "",
+        baseline: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
     ) -> RecordingGatewaySession:
         async with self._lock:
             existing = self._sessions.get(config.action)
@@ -1112,7 +1175,16 @@ class RecordingSessionRegistry:
                 WorkflowStatus.WAITING_OPERATOR,
             }
         )
-        if in_flight and not restart:
+        reset = reset_stage_seven
+        if in_flight and not reset:
+            existing_attempt = str(getattr(existing, "_stage_seven_attempt_id", "") or "")
+            if attempt_id and existing_attempt and attempt_id != existing_attempt:
+                await send({
+                    "type": "error",
+                    "detail": "阶段 7 会话 attempt 不匹配，已拒绝覆盖正在运行的验证",
+                })
+                await existing.attach(send)
+                return existing
             await existing.attach(send)
             return existing
         if existing is not None:
@@ -1128,7 +1200,14 @@ class RecordingSessionRegistry:
         async with self._lock:
             self._sessions[config.action] = session
         try:
-            await session.start_verification_only(draft, title=title, result_id=result_id)
+            await session.start_verification_only(
+                draft,
+                title=title,
+                result_id=result_id,
+                baseline=baseline,
+                attempt_id=attempt_id,
+                checkpoint=None if reset else checkpoint,
+            )
         except Exception:
             async with self._lock:
                 self._sessions.pop(config.action, None)

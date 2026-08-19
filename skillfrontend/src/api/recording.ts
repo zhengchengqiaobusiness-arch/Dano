@@ -10,6 +10,9 @@ export interface RecordingResultSummary {
   created_at: string;
   published: boolean;
   machine_verification_ran?: boolean;
+  machine_verification_status?: string;
+  stage_seven_attempt_id?: string;
+  stage_seven_updated_at?: string;
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {
