@@ -242,6 +242,7 @@ class RecordingGatewaySession:
     _live_pending_reason: str = field(default="", init=False)
     _last_live_count: int = field(default=0, init=False)
     _live_iteration: int = field(default=0, init=False)
+    _live_failed_batches: set[tuple[str, int]] = field(default_factory=set, init=False)
     _live_notebook: LiveNotebook | None = field(default=None, init=False, repr=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
@@ -820,6 +821,7 @@ class RecordingGatewaySession:
                     return
                 self._capture_live_notebook()
                 self._last_live_count = len(self.capture.captured_all_requests())
+                self._live_failed_batches.clear()
                 after_counts = _capture_counts(self.capture)
                 after_spec = _spec_fields(pi.flow_spec)
                 note_run_fact(
@@ -910,7 +912,14 @@ class RecordingGatewaySession:
                     )
                 if reason == "final_request_tail":
                     raise
-                return
+                failed_key = (reason, self._last_live_count)
+                self._live_failed_batches.add(failed_key)
+                if not self._live_pending_reason:
+                    return
+                pending_key = (self._live_pending_reason, self._last_live_count)
+                if pending_key in self._live_failed_batches:
+                    self._live_pending_reason = ""
+                    return
 
     def _capture_live_notebook(self) -> None:
         if self._pi is None or self._pi.flow_spec is None:

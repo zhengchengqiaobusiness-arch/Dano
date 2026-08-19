@@ -641,11 +641,22 @@ def _grounded_ref_tokens(spec) -> set[str]:  # noqa: ANN001
                 tokens.add(value)
     for item in getattr(spec.request_facts, "field_evidence", []) or []:
         if isinstance(item, dict):
-            for key in ("evidence_id", "event_id", "action_id", "field"):
+            for key in ("evidence_id", "event_id", "action_id"):
                 value = str(item.get(key) or "")
                 if value:
                     tokens.add(value)
     return tokens
+
+
+def _ref_token_matches(ref: str, token: str) -> bool:
+    if not ref or not token:
+        return False
+    if ref == token:
+        return True
+    if ":" in ref:
+        _prefix, _, rest = ref.partition(":")
+        return bool(rest) and rest == token
+    return False
 
 
 def _require_grounded_refs(spec, op: str, evidence_refs: list[str]) -> None:  # noqa: ANN001
@@ -653,7 +664,7 @@ def _require_grounded_refs(spec, op: str, evidence_refs: list[str]) -> None:  # 
     tokens = _grounded_ref_tokens(spec)
     for ref in evidence_refs:
         text = str(ref)
-        if text in tokens or any(token and token in text for token in tokens):
+        if any(_ref_token_matches(text, token) for token in tokens):
             return
     for item in getattr(spec.request_facts, "field_evidence", []) or []:
         if isinstance(item, dict) and _evidence_matches_refs(item, evidence_refs):
