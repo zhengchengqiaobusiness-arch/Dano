@@ -33,9 +33,6 @@ from dano.execution.page.recording_analysis_state import (
 from dano.execution.page.flow_spec_core.fingerprints import (
     _stable_json_hash,
 )
-from dano.onboarding.recording_release import (
-    evaluate_recording_release,
-)
 
 
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:

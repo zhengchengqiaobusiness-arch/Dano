@@ -227,7 +227,7 @@ def test_no_duplicate_top_level_function_definitions_across_new_modules() -> Non
     duplicates = {
         name: paths
         for name, paths in defined.items()
-        if len(paths) > 1 and not name.startswith("test_") and name not in {"_bind_flow_spec_helpers"}
+        if len(set(paths)) > 1 and not name.startswith("test_") and name not in {"_bind_flow_spec_helpers"}
     }
     # Re-exports via assignment are not function definitions; this only flags
     # two `def`/`class` bodies for the same name.

@@ -56,7 +56,6 @@ KNOWN_MODULES = {
     "FieldRef": "dano.execution.page.recording_field_identity",
     "canonical_wire_path": "dano.execution.page.recording_field_identity",
     "resolve_field_ref": "dano.execution.page.recording_field_identity",
-    "evaluate_recording_release": "dano.onboarding.recording_release",
     "discover_response_key_maps": "dano.execution.page.value_tracing",
     "discover_workflow_value_links": "dano.execution.page.value_tracing",
 }
@@ -150,12 +149,9 @@ def strip_and_import(lines: list[str], segments: list[tuple[int, int, str, str]]
         + bind_block
     )
     text = "".join(out)
-    if "register_sync_flow_spec_models(sync_flow_spec_models)" in text:
-        text = text.replace(
-            "register_sync_flow_spec_models(sync_flow_spec_models)\n",
-            import_block + "\nregister_sync_flow_spec_models(sync_flow_spec_models)\n",
-            1,
-        )
+    marker = "register_sync_flow_spec_models(sync_flow_spec_models)\n"
+    if marker in text:
+        text = text.replace(marker, import_block + "\n" + marker, 1)
     else:
         text += import_block
     return text
@@ -286,7 +282,16 @@ def main() -> None:
     dest_mod = sys.argv[1]
     raw_names = sys.argv[2:]
     use_closure = "--closure" in raw_names
-    raw_names = [item for item in raw_names if item != "--closure"]
+    src_mod = "flow_spec"
+    filtered: list[str] = []
+    for item in raw_names:
+        if item == "--closure":
+            use_closure = True
+        elif item.startswith("--src="):
+            src_mod = item.split("=", 1)[1]
+        else:
+            filtered.append(item)
+    raw_names = filtered
     names: list[str] = []
     for item in raw_names:
         if item.startswith("owner:"):
@@ -297,7 +302,8 @@ def main() -> None:
             names.append(item)
     dest = PAGE / f"{dest_mod.replace('.', '/')}.py"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    source = SRC.read_text(encoding="utf-8")
+    src_path = PAGE / f"{src_mod.replace('.', '/')}.py"
+    source = src_path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     tree = ast.parse(source)
     local = defined_locally(tree)
@@ -326,11 +332,13 @@ def main() -> None:
     leftover_peers: dict[str, list[str]] = {}
     unresolved = []
     for name in sorted((free - wanted) - set(STDLIB) - MODELS - CAPTURE):
-        if name in peers:
+        if name in peers and peers[name] != f"dano.execution.page.{src_mod}":
             leftover_peers.setdefault(peers[name], []).append(name)
         elif name in KNOWN_MODULES:
             leftover_peers.setdefault(KNOWN_MODULES[name], []).append(name)
         elif name in local:
+            unresolved.append(name)
+        elif src_mod != "flow_spec" and name.startswith("_"):
             unresolved.append(name)
     for module, symbols in leftover_peers.items():
         extra_imports.append(f"from {module} import (")
@@ -340,8 +348,8 @@ def main() -> None:
     leftover = unresolved
     write_module(dest, header, segments, leftover)
     dest.write_text(inject_legacy_imports(dest.read_text(encoding="utf-8"), leftover), encoding="utf-8")
-    SRC.write_text(strip_and_import(lines, segments, dest_mod, sorted(wanted)), encoding="utf-8")
-    print(f"moved {len(wanted)} symbols to {dest}")
+    src_path.write_text(strip_and_import(lines, segments, dest_mod, sorted(wanted)), encoding="utf-8")
+    print(f"moved {len(wanted)} symbols to {dest} from {src_mod}")
 
 
 if __name__ == "__main__":
