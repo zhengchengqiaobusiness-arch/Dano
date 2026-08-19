@@ -78,6 +78,51 @@ def has_recorded_value(step: dict) -> bool:
     return value is not None and value != ""
 
 
+_RESPONSE_TEXT_MAX = 8192
+
+
+def _classify_http_response(
+    *,
+    status,
+    content_type: str = "",
+    json_data=None,
+    text: str | None = None,
+    body_bytes: bytes | None = None,
+) -> dict:
+    """Normalize a captured HTTP response without dropping non-JSON evidence."""
+    content_type = content_type or ""
+    ct = content_type.lower()
+    fields = {
+        "status": status,
+        "content_type": content_type,
+        "response_json": json_data,
+    }
+    if json_data is not None:
+        fields.update(response_kind="json", response_empty=False)
+        return fields
+    if status in {204, 205}:
+        fields.update(response_kind="empty", response_empty=True, response_size=0)
+        return fields
+    if body_bytes and not any(token in ct for token in ("text/", "json", "xml", "html", "javascript")):
+        fields.update(
+            response_kind="binary",
+            response_empty=False,
+            response_size=len(body_bytes),
+        )
+        return fields
+    raw_text = text if text is not None else ""
+    if body_bytes and not raw_text:
+        raw_text = body_bytes.decode("utf-8", errors="replace")
+    bounded = raw_text if len(raw_text) <= _RESPONSE_TEXT_MAX else raw_text[:_RESPONSE_TEXT_MAX] + "...[已截断]"
+    fields.update(
+        response_kind="text" if raw_text else "empty",
+        response_text=bounded if raw_text else None,
+        response_empty=not raw_text,
+        response_size=len(raw_text.encode("utf-8", errors="ignore")),
+    )
+    return fields
+
+
 _VIEW_W, _VIEW_H = 1600, 800
 _CAST_W, _CAST_H = _VIEW_W, _VIEW_H
 _CAST_QUALITY = 70
@@ -292,6 +337,82 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return false;
   }
+  function requiredStateOf(el) {
+    try {
+      if (requiredOf(el)) return 'required';
+      if (el.getAttribute && el.getAttribute('aria-required') === 'false') return 'optional';
+    } catch (e) {}
+    return 'unknown';
+  }
+  function recordedScalar(value) {
+    return (value === null || value === undefined) ? '' : value;
+  }
+  function isContentEditable(el) {
+    try {
+      return !!(el && (el.isContentEditable || (el.getAttribute && String(el.getAttribute('contenteditable') || '').toLowerCase() === 'true')));
+    } catch (e) { return false; }
+  }
+  function isSwitchEl(el) {
+    try {
+      if (!el) return false;
+      var role = String((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
+      if (role === 'switch') return true;
+      var type = String(el.type || '').toLowerCase();
+      var cls = String(el.className || '').toLowerCase();
+      if (type === 'checkbox' && /switch|toggle/.test(cls)) return true;
+      return !!(el.closest && el.closest('[role="switch"],.el-switch,.ant-switch,.van-switch,.q-toggle,.v-switch,.mat-mdc-slide-toggle,.ant-switch-inner'));
+    } catch (e) { return false; }
+  }
+  function readBooleanState(el) {
+    try {
+      var type = String(el.type || '').toLowerCase();
+      if (typeof el.checked === 'boolean' && (type === 'checkbox' || type === 'radio' || isSwitchEl(el))) return !!el.checked;
+      var aria = el.getAttribute && el.getAttribute('aria-checked');
+      if (aria === 'true') return true;
+      if (aria === 'false') return false;
+      var cls = String(el.className || '').toLowerCase();
+      if (/\bis-checked\b|\bis-active\b/.test(cls)) return true;
+      var host = el.closest && el.closest('[role="switch"],.el-switch,.ant-switch,.van-switch');
+      if (host && host !== el) return readBooleanState(host);
+    } catch (e) {}
+    return false;
+  }
+  function radioGroupOptions(el) {
+    try {
+      var name = el.name || '';
+      var root = el.form || document;
+      var nodes = name ? root.querySelectorAll('input[type="radio"][name="' + name.replace(/"/g, '\\"') + '"]') : [el];
+      var out = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        out.push({
+          label: clean(labelText(node) || node.getAttribute('aria-label') || node.value || ''),
+          value: recordedScalar(node.value),
+          checked: !!node.checked
+        });
+      }
+      return out;
+    } catch (e) { return []; }
+  }
+  function fileFieldFacts(el) {
+    var files = el.files || [];
+    var items = [];
+    for (var i = 0; i < files.length; i++) {
+      items.push({
+        filename: files[i].name || '',
+        mime_type: files[i].type || '',
+        size: files[i].size || 0
+      });
+    }
+    return {
+      filename: items[0] ? items[0].filename : '',
+      mime_type: items[0] ? items[0].mime_type : '',
+      size: items[0] ? items[0].size : 0,
+      multiple: !!el.multiple,
+      file_count: files.length,
+      files: items
+    };
+  }
   function controlAliases(el) {
     // Keep the request-field identity carried by the control structure.  A
     // repeated sample value ("1" is common in OA forms) is never an identity.
@@ -372,9 +493,12 @@ _RECORDER_JS = r"""() => {
       if (editableCombobox || (tag === 'input' && !el.readOnly && autocompleteHost)) return 'text';
       if (tag === 'select' || /select|cascader/.test(cls)) return 'select';
       if (role === 'combobox' && (el.readOnly || ariaAutocomplete === '' || ariaAutocomplete === 'none')) return 'select';
+      if (type === 'file') return 'file';
       if (type === 'number' || (el.getAttribute && el.getAttribute('role')) === 'spinbutton') return 'number';
+      if (role === 'switch' || isSwitchEl(el)) return 'switch';
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
+      if (isContentEditable(el)) return 'contenteditable';
       if (tag === 'textarea') return 'textarea';
       if (tag === 'input') return 'text';
     } catch (_) {}
@@ -398,6 +522,7 @@ _RECORDER_JS = r"""() => {
   function fieldEvidence(el) {
     if (!el) return {};
     var dialog = inDialog(el);
+    var reqState = requiredStateOf(el);
     return {
       field_aliases: controlAliases(el),
       control_kind: controlKind(el),
@@ -407,7 +532,8 @@ _RECORDER_JS = r"""() => {
       minimum: el.getAttribute && el.getAttribute('min') !== null ? Number(el.getAttribute('min')) : null,
       maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null,
       in_dialog: !!dialog,
-      surface: dialog ? 'dialog' : 'page'
+      surface: dialog ? 'dialog' : 'page',
+      required_state: reqState
     };
   }
   window.__danoRequiredFields = function () {
@@ -462,8 +588,9 @@ _RECORDER_JS = r"""() => {
   };
   window.__danoFormFieldEvidence = function () {
     var out = [];
+    var seenRadio = {};
     try {
-      var controls = document.querySelectorAll('input,select,textarea,[role="textbox"],[role="combobox"],[role="spinbutton"]');
+      var controls = document.querySelectorAll('input,select,textarea,[role="textbox"],[role="combobox"],[role="spinbutton"],[role="switch"],[contenteditable="true"]');
       for (var i = 0; i < controls.length; i++) {
         var el = controls[i];
         var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
@@ -471,19 +598,75 @@ _RECORDER_JS = r"""() => {
         var loc = locateField(el);
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
-        // 页面快照只为业务字段匹配服务；密码、验证码、支付与令牌类控件绝不采集值。
-        // Element Plus/Ant 等选择器经常把显示值放在宿主文本节点，内部 input.value
-        // 始终为空。复用实时选择捕获的同一读值逻辑，避免后续空 fill 覆盖已选项。
         var evidence = fieldEvidence(el);
-        var value = isSensitive(el) ? '' : clean(el.value || el.getAttribute('value') || '');
-        if (!value && evidence.control_kind === 'select') {
-          var selectHost = el.closest ? el.closest(TRIGGER_CLS) : null;
-          value = clean(pickVal(selectHost || el));
+        var ty = String(el.type || '').toLowerCase();
+        if (ty === 'radio') {
+          var group = el.name || field || loc;
+          if (seenRadio[group]) continue;
+          seenRadio[group] = true;
+          var radios = radioGroupOptions(el);
+          var selected = null;
+          for (var r = 0; r < radios.length; r++) { if (radios[r].checked) selected = radios[r]; }
+          field = el.name || field;
+          evidence.control_kind = 'radio';
+          evidence.options = radios.map(function (item) { return {label: item.label, value: item.value}; });
+          evidence.group_name = el.name || '';
+          evidence.selected_label = selected ? selected.label : '';
+          var radioValue = selected ? selected.value : '';
+          if (!label && !field) continue;
+          var dialogRadio = inDialog(el);
+          var reqRadio = requiredStateOf(el);
+          out.push({
+            field: field, label: label, value: radioValue, required: reqRadio === 'required',
+            required_state: reqRadio,
+            required_observed: reqRadio === 'required' ? true : (reqRadio === 'optional' ? false : null),
+            field_aliases: evidence.field_aliases || [],
+            control_kind: 'radio',
+            input_type: 'radio',
+            options: evidence.options,
+            group_name: evidence.group_name,
+            selected_label: evidence.selected_label,
+            disabled: !!evidence.disabled,
+            read_only: !!evidence.read_only,
+            in_dialog: !!dialogRadio,
+            surface: dialogRadio ? 'dialog' : 'page'
+          });
+          continue;
+        }
+        var value;
+        if (isSensitive(el)) {
+          value = '';
+        } else if (ty === 'file' || evidence.control_kind === 'file') {
+          var facts = fileFieldFacts(el);
+          evidence.filename = facts.filename;
+          evidence.mime_type = facts.mime_type;
+          evidence.size = facts.size;
+          evidence.multiple = facts.multiple;
+          evidence.file_count = facts.file_count;
+          evidence.files = facts.files;
+          evidence.control_kind = 'file';
+          value = facts.filename || '';
+        } else if (ty === 'checkbox' || evidence.control_kind === 'checkbox' || evidence.control_kind === 'switch' || isSwitchEl(el)) {
+          value = readBooleanState(el);
+          evidence.checked = value;
+        } else if (isContentEditable(el) || evidence.control_kind === 'contenteditable') {
+          value = recordedScalar(el.innerText || el.textContent);
+          evidence.control_kind = 'contenteditable';
+        } else {
+          value = recordedScalar(el.value);
+          if (value === '' && el.getAttribute) value = recordedScalar(el.getAttribute('value'));
+          if ((value === '' || value === null) && evidence.control_kind === 'select') {
+            var selectHost = el.closest ? el.closest(TRIGGER_CLS) : null;
+            value = clean(pickVal(selectHost || el));
+          }
         }
         if (!label && !field) continue;
         var dialog = inDialog(el);
-        out.push({
-          field: field, label: label, value: value, required: requiredOf(el),
+        var reqState = requiredStateOf(el);
+        var item = {
+          field: field, label: label, value: value, required: reqState === 'required',
+          required_state: reqState,
+          required_observed: reqState === 'required' ? true : (reqState === 'optional' ? false : null),
           field_aliases: evidence.field_aliases || [],
           control_kind: evidence.control_kind || 'unknown',
           input_type: evidence.input_type || '',
@@ -493,7 +676,11 @@ _RECORDER_JS = r"""() => {
           maximum: evidence.maximum,
           in_dialog: !!dialog,
           surface: dialog ? 'dialog' : 'page'
+        };
+        ['checked','filename','mime_type','size','multiple','file_count','files'].forEach(function (key) {
+          if (evidence[key] !== undefined) item[key] = evidence[key];
         });
+        out.push(item);
       }
     } catch (e) {}
     return out.slice(0, 200);
@@ -577,11 +764,12 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return out.slice(0, 200);
   };
-  function emitFormSnapshot() {
+  function emitFormSnapshot(actionId) {
     if (onLoginPage()) return;
     try {
       window.__danoRecord(JSON.stringify({
         op: 'form_snapshot',
+        action_id: actionId || '',
         required_fields: window.__danoRequiredFields ? window.__danoRequiredFields() : [],
         fields: window.__danoFormFieldEvidence ? window.__danoFormFieldEvidence() : [],
         output_fields: window.__danoTableColumnEvidence ? window.__danoTableColumnEvidence() : [],
@@ -665,15 +853,18 @@ _RECORDER_JS = r"""() => {
       if (!existingActionId) actionSeq += 1;
       var actionId = existingActionId || ('action_' + actionSeq);
       var startMutationSeq = mutationSeq;
-      window.__danoRecord(JSON.stringify({
+      var reqState = (evidence && evidence.required_state) || (required ? 'required' : 'unknown');
+      var payload = {
         op: op,
         action_id: actionId,
         observed_at: Date.now(),
         locator: loc,
-        value: value || '',
+        value: (value === null || value === undefined) ? '' : value,
         field: field || '',
-        required: !!required,
-        options: options || [],
+        required: reqState === 'required',
+        required_state: reqState,
+        required_observed: reqState === 'required' ? true : (reqState === 'optional' ? false : null),
+        options: options || (evidence && evidence.options) || [],
         field_aliases: (evidence && evidence.field_aliases) || [],
         control_kind: (evidence && evidence.control_kind) || 'unknown',
         input_type: (evidence && evidence.input_type) || '',
@@ -686,18 +877,31 @@ _RECORDER_JS = r"""() => {
         enum_source: (evidence && evidence.enum_source) || '',
         mapping_complete: !!(evidence && evidence.mapping_complete),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
-      }));
+      };
+      if (evidence) {
+        ['checked','group_name','selected_label','filename','mime_type','size','multiple','file_count','files'].forEach(function (key) {
+          if (evidence[key] !== undefined) payload[key] = evidence[key];
+        });
+      }
+      window.__danoRecord(JSON.stringify(payload));
       setTimeout(function () { emitDomEffect(actionId, startMutationSeq); }, 350);
     } catch (e) {}
   }
   var pendingFill = {};
   var fillTimers = {};
+  function currentFillValue(el) {
+    if (isContentEditable(el)) return recordedScalar(el.innerText || el.textContent);
+    return recordedScalar(el.value);
+  }
   function scheduleFill(el) {
     try {
       if (isSensitive(el)) return;
       var loc = locateField(el);
       if (!loc) return;
-      pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el) };
+      var existing = pendingFill[loc];
+      var actionId = existing && existing.actionId ? existing.actionId : null;
+      if (!actionId) { actionSeq += 1; actionId = 'action_' + actionSeq; }
+      pendingFill[loc] = { el: el, value: currentFillValue(el), field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el), actionId: actionId };
       if (fillTimers[loc]) clearTimeout(fillTimers[loc]);
       fillTimers[loc] = setTimeout(function () { flushFill(loc); }, 300);
     } catch (e) {}
@@ -708,7 +912,9 @@ _RECORDER_JS = r"""() => {
       if (!p) return;
       delete pendingFill[loc];
       if (fillTimers[loc]) { clearTimeout(fillTimers[loc]); delete fillTimers[loc]; }
-      emit('fill', loc, p.value, p.field, p.required, [], p.evidence || fieldEvidence(p.el));
+      var evidence = p.evidence || fieldEvidence(p.el);
+      if (isContentEditable(p.el)) evidence.control_kind = 'contenteditable';
+      emit('fill', loc, p.value, p.field, p.required, [], evidence, p.actionId);
     } catch (e) {}
   }
   function flushElementFill(el) {
@@ -881,11 +1087,48 @@ _RECORDER_JS = r"""() => {
     }
     return null;
   }
+  function emitRadioGroup(el) {
+    var loc = locateField(el);
+    if (!loc) return;
+    var evidence = fieldEvidence(el);
+    evidence.control_kind = 'radio';
+    var options = radioGroupOptions(el);
+    var selected = null;
+    for (var i = 0; i < options.length; i++) { if (options[i].checked) selected = options[i]; }
+    evidence.group_name = el.name || '';
+    evidence.selected_label = selected ? selected.label : '';
+    evidence.options = options.map(function (item) { return {label: item.label, value: item.value}; });
+    var field = el.name || fieldOf(loc);
+    var groupLoc = el.name ? ('css=input[type="radio"][name="' + String(el.name).replace(/"/g, '\\"') + '"]') : loc;
+    emit('select', groupLoc, selected ? selected.value : recordedScalar(el.value), field, requiredOf(el), evidence.options, evidence);
+  }
+  function emitToggle(el, kind) {
+    var loc = locateField(el) || locateClickable(el);
+    if (!loc) return;
+    var evidence = fieldEvidence(el);
+    evidence.control_kind = kind || (isSwitchEl(el) ? 'switch' : 'checkbox');
+    var checked = readBooleanState(el);
+    evidence.checked = checked;
+    emit('toggle', loc, checked, fieldOf(loc), requiredOf(el), [], evidence);
+  }
+  function emitFile(el) {
+    var loc = locateField(el);
+    if (!loc) return;
+    var evidence = fieldEvidence(el);
+    evidence.control_kind = 'file';
+    var facts = fileFieldFacts(el);
+    evidence.filename = facts.filename;
+    evidence.mime_type = facts.mime_type;
+    evidence.size = facts.size;
+    evidence.multiple = facts.multiple;
+    evidence.file_count = facts.file_count;
+    evidence.files = facts.files;
+    emit('upload', loc, facts.filename || '', fieldOf(loc), requiredOf(el), [], evidence);
+  }
   document.addEventListener('input', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
-    // 密码/验证码/支付/令牌敏感字段绝不录；change/blur 路径也复用同一判断。
     if (isSensitive(el)) return;
-    // 密码框绝不录(安全);非文本类型跳过
+    if (isContentEditable(el)) { scheduleFill(el); return; }
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) {
       scheduleFill(el);
     }
@@ -893,18 +1136,24 @@ _RECORDER_JS = r"""() => {
   document.addEventListener('change', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
+    if (isContentEditable(el)) { flushElementFill(el); return; }
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
     if (tag === 'select') {
       var l1 = locateField(el); var nativeEvidence = fieldEvidence(el);
       nativeEvidence.enum_source = 'dom'; nativeEvidence.mapping_complete = true;
       emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el), nativeEvidence);
+    } else if (tag === 'input' && ty === 'file') {
+      emitFile(el);
+    } else if (tag === 'input' && ty === 'checkbox') {
+      emitToggle(el, isSwitchEl(el) ? 'switch' : 'checkbox');
+    } else if (tag === 'input' && ty === 'radio') {
+      emitRadioGroup(el);
     }
-    else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   document.addEventListener('blur', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
-    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
+    if (isContentEditable(el) || tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
   // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。
@@ -1125,7 +1374,13 @@ _RECORDER_JS = r"""() => {
       return;
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
-    if (e.target.closest && e.target.closest('input,select,textarea')) { clearActiveControl(); return; }
+    if (e.target.closest && e.target.closest('input,select,textarea,[contenteditable="true"]')) { clearActiveControl(); return; }
+    var switchHost = e.target.closest && e.target.closest('[role="switch"],.el-switch,.ant-switch,.van-switch,.q-toggle,.v-switch,.mat-mdc-slide-toggle');
+    if (switchHost) {
+      var switchTarget = switchHost;
+      setTimeout(function () { emitToggle(switchTarget, 'switch'); }, 50);
+      return;
+    }
     // D) 普通可点元素(按钮/卡片/菜单/链接)
     clearActiveControl();
     var el = target(e.target); if (!el) return;
@@ -1133,9 +1388,14 @@ _RECORDER_JS = r"""() => {
     var role = roleOf(el); var name = accName(el);
     var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
     var isFormCommand = role === 'button' && FORM_COMMAND.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
-    if (isFormCommand) emitFormSnapshot();
-    if (isFormCommand) scheduleEvidenceSnapshot();
-    emit(isSubmit ? 'submit' : 'click', loc, '', '');
+    var formActionId = '';
+    if (isFormCommand) {
+      actionSeq += 1;
+      formActionId = 'action_' + actionSeq;
+      emitFormSnapshot(formActionId);
+      scheduleEvidenceSnapshot();
+    }
+    emit(isSubmit ? 'submit' : 'click', loc, '', '', false, [], null, formActionId || undefined);
   }, true);
 }"""
 
@@ -1449,22 +1709,40 @@ class RecordSession:
                 pass
         return idx
 
-    def _attach_response(self, *, url: str, method: str, response_json, status, content_type: str,
-                         request_index: int | None = None) -> bool:
+    def _attach_response(self, *, url: str, method: str, status, content_type: str,
+                         request_index: int | None = None,
+                         response_json=None, response_kind: str = "",
+                         response_text: str | None = None, response_empty: bool | None = None,
+                         response_size: int | None = None) -> bool:
         """优先按请求实例精确贴回响应，缺少实例锚点时才退回 url+method。
 
         集中处理反查 + 改字段,避免 _route / _on_response / 后续 P0-3 依赖闭包都各自遍历 all_requests。
         P0-2:贴完响应后顺手再分类一次(此时 read_option / business_get 才能判准)。"""
         candidates = self.all_requests
         if request_index is not None:
-            candidates = [r for r in self.all_requests if r.get("index") == request_index]
+            indexed = [r for r in self.all_requests if r.get("index") == request_index]
+            if indexed:
+                candidates = indexed
         for r in reversed(candidates):
-            if r.get("url") == url and r.get("method") == method and r.get("response_json") is None:
+            if request_index is None and not (r.get("url") == url and r.get("method") == method):
+                continue
+            if request_index is None and r.get("response_kind"):
+                continue
+            r["status"] = status
+            r["response_status"] = status
+            r["content_type"] = content_type or r.get("content_type", "")
+            if response_kind:
+                r["response_kind"] = response_kind
+            if response_json is not None:
                 r["response_json"] = response_json
-                r["status"] = status
-                r["content_type"] = content_type or r.get("content_type", "")
-                self._classify_entry(r)                  # P0-2:响应落地后再分一次(更准)
-                return True
+            if response_text is not None:
+                r["response_text"] = response_text
+            if response_empty is not None:
+                r["response_empty"] = response_empty
+            if response_size is not None:
+                r["response_size"] = response_size
+            self._classify_entry(r)
+            return True
         return False
 
     def _classify_entry(self, entry: dict) -> None:
@@ -1684,7 +1962,7 @@ class RecordSession:
             return
         try:
             m = (response.request.method or "").upper()
-            if m == "GET" or m in ("POST", "PUT", "PATCH"):   # GET=select 候选源;写=取响应(Q3 步链 taskId)
+            if m in ("GET", "POST", "PUT", "PATCH", "DELETE"):   # GET=select 候选源;写/删=把响应贴回原 request_id
                 asyncio.create_task(self._on_response(response))
         except Exception:  # noqa: BLE001
             pass
@@ -1719,32 +1997,47 @@ class RecordSession:
                         self.script_sources.append({"url": response.url, "text": body})
                         self._script_source_bytes += body_size
                 return
-            # P0-1:全量捕获响应(JSON body)→ 贴回 all_requests 同源记录(P0-3 依赖闭包靠它发现 step 串联)。
-            # 写/读响应统一贴回 all_requests；列表候选仍额外进入派生 reads 投影。
-            # 容错:content-type 不是 JSON 也再试一次 response.json()(治"没设 ct 但 body 是 JSON 文本")。
-            if "json" in (ct or "").lower():
+            request_index = self._request_fact_index.get(id(response.request))
+            json_data = None
+            text = None
+            if "json" in (ct or "").lower() or not ct:
                 try:
-                    data = await response.json()
+                    json_data = await response.json()
                 except Exception:  # noqa: BLE001
-                    data = None
-                if data is not None:
-                    request_index = self._request_fact_index.get(id(response.request))
-                    self._attach_response(
-                        url=url, method=m, response_json=data,
-                        status=response.status, content_type=ct,
-                        request_index=request_index,
-                    )
-                    # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
+                    json_data = None
+            if json_data is None:
+                try:
+                    text = await response.text()
+                except Exception:  # noqa: BLE001
+                    text = None
+                if text and "json" in (ct or "").lower():
+                    try:
+                        json_data = json.loads(text)
+                        text = None
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif text and not ct:
+                    stripped = text.lstrip()
+                    if stripped[:1] in "{[":
+                        try:
+                            json_data = json.loads(text)
+                            text = None
+                        except Exception:  # noqa: BLE001
+                            pass
+            fields = _classify_http_response(
+                status=response.status,
+                content_type=ct,
+                json_data=json_data,
+                text=text,
+            )
+            self._attach_response(
+                url=url, method=m, request_index=request_index, **fields,
+            )
             if any(n in url.lower() for n in _READ_NOISE):    # 只跳静态/流(保留字典/列表接口)
                 return
-            # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆。
-            # 提交那条写请求返回的是结果对象、非列表 → as_list_payload 为 None,不会被误当候选源。
-            data_for_list = data if 'data' in locals() else None
+            data_for_list = json_data
             if data_for_list is None:
-                try:
-                    data_for_list = await response.json()
-                except Exception:  # noqa: BLE001
-                    return
+                return
             items = as_list_payload(data_for_list)
             if items is None:
                 return
@@ -1938,10 +2231,21 @@ class RecordSession:
         if step.get("op") == "form_snapshot":
             step["event_id"] = event_id
             step["observed_at"] = observed_at
+            action_id = str(step.get("action_id") or "")
+            if action_id:
+                transaction_id = "|".join(part for part in (
+                    scope[0] or "page_unknown",
+                    scope[1] or "frame_unknown",
+                    action_id,
+                ))
+                step["action_id"] = action_id
+                step["transaction_id"] = transaction_id
             self.form_snapshots.append(step)
             self.page_events.append({
                 "event_id": event_id,
                 "kind": "form_snapshot",
+                "action_id": action_id,
+                "transaction_id": str(step.get("transaction_id") or ""),
                 "observed_at": observed_at,
                 "page_id": scope[0],
                 "frame_id": scope[1],
@@ -1962,6 +2266,20 @@ class RecordSession:
             action_id,
         ))
         step["transaction_id"] = transaction_id
+        if op == "upload":
+            filename = str(step.get("filename") or "").strip()
+            raw_value = step.get("value")
+            if isinstance(raw_value, str) and (
+                "fakepath" in raw_value.casefold() or "\\" in raw_value or raw_value.startswith("/")
+            ):
+                basename = filename or Path(raw_value.replace("\\", "/")).name
+                if "fakepath" in basename.casefold():
+                    basename = filename
+                step["value"] = basename
+                if not filename:
+                    step["filename"] = basename
+            elif not filename and isinstance(raw_value, str):
+                step["filename"] = Path(raw_value.replace("\\", "/")).name
         self.page_events.append({
             "event_id": event_id,
             "kind": "action",
@@ -1971,7 +2289,7 @@ class RecordSession:
             "locator": str(step.get("locator") or ""),
             "field": str(step.get("field") or ""),
             "required": bool(step.get("required")),
-            "has_value": bool(step.get("value")),
+            "has_value": has_recorded_value(step),
             "observed_at": observed_at,
             "page_id": scope[0],
             "frame_id": scope[1],
@@ -2412,7 +2730,7 @@ class RecordSession:
         for i, s in enumerate(self.steps):
             field = s.get("field") or None
             steps.append({"op": s["op"], "locator": s.get("locator"), "field": field})
-            if field and s.get("op") in ("fill", "select", "pick") and has_recorded_value(s):
+            if field and s.get("op") in ("fill", "select", "pick", "toggle", "upload") and has_recorded_value(s):
                 samples[keymap[i]] = s.get("value", "")
         return steps, samples
 
@@ -3116,8 +3434,17 @@ class RecordSession:
                     "surface": field_surface(field),
                 })
         for step in self.steps:
-            if step.get("op") not in {"fill", "select", "pick"}:
+            if step.get("op") not in {"fill", "select", "pick", "toggle", "upload"}:
                 continue
+            extra = {
+                key: step.get(key)
+                for key in (
+                    "checked", "group_name", "selected_label", "options",
+                    "filename", "mime_type", "size", "multiple", "file_count", "files",
+                    "required_state", "required_observed",
+                )
+                if step.get(key) not in (None, "")
+            }
             evidence.append({
                 "field": str(step.get("field") or ""),
                 "label": str(step.get("field") or ""),
@@ -3138,6 +3465,7 @@ class RecordSession:
                 "observed_at": step.get("observed_at"),
                 "in_dialog": bool(step.get("in_dialog")),
                 "surface": str(step.get("surface") or ("dialog" if step.get("in_dialog") else "page")),
+                **extra,
             })
         deduped: list[dict] = []
         for item in evidence:
@@ -3206,9 +3534,9 @@ class RecordSession:
             )
         return out
 
-    def recorded_form_samples(self) -> dict[str, str]:
+    def recorded_form_samples(self) -> dict[str, object]:
         """Return submit-time label/value evidence, preserving range members."""
-        out: dict[str, str] = {}
+        out: dict[str, object] = {}
         counters: dict[str, int] = {}
         page_fields: list[dict] = []
         dialog_fields: list[dict] = []
@@ -3222,8 +3550,8 @@ class RecordSession:
                 dialog_fields = dialog
         for field in [*page_fields, *dialog_fields]:
             label = str(field.get("label") or field.get("field") or "").strip()
-            value = str(field.get("value") or "").strip()
-            if not label or not value:
+            value = field.get("value")
+            if not label or not has_recorded_value({"value": value}):
                 continue
             counters[label] = counters.get(label, 0) + 1
             key = label if counters[label] == 1 else f"{label}#{counters[label]}"

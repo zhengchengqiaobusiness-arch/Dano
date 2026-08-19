@@ -91,57 +91,175 @@ def _multipart_contains_file(post_data: str | None) -> bool:
     )
 
 
-def _parse_multipart_text_fields(post_data: str) -> dict[str, object] | None:
-    """Parse ordinary multipart text controls without retaining file bytes."""
+def _form_pairs_to_map(pairs: list[tuple[str, str]]) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for name, value in pairs:
+        existing = fields.get(name)
+        if existing is None:
+            fields[name] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            fields[name] = [existing, value]
+    return fields
+
+
+def _public_body_path(path: str) -> str:
+    public = str(path or "").replace(f".{_JSONSTR}", "").replace(f"{_JSONSTR}.", "")
+    return "" if public == _JSONSTR else public
+
+
+def _public_body_paths(value: object) -> list[str]:
+    paths: list[str] = []
+    for path, _tokens, _text, _raw in _leaf_paths(value):
+        public = _public_body_path(path)
+        if public and public not in paths:
+            paths.append(public)
+    return paths
+
+
+def _parse_multipart_complete(post_data: str) -> dict[str, object] | None:
+    """Parse multipart text fields and file metadata without keeping file bytes."""
     if "content-disposition" not in post_data.lower() or "form-data" not in post_data.lower():
         return None
     first_line = post_data.splitlines()[0].strip() if post_data.splitlines() else ""
     if not first_line.startswith("--"):
         return None
-    fields: dict[str, object] = {}
+    text_fields: dict[str, object] = {}
+    file_fields: list[dict[str, object]] = []
     for part in post_data.split(first_line)[1:]:
-        part = part.strip("\r\n-")
-        if not part:
+        part = part.strip("\r\n")
+        if not part or part in {"-", "--"} or part.startswith("--"):
             continue
         headers, separator, value = part.partition("\r\n\r\n")
         if not separator:
             headers, separator, value = part.partition("\n\n")
-        if not separator or _multipart_contains_file(headers):
+        if not separator:
             continue
-        match = _re.search(r'\bname\s*=\s*"([^"]+)"', headers, _re.I)
-        if not match:
+        name_match = _re.search(r'\bname\s*=\s*"([^"]+)"', headers, _re.I)
+        if not name_match:
             continue
-        name = match.group(1)
-        parsed: object = value.rstrip("\r\n")
-        existing = fields.get(name)
+        name = name_match.group(1)
+        if name.casefold() == "boundary":
+            continue
+        filename_match = _re.search(r'\bfilename\s*=\s*"([^"]*)"', headers, _re.I)
+        body = value.rstrip("\r\n")
+        if filename_match is not None:
+            mime_match = _re.search(r"content-type\s*:\s*([^\r\n]+)", headers, _re.I)
+            file_fields.append({
+                "name": name,
+                "filename": filename_match.group(1),
+                "mime_type": mime_match.group(1).strip() if mime_match else "",
+                "size": len(body.encode("utf-8", errors="ignore")),
+            })
+            continue
+        parsed: object = body
+        existing = text_fields.get(name)
         if existing is None:
-            fields[name] = parsed
+            text_fields[name] = parsed
         elif isinstance(existing, list):
             existing.append(parsed)
         else:
-            fields[name] = [existing, parsed]
-    return fields or None
+            text_fields[name] = [existing, parsed]
+    if not text_fields and not file_fields:
+        return None
+    field_paths = list(dict.fromkeys([
+        *_public_body_paths(text_fields),
+        *[str(item.get("name") or "") for item in file_fields if item.get("name")],
+    ]))
+    return {
+        "kind": "multipart",
+        "value": text_fields,
+        "field_paths": field_paths,
+        "file_fields": file_fields,
+        "parse_complete": True,
+    }
 
 
-def _parse_body(post_data):  # noqa: ANN001, ANN202
+def _parse_multipart_text_fields(post_data: str) -> dict[str, object] | None:
+    """Parse ordinary multipart text controls without retaining file bytes."""
+    parsed = _parse_multipart_complete(post_data)
+    if parsed is None:
+        return None
+    return parsed["value"] or None
+
+
+def parse_recorded_request_body(post_data, content_type: str = "") -> dict:
+    """Single request-body parser for capture, field evidence and FlowSpec flatten."""
+    empty = {
+        "kind": "empty",
+        "value": None,
+        "field_paths": [],
+        "file_fields": [],
+        "parse_complete": True,
+    }
+    if isinstance(post_data, (bytes, bytearray)):
+        post_data = post_data.decode("utf-8", errors="replace")
+    if post_data is None or post_data == "":
+        return empty
     if isinstance(post_data, (dict, list)):
-        return _unwrap_json_strings(copy.deepcopy(post_data))
-    if not post_data:
-        return None
+        value = _unwrap_json_strings(copy.deepcopy(post_data))
+        return {
+            "kind": "json",
+            "value": value,
+            "field_paths": _public_body_paths(value),
+            "file_fields": [],
+            "parse_complete": True,
+        }
     if not isinstance(post_data, str):
-        return None
-    multipart = _parse_multipart_text_fields(post_data)
-    if multipart is not None:
-        return multipart
-    try:
-        return _unwrap_json_strings(json.loads(post_data))   # JSON:解析 + 解开内层 stringified JSON,内层字段可参数化
-    except Exception:  # noqa: BLE001 —— 非 JSON,尝试 application/x-www-form-urlencoded(a=1&b=2)
-        if "=" in post_data:
-            from urllib.parse import parse_qsl
-            pairs = parse_qsl(post_data, keep_blank_values=True)
-            if pairs:
-                return dict(pairs)                           # 扁平表单字段(同样可参数化 / identity / select)
-        return None
+        return {**empty, "kind": "text", "parse_complete": False}
+
+    content_type = str(content_type or "").lower()
+    stripped = post_data.strip()
+    looks_json = "json" in content_type or stripped[:1] in {"{", "["}
+    looks_multipart = "multipart" in content_type or (
+        stripped.startswith("--")
+        and "content-disposition" in post_data.lower()
+        and "form-data" in post_data.lower()
+    )
+    if looks_json:
+        try:
+            loaded = json.loads(post_data)
+        except Exception:  # noqa: BLE001
+            loaded = None
+        if isinstance(loaded, (dict, list)):
+            value = _unwrap_json_strings(loaded)
+            return {
+                "kind": "json",
+                "value": value,
+                "field_paths": _public_body_paths(value),
+                "file_fields": [],
+                "parse_complete": True,
+            }
+    if looks_multipart:
+        multipart = _parse_multipart_complete(post_data)
+        if multipart is not None:
+            return multipart
+    if "=" in post_data:
+        pairs = parse_qsl(post_data, keep_blank_values=True)
+        if pairs:
+            value = _form_pairs_to_map(pairs)
+            return {
+                "kind": "form",
+                "value": value,
+                "field_paths": _public_body_paths(value),
+                "file_fields": [],
+                "parse_complete": True,
+            }
+    return {
+        "kind": "text",
+        "value": post_data,
+        "field_paths": [],
+        "file_fields": [],
+        "parse_complete": False,
+    }
+
+
+def _parse_body(post_data, content_type: str = ""):  # noqa: ANN001, ANN202
+    parsed = parse_recorded_request_body(post_data, content_type)
+    if parsed["kind"] in {"json", "form", "multipart"}:
+        return parsed["value"]
+    return None
 
 
 def _values(node) -> list[str]:
@@ -2128,9 +2246,12 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
     collapse_paths:**列表多选**接管的对象数组路径(participants…)→ 其下逐元素叶子折叠成**一个**列表参数字段
     (type=list-enum),前端只见一个"选多个人"的参数,不再是 participants[0].userId… 一堆。
     """
-    body = _parse_body(post_data)
-    if body is None:
+    parsed = parse_recorded_request_body(post_data)
+    body = parsed["value"]
+    if body is None and not parsed.get("file_fields"):
         return []
+    if body is None:
+        body = {}
     samples = samples or {}
     required_labels = required_labels or set()
     strict_control_evidence = any(
@@ -2205,8 +2326,14 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
     def walk(node, path):
         if isinstance(node, dict):
+            if set(node) == {_JSONSTR}:
+                walk(node[_JSONSTR], path)
+                return
             for k, v in node.items():
-                walk(v, f"{path}.{k}" if path else k)
+                if k == _JSONSTR:
+                    walk(v, path)
+                else:
+                    walk(v, f"{path}.{k}" if path else k)
         elif isinstance(node, list):
             if not node and path:
                 key = path.split(".")[-1].split("[")[0]
@@ -2222,6 +2349,14 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             leaves.append((path, key, node, sv, time_like, internal))
 
     walk(body, "")
+    seen_file_paths = {path for path, _key, _node, _sv, _tl, _internal in leaves}
+    for item in parsed.get("file_fields") or []:
+        name = str(item.get("name") or "")
+        if not name or name in seen_file_paths:
+            continue
+        filename = item.get("filename") or ""
+        leaves.append((name, name, filename, str(filename), False, False))
+        seen_file_paths.add(name)
     body_value_counts: dict[str, int] = {}
     for _path, _key, _node, value, _time_like, _internal in leaves:
         body_value_counts[value] = body_value_counts.get(value, 0) + 1
@@ -2283,7 +2418,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             new_label = str(item.get("label") or item.get("field") or "").strip()
             old_op = str(previous.get("op") or "").lower()
             new_op = str(item.get("op") or "").lower()
-            interacted = {"fill", "select", "pick"}
+            interacted = {"fill", "select", "pick", "toggle", "upload"}
             if old_label and new_label and old_label != new_label:
                 if new_op in interacted and old_op not in interacted:
                     pass
@@ -2312,8 +2447,14 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             (item or {}).get("disabled") or (item or {}).get("read_only")
         ):
             return "enum"
-        if kind in {"checkbox", "radio"}:
+        if kind in {"checkbox", "switch"}:
             return "boolean"
+        if kind == "radio":
+            return "enum"
+        if kind in {"contenteditable", "textarea"}:
+            return "string"
+        if kind == "file":
+            return "file"
         return fallback
 
     labels: dict[int, tuple] = {}
@@ -2616,15 +2757,25 @@ def _split_path(path) -> list:
     return out
 
 
+def _unwrap_jsonstr_node(node):  # noqa: ANN001, ANN202
+    if isinstance(node, dict) and set(node) == {_JSONSTR}:
+        return node[_JSONSTR]
+    return node
+
+
 def _get_by_path(node, path: str):
     for k in _split_path(path):
+        node = _unwrap_jsonstr_node(node)
         try:
             node = node[k]
         except Exception:  # noqa: BLE001
-            # H18 修复:路径不可达时记 debug 日志,便于排查"参数找不到 → 运行期 None 静默注入"
-            _log.debug("get_by_path miss path=%r k=%r", path, k)
-            return None
-    return node
+            inner = node.get(_JSONSTR) if isinstance(node, dict) else None
+            try:
+                node = inner[k]
+            except Exception:  # noqa: BLE001
+                _log.debug("get_by_path miss path=%r k=%r", path, k)
+                return None
+    return _unwrap_jsonstr_node(node)
 
 
 def _get_many_by_path(node, path: str) -> list:
@@ -2658,11 +2809,19 @@ def _set_by_path(node, path, value) -> bool:
     else:
         ks = _split_path(path)
     for k in ks[:-1]:
+        node = _unwrap_jsonstr_node(node)
         try:
             node = node[k]
         except (KeyError, IndexError, TypeError):
-            return False                                     # 路径不可达 / 中间节点不是容器
+            inner = node.get(_JSONSTR) if isinstance(node, dict) else None
+            try:
+                node = inner[k]
+            except (KeyError, IndexError, TypeError, AttributeError):
+                return False                                     # 路径不可达 / 中间节点不是容器
+    node = _unwrap_jsonstr_node(node)
     try:
+        if isinstance(node, dict) and ks[-1] not in node and _JSONSTR in node:
+            node = node[_JSONSTR]
         node[ks[-1]] = value
         return True
     except (KeyError, IndexError, TypeError):

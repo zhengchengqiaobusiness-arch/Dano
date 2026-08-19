@@ -241,6 +241,10 @@ class RequestFact(BaseModel):
     post_data: Any = None
     response_status: Any = None
     response_json: Any = None
+    response_kind: str = ""
+    response_text: str | None = None
+    response_empty: bool = False
+    response_size: Any = None
     response_schema: dict[str, Any] = Field(default_factory=dict)
     timestamp: Any = None
 
@@ -3693,6 +3697,10 @@ def _request_fact_entry(req: dict, role: dict) -> dict[str, Any]:
         "post_data": req.get("post_data"),
         "response_status": req.get("response_status", req.get("status")),
         "response_json": response_json,
+        "response_kind": req.get("response_kind") or ("json" if response_json is not None else ""),
+        "response_text": req.get("response_text"),
+        "response_empty": bool(req.get("response_empty")),
+        "response_size": req.get("response_size"),
         "response_schema": _schema_from_response_value(response_json) if response_json is not None else {},
         "timestamp": req.get("timestamp") or req.get("captured_at"),
     }

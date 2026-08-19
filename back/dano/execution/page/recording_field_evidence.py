@@ -9,6 +9,11 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from dano.execution.page.request_capture import (
+    _JSONSTR,
+    parse_recorded_request_body,
+)
+
 
 def _route_identity(item: dict[str, Any]) -> str:
     for key in ("trigger_page_context", "page_context"):
@@ -39,25 +44,33 @@ def _same_scope(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
     return not (request_route and evidence_route and request_route != evidence_route)
 
 
+def _request_content_type(request: dict[str, Any]) -> str:
+    headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
+    return str(
+        request.get("content_type")
+        or headers.get("content-type")
+        or headers.get("Content-Type")
+        or ""
+    )
+
+
 def _parse_body(request: dict[str, Any]) -> Any:
-    raw = request.get("post_data")
-    if isinstance(raw, (dict, list)):
-        return raw
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError):
-        pairs = parse_qs(raw, keep_blank_values=True)
-        return pairs or None
+    parsed = parse_recorded_request_body(request.get("post_data"), _request_content_type(request))
+    return parsed["value"]
+
+
+def _parsed_request_body(request: dict[str, Any]) -> dict[str, Any]:
+    return parse_recorded_request_body(request.get("post_data"), _request_content_type(request))
 
 
 def _leaves(value: Any, prefix: str = "") -> list[str]:
     if isinstance(value, dict):
+        if set(value) == {_JSONSTR}:
+            return _leaves(value[_JSONSTR], prefix)
         return [
             path
             for key, child in value.items()
-            for path in _leaves(child, f"{prefix}.{key}" if prefix else str(key))
+            for path in _leaves(child, prefix if key == _JSONSTR else (f"{prefix}.{key}" if prefix else str(key)))
         ]
     if isinstance(value, list):
         if not value:
@@ -75,20 +88,23 @@ def _request_fields(request: dict[str, Any]) -> list[str]:
     query = request.get("query")
     if not isinstance(query, dict):
         query = parse_qs(parsed.query, keep_blank_values=True)
-    # Query mappings already carry the wire key (including keys such as
-    # ``createTime[0]``). parse_qs wraps scalar values in a list, which is a
-    # parser representation and must not invent a second ``[0]`` path segment.
+    parsed_body = _parsed_request_body(request)
     fields = [f"query.{key}" for key in query]
-    fields.extend(f"body.{path}" for path in _leaves(_parse_body(request)))
-    return fields
+    fields.extend(f"body.{path}" for path in parsed_body.get("field_paths") or [])
+    return list(dict.fromkeys(fields))
 
 
 def _value_leaves(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
     if isinstance(value, dict):
+        if set(value) == {_JSONSTR}:
+            return _value_leaves(value[_JSONSTR], prefix)
         return [
             item
             for key, child in value.items()
-            for item in _value_leaves(child, f"{prefix}.{key}" if prefix else str(key))
+            for item in _value_leaves(
+                child,
+                prefix if key == _JSONSTR else (f"{prefix}.{key}" if prefix else str(key)),
+            )
         ]
     if isinstance(value, list):
         return [
@@ -112,7 +128,12 @@ def _request_field_values(request: dict[str, Any]) -> list[tuple[str, Any]]:
             values.extend((f"query.{key}[{index}]", item) for index, item in enumerate(value))
         else:
             values.append((f"query.{key}", value))
-    values.extend((f"body.{path}", value) for path, value in _value_leaves(_parse_body(request)))
+    parsed_body = _parsed_request_body(request)
+    values.extend((f"body.{path}", value) for path, value in _value_leaves(parsed_body.get("value")))
+    for item in parsed_body.get("file_fields") or []:
+        name = str(item.get("name") or "")
+        if name:
+            values.append((f"body.{name}", item.get("filename") or ""))
     return values
 
 
@@ -290,8 +311,21 @@ def _is_distinctive_recorded_value(value: Any) -> bool:
 
 
 def _same_recorded_value(left: Any, right: Any) -> bool:
-    if left is None or right is None or isinstance(left, (dict, list, bool)) or isinstance(right, (dict, list, bool)):
+    if left is None or right is None:
         return False
+    if isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
+        return False
+    if isinstance(left, bool) or isinstance(right, bool):
+        def as_bool(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.strip().casefold() in {"true", "false"}:
+                return value.strip().casefold() == "true"
+            return None
+
+        left_bool = as_bool(left)
+        right_bool = as_bool(right)
+        return left_bool is not None and left_bool == right_bool
     left_text = str(left).strip()
     right_text = str(right).strip()
     if not left_text or not right_text:
