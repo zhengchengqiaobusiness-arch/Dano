@@ -642,18 +642,42 @@ class RecordingPiSession:
                 or ""
             )
 
+        request_sigs = {
+            str(item.get("request_id") or ""): _request_sig(item)
+            for item in captured
+            if isinstance(item, dict) and item.get("request_id")
+        }
+        field_ids = tuple(
+            _field_sig(item)
+            for item in raw_fields
+            if isinstance(item, dict) and _field_sig(item)
+        )
+        event_ids = tuple(
+            str(item.get("event_id") or "")
+            for item in page_events
+            if isinstance(item, dict) and item.get("event_id")
+        )
         marker = (
-            tuple(_request_sig(item) for item in captured if isinstance(item, dict)),
-            tuple(_field_sig(item) for item in raw_fields if isinstance(item, dict)),
-            tuple(
-                str(item.get("event_id") or "")
-                for item in page_events
-                if isinstance(item, dict)
-            ),
+            tuple(sorted(request_sigs.items())),
+            field_ids,
+            event_ids,
             len(page_enums),
         )
         if marker == self._live_evidence_marker:
             return
+
+        previous = self._live_evidence_marker
+        previous_request_map = dict(previous[0]) if isinstance(previous, tuple) and previous else {}
+        previous_event_ids = previous[2] if isinstance(previous, tuple) and len(previous) > 2 else ()
+        previous_enum_len = previous[3] if isinstance(previous, tuple) and len(previous) > 3 else None
+        changed_request_ids = {
+            request_id
+            for request_id, signature in request_sigs.items()
+            if previous_request_map.get(request_id) != signature
+        }
+        requests_changed = bool(changed_request_ids) or set(previous_request_map) != set(request_sigs)
+        events_changed = previous_event_ids != event_ids
+        enums_changed = previous_enum_len != len(page_enums)
 
         from dano.execution.page.flow_spec import (
             RequestFact,
@@ -661,25 +685,46 @@ class RecordingPiSession:
         )
         from dano.execution.page.recording_field_identity import bind_field_evidence
 
-        # Binding a large DOM/request fact set is CPU-heavy. It must not share
-        # the gateway event-loop thread with the recorder WebSocket heartbeat.
-        bound_fields = await asyncio.to_thread(
-            bind_field_evidence,
-            captured,
-            page_events,
-            raw_fields,
-            page_enum_options=page_enums,
-        )
-        option_sources = await asyncio.to_thread(
-            _option_sources_from_page_enum_options,
-            page_enums,
-            captured,
-        )
+        current = self.flow_spec
+        existing_by_sig = {
+            _field_sig(item): item
+            for item in list(getattr(current.request_facts, "field_evidence", None) or [])
+            if isinstance(item, dict) and _field_sig(item)
+        }
+        fields_to_bind = []
+        for item in raw_fields:
+            if not isinstance(item, dict):
+                continue
+            sig = _field_sig(item)
+            existing = existing_by_sig.get(sig) if sig else None
+            if existing is None or str(existing.get("binding_status") or "") != "bound":
+                fields_to_bind.append(item)
+                continue
+            if str(existing.get("request_id") or "") in changed_request_ids:
+                fields_to_bind.append(item)
+
+        bound_delta: list[dict[str, Any]] = []
+        if fields_to_bind:
+            # Binding is CPU-heavy; keep it off the gateway event-loop thread.
+            bound_delta = await asyncio.to_thread(
+                bind_field_evidence,
+                captured,
+                page_events,
+                fields_to_bind,
+                page_enum_options=page_enums,
+            )
+        option_sources: list[dict[str, Any]] = []
+        if requests_changed or enums_changed or previous is None:
+            option_sources = await asyncio.to_thread(
+                _option_sources_from_page_enum_options,
+                page_enums,
+                captured,
+            )
         async with self._state_lock:
             if marker == self._live_evidence_marker:
                 return
-            previous = self._live_evidence_marker
-            current = self.current_flow_spec()
+            live = self.flow_spec
+            current = live.model_copy(deep=True)
             current.meta = {
                 **(current.meta or {}),
                 "live_request_ids": [
@@ -688,27 +733,79 @@ class RecordingPiSession:
                     if isinstance(item, dict) and item.get("request_id")
                 ][-500:],
             }
-            previous_request_sigs = previous[0] if isinstance(previous, tuple) and previous else None
-            if previous_request_sigs != marker[0]:
-                current.request_facts.requests = [
-                    RequestFact.model_validate(deepcopy(item))
-                    for item in captured
-                    if isinstance(item, dict)
+            live_requests = list(live.request_facts.requests or [])
+            if requests_changed:
+                by_id = {
+                    str(item.request_id or ""): item
+                    for item in live_requests
+                }
+                merged_requests = []
+                for item in captured:
+                    if not isinstance(item, dict):
+                        continue
+                    request_id = str(item.get("request_id") or "")
+                    existing = by_id.get(request_id)
+                    if (
+                        existing is not None
+                        and previous_request_map.get(request_id) == request_sigs.get(request_id)
+                    ):
+                        merged_requests.append(existing)
+                    else:
+                        merged_requests.append(RequestFact.model_validate(deepcopy(item)))
+                current.request_facts.requests = merged_requests
+            else:
+                current.request_facts.requests = live_requests
+            if events_changed:
+                live_events = list(live.request_facts.page_events or [])
+                if (
+                    previous_event_ids
+                    and len(event_ids) >= len(previous_event_ids)
+                    and event_ids[: len(previous_event_ids)] == previous_event_ids
+                ):
+                    current.request_facts.page_events = [
+                        *live_events,
+                        *deepcopy(page_events[len(previous_event_ids):]),
+                    ]
+                else:
+                    current.request_facts.page_events = deepcopy(page_events)
+            else:
+                current.request_facts.page_events = list(live.request_facts.page_events or [])
+            live_fields = list(getattr(live.request_facts, "field_evidence", None) or [])
+            if bound_delta:
+                merged_fields = {
+                    _field_sig(item): item
+                    for item in live_fields
+                    if isinstance(item, dict) and _field_sig(item)
+                }
+                for item in bound_delta:
+                    if isinstance(item, dict):
+                        merged_fields[_field_sig(item) or f"occ-{len(merged_fields)}"] = deepcopy(item)
+                ordered: list[dict[str, Any]] = []
+                seen: set[str] = set()
+                for item in raw_fields:
+                    if not isinstance(item, dict):
+                        continue
+                    sig = _field_sig(item)
+                    if sig and sig in merged_fields and sig not in seen:
+                        ordered.append(merged_fields[sig])
+                        seen.add(sig)
+                for sig, item in merged_fields.items():
+                    if sig not in seen:
+                        ordered.append(item)
+                current.request_facts.field_evidence = ordered
+            else:
+                current.request_facts.field_evidence = live_fields
+            if requests_changed or enums_changed or previous is None:
+                retained_sources = [
+                    deepcopy(source)
+                    for source in (current.request_facts.option_sources or [])
+                    if not (
+                        isinstance(source, dict)
+                        and source.get("kind") == "page_enum_options"
+                    )
                 ]
-            previous_event_ids = previous[2] if isinstance(previous, tuple) and len(previous) > 2 else None
-            if previous_event_ids != marker[2]:
-                current.request_facts.page_events = deepcopy(page_events)
-            current.request_facts.field_evidence = deepcopy(bound_fields)
-            retained_sources = [
-                deepcopy(source)
-                for source in (current.request_facts.option_sources or [])
-                if not (
-                    isinstance(source, dict)
-                    and source.get("kind") == "page_enum_options"
-                )
-            ]
-            retained_sources.extend(option_sources)
-            current.request_facts.option_sources = retained_sources
+                retained_sources.extend(option_sources)
+                current.request_facts.option_sources = retained_sources
             self.flow_spec = current
             self._live_evidence_marker = marker
 

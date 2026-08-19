@@ -132,3 +132,92 @@ def test_evidence_refs_require_full_id_not_substring() -> None:
     with pytest.raises(ValueError):
         _require_grounded_refs(spec, "set_param_source", ["id"])
 
+
+class _LiveRecorder:
+    def __init__(self) -> None:
+        self.requests = [{
+            "request_id": "req_1",
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://example.test/save",
+            "post_data": '{"title":"a"}',
+            "response_status": 200,
+        }]
+        self.events = [{"event_id": "event_1", "action_id": "action_1"}]
+        self.fields = [{
+            "occurrence_id": "field-occ-1",
+            "evidence_id": "field-occ-1",
+            "field": "title",
+            "value": "a",
+            "field_aliases": ["title"],
+        }]
+        self.enums: dict = {}
+
+    def captured_all_requests(self):
+        return list(self.requests)
+
+    def recorded_page_events(self):
+        return list(self.events)
+
+    def recorded_field_evidence(self):
+        return list(self.fields)
+
+    def recorded_page_enum_options(self):
+        return dict(self.enums)
+
+
+async def test_refresh_live_evidence_only_binds_new_occurrences(monkeypatch) -> None:
+    from dano.execution.page.flow_spec import FlowSpec
+    from dano.onboarding.recording_pi import RecordingPiSession
+
+    bound_payloads: list[list[str]] = []
+
+    def fake_bind(requests, page_events, evidence, page_enum_options=None):  # noqa: ANN001, ARG001
+        ids = [
+            str(item.get("occurrence_id") or item.get("evidence_id") or "")
+            for item in (evidence or [])
+            if isinstance(item, dict)
+        ]
+        bound_payloads.append(ids)
+        return [
+            {**item, "binding_status": "bound", "request_id": "req_1", "wire_path": "body.title"}
+            for item in (evidence or [])
+            if isinstance(item, dict)
+        ]
+
+    monkeypatch.setattr(
+        "dano.execution.page.recording_field_identity.bind_field_evidence",
+        fake_bind,
+    )
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec._option_sources_from_page_enum_options",
+        lambda *_args, **_kwargs: [],
+    )
+    session = RecordingPiSession(
+        tenant="t",
+        subsystem="oa",
+        recording_id="recording_" + ("b" * 32),
+        resume_history=False,
+    )
+    session.flow_spec = FlowSpec(tenant="t", subsystem="oa")
+    recorder = _LiveRecorder()
+    session._live_recorder = recorder
+    await session.refresh_live_evidence()
+    first_request = session.flow_spec.request_facts.requests[0]
+    recorder.fields.append({
+        "occurrence_id": "field-occ-2",
+        "evidence_id": "field-occ-2",
+        "field": "remark",
+        "value": "b",
+        "field_aliases": ["remark"],
+    })
+    await session.refresh_live_evidence()
+    assert bound_payloads[0] == ["field-occ-1"]
+    assert bound_payloads[1] == ["field-occ-2"]
+    assert session.flow_spec.request_facts.requests[0] is first_request
+    occ = {
+        str(item.get("occurrence_id") or "")
+        for item in session.flow_spec.request_facts.field_evidence
+    }
+    assert occ == {"field-occ-1", "field-occ-2"}
+
