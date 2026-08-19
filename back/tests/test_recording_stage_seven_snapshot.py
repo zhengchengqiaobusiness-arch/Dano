@@ -297,3 +297,99 @@ def test_recording_result_detail_skips_heavy_projection_and_keeps_capabilities(
     assert payload["capability_count"] == 1
     assert payload["draft"]["capabilities"][0]["title"] == "查询销售订单"
     assert "secret-token" not in dumped
+
+
+def _saved_result(*, published: bool, verified: bool):
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from dano.assets.drafts import AssetDraft
+    from dano.onboarding.recording_results import stage_six_result_body
+    from dano.shared.enums import AssetType, Subsystem
+
+    body = stage_six_result_body(
+        action="action_saved",
+        title="销售订单管理",
+        goal="查询销售订单",
+        tenant="tenant",
+        subsystem="oa",
+        draft=_spec().model_dump(mode="json"),
+        published=published,
+        machine_verification_ran=verified,
+    )
+    return AssetDraft(
+        asset_draft_id=uuid4(),
+        run_id="recording_saved",
+        tenant="tenant",
+        subsystem=Subsystem("oa"),
+        asset_type=AssetType.PAGE_SCRIPT,
+        asset_key="recording-result:action_saved",
+        body=body,
+        content_hash="hash",
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_recording_result_list_hides_publish_until_verified_analysis_finishes() -> None:
+    from dano.onboarding.recording_results import recording_result_summary
+
+    skipped = recording_result_summary(_saved_result(published=True, verified=False))
+    verified = recording_result_summary(_saved_result(published=True, verified=True))
+    assert skipped["published"] is False
+    assert verified["published"] is True
+
+
+@pytest.mark.asyncio
+async def test_registry_abort_stops_in_flight_verification() -> None:
+    from dano.onboarding.recording_gateway import RecordingSessionRegistry
+    from dano.onboarding.recording_workflow import RecordingWorkflow
+
+    started = asyncio.Event()
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    async def hanging_replay(request, spec_arg):  # noqa: ANN001, ANN202
+        started.set()
+        await asyncio.sleep(30)
+        return {"status": 200, "response": {"code": 0}}
+
+    services = ProductionRecordingServices(
+        recording_id="rec_abort",
+        materializer=unused,
+        pi_provider=unused,
+        publisher=unused,
+        replay_executor=hanging_replay,
+    )
+    workflow = RecordingWorkflow(
+        WorkflowSnapshot(
+            run_id="recording_abort",
+            action="action_abort",
+            status=WorkflowStatus.EDITABLE,
+            draft=_spec().model_dump(mode="json"),
+        ),
+        SelfHealingPipeline(CanonicalRecordingRuntime(services.pipeline_services())),
+    )
+
+    class _Session:
+        capture = None
+        closed = False
+
+        def __init__(self) -> None:
+            self.workflow = workflow
+
+        async def close(self) -> None:
+            self.closed = True
+
+    session = _Session()
+    registry = RecordingSessionRegistry()
+    registry._sessions["action_abort"] = session  # type: ignore[assignment]
+    await workflow.republish(machine_verification=True)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert workflow.snapshot.status == WorkflowStatus.PROCESSING
+    started_abort = time.perf_counter()
+    await registry.abort("action_abort")
+    assert time.perf_counter() - started_abort < 3
+    assert "action_abort" not in registry._sessions
+    assert workflow.snapshot.status == WorkflowStatus.CANCELLED
+    assert session.closed is True

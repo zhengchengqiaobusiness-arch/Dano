@@ -298,6 +298,12 @@ function paramSourceLabel(param: FlowParam) {
   if (param.source_kind === "page_default") {
     return paramIsCallerInput(param) ? "页面预填，可修改" : "页面预填";
   }
+  if (param.source_kind === "selected_option_field") {
+    return paramIsCallerInput(param) ? "所选记录带入，可修改" : "所选记录自动带入";
+  }
+  if (param.source_kind === "computed") {
+    return paramIsCallerInput(param) ? "自动计算，可修改" : "自动计算";
+  }
   if (param.source_kind === "unknown") {
     return "未知";
   }
@@ -350,7 +356,7 @@ function paramSourceTagColor(param: FlowParam) {
     return "gold";
   }
   if (kind === "constant") return "default";
-  if (kind === "unknown" || paramSourceLabel(param) === "未知") return "error";
+  if (kind === "unknown" || paramSourceLabel(param) === "未知") return "#cf1322";
   if (paramIsCallerInput(param)) return "blue";
   return "default";
 }
@@ -392,7 +398,8 @@ function fmtHistoryTime(value?: string) {
   return date.toLocaleString();
 }
 
-const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 460, boxSizing: "border-box" as const };
+const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 420, boxSizing: "border-box" as const };
+const REPLAY_SKIP_HINTS = ["跳过回放取证", "仍无法登录", "录制会话登录态已过期", "请刷新凭证后重新点"];
 
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
@@ -415,7 +422,19 @@ const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
   waiting_operator: { label: "需要确认", color: "warning" },
 };
 
+function capabilityTitleOf(item: WorkflowActivity) {
+  const titled = String(item.target?.capability_title || "").trim();
+  if (titled) return titled;
+  const named = item.label.match(/能力[「"]([^」"]+)[」"]/);
+  if (named) return named[1];
+  if (item.label.includes("整体流程")) return "整体流程";
+  return "";
+}
+
 function activityDisplay(item: { status: string; label: string }) {
+  if (REPLAY_SKIP_HINTS.some((hint) => item.label.includes(hint))) {
+    return { label: "已跳过回放取证", color: "warning" as const };
+  }
   if (item.label.startsWith("发现了")) return { label: "发现了" };
   if (item.label.startsWith("我觉得") || item.label.startsWith("准备")) {
     return { label: "准备处理", color: "processing" as const };
@@ -425,94 +444,47 @@ function activityDisplay(item: { status: string; label: string }) {
   return ACTIVITY_STATUS[item.status] || { label: item.status || "处理" };
 }
 
-function parseCapabilityActivity(label: string): { capability: string } | null {
-  const named = label.match(/能力[「"]([^」"]+)[」"]/);
-  if (named) return { capability: named[1] };
-  if (label.includes("整体流程")) return { capability: "整体流程" };
-  return null;
+function preflightOf(snapshot: WorkflowSnapshot | null | undefined) {
+  const draft = snapshot?.draft as Record<string, unknown> | null | undefined;
+  const meta = (draft?.meta || {}) as Record<string, unknown>;
+  const run = (meta.verification_run || {}) as Record<string, unknown>;
+  return (run.preflight || {}) as Record<string, unknown>;
 }
 
-type CapabilityActivityGroup = {
-  round: number;
-  capability: string;
-  items: WorkflowActivity[];
-};
+function looksReplaySkipped(snapshot: WorkflowSnapshot | null | undefined) {
+  if (!snapshot) return false;
+  const preflight = preflightOf(snapshot);
+  if (preflight.skip_replay === true) return true;
+  const text = `${snapshot.progress.label || ""} ${(snapshot.issues || []).map((issue) => issue.message || "").join(" ")}`;
+  return REPLAY_SKIP_HINTS.some((hint) => text.includes(hint));
+}
 
-function groupActivitiesByCapability(activities: WorkflowActivity[]): CapabilityActivityGroup[] {
-  const groups: CapabilityActivityGroup[] = [];
-  let current: CapabilityActivityGroup | null = null;
-  for (const act of activities) {
-    const parsed = parseCapabilityActivity(act.label);
-    const round = act.round || current?.round || 0;
-    const startNew = Boolean(
-      parsed
-      && (
-        !current
-        || current.round !== round
-        || current.capability !== parsed.capability
-        || /开始处理能力/.test(act.label)
-      ),
-    );
-    if (startNew && parsed) {
-      current = { round, capability: parsed.capability, items: [act] };
-      groups.push(current);
-      continue;
-    }
-    if (!current || current.round !== round) {
-      current = { round, capability: current?.capability || "流程", items: [act] };
-      groups.push(current);
-      continue;
-    }
-    current.items.push(act);
+function isAuthNoiseActivity(item: WorkflowActivity) {
+  if (item.code === "replay_auth") return true;
+  return REPLAY_SKIP_HINTS.some((hint) => item.label.includes(hint));
+}
+
+function dedupeAnalysisActivities(activities: WorkflowActivity[]) {
+  const seen = new Set<string>();
+  const next: WorkflowActivity[] = [];
+  for (const item of activities) {
+    const key = `${item.status}\0${item.label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(item);
   }
-  return groups;
+  return next;
 }
 
-function renderGroupedActivities(activities: WorkflowActivity[]) {
-  const groups = groupActivitiesByCapability(activities);
-  const rounds = [...new Set(groups.map((group) => group.round))];
-  return (
-    <Collapse
-      size="small"
-      defaultActiveKey={rounds.map((round) => `round-${round}`)}
-      items={rounds.map((round) => {
-        const capGroups = groups.filter((group) => group.round === round);
-        return {
-          key: `round-${round}`,
-          label: round ? `第 ${round} 轮` : "处理进展",
-          children: (
-            <Collapse
-              size="small"
-              defaultActiveKey={capGroups.map((group, index) => `${round}-${group.capability}-${index}`)}
-              items={capGroups.map((group, index) => ({
-                key: `${round}-${group.capability}-${index}`,
-                label: group.capability,
-                children: (
-                  <List
-                    size="small"
-                    dataSource={group.items}
-                    renderItem={(item) => {
-                      const display = activityDisplay(item);
-                      return (
-                        <List.Item>
-                          <Space align="start" style={{ width: "100%" }}>
-                            <Tag color={display.color}>{display.label}</Tag>
-                            <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
-                              <Text>{item.label}</Text>
-                            </Space>
-                          </Space>
-                        </List.Item>
-                      );
-                    }}
-                  />
-                ),
-              }))}
-            />
-          ),
-        };
-      })}
-    />
-  );
+function analysisStatusView(status: WorkflowStatus, cancelling: boolean, _snapshot: WorkflowSnapshot | null) {
+  if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "正在终止" };
+  if (status === "cancelled") return { color: "default" as const, label: "已终止" };
+  if (status === "published") return { color: "success" as const, label: "已发布" };
+  if (status === "failed") return { color: "error" as const, label: "失败" };
+  if (status === "waiting_operator") return { color: "warning" as const, label: "需要确认" };
+  if (status === "processing") return { color: "processing" as const, label: "分析中" };
+  if (status === "editable") return { color: "default" as const, label: "待继续" };
+  return { color: "default" as const, label: STATUS_LABELS[status] };
 }
 
 function isStageSevenProgress(progress?: { step?: string; round?: number } | null) {
@@ -520,12 +492,10 @@ function isStageSevenProgress(progress?: { step?: string; round?: number } | nul
   return (Number(progress?.round || 0) > 0) || ["verifying", "resolving"].includes(step);
 }
 
-function pageStage(status: WorkflowStatus, resumeOnly = false, verificationLive = false) {
+function pageStage(status: WorkflowStatus, resumeOnly = false, _verificationLive = false) {
   if (resumeOnly) return 2;
   if (status === "idle") return 0;
   if (status === "recording") return 1;
-  if (status === "waiting_operator") return 2;
-  if (status === "processing") return verificationLive ? 2 : 1;
   return 2;
 }
 
@@ -759,8 +729,10 @@ export default function PageRecorder({
       cancellingRef.current = false;
       setCancelling(false);
       setConnecting(false);
-      // Keep the socket and analysis window so the operator can answer,
-      // retry, or republish. startRecording / startAnalysis / unmount close it.
+      if (status === "cancelled") {
+        setAnalysisRequested(false);
+        closeRecordingSocket();
+      }
     }
   }, [status]);
 
@@ -812,7 +784,18 @@ export default function PageRecorder({
   }
 
   function canAutoReconnectRecording() {
-    return snapshotRef.current?.status === "recording" && socketInitRef.current?.type === "start";
+    const status = snapshotRef.current?.status;
+    const initType = socketInitRef.current?.type;
+    if (["published", "editable", "failed", "cancelled"].includes(status || "")) {
+      return false;
+    }
+    if (initType === "start") {
+      return ["recording", "processing", "waiting_operator"].includes(status || "recording");
+    }
+    if (initType === "resume_verification") {
+      return ["processing", "waiting_operator"].includes(status || "");
+    }
+    return false;
   }
 
   function send(payload: Record<string, unknown>) {
@@ -959,6 +942,10 @@ export default function PageRecorder({
       setKeepResult(true);
       setViewStage(2);
     }
+    if (["editable", "published", "failed"].includes(next.status) && next.draft) {
+      setKeepResult(true);
+      setViewStage(2);
+    }
     if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
       finishRequestedRef.current = false;
@@ -1028,6 +1015,8 @@ export default function PageRecorder({
         if (row.action === actionRef.current) {
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
+          setKeepResult(true);
+          setViewStage(2);
         }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);
@@ -1070,7 +1059,11 @@ export default function PageRecorder({
       wsRef.current = null;
       setConnected(false);
       setConnecting(false);
-      if (closingRef.current || cancellingRef.current || !canAutoReconnectRecording()) {
+      if (cancellingRef.current) {
+        applyCancelledSnapshot();
+        return;
+      }
+      if (closingRef.current || !canAutoReconnectRecording()) {
         const resumeDisconnected = socketInitRef.current?.type === "resume_verification"
           && snapshotRef.current?.status === "processing";
         const neverStarted = acceptNextSnapshotRef.current
@@ -1161,7 +1154,7 @@ export default function PageRecorder({
       title: item.title,
       revision: 0,
       status: "editable",
-      progress: { step: "ready", label: "已打开录制结果" },
+      progress: { step: "ready", label: "已打开录制结果，尚未开始机器验证" },
       draft,
       capture_frozen: true,
     };
@@ -1179,7 +1172,7 @@ export default function PageRecorder({
     cancellingRef.current = false;
     setCancelling(false);
     setAnalysisRequested(false);
-    setStageSevenOpen(false);
+    setStageSevenOpen(true);
     closeRecordingSocket();
     setOpeningId(item.id);
     actionRef.current = item.action;
@@ -1328,6 +1321,8 @@ export default function PageRecorder({
     if (finishRequestedRef.current || status !== "recording") return;
     finishRequestedRef.current = true;
     setFinishRequested(true);
+    setKeepResult(true);
+    setViewStage(2);
     if (!send({ type: "finish",
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
@@ -1337,16 +1332,40 @@ export default function PageRecorder({
     }
   }
 
-  function cancelProcessing() {
-    if (cancellingRef.current) return;
-    if (send({ type: "cancel" })) {
-      cancellingRef.current = true;
-      setCancelling(true);
-      return;
-    }
-    closeRecordingSocket();
+  function applyCancelledSnapshot() {
+    cancellingRef.current = false;
+    setCancelling(false);
     setAnalysisRequested(false);
     setConnecting(false);
+    if (snapshotRef.current && snapshotRef.current.status !== "cancelled") {
+      const cancelled: WorkflowSnapshot = {
+        ...snapshotRef.current,
+        status: "cancelled",
+        error: "",
+        progress: {
+          step: "ready",
+          label: "当前分析已终止，草稿已保留",
+          round: snapshotRef.current.progress.round || 0,
+        },
+      };
+      snapshotRef.current = cancelled;
+      setSnapshot(cancelled);
+    }
+  }
+
+  function cancelProcessing() {
+    if (cancellingRef.current || status === "cancelled") return;
+    cancellingRef.current = true;
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "cancel" }));
+      } catch {
+        // Local UI still stops even if the cancel frame cannot be written.
+      }
+    }
+    closeRecordingSocket();
+    applyCancelledSnapshot();
   }
 
   function answerQuestion(value?: string) {
@@ -2100,7 +2119,15 @@ export default function PageRecorder({
                       <Text strong>{paramDisplayName(param)}</Text>
                       <Tag>{paramTypeLabel(param)}</Tag>
                       {param.required ? <Tag color="error">必填</Tag> : <Tag>可选</Tag>}
-                      <Tag color={paramSourceTagColor(param)}>
+                      <Tag
+                        color={paramSourceTagColor(param)}
+                        style={paramSourceLabel(param) === "未知" ? {
+                          color: "#fff",
+                          background: "#cf1322",
+                          borderColor: "#a8071a",
+                          fontWeight: 600,
+                        } : undefined}
+                      >
                         {paramSourceLabel(param)}
                       </Tag>
                     </Space>
@@ -2518,59 +2545,55 @@ export default function PageRecorder({
   }
 
   function renderVerificationLog() {
-    const activities: WorkflowActivity[] = snapshot?.activity || [];
+    const activities: WorkflowActivity[] = dedupeAnalysisActivities(snapshot?.activity || []);
+    const replaySkipped = looksReplaySkipped(snapshot);
 
-    // ── Build unified timeline items ─────────────────────────────────────────
-    // Each entry: { kind: "round_divider" | "activity" | "thought", ... }
     type TLEntry =
-      | { kind: "round_divider"; round: number }
+      | { kind: "capability_header"; capability: string }
       | { kind: "activity"; item: WorkflowActivity; idx: number }
       | { kind: "thought"; item: ThoughtChunk; idx: number };
 
     const entries: TLEntry[] = [];
+    let lastCapability = "";
+    activities.forEach((item, idx) => {
+      if (isAuthNoiseActivity(item) || item.label.includes("发现能力「整体流程」")) return;
+      const capability = capabilityTitleOf(item);
+      if (capability === "整体流程") {
+        entries.push({ kind: "activity", item, idx });
+        return;
+      }
+      if (capability && capability !== lastCapability) {
+        entries.push({ kind: "capability_header", capability });
+        lastCapability = capability;
+      }
+      entries.push({ kind: "activity", item, idx });
+    });
 
     for (let i = 0; i < thoughts.length; i++) {
       entries.push({ kind: "thought", item: thoughts[i], idx: i });
     }
 
-    // ── Status badge ─────────────────────────────────────────────────────────
-    const statusColor = cancelling ? "warning"
-      : status === "waiting_operator" ? "warning"
-      : status === "published" ? "success"
-      : status === "failed" ? "error"
-      : processing ? "processing"
-      : "default";
-    const statusLabel = cancelling && status !== "cancelled"
-      ? "正在终止"
-      : snapshot?.error
-        ? snapshot.error
-        : (snapshot?.progress.label || STATUS_LABELS[status]);
+    const statusView = analysisStatusView(status, cancelling, snapshot);
+    const statusColor = statusView.color;
+    const statusLabel = statusView.label;
 
     // ── Map entries to Ant Timeline items ────────────────────────────────────
     const tlItems = entries.map((entry, ei): NonNullable<React.ComponentProps<typeof Timeline>["items"]>[number] => {
-      if (entry.kind === "round_divider") {
+      if (entry.kind === "capability_header") {
         return {
-          key: `round-${entry.round}`,
+          key: `capability-${entry.capability}-${ei}`,
           dot: (
             <div style={{
-              width: 20,
-              height: 20,
+              minWidth: 8,
+              height: 8,
               borderRadius: "50%",
-              background: "#e6f4ff",
-              border: "1px solid #91caff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 10,
-              color: "#1677ff",
-              fontWeight: 600,
-            }}>
-              {entry.round}
-            </div>
+              background: "#1677ff",
+              marginTop: 6,
+            }} />
           ),
           children: (
-            <Text type="secondary" style={{ fontSize: 11, fontWeight: 500, letterSpacing: "0.05em" }}>
-              第 {entry.round} 轮
+            <Text strong style={{ fontSize: 13 }}>
+              {entry.capability}
             </Text>
           ),
         };
@@ -2712,7 +2735,7 @@ export default function PageRecorder({
             <ThunderboltOutlined style={{ color: processing ? "#1677ff" : "#8c8c8c" }} />
             <Text style={{ fontWeight: 500 }}>实时分析模式</Text>
             <Tag color={statusColor} style={{ fontSize: 11 }}>{statusLabel}</Tag>
-            {snapshot?.progress.round
+            {snapshot?.progress.round && processing
               ? <Text type="secondary" style={{ fontSize: 11 }}>第 {snapshot.progress.round} 轮</Text>
               : null}
           </Space>
@@ -2730,28 +2753,56 @@ export default function PageRecorder({
           },
         }}
       >
+        {status === "cancelled" ? (
+          <Alert
+            showIcon
+            type="warning"
+            style={{ marginBottom: 8 }}
+            message="分析已终止"
+            description="草稿已保留，确认后可再次开始分析。"
+          />
+        ) : null}
+        {replaySkipped && status !== "cancelled" ? (
+          <Alert
+            showIcon
+            type="warning"
+            style={{ marginBottom: 8 }}
+            message="已跳过回放取证"
+            description="录制浏览器登录态已过期，不影响已产出的 Skill。分析会继续处理能力；运行期调用使用独立凭证。"
+          />
+        ) : null}
+        {status === "failed" && snapshot?.error ? (
+          <Alert
+            showIcon
+            type="error"
+            style={{ marginBottom: 8 }}
+            message="分析失败"
+            description={snapshot.error}
+          />
+        ) : null}
         {renderOperatorQuestion()}
         <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {isEmpty ? (
+          {isEmpty && status !== "cancelled" && !replaySkipped ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={connecting || runBusy ? "正在连接…" : "分析日志将显示在这里"}
+              description={
+                connecting || runBusy
+                  ? "正在连接…"
+                  : "尚未开始机器验证，确认能力后点击开始分析"
+              }
               style={{ marginTop: 24 }}
             />
           ) : (
             <>
-              {activities.length ? (
-                <div style={{ marginBottom: 8 }}>{renderGroupedActivities(activities)}</div>
-              ) : processing ? (
-                <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
-                  {snapshot?.progress.label || "正在启动机器验证"}
-                </Text>
-              ) : null}
               {tlItems.length ? (
                 <Timeline
                   style={{ paddingTop: 8 }}
                   items={tlItems}
                 />
+              ) : status === "cancelled" ? null : processing ? (
+                <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
+                  {snapshot?.progress.label || "正在启动机器验证"}
+                </Text>
               ) : null}
             </>
           )}
@@ -2797,7 +2848,7 @@ export default function PageRecorder({
                 disabled={!draft || processing}
                 onClick={() => setEditingResult(true)}
               >修改结果</Button>
-              {canRetryPublish ? (
+              {canRetryPublish && !analysisMode ? (
                 <Button
                   type="primary"
                   loading={processing || Boolean(patchInFlightRef.current)}
@@ -2876,8 +2927,17 @@ export default function PageRecorder({
         </Card>
       ) : null}
       {(snapshot?.activity || []).length ? (
-        <Card size="small" title="处理进展" styles={{ body: { padding: 0 } }}>
-          {renderGroupedActivities(snapshot?.activity || [])}
+        <Card size="small" title="处理进展">
+          <Timeline
+            items={dedupeAnalysisActivities(snapshot?.activity || []).map((item, index) => {
+              const display = activityDisplay(item);
+              return {
+                key: `assist-act-${item.sequence}-${index}`,
+                color: display.color === "error" ? "red" : display.color === "success" ? "green" : display.color === "warning" ? "orange" : "blue",
+                children: <Text>{item.label}</Text>,
+              };
+            })}
+          />
         </Card>
       ) : null}
       {(snapshot?.insights || []).length ? (

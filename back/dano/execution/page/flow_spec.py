@@ -754,7 +754,7 @@ def _record_identity_is_caller_owned(method: str, value: Any) -> bool:
     method = str(method or "").upper()
     if method == "POST" and str(value).strip() in {"0", "0.0"}:
         return False
-    return method in {"POST", "PUT", "PATCH", "DELETE"}
+    return method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 
 def _param_is_document_record_identity(param: ParamField) -> bool:
@@ -1349,6 +1349,21 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
 
+    if (
+        _is_document_record_identity_path(key, path)
+        and _record_identity_is_caller_owned(method, field.get("raw_value", field.get("value")))
+    ):
+        return {
+            "category": "user_param",
+            "source_kind": "user_input",
+            "source": {"kind": "selected_record_identity", "path": path, "required_state": "required"},
+            "editable": True,
+            "exposed_to_user": True,
+            "required": True,
+            "reason": "该字段是打开/更新/删除目标记录的标识；调用方必须传入要操作的记录，不能把录制时点中的 ID 当成可复用常量",
+            "need_human_confirm": False,
+        }
+
     if method == "GET" and path.startswith("query."):
         if query_is_option_source:
             return {
@@ -1359,6 +1374,20 @@ def _param_source_guess(
                 "exposed_to_user": False,
                 "reason": "候选接口上的查询参数没有对应可编辑控件，标注未知；请求仍按录制原样携带，不影响原接口",
                 "need_human_confirm": True,
+            }
+        if query_is_business_query and _caller_filter_key(key, path):
+            return {
+                "category": "user_param",
+                "source_kind": "user_input",
+                "source": {
+                    "kind": "business_query_filter",
+                    "path": path,
+                    "required_state": "optional",
+                },
+                "editable": True,
+                "exposed_to_user": True,
+                "reason": "业务查询上的筛选条件由调用方提供；控件未绑定也不标未知，调用方可省略或覆盖",
+                "need_human_confirm": False,
             }
         return {
             "category": "runtime_var",
@@ -8405,13 +8434,9 @@ def to_flow_spec(
         },
     )
     _mark_repeated_write_observations(spec)
-    _infer_computed_runtime_fields(spec)
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
-    _infer_selected_option_row_fields(spec)
-    _apply_create_form_field_contracts(spec)
-    _apply_edit_form_field_contracts(spec)
-    _apply_row_command_field_contracts(spec)
+    _apply_mechanical_field_contracts(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
 
 
@@ -8823,6 +8848,14 @@ def _looks_total_formula_leaf(key: str, path: str) -> bool:
     ))
 
 
+def _looks_unit_price_formula_leaf(key: str, path: str) -> bool:
+    """Unit/catalog prices are inputs or row echoes, not formula targets."""
+    if _looks_total_formula_leaf(key, path) or _looks_percent_formula_leaf(key, path):
+        return False
+    leaf = _field_leaf_token(key, path)
+    return any(token in leaf for token in ("price", "unitprice", "taxprice", "cost"))
+
+
 def _looks_percent_formula_leaf(key: str, path: str) -> bool:
     leaf = _field_leaf_token(key, path)
     return any(token in leaf for token in ("percent", "rate", "ratio"))
@@ -8900,6 +8933,8 @@ def _arithmetic_target_allowed(param: ParamField) -> bool:
     if _param_is_document_record_identity(param):
         return False
     if _looks_non_quantity_formula_leaf(param.key, param.path):
+        return False
+    if _looks_unit_price_formula_leaf(param.key, param.path):
         return False
     if param.source_kind in _OPTION_SOURCE_KINDS or param.type in {"enum", "list-enum"}:
         return False
@@ -9643,6 +9678,190 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                     )
 
 
+def _step_role(step: FlowStep) -> str:
+    return str((step.source_meta or {}).get("role") or step.semantic_role or "").casefold()
+
+
+def _step_is_option_read(step: FlowStep) -> bool:
+    return _step_role(step) in {
+        "read_option", "option", "option_source", "explicit_read_option",
+    }
+
+
+def _step_is_record_detail_query(step: FlowStep) -> bool:
+    """A GET that only names the record being opened, not a search form."""
+    if str(step.method or "").upper() != "GET":
+        return False
+    filters = [
+        param for param in (step.params or [])
+        if str(param.path or "").startswith("query.")
+        and _caller_filter_key(param.key, param.path)
+    ]
+    return bool(filters) and all(
+        _param_is_document_record_identity(param)
+        or _looks_row_identity_leaf(param.key, param.path)
+        for param in filters
+    )
+
+
+def _step_is_business_list_query(step: FlowStep) -> bool:
+    """Any non-option business GET that carries query leaves is a list/search."""
+    if str(step.method or "").upper() != "GET":
+        return False
+    if _step_is_option_read(step) or _step_is_record_detail_query(step):
+        return False
+    if _step_role(step) in {"auth", "support", "context", "telemetry", "noise"}:
+        return False
+    return any(
+        str(param.path or "").startswith("query.")
+        for param in (step.params or [])
+    )
+
+
+def _mark_query_filter_caller(param: ParamField, *, reason: str) -> None:
+    param.category = "user_param"
+    param.exposed_to_user = True
+    param.editable = True
+    param.need_human_confirm = False
+    if _param_has_local_required_marker(param):
+        param.required = True
+        param.source = {**(param.source or {}), "required_state": "required"}
+    else:
+        param.required = False
+        param.source = {**(param.source or {}), "required_state": "optional"}
+    if reason:
+        param.reason = reason
+
+
+def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
+    """Business list/search filters stay caller-owned on every query capability.
+
+    Option-source leftovers and transport keys stay internal. Pagination is
+    page context. A missing control binding is not proof that a search leaf is
+    a system field — the query string of a list execute *is* the search form.
+    """
+    caller_kinds = {
+        "user_input", "form_option", "page_default", "api_option",
+        "page_enum", "static_enum", "manual_enum", "caller_input",
+    }
+    for step in spec.steps or []:
+        if not _step_is_business_list_query(step):
+            continue
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param):
+                continue
+            if not str(param.path or "").startswith("query."):
+                continue
+            if _looks_pagination_field(param.key, param.path):
+                continue
+            if not _caller_filter_key(param.key, param.path):
+                continue
+            if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
+                continue
+            if param.source_kind in {
+                "page_context", "request_header", "session", "current_user",
+                "computed", "page_rule", "selected_option_field",
+            }:
+                continue
+            if param.source_kind in caller_kinds:
+                if not param.exposed_to_user or param.category != "user_param":
+                    _mark_query_filter_caller(param, reason="")
+                continue
+            if param.source_kind not in {"", "unknown"}:
+                continue
+            chooser = (
+                bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
+                or (
+                    _field_leaf_token(param.key, param.path).endswith("id")
+                    and not _param_is_document_record_identity(param)
+                )
+            )
+            if chooser:
+                param.source_kind = "form_option"
+                param.source = {"kind": "form_option", "path": param.path}
+                _mark_query_filter_caller(
+                    param,
+                    reason="查询页上由调用方选择的筛选条件",
+                )
+            else:
+                param.source_kind = "user_input"
+                param.source = {
+                    "kind": "business_query_filter",
+                    "path": param.path,
+                    "recorded": True,
+                }
+                _mark_query_filter_caller(
+                    param,
+                    reason="查询页上的业务筛选由调用方提供；控件未绑定时仍按筛选条件保留",
+                )
+
+
+def _mark_auto_fill_caller_override(param: ParamField, reason: str) -> None:
+    param.category = "user_param"
+    param.exposed_to_user = True
+    param.editable = True
+    param.required = False
+    param.need_human_confirm = False
+    param.source = {
+        **(param.source or {}),
+        "allow_caller_override": True,
+        "required_state": "optional",
+    }
+    if reason and "可修改" not in (param.reason or ""):
+        param.reason = f"{param.reason}；{reason}" if param.reason else reason
+
+
+def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
+    """Keep auto-fill origin, but follow the page: editable means caller may change it.
+
+    Origin (how the page produced the value) and ownership (who may supply it)
+    are separate. Selected-row echoes default to caller-overridable. Computed
+    totals stay system-owned unless a non-readonly control proves the page
+    lets the operator overwrite the formula. Readonly/disabled locks the field
+    on the system side.
+    """
+    for step in spec.steps or []:
+        if _step_is_row_command(step):
+            continue
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param):
+                continue
+            if _looks_pagination_field(param.key, param.path):
+                continue
+            if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
+                continue
+            if (
+                _param_is_document_record_identity(param)
+                and param.source_kind != "user_input"
+            ):
+                continue
+            if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
+                continue
+            if _param_control_is_readonly(param):
+                continue
+            if param.source_kind == "selected_option_field":
+                _mark_auto_fill_caller_override(param, "所选记录自动带入，页面允许修改")
+                continue
+            if _looks_display_echo_field(step, param) and not _param_has_editable_control_evidence(param):
+                continue
+            if (
+                param.source_kind == "computed"
+                and _param_has_editable_control_evidence(param)
+            ):
+                _mark_auto_fill_caller_override(param, "页面自动计算，但仍允许调用方修改")
+
+
+def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
+    """Apply the same origin/ownership rules to every capability family."""
+    _infer_selected_option_row_fields(spec)
+    _infer_computed_runtime_fields(spec)
+    _apply_create_form_field_contracts(spec)
+    _apply_edit_form_field_contracts(spec)
+    _apply_row_command_field_contracts(spec)
+    _apply_query_form_field_contracts(spec)
+    _apply_page_rule_caller_override(spec)
+
+
 def _query_range_index(path: str) -> tuple[str, int] | None:
     match = re.fullmatch(r"(query\..+)\[(\d+)\]$", str(path or ""))
     if match is None:
@@ -10033,7 +10252,7 @@ def _param_exposed_to_caller(
     ):
         return bool(param.category == "user_param" and param.exposed_to_user)
     if (
-        param.source_kind == "previous_response"
+        param.source_kind in {"previous_response", "selected_option_field", "computed"}
         and bool(
             (param.source or {}).get("allow_caller_override")
             or (param.source or {}).get("caller_override")
@@ -10750,11 +10969,7 @@ def _repair_generated_capability_contracts(
 ) -> FlowSpec:
     """Deterministically repair only Planner-generated capability contracts."""
     _normalize_capability_references(spec)
-    _infer_computed_runtime_fields(spec)
-    _infer_selected_option_row_fields(spec)
-    _apply_create_form_field_contracts(spec)
-    _apply_edit_form_field_contracts(spec)
-    _apply_row_command_field_contracts(spec)
+    _apply_mechanical_field_contracts(spec)
     rebuild_flow_dependencies(spec)
     if repair_option_bindings:
         _repair_structural_option_bindings(spec)
@@ -11392,11 +11607,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     if not spec.capabilities:
         return spec
 
-    _infer_computed_runtime_fields(spec)
-    _infer_selected_option_row_fields(spec)
-    _apply_create_form_field_contracts(spec)
-    _apply_edit_form_field_contracts(spec)
-    _apply_row_command_field_contracts(spec)
+    _apply_mechanical_field_contracts(spec)
     # Capability compilation happens after live semantic edits. Apply only the
     # dependencies safe for execution so a confirmed response chain wins over
     # an unsupported caller-input guess. Keep non-executable selector evidence
@@ -18988,11 +19199,7 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     current = sync_flow_spec_models(spec.model_copy(deep=True))
     _repair_structural_option_bindings(current)
     _refresh_api_option_display_labels(current)
-    _infer_computed_runtime_fields(current)
-    _infer_selected_option_row_fields(current)
-    _apply_create_form_field_contracts(current)
-    _apply_edit_form_field_contracts(current)
-    _apply_row_command_field_contracts(current)
+    _apply_mechanical_field_contracts(current)
     _repair_readonly_control_defaults(current)
     _repair_uncontrolled_write_state_fields(current)
     _materialize_captured_response_key_maps(

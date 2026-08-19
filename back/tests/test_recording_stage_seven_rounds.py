@@ -363,3 +363,21 @@ async def test_repair_records_capability_verification_and_flow_group_key() -> No
     assert "__flow__" in verification
     assert context.capability_rounds["cap_edit"] == 1
     assert context.capability_rounds["__flow__"] == 1
+
+
+def test_plan_thought_lists_capabilities_sequentially() -> None:
+    from dano.onboarding.recording_workflow import _issues_grouped_by_capability, _plan_thought
+
+    spec = _spec()
+    issues = (
+        _issue("write_verify:step_del", "step_del"),
+        _issue("write_verify:step_edit", "step_edit"),
+        _issue("write_verify:step_edit_enum", "step_edit", code="enum"),
+    )
+    groups = _issues_grouped_by_capability(spec.model_dump(mode="json"), issues)
+    assert [title for _, title, _ in groups] == ["编辑销售订单", "删除销售订单"]
+    assert len(groups[0][2]) == 2
+    assert len(groups[1][2]) == 1
+    plan = _plan_thought(spec.model_dump(mode="json"), issues)
+    assert plan.index("编辑销售订单") < plan.index("删除销售订单")
+    assert "一次只处理一个能力" in plan

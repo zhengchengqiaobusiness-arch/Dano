@@ -79,6 +79,37 @@ def headers_from_api_request(api_request: dict | None) -> dict:
     return normalize_headers(h)
 
 
+_SESSION_HEADER_NAMES = frozenset({"cookie", "authorization", "set-cookie"})
+
+
+def overlay_runtime_auth(captured: dict | None, runtime: dict | None) -> dict:
+    """Analysis/runtime replay: keep non-secret captured headers, replace session auth.
+
+    Recording cookies/Authorization are the expired browser session. Runtime
+    tokens from token_store must win; stale Cookie must not ride along.
+    """
+    captured = normalize_headers(captured)
+    runtime = normalize_headers(runtime)
+    if not runtime:
+        return captured
+    base = {
+        key: value
+        for key, value in captured.items()
+        if key.casefold() not in _SESSION_HEADER_NAMES and not _is_secret_key(key)
+    }
+    return normalize_headers({**base, **runtime})
+
+
+def runtime_replay_auth(
+    captured: dict | None,
+    runtime: dict | None,
+    storage_state: dict | None = None,
+) -> tuple[dict, dict | None]:
+    """Headers plus whether Playwright storage_state may still be attached."""
+    runtime = normalize_headers(runtime)
+    return overlay_runtime_auth(captured, runtime), (None if runtime else storage_state)
+
+
 def merge_auth_headers(api_request: dict, override: dict | None) -> dict:
     """把新存的鉴权头覆盖进 api_request 的 auth_headers(顶层 + 多步工作流**每一步**,因每个请求都需带 token)。
     返回新 dict,不改原对象;override 为空则原样返回拷贝。"""

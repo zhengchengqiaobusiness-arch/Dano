@@ -154,20 +154,24 @@ plausible. `category` is not an editable field axis and must not be submitted.
   Python binds the observed label/value map from page evidence; you do not need to transcribe
   every pair if the captured mapping is already complete.
 - Cite the field fact and the control/dictionary fact for conclusions derived from page controls.
-- A non-pagination filter with field-local editable control evidence remains an optional caller
-  input even when the response is an array of objects. A list-shaped business result is not
-  evidence that the request is an option endpoint. A search click alone does not prove every
-  leftover query leaf is caller-owned. Extra leaves without a control, upstream, or formula stay
-  `unknown` and keep their recorded wire value.
+- A non-pagination filter on a business list/search execute GET is an optional caller
+  input even when the response is an array of objects, and even when a control failed to
+  bind. The query string of that execute request *is* the search form. A list-shaped
+  business result is not evidence that the request is an option endpoint. Option-source
+  leftover query params and transport keys (`nonce`, `token`, `timestamp`) stay internal
+  or `unknown`. A detail GET that only names the opened record is not a search form.
 - Disabled or read-only display values are not caller inputs. Bind them to the observed
   runtime/API source, or leave them unknown.
-- An editable control that the page prefilled is still a caller field. The recorded value is
-  only a default the caller may keep or change — create, edit, numeric defaults, dates, and
-  selects all follow this judgment. Do not hide it as a system-owned default merely because
-  the operator did not overwrite it during recording.
-- Extra request leaves with no control, no upstream, and no formula stay `unknown`. Show them
-  as 未知. Keep the recorded wire value so the original request still works. Do not invent
-  `constant`, `session`, or `page_default` from a field name.
+- Origin and caller editability are separate. An editable control that the page prefilled,
+  selected-row echoed, or hydrated is still a caller field: the recorded value is only a
+  default the caller may keep or change. Create, edit, query filters, numeric defaults,
+  dates, and selects all follow this judgment. Do not hide a writable auto-fill as a
+  system-owned default merely because the operator did not overwrite it during recording.
+  Readonly or disabled is the page rule that keeps a field on the system side.
+- Extra request leaves with no control, no upstream, and no formula stay `unknown` only
+  when they are not a business list filter and not a create/submit form body leaf. Show
+  remaining unknowns as 未知. Keep the recorded wire value so the original request still
+  works. Do not invent `constant`, `session`, or `page_default` from a field name.
 - An option API is the source of a select only when that control used it: the selected
   value or label appears in that response, and the request is the one that populated the
   control. A page-load `simple-list` for tenants, users, or products is not automatically
@@ -215,12 +219,14 @@ in this order:
 Field origin and caller editability are separate facts. A new value entered by the operator uses
 `caller_input`. A value loaded from an earlier interface uses `response_binding`; when the target
 is an edit form (record hydration or field-local editable control), keep the upstream binding as
-the initial value and allow caller override even if the operator did not retype it. Token and
-user identifiers use `session`. Frontend-calculated values use `computed`. UUIDs, timestamps, and
-similar runtime values use `generated`. A recorded sample value is not automatically `constant`.
-A hidden field is not automatically `caller_input`. A list response does not automatically turn
-filter fields into enums. A row-command discriminator is `constant` even when a same-named list
-filter has a dictionary API.
+the initial value and allow caller override even if the operator did not retype it. A selected
+option-row echo uses the same rule: keep the projection origin and allow caller override unless
+the control is readonly. Token and user identifiers use `session`. Frontend-calculated values use
+`computed`; they stay internal unless a non-readonly control proves the page lets the operator
+overwrite the formula. UUIDs, timestamps, and similar runtime values use `generated`. A recorded
+sample value is not automatically `constant`. A hidden field is not automatically `caller_input`.
+A list response does not automatically turn filter fields into enums. A row-command discriminator
+is `constant` even when a same-named list filter has a dictionary API.
 
 A source conclusion is valid only when the current compiler can execute it.
 

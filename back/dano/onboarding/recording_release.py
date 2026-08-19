@@ -225,6 +225,16 @@ def _unverified_target_ids(spec: FlowSpec, *kinds: str) -> set[str]:
     }
 
 
+def _enum_marked_unverified(spec: FlowSpec, step_id: str, path: str) -> bool:
+    skipped = _unverified_target_ids(spec, "enum")
+    wire = str(path or "")
+    return bool(skipped & {
+        f"{step_id}:{wire}",
+        f"{step_id}:{wire.removeprefix('body.')}",
+        wire,
+    })
+
+
 def _active_link_issues(spec: FlowSpec, capability_id: str = "") -> list[ReleaseIssue]:
     issues: list[ReleaseIssue] = []
     skipped = _unverified_target_ids(spec, "dependency", "dependency_candidate")
@@ -440,7 +450,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                         suggested_operations=("set_param_required",),
                     ))
             enum_issue = _capability_param_enum_issue(param)
-            if enum_issue:
+            if enum_issue and not _enum_marked_unverified(spec, step_id, str(param.path or "")):
                 issues.append(ReleaseIssue(
                     check_code="enum_options_unverified",
                     message=f"枚举字段 `{step_id}:{param.path}` {enum_issue}",

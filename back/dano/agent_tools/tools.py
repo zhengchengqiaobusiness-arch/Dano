@@ -1149,23 +1149,27 @@ async def _recording_storage_state(session) -> dict | None:  # noqa: ANN001
         if state:
             return state
     from dano.execution.page.sessions import load_session_state
+    from dano.infra.token_store import get_token_headers
 
+    if await get_token_headers(session.tenant, session.subsystem):
+        return None
     return load_session_state(session.tenant, session.subsystem)
 
 
 async def _recording_auth_headers(session, requests: list[dict]) -> dict:  # noqa: ANN001
     from dano.execution.page.request_capture import extract_auth_headers
-    from dano.infra.token_store import get_token_headers, normalize_headers
+    from dano.infra.token_store import get_token_headers, normalize_headers, overlay_runtime_auth
 
-    # Persisted runtime credentials are only a fallback during recording.  The
-    # headers captured from the active browser request are newer and must win.
-    headers = normalize_headers(await get_token_headers(session.tenant, session.subsystem))
+    captured: dict[str, str] = {}
     for request in requests:
-        headers = normalize_headers({
-            **headers,
+        captured = normalize_headers({
+            **captured,
             **extract_auth_headers(request.get("headers")),
         })
-    return headers
+    runtime = normalize_headers(await get_token_headers(session.tenant, session.subsystem))
+    if getattr(session, "_live_recorder", None) is not None:
+        return normalize_headers({**runtime, **captured})
+    return overlay_runtime_auth(captured, runtime)
 
 
 def _recording_replay_overrides(value: object, *, label: str) -> dict:

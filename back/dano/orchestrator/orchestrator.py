@@ -546,6 +546,7 @@ class Orchestrator:
         override = await get_token_headers(tenant, skill.subsystem.value)
         if override:
             api_request = merge_auth_headers(api_request, override)
+        call_storage = None if override else storage
 
         payload = CapabilityInvokePayload(
             input=_without_capability_markers(intent.fields),
@@ -558,7 +559,7 @@ class Orchestrator:
             payload=payload,
             api_request=api_request,
             base_url=base_url,
-            storage_state=storage,
+            storage_state=call_storage,
             verify=tls_verify(),
         )
         if is_auth_failure(out):
@@ -578,7 +579,7 @@ class Orchestrator:
                     payload=payload,
                     api_request=api_request,
                     base_url=base_url,
-                    storage_state=storage,
+                    storage_state=None if override else storage,
                     verify=tls_verify(),
                 )
         ok = bool(out.get("ok"))
@@ -669,8 +670,10 @@ class Orchestrator:
         override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
         if override:
             apir = merge_auth_headers(apir, override)
-        result = await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
-                                           verify=tls_verify())
+        result = await fetch_field_options(
+            apir, field, base_url=base_url, storage_state=None if override else storage,
+            verify=tls_verify(),
+        )
         if is_auth_failure(result):
             try:
                 refreshed = await refresh_one(tenant, skill.subsystem.value, force=True)
@@ -683,7 +686,8 @@ class Orchestrator:
                 if override:
                     apir = merge_auth_headers(apir, override)
                 result = await fetch_field_options(
-                    apir, field, base_url=base_url, storage_state=storage, verify=tls_verify(),
+                    apir, field, base_url=base_url,
+                    storage_state=None if override else storage, verify=tls_verify(),
                 )
         if capability:
             result["capability"] = capability

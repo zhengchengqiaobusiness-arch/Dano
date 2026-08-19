@@ -152,7 +152,7 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "capability_count": int(body.get("capability_count") or 0),
         "request_count": int(body.get("request_count") or 0),
         "created_at": created,
-        "published": bool(body.get("published")),
+        "published": bool(body.get("published")) and bool(body.get("machine_verification_ran")),
         "machine_verification_ran": bool(body.get("machine_verification_ran")),
     }
 

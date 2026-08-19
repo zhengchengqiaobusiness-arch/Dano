@@ -342,13 +342,18 @@ class SelfHealingPipeline:
             draft = checked.draft
             context.remember_draft(draft)
             if not checked.issues:
-                for issue in previous_issue_map.values():
-                    await context.record(_issue_activity(
-                        issue,
+                for capability_id, title, members in _issues_grouped_by_capability(
+                    draft, tuple(previous_issue_map.values()),
+                ):
+                    if not members:
+                        continue
+                    await context.record(_capability_activity(
+                        title=title,
+                        capability_id=capability_id,
                         step=WorkflowStep.VERIFYING,
                         round_number=round_number,
                         status="resolved",
-                        label=_resolved_thought(issue),
+                        label=f"能力「{title}」验证通过",
                     ))
                 await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
                 release = await self._bounded(self.runtime.publish(draft, context))
@@ -359,37 +364,52 @@ class SelfHealingPipeline:
                 )
 
             current_issue_map = {issue.issue_id: issue for issue in checked.issues}
-            for issue_id, issue in current_issue_map.items():
-                if issue_id not in previous_issue_map:
-                    await context.record(_issue_activity(
-                        issue,
-                        step=WorkflowStep.VERIFYING,
-                        round_number=round_number,
-                        status="pending",
-                        label=_discovery_thought(issue),
-                    ))
-            for issue_id, issue in previous_issue_map.items():
-                if issue_id not in current_issue_map:
-                    await context.record(_issue_activity(
-                        issue,
-                        step=WorkflowStep.VERIFYING,
-                        round_number=round_number,
-                        status="resolved",
-                        label=_resolved_thought(issue),
-                    ))
+            new_ids = set(current_issue_map) - set(previous_issue_map)
+            resolved_ids = set(previous_issue_map) - set(current_issue_map)
+            for capability_id, title, members in _issues_grouped_by_capability(draft, checked.issues):
+                new_count = sum(1 for issue in members if issue.issue_id in new_ids)
+                if not new_count:
+                    continue
+                await context.record(_capability_activity(
+                    title=title,
+                    capability_id=capability_id,
+                    step=WorkflowStep.VERIFYING,
+                    round_number=round_number,
+                    status="pending",
+                    label=f"发现能力「{title}」有 {new_count} 个待处理问题",
+                ))
+            for capability_id, title, members in _issues_grouped_by_capability(
+                draft, tuple(previous_issue_map.values()),
+            ):
+                resolved_count = sum(1 for issue in members if issue.issue_id in resolved_ids)
+                if not resolved_count:
+                    continue
+                await context.record(_capability_activity(
+                    title=title,
+                    capability_id=capability_id,
+                    step=WorkflowStep.VERIFYING,
+                    round_number=round_number,
+                    status="resolved",
+                    label=f"能力「{title}」已关闭 {resolved_count} 个问题",
+                ))
             previous_issue_map = current_issue_map
 
             external = tuple(
                 issue for issue in checked.issues if issue.resolver == "external_blocked"
             )
             if external:
+                seen_blocked: set[str] = set()
                 for issue in external:
+                    label = str(issue.message or "").strip()
+                    if label in seen_blocked:
+                        continue
+                    seen_blocked.add(label)
                     await context.record(_issue_activity(
                         issue,
                         step=WorkflowStep.RESOLVING,
                         round_number=round_number,
                         status="blocked",
-                        label=issue.message,
+                        label=label,
                     ))
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
@@ -412,13 +432,14 @@ class SelfHealingPipeline:
             previous_fingerprint = current_fingerprint
             previous_unresolved = unresolved
             if unchanged >= self.max_unchanged_rounds:
-                for issue in checked.issues:
-                    await context.record(_issue_activity(
-                        issue,
+                for capability_id, title, members in _issues_grouped_by_capability(draft, checked.issues):
+                    await context.record(_capability_activity(
+                        title=title,
+                        capability_id=capability_id,
                         step=WorkflowStep.RESOLVING,
                         round_number=round_number,
                         status="blocked",
-                        label=f"连续验证未取得进展：{issue.message}",
+                        label=f"能力「{title}」连续验证未取得进展，仍有 {len(members)} 个问题",
                     ))
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
@@ -450,7 +471,7 @@ class SelfHealingPipeline:
                     step=WorkflowStep.RESOLVING,
                     round=round_number,
                     status="running",
-                    label=_plan_thought(machine_issues),
+                    label=_plan_thought(draft, machine_issues),
                 ))
             repaired = await self._bounded(self.runtime.repair(
                 draft,
@@ -503,6 +524,73 @@ def _issue_signature(issues: tuple[WorkflowIssue, ...]) -> tuple[str, ...]:
         )
         for issue in issues
     ))
+
+
+def _capability_id_from_draft(draft: dict[str, Any] | None, issue: WorkflowIssue) -> str:
+    explicit = str(issue.target.get("capability_id") or "")
+    if explicit:
+        return explicit
+    step_id = str(issue.target.get("step_id") or "")
+    if not step_id:
+        return ""
+    for capability in list((draft or {}).get("capabilities") or []):
+        if not isinstance(capability, dict):
+            continue
+        if step_id in {str(item) for item in (capability.get("step_ids") or [])}:
+            return str(capability.get("capability_id") or "")
+        if any(
+            isinstance(node, dict) and str(node.get("step_id") or "") == step_id
+            for node in (capability.get("nodes") or [])
+        ):
+            return str(capability.get("capability_id") or "")
+    return ""
+
+
+def _issues_grouped_by_capability(
+    draft: dict[str, Any] | None,
+    issues: tuple[WorkflowIssue, ...] | list[WorkflowIssue],
+) -> list[tuple[str, str, tuple[WorkflowIssue, ...]]]:
+    """Keep check/repair narration in stage-six capability order."""
+
+    by_id: dict[str, list[WorkflowIssue]] = {}
+    for issue in issues:
+        by_id.setdefault(_capability_id_from_draft(draft, issue), []).append(issue)
+    ordered: list[tuple[str, str, tuple[WorkflowIssue, ...]]] = []
+    for capability in list((draft or {}).get("capabilities") or []):
+        if not isinstance(capability, dict):
+            continue
+        capability_id = str(capability.get("capability_id") or "")
+        members = by_id.pop(capability_id, None)
+        if not members:
+            continue
+        title = str(capability.get("title") or capability.get("name") or capability_id or "未命名能力")
+        ordered.append((capability_id, title, tuple(members)))
+    leftovers = [issue for group in by_id.values() for issue in group]
+    real_leftovers = [
+        issue for issue in leftovers
+        if issue.code != "replay_auth" and str(issue.target.get("kind") or "") != "session"
+    ]
+    if real_leftovers:
+        ordered.append(("", "整体流程", tuple(real_leftovers)))
+    return ordered
+
+
+def _capability_activity(
+    *,
+    title: str,
+    capability_id: str,
+    step: WorkflowStep,
+    round_number: int,
+    status: str,
+    label: str,
+) -> WorkflowActivity:
+    return WorkflowActivity(
+        step=step,
+        round=round_number,
+        status=status,
+        label=label,
+        target={"capability_id": capability_id, "capability_title": title},
+    )
 
 
 def _issue_activity(
@@ -564,24 +652,13 @@ def _discovery_thought(issue: WorkflowIssue) -> str:
     return f"发现了问题：{message}"
 
 
-def _plan_thought(issues: tuple[WorkflowIssue, ...]) -> str:
-    evidence = sum(1 for issue in issues if issue.resolver == "collect_evidence")
-    repair = sum(1 for issue in issues if issue.resolver == "machine_repair")
-    actions: list[str] = []
-    if evidence:
-        actions.append(f"补 {evidence} 项验证证据")
-    if repair:
-        actions.append(f"修 {repair} 处能力契约")
-    action = "，".join(actions) or "继续处理剩余问题"
-    samples = "；".join(
-        (_issue_subject(issue) or issue.code or issue.message)[:40]
-        for issue in issues[:3]
-    )
-    more = f" 等 {len(issues)} 项" if len(issues) > 3 else ""
+def _plan_thought(draft: dict[str, Any] | None, issues: tuple[WorkflowIssue, ...]) -> str:
+    groups = _issues_grouped_by_capability(draft, issues)
+    names = [title for _, title, members in groups if members]
+    listed = "、".join(names) or "当前能力"
     return (
-        f"我觉得应该这样处理：本轮先{action}。"
-        f"具体包括 {samples}{more}。"
-        "准备按能力分组，一个能力一个能力地定向修复，不重新划分能力。"
+        f"本轮按能力依次处理：{listed}。"
+        "一次只处理一个能力，处理完再进入下一个，不把所有能力捆在一起修。"
     )
 
 
@@ -822,6 +899,7 @@ class RecordingWorkflow:
 
     async def cancel(self) -> WorkflowSnapshot:
         self._cancelled = True
+        await self._stop_running_work()
         if self.snapshot.status not in {
             WorkflowStatus.PUBLISHED,
             WorkflowStatus.CANCELLED,
@@ -836,7 +914,6 @@ class RecordingWorkflow:
                 progress=self._next_progress(WorkflowStep.READY, "当前分析已终止，草稿已保留"),
                 error="",
             )
-        await self._stop_running_work()
         return self.snapshot
 
     async def _stop_running_work(self) -> None:
@@ -844,7 +921,7 @@ class RecordingWorkflow:
             try:
                 cancelled = self.cancel_listener()
                 if isinstance(cancelled, Awaitable):
-                    await asyncio.wait_for(cancelled, timeout=8.0)
+                    await asyncio.wait_for(cancelled, timeout=3.0)
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - UI already left the run
                 pass
         if self._answer is not None and not self._answer.done():
@@ -854,7 +931,7 @@ class RecordingWorkflow:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(self._task, return_exceptions=True),
-                    timeout=5.0,
+                    timeout=2.0,
                 )
             except asyncio.TimeoutError:
                 pass
@@ -919,7 +996,11 @@ class RecordingWorkflow:
                         if outcome.status == WorkflowStatus.PUBLISHED
                         else WorkflowStep.READY
                     ),
-                    label=("发布完成" if outcome.status == WorkflowStatus.PUBLISHED else "处理已结束"),
+                    label=(
+                        "发布完成"
+                        if outcome.status == WorkflowStatus.PUBLISHED
+                        else "分析已结束，可查看能力结果"
+                    ),
                     request_count=self.snapshot.progress.request_count,
                 ),
             )

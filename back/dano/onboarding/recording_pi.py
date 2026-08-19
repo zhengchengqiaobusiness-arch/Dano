@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
@@ -52,6 +53,23 @@ def configure_recording_pi_stdout_limit(reader: Any) -> None:
 def recording_pi_process_has_exited(proc: Any) -> bool:
     """True only when the sidecar process is gone; stdout EOF alone is not death."""
     return proc is None or getattr(proc, "returncode", None) is not None
+
+
+def kill_recording_pi_process_tree(proc: Any) -> None:
+    """Kill the Node sidecar and any children started for this recording action."""
+
+    if proc is None or getattr(proc, "returncode", None) is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" and pid:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    proc.kill()
 _OS_ENV_WHITELIST = (
     "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "windir", "ComSpec",
     "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
@@ -1156,7 +1174,7 @@ class RecordingPiSession:
             details={"line": text},
         )
 
-    async def close(self) -> None:
+    async def close(self, *, force: bool = False) -> None:
         if self._closed:
             return
         self._closed = True
@@ -1171,23 +1189,29 @@ class RecordingPiSession:
         try:
             proc = self._proc
             if proc is not None and proc.returncode is None:
+                if force:
+                    kill_recording_pi_process_tree(proc)
+                else:
+                    try:
+                        await self._command("close", timeout_s=min(self.timeout_s, 10.0))
+                    except BaseException:  # noqa: BLE001 - cleanup must continue after a dead sidecar
+                        pass
+                    if proc.stdin is not None:
+                        proc.stdin.close()
                 try:
-                    await self._command("close", timeout_s=min(self.timeout_s, 10.0))
-                except BaseException:  # noqa: BLE001 - cleanup must continue after a dead sidecar
-                    pass
-                if proc.stdin is not None:
-                    proc.stdin.close()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    await asyncio.wait_for(proc.wait(), timeout=2.0 if force else 5.0)
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                    kill_recording_pi_process_tree(proc)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
             for task in (self._stdout_task, self._stderr_task, self._watch_task):
                 if task is not None and not task.done():
                     task.cancel()
                     try:
-                        await task
-                    except BaseException:  # noqa: BLE001
+                        await asyncio.wait_for(task, timeout=1.0)
+                    except (asyncio.TimeoutError, BaseException):  # noqa: BLE001
                         pass
             self._proc = None
             if self._server is not None:

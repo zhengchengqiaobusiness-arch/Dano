@@ -398,7 +398,13 @@ class RecordingGatewaySession:
         self._closed = True
         if self._live_task is not None and not self._live_task.done():
             self._live_task.cancel()
-            await asyncio.gather(self._live_task, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(self._live_task, return_exceptions=True),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                pass
         if self.workflow is not None and self.workflow.snapshot.status not in {
             WorkflowStatus.IDLE,
             WorkflowStatus.PUBLISHED,
@@ -407,18 +413,18 @@ class RecordingGatewaySession:
             WorkflowStatus.FAILED,
         }:
             await self.workflow.cancel()
-        await self._close_pi()
+        await self._close_pi(force=True)
         if self.capture is not None:
             await self.capture.stop()
             self.capture = None
 
-    async def _close_pi(self) -> None:
+    async def _close_pi(self, *, force: bool = False) -> None:
         pi = self._pi
         self._pi = None
         if pi is None:
             return
         try:
-            await asyncio.wait_for(pi.close(), timeout=8.0)
+            await asyncio.wait_for(pi.close(force=force), timeout=3.0 if force else 8.0)
         except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - cancel must not stall the UI
             pass
 
@@ -429,11 +435,24 @@ class RecordingGatewaySession:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(self._live_task, return_exceptions=True),
-                    timeout=3.0,
+                    timeout=1.0,
                 )
             except asyncio.TimeoutError:
                 pass
-        await self._close_pi()
+        await self._close_pi(force=True)
+
+    async def abort_run(self) -> None:
+        """Hard-stop Pi, HTTP replay, and the workflow owned by this action."""
+
+        try:
+            await self._cancel_analysis()
+            if self.workflow is not None and self.workflow.snapshot.status not in {
+                WorkflowStatus.PUBLISHED,
+                WorkflowStatus.CANCELLED,
+            }:
+                await self.workflow.cancel()
+        finally:
+            await self.close()
 
     async def _materialize(
         self,
@@ -921,7 +940,7 @@ class RecordingGatewaySession:
 
         updated = await DraftStore().patch_recording_result_flags(
             self._stage_six_result_id,
-            published=True if published else None,
+            published=bool(published and self._machine_verification),
             machine_verification_ran=True if self._machine_verification else None,
         )
         if updated is not None:
@@ -1068,6 +1087,26 @@ class RecordingSessionRegistry:
         session = self._sessions.get(action)
         if session is not None:
             session.detach(send)
+
+    async def abort(self, action: str) -> None:
+        """Stop every process owned by this recording action."""
+
+        async with self._lock:
+            session = self._sessions.pop(action, None)
+        if session is None:
+            return
+        abort_run = getattr(session, "abort_run", None)
+        if abort_run is not None:
+            await abort_run()
+            return
+        try:
+            if session.workflow is not None and session.workflow.snapshot.status not in {
+                WorkflowStatus.PUBLISHED,
+                WorkflowStatus.CANCELLED,
+            }:
+                await session.workflow.cancel()
+        finally:
+            await session.close()
 
     async def close(self) -> None:
         async with self._lock:

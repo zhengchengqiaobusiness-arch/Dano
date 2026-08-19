@@ -1188,10 +1188,14 @@ async def record_ws(ws: WebSocket) -> None:
                 if str(exc) != "WebSocket is not connected. Need to call \"accept\" first.":
                     raise
                 raise WebSocketDisconnect(code=1006) from exc
+            if str(message.get("type") or "") == "cancel" and _recording_session_registry is not None:
+                await _recording_session_registry.abort(action)
+                break
             try:
                 await session.dispatch(message)
             except ValueError as exc:
                 await sender.send_json({"type": "error", "detail": str(exc)})
+                continue
     except WebSocketDisconnect:
         log.info("recording.websocket_disconnected", action=(session.config.action if session else ""))
     except Exception as exc:  # noqa: BLE001
@@ -1201,8 +1205,16 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        should_abort = (
+            session is not None
+            and getattr(session, "capture", None) is None
+            and getattr(session, "workflow", None) is not None
+            and session.workflow.snapshot.status.value in {"processing", "waiting_operator"}
+        )
         if session is not None and _recording_session_registry is not None:
             _recording_session_registry.detach(action, send_message)
+            if should_abort:
+                await _recording_session_registry.abort(action)
         await sender.close()
         try:
             await ws.close()

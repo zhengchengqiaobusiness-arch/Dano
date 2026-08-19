@@ -20,12 +20,12 @@ from dano.onboarding.recording_release import (
     evaluate_recording_release,
 )
 from dano.onboarding.recording_verify import (
-    AUTH_EXPIRED_MESSAGE,
     FLOW_GROUP_KEY,
-    _REPLAY_ISSUE_CODES,
+    REPLAY_SKIPPED_MESSAGE,
     apply_recorded_evidence_fixes,
     assign_unassigned_internal_steps,
     finalize_verification_state,
+    is_replay_issue_code,
     machine_repair_disposition,
     mark_issues_unverified,
     select_preflight_probe,
@@ -46,9 +46,11 @@ PiProvider = Callable[[bool], Awaitable[Any]]
 Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
 ReplayExecutor = Callable[[dict[str, Any], FlowSpec], Awaitable[dict[str, Any]]]
+TokenRefresher = Callable[..., Awaitable[dict[str, Any]]]
 _CAPABILITY_REPAIR_BUDGET = 2
 PREFLIGHT_TIMEOUT_S = 8.0
 PREFLIGHT_PROGRESS_LABEL = "正在检查回放登录态"
+PREFLIGHT_REFRESH_LABEL = "登录态已过期，正在自动刷新凭证"
 _PROTOCOL_ATTEMPTS = 3
 _SUBMISSION_TOOLS = {
     "plan": "submit_recording_plan",
@@ -350,6 +352,19 @@ def _issue_capability_id(spec: FlowSpec, issue: WorkflowIssue) -> str:
     return ""
 
 
+def _session_level_issue(issue: WorkflowIssue) -> bool:
+    if issue.code == "replay_auth":
+        return True
+    return str(issue.target.get("kind") or "") == "session"
+
+
+def _stamp_issue_capability(spec: FlowSpec, issue: WorkflowIssue) -> WorkflowIssue:
+    capability_id = _issue_capability_id(spec, issue)
+    if not capability_id or str(issue.target.get("capability_id") or "") == capability_id:
+        return issue
+    return issue.model_copy(update={"target": {**issue.target, "capability_id": capability_id}})
+
+
 def _group_issues_by_capability(
     spec: FlowSpec,
     issues: tuple[WorkflowIssue, ...],
@@ -367,7 +382,12 @@ def _group_issues_by_capability(
         members = grouped.pop(capability.capability_id, None)
         if members:
             ordered.append((capability, tuple(members)))
-    leftovers = [issue for members in grouped.values() for issue in members]
+    leftovers = [
+        issue
+        for members in grouped.values()
+        for issue in members
+        if not _session_level_issue(issue)
+    ]
     if leftovers:
         ordered.append((None, tuple(leftovers)))
     return ordered
@@ -486,21 +506,39 @@ def _record_capability_verification(
     spec.meta = {**(spec.meta or {}), "capability_verification": existing}
 
 
+def _issues_from_spec(spec: FlowSpec) -> tuple[WorkflowIssue, ...]:
+    report = verification_report(spec)
+    issues = _dedupe_workflow_issues(tuple(
+        _stamp_issue_capability(spec, _todo_issue(todo, spec))
+        for todo in report.get("todos") or []
+    ))
+    if issues:
+        return issues
+    decision = evaluate_recording_release(spec)
+    return _dedupe_workflow_issues(tuple(
+        _stamp_issue_capability(spec, _workflow_issue(issue, spec))
+        for capability in decision.capabilities
+        for issue in capability.issues
+    ))
+
+
 async def _default_replay_executor(request: dict[str, Any], spec: FlowSpec) -> dict[str, Any]:
     from dano.execution.page.replay import replay_request
     from dano.execution.page.request_capture import extract_auth_headers
     from dano.execution.page.sessions import load_session_state
-    from dano.infra.token_store import get_token_headers, normalize_headers
+    from dano.infra.token_store import get_token_headers, runtime_replay_auth
 
-    headers = normalize_headers(await get_token_headers(spec.tenant, spec.subsystem))
-    headers = normalize_headers({
-        **headers,
-        **extract_auth_headers(request.get("headers")),
-    })
+    captured = extract_auth_headers(request.get("headers"))
+    runtime = await get_token_headers(spec.tenant, spec.subsystem)
+    headers, storage_state = runtime_replay_auth(
+        captured,
+        runtime,
+        load_session_state(spec.tenant, spec.subsystem),
+    )
     return await replay_request(
         request,
         auth_headers=headers,
-        storage_state=load_session_state(spec.tenant, spec.subsystem),
+        storage_state=storage_state,
     )
 
 
@@ -513,6 +551,7 @@ class ProductionRecordingServices:
     pi_provider: PiProvider
     publisher: Publisher
     replay_executor: ReplayExecutor | None = None
+    token_refresher: TokenRefresher | None = None
 
     def pipeline_services(self) -> RecordingPipelineServices:
         return RecordingPipelineServices(
@@ -545,16 +584,17 @@ class ProductionRecordingServices:
         ))
         spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
         spec = assign_unassigned_internal_steps(spec)
-        spec, report = finalize_verification_state(
+        spec, _report = finalize_verification_state(
             spec,
             rounds=0,
             max_rounds=0,
         )
         spec = assign_unassigned_internal_steps(spec)
-        report = verification_report(spec)
-        preflight = await self._preflight_replay_health(spec)
-        if preflight.get("auth_failed"):
-            await context.progress(WorkflowStep.VERIFYING, AUTH_EXPIRED_MESSAGE, 0)
+        preflight = await self._preflight_replay_health(spec, context)
+        if preflight.get("skip_replay"):
+            await context.progress(WorkflowStep.VERIFYING, REPLAY_SKIPPED_MESSAGE, 0)
+        elif preflight.get("refreshed"):
+            await context.progress(WorkflowStep.VERIFYING, "凭证已刷新，开始检查能力", 0)
         elif not preflight.get("skipped"):
             await context.progress(WorkflowStep.VERIFYING, "回放登录态正常，开始检查能力", 0)
         verification_run = dict((spec.meta or {}).get("verification_run") or {})
@@ -565,43 +605,52 @@ class ProductionRecordingServices:
         }
         spec.meta = {**(spec.meta or {}), "verification_run": verification_run}
 
-        issues = _dedupe_workflow_issues(tuple(
-            _todo_issue(todo, spec) for todo in report.get("todos") or []
-        ))
-        if not issues:
-            decision = evaluate_recording_release(spec)
-            issues = _dedupe_workflow_issues(tuple(
-                _workflow_issue(issue, spec)
-                for capability in decision.capabilities
-                for issue in capability.issues
+        issues = _issues_from_spec(spec)
+        if preflight.get("skip_replay"):
+            replay_issues = tuple(issue for issue in issues if is_replay_issue_code(issue.code))
+            if replay_issues:
+                mark_issues_unverified(
+                    spec,
+                    replay_issues,
+                    reason=REPLAY_SKIPPED_MESSAGE,
+                )
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.VERIFYING,
+                round=0,
+                status="running",
+                label=REPLAY_SKIPPED_MESSAGE,
             ))
-
-        if preflight.get("auth_failed"):
-            blocked = [
-                issue.model_copy(update={
-                    "resolver": "external_blocked",
-                    "message": AUTH_EXPIRED_MESSAGE,
-                })
-                for issue in issues
-                if issue.code in _REPLAY_ISSUE_CODES
-            ]
-            if not blocked:
-                blocked = [
-                    WorkflowIssue(
-                        issue_id="replay_auth_expired",
-                        code="replay_auth",
-                        message=AUTH_EXPIRED_MESSAGE,
-                        resolver="external_blocked",
-                        target={"kind": "session"},
-                    )
-                ]
-            return spec.model_dump(mode="json"), _dedupe_workflow_issues(tuple(blocked))
+            verification_run = dict((spec.meta or {}).get("verification_run") or {})
+            verification_run["preflight"] = preflight
+            spec.meta = {**(spec.meta or {}), "verification_run": verification_run}
+            issues = tuple(
+                issue for issue in _issues_from_spec(spec)
+                if not is_replay_issue_code(issue.code)
+            )
         return spec.model_dump(mode="json"), issues
 
-    async def _preflight_replay_health(self, spec: FlowSpec) -> dict[str, Any]:
-        probe = select_preflight_probe(spec)
-        if probe is None:
-            return {"skipped": True, "ok": True}
+    async def _refresh_runtime_token(self, tenant: str, subsystem: str) -> dict[str, Any]:
+        refresher = self.token_refresher
+        if refresher is None:
+            from dano.infra.token_refresh import refresh_one
+            refresher = refresh_one
+        try:
+            result = dict(await refresher(tenant, subsystem, force=True) or {})
+        except Exception as exc:  # noqa: BLE001 - keep the original auth failure
+            return {"ok": False, "status": "error", "reason": type(exc).__name__}
+        if result.get("status") == "refreshed":
+            return result
+        return {
+            **result,
+            "ok": False,
+            "status": str(result.get("status") or result.get("reason") or "failed"),
+        }
+
+    async def _run_preflight_probe(
+        self,
+        probe: dict[str, Any],
+        spec: FlowSpec,
+    ) -> dict[str, Any]:
         executor = self.replay_executor or _default_replay_executor
         try:
             result = await asyncio.wait_for(executor(probe, spec), timeout=PREFLIGHT_TIMEOUT_S)
@@ -628,6 +677,54 @@ class ProductionRecordingServices:
             "status": status,
             "path": str(probe.get("path") or probe.get("url") or ""),
             "request_id": str(probe.get("request_id") or ""),
+        }
+
+    async def _preflight_replay_health(
+        self,
+        spec: FlowSpec,
+        context: PipelineContext,
+    ) -> dict[str, Any]:
+        probe = select_preflight_probe(spec)
+        if probe is None:
+            return {"skipped": True, "ok": True}
+        first = await self._run_preflight_probe(probe, spec)
+        if first.get("skipped") or first.get("error") or not first.get("auth_failed"):
+            return first
+        await context.progress(WorkflowStep.VERIFYING, PREFLIGHT_REFRESH_LABEL, 0)
+        await context.record(WorkflowActivity(
+            step=WorkflowStep.VERIFYING,
+            round=0,
+            status="running",
+            label=PREFLIGHT_REFRESH_LABEL,
+        ))
+        refresh = await self._refresh_runtime_token(spec.tenant, spec.subsystem)
+        if refresh.get("status") != "refreshed":
+            return {
+                **first,
+                "auth_failed": True,
+                "skip_replay": True,
+                "refreshed": False,
+                "refresh_status": refresh.get("status") or refresh.get("reason") or "failed",
+            }
+        await context.record(WorkflowActivity(
+            step=WorkflowStep.VERIFYING,
+            round=0,
+            status="running",
+            label="凭证已刷新，正在重新检查登录态",
+        ))
+        retry = await self._run_preflight_probe(probe, spec)
+        if retry.get("auth_failed"):
+            return {
+                **retry,
+                "auth_failed": True,
+                "skip_replay": True,
+                "refreshed": True,
+                "refresh_status": "refreshed",
+            }
+        return {
+            **retry,
+            "refreshed": True,
+            "refresh_status": "refreshed",
         }
 
     async def repair(
@@ -683,6 +780,22 @@ class ProductionRecordingServices:
             report.applied.append(issue.issue_id)
             report.resolved.append(issue.issue_id)
         remaining = still_open
+        preflight = dict(
+            ((spec.meta or {}).get("verification_run") or {}).get("preflight") or {}
+        )
+        if preflight.get("skip_replay"):
+            leftover_replay = tuple(
+                issue for issue in remaining if is_replay_issue_code(issue.code)
+            )
+            if leftover_replay:
+                mark_issues_unverified(
+                    spec,
+                    leftover_replay,
+                    reason=REPLAY_SKIPPED_MESSAGE,
+                )
+            remaining = [
+                issue for issue in remaining if not is_replay_issue_code(issue.code)
+            ]
         dispatchable = tuple(issue for issue in remaining if _dispatchable_issue(issue))
 
         if dispatchable:
@@ -734,11 +847,12 @@ class ProductionRecordingServices:
                 if capability is not None
                 else FLOW_GROUP_KEY
             )
-            label = (
-                f"「{capability.title or capability.name}」"
+            title = (
+                str(capability.title or capability.name)
                 if capability is not None
                 else "整体流程"
             )
+            cap_target = {"capability_id": group_key, "capability_title": title}
             dispatched = int((context.capability_rounds or {}).get(group_key) or 0)
             if dispatched >= _CAPABILITY_REPAIR_BUDGET:
                 mark_issues_unverified(
@@ -759,18 +873,25 @@ class ProductionRecordingServices:
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
                     status="blocked",
-                    label=f"能力{label}已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，已标为未验证",
+                    label=f"能力「{title}」已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，已标为未验证",
+                    target=cap_target,
                 ))
                 continue
             context.capability_rounds[group_key] = dispatched + 1
+            await context.progress(
+                WorkflowStep.RESOLVING,
+                f"正在处理能力「{title}」（{index}/{total}）",
+                context.current_round,
+            )
             await context.record(WorkflowActivity(
                 step=WorkflowStep.RESOLVING,
                 round=context.current_round,
                 status="running",
                 label=(
-                    f"开始处理能力{label}（第 {index}/{total} 组）："
+                    f"开始处理能力「{title}」（第 {index}/{total} 组）："
                     f"待解决 {len(group_issues)} 个问题"
                 ),
+                target={"capability_id": group_key, "capability_title": title},
             ))
             pi.bind_flow_spec(spec)
             before_pi = flow_spec_fingerprint(spec)
@@ -807,7 +928,8 @@ class ProductionRecordingServices:
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
                     status="running",
-                    label=f"能力{label}本组修复未落地：{exc}",
+                    label=f"能力「{title}」本组修复未落地：{exc}",
+                    target=cap_target,
                 ))
                 continue
             repaired = pi.current_flow_spec()
@@ -819,7 +941,8 @@ class ProductionRecordingServices:
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
                     status="running",
-                    label=f"能力{label}的提交清空了能力集合，已回退本组修改",
+                    label=f"能力「{title}」的提交清空了能力集合，已回退本组修改",
+                    target=cap_target,
                 ))
                 continue
             changed = flow_spec_fingerprint(repaired) != before_pi
@@ -863,9 +986,10 @@ class ProductionRecordingServices:
                 round=context.current_round,
                 status="running",
                 label=(
-                    f"能力{label}本组处理完成：解决 {len(resolved_now)} 项，"
+                    f"能力「{title}」本组处理完成：解决 {len(resolved_now)} 项，"
                     f"剩余 {len(group_issues) - len(resolved_now)} 项"
                 ),
+                target=cap_target,
             ))
         return spec
 

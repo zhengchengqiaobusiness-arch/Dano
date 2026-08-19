@@ -936,9 +936,11 @@ def test_create_form_projects_option_row_and_computes_line_total() -> None:
     ):
         item = _param(create, path)
         assert item.source_kind == "selected_option_field", (path, item.source_kind, item.reason)
-        assert not _param_exposed_to_caller(item)
+        assert _param_exposed_to_caller(item), (path, item.exposed_to_user, item.reason)
+        assert bool((item.source or {}).get("allow_caller_override"))
         assert (item.source or {}).get("response_path") == catalog_leaf
         assert item.source_kind != "unknown"
+        assert item.source_kind != "computed"
     total = _param(create, "items[0].totalPrice")
     assert total.source_kind == "computed", (total.source_kind, total.reason)
     assert not _param_exposed_to_caller(total)
@@ -1083,3 +1085,120 @@ def test_write_locator_with_inspect_text_stays_write_family() -> None:
     step = _step_by_suffix(spec, "/doc/update")
     assert _is_write_step(step)
     assert _capability_operation_kind(step) not in {"inspect", "query_status", "preview"}
+
+
+def test_unbound_list_filters_are_caller_not_unknown() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_list", method="GET",
+                url=(
+                    "http://example.test/admin-api/doc/page?pageNo=1&pageSize=10"
+                    "&no=1&remark=1&customerId=8&productId=4&status=20"
+                ),
+                sequence=1, role="business_get", action="act_search", locator="text=搜索",
+                response={"code": 0, "data": {"list": [{"id": 1}]}},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="状态", aliases=["status"], kind="select", value="已审",
+                request_id="req_list", path="query.status", in_dialog=False,
+            ),
+        ],
+        page_events=[{"event_id": "ev_search", "kind": "click", "action_id": "act_search"}],
+        page_context=PAGE,
+    )
+    listing = _step_by_suffix(spec, "/doc/page")
+    for path in ("query.no", "query.remark", "query.customerId", "query.productId", "query.status"):
+        item = _param(listing, path)
+        assert _param_exposed_to_caller(item), (path, item.source_kind, item.reason)
+        assert item.source_kind != "unknown"
+        assert item.required is False
+    assert not _param_exposed_to_caller(_param(listing, "query.pageNo"))
+    spec = _compile(spec, [{
+        "name": "search_docs",
+        "title": "查询单据",
+        "kind": "query",
+        "anchor_step_id": listing.step_id,
+        "request_refs": [{"step_id": listing.step_id, "usage": "execute"}],
+    }])
+    props = ((next(item for item in spec.capabilities if item.name == "search_docs").input_schema or {}).get("properties") or {})
+    assert "no" in props
+    assert "remark" in props
+    assert "pageNo" not in props
+
+
+def test_option_source_query_leftover_stays_unknown() -> None:
+    spec = _edit_and_command_spec()
+    option = _step_by_suffix(spec, "/dict-data/simple-list")
+    leftover = _param(option, "query.dictType")
+    assert leftover.source_kind == "unknown"
+    assert not _param_exposed_to_caller(leftover)
+
+
+def test_readonly_option_row_echo_stays_system() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_items", method="GET",
+                url="http://example.test/admin-api/item/simple-list",
+                sequence=1, role="read_option",
+                response={"code": 0, "data": [
+                    {"id": 4, "name": "甲件", "barCode": "b1", "price": 5000},
+                    {"id": 7, "name": "乙件", "barCode": "b2", "price": 3000},
+                ]},
+            ),
+            _req(
+                "req_create", method="POST",
+                url="http://example.test/admin-api/doc/create",
+                sequence=2, role="business_write", action="act_create", locator="text=确定",
+                body={
+                    "partyId": 5,
+                    "items": [{
+                        "productId": 4,
+                        "productName": "甲件",
+                        "productBarCode": "b1",
+                        "productPrice": 5000,
+                        "count": 2,
+                        "totalPrice": 10000,
+                    }],
+                },
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="产品名称", aliases=["productName"], kind="text", value="甲件",
+                request_id="req_create", path="body.items[0].productName",
+                in_dialog=True, read_only=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    name = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productName")
+    assert name.source_kind == "selected_option_field"
+    assert not _param_exposed_to_caller(name)
+    price = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productPrice")
+    assert price.source_kind == "selected_option_field"
+    assert _param_exposed_to_caller(price)
+    assert price.source_kind != "computed"
+
+
+def test_detail_get_identity_is_not_a_search_filter() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=32",
+                sequence=1, role="business_get", action="act_view", locator="text=详情",
+                response={"code": 0, "data": {"id": 32, "remark": "x"}},
+            ),
+        ],
+        page_events=[{"event_id": "ev_view", "kind": "click", "action_id": "act_view"}],
+        page_context=PAGE,
+    )
+    record_id = _param(_step_by_suffix(spec, "/doc/get"), "query.id")
+    assert (record_id.source or {}).get("kind") == "selected_record_identity"
+    assert _param_exposed_to_caller(record_id)
+    assert record_id.source_kind != "unknown"

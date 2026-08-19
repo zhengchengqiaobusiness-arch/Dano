@@ -28,7 +28,8 @@ _REPLAY_ISSUE_CODES = frozenset({
     "enum_options_unverified",
 })
 FLOW_GROUP_KEY = "__flow__"
-AUTH_EXPIRED_MESSAGE = "录制会话登录态已过期，回放验证无法进行；请刷新凭证后重新点『开始分析』"
+AUTH_EXPIRED_MESSAGE = "录制登录态已过期，已跳过回放取证；Skill 仍可使用运行期凭证调用"
+REPLAY_SKIPPED_MESSAGE = AUTH_EXPIRED_MESSAGE
 _NOISE_PATH_MARKERS = (
     "/tenant/",
     "get-by-website",
@@ -62,6 +63,10 @@ def normalized_request_path(url_or_path: str) -> str:
     path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
     path = (path or raw.split("?", 1)[0]).strip()
     return path.rstrip("/") or path
+
+
+def is_replay_issue_code(code: str) -> bool:
+    return str(code or "") in _REPLAY_ISSUE_CODES
 
 
 def replay_auth_failed(status: Any, body: Any) -> bool:

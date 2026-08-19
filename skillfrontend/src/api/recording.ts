@@ -9,6 +9,7 @@ export interface RecordingResultSummary {
   request_count: number;
   created_at: string;
   published: boolean;
+  machine_verification_ran?: boolean;
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {

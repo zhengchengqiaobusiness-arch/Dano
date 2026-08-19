@@ -12,19 +12,17 @@ from dano.execution.page.flow_spec import (
     RequestFact,
     RequestFacts,
 )
-from dano.onboarding.recording_pipeline import CanonicalRecordingRuntime
+from dano.infra.token_store import overlay_runtime_auth, runtime_replay_auth
+from dano.onboarding.recording_release import evaluate_recording_release
 from dano.onboarding.recording_runtime import ProductionRecordingServices
 from dano.onboarding.recording_verify import (
-    AUTH_EXPIRED_MESSAGE,
+    REPLAY_SKIPPED_MESSAGE,
     replay_auth_failed,
     select_preflight_probe,
 )
 from dano.onboarding.recording_workflow import (
     PipelineContext,
-    PipelineSeed,
-    SelfHealingPipeline,
     WorkflowActivity,
-    WorkflowStatus,
 )
 
 
@@ -113,14 +111,41 @@ def test_replay_auth_failed_ignores_token_mentions_in_payload() -> None:
     assert not replay_auth_failed(200, {"token": "abc", "msg": "ok"})
 
 
-@pytest.mark.asyncio
-async def test_auth_failure_returns_editable_without_pi() -> None:
-    spec = _spec()
-    pi_calls = {"count": 0}
+class _StubPi:
+    last_submission_kind = None
 
-    async def exploding_pi(fresh: bool):  # noqa: FBT001, ANN202
-        pi_calls["count"] += 1
-        raise AssertionError("Pi must not run after replay auth failure")
+    def __init__(self) -> None:
+        self.prompts = 0
+
+    async def prompt(self, text):  # noqa: ANN001, ARG002
+        self.prompts += 1
+        raise AssertionError("Pi must not collect replay evidence after auth skip")
+
+    def bind_flow_spec(self, spec) -> None:  # noqa: ANN001, ARG002
+        return None
+
+
+def test_runtime_auth_drops_stale_recording_cookie() -> None:
+    headers, storage = runtime_replay_auth(
+        {"Cookie": "sid=stale", "Authorization": "Bearer old", "Tenant-Id": "1"},
+        {"Authorization": "Bearer fresh"},
+        {"cookies": [{"name": "sid", "value": "stale"}]},
+    )
+    assert headers == {"Authorization": "Bearer fresh", "Tenant-Id": "1"}
+    assert storage is None
+    assert overlay_runtime_auth(
+        {"Cookie": "sid=stale", "Tenant-Id": "1"},
+        {},
+    ) == {"Cookie": "sid=stale", "Tenant-Id": "1"}
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_skips_replay_and_continues_without_pi() -> None:
+    spec = _spec()
+    stub = _StubPi()
+
+    async def pi_provider(fresh: bool):  # noqa: FBT001, ARG001, ANN202
+        return stub
 
     async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("not used")
@@ -129,34 +154,94 @@ async def test_auth_failure_returns_editable_without_pi() -> None:
         assert "tenant" not in str(request.get("path") or "")
         return {"status": 401, "response": {"code": 401, "msg": "未登录"}}
 
+    async def no_refresh(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return {"ok": False, "reason": "not_configured"}
+
     services = ProductionRecordingServices(
         recording_id="rec_preflight",
         materializer=unused,
-        pi_provider=exploding_pi,
+        pi_provider=pi_provider,
         publisher=unused,
         replay_executor=replay_executor,
+        token_refresher=no_refresh,
     )
     activities: list[WorkflowActivity] = []
-    context = _context(activities)
-    pipeline = SelfHealingPipeline(CanonicalRecordingRuntime(services.pipeline_services()))
-    outcome = await pipeline.run(
-        PipelineSeed(
-            kind="edited_spec",
-            draft=spec.model_dump(mode="json"),
-            machine_verification=True,
-        ),
-        context,
-    )
-    assert outcome.status == WorkflowStatus.EDITABLE
-    assert outcome.issues
-    assert all(issue.resolver == "external_blocked" for issue in outcome.issues)
-    assert all(AUTH_EXPIRED_MESSAGE in issue.message for issue in outcome.issues)
-    preflight = (outcome.draft or {}).get("meta", {}).get("verification_run", {}).get("preflight")
-    assert preflight["auth_failed"] is True
-    edit_step = next(step for step in (outcome.draft or {}).get("steps") or [] if step["step_id"] == "step_edit")
+    draft, issues = await services.verify(spec.model_dump(mode="json"), _context(activities))
+    assert all(issue.code != "replay_auth" for issue in issues)
+    assert all(issue.resolver != "external_blocked" for issue in issues)
+    assert all(not issue.code.startswith("write_") for issue in issues)
+    blocked = [item.label for item in activities if item.status == "blocked"]
+    assert not any("登录态" in label for label in blocked)
+    preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
+    assert preflight.get("auth_failed") is True
+    assert preflight.get("skip_replay") is True
+    assert preflight.get("refresh_status") == "not_configured"
+    edit_step = next(step for step in (draft.get("steps") or []) if step["step_id"] == "step_edit")
     remark = next(param for param in edit_step["params"] if param["path"] == "query.remark")
     assert remark["source_kind"] == "user_input"
-    assert pi_calls["count"] == 0
+    assert stub.prompts == 0
+    assert any(REPLAY_SKIPPED_MESSAGE in item.label for item in activities)
+    assert not any("整体流程" in item.label for item in activities)
+    unverified = (draft.get("meta") or {}).get("unverified") or []
+    assert any(item.get("target_kind") == "write_verify" for item in unverified if isinstance(item, dict))
+
+
+def test_unverified_replay_targets_do_not_block_release() -> None:
+    spec = _spec()
+    spec.meta = {
+        "unverified": [
+            {"target_kind": "write_verify", "target_id": "step_edit", "reason": "skip"},
+        ],
+    }
+    decision = evaluate_recording_release(spec)
+    codes = {
+        issue.check_code
+        for capability in decision.capabilities
+        for issue in capability.issues
+    }
+    assert "write_readback_missing" not in codes
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_refreshes_token_and_continues() -> None:
+    spec = _spec()
+    probes = {"count": 0}
+    refreshes = {"count": 0}
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    async def replay_executor(request, spec_arg):  # noqa: ANN001, ANN202
+        probes["count"] += 1
+        if probes["count"] == 1:
+            return {"status": 401, "response": {"code": 401, "msg": "未登录"}}
+        return {"status": 200, "response": {"code": 0, "data": {}}}
+
+    async def refresher(tenant, subsystem, *, force=False):  # noqa: ANN001, ARG001, FBT002
+        refreshes["count"] += 1
+        assert force is True
+        assert tenant == "tenant"
+        return {"ok": True, "status": "refreshed"}
+
+    services = ProductionRecordingServices(
+        recording_id="rec_refresh",
+        materializer=unused,
+        pi_provider=unused,
+        publisher=unused,
+        replay_executor=replay_executor,
+        token_refresher=refresher,
+    )
+    activities: list[WorkflowActivity] = []
+    draft, issues = await services.verify(spec.model_dump(mode="json"), _context(activities))
+    assert probes["count"] == 2
+    assert refreshes["count"] == 1
+    assert all(issue.code != "replay_auth" for issue in issues)
+    preflight = (draft.get("meta") or {}).get("verification_run", {}).get("preflight") or {}
+    assert preflight.get("auth_failed") is not True
+    assert preflight.get("refreshed") is True
+    labels = [item.label for item in activities]
+    assert any("正在自动刷新凭证" in label for label in labels)
+    assert any("凭证已刷新" in label for label in labels)
 
 
 @pytest.mark.asyncio
