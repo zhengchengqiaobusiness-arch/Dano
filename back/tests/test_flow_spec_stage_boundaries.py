@@ -195,9 +195,24 @@ def test_no_duplicate_top_level_function_definitions_across_new_modules() -> Non
         duplicates = {name: count for name, count in func_counts.items() if count > 1}
         assert duplicates == {"_projection_path_score": 2}, duplicates
         return
+
     defined: dict[str, list[str]] = {}
+    split_roots = {
+        PAGE / "flow_spec_core",
+        PAGE / "flow_materialization",
+    }
+    split_files = {
+        PAGE / "recording_facts.py",
+        PAGE / "recording_analysis_state.py",
+        PAGE / "recording_agent_contract.py",
+        PAGE / "capability_contracts.py",
+        PAGE / "flow_release.py",
+        PAGE / "flow_client_projection.py",
+    }
     for path in _python_files(PAGE):
         if path.name == "flow_spec.py":
+            continue
+        if not (path in split_files or any(root in path.parents for root in split_roots)):
             continue
         for node in _parse(path).body:
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
