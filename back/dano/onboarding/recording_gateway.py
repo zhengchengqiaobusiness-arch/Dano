@@ -93,6 +93,15 @@ def _spec_fields(spec: Any) -> dict[str, Any]:
             name = cap.get("name") or cap.get("id")
         if name:
             names.append(str(name))
+    plan_names: list[str] = []
+    model = meta.get("capability_model") if isinstance(meta.get("capability_model"), dict) else {}
+    plan = model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    for cap in plan.get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        name = cap.get("name") or cap.get("title") or cap.get("id")
+        if name:
+            plan_names.append(str(name))
     stats = {"bound": 0, "ambiguous": 0, "unbound": 0, "unresolved": 0}
     for item in evidence:
         status = str(item.get("binding_status") or "unbound")
@@ -106,8 +115,8 @@ def _spec_fields(spec: Any) -> dict[str, Any]:
             unresolved += 1
     return {
         "flow_version": int(meta.get("current_version") or 0),
-        "capability_count": len(capabilities),
-        "capability_names": names,
+        "capability_count": len(names) or len(plan_names),
+        "capability_names": names or plan_names,
         "unresolved_count": unresolved,
         "field_binding_stats": stats,
     }
@@ -421,6 +430,13 @@ class RecordingGatewaySession:
         )
         storage = await self.capture.storage_state()
         save_session(self.config.tenant, self.config.subsystem, storage)
+        role_overrides = {}
+        if self._pi is not None and getattr(self._pi, "flow_spec", None) is not None:
+            from dano.execution.page.recording_live import request_role_overrides_from_spec
+
+            role_overrides = request_role_overrides_from_spec(self._pi.flow_spec)
+        if not role_overrides and self._live_notebook is not None:
+            role_overrides = dict((self._live_notebook.meta or {}).get("request_role_overrides") or {})
         spec = to_flow_spec(
             captured_requests=all_requests,
             reads=reads,
@@ -435,6 +451,7 @@ class RecordingGatewaySession:
             page_events=page_events,
             tenant=self.config.tenant,
             subsystem=self.config.subsystem,
+            request_role_overrides=role_overrides,
         )
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
@@ -478,13 +495,13 @@ class RecordingGatewaySession:
             self._live_task = asyncio.create_task(self._drain_live())
         if self._live_task is not None and not self._live_task.done():
             # Pause new browser facts first, then drain every already queued
-            # real-time batch.  Direct export is allowed to use those live
-            # conclusions, but must never start a separate final Pi plan.
+            # real-time batch.  In-flight batch failures stay non-fatal so
+            # capture can still freeze; the forced tail below is the protocol
+            # checkpoint.
             await asyncio.gather(self._live_task, return_exceptions=True)
         # The normal live queue is coalesced while Pi is busy.  A recording can
         # therefore stop with a short final tail that never reached the batch
-        # threshold.  Drain that same queue once more; do not start a separate
-        # final planning path.
+        # threshold.  Drain that same queue once more with the same Skill.
         if self.capture.captured_all_requests():
             # The final tail is a consolidation phase, not merely a count
             # threshold. Run it once even when the latest request was already
@@ -492,7 +509,7 @@ class RecordingGatewaySession:
             # collection from the frozen facts.
             self._live_pending_reason = "final_request_tail"
             self._live_task = asyncio.create_task(self._drain_live())
-            await asyncio.gather(self._live_task, return_exceptions=True)
+            await self._live_task
         self._capture_frozen = True
         self._capture_live_notebook()
         if self._pi is not None:
@@ -678,7 +695,16 @@ class RecordingGatewaySession:
     def _schedule_live(self, reason: str) -> None:
         if self._capture_frozen or self._closed:
             return
-        self._live_pending_reason = self._live_pending_reason or reason
+        priority = {
+            "recording_started": 1,
+            "request_batch": 2,
+            "business_request": 3,
+            "submit_candidate": 4,
+            "final_request_tail": 5,
+        }
+        pending = self._live_pending_reason
+        if not pending or priority.get(reason, 0) > priority.get(pending, 0):
+            self._live_pending_reason = reason
         if self._live_task is None or self._live_task.done():
             self._live_task = asyncio.create_task(self._drain_live())
 
@@ -815,6 +841,8 @@ class RecordingGatewaySession:
                         request_count=request_count,
                         insights=insights[-100:],
                     )
+                if reason == "final_request_tail":
+                    raise
                 return
 
     def _capture_live_notebook(self) -> None:

@@ -1,0 +1,837 @@
+"""Mechanical field-axis contracts for generic list / edit / row-command pages."""
+
+from __future__ import annotations
+
+import json
+from urllib.parse import parse_qs, urlsplit
+
+from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.flow_spec import (
+    _param_exposed_to_caller,
+    to_flow_spec,
+)
+
+
+PAGE = {
+    "url": "http://example.test/app/docs",
+    "path": "/app/docs",
+    "document_title": "单据",
+}
+
+
+def _req(
+    request_id: str,
+    *,
+    method: str,
+    url: str,
+    sequence: int,
+    query: dict | None = None,
+    body: dict | None = None,
+    response: dict | None = None,
+    role: str,
+    action: str = "",
+    locator: str = "",
+) -> dict:
+    parsed_query = query or {}
+    if "?" in url and not parsed_query:
+        parsed_query = parse_qs(urlsplit(url).query, keep_blank_values=True)
+    return {
+        "request_id": request_id,
+        "sequence": sequence,
+        "method": method,
+        "url": url,
+        "query": parsed_query,
+        "post_data": None if body is None else json.dumps(body, ensure_ascii=False),
+        "response_status": 200,
+        "response_json": response if response is not None else {"code": 0, "data": True},
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "trigger_page_context": PAGE,
+        "trigger_action_id": action,
+        "trigger_locator": locator,
+        "trigger_transaction_id": action,
+        "_request_role": {"role": role, "keep": True, "confidence": 0.95},
+    }
+
+
+def _control(
+    *,
+    label: str,
+    aliases: list[str],
+    kind: str,
+    value: str,
+    request_id: str,
+    path: str,
+    in_dialog: bool,
+    required: bool = False,
+    read_only: bool = False,
+    op: str = "snapshot",
+    source_url: str = "",
+) -> dict:
+    wire_path = path if path.startswith(("query.", "body.")) else f"body.{path}"
+    item = {
+        "label": label,
+        "field": aliases[0] if aliases else label,
+        "value": value,
+        "field_aliases": aliases,
+        "control_kind": kind,
+        "required": required,
+        "required_observed": required,
+        "binding_status": "bound",
+        "request_id": request_id,
+        "wire_path": wire_path,
+        "op": op,
+        "in_dialog": in_dialog,
+        "surface": "dialog" if in_dialog else "page",
+        "disabled": False,
+        "read_only": read_only,
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+    }
+    if source_url:
+        item["source_url"] = source_url
+    return item
+
+
+def _page_enum(*, label: str, aliases: list[str], selected: str, selected_value, options: list, source_url: str) -> dict:
+    return {
+        label: {
+            "control_kind": "select",
+            "field_key": aliases[0],
+            "field_aliases": aliases,
+            "selected": selected,
+            "selected_value": selected_value,
+            "options": options,
+            "source_url": source_url,
+            "enum_source": "api",
+            "in_dialog": False,
+            "surface": "page",
+        }
+    }
+
+
+def _param(step, path: str):
+    relative = path.removeprefix("body.").removeprefix("query.")
+    for item in step.params:
+        if item.path in {path, relative, f"body.{relative}", f"query.{relative}"}:
+            return item
+    raise AssertionError(f"{path} not found on {step.method} {step.path}: {[p.path for p in step.params]}")
+
+
+def _step_by_suffix(spec, suffix: str):
+    matches = [
+        step for step in spec.steps
+        if str(step.path or step.url or "").split("?", 1)[0].endswith(suffix)
+    ]
+    assert matches, f"no step ending with {suffix}: {[step.path for step in spec.steps]}"
+    return matches[0]
+
+
+def _compile(spec, capabilities: list[dict]):
+    plan = {
+        "business_understanding": {"business_name": "单据"},
+        "capabilities": capabilities,
+        "unresolved_items": [],
+    }
+    compilation = compile_capabilities(spec, plan)
+    assert not compilation.errors, compilation.errors
+    return compilation.spec
+
+
+def _edit_and_command_spec(*, include_dialog_controls: bool = True):
+    dict_url = "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status"
+    status_options = [
+        {"label": "待审", "value": 10},
+        {"label": "已审", "value": 20},
+    ]
+    detail = {
+        "id": 32,
+        "partyId": 5,
+        "qty": 2,
+        "unitPrice": 6000,
+        "lineTotal": 12000,
+        "note": "keep",
+        "status": 10,
+    }
+    update_body = {
+        "id": 32,
+        "partyId": 5,
+        "qty": 2,
+        "unitPrice": 6000,
+        "lineTotal": 12000,
+        "note": "keep",
+    }
+    evidence = [
+        _control(
+            label="状态", aliases=["status"], kind="select", value="待审",
+            request_id="req_list", path="query.status", in_dialog=False, source_url=dict_url,
+        ),
+        _control(
+            label="单据编号", aliases=["no"], kind="text", value="",
+            request_id="req_list", path="query.no", in_dialog=False,
+        ),
+    ]
+    if include_dialog_controls:
+        evidence.extend([
+            _control(
+                label="往来单位", aliases=["partyId"], kind="select", value="甲公司",
+                request_id="req_update", path="body.partyId", in_dialog=True,
+            ),
+            _control(
+                label="数量", aliases=["qty"], kind="number", value="2",
+                request_id="req_update", path="body.qty", in_dialog=True,
+            ),
+            _control(
+                label="单价", aliases=["unitPrice"], kind="number", value="6000",
+                request_id="req_update", path="body.unitPrice", in_dialog=True,
+            ),
+            _control(
+                label="金额", aliases=["lineTotal"], kind="number", value="12000",
+                request_id="req_update", path="body.lineTotal", in_dialog=True, read_only=True,
+            ),
+            _control(
+                label="备注", aliases=["note"], kind="textarea", value="keep",
+                request_id="req_update", path="body.note", in_dialog=True,
+            ),
+        ])
+    return to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_dict", method="GET", url=dict_url, sequence=1, role="read_option",
+                response={"code": 0, "data": status_options},
+            ),
+            _req(
+                "req_list", method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1&pageSize=10&status=10",
+                sequence=2, role="business_get", action="act_search", locator="text=搜索",
+                response={"code": 0, "data": {"list": [{"id": 32, "status": 10}]}},
+            ),
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=32",
+                sequence=3, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": detail},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=4, role="business_write", action="act_edit", locator="text=确定",
+                body=update_body, response={"code": 0, "data": True},
+            ),
+            _req(
+                "req_approve", method="PUT",
+                url="http://example.test/admin-api/doc/update-status",
+                sequence=5, role="business_write", action="act_approve", locator="text=审批",
+                body={"id": 32, "status": 20}, response={"code": 0, "data": True},
+            ),
+            _req(
+                "req_reject", method="PUT",
+                url="http://example.test/admin-api/doc/update-status",
+                sequence=6, role="business_write", action="act_reject", locator="text=反审批",
+                body={"id": 32, "status": 10}, response={"code": 0, "data": True},
+            ),
+        ],
+        reads=[{
+            "request_id": "req_dict",
+            "method": "GET",
+            "url": dict_url,
+            "json": status_options,
+            "role": "explicit_read_option",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=evidence,
+        page_enum_options=_page_enum(
+            label="状态",
+            aliases=["status", "状态"],
+            selected="待审",
+            selected_value=10,
+            options=status_options,
+            source_url=dict_url,
+        ),
+        page_events=[
+            {"event_id": "ev_search", "kind": "click", "action_id": "act_search"},
+            {"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"},
+            {"event_id": "ev_approve", "kind": "click", "action_id": "act_approve"},
+            {"event_id": "ev_reject", "kind": "click", "action_id": "act_reject"},
+        ],
+        page_context=PAGE,
+        samples={"往来单位": "甲公司", "数量": "2", "备注": "keep", "状态": "待审"},
+    )
+
+
+def test_edit_hydrated_fields_are_caller_owned_with_upstream_default() -> None:
+    spec = _edit_and_command_spec()
+    update = _step_by_suffix(spec, "/doc/update")
+    for item in (_param(update, "partyId"), _param(update, "qty"), _param(update, "note")):
+        assert _param_exposed_to_caller(item), (item.path, item.source_kind, item.exposed_to_user, item.reason)
+        assert item.source_kind == "previous_response"
+        assert bool((item.source or {}).get("allow_caller_override"))
+        assert "可修改" in (item.reason or "")
+
+
+def test_edit_formula_totals_are_computed_not_unknown() -> None:
+    spec = _edit_and_command_spec()
+    total = _param(_step_by_suffix(spec, "/doc/update"), "lineTotal")
+    assert total.source_kind == "computed", (total.source_kind, total.reason)
+    assert not _param_exposed_to_caller(total)
+    assert total.source_kind != "unknown"
+
+
+def test_row_command_id_is_caller_selected_record_not_upstream() -> None:
+    spec = _edit_and_command_spec()
+    record_id = _param(_step_by_suffix(spec, "/doc/update-status"), "id")
+    assert _param_exposed_to_caller(record_id)
+    assert record_id.source_kind == "user_input"
+    assert (record_id.source or {}).get("kind") == "selected_record_identity"
+    assert record_id.required is True
+    assert record_id.source_kind != "previous_response"
+
+
+def test_row_command_fixed_payload_is_constant_not_live_option() -> None:
+    spec = _edit_and_command_spec()
+    status = _param(_step_by_suffix(spec, "/doc/update-status"), "status")
+    assert status.source_kind == "constant", (status.source_kind, status.type, status.reason)
+    assert not _param_exposed_to_caller(status)
+    assert status.source_kind != "api_option"
+    assert status.type != "enum"
+
+
+def test_row_command_orchestration_does_not_pull_unrelated_dict_api() -> None:
+    spec = _edit_and_command_spec()
+    approve = _step_by_suffix(spec, "/doc/update-status")
+    spec = _compile(spec, [{
+        "name": "approve_doc",
+        "title": "审批单据",
+        "kind": "update",
+        "anchor_step_id": approve.step_id,
+        "request_refs": [{"step_id": approve.step_id, "usage": "execute"}],
+    }])
+    cap = next(item for item in spec.capabilities if item.name == "approve_doc")
+    paths = [str(ref.path or "") for ref in cap.request_refs]
+    assert any(path.endswith("/doc/update-status") for path in paths)
+    assert not any("dict-data" in path or "simple-list" in path for path in paths)
+    assert not any(ref.usage == "option_source" for ref in cap.request_refs)
+
+
+def test_list_filter_keeps_its_own_enum_and_does_not_rename_edit_fields() -> None:
+    spec = _edit_and_command_spec()
+    filter_status = _param(_step_by_suffix(spec, "/doc/page"), "query.status")
+    assert filter_status.source_kind == "api_option"
+    assert _param_exposed_to_caller(filter_status)
+    party = _param(_step_by_suffix(spec, "/doc/update"), "partyId")
+    assert party.label in {"往来单位", "partyId"}
+    assert party.path.endswith("partyId")
+
+
+def test_write_query_command_keeps_status_constant() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_dict", method="GET",
+                url="http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
+                sequence=1, role="read_option",
+                response={"code": 0, "data": [{"label": "待审", "value": 10}, {"label": "已审", "value": 20}]},
+            ),
+            _req(
+                "req_list", method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1&pageSize=10&status=10",
+                sequence=2, role="business_get", action="act_search", locator="text=搜索",
+                response={"code": 0, "data": {"list": [{"id": 36, "status": 10}]}},
+            ),
+            _req(
+                "req_approve", method="PUT",
+                url="http://example.test/admin-api/doc/update-status?id=36&status=20",
+                sequence=3, role="business_write", action="act_approve", locator="text=审批",
+                response={"code": 0, "data": True},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="状态", aliases=["status"], kind="select", value="待审",
+                request_id="req_list", path="query.status", in_dialog=False,
+                source_url="http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
+            ),
+        ],
+        page_enum_options=_page_enum(
+            label="状态",
+            aliases=["status", "状态"],
+            selected="待审",
+            selected_value=10,
+            options=[{"label": "待审", "value": 10}, {"label": "已审", "value": 20}],
+            source_url="http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
+        ),
+        page_events=[{"event_id": "ev_approve", "kind": "click", "action_id": "act_approve"}],
+        page_context=PAGE,
+    )
+    approve = _step_by_suffix(spec, "/doc/update-status")
+    record_id = _param(approve, "query.id")
+    status = _param(approve, "query.status")
+    assert (record_id.source or {}).get("kind") == "selected_record_identity"
+    assert status.source_kind == "constant", (status.source_kind, status.reason)
+    assert not _param_exposed_to_caller(status)
+
+
+def test_line_item_identity_product_is_computed() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {
+                    "id": 36,
+                    "partyId": 5,
+                    "remark": "x",
+                    "items": [{"id": 39, "productId": 4, "count": 1, "productPrice": 5000, "totalPrice": 5000}],
+                }},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_edit", locator="text=确定",
+                body={
+                    "id": 36,
+                    "partyId": 5,
+                    "remark": "x",
+                    "items": [{"id": 39, "productId": 4, "count": 1, "productPrice": 5000, "totalPrice": 5000}],
+                },
+            ),
+        ],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    update = _step_by_suffix(spec, "/doc/update")
+    line_total = _param(update, "items[0].totalPrice")
+    assert line_total.source_kind == "computed", (line_total.source_kind, line_total.reason)
+    party = _param(update, "partyId")
+    assert _param_exposed_to_caller(party)
+    assert party.source_kind == "previous_response"
+
+
+def test_edit_without_dialog_snapshot_still_exposes_hydrated_form_fields() -> None:
+    spec = _edit_and_command_spec(include_dialog_controls=False)
+    update = _step_by_suffix(spec, "/doc/update")
+    for item in (_param(update, "partyId"), _param(update, "note")):
+        assert _param_exposed_to_caller(item), (item.path, item.source_kind, item.reason)
+        assert item.source_kind == "previous_response"
+        assert bool((item.source or {}).get("allow_caller_override"))
+    total = _param(update, "lineTotal")
+    assert total.source_kind == "computed"
+    assert not _param_exposed_to_caller(total)
+
+
+def test_formatted_dialog_number_binds_to_write_field() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {"id": 36, "partyId": 5, "discountPercent": 0, "note": "x"}},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_save", locator="text=确定",
+                body={"id": 36, "partyId": 5, "discountPercent": 1110, "note": "x"},
+            ),
+        ],
+        field_evidence=[{
+            "label": "优惠率（%）",
+            "field": "优惠率（%）",
+            "value": "1110.00",
+            "field_aliases": [],
+            "control_kind": "number",
+            "required": False,
+            "op": "fill",
+            "in_dialog": True,
+            "surface": "dialog",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "action_id": "act_fill",
+            "observed_at": 1000,
+        }],
+        page_events=[
+            {"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"},
+            {"event_id": "ev_save", "kind": "click", "action_id": "act_save"},
+        ],
+        page_context=PAGE,
+    )
+    discount = _param(_step_by_suffix(spec, "/doc/update"), "discountPercent")
+    assert _param_exposed_to_caller(discount)
+    assert discount.label == "优惠率（%）"
+    assert discount.type == "number"
+    assert discount.source_kind in {"user_input", "previous_response"}
+
+
+def test_changed_hydrated_field_stays_upstream_default_and_caller_owned() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {
+                    "id": 36, "partyId": 5, "qty": 2, "unitPrice": 6000, "lineTotal": 12000, "note": "keep",
+                }},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_edit", locator="text=确定",
+                body={"id": 36, "partyId": 5, "qty": 3, "unitPrice": 6000, "lineTotal": 18000, "note": "keep"},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="数量", aliases=["qty"], kind="number", value="3",
+                request_id="req_update", path="body.qty", in_dialog=True, op="fill",
+            ),
+        ],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    update = _step_by_suffix(spec, "/doc/update")
+    qty = _param(update, "qty")
+    assert qty.source_kind == "previous_response"
+    assert bool((qty.source or {}).get("allow_caller_override"))
+    assert _param_exposed_to_caller(qty)
+    record_id = _param(update, "id")
+    assert not _param_exposed_to_caller(record_id)
+
+
+def test_header_discount_formula_uses_percent_not_creator() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {
+                    "id": 36,
+                    "creator": 1,
+                    "totalProductPrice": 5000,
+                    "discountPercent": 1110,
+                    "discountPrice": 55500,
+                    "totalPrice": -50500,
+                }},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_edit", locator="text=确定",
+                body={
+                    "id": 36,
+                    "creator": 1,
+                    "totalProductPrice": 5000,
+                    "discountPercent": 1110,
+                    "discountPrice": 55500,
+                    "totalPrice": -50500,
+                },
+            ),
+        ],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    update = _step_by_suffix(spec, "/doc/update")
+    creator = _param(update, "creator")
+    assert creator.source_kind != "computed"
+    assert not _param_exposed_to_caller(creator)
+    discount_price = _param(update, "discountPrice")
+    total_price = _param(update, "totalPrice")
+    assert discount_price.source_kind == "computed", (discount_price.source_kind, discount_price.reason)
+    assert total_price.source_kind == "computed", (total_price.source_kind, total_price.reason)
+    assert "creator" not in (discount_price.reason or "")
+    assert "creator" not in (total_price.reason or "")
+
+
+def test_list_status_evidence_does_not_bind_to_write_query() -> None:
+    from dano.execution.page.recording_field_evidence import bind_field_evidence
+
+    bound = bind_field_evidence(
+        [
+            _req(
+                "req_list", method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1&status=10",
+                sequence=1, role="business_get", action="act_search",
+            ),
+            _req(
+                "req_approve", method="PUT",
+                url="http://example.test/admin-api/doc/update-status?id=36&status=20",
+                sequence=2, role="business_write", action="act_approve",
+            ),
+        ],
+        [{"event_id": "ev_status", "kind": "change", "action_id": "act_search"}],
+        [{
+            "label": "状态",
+            "field": "状态",
+            "field_aliases": ["status"],
+            "control_kind": "select",
+            "value": "",
+            "op": "fill",
+            "in_dialog": False,
+            "surface": "page",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "action_id": "act_search",
+            "page_context": PAGE,
+        }],
+    )
+    assert len(bound) == 1
+    assert bound[0]["binding_status"] == "bound"
+    assert bound[0]["request_id"] == "req_list"
+    assert bound[0]["wire_path"] == "query.status"
+
+
+def test_date_range_start_binds_to_first_query_index() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_list", method="GET",
+                url=(
+                    "http://example.test/admin-api/doc/page?pageNo=1&pageSize=10"
+                    "&orderTime%5B0%5D=2026-08-07%2000%3A00%3A00"
+                    "&orderTime%5B1%5D=2026-08-07%2023%3A59%3A59"
+                ),
+                sequence=1, role="business_get", action="act_search",
+            ),
+        ],
+        field_evidence=[{
+            "label": "开始日期",
+            "field": "开始日期",
+            "value": "2026-08-07",
+            "field_aliases": [],
+            "control_kind": "date",
+            "required": False,
+            "op": "fill",
+            "in_dialog": False,
+            "surface": "page",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "action_id": "act_search",
+            "observed_at": 1000,
+            "page_context": PAGE,
+        }],
+        page_events=[{"event_id": "ev_search", "kind": "click", "action_id": "act_search", "observed_at": 1100}],
+        page_context=PAGE,
+    )
+    listing = _step_by_suffix(spec, "/doc/page")
+    start = _param(listing, "query.orderTime[0]")
+    end = _param(listing, "query.orderTime[1]")
+    assert start.label == "开始日期"
+    assert start.type == "date"
+    assert _param_exposed_to_caller(start)
+    assert start.source_kind != "unknown"
+    assert end.source_kind in {"page_rule", "user_input"}
+    if end.source_kind == "page_rule":
+        assert not _param_exposed_to_caller(end)
+
+
+def test_dialog_date_binds_to_business_time_not_audit_stamp() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {
+                    "id": 36, "orderTime": 1786896000000, "createTime": 1786933682000, "remark": "x",
+                }},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_save", locator="text=确定",
+                body={"id": 36, "orderTime": 1786896000000, "createTime": 1786933682000, "remark": "x"},
+            ),
+        ],
+        field_evidence=[{
+            "label": "订单时间",
+            "field": "订单时间",
+            "value": "2026-08-17",
+            "field_aliases": [],
+            "control_kind": "date",
+            "required": True,
+            "op": "snapshot",
+            "in_dialog": True,
+            "surface": "dialog",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    update = _step_by_suffix(spec, "/doc/update")
+    order_time = _param(update, "orderTime")
+    create_time = _param(update, "createTime")
+    assert order_time.label == "订单时间"
+    assert order_time.type == "date"
+    assert order_time.required is True
+    assert _param_exposed_to_caller(order_time)
+    assert order_time.source_kind == "previous_response"
+    assert not _param_exposed_to_caller(create_time)
+
+
+def test_hydrated_select_keeps_previous_response_when_option_api_is_attached() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_options", method="GET",
+                url="http://example.test/admin-api/erp/customer/simple-list",
+                sequence=1, role="read_option",
+                response={"code": 0, "data": [{"id": 8, "name": "鲜生"}, {"id": 9, "name": "12"}]},
+            ),
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=2, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {"id": 36, "customerId": 8, "remark": "x"}},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=3, role="business_write", action="act_save", locator="text=确定",
+                body={"id": 36, "customerId": 8, "remark": "x"},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="客户", aliases=["customerId"], kind="select", value="鲜生",
+                request_id="req_update", path="body.customerId", in_dialog=True,
+                source_url="http://example.test/admin-api/erp/customer/simple-list",
+            ),
+        ],
+        reads=[{
+            "request_id": "req_options",
+            "method": "GET",
+            "url": "http://example.test/admin-api/erp/customer/simple-list",
+            "json": [{"id": 8, "name": "鲜生"}, {"id": 9, "name": "12"}],
+            "role": "explicit_read_option",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    customer = _param(_step_by_suffix(spec, "/doc/update"), "customerId")
+    assert customer.source_kind == "previous_response", (customer.source_kind, customer.source, customer.reason)
+    assert bool((customer.source or {}).get("allow_caller_override"))
+    assert (customer.source or {}).get("option_source")
+    assert _param_exposed_to_caller(customer)
+
+
+def test_null_detail_and_zero_write_still_hydrate_line_tax() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://example.test/admin-api/doc/get?id=36",
+                sequence=1, role="business_get", action="act_edit", locator="text=编辑",
+                response={"code": 0, "data": {
+                    "id": 36,
+                    "partyId": 5,
+                    "remark": "x",
+                    "items": [{"id": 39, "count": 1, "productPrice": 5000, "taxPrice": None, "totalPrice": 5000}],
+                }},
+            ),
+            _req(
+                "req_update", method="PUT",
+                url="http://example.test/admin-api/doc/update",
+                sequence=2, role="business_write", action="act_edit", locator="text=确定",
+                body={
+                    "id": 36,
+                    "partyId": 5,
+                    "remark": "x",
+                    "items": [{"id": 39, "count": 1, "productPrice": 5000, "taxPrice": 0, "totalPrice": 5000}],
+                },
+            ),
+        ],
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    tax = _param(_step_by_suffix(spec, "/doc/update"), "items[0].taxPrice")
+    assert tax.source_kind == "previous_response", (tax.source_kind, tax.reason)
+    assert tax.source_kind != "unknown"
+
+
+def test_computed_arithmetic_formula_is_a_complete_contract() -> None:
+    from dano.execution.page.flow_spec import ParamField, _field_source_configuration_advice
+
+    param = ParamField(
+        key="lineTotal",
+        path="body.items[0].lineTotal",
+        source_kind="computed",
+        source={"strategy": "product", "left_field": "qty", "right_field": "unitPrice"},
+    )
+    assert _field_source_configuration_advice(param) is None
+
+
+def test_dialog_control_binds_when_spa_routes_differ() -> None:
+    from dano.execution.page.recording_field_evidence import bind_field_evidence
+
+    write = _req(
+        "req_update", method="PUT",
+        url="http://example.test/admin-api/doc/update",
+        sequence=2, role="business_write", action="act_edit",
+        body={"remark": "keep"},
+    )
+    write["page_context"] = {**PAGE, "path": "/app/docs/edit"}
+    write["timestamp"] = 1_000.0
+    evidence = _control(
+        label="备注", aliases=["remark"], kind="textarea", value="keep",
+        request_id="req_update", path="body.remark", in_dialog=True, op="fill",
+    )
+    evidence["observed_at"] = 999.0
+    evidence["page_context"] = PAGE
+    bound = bind_field_evidence(
+        [
+            _req(
+                "req_list", method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1, role="business_get",
+            ),
+            write,
+        ],
+        [],
+        [evidence],
+    )
+    remark = next(item for item in bound if item.get("label") == "备注")
+    assert remark.get("binding_status") == "bound"
+    assert remark.get("request_id") == "req_update"
+
+
+def test_debounced_fill_after_request_still_binds() -> None:
+    from dano.execution.page.recording_field_evidence import bind_field_evidence
+
+    write = _req(
+        "req_update", method="PUT",
+        url="http://example.test/admin-api/doc/update",
+        sequence=1, role="business_write", action="act_edit",
+        body={"remark": "keep"},
+    )
+    write["timestamp"] = 1_000.0
+    evidence = _control(
+        label="备注", aliases=["remark"], kind="textarea", value="keep",
+        request_id="req_update", path="body.remark", in_dialog=True, op="fill",
+    )
+    evidence["observed_at"] = 1_001.2
+    evidence["action_id"] = "act_edit"
+    bound = bind_field_evidence([write], [], [evidence])
+    remark = next(item for item in bound if item.get("label") == "备注")
+    assert remark.get("binding_status") == "bound"
+
+
+def test_hydration_detail_id_stays_required_caller_selected_record() -> None:
+    spec = _edit_and_command_spec()
+    detail = _step_by_suffix(spec, "/doc/get")
+    record_id = _param(detail, "query.id")
+    assert (record_id.source or {}).get("kind") == "selected_record_identity"
+    assert record_id.required is True
+    assert _param_exposed_to_caller(record_id)

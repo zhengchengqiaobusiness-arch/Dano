@@ -847,7 +847,7 @@ def _records_have_complete_mapping(records: list[dict], *, expected_count: int |
 
 def _field_has_structural_select_identity(field: dict | None) -> bool:
     """Only a recorded select control with an exact request alias owns an API enum."""
-    if not field or str(field.get("control_kind") or "").lower() != "select":
+    if not field or str(field.get("control_kind") or "").lower() not in {"select", "combobox"}:
         return False
     path = str(field.get("path") or "")
     leaf = path.split(".")[-1].split("[")[0]
@@ -1510,6 +1510,16 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         if len(matches) != 1:
             continue
         path, toks = matches[0]
+        if fields is not None:
+            field = next(
+                (
+                    item for item in fields
+                    if str(item.get("path") or "") in {path, f"body.{path}", f"query.{path}"}
+                ),
+                None,
+            )
+            if not _field_has_structural_select_identity(field):
+                continue
         if path in existing or any(o.get("path") == path for o in out):
             continue
         current = next((
@@ -2251,6 +2261,20 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             continue
         index = candidates[0]
         previous = structural.get(index)
+        evidence_surface = (
+            "dialog" if item.get("in_dialog") is True
+            else "page" if item.get("in_dialog") is False
+            else str(item.get("surface") or "").strip().lower()
+        )
+        bound_is_body = bound_path.startswith("body.")
+        if (
+            not bound_is_body
+            and evidence_surface in {"page", "list", "filter"}
+            and str(item.get("op") or "").lower() in {"", "snapshot"}
+        ):
+            # List-page filters share leaf names with later row-command bodies.
+            # A page-surface snapshot must not become the write field's select.
+            continue
         # Multiple controls can represent one range/object field. Prefer the
         # evidence with a human label and a concrete control kind; never choose
         # between conflicting labels by order.
@@ -2274,8 +2298,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
     def type_from_control(item: dict | None, fallback: str) -> str:
         kind = str((item or {}).get("control_kind") or "").lower()
-        if kind in {"text", "textarea"}:
+        if kind == "textarea":
             return "string"
+        if kind == "text":
+            return "number" if fallback == "number" else "string"
         if kind == "number":
             return "number"
         if kind == "date":

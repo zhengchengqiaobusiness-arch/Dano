@@ -1390,7 +1390,7 @@ def _param_source_guess(
         return {
             "category": "user_param",
             "source_kind": "user_input",
-            "source": {"kind": "record_identity", "path": path, "required_state": "required"},
+            "source": {"kind": "selected_record_identity", "path": path, "required_state": "required"},
             "editable": True,
             "exposed_to_user": True,
             "required": True,
@@ -1957,9 +1957,13 @@ def _build_step_from_capture(
         selects_raw = suggest_selects(pd, option_reads, grounded_samples, skip_paths=list_paths, fields=flat_fields) + list_selects
         apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
         selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
-        selects_raw += _detect_query_selects(
-            req, grounded_samples, option_reads, page_enum_options, field_evidence,
-        )
+        # Query-string enums on GET filters stay on the list request. A later
+        # write that happens to carry ``?status=`` is a command discriminator,
+        # not that list dropdown.
+        if method == "GET":
+            selects_raw += _detect_query_selects(
+                req, grounded_samples, option_reads, page_enum_options, field_evidence,
+            )
 
         # identity(运行期重取)
         iden_raw = suggest_identity(pd, storage_state, samples)
@@ -2474,7 +2478,9 @@ def _params_from_get_query(
         control_by_key[key] = item
 
     # Strongest evidence: the opened DOM control reports its actual name/id.
-    for raw_enum_key, raw_options in (page_enum_options or {}).items():
+    # Page-wide enums belong to GET filters. A write that reuses ``?status=``
+    # is carrying a command discriminator, not that list dropdown.
+    for raw_enum_key, raw_options in (page_enum_options or {}).items() if str(req.get("method") or "GET").upper() == "GET" else ():
         if not isinstance(raw_options, dict):
             continue
         field_key = str(raw_options.get("field_key") or raw_enum_key or "").strip()
@@ -3420,6 +3426,25 @@ def _workflow_context_values_for_request(request: dict) -> set[str]:
     return values
 
 
+def _record_identity_values_for_request(request: dict) -> tuple[str, ...]:
+    """Distinguish two captures of the same endpoint that name different records.
+
+    Workflow context requires long routing tokens.  Short document ids such as
+    ``query.id=36`` vs ``query.id=37`` are still different facts and must not
+    collapse into one preflight/detail step.
+    """
+    values: list[str] = []
+    for field_path, raw_value in _request_values(request):
+        value = str(raw_value or "").strip()
+        if not value:
+            continue
+        key = str(field_path).rsplit(".", 1)[-1].split("[", 1)[0]
+        if not _is_document_record_identity_path(key, field_path):
+            continue
+        values.append(f"{_field_leaf_token(key, field_path)}={value}")
+    return tuple(sorted(values))
+
+
 def _request_transaction_id(request: dict) -> str:
     explicit = str(request.get("trigger_transaction_id") or "").strip()
     if explicit:
@@ -3443,7 +3468,9 @@ def _request_has_command_anchor(request: dict) -> bool:
     )
 
 
-def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...], str]:
+def _preread_dedupe_key(
+    req: dict,
+) -> tuple[str, str, tuple[str, ...], str, tuple[str, ...]]:
     # Same endpoint may serve several workflows. Distinct routing values are
     # different facts and must never collapse into the latest request.
     context = tuple(sorted(_workflow_context_values_for_request(req)))
@@ -3451,7 +3478,11 @@ def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...], str]:
     # routinely reused by edit/detail/progress actions; collapsing those facts
     # makes later capability planning irrecoverably lose two of the actions.
     command = _request_transaction_id(req) if _request_has_command_anchor(req) else ""
-    return ((req.get("method") or "GET").upper(), _request_path(req), context, command)
+    # Record identity is independent of command/workflow tokens.  Two detail
+    # GETs that only differ by ``id`` are two facts, even when both are short
+    # integers and share the same click-less hydration path.
+    identity = _record_identity_values_for_request(req)
+    return ((req.get("method") or "GET").upper(), _request_path(req), context, command, identity)
 
 
 _TRANSPORT_FILTER_KEYS = frozenset({
@@ -3508,7 +3539,7 @@ def _preread_candidate_score(req: dict) -> tuple[int, int, int, float]:
 
 def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
     """同一路径反复触发时保留业务条件最完整的一次，序号仅作为同分兜底。"""
-    best_by_path: dict[tuple[str, str, tuple[str, ...], str], dict] = {}
+    best_by_path: dict[tuple[str, str, tuple[str, ...], str, tuple[str, ...]], dict] = {}
     for req in preread_cands:
         key = _preread_dedupe_key(req)
         current = best_by_path.get(key)
@@ -4998,6 +5029,53 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                 )
             ):
                 param.label = label
+            control_kind = str(control.get("control_kind") or "").lower()
+            if not _param_field_manually_edited(param, "type"):
+                if control_kind == "date":
+                    param.type = "date"
+                elif control_kind in {"datetime", "time"}:
+                    param.type = "datetime"
+                elif control_kind == "number":
+                    param.type = "number"
+                elif control_kind == "textarea":
+                    param.type = "string"
+                elif control_kind == "text" and str(param.wire_type or "") != "number":
+                    param.type = "string"
+            if (
+                param.source_kind in {"unknown", ""}
+                and str(step.method or "").upper() in {"GET", "HEAD"}
+                and str(param.path or "").startswith("query.")
+                and control_kind not in {"", "unknown", "table_column"}
+                and not bool(control.get("disabled") or control.get("read_only"))
+                and not _param_has_manual_contract(param)
+            ):
+                param.category = "user_param"
+                param.source_kind = "user_input"
+                param.source = {
+                    **(param.source or {}),
+                    "kind": "control_default",
+                    "path": param.path,
+                    "required_state": "optional",
+                }
+                param.exposed_to_user = True
+                param.editable = True
+                param.need_human_confirm = False
+                param.reason = "查询页上的可编辑筛选控件；调用方可省略或覆盖录制时的筛选值"
+            if not any(
+                isinstance(item, dict) and item.get("kind") == "page_control"
+                for item in (param.evidence or [])
+            ):
+                param.evidence = [
+                    *(param.evidence or []),
+                    {
+                        "kind": "page_control",
+                        "source": "recorder_dom",
+                        "control_kind": control_kind,
+                        "interacted": str(control.get("op") or "").lower() in {"fill", "select", "pick"},
+                        "request_path": param.path,
+                        "binding_status": "bound",
+                    },
+                ]
             if isinstance(control.get("required_observed"), bool):
                 param.evidence = [
                     item for item in (param.evidence or [])
@@ -5482,6 +5560,8 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
         if (
             (step.method or "GET").upper() in {"GET", "HEAD"}
             and str(param.path or "").startswith("query.")
+            and required_state != "required"
+            and str((param.source or {}).get("kind") or "") != "selected_record_identity"
             and not _param_field_manually_edited(param, "required")
             and not _param_required_agent_classified(param)
         ):
@@ -5881,7 +5961,15 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             param.category = "user_param"
             param.exposed_to_user = True
             param.editable = True
-        if not source_owned:
+        keep_hydration = (
+            param.source_kind == "previous_response"
+            and bool(
+                (param.source or {}).get("link_id")
+                or (param.source or {}).get("allow_caller_override")
+                or (param.source or {}).get("option_source")
+            )
+        )
+        if not source_owned and not keep_hydration:
             param.source_kind = source_kind
         if not options_owned and source_kind == "api_option":
             # The selected API is authoritative, including an empty result.
@@ -5893,8 +5981,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             param.enum_options = list(options or param.enum_options or []) or None
             param.enum_value_map = dict(option_map or param.enum_value_map or {}) or None
         if not source_owned:
-            param.source = {
-                **dict(param.source or {}),
+            option_contract = {
                 "kind": source_kind,
                 "source_url": binding.source_url if source_kind == "api_option" else None,
                 "source_method": binding.source_method,
@@ -5916,6 +6003,16 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                     else (binding.enum_confirmed if binding.enum_confirmed is not None else True)
                 ),
             }
+            if keep_hydration:
+                param.source_kind = "previous_response"
+                param.source = {
+                    **dict(param.source or {}),
+                    "kind": "previous_response",
+                    "allow_caller_override": True,
+                    "option_source": option_contract,
+                }
+            else:
+                param.source = {**dict(param.source or {}), **option_contract}
         if not _param_field_manually_edited(param, "need_human_confirm"):
             param.need_human_confirm = bool(
                 source_kind == "unknown"
@@ -6762,6 +6859,10 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             continue
         target_param = _resolve_param_reference(target, target_path)
         for p in [target_param] if target_param is not None else []:
+            hydration = bool(
+                (lk.meta or {}).get("captured_record_hydration")
+                or (lk.evidence or {}).get("kind") == "record_hydration"
+            )
             captured_binding_overrides_agent_input = bool(
                 p.source_kind in {
                     "user_input", "page_default", "unknown", *_OPTION_SOURCE_KINDS,
@@ -6785,14 +6886,24 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 _param_source_agent_classified(p)
                 and p.source_kind != "chained"
                 and not captured_binding_overrides_agent_input
+                and not hydration
             ):
                 # 依赖连线和字段来源是独立可编辑的事实。人工已选择
                 # 分类/来源后，同步层不得再用旧连线覆盖用户结果。
                 continue
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
-            caller_editable = _param_has_editable_control_evidence(p)
+            caller_editable = (
+                not _param_control_is_readonly(p)
+                and (
+                    _param_has_editable_control_evidence(p)
+                    or hydration
+                    or _param_was_caller_typed(p)
+                )
+            )
             option_source = dict(p.source or {}) if p.source_kind in _OPTION_SOURCE_KINDS else {}
+            if not option_source and isinstance((p.source or {}).get("option_source"), dict):
+                option_source = dict((p.source or {}).get("option_source") or {})
             p.category = "user_param" if caller_editable else "runtime_var"
             p.source_kind = "previous_response"
             p.source = {
@@ -6924,11 +7035,6 @@ def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
 def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk: FlowLink | None = None) -> bool:
     if lk is not None and not _link_is_auto_generated(lk):
         return True
-    # Picking the first row of a previous list is not a dependency. It is an
-    # arbitrary choice and is dangerous for editable dropdown IDs. Legitimate
-    # collection transforms use foreach/map nodes or an explicit manual link.
-    if "[" in str(source_path or ""):
-        return False
     if param is None:
         return False
     evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
@@ -6939,6 +7045,14 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
         r"[^a-z0-9]+", "",
         str(param.path or param.key or "").split(".")[-1].lower(),
     )
+    # Picking the first row of a previous *list* is not a dependency. The same
+    # record's own line items in a detail response are hydration, not a list pick.
+    if "[" in str(source_path or "") and not (
+        evidence.get("kind") == "record_hydration"
+        and source_leaf == target_leaf
+        and int(evidence.get("match_count") or 0) >= 3
+    ):
+        return False
     if (
         lk is not None
         and lk.confirmed
@@ -7026,6 +7140,12 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
         return False
     target_param = _resolve_param_reference(target, link.target_path)
     evidence = link.evidence if isinstance(link.evidence, dict) else {}
+    source_leaf = re.sub(r"[^a-z0-9]+", "", source_path.split(".")[-1].casefold())
+    target_leaf = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str((target_param.path if target_param is not None else "") or (target_param.key if target_param is not None else "") or link.target_path).split(".")[-1].casefold(),
+    )
     hydration_match = bool(
         evidence.get("kind") == "record_hydration"
         and not isinstance(evidence.get("captured_source_value"), (dict, list, bool))
@@ -7035,9 +7155,22 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
         and str(evidence.get("captured_target_value")).strip()
         == str(target_param.value if target_param is not None else "").strip()
     )
+    hydration_override = bool(
+        evidence.get("kind") == "record_hydration"
+        and evidence.get("value_overridden") is True
+        and source_leaf == target_leaf
+    )
+    hydration_empty = bool(
+        evidence.get("kind") == "record_hydration"
+        and evidence.get("empty_projection") is True
+        and source_leaf == target_leaf
+    )
     if target_param is None or not (
         _recorded_scalar_values_match(source_value, target_param.value)
+        or _composite_values_match(source_value, target_param.value)
         or hydration_match
+        or hydration_override
+        or hydration_empty
     ):
         return False
     source_action = str(evidence.get("source_action_id") or "")
@@ -7263,7 +7396,7 @@ def _discover_record_hydration_links(
         target_values = {
             path: raw
             for path, _tokens, _scalar, raw in _leaf_paths(target_body)
-            if raw not in (None, "") and not isinstance(raw, (dict, list, bool))
+            if not isinstance(raw, (dict, list, bool))
         }
         if not target_values:
             continue
@@ -7290,19 +7423,32 @@ def _discover_record_hydration_links(
                     payload = response[envelope]
                     prefix = f"{envelope}."
                     break
-            matches: list[dict[str, str]] = []
+            matches: list[dict[str, Any]] = []
             for path, _tokens, _scalar, raw in _leaf_paths(payload):
-                if (
-                    path not in target_values
-                    or isinstance(raw, (dict, list, bool))
-                    or not _recorded_scalar_values_match(raw, target_values[path])
-                ):
+                if path not in target_values or isinstance(raw, (dict, list, bool)):
                     continue
+                target_raw = target_values[path]
+                if isinstance(target_raw, (dict, list, bool)):
+                    continue
+                source_empty = raw in (None, "")
+                target_empty = target_raw in (None, "")
+                equal = (
+                    source_empty and target_empty
+                ) or (
+                    not source_empty
+                    and not target_empty
+                    and (
+                        _recorded_scalar_values_match(raw, target_raw)
+                        or _composite_values_match(raw, target_raw)
+                    )
+                )
                 matches.append({
                     "source_path": f"{prefix}{path}" if path else prefix.rstrip("."),
                     "target_path": path,
                     "source_value": copy.deepcopy(raw),
-                    "target_value": copy.deepcopy(target_values[path]),
+                    "target_value": copy.deepcopy(target_raw),
+                    "value_overridden": not equal and not (source_empty and target_empty),
+                    "empty_projection": source_empty and target_empty,
                 })
             identity_paths = [
                 item["target_path"] for item in matches
@@ -7408,10 +7554,7 @@ def to_flow_spec(
         isinstance(event, dict) and event.get("event_id") and event.get("kind")
         for event in page_events
     )
-    if observer_events_present and not all(
-        isinstance(item, dict) and bool(item.get("binding_status"))
-        for item in (field_evidence or [])
-    ):
+    if observer_events_present and field_evidence:
         binding_requests = []
         for request, role in zip(captured_requests, request_roles):
             binding_request = dict(request)
@@ -8094,6 +8237,8 @@ def to_flow_spec(
                 "match_count": len(candidate.get("matches") or []),
                 "captured_source_value": copy.deepcopy(match.get("source_value")),
                 "captured_target_value": copy.deepcopy(match.get("target_value")),
+                "value_overridden": bool(match.get("value_overridden")),
+                "empty_projection": bool(match.get("empty_projection")),
             }
             meta = {
                 "actor": "heuristic",
@@ -8198,6 +8343,8 @@ def to_flow_spec(
     _infer_computed_runtime_fields(spec)
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
+    _apply_edit_form_field_contracts(spec)
+    _apply_row_command_field_contracts(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
 
 
@@ -8587,6 +8734,31 @@ def _param_control_kinds(param: ParamField) -> set[str]:
     }
 
 
+def _looks_non_quantity_formula_leaf(key: str, path: str) -> bool:
+    """IDs, codes and state discriminators can numerically coincide with money."""
+    leaf = _field_leaf_token(key, path)
+    if leaf in {
+        "id", "ids", "code", "no", "key", "status", "state", "type", "flag",
+        "creator", "updater", "modifier", "owner", "assignee", "operator",
+    }:
+        return True
+    return leaf.endswith(("id", "ids", "code", "key", "status", "state"))
+
+
+def _looks_count_formula_leaf(key: str, path: str) -> bool:
+    return _field_leaf_token(key, path) in {"count", "qty", "quantity", "num"}
+
+
+def _looks_total_formula_leaf(key: str, path: str) -> bool:
+    leaf = _field_leaf_token(key, path)
+    return any(token in leaf for token in ("total", "amount", "subtotal", "payable", "linetotal"))
+
+
+def _looks_percent_formula_leaf(key: str, path: str) -> bool:
+    leaf = _field_leaf_token(key, path)
+    return any(token in leaf for token in ("percent", "rate", "ratio"))
+
+
 def _is_numeric_formula_operand(param: ParamField) -> bool:
     """Selects, enums and record IDs can numerically coincide; they are not quantities."""
     if _looks_pagination_field(param.key, param.path):
@@ -8597,8 +8769,10 @@ def _is_numeric_formula_operand(param: ParamField) -> bool:
         return False
     if _is_document_record_identity_path(param.key, param.path):
         return False
-    if param.source_kind == "previous_response" and "number" not in _param_control_kinds(param):
+    if _looks_non_quantity_formula_leaf(param.key, param.path):
         return False
+    if param.source_kind == "previous_response":
+        return _as_finite_number(param.value) is not None
     return True
 
 
@@ -8607,7 +8781,9 @@ def _is_stable_operand(param: ParamField) -> bool:
         return False
     if "number" in _param_control_kinds(param):
         return True
-    return _param_was_caller_typed(param) or param.source_kind in _STABLE_OPERAND_KINDS
+    if _param_was_caller_typed(param) or param.source_kind in _STABLE_OPERAND_KINDS:
+        return True
+    return False
 
 
 def _param_has_page_control_evidence(param: ParamField | None) -> bool:
@@ -8638,22 +8814,39 @@ def _arithmetic_target_allowed(param: ParamField) -> bool:
         return False
     if _looks_pagination_field(param.key, param.path):
         return False
-    if _param_has_page_control_evidence(param) and not _param_control_is_readonly(param):
+    if _param_is_document_record_identity(param):
         return False
-    return param.source_kind not in {
-        "computed", "selected_option_field", "previous_response",
-        "api_option", "page_enum", "form_option", "current_user",
-        "system_time", "system_generated", "page_default",
-    }
+    if _looks_non_quantity_formula_leaf(param.key, param.path):
+        return False
+    if param.source_kind in _OPTION_SOURCE_KINDS or param.type in {"enum", "list-enum"}:
+        return False
+    if _param_control_kinds(param) & {"select", "combobox", "radio"}:
+        return False
+    if param.source_kind in {
+        "computed", "selected_option_field", "current_user",
+        "system_time", "system_generated",
+    }:
+        return False
+    if (
+        _param_has_editable_control_evidence(param)
+        and not _param_control_is_readonly(param)
+    ):
+        return False
+    return True
 
 
 def _is_identity_arithmetic(kind: str, left: float, right: float) -> bool:
     if kind == "product":
-        return abs(left - 1.0) <= _IDENTITY_ARITHMETIC_EPS or abs(right - 1.0) <= _IDENTITY_ARITHMETIC_EPS
+        return (
+            abs(left - 1.0) <= _IDENTITY_ARITHMETIC_EPS
+            or abs(right - 1.0) <= _IDENTITY_ARITHMETIC_EPS
+            or abs(left) <= _IDENTITY_ARITHMETIC_EPS
+            or abs(right) <= _IDENTITY_ARITHMETIC_EPS
+        )
     if kind == "sum":
         return abs(left) <= _IDENTITY_ARITHMETIC_EPS or abs(right) <= _IDENTITY_ARITHMETIC_EPS
     if kind == "difference":
-        return abs(right) <= _IDENTITY_ARITHMETIC_EPS
+        return abs(right) <= _IDENTITY_ARITHMETIC_EPS or abs(left - right) <= _IDENTITY_ARITHMETIC_EPS
     if kind == "percent_of":
         return abs(right - 100.0) <= _IDENTITY_ARITHMETIC_EPS
     if kind == "remainder_after_percent":
@@ -8669,6 +8862,9 @@ def _operand_quality(param: ParamField) -> int:
         "form_option": 3,
         "api_option": 3,
         "page_enum": 3,
+        "previous_response": 2,
+        "page_default": 2,
+        "page_rule": 2,
     }.get(param.source_kind, 0)
 
 
@@ -8680,10 +8876,16 @@ def _identity_product_allowed(target: ParamField, left: ParamField, right: Param
         else right
     )
     other = right if one is left else left
+    same_group = (
+        _param_group_prefix(one.path) == _param_group_prefix(target.path)
+        and _param_group_prefix(other.path) == _param_group_prefix(target.path)
+    )
     return (
-        _param_was_caller_typed(one)
+        same_group
         and not _param_was_caller_typed(target)
-        and other.source_kind in _INPUT_OPERAND_KINDS
+        and _looks_count_formula_leaf(one.key, one.path)
+        and _looks_total_formula_leaf(target.key, target.path)
+        and not _looks_total_formula_leaf(other.key, other.path)
     )
 
 
@@ -8717,12 +8919,28 @@ def _pick_arithmetic_match(
                     continue
                 if not _numbers_match(target_number, actual):
                     continue
+                if kind in {"percent_of", "remainder_after_percent"} and not (
+                    _looks_percent_formula_leaf(left.key, left.path)
+                    or _looks_percent_formula_leaf(right.key, right.path)
+                ):
+                    continue
                 identity = _is_identity_arithmetic(kind, left_number, right_number)
                 if identity and not (
                     kind == "product" and _identity_product_allowed(target, left, right)
                 ):
                     continue
                 if not (_is_stable_operand(left) and _is_stable_operand(right)):
+                    continue
+                if (
+                    left.source_kind == "computed"
+                    and right.source_kind == "computed"
+                    and kind in {"sum", "difference"}
+                ):
+                    continue
+                if kind in {"sum", "difference"} and any(
+                    _looks_percent_formula_leaf(param.key, param.path)
+                    for param, _number in siblings
+                ):
                     continue
                 matches.append((kind, left, right, identity))
     if not matches:
@@ -8731,7 +8949,17 @@ def _pick_arithmetic_match(
     top = [item for item in matches if _arithmetic_match_score(target, *item) == best_score]
     kinds = {item[0] for item in top}
     if len(kinds) != 1:
-        return None
+        percent_top = [
+            item for item in top
+            if item[0] in {"percent_of", "remainder_after_percent"}
+            or _looks_percent_formula_leaf(item[1].key, item[1].path)
+            or _looks_percent_formula_leaf(item[2].key, item[2].path)
+        ]
+        percent_kinds = {item[0] for item in percent_top}
+        if len(percent_kinds) != 1:
+            return None
+        top = percent_top
+        kinds = percent_kinds
     kind = next(iter(kinds))
 
     def pair_key(left: ParamField, right: ParamField) -> tuple[float, float]:
@@ -8781,6 +9009,7 @@ def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
                 for param in step.params or []
                 if (number := _as_finite_number(param.value)) is not None
             ]
+            ranked: list[tuple[int, int, int, ParamField, str, ParamField, ParamField]] = []
             for target, target_number in numeric:
                 if not _arithmetic_target_allowed(target):
                     continue
@@ -8792,34 +9021,61 @@ def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
                 ]
                 picked = _pick_arithmetic_match(target, target_number, local)
                 if picked is None:
-                    picked = _pick_arithmetic_match(
-                        target,
-                        target_number,
-                        [(param, number) for param, number in numeric if param is not target],
-                    )
+                    global_siblings = [
+                        (param, number) for param, number in numeric if param is not target
+                    ]
+                    if any(
+                        _looks_percent_formula_leaf(param.key, param.path)
+                        for param, _number in global_siblings
+                    ) and (
+                        _looks_total_formula_leaf(target.key, target.path)
+                        or _looks_percent_formula_leaf(target.key, target.path)
+                    ):
+                        picked = _pick_arithmetic_match(target, target_number, global_siblings)
                 if picked is None:
                     continue
                 kind, left, right = picked
-                target.category = "runtime_var"
-                target.source_kind = "computed"
-                target.source = {
-                    "kind": "computed",
-                    "strategy": kind,
-                    "left_field": left.key,
-                    "right_field": right.key,
-                    "result_field": target.key,
-                    "path": target.path,
-                    "sample_verified": True,
-                }
-                target.exposed_to_user = False
-                target.editable = False
-                target.required = False
-                target.need_human_confirm = False
-                target.reason = (
-                    f"录制样例证明该字段由 `{left.key}` 与 `{right.key}` 按 {kind} 计算得到，运行期自动计算"
+                ranked.append((
+                    int(kind in {"percent_of", "remainder_after_percent"}),
+                    int(
+                        _looks_percent_formula_leaf(left.key, left.path)
+                        or _looks_percent_formula_leaf(right.key, right.path)
+                    ),
+                    int(_looks_total_formula_leaf(target.key, target.path)),
+                    target, kind, left, right,
+                ))
+            if not ranked:
+                continue
+            ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            target, kind, left, right = ranked[0][3:]
+            target.category = "runtime_var"
+            target.source_kind = "computed"
+            target.source = {
+                "kind": "computed",
+                "strategy": kind,
+                "left_field": left.key,
+                "right_field": right.key,
+                "result_field": target.key,
+                "path": target.path,
+                "sample_verified": True,
+            }
+            target.exposed_to_user = False
+            target.editable = False
+            target.required = False
+            target.need_human_confirm = False
+            if (
+                not _param_field_manually_edited(target, "type")
+                and (
+                    str(target.wire_type or "") == "number"
+                    or _as_finite_number(target.value) is not None
                 )
-                step.sample_inputs.pop(target.key, None)
-                changed = True
+            ):
+                target.type = "number"
+            target.reason = (
+                f"录制样例证明该字段由 `{left.key}` 与 `{right.key}` 按 {kind} 计算得到，运行期自动计算"
+            )
+            step.sample_inputs.pop(target.key, None)
+            changed = True
 
 
 def _param_is_temporal(param: ParamField) -> bool:
@@ -8838,8 +9094,294 @@ def _param_is_temporal(param: ParamField) -> bool:
     )
 
 
+def _step_is_record_edit_form(step: FlowStep) -> bool:
+    params = list(step.params or [])
+    hydrated = [
+        param for param in params
+        if param.source_kind == "previous_response"
+        and not _param_is_document_record_identity(param)
+    ]
+    if len(hydrated) >= 3:
+        return True
+    body_fields = [
+        param for param in params
+        if not str(param.path or "").startswith("query.")
+        and not _param_is_document_record_identity(param)
+    ]
+    dialog_owned = any(_param_has_command_local_control(step, param) for param in body_fields)
+    return len(hydrated) >= 2 and (len(body_fields) >= 2 or dialog_owned)
+
+
+def _param_has_command_local_control(step: FlowStep, param: ParamField) -> bool:
+    """True only when the control belongs to this write, not a list filter."""
+    action = str((step.source_meta or {}).get("trigger_action_id") or "")
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or item.get("kind") != "page_control":
+            continue
+        surface = str(item.get("surface") or "").strip().lower()
+        in_dialog = item.get("in_dialog") is True or surface in {"dialog", "modal", "drawer"}
+        interacted = bool(item.get("interacted")) or str(item.get("op") or "").lower() in {
+            "fill", "select", "pick",
+        }
+        evidence_action = str(item.get("action_id") or "")
+        if in_dialog:
+            return True
+        if interacted and (not action or not evidence_action or evidence_action == action):
+            return True
+    return False
+
+
+def _step_is_row_command(step: FlowStep) -> bool:
+    """A list-row click that mutates one record without opening an edit form."""
+    if str(step.method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    if _step_is_record_edit_form(step):
+        return False
+    return any(_param_is_document_record_identity(param) for param in step.params or [])
+
+
+def _apply_row_command_field_contracts(spec: FlowSpec) -> None:
+    """Keep row-command identity caller-selected and payload literals fixed.
+
+    List filters and dictionary APIs live on the same page as approve/reject/
+    delete buttons. Their leaf names (status, type, flag) must not become the
+    command's public options. The command only needs the record the caller
+    selected; every other leaf without a field-local control is the button's
+    recorded discriminator.
+    """
+    for step in spec.steps or []:
+        if not _step_is_row_command(step):
+            continue
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param):
+                continue
+            if _param_is_document_record_identity(param):
+                param.category = "user_param"
+                param.source_kind = "user_input"
+                param.source = {
+                    "kind": "selected_record_identity",
+                    "path": param.path,
+                    "required_state": "required",
+                }
+                param.required = True
+                param.exposed_to_user = True
+                param.editable = True
+                param.need_human_confirm = False
+                param.reason = (
+                    "调用方选择要操作的记录；行级点击没有详情回填，"
+                    "不能把列表或上游样例 ID 当成固定值"
+                )
+                continue
+            if _param_has_command_local_control(step, param):
+                continue
+            if param.source_kind in {
+                "computed", "current_user", "system_time", "system_generated",
+                "page_context", "request_header", "session",
+            }:
+                continue
+            param.category = "system_const"
+            param.source_kind = "constant"
+            param.source = {
+                "kind": "command_literal",
+                "path": param.path,
+                "value": param.value,
+            }
+            param.required = False
+            param.exposed_to_user = False
+            param.editable = False
+            param.enum_options = None
+            param.enum_value_map = None
+            if param.type in {"enum", "list-enum"}:
+                param.type = param.wire_type or "string"
+            param.need_human_confirm = False
+            param.reason = (
+                "行级命令随按钮提交的固定判别值，不是列表筛选或字典接口的实时选项"
+            )
+            step.selects = [
+                binding for binding in (step.selects or [])
+                if binding.path != param.path
+            ]
+            if param.key:
+                step.sample_inputs.pop(param.key, None)
+
+
+def _looks_audit_system_leaf(key: str, path: str) -> bool:
+    leaf = _field_leaf_token(key, path)
+    if leaf in {
+        "createtime", "updatetime", "createdat", "updatedat",
+        "creator", "updater", "modifier", "createby", "updateby",
+        "creatorname", "updatername", "createdby", "updatedby",
+    }:
+        return True
+    return leaf.endswith(("createtime", "updatetime", "createdat", "updatedat"))
+
+
+def _looks_row_identity_leaf(key: str, path: str) -> bool:
+    return "[" in str(path or "") and _field_leaf_token(key, path) in {"id", "ids"}
+
+
+def _looks_display_echo_field(step: FlowStep, param: ParamField) -> bool:
+    leaf = _field_leaf_token(param.key, param.path)
+    stem = ""
+    for suffix in ("name", "title", "label", "text"):
+        if leaf.endswith(suffix) and len(leaf) > len(suffix):
+            stem = leaf[: -len(suffix)]
+            break
+    if not stem:
+        return False
+    group = _param_group_prefix(param.path)
+    for other in step.params or []:
+        if other is param or _param_group_prefix(other.path) != group:
+            continue
+        other_leaf = _field_leaf_token(other.key, other.path)
+        if other_leaf in {stem, f"{stem}id", f"{stem}ids"}:
+            return True
+    return False
+
+
+def _mark_system_hydrated_field(param: ParamField, reason: str) -> None:
+    param.category = "runtime_var"
+    param.exposed_to_user = False
+    param.editable = False
+    param.required = False
+    param.need_human_confirm = False
+    if param.source_kind == "previous_response":
+        param.source = {**(param.source or {}), "allow_caller_override": False, "required_state": "optional"}
+        param.reason = reason
+        return
+    if param.source_kind in {"unknown", "user_input", "page_default"}:
+        param.source_kind = "previous_response" if (param.source or {}).get("link_id") else param.source_kind
+        param.source = {**(param.source or {}), "allow_caller_override": False, "required_state": "optional"}
+        param.reason = reason
+
+
+def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
+    """Keep edit-form identity/audit/display echoes system-owned.
+
+    Hydration makes most write leaves caller-overridable. The document id used
+    to load the record, audit timestamps, and label echoes of a chosen *Id stay
+    on the system side even when their values came from the detail GET.
+    """
+    for step in spec.steps or []:
+        if not _step_is_record_edit_form(step):
+            continue
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param) or param.source_kind == "computed":
+                continue
+            if _param_is_document_record_identity(param) or _looks_row_identity_leaf(param.key, param.path):
+                _mark_system_hydrated_field(
+                    param,
+                    "该字段是记录或行项目标识，由详情接口回填，不作为调用方输入",
+                )
+                continue
+            if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
+                _mark_system_hydrated_field(
+                    param,
+                    "该字段是审计/系统时间或创建人痕迹，由详情接口回填，不作为调用方输入",
+                )
+                continue
+            if (
+                _field_leaf_token(param.key, param.path) in {"status", "state"}
+                and not _param_has_command_local_control(step, param)
+            ):
+                _mark_system_hydrated_field(
+                    param,
+                    "该字段是单据状态回写，编辑提交随详情带出，不是列表筛选或行级命令",
+                )
+                continue
+            if _looks_display_echo_field(step, param) and not _param_has_command_local_control(step, param):
+                _mark_system_hydrated_field(
+                    param,
+                    "该字段是选项显示名回写，随所选标识自动带出，不作为调用方输入",
+                )
+                continue
+            if (
+                param.source_kind == "previous_response"
+                and param.value in (None, "")
+                and not _param_has_command_local_control(step, param)
+            ):
+                _mark_system_hydrated_field(
+                    param,
+                    "该字段在详情与提交中均为空，随请求携带，不作为调用方输入",
+                )
+                continue
+            if (
+                param.source_kind == "previous_response"
+                and not _param_control_is_readonly(param)
+                and not _looks_audit_system_leaf(param.key, param.path)
+            ):
+                param.category = "user_param"
+                param.exposed_to_user = True
+                param.editable = True
+                param.source = {**(param.source or {}), "allow_caller_override": True}
+                if "可修改" not in (param.reason or ""):
+                    param.reason = (
+                        f"{param.reason}；调用方仍可修改该字段，显式输入优先于上游默认值"
+                        if param.reason else
+                        "编辑场景默认来自上游详情；调用方仍可修改该字段，显式输入优先于上游默认值"
+                    )
+
+
+def _query_range_index(path: str) -> tuple[str, int] | None:
+    match = re.fullmatch(r"(query\..+)\[(\d+)\]$", str(path or ""))
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
+
+
+def _calendar_date_text(value: Any) -> str | None:
+    text = str(value if value is not None else "").strip()
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    return None
+
+
+def _apply_date_range_companions(spec: FlowSpec) -> None:
+    """Keep a same-day query range end as a page rule when only the start was filled."""
+    for step in spec.steps or []:
+        grouped: dict[str, dict[int, ParamField]] = {}
+        for param in step.params or []:
+            parsed = _query_range_index(param.path or "")
+            if parsed is None:
+                continue
+            grouped.setdefault(parsed[0], {})[parsed[1]] = param
+        for parts in grouped.values():
+            start, end = parts.get(0), parts.get(1)
+            if start is None or end is None:
+                continue
+            start_text = str(start.value or "")
+            end_text = str(end.value or "")
+            start_date = _calendar_date_text(start.value)
+            end_date = _calendar_date_text(end.value)
+            if (
+                start_date is None
+                or start_date != end_date
+                or not re.search(r"00:00(?::00)?$", start_text)
+                or not re.search(r"23:59(?::59)?$", end_text)
+            ):
+                continue
+            if end.locked or _param_has_manual_contract(end):
+                continue
+            if end.source_kind in {"user_input", "page_default", "api_option", "page_enum"} and _param_exposed_to_caller(end):
+                continue
+            end.category = "runtime_var"
+            end.source_kind = "page_rule"
+            end.source = {
+                "kind": "date_range_end",
+                "start_field": start.key,
+                "path": end.path,
+            }
+            end.exposed_to_user = False
+            end.editable = False
+            end.required = False
+            end.need_human_confirm = False
+            end.reason = "查询区间结束时刻由开始日期按当天结束补齐，不作为独立调用方输入"
+
+
 def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
     """Hide recorded computed fields only when their samples prove the formula."""
+    _apply_date_range_companions(spec)
     _infer_arithmetic_computed_fields(spec)
     def leaf_name(param: ParamField) -> str:
         raw = param.key or str(param.path or "").split(".")[-1]
@@ -9061,6 +9603,7 @@ def _repair_readonly_control_defaults(spec: FlowSpec) -> int:
         for step, param, _path in candidates:
             if (
                 param.locked
+                or param.source_kind == "computed"
                 or _param_has_manual_contract(param)
                 or _param_source_agent_classified(param)
                 or _param_has_editable_control_evidence(param)
@@ -9885,6 +10428,8 @@ def _repair_generated_capability_contracts(
     """Deterministically repair only Planner-generated capability contracts."""
     _normalize_capability_references(spec)
     _infer_computed_runtime_fields(spec)
+    _apply_edit_form_field_contracts(spec)
+    _apply_row_command_field_contracts(spec)
     rebuild_flow_dependencies(spec)
     if repair_option_bindings:
         _repair_structural_option_bindings(spec)
@@ -10523,6 +11068,8 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         return spec
 
     _infer_computed_runtime_fields(spec)
+    _apply_edit_form_field_contracts(spec)
+    _apply_row_command_field_contracts(spec)
     # Capability compilation happens after live semantic edits. Apply only the
     # dependencies safe for execution so a confirmed response chain wins over
     # an unsupported caller-input guess. Keep non-executable selector evidence
@@ -11940,8 +12487,18 @@ def _compact_repeated_endpoint_observations(
     )
 
 
+def _request_fact_has_record_identity(item: dict[str, Any]) -> bool:
+    query = item.get("query")
+    if isinstance(query, dict):
+        for key, raw in query.items():
+            value = raw[0] if isinstance(raw, list) and raw else raw
+            if _is_document_record_identity_path(str(key), f"query.{key}") and str(value or "").strip():
+                return True
+    return bool(_record_identity_values_for_request(item))
+
+
 def _model_visible_request_facts(
-    request_facts: list[dict[str, Any]], *, max_items: int = 40,
+    request_facts: list[dict[str, Any]], *, max_items: int = 80,
 ) -> list[dict[str, Any]]:
     """Keep late/candidate requests visible without expanding model context.
 
@@ -11957,6 +12514,7 @@ def _model_visible_request_facts(
         or str(item.get("role") or "") in priority_roles
         or item.get("materialized_step_id")
         or str(item.get("trigger_op") or "").lower() in {"click", "submit", "select", "pick"}
+        or _request_fact_has_record_identity(item)
     ]
     selected: dict[str, dict[str, Any]] = {}
     for item in [*reversed(priority), *reversed(request_facts)]:
@@ -12062,6 +12620,12 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "action_delta_ms": request.get("action_delta_ms"),
                 "causality_confidence": request.get("causality_confidence"),
                 "query_paths": list(request.get("query_paths") or []),
+                "query": compact_model_payload(
+                    _client_redact_sensitive(request.get("query") or {}, "query"),
+                    max_depth=3,
+                    max_items=20,
+                    max_string=80,
+                ),
                 "body_paths": list(request.get("body_paths") or []),
                 "state": request.get("state"),
                 "materialized_step_id": request.get("materialized_step_id"),
@@ -16576,6 +17140,22 @@ def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+_COMPUTED_DATE_STRATEGIES = frozenset({"date_span_days", "date_span_days_json"})
+_COMPUTED_ARITHMETIC_STRATEGIES = frozenset({
+    "product", "sum", "percent_of", "remainder_after_percent", "difference",
+})
+
+
+def _computed_formula_is_complete(source: dict | None) -> bool:
+    source = source or {}
+    strategy = str(source.get("strategy") or "")
+    if strategy in _COMPUTED_DATE_STRATEGIES:
+        return bool(source.get("start_field") and source.get("end_field"))
+    if strategy in _COMPUTED_ARITHMETIC_STRATEGIES:
+        return bool(source.get("left_field") and source.get("right_field"))
+    return False
+
+
 def _runtime_param_publish_error(param: ParamField) -> str | None:
     """Source inference/configuration is advisory and never a publish error.
 
@@ -16603,11 +17183,7 @@ def _field_source_configuration_advice(param: ParamField) -> str | None:
         "uuid", "random_string", "random_number",
     }:
         return f"字段 `{param.path}` 的系统生成值缺少有效生成策略"
-    if source_kind == "computed" and not (
-        (param.source or {}).get("strategy") in {"date_span_days", "date_span_days_json"}
-        and (param.source or {}).get("start_field")
-        and (param.source or {}).get("end_field")
-    ):
+    if source_kind == "computed" and not _computed_formula_is_complete(param.source):
         return f"字段 `{param.path}` 的系统计算值缺少可执行规则"
     if source_kind == "previous_response" and not (
         (param.source or {}).get("step_id")
@@ -18051,6 +18627,8 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     _repair_structural_option_bindings(current)
     _refresh_api_option_display_labels(current)
     _infer_computed_runtime_fields(current)
+    _apply_edit_form_field_contracts(current)
+    _apply_row_command_field_contracts(current)
     _repair_readonly_control_defaults(current)
     _repair_uncontrolled_write_state_fields(current)
     _materialize_captured_response_key_maps(
@@ -19341,6 +19919,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 or _param_has_manual_contract(param)
                 or _param_has_grounded_direct_input_contract(param)
                 or (
+                    param.source_kind == "previous_response"
+                    and isinstance((param.source or {}).get("option_source"), dict)
+                )
+                or (
                     param.source_kind in _OPTION_SOURCE_KINDS
                     and not rebindable_option
                 )
@@ -20231,20 +20813,11 @@ def _bind_option_source(
     options_owned = automated and _param_axis_manually_edited(
         param, "enum_options", "enum_value_map",
     )
-    if not category_owned:
-        param.category = "user_param"
-    param.source_kind = "api_option"
-    # ``type`` is the caller-facing business contract; ``wire_type`` retains
-    # the recorded JSON scalar transported to the backend.
-    if not param.wire_type:
-        param.wire_type = param.type
-    if not type_owned:
-        param.type = "list-enum" if multi else "enum"
-    if not category_owned:
-        param.exposed_to_user = True
-        param.editable = True
-    param.need_human_confirm = False
-    param.source = {
+    keep_hydration = (
+        param.source_kind == "previous_response"
+        and bool((param.source or {}).get("allow_caller_override") or (param.source or {}).get("link_id"))
+    )
+    option_contract = {
         "kind": "api_option",
         "source_step_id": source_step_id,
         "source_request_id": source_request_id,
@@ -20255,7 +20828,34 @@ def _bind_option_source(
         "category_value": category_value,
         "id_path": id_path or param.path,
     }
-    param.reason = "字段候选来自接口选项源，调用方传显示值，运行期按 label/value 映射提交真实值"
+    if not category_owned:
+        param.category = "user_param"
+    # ``type`` is the caller-facing business contract; ``wire_type`` retains
+    # the recorded JSON scalar transported to the backend.
+    if not param.wire_type:
+        param.wire_type = param.type
+    if not type_owned:
+        param.type = "list-enum" if multi else "enum"
+    if not category_owned:
+        param.exposed_to_user = True
+        param.editable = True
+    param.need_human_confirm = False
+    if keep_hydration:
+        param.source_kind = "previous_response"
+        param.source = {
+            **dict(param.source or {}),
+            "kind": "previous_response",
+            "allow_caller_override": True,
+            "option_source": option_contract,
+        }
+        param.reason = (
+            "编辑场景默认来自上游详情，候选来自接口选项源；"
+            "调用方可改，显式输入优先于上游默认值"
+        )
+    else:
+        param.source_kind = "api_option"
+        param.source = option_contract
+        param.reason = "字段候选来自接口选项源，调用方传显示值，运行期按 label/value 映射提交真实值"
     if options and not options_owned:
         param.enum_options = list(options)
     if option_map and not options_owned:
@@ -22707,7 +23307,11 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "facts": compact_model_payload(
-            _semantic_fact_snapshot(current), max_depth=8, max_items=40, max_string=500,
+            _semantic_fact_snapshot(current),
+            max_depth=8,
+            max_items=80,
+            max_string=500,
+            list_keep="tail",
         ),
         "current_contract": compact_model_payload(
             _semantic_mutable_context(current), max_depth=6, max_items=40, max_string=500,
@@ -22785,7 +23389,11 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         # A deferred live field conclusion is durably staged in
         # recording_agent_ops and is replayed after request materialization.
         # It must not consume another Pi submission attempt.
-        "submission_complete": not must_retry,
+        # Rejected optional field hypotheses stay visible in must_retry, but a
+        # stored live capability plan is already a successful submission.
+        # Compile-owned field replay happens at freeze and must not consume
+        # another Pi attempt.
+        "submission_complete": (not must_retry) or capability_plan_complete,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }

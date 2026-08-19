@@ -26,7 +26,10 @@ from dano.onboarding.recording_verify import (
 from dano.onboarding.recording_workflow import (
     PipelineContext,
     RepairReport,
+    WorkflowActivity,
+    WorkflowCancelled,
     WorkflowIssue,
+    WorkflowStep,
 )
 
 
@@ -295,19 +298,151 @@ def _dedupe_workflow_issues(issues: tuple[WorkflowIssue, ...]) -> tuple[Workflow
     return tuple(kept[key] for key in order if key in kept)
 
 
-def _issue_still_open(spec: FlowSpec, issue: WorkflowIssue) -> bool:
+def _open_issue_tokens(spec: FlowSpec) -> tuple[set[str], set[tuple[str, str, str]]]:
+    """Compute the currently open verification todos once per draft state."""
     report = verification_report(spec)
     todos = [item for item in report.get("todos") or [] if isinstance(item, dict)]
-    tokens = {
+    ids = {
         str(item.get("issue_id") or item.get("target_id") or "")
         for item in todos
     }
-    if issue.issue_id in tokens:
-        return True
-    identity = _issue_field_identity(issue)
-    if any(_issue_field_identity(_todo_issue(item, spec)) == identity for item in todos):
-        return True
-    return False
+    identities = {_issue_field_identity(_todo_issue(item, spec)) for item in todos}
+    return ids, identities
+
+
+def _issue_still_open(spec: FlowSpec, issue: WorkflowIssue) -> bool:
+    ids, identities = _open_issue_tokens(spec)
+    return issue.issue_id in ids or _issue_field_identity(issue) in identities
+
+
+def _issue_capability_id(spec: FlowSpec, issue: WorkflowIssue) -> str:
+    """Resolve which stage-six capability owns an issue, or "" for flow-level."""
+    explicit = str(issue.target.get("capability_id") or "")
+    if explicit:
+        return explicit
+    step_id = str(issue.target.get("step_id") or "")
+    if not step_id:
+        return ""
+    for capability in spec.capabilities:
+        if step_id in {str(item) for item in capability.step_ids}:
+            return capability.capability_id
+        if any(
+            isinstance(node, dict) and str(node.get("step_id") or "") == step_id
+            for node in capability.nodes
+        ):
+            return capability.capability_id
+    return ""
+
+
+def _group_issues_by_capability(
+    spec: FlowSpec,
+    issues: tuple[WorkflowIssue, ...],
+) -> list[tuple[Any, tuple[WorkflowIssue, ...]]]:
+    """Order repair work by the stage-six capability list; flow-level work last."""
+    known = {capability.capability_id for capability in spec.capabilities}
+    grouped: dict[str, list[WorkflowIssue]] = {}
+    for issue in issues:
+        capability_id = _issue_capability_id(spec, issue)
+        if capability_id not in known:
+            capability_id = ""
+        grouped.setdefault(capability_id, []).append(issue)
+    ordered: list[tuple[Any, tuple[WorkflowIssue, ...]]] = []
+    for capability in spec.capabilities:
+        members = grouped.pop(capability.capability_id, None)
+        if members:
+            ordered.append((capability, tuple(members)))
+    leftovers = [issue for members in grouped.values() for issue in members]
+    if leftovers:
+        ordered.append((None, tuple(leftovers)))
+    return ordered
+
+
+def _capability_brief(spec: FlowSpec, capability) -> dict[str, Any]:  # noqa: ANN001
+    """Project the stage-six contract of one capability for the repair prompt."""
+    steps_by_id = {step.step_id: step for step in spec.steps}
+    member_ids = [str(item) for item in capability.step_ids if item]
+    members = [
+        {
+            "step_id": step_id,
+            "method": steps_by_id[step_id].method,
+            "path": steps_by_id[step_id].path,
+        }
+        for step_id in member_ids
+        if step_id in steps_by_id
+    ]
+    anchor = next(
+        (
+            {
+                key: node.get(key)
+                for key in ("step_id", "request_id", "method", "path")
+                if node.get(key)
+            }
+            for node in capability.nodes
+            if isinstance(node, dict) and str(node.get("usage") or "") == "execute"
+        ),
+        {},
+    )
+    member_set = set(member_ids)
+    dependencies = [
+        {
+            "link_id": link.link_id,
+            "source_step_id": link.source_step_id,
+            "source_path": link.source_path,
+            "target_step_id": link.target_step_id,
+            "target_path": link.target_path,
+            "confirmed": bool(link.confirmed),
+        }
+        for link in spec.links
+        if link.source_step_id in member_set or link.target_step_id in member_set
+    ]
+    return {
+        "capability_id": capability.capability_id,
+        "name": capability.name,
+        "title": capability.title,
+        "kind": capability.kind,
+        "anchor": anchor,
+        "steps": members,
+        "dependencies": dependencies[:20],
+    }
+
+
+def _capability_repair_prompt(
+    *,
+    capability,  # noqa: ANN001
+    brief: dict[str, Any],
+    issues: tuple[WorkflowIssue, ...],
+    index: int,
+    total: int,
+) -> str:
+    payload = [issue.model_dump(mode="json") for issue in issues]
+    if capability is not None:
+        scope = (
+            f"本轮只处理能力「{capability.title or capability.name}」（{capability.name}）"
+            f"的问题，这是第 {index}/{total} 组；"
+            "其他能力的问题会在后续组单独处理，不要顺手处理。"
+        )
+        anchor_text = (
+            "该能力在阶段六编译出的契约（执行锚点、成员步骤、相关依赖）如下，"
+            "修复必须与它衔接，不得脱离这些事实：capability="
+            + json.dumps(brief, ensure_ascii=False, separators=(",", ":"))
+        )
+    else:
+        scope = f"本轮处理不属于单个能力的整体流程问题，这是第 {index}/{total} 组。"
+        anchor_text = ""
+    return (
+        "继续同一录制的修复闭环。" + scope
+        + "先用中文逐句说出：发现了什么不对、我觉得应该怎样处理、准备调用哪个工具、为什么。"
+        "不要只重复 issue 代码。"
+        "先调用 get_validation_report 读取当前待办；不要一上来就调用 get_recording_state。"
+        + anchor_text
+        + "只按结构化 issue 的 resolver、target、evidence 和 allowed_operations 处理本组问题；"
+        "不得重建 FlowSpec、清空能力或重新划分能力。"
+        "write_verify 用 execute_write_with_verify，读请求必须来自 issue 里已有的 "
+        "candidate_read_request_ids 或 validation report；不要打开浏览器重录。"
+        "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/字典/依赖工具补证。"
+        "完成后调用 submit_recording_repair 一次性提交本组全部修复。issues="
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
 
 
 @dataclass
@@ -404,8 +539,9 @@ class ProductionRecordingServices:
                 remaining.append(issue)
 
         still_open: list[WorkflowIssue] = []
+        open_ids, open_identities = _open_issue_tokens(spec)
         for issue in remaining:
-            if _issue_still_open(spec, issue):
+            if issue.issue_id in open_ids or _issue_field_identity(issue) in open_identities:
                 still_open.append(issue)
                 continue
             report.applied.append(issue.issue_id)
@@ -414,37 +550,15 @@ class ProductionRecordingServices:
 
         if remaining:
             try:
-                pi = await self.pi_provider(False)
-                pi.bind_flow_spec(spec)
-                before_pi = flow_spec_fingerprint(spec)
-                payload = [issue.model_dump(mode="json") for issue in remaining]
-                await _submit_with_protocol_recovery(
-                    pi,
-                    prompt=(
-                    "继续同一录制的修复闭环。先用中文逐句说出：发现了什么不对、我觉得应该怎样处理、"
-                    "准备调用哪个工具、为什么。不要只重复 issue 代码。"
-                    "先调用 get_validation_report 读取当前待办；不要一上来就调用 get_recording_state。"
-                    "只按结构化 issue 的 resolver、target、evidence 和 "
-                    "allowed_operations 处理剩余问题；不得重建 FlowSpec、清空能力或重新划分能力。"
-                    "write_verify 用 execute_write_with_verify，读请求必须来自 issue 里已有的 "
-                    "candidate_read_request_ids 或 validation report；不要打开浏览器重录。"
-                    "machine_repair 提交 FlowSpec 修复，collect_evidence 使用回放/字典/依赖工具补证。"
-                    "完成后调用 submit_recording_repair。issues="
-                    + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-                    ),
-                    accepted_kinds={"repair"},
-                    context=context,
+                spec = await self._repair_capability_groups(
+                    spec,
+                    tuple(remaining),
+                    kept_capabilities,
+                    report,
+                    context,
                 )
-                repaired = pi.current_flow_spec()
-                if kept_capabilities and not repaired.capabilities:
-                    report.rejected.append("pi_cleared_capabilities")
-                    report.still_pending.extend(issue.issue_id for issue in remaining)
-                elif flow_spec_fingerprint(repaired) == before_pi:
-                    report.skipped.append("pi_repair")
-                    report.still_pending.extend(issue.issue_id for issue in remaining)
-                else:
-                    spec = repaired
-                    report.applied.extend(issue.issue_id for issue in remaining)
+            except WorkflowCancelled:
+                raise
             except Exception:  # noqa: BLE001 - protocol errors keep the current draft
                 report.still_pending.extend(issue.issue_id for issue in remaining)
         else:
@@ -456,6 +570,110 @@ class ProductionRecordingServices:
         if kept_capabilities and not spec.capabilities:
             spec.capabilities = kept_capabilities
         return spec.model_dump(mode="json")
+
+    async def _repair_capability_groups(
+        self,
+        spec: FlowSpec,
+        remaining: tuple[WorkflowIssue, ...],
+        kept_capabilities: list[Any],
+        report: RepairReport,
+        context: PipelineContext,
+    ) -> FlowSpec:
+        """Repair one capability at a time so every fix stays anchored in stage six.
+
+        Each group binds the current draft, receives only its own issues plus the
+        stage-six capability contract, and is re-checked immediately after the
+        submission. A failed group never blocks the remaining groups, and
+        meta-only progress (fact_check, verification log) is preserved even when
+        the execution fingerprint did not change.
+        """
+        groups = _group_issues_by_capability(spec, remaining)
+        total = len(groups)
+        pi = await self.pi_provider(False)
+        for index, (capability, group_issues) in enumerate(groups, start=1):
+            context.ensure_active()
+            label = (
+                f"「{capability.title or capability.name}」"
+                if capability is not None
+                else "整体流程"
+            )
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.RESOLVING,
+                round=context.current_round,
+                status="running",
+                label=(
+                    f"开始处理能力{label}（第 {index}/{total} 组）："
+                    f"待解决 {len(group_issues)} 个问题"
+                ),
+            ))
+            pi.bind_flow_spec(spec)
+            before_pi = flow_spec_fingerprint(spec)
+            try:
+                await _submit_with_protocol_recovery(
+                    pi,
+                    prompt=_capability_repair_prompt(
+                        capability=capability,
+                        brief=(
+                            _capability_brief(spec, capability)
+                            if capability is not None
+                            else {}
+                        ),
+                        issues=group_issues,
+                        index=index,
+                        total=total,
+                    ),
+                    accepted_kinds={"repair"},
+                    context=context,
+                )
+            except WorkflowCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one capability must not sink the rest
+                report.still_pending.extend(issue.issue_id for issue in group_issues)
+                await context.record(WorkflowActivity(
+                    step=WorkflowStep.RESOLVING,
+                    round=context.current_round,
+                    status="running",
+                    label=f"能力{label}本组修复未落地：{exc}",
+                ))
+                continue
+            repaired = pi.current_flow_spec()
+            if kept_capabilities and not repaired.capabilities:
+                report.rejected.append("pi_cleared_capabilities")
+                report.still_pending.extend(issue.issue_id for issue in group_issues)
+                pi.bind_flow_spec(spec)
+                await context.record(WorkflowActivity(
+                    step=WorkflowStep.RESOLVING,
+                    round=context.current_round,
+                    status="running",
+                    label=f"能力{label}的提交清空了能力集合，已回退本组修改",
+                ))
+                continue
+            changed = flow_spec_fingerprint(repaired) != before_pi
+            spec = repaired
+            open_ids, open_identities = _open_issue_tokens(spec)
+            resolved_now: list[str] = []
+            for issue in group_issues:
+                if issue.issue_id in open_ids or _issue_field_identity(issue) in open_identities:
+                    report.still_pending.append(issue.issue_id)
+                else:
+                    report.applied.append(issue.issue_id)
+                    report.resolved.append(issue.issue_id)
+                    resolved_now.append(issue.issue_id)
+            group_name = capability.name if capability is not None else "flow"
+            if changed and not resolved_now:
+                report.applied.append(f"capability_repair:{group_name}")
+            elif not changed and not resolved_now:
+                report.skipped.append(f"pi_repair:{group_name}")
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.RESOLVING,
+                round=context.current_round,
+                status="running",
+                label=(
+                    f"能力{label}本组处理完成：解决 {len(resolved_now)} 项，"
+                    f"剩余 {len(group_issues) - len(resolved_now)} 项"
+                ),
+            ))
+        return spec
 
     async def publish(
         self,

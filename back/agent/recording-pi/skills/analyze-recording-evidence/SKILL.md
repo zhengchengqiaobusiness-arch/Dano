@@ -39,9 +39,14 @@ collaborate, not compete.
 
 - For `base_state_analysis`, call `get_recording_state` and analyze all facts currently present.
 - For `request_batch`, call `get_recording_state`, then page through `get_recording_delta` from the
-  supplied `since_seq` until `has_more=false`.
-- For `final_request_tail`, do the same delta drain and include every conclusion already accepted
-  earlier in the session. This is tail completion, not a separate final planning pass.
+  supplied `since_seq` until `has_more=false`. Delta includes this batch's `requests`,
+  `page_events`, and related `field_evidence`. If you rewind below the batch floor, older pages
+  arrive as `compact_history=true` identity rows; full payloads stay in state. State keeps the
+  newest field evidence and retained/identity-bearing requests; do not assume early dialog fills
+  were dropped.
+- For `final_request_tail`, start delta from `since_seq=0` and page until `has_more=false`, then
+  include every conclusion already accepted earlier in the session. This is tail completion, not
+  a separate final planning pass. Missing this submission fails freeze.
 - Do not reread an identical projection unless a rejected operation requires a fresh version.
 
 ## Identify capabilities from evidence
@@ -167,9 +172,26 @@ plausible. `category` is not an editable field axis and must not be submitted.
   value or label appears in that response, and the request is the one that populated the
   control. A page-load `simple-list` for tenants, users, or products is not automatically
   every nearby dropdown.
+- A list-row command (approve, reject, delete, enable, submit-from-row) is a click, not a
+  form. The record id is a caller-selected record. Other payload leaves without a
+  field-local control are the button's fixed discriminator (`constant`), never a live
+  dictionary option stolen from a list filter with the same leaf name.
+- An edit write hydrated from a detail read is the opposite: unchanged form fields keep
+  that response as the initial value and stay caller-overridable even when the operator
+  did not retype them. Readonly or sample-proven formula leaves stay system-owned.
 - The same visible label on a list filter and in an add/edit dialog is two fields. Keep
   both surfaces. Bind the list control to the query request and the dialog control to the
   write. Do not let one steal the other's name, type, requiredness, or option list.
+- A date-only control that produces `foo[0]=YYYY-MM-DD 00:00:00` and
+  `foo[1]=YYYY-MM-DD 23:59:59` is a range. `开始` / `start` / `from` bind to `[0]`;
+  `结束` / `end` / `until` bind to `[1]`. A single filled start date must not stay
+  unknown merely because both ends share the calendar day. A dialog date must bind to
+  the business timestamp, not an audit `createTime` / `updateTime` on the same day.
+- An empty dialog select still has a page label. If its option API family or the only
+  remaining write `*Id` using a wire key is unique, `rename_field` to that page label.
+  Pair `/customer/simple-list` with `customerId`, `/account/simple-list` with
+  `accountId`, `/user/simple-list` with the remaining user/owner id — never invent a
+  mapping when two unmatched ids remain equally plausible.
 - Numeric coincidence is not a formula. Do not mark `computed` from IDs, status codes, or
   unrelated selects just because three numbers happen to add or multiply. Python only keeps
   sample-proven arithmetic between quantity/money operands.
@@ -191,13 +213,14 @@ in this order:
 8. If none of the above can be proved, keep the field unresolved; do not guess.
 
 Field origin and caller editability are separate facts. A new value entered by the operator uses
-`caller_input`. A value loaded from an earlier interface uses `response_binding`; when direct
-control evidence also proves that the operator can edit that loaded value, keep the upstream
-binding as its initial value and mark it as caller-overridable. Token and user identifiers use
-`session`. Frontend-calculated values use `computed`. UUIDs, timestamps, and similar runtime values
-use `generated`. A recorded sample value is not automatically `constant`. A hidden field is not
-automatically `caller_input`. A list response does not automatically turn filter fields into
-enums.
+`caller_input`. A value loaded from an earlier interface uses `response_binding`; when the target
+is an edit form (record hydration or field-local editable control), keep the upstream binding as
+the initial value and allow caller override even if the operator did not retype it. Token and
+user identifiers use `session`. Frontend-calculated values use `computed`. UUIDs, timestamps, and
+similar runtime values use `generated`. A recorded sample value is not automatically `constant`.
+A hidden field is not automatically `caller_input`. A list response does not automatically turn
+filter fields into enums. A row-command discriminator is `constant` even when a same-named list
+filter has a dictionary API.
 
 A source conclusion is valid only when the current compiler can execute it.
 
@@ -264,12 +287,15 @@ new dependency types.
   caller choice per required label. The runtime must fetch the current keys and assemble the wire
   object; never expose the dynamic internal keys or require the caller to construct that object.
 - For an edit/update action, an earlier record read may hydrate the later write only when the same
-  record identity and several exact same-path values are observed in both response and request.
-  Keep the record identity as the caller selector. Unchanged editable fields keep that response as
-  their initial value and stay caller-overridable; their page label, type, requiredness, and
-  option list stay on the field. Leave genuinely edited fields caller-owned. One coincidental
-  equal value is not hydration proof. A record create/update timestamp copied from the detail
-  response is upstream data, not `generated`/`now_ms`.
+  record identity and several same-path leaves are observed in both response and request. Values
+  may differ when the operator edited the form; that is still hydration with caller override, not
+  a new origin. Keep the GET record id as the caller selector. The write-body id / line id, audit
+  timestamps, and `*Name` echoes of a chosen `*Id` stay system-owned. Other form leaves keep the
+  response as the initial value, stay caller-overridable, and keep their page label, type,
+  requiredness, and option list. One coincidental equal value is not hydration proof.
+- When a dialog control has a visible label and exactly one write field of that control kind still
+  uses a wire key as its public label, `rename_field` to the page label. Do not copy list-filter
+  labels onto the write, or write labels onto the list.
 - Prefer exact candidates in `heuristic_candidates.response_key_maps` only after checking them
   against captured source rows and target keys.
 - Never confirm a dependency or claim machine verification during recording analysis.

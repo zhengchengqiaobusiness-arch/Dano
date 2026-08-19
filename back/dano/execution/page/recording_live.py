@@ -144,6 +144,9 @@ class LiveNotebook:
             ][-50:]
         if raw_meta.get("recording_goal_text"):
             meta["recording_goal_text"] = str(raw_meta["recording_goal_text"])
+        overrides = request_role_overrides_from_spec(shadow)
+        if overrides:
+            meta["request_role_overrides"] = overrides
         step_request_ids = {
             str(step.step_id): request_id
             for step in (getattr(shadow, "steps", None) or [])
@@ -166,6 +169,36 @@ class LiveNotebook:
         """Revalidate every hypothesis against one finalized fact snapshot."""
 
         return merge_live_agent_state(self, finalized_spec)
+
+
+def request_role_overrides_from_spec(spec) -> dict[str, dict]:  # noqa: ANN001
+    """Project Skill-accepted request roles for ``to_flow_spec`` materialization."""
+    analysis = getattr(getattr(spec, "request_facts", None), "analysis", None) or {}
+    overrides: dict[str, dict] = {}
+    for request_id, item in analysis.items():
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            role = str(item.get("role") or "")
+            keep = item.get("keep")
+            reason = str(item.get("reason") or "")
+            confidence = item.get("confidence") or 0
+        else:
+            role = str(getattr(item, "role", "") or "")
+            keep = getattr(item, "keep", None)
+            reason = str(getattr(item, "reason", "") or "")
+            confidence = getattr(item, "confidence", 0) or 0
+        if not role:
+            continue
+        overrides[str(request_id)] = {
+            "role": role,
+            "keep": bool(keep) if keep is not None else role not in {"noise", "auth", "telemetry"},
+            "reason": reason,
+            "confidence": float(confidence or 0),
+        }
+    return overrides
+
+
 _SECRET_QUERY_HINTS = ("authorization", "cookie", "token", "secret", "password", "session", "credential")
 _INLINE_SECRET_RE = re.compile(
     r"(?i)\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
@@ -180,6 +213,7 @@ def compact_model_payload(
     max_depth: int = 5,
     max_items: int = 20,
     max_string: int = 800,
+    list_keep: str = "head",
     _depth: int = 0,
 ):  # noqa: ANN001, ANN202
     """Keep model-facing evidence useful while placing a hard bound on each branch."""
@@ -197,6 +231,7 @@ def compact_model_payload(
                 max_depth=max_depth,
                 max_items=max_items,
                 max_string=max_string,
+                list_keep=list_keep,
                 _depth=_depth + 1,
             )
             for key, value in items[:max_items]
@@ -207,18 +242,24 @@ def compact_model_payload(
     if isinstance(node, list):
         if _depth >= max_depth:
             return [{"__truncated_items__": len(node)}]
+        values = node[-max_items:] if list_keep == "tail" else node[:max_items]
         out = [
             compact_model_payload(
                 value,
                 max_depth=max_depth,
                 max_items=max_items,
                 max_string=max_string,
+                list_keep=list_keep,
                 _depth=_depth + 1,
             )
-            for value in node[:max_items]
+            for value in values
         ]
         if len(node) > max_items:
-            out.append({"__truncated_items__": len(node) - max_items})
+            marker = {"__truncated_items__": len(node) - max_items}
+            if list_keep == "tail":
+                out.insert(0, marker)
+            else:
+                out.append(marker)
         return out
     return deepcopy(node)
 
@@ -308,6 +349,9 @@ def recording_delta(
     goal_text: str = "",
     captured_requests: list[dict] | None = None,
     page_events: list[dict] | None = None,
+    field_evidence: list[dict] | None = None,
+    stop_before: int | None = None,
+    compact: bool = False,
 ) -> dict:  # noqa: ANN001
     """Project a bounded, redacted append-only request delta for the model."""
     requests = (
@@ -315,9 +359,10 @@ def recording_delta(
         if captured_requests is not None
         else recorder.captured_all_requests()
     )
-    start = max(0, min(int(since_seq or 0), len(requests)))
+    end = len(requests) if stop_before is None else max(0, min(int(stop_before), len(requests)))
+    start = max(0, min(int(since_seq or 0), end))
     page_size = max(1, min(int(limit or _DEFAULT_DELTA_LIMIT), _MAX_DELTA_LIMIT))
-    fresh = requests[start:start + page_size]
+    fresh = requests[start:min(start + page_size, end)]
     next_seq = start + len(fresh)
     fresh_ids = {str(request.get("request_id") or "") for request in fresh}
     graph_requests = [
@@ -352,6 +397,28 @@ def recording_delta(
             or str(event.get("transaction_id") or "") in transaction_ids
         )
     ] if fresh else []
+    raw_fields = field_evidence
+    if raw_fields is None:
+        read_fields = getattr(recorder, "recorded_field_evidence", None)
+        raw_fields = list(read_fields() or []) if callable(read_fields) else []
+    bound_fields = raw_fields
+    if raw_fields and not any(
+        isinstance(item, dict) and item.get("binding_status")
+        for item in raw_fields
+    ):
+        from dano.execution.page.recording_field_evidence import bind_field_evidence
+
+        bound_fields = bind_field_evidence(requests, page_events, raw_fields)
+    related_fields = [
+        item for item in bound_fields
+        if isinstance(item, dict) and (
+            str(item.get("request_id") or "") in fresh_ids
+            or str(item.get("action_id") or "") in action_ids
+            or str(item.get("transaction_id") or "") in transaction_ids
+        )
+    ] if fresh else []
+    if not related_fields and bound_fields:
+        related_fields = [item for item in bound_fields if isinstance(item, dict)][-40:]
     return {
         "since_seq": start,
         "next_seq": next_seq,
@@ -359,8 +426,26 @@ def recording_delta(
         "page_size": page_size,
         "has_more": next_seq < len(requests),
         "goal_text": str(goal_text or ""),
-        "requests": [_request_projection(request) for request in fresh],
+        "compact_history": compact,
+        "requests": [
+            (
+                {
+                    key: value
+                    for key, value in _request_projection(request).items()
+                    if key in {
+                        "request_id", "index", "request_index", "sequence", "method",
+                        "path", "url", "role", "keep", "query", "trigger_action_id",
+                        "trigger_op",
+                    }
+                }
+                if compact else _request_projection(request)
+            )
+            for request in fresh
+        ],
         "page_events": compact_model_payload(_redact(related_events[-50:]), max_depth=5, max_items=50),
+        "field_evidence": compact_model_payload(
+            _redact(related_fields[-40:]), max_depth=6, max_items=40, list_keep="tail",
+        ),
         "heuristic_candidates": {
             "request_roles": [
                 {
@@ -562,6 +647,9 @@ def _require_grounded_refs(spec, op: str, evidence_refs: list[str]) -> None:  # 
     for ref in evidence_refs:
         text = str(ref)
         if text in tokens or any(token and token in text for token in tokens):
+            return
+    for item in getattr(spec.request_facts, "field_evidence", []) or []:
+        if isinstance(item, dict) and _evidence_matches_refs(item, evidence_refs):
             return
     raise ValueError(
         f"{op} evidence_refs must cite recorded facts "
@@ -1153,7 +1241,13 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             and (param.source or {}).get("enum_confirmed") is True
             and param.enum_options
         )
-        if recorded_option is not None or explicitly_confirmed_option:
+        from dano.execution.page.flow_spec import _param_control_kinds
+
+        keep_option = (
+            (recorded_option is not None or explicitly_confirmed_option)
+            and bool(_param_control_kinds(param) & {"select", "combobox", "radio"})
+        )
+        if keep_option:
             param.source = {
                 **(param.source or {}),
                 "kind": param.source_kind,
@@ -1295,17 +1389,22 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
                 **(link.meta or {}),
                 "captured_value_match": True,
             }
-        caller_override = any(
-            _evidence_matches_refs(item, evidence_refs)
-            and _page_control_is_editable(item)
-            and bool(
-                item.get("recorded_user_input")
-                or str(item.get("op") or "").lower() in {
-                    "fill", "input", "change", "select", "check", "click",
-                }
-            )
-            for item in _field_evidence_candidates(
-                spec, step, param, evidence_refs=evidence_refs,
+        from dano.execution.page.flow_spec import (
+            _param_control_is_readonly,
+            _param_has_editable_control_evidence,
+        )
+
+        caller_override = (
+            not _param_control_is_readonly(param)
+            and (
+                _param_has_editable_control_evidence(param)
+                or any(
+                    _evidence_matches_refs(item, evidence_refs)
+                    and _page_control_is_editable(item)
+                    for item in _field_evidence_candidates(
+                        spec, step, param, evidence_refs=evidence_refs,
+                    )
+                )
             )
         )
         param.source_kind = "previous_response"
@@ -1370,12 +1469,82 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.exposed_to_user = False
 
     elif source_kind == "computed":
+        from dano.execution.page.flow_spec import (
+            _COMPUTED_ARITHMETIC_STRATEGIES,
+            _COMPUTED_DATE_STRATEGIES,
+            _as_finite_number,
+        )
+
         raw_source = edit.get("source") if isinstance(edit.get("source"), dict) else {}
         strategy = str(edit.get("strategy") or raw_source.get("strategy") or "")
         start_field = str(edit.get("start_field") or raw_source.get("start_field") or "")
         end_field = str(edit.get("end_field") or raw_source.get("end_field") or "")
+        left_field = str(edit.get("left_field") or raw_source.get("left_field") or "")
+        right_field = str(edit.get("right_field") or raw_source.get("right_field") or "")
         output_key = str(edit.get("output_key") or raw_source.get("output_key") or "")
-        if strategy != "date_span_days_json" or not start_field or not end_field:
+        if strategy in _COMPUTED_ARITHMETIC_STRATEGIES and left_field and right_field:
+            resolved = []
+            for field in (left_field, right_field):
+                matches = [
+                    item for item in step.params
+                    if field in {
+                        str(item.key or ""),
+                        str(item.label or ""),
+                        str(item.path or ""),
+                        str(item.path or "").rsplit(".", 1)[-1],
+                    }
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"computed classification for {param.path} requires one sibling field "
+                        f"for {field!r}; matched={len(matches)}"
+                    )
+                resolved.append(matches[0])
+            left_number = _as_finite_number(resolved[0].value)
+            right_number = _as_finite_number(resolved[1].value)
+            target_number = _as_finite_number(param.value)
+            expected = None
+            if left_number is not None and right_number is not None:
+                if strategy == "product":
+                    expected = left_number * right_number
+                elif strategy == "sum":
+                    expected = left_number + right_number
+                elif strategy == "difference":
+                    expected = left_number - right_number
+                elif strategy == "percent_of":
+                    expected = left_number * right_number / 100.0
+                elif strategy == "remainder_after_percent":
+                    expected = left_number - (left_number * right_number / 100.0)
+            if (
+                expected is not None
+                and target_number is not None
+                and abs(expected - target_number) > 1e-6
+            ):
+                raise ValueError(
+                    f"computed classification for {param.path} contradicts the recorded sample"
+                )
+            param.source_kind = "computed"
+            param.source = {
+                "kind": "computed",
+                "strategy": strategy,
+                "left_field": resolved[0].key,
+                "right_field": resolved[1].key,
+                "result_field": param.key,
+                "path": param.path,
+                "reason": reason,
+                "actor": "agent",
+                "sample_verified": expected is not None,
+            }
+            param.category = "runtime_var"
+            param.exposed_to_user = False
+            param.editable = False
+            if required_state:
+                param.source = {**(param.source or {}), "required_state": required_state}
+            advice = _field_source_configuration_advice(param)
+            if advice:
+                raise ValueError(f"source classification does not compile: {advice}")
+            return
+        if strategy not in _COMPUTED_DATE_STRATEGIES or not start_field or not end_field:
             raise ValueError(
                 f"computed classification for {param.path} requires strategy=date_span_days_json "
                 "with start_field and end_field naming the user params it derives from"
@@ -2881,6 +3050,15 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             **(merged.meta or {}),
             "indexed_range_changes": range_changes,
         }
+    from dano.execution.page.flow_spec import (
+        _apply_edit_form_field_contracts,
+        _apply_row_command_field_contracts,
+        _infer_computed_runtime_fields,
+    )
+
+    _infer_computed_runtime_fields(merged)
+    _apply_edit_form_field_contracts(merged)
+    _apply_row_command_field_contracts(merged)
     live_capability_model = live_meta.get("capability_model")
     live_semantic_plan = (
         live_capability_model.get("semantic_plan")

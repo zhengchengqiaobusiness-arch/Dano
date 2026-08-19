@@ -415,6 +415,8 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             include_collection_sources=is_write,
         )
         errors.extend(f"{prefix}: {message}" for message in dependency_errors)
+        if dependency_errors:
+            continue
         member_steps = [by_step[step_id] for step_id in step_ids]
         refs = [
             _request_ref(

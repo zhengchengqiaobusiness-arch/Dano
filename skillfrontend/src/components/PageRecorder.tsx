@@ -225,6 +225,7 @@ const TYPE_OPTIONS = Object.entries(TYPE_LABELS).map(([value, label]) => ({ valu
 const SOURCE_OPTIONS = [
   ["caller_input", "调用方输入"],
   ["user_input", "调用方输入"],
+  ["selected_record_identity", "客户选择记录"],
   ["api_option", "实时接口取值"],
   ["page_enum", "页面枚举"],
   ["static_enum", "固定选项"],
@@ -248,6 +249,8 @@ function sourceKindLabel(value?: string) {
   const labels: Record<string, string> = {
     caller_input: "调用方输入",
     user_input: "调用方输入",
+    selected_record_identity: "客户选择记录",
+    record_identity: "客户选择记录",
     api_option: "实时接口取值",
     page_enum: "页面枚举",
     static_enum: "固定选项",
@@ -277,9 +280,16 @@ function sourceKindLabel(value?: string) {
 
 function paramSourceLabel(param: FlowParam) {
   const source = asRecord(param.source);
+  const sourceKind = safeString(source.kind);
+  if (sourceKind === "selected_record_identity" || sourceKind === "record_identity") {
+    return "客户选择记录";
+  }
   if (
     paramIsCallerInput(param)
-    && ["response_binding", "previous_response", "dynamic_structure"].includes(param.source_kind || "")
+    && (
+      ["response_binding", "previous_response", "dynamic_structure"].includes(param.source_kind || "")
+      || sourceKind === "previous_response"
+    )
   ) {
     return "上游默认值，可修改";
   }

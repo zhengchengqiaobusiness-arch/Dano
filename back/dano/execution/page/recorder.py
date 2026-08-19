@@ -295,7 +295,7 @@ _RECORDER_JS = r"""() => {
   function controlAliases(el) {
     // Keep the request-field identity carried by the control structure.  A
     // repeated sample value ("1" is common in OA forms) is never an identity.
-    var attrs = ['name','data-field','data-name','data-key','data-prop','data-path','formcontrolname',
+    var attrs = ['name','data-field','data-name','data-key','data-prop','data-path','prop','formcontrolname',
                  'ng-reflect-name','ng-reflect-form-control-name'];
     var out = []; var seen = {}; var nodes = [];
     function add(raw) {

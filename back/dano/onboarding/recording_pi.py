@@ -540,21 +540,33 @@ class RecordingPiSession:
                     "不要调用 get_recording_delta 或 browser_*。"
                 ),
             }
-        # A live turn is scoped to the batch that triggered it.  The model may
-        # request an older cursor after context compaction, but replaying the
-        # complete recording here duplicates thousands of facts and can make
-        # the final tail lose the very requests it needs to consolidate.
-        since_seq = max(int(since_seq), int(self._live_delta_floor))
+        requested = int(since_seq)
+        floor = int(self._live_delta_floor)
         captured = list(self._live_recorder.captured_all_requests() or [])
         page_events = list(self._live_recorder.recorded_page_events() or [])
-        delta = recording_delta(
-            self._live_recorder,
-            since_seq=since_seq,
-            limit=limit,
-            goal_text=self._live_goal_text,
-            captured_requests=captured,
-            page_events=page_events,
-        )
+        # Mid-batch turns may rewind to see older request identities, but those
+        # pages stay compact so the live window is not drowned in payloads.
+        # The forced tail already sets floor=0 and returns full facts.
+        if requested < floor:
+            delta = recording_delta(
+                self._live_recorder,
+                since_seq=requested,
+                limit=limit,
+                goal_text=self._live_goal_text,
+                captured_requests=captured,
+                page_events=page_events,
+                stop_before=floor,
+                compact=True,
+            )
+        else:
+            delta = recording_delta(
+                self._live_recorder,
+                since_seq=max(requested, floor),
+                limit=limit,
+                goal_text=self._live_goal_text,
+                captured_requests=captured,
+                page_events=page_events,
+            )
         # Keep edit grounding aligned with the exact batch just returned.
         await self.refresh_live_evidence(
             captured_requests=captured,
@@ -732,7 +744,10 @@ class RecordingPiSession:
         )
         goal_text = self._live_goal_text.strip() or "（未提供明确录制目标）"
         previous_floor = self._live_delta_floor
-        self._live_delta_floor = since_seq
+        # Mid-batch turns stay scoped to the trigger window so one prompt does
+        # not replay thousands of facts.  The forced tail must be able to page
+        # the complete frozen collection for whole-package submit.
+        self._live_delta_floor = 0 if reason == "final_request_tail" else since_seq
         try:
             return await self.prompt(
                 "执行当前录制分析任务。"
@@ -915,7 +930,9 @@ class RecordingPiSession:
             if mode == "plan" and (
                 submitted_capabilities or validation.get("capability_plan_complete")
             ):
-                submission_complete = bool(validation.get("capability_plan_complete"))
+                # A stored live boundary is a successful submission. Field-axis
+                # retries and compile-owned gaps belong to freeze / later batches.
+                submission_complete = True
             if mode == "repair":
                 submission_complete = bool(validation.get("all_applied", True))
             validation["submission_complete"] = submission_complete

@@ -206,6 +206,7 @@ class PipelineContext:
     latest_draft: dict[str, Any] | None = None
     machine_verification: bool = False
     last_repair_report: RepairReport | None = None
+    current_round: int = 0
 
     def ensure_active(self) -> None:
         if self.cancelled():
@@ -334,6 +335,7 @@ class SelfHealingPipeline:
         while True:
             context.ensure_active()
             round_number += 1
+            context.current_round = round_number
             await context.progress(WorkflowStep.VERIFYING, "正在检查和验证能力", round_number)
             checked = await self._bounded(self.runtime.check(draft, context))
             draft = checked.draft
@@ -578,7 +580,7 @@ def _plan_thought(issues: tuple[WorkflowIssue, ...]) -> str:
     return (
         f"我觉得应该这样处理：本轮先{action}。"
         f"具体包括 {samples}{more}。"
-        "准备按录制事实定向修，不重新划分能力。"
+        "准备按能力分组，一个能力一个能力地定向修复，不重新划分能力。"
     )
 
 
@@ -870,7 +872,7 @@ class RecordingWorkflow:
         if seed.kind == "edited_spec" and seed.machine_verification:
             progress = self._next_progress(WorkflowStep.VERIFYING, "正在开始机器验证")
         else:
-            progress = self._next_progress(WorkflowStep.FREEZING, "正在冻结录制事实")
+            progress = self._next_progress(WorkflowStep.FREEZING, "正在完成尾部分析并冻结录制事实")
         await self._set(
             WorkflowStatus.PROCESSING,
             progress=progress,
