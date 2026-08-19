@@ -42,6 +42,7 @@ from dano.execution.page.request_capture import (
     looks_internal_param_name,
     looks_like_auth_write,
     looks_like_read_request,
+    parse_recorded_request_body,
     self_check,
     substitute,
     suggest_assignee_names,
@@ -1144,6 +1145,13 @@ def _is_missing_wire_placeholder(value: Any) -> bool:
     return isinstance(value, str) and value.strip().casefold() in _MISSING_WIRE_PLACEHOLDERS
 
 
+def _recorded_param_sample(value: Any) -> Any:
+    """Preserve false/0; only missing values become an empty sample."""
+    if value is None:
+        return ""
+    return value
+
+
 def _param_source_guess(
     *,
     field: dict,
@@ -1161,7 +1169,8 @@ def _param_source_guess(
     query_is_option_source: bool = False,
     query_is_business_query: bool = False,
 ) -> dict[str, Any]:
-    value = str(field.get("value") or "")
+    raw_value = field.get("value")
+    value = "" if raw_value is None else str(raw_value)
 
     header_source = _request_header_source_for_token(key, path, value, request_headers)
     if header_source:
@@ -1333,7 +1342,7 @@ def _param_source_guess(
             return {
                 "category": "user_param",
                 "source_kind": "user_input",
-                "source": {"kind": "control_default", "path": path, "required_state": "optional"},
+                "source": {"kind": "control_default", "path": path, "required_state": "unknown"},
                 "editable": True,
                 "exposed_to_user": True,
                 "reason": "查询页上的可编辑筛选控件；调用方可省略或覆盖录制时的筛选值",
@@ -1394,11 +1403,11 @@ def _param_source_guess(
                 "source": {
                     "kind": "business_query_filter",
                     "path": path,
-                    "required_state": "optional",
+                    "required_state": "unknown",
                 },
                 "editable": True,
                 "exposed_to_user": True,
-                "reason": "业务查询上的筛选条件由调用方提供；控件未绑定也不标未知，调用方可省略或覆盖",
+                "reason": "业务查询上的筛选条件由调用方提供；未看到 required 或成功省略证据时保持 unknown",
                 "need_human_confirm": False,
             }
         return {
@@ -2310,7 +2319,7 @@ def _build_step_from_capture(
             path=path,
             key=nm,
             label=display_label,
-            value="" if missing_wire_placeholder else str(f.get("value") or ""),
+            value="" if missing_wire_placeholder else _recorded_param_sample(f.get("value")),
             type=ptype,
             wire_type=wire_type,
             required=(
@@ -5179,7 +5188,7 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                     **(param.source or {}),
                     "kind": "control_default",
                     "path": param.path,
-                    "required_state": "optional",
+                    "required_state": str((param.source or {}).get("required_state") or "unknown"),
                 }
                 param.exposed_to_user = True
                 param.editable = True
@@ -5221,12 +5230,11 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                     not _param_field_manually_edited(param, "required")
                     and not _param_required_agent_classified(param)
                 ):
-                    param.required = bool(
-                        control["required_observed"] and _param_exposed_to_caller(param)
-                    )
+                    observed = bool(control["required_observed"])
+                    param.required = bool(observed and _param_exposed_to_caller(param))
                     param.source = {
                         **(param.source or {}),
-                        "required_state": "required" if param.required else "optional",
+                        "required_state": "required" if observed else "optional",
                     }
 
 
@@ -9600,8 +9608,7 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
         read = fact.model_dump(exclude_none=True)
         read["role"] = str(analysis.role if analysis is not None else read.get("role") or "")
         if not (
-            _read_is_option_source(read)
-            or read["role"] in {"option", "read_option", "option_source", "explicit_read_option"}
+            read["role"] in {"option", "read_option", "option_source", "explicit_read_option"}
             or _choice_control_triggered(read)
         ):
             continue
@@ -9648,9 +9655,17 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                     "page_context", "request_header",
                 }:
                     continue
+                if (
+                    _looks_page_context_field(sibling.key, sibling.path)
+                    or _looks_audit_system_leaf(sibling.key, sibling.path)
+                    or _field_leaf_token(sibling.key, sibling.path) in {"ownerid", "userid"}
+                ):
+                    continue
                 sibling_leaf = _field_leaf_token(sibling.key, sibling.path)
                 if sibling_leaf.endswith("id") or sibling_leaf in {"id", "ids"}:
                     if _looks_row_identity_leaf(sibling.key, sibling.path) or _param_is_document_record_identity(sibling):
+                        continue
+                    if not (_param_control_kinds(sibling) & {"select", "combobox", "radio"}):
                         continue
                     response_path = _best_option_projection_path(
                         row, sibling.path, sibling.value, min_score=40,
@@ -10014,6 +10029,79 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                 _mark_auto_fill_caller_override(param, "页面自动计算，但仍允许调用方修改")
 
 
+def _request_present_leaves(req: dict[str, Any]) -> set[str]:
+    leaves: set[str] = set()
+    query = req.get("query") or {}
+    if isinstance(query, dict):
+        for key, values in query.items():
+            if values in (None, "", [], [""]):
+                continue
+            leaves.add(str(key))
+    url = str(req.get("url") or "")
+    if "?" in url:
+        for key, values in parse_qs(url.split("?", 1)[1], keep_blank_values=True).items():
+            if values in ([], [""]):
+                continue
+            leaves.add(str(key))
+    parsed = parse_recorded_request_body(req.get("post_data"), str(req.get("content_type") or ""))
+    for path in parsed.get("field_paths") or []:
+        text = str(path or "").removeprefix("body.").removeprefix("query.")
+        if text:
+            leaves.add(text)
+            leaves.add(text.rsplit(".", 1)[-1].split("[")[0])
+    return {leaf for leaf in leaves if leaf}
+
+
+def _successful_peer_omitted_leaves(spec: FlowSpec) -> set[tuple[str, str]]:
+    groups: dict[tuple[str, str], list[set[str]]] = {}
+    for fact in spec.request_facts.requests or []:
+        status = int(getattr(fact, "response_status", None) or 0)
+        if not (200 <= status < 400):
+            continue
+        method = str(getattr(fact, "method", "") or "GET").upper()
+        path = _request_path({
+            "url": getattr(fact, "url", "") or "",
+            "path": getattr(fact, "path", "") or "",
+        })
+        groups.setdefault((method, path), []).append(_request_present_leaves({
+            "url": getattr(fact, "url", "") or "",
+            "query": getattr(fact, "query", None) or {},
+            "post_data": getattr(fact, "post_data", None),
+            "content_type": getattr(fact, "content_type", "") or "",
+        }))
+    omitted: set[tuple[str, str]] = set()
+    for (_method, path), leaf_sets in groups.items():
+        if len(leaf_sets) < 2:
+            continue
+        union: set[str] = set()
+        for item in leaf_sets:
+            union |= item
+        for item in leaf_sets:
+            for leaf in union - item:
+                omitted.add((path, leaf))
+    return omitted
+
+
+def _apply_successful_omit_optional(spec: FlowSpec) -> None:
+    omitted = _successful_peer_omitted_leaves(spec)
+    if not omitted:
+        return
+    for step in spec.steps or []:
+        path = _request_path({"url": step.path or step.url or ""})
+        for param in step.params or []:
+            if param.locked or _param_has_manual_contract(param):
+                continue
+            if str((param.source or {}).get("required_state") or "") == "required":
+                continue
+            if _param_has_page_required_evidence(param) or _param_has_local_required_marker(param):
+                continue
+            leaf = _field_leaf_token(param.key, param.path)
+            if (path, leaf) not in omitted:
+                continue
+            param.source = {**(param.source or {}), "required_state": "optional"}
+            param.required = False
+
+
 def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
     """Apply the same origin/ownership rules to every capability family."""
     _infer_selected_option_row_fields(spec)
@@ -10022,6 +10110,7 @@ def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
     _apply_edit_form_field_contracts(spec)
     _apply_row_command_field_contracts(spec)
     _apply_query_form_field_contracts(spec)
+    _apply_successful_omit_optional(spec)
     _apply_page_rule_caller_override(spec)
 
 

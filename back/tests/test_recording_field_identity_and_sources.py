@@ -436,3 +436,341 @@ def test_long_recording_keeps_first_form_facts_after_snapshot_tail_drop() -> Non
     )
     by_tx = session.recorded_form_samples_by_transaction()
     assert any("first-title" in group.values() for group in by_tx.values())
+
+
+def test_html_and_aria_required_markers_are_required() -> None:
+    from dano.execution.page.recorder import _RECORDER_JS
+
+    assert "function requiredStateOf" in _RECORDER_JS
+    assert "aria-required" in _RECORDER_JS
+    session = RecordSession()
+    _feed(session, {
+        "op": "fill", "locator": "css=input[name=title]", "field": "标题",
+        "value": "x", "field_aliases": ["title"], "control_kind": "text",
+        "required": True, "required_state": "required", "required_observed": True,
+        "action_id": "action_title", "page_context": PAGE,
+    })
+    _feed(session, {
+        "op": "fill", "locator": "css=input[name=note]", "field": "说明",
+        "value": "y", "field_aliases": ["note"], "control_kind": "text",
+        "required": True, "required_state": "required", "required_observed": True,
+        "action_id": "action_note", "page_context": PAGE,
+    })
+    evidence = session.recorded_field_evidence()
+    title = next(item for item in evidence if "title" in (item.get("field_aliases") or []))
+    note = next(item for item in evidence if "note" in (item.get("field_aliases") or []))
+    assert title.get("required_state") == "required"
+    assert note.get("required_state") == "required"
+
+
+def test_empty_string_and_present_value_do_not_prove_optional_or_required() -> None:
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_save",
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://example.test/doc/create",
+            "post_data": json.dumps({"remark": "", "title": "hello"}),
+            "response_status": 200,
+            "response_json": {"code": 0},
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_action_id": "act_create",
+            "trigger_transaction_id": "act_create",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        }],
+        field_evidence=[
+            {
+                "label": "备注", "field": "remark", "value": "",
+                "field_aliases": ["remark"], "control_kind": "textarea",
+                "required_state": "unknown", "required_observed": None,
+                "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+                "action_id": "act_create", "transaction_id": "act_create",
+                "op": "fill", "binding_status": "bound", "request_id": "req_save",
+                "wire_path": "body.remark", "editable": True,
+            },
+            {
+                "label": "标题", "field": "title", "value": "hello",
+                "field_aliases": ["title"], "control_kind": "text",
+                "required_state": "unknown", "required_observed": None,
+                "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+                "action_id": "act_create", "transaction_id": "act_create",
+                "op": "fill", "binding_status": "bound", "request_id": "req_save",
+                "wire_path": "body.title", "editable": True,
+            },
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    create = next(item for item in spec.steps if "/doc/create" in str(item.path or item.url or ""))
+    remark = next(param for param in create.params if "remark" in str(param.path or param.key))
+    title = next(param for param in create.params if "title" in str(param.path or param.key))
+    assert str((remark.source or {}).get("required_state") or "unknown") == "unknown"
+    assert str((title.source or {}).get("required_state") or "unknown") == "unknown"
+
+
+def test_successful_omit_can_mark_query_filter_optional() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_full",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/admin-api/doc/page?status=20&remark=keep",
+                "query": {"status": ["20"], "remark": ["keep"]},
+                "response_status": 200,
+                "response_json": {"code": 0, "data": {"list": []}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "trigger_action_id": "act_search_a",
+                "trigger_transaction_id": "act_search_a",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.95},
+            },
+            {
+                "request_id": "req_omit",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://example.test/admin-api/doc/page?status=20",
+                "query": {"status": ["20"]},
+                "response_status": 200,
+                "response_json": {"code": 0, "data": {"list": []}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "trigger_action_id": "act_search_b",
+                "trigger_transaction_id": "act_search_b",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.95},
+            },
+        ],
+        field_evidence=[{
+            "label": "状态", "field": "status", "value": "20",
+            "field_aliases": ["status"], "control_kind": "select",
+            "required_state": "unknown", "required_observed": None,
+            "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+            "action_id": "act_search_a", "transaction_id": "act_search_a",
+            "op": "select", "binding_status": "bound", "request_id": "req_full",
+            "wire_path": "query.status", "editable": True,
+        }],
+        page_events=[
+            {"event_id": "ev_a", "kind": "click", "action_id": "act_search_a"},
+            {"event_id": "ev_b", "kind": "click", "action_id": "act_search_b"},
+        ],
+        page_context=PAGE,
+    )
+    listing = next(item for item in spec.steps if "/doc/page" in str(item.path or item.url or ""))
+    remark = next(param for param in listing.params if "remark" in str(param.path or param.key))
+    status = next(param for param in listing.params if "status" in str(param.path or param.key))
+    assert str((remark.source or {}).get("required_state") or "") == "optional"
+    assert str((status.source or {}).get("required_state") or "unknown") == "unknown"
+
+
+def test_required_state_does_not_mix_across_surfaces() -> None:
+    session = RecordSession()
+    _feed(session, {
+        "op": "fill", "locator": "css=input[name=keyword]", "field": "关键字",
+        "value": "list", "field_aliases": ["keyword"], "control_kind": "text",
+        "required_state": "unknown", "required_observed": None,
+        "in_dialog": False, "surface": "page",
+        "action_id": "action_search", "page_context": PAGE,
+    })
+    _feed(session, {
+        "op": "fill", "locator": "css=input[name=keyword]", "field": "关键字",
+        "value": "edit", "field_aliases": ["keyword"], "control_kind": "text",
+        "required_state": "required", "required_observed": True,
+        "in_dialog": True, "surface": "dialog", "form_root": "dialog_edit",
+        "action_id": "action_edit", "page_context": PAGE,
+    })
+    evidence = session.recorded_field_evidence()
+    rows = [item for item in evidence if "keyword" in (item.get("field_aliases") or [])]
+    identities = {item.get("field_identity_id") for item in rows}
+    assert len(identities) == 2
+    states = {(item.get("surface") or ("dialog" if item.get("in_dialog") else "page"), item.get("required_state")) for item in rows}
+    assert ("page", "unknown") in states
+    assert ("dialog", "required") in states
+
+
+def test_equal_array_counts_bind_template_not_first_row() -> None:
+    requests = [{
+        "request_id": "req_save",
+        "method": "POST",
+        "url": "http://example.test/doc/save",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "trigger_action_id": "action_save",
+        "trigger_transaction_id": "page_1|frame_1|action_save",
+        "post_data": json.dumps({
+            "items": [
+                {"productId": "p1", "count": 2},
+                {"productId": "p2", "count": 2},
+            ]
+        }),
+        "role": "business_write",
+    }]
+    evidence = [{
+        "label": "数量",
+        "field": "count",
+        "value": 2,
+        "field_aliases": ["count"],
+        "control_kind": "number",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "action_id": "action_save",
+        "transaction_id": "page_1|frame_1|action_save",
+        "op": "fill",
+    }]
+    bound = bind_field_evidence(requests, [], evidence)
+    item = bound[0]
+    assert item.get("wire_path") != "body.items[0].count"
+    assert item.get("wire_path") == "body.items[].count" or item.get("binding_status") == "ambiguous"
+
+
+def test_business_list_is_not_option_catalog() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_list",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/admin-api/doc/page",
+                "response_status": 200,
+                "response_json": {"code": 0, "data": [
+                    {"id": 4, "name": "甲件", "price": 5000},
+                    {"id": 7, "name": "乙件", "price": 3000},
+                ]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "trigger_action_id": "act_search",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.95},
+            },
+            {
+                "request_id": "req_create",
+                "sequence": 2,
+                "method": "POST",
+                "url": "http://example.test/admin-api/doc/create",
+                "post_data": json.dumps({
+                    "productId": 4,
+                    "productName": "甲件",
+                    "productPrice": 5000,
+                }),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "trigger_action_id": "act_create",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+            },
+        ],
+        field_evidence=[{
+            "label": "产品", "field": "productId", "value": 4,
+            "field_aliases": ["productId"], "control_kind": "select",
+            "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+            "action_id": "act_create", "op": "select",
+            "binding_status": "bound", "request_id": "req_create",
+            "wire_path": "body.productId", "editable": True,
+        }],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    create = next(item for item in spec.steps if "/doc/create" in str(item.path or item.url or ""))
+    name = next(param for param in create.params if "productName" in str(param.path or param.key))
+    assert name.source_kind != "selected_option_field"
+
+
+def test_identical_id_values_do_not_all_become_option_fields() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_items",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/admin-api/item/simple-list",
+                "response_status": 200,
+                "response_json": {"code": 0, "data": [
+                    {"id": 5, "tenantId": 5, "ownerId": 5, "name": "甲件"},
+                    {"id": 7, "tenantId": 5, "ownerId": 9, "name": "乙件"},
+                ]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "read_option", "keep": True, "confidence": 0.95},
+            },
+            {
+                "request_id": "req_create",
+                "sequence": 2,
+                "method": "POST",
+                "url": "http://example.test/admin-api/doc/create",
+                "post_data": json.dumps({
+                    "partyId": 5,
+                    "tenantId": 5,
+                    "ownerId": 5,
+                    "productName": "甲件",
+                }),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "trigger_action_id": "act_create",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+            },
+        ],
+        field_evidence=[{
+            "label": "往来单位", "field": "partyId", "value": 5,
+            "field_aliases": ["partyId"], "control_kind": "select",
+            "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+            "action_id": "act_create", "op": "select",
+            "binding_status": "bound", "request_id": "req_create",
+            "wire_path": "body.partyId", "editable": True, "in_dialog": True,
+        }],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    create = next(item for item in spec.steps if "/doc/create" in str(item.path or item.url or ""))
+    tenant = next(param for param in create.params if "tenantId" in str(param.path or param.key))
+    owner = next(param for param in create.params if "ownerId" in str(param.path or param.key))
+    assert tenant.source_kind != "selected_option_field"
+    assert owner.source_kind != "selected_option_field"
+    assert tenant.source_kind != "form_option"
+    assert owner.source_kind != "form_option"
+
+
+def test_to_flow_spec_uses_transaction_form_samples_not_global_splice() -> None:
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_edit",
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://example.test/doc/update",
+            "post_data": json.dumps({"remark": "乙"}),
+            "response_status": 200,
+            "response_json": {"code": 0},
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_action_id": "act_edit",
+            "trigger_transaction_id": "tx_edit",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        }],
+        field_evidence=[{
+            "label": "备注", "field": "remark", "value": "乙",
+            "field_aliases": ["remark"], "control_kind": "textarea",
+            "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+            "action_id": "act_edit", "transaction_id": "tx_edit",
+            "op": "fill", "binding_status": "bound", "request_id": "req_edit",
+            "wire_path": "body.remark",
+        }],
+        samples={"备注": "甲", "关键字": "list"},
+        form_samples_by_transaction={"tx_edit": {"备注": "乙"}},
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+    update = next(item for item in spec.steps if "/doc/update" in str(item.path or item.url or ""))
+    assert update.sample_inputs.get("remark") in {"乙", None} or "甲" not in str(update.sample_inputs)
+    assert "关键字" not in (update.sample_inputs or {})
+    assert "list" not in (update.sample_inputs or {}).values()

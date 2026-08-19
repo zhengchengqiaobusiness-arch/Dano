@@ -262,6 +262,15 @@ def _parse_body(post_data, content_type: str = ""):  # noqa: ANN001, ANN202
     return None
 
 
+def _scalar_recorded_value(node):
+    """Keep false/0 as recorded scalars; only null becomes an empty sample."""
+    if node is None:
+        return ""
+    if type(node) is bool or type(node) in (int, float):
+        return node
+    return str(node)
+
+
 def _values(node) -> list[str]:
     """递归取 body 里所有标量值(字符串化),用于和用户样例匹配。"""
     out: list[str] = []
@@ -271,8 +280,13 @@ def _values(node) -> list[str]:
     elif isinstance(node, list):
         for v in node:
             out += _values(v)
-    elif node is not None and not isinstance(node, bool):
-        out.append(str(node))
+    elif node is not None:
+        if node is True:
+            out.append("true")
+        elif node is False:
+            out.append("false")
+        else:
+            out.append(str(node))
     return out
 
 
@@ -2342,7 +2356,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             for i, v in enumerate(node):
                 walk(v, f"{path}[{i}]")
         else:
-            sv = "" if node is None else str(node)
+            sv = _scalar_recorded_value(node)
             key = path.split(".")[-1].split("[")[0]
             time_like = bool(_TIME_KEY.search(key))
             internal = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
@@ -2599,7 +2613,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             return [walk(v, f"{path}[{i}]") for i, v in enumerate(node)]
         if path in param_map:
             name = param_map[path]
-            sv = "" if node is None else str(node)
+            sv = _scalar_recorded_value(node)
             params.append(name)
             types[name] = _infer_type(node, path.split(".")[-1].split("[")[0])   # 字段类型(值推断)
             rec = str(typed.get(name)) if (typed and typed.get(name) not in (None, "")) else None

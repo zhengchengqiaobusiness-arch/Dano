@@ -389,3 +389,52 @@ def test_resp_dispatch_includes_delete() -> None:
     source = RecordSession._resp_dispatch.__code__.co_consts
     joined = " ".join(str(item) for item in source)
     assert "DELETE" in joined
+
+
+def test_false_and_zero_survive_flow_spec_params() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_save",
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://example.test/save",
+            "post_data": json.dumps({"agree": False, "count": 0}),
+            "response_status": 200,
+            "response_json": {"ok": True},
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_action_id": "action_save",
+            "trigger_transaction_id": "page_1|frame_1|action_save",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+        }],
+        field_evidence=[
+            {
+                "label": "同意", "field": "agree", "value": False,
+                "field_aliases": ["agree"], "control_kind": "checkbox",
+                "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+                "action_id": "action_save", "transaction_id": "page_1|frame_1|action_save",
+                "op": "toggle", "binding_status": "bound", "request_id": "req_save",
+                "wire_path": "body.agree",
+            },
+            {
+                "label": "数量", "field": "count", "value": 0,
+                "field_aliases": ["count"], "control_kind": "number",
+                "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+                "action_id": "action_save", "transaction_id": "page_1|frame_1|action_save",
+                "op": "fill", "binding_status": "bound", "request_id": "req_save",
+                "wire_path": "body.count",
+            },
+        ],
+        page_events=[{"event_id": "ev_save", "kind": "click", "action_id": "action_save"}],
+        page_context=PAGE,
+    )
+    step = next(item for item in spec.steps if str(item.path or item.url or "").endswith("/save"))
+    agree = next(param for param in step.params if "agree" in str(param.path or param.key))
+    count = next(param for param in step.params if "count" in str(param.path or param.key))
+    assert agree.value is False
+    assert count.value == 0
+    assert agree.type == "boolean"
+
