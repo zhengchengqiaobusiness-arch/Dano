@@ -39,6 +39,11 @@ from dano.onboarding.recording_workflow import (
     WorkflowCancelled,
     WorkflowIssue,
     WorkflowStep,
+    _capability_feedback_label,
+    _capability_intro_label,
+    _discovery_thought,
+    _issue_detail_label,
+    _operator_question,
 )
 
 
@@ -796,21 +801,20 @@ class ProductionRecordingServices:
             remaining = [
                 issue for issue in remaining if not is_replay_issue_code(issue.code)
             ]
-        dispatchable = tuple(issue for issue in remaining if _dispatchable_issue(issue))
-
-        if dispatchable:
+        if remaining:
             try:
                 spec = await self._repair_capability_groups(
                     spec,
-                    dispatchable,
+                    tuple(remaining),
                     kept_capabilities,
                     report,
                     context,
+                    operator_answers=operator_answers,
                 )
             except WorkflowCancelled:
                 raise
             except Exception:  # noqa: BLE001 - protocol errors keep the current draft
-                report.still_pending.extend(issue.issue_id for issue in dispatchable)
+                report.still_pending.extend(issue.issue_id for issue in remaining)
         else:
             report.skipped.extend(
                 issue.issue_id for issue in issues if issue.issue_id not in report.applied
@@ -828,18 +832,16 @@ class ProductionRecordingServices:
         kept_capabilities: list[Any],
         report: RepairReport,
         context: PipelineContext,
+        operator_answers: dict[str, str] | None = None,
     ) -> FlowSpec:
-        """Repair one capability at a time so every fix stays anchored in stage six.
+        """List each capability's problems, apply that group's edits, then feedback.
 
-        Each group binds the current draft, receives only its own issues plus the
-        stage-six capability contract, and is re-checked immediately after the
-        submission. A failed group never blocks the remaining groups, and
-        meta-only progress (fact_check, verification log) is preserved even when
-        the execution fingerprint did not change.
+        The next capability starts only after the current group's feedback.
         """
+        answers = dict(operator_answers or {})
         groups = _group_issues_by_capability(spec, remaining)
         total = len(groups)
-        pi = await self.pi_provider(False)
+        pi: Any = None
         for index, (capability, group_issues) in enumerate(groups, start=1):
             context.ensure_active()
             group_key = (
@@ -853,6 +855,33 @@ class ProductionRecordingServices:
                 else "整体流程"
             )
             cap_target = {"capability_id": group_key, "capability_title": title}
+            last = index == total
+            await context.progress(
+                WorkflowStep.RESOLVING,
+                f"正在处理能力「{title}」（{index}/{total}）",
+                context.current_round,
+            )
+            await context.record(WorkflowActivity(
+                step=WorkflowStep.RESOLVING,
+                round=context.current_round,
+                status="running",
+                label=_capability_intro_label(
+                    title, index=index, total=total, issue_count=len(group_issues),
+                ),
+                target=cap_target,
+            ))
+            for issue_index, issue in enumerate(group_issues, start=1):
+                await context.record(WorkflowActivity(
+                    step=WorkflowStep.RESOLVING,
+                    round=context.current_round,
+                    status="pending",
+                    label=_issue_detail_label(
+                        issue, index=issue_index, total=len(group_issues),
+                    ),
+                    issue_id=issue.issue_id,
+                    code=issue.code,
+                    target={**issue.target, **cap_target},
+                ))
             dispatched = int((context.capability_rounds or {}).get(group_key) or 0)
             if dispatched >= _CAPABILITY_REPAIR_BUDGET:
                 mark_issues_unverified(
@@ -876,98 +905,166 @@ class ProductionRecordingServices:
                     label=f"能力「{title}」已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，已标为未验证",
                     target=cap_target,
                 ))
-                continue
-            context.capability_rounds[group_key] = dispatched + 1
-            await context.progress(
-                WorkflowStep.RESOLVING,
-                f"正在处理能力「{title}」（{index}/{total}）",
-                context.current_round,
-            )
-            await context.record(WorkflowActivity(
-                step=WorkflowStep.RESOLVING,
-                round=context.current_round,
-                status="running",
-                label=(
-                    f"开始处理能力「{title}」（第 {index}/{total} 组）："
-                    f"待解决 {len(group_issues)} 个问题"
-                ),
-                target={"capability_id": group_key, "capability_title": title},
-            ))
-            pi.bind_flow_spec(spec)
-            before_pi = flow_spec_fingerprint(spec)
-            try:
-                await _submit_with_protocol_recovery(
-                    pi,
-                    prompt=_capability_repair_prompt(
-                        capability=capability,
-                        brief=(
-                            _capability_brief(spec, capability)
-                            if capability is not None
-                            else {}
-                        ),
-                        issues=group_issues,
-                        index=index,
-                        total=total,
-                    ),
-                    accepted_kinds={"repair"},
-                    context=context,
-                )
-            except WorkflowCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 - one capability must not sink the rest
-                report.still_pending.extend(issue.issue_id for issue in group_issues)
-                _record_capability_verification(
-                    spec,
-                    group_key,
-                    status="blocked",
-                    resolved=[],
-                    pending=[issue.issue_id for issue in group_issues],
-                    reason=str(exc),
-                )
                 await context.record(WorkflowActivity(
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
-                    status="running",
-                    label=f"能力「{title}」本组修复未落地：{exc}",
+                    status="blocked",
+                    label=_capability_feedback_label(
+                        title=title,
+                        resolved=(),
+                        pending=group_issues,
+                        last=last,
+                    ),
                     target=cap_target,
                 ))
                 continue
-            repaired = pi.current_flow_spec()
-            if kept_capabilities and not repaired.capabilities:
-                report.rejected.append("pi_cleared_capabilities")
-                report.still_pending.extend(issue.issue_id for issue in group_issues)
+            context.capability_rounds[group_key] = dispatched + 1
+            remaining_group: list[WorkflowIssue] = []
+            operator_resolved: list[WorkflowIssue] = []
+            for issue in group_issues:
+                if issue.resolver != "operator":
+                    remaining_group.append(issue)
+                    continue
+                answer = str(answers.get(issue.issue_id) or "").strip()
+                if not answer:
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="waiting_operator",
+                        label=_discovery_thought(issue) + " 需要你确认后我才能继续。",
+                        issue_id=issue.issue_id,
+                        code=issue.code,
+                        target={**issue.target, **cap_target},
+                    ))
+                    answer = str(await context.ask_operator(_operator_question(issue)) or "").strip()
+                    answers[issue.issue_id] = answer
+                applied = False
+                if answer:
+                    try:
+                        applied = _apply_operator_answer(spec, issue, answer)
+                    except Exception:  # noqa: BLE001
+                        applied = False
+                if applied:
+                    report.applied.append(issue.issue_id)
+                    report.resolved.append(issue.issue_id)
+                    operator_resolved.append(issue)
+                else:
+                    if answer:
+                        report.rejected.append(issue.issue_id)
+                    remaining_group.append(issue)
+            pi_issues = tuple(issue for issue in remaining_group if _dispatchable_issue(issue))
+            before_pi = flow_spec_fingerprint(spec)
+            if pi_issues:
+                if pi is None:
+                    pi = await self.pi_provider(False)
                 pi.bind_flow_spec(spec)
                 await context.record(WorkflowActivity(
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
                     status="running",
-                    label=f"能力「{title}」的提交清空了能力集合，已回退本组修改",
+                    label=f"开始修改能力「{title}」",
                     target=cap_target,
                 ))
-                continue
-            changed = flow_spec_fingerprint(repaired) != before_pi
-            spec = repaired
+                try:
+                    await _submit_with_protocol_recovery(
+                        pi,
+                        prompt=_capability_repair_prompt(
+                            capability=capability,
+                            brief=(
+                                _capability_brief(spec, capability)
+                                if capability is not None
+                                else {}
+                            ),
+                            issues=pi_issues,
+                            index=index,
+                            total=total,
+                        ),
+                        accepted_kinds={"repair"},
+                        context=context,
+                    )
+                except WorkflowCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one capability must not sink the rest
+                    report.still_pending.extend(issue.issue_id for issue in remaining_group)
+                    _record_capability_verification(
+                        spec,
+                        group_key,
+                        status="blocked",
+                        resolved=[issue.issue_id for issue in operator_resolved],
+                        pending=[issue.issue_id for issue in remaining_group],
+                        reason=str(exc),
+                    )
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="running",
+                        label=f"能力「{title}」本组修复未落地：{exc}",
+                        target=cap_target,
+                    ))
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="blocked",
+                        label=_capability_feedback_label(
+                            title=title,
+                            resolved=tuple(operator_resolved),
+                            pending=tuple(remaining_group),
+                            last=last,
+                        ),
+                        target=cap_target,
+                    ))
+                    continue
+                repaired = pi.current_flow_spec()
+                if kept_capabilities and not repaired.capabilities:
+                    report.rejected.append("pi_cleared_capabilities")
+                    report.still_pending.extend(issue.issue_id for issue in remaining_group)
+                    pi.bind_flow_spec(spec)
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="running",
+                        label=f"能力「{title}」的提交清空了能力集合，已回退本组修改",
+                        target=cap_target,
+                    ))
+                    await context.record(WorkflowActivity(
+                        step=WorkflowStep.RESOLVING,
+                        round=context.current_round,
+                        status="blocked",
+                        label=_capability_feedback_label(
+                            title=title,
+                            resolved=tuple(operator_resolved),
+                            pending=tuple(remaining_group),
+                            last=last,
+                        ),
+                        target=cap_target,
+                    ))
+                    continue
+                spec = repaired
+            changed = flow_spec_fingerprint(spec) != before_pi
             open_ids, open_identities = _open_issue_tokens(spec)
-            resolved_now: list[str] = []
+            resolved_issues: list[WorkflowIssue] = list(operator_resolved)
+            pending_issues: list[WorkflowIssue] = []
+            resolved_ids = {issue.issue_id for issue in resolved_issues}
             for issue in group_issues:
+                if issue.issue_id in resolved_ids:
+                    continue
                 if issue.issue_id in open_ids or _issue_field_identity(issue) in open_identities:
                     report.still_pending.append(issue.issue_id)
-                else:
-                    report.applied.append(issue.issue_id)
-                    report.resolved.append(issue.issue_id)
-                    resolved_now.append(issue.issue_id)
+                    pending_issues.append(issue)
+                    continue
+                report.applied.append(issue.issue_id)
+                report.resolved.append(issue.issue_id)
+                resolved_issues.append(issue)
+                resolved_ids.add(issue.issue_id)
             group_name = capability.name if capability is not None else "flow"
-            if changed and not resolved_now:
+            if pi_issues and changed and not pending_issues:
                 report.applied.append(f"capability_repair:{group_name}")
-            elif not changed and not resolved_now:
+            elif pi_issues and not changed and pending_issues:
                 report.skipped.append(f"pi_repair:{group_name}")
-            pending_ids = [
-                issue.issue_id for issue in group_issues if issue.issue_id not in resolved_now
-            ]
-            if not pending_ids:
+            if not pending_issues:
                 verification_status = "verified"
                 verification_reason = ""
-            elif resolved_now:
+            elif resolved_issues:
                 verification_status = "partially_verified"
                 verification_reason = "本组仍有未关闭问题"
             else:
@@ -977,17 +1074,19 @@ class ProductionRecordingServices:
                 spec,
                 group_key,
                 status=verification_status,
-                resolved=resolved_now,
-                pending=pending_ids,
+                resolved=[issue.issue_id for issue in resolved_issues],
+                pending=[issue.issue_id for issue in pending_issues],
                 reason=verification_reason,
             )
             await context.record(WorkflowActivity(
                 step=WorkflowStep.RESOLVING,
                 round=context.current_round,
-                status="running",
-                label=(
-                    f"能力「{title}」本组处理完成：解决 {len(resolved_now)} 项，"
-                    f"剩余 {len(group_issues) - len(resolved_now)} 项"
+                status="resolved" if not pending_issues else "running",
+                label=_capability_feedback_label(
+                    title=title,
+                    resolved=tuple(resolved_issues),
+                    pending=tuple(pending_issues),
+                    last=last,
                 ),
                 target=cap_target,
             ))

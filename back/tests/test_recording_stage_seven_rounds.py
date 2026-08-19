@@ -209,9 +209,15 @@ async def test_repair_prompts_pi_once_per_capability() -> None:
     assert not report.still_pending
 
     labels = [activity.label for activity in activities]
-    assert any("编辑销售订单" in label and "第 1/2 组" in label for label in labels)
-    assert any("删除销售订单" in label and "第 2/2 组" in label for label in labels)
-    assert any("解决 1 项" in label for label in labels)
+    edit_start = next(i for i, label in enumerate(labels) if "开始处理能力「编辑销售订单」" in label)
+    edit_problem = next(i for i, label in enumerate(labels) if "问题 1/1：" in label and "step_edit" in label)
+    edit_fix = next(i for i, label in enumerate(labels) if "开始修改能力「编辑销售订单」" in label)
+    edit_feedback = next(i for i, label in enumerate(labels) if "反馈：能力「编辑销售订单」" in label)
+    delete_start = next(i for i, label in enumerate(labels) if "开始处理能力「删除销售订单」" in label)
+    assert edit_start < edit_problem < edit_fix < edit_feedback < delete_start
+    assert any("哪里：" in label and "怎么改：" in label for label in labels)
+    assert any("本组完成，进入下一个能力" in label for label in labels)
+    assert any("本组完成。本轮能力处理结束" in label for label in labels)
     assert all(activity.round == 3 for activity in activities)
     assert repaired["capabilities"]
 
@@ -365,8 +371,12 @@ async def test_repair_records_capability_verification_and_flow_group_key() -> No
     assert context.capability_rounds["__flow__"] == 1
 
 
-def test_plan_thought_lists_capabilities_sequentially() -> None:
-    from dano.onboarding.recording_workflow import _issues_grouped_by_capability, _plan_thought
+def test_issue_detail_lists_where_and_how_to_fix() -> None:
+    from dano.onboarding.recording_workflow import (
+        _issue_detail_label,
+        _issue_fix_plan,
+        _issues_grouped_by_capability,
+    )
 
     spec = _spec()
     issues = (
@@ -378,6 +388,11 @@ def test_plan_thought_lists_capabilities_sequentially() -> None:
     assert [title for _, title, _ in groups] == ["编辑销售订单", "删除销售订单"]
     assert len(groups[0][2]) == 2
     assert len(groups[1][2]) == 1
-    plan = _plan_thought(spec.model_dump(mode="json"), issues)
-    assert plan.index("编辑销售订单") < plan.index("删除销售订单")
-    assert "一次只处理一个能力" in plan
+    issue = issues[1]
+    plan = _issue_fix_plan(issue)
+    assert "回读" in plan
+    label = _issue_detail_label(issue, index=1, total=2)
+    assert label.startswith("问题 1/2：")
+    assert "哪里：" in label
+    assert "怎么改：" in label
+    assert "回读" in label

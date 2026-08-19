@@ -364,20 +364,7 @@ class SelfHealingPipeline:
                 )
 
             current_issue_map = {issue.issue_id: issue for issue in checked.issues}
-            new_ids = set(current_issue_map) - set(previous_issue_map)
             resolved_ids = set(previous_issue_map) - set(current_issue_map)
-            for capability_id, title, members in _issues_grouped_by_capability(draft, checked.issues):
-                new_count = sum(1 for issue in members if issue.issue_id in new_ids)
-                if not new_count:
-                    continue
-                await context.record(_capability_activity(
-                    title=title,
-                    capability_id=capability_id,
-                    step=WorkflowStep.VERIFYING,
-                    round_number=round_number,
-                    status="pending",
-                    label=f"发现能力「{title}」有 {new_count} 个待处理问题",
-                ))
             for capability_id, title, members in _issues_grouped_by_capability(
                 draft, tuple(previous_issue_map.values()),
             ):
@@ -391,6 +378,13 @@ class SelfHealingPipeline:
                     round_number=round_number,
                     status="resolved",
                     label=f"能力「{title}」已关闭 {resolved_count} 个问题",
+                ))
+            if round_number == 1:
+                await context.record(WorkflowActivity(
+                    step=WorkflowStep.VERIFYING,
+                    round=round_number,
+                    status="running",
+                    label="检查完成。接下来按能力逐个列出问题、说明改法并修改；完成一个能力后才进入下一个。",
                 ))
             previous_issue_map = current_issue_map
 
@@ -449,30 +443,7 @@ class SelfHealingPipeline:
                 )
 
             answers: dict[str, str] = {}
-            for issue in checked.issues:
-                if issue.resolver != "operator":
-                    continue
-                await context.record(_issue_activity(
-                    issue,
-                    step=WorkflowStep.RESOLVING,
-                    round_number=round_number,
-                    status="waiting_operator",
-                    label=_discovery_thought(issue) + " 需要你确认后我才能继续。",
-                ))
-                answer = await context.ask_operator(_operator_question(issue))
-                answers[issue.issue_id] = answer
-
-            await context.progress(WorkflowStep.RESOLVING, "正在解决验证问题", round_number)
-            machine_issues = tuple(
-                issue for issue in checked.issues if issue.resolver != "operator"
-            )
-            if machine_issues:
-                await context.record(WorkflowActivity(
-                    step=WorkflowStep.RESOLVING,
-                    round=round_number,
-                    status="running",
-                    label=_plan_thought(draft, machine_issues),
-                ))
+            await context.progress(WorkflowStep.RESOLVING, "正在按能力逐个处理问题", round_number)
             repaired = await self._bounded(self.runtime.repair(
                 draft,
                 checked.issues,
@@ -631,6 +602,81 @@ def _issue_subject(issue: WorkflowIssue) -> str:
     return ""
 
 
+def _issue_fix_plan(issue: WorkflowIssue) -> str:
+    code = str(issue.code or "")
+    resolver = str(issue.resolver or "")
+    if code in {"write_verify", "write_readback_missing"}:
+        return "用录制里已有的查询请求做回读校验，证明这次提交已经生效。"
+    if code in {"enum", "enum_options_unverified"}:
+        return "补全该字段的可选值，并绑定到录制到的选项来源。"
+    if code in {
+        "dependency",
+        "dependency_candidate",
+        "dependency_verification_missing",
+        "dependency_verification_stale",
+    }:
+        return "核对上下游取值链路，确认调用时能自动带上正确的关联值。"
+    if code == "field_source_unknown":
+        if resolver == "operator":
+            return "请你确认：这是调用时由用户填写，还是使用录制时的固定值。"
+        return "根据录制证据判定字段来源；空值会标成调用方可选输入。"
+    if code == "required_axis_unconfirmed":
+        return "请你确认提交时该字段是必填还是可选。"
+    if resolver == "machine_repair":
+        return "由确定性修补改 FlowSpec 结构，不重录、不重划能力。"
+    if resolver == "operator":
+        return "需要你确认业务规则后才能继续改。"
+    if resolver == "collect_evidence":
+        return "补采集证后再写回验证结果。"
+    return "按该问题的验证待办逐项处理。"
+
+
+def _issue_detail_label(issue: WorkflowIssue, *, index: int, total: int) -> str:
+    subject = _issue_subject(issue).strip("「」") or str(issue.code or "该问题")
+    where = str(issue.message or "").strip() or _discovery_thought(issue)
+    return (
+        f"问题 {index}/{total}：{subject}\n"
+        f"哪里：{where}\n"
+        f"怎么改：{_issue_fix_plan(issue)}"
+    )
+
+
+def _capability_intro_label(title: str, *, index: int, total: int, issue_count: int) -> str:
+    return (
+        f"开始处理能力「{title}」（{index}/{total}），共 {issue_count} 个问题。"
+        "先列出每个问题在哪里、准备怎么改；改完并反馈后，才进入下一个能力。"
+    )
+
+
+def _capability_feedback_label(
+    *,
+    title: str,
+    resolved: tuple[WorkflowIssue, ...],
+    pending: tuple[WorkflowIssue, ...],
+    last: bool,
+) -> str:
+    lines = [f"反馈：能力「{title}」"]
+    if resolved:
+        names = "、".join(
+            _issue_subject(item).strip("「」") or item.code for item in resolved
+        )
+        lines.append(f"已处理：{names}")
+    else:
+        lines.append("已处理：本组没有关闭的问题")
+    if pending:
+        names = "、".join(
+            _issue_subject(item).strip("「」") or item.code for item in pending
+        )
+        lines.append(f"仍未关闭：{names}")
+    else:
+        lines.append("本组问题已全部关闭")
+    if last:
+        lines.append("本组完成。本轮能力处理结束，将再检查一遍。")
+    else:
+        lines.append("本组完成，进入下一个能力。")
+    return "\n".join(lines)
+
+
 def _discovery_thought(issue: WorkflowIssue) -> str:
     subject = _issue_subject(issue)
     message = str(issue.message or "").strip()
@@ -652,16 +698,6 @@ def _discovery_thought(issue: WorkflowIssue) -> str:
     return f"发现了问题：{message}"
 
 
-def _plan_thought(draft: dict[str, Any] | None, issues: tuple[WorkflowIssue, ...]) -> str:
-    groups = _issues_grouped_by_capability(draft, issues)
-    names = [title for _, title, members in groups if members]
-    listed = "、".join(names) or "当前能力"
-    return (
-        f"本轮按能力依次处理：{listed}。"
-        "一次只处理一个能力，处理完再进入下一个，不把所有能力捆在一起修。"
-    )
-
-
 def _result_thought(report: RepairReport | None, *, applied: bool, remaining: int) -> str:
     if report is None:
         return "本轮结果：修复步骤已结束，接下来会再检查一遍这些问题是否还在。"
@@ -681,9 +717,9 @@ def _result_thought(report: RepairReport | None, *, applied: bool, remaining: in
     next_step = (
         "接下来会再检查一遍，看这些问题是否消失。"
         if applied
-        else "FlowSpec 没有有效变化，若下一轮仍无进展就会停下来交给你改。"
+        else "若下一轮仍无进展就会停下来交给你改。"
     )
-    return f"本轮结果：{'；'.join(bits)}。还剩 {remaining} 个问题。{next_step}"
+    return f"本轮各能力已处理完。{'；'.join(bits)}。还剩 {remaining} 个问题。{next_step}"
 
 
 def _resolved_thought(issue: WorkflowIssue) -> str:

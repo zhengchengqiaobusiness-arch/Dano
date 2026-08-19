@@ -624,6 +624,7 @@ export default function PageRecorder({
   const reconnectAttemptRef = useRef(0);
   const closingRef = useRef(false);
   const finishRequestedRef = useRef(false);
+  const resumeOnlyRef = useRef(false);
   const cancellingRef = useRef(false);
   const machineVerificationRef = useRef(setup.machineVerification);
   const socketInitRef = useRef<Record<string, unknown> | null>(null);
@@ -663,7 +664,10 @@ export default function PageRecorder({
       if (reachedStage >= 1) setKeepRecording(true);
       if (reachedStage >= 2) setKeepResult(true);
     }
-    if (reachedStage > reachedStageRef.current) setViewStage(reachedStage);
+    if (reachedStage > reachedStageRef.current) {
+      setViewStage(reachedStage);
+      if (reachedStage >= 2 && !resumeOnly) setAssistantOpen(true);
+    }
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
 
@@ -781,6 +785,12 @@ export default function PageRecorder({
     setConnected(false);
     setConnecting(false);
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
+  }
+
+  function enterCapabilityResults() {
+    setKeepResult(true);
+    setViewStage(2);
+    setAssistantOpen(true);
   }
 
   function canAutoReconnectRecording() {
@@ -938,13 +948,8 @@ export default function PageRecorder({
     setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
-    if (next.status === "waiting_operator" && machineVerificationRef.current) {
-      setKeepResult(true);
-      setViewStage(2);
-    }
-    if (["editable", "published", "failed"].includes(next.status) && next.draft) {
-      setKeepResult(true);
-      setViewStage(2);
+    if (next.status !== "recording" && next.status !== "idle" && !resumeOnlyRef.current) {
+      enterCapabilityResults();
     }
     if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
@@ -969,7 +974,15 @@ export default function PageRecorder({
   }
 
   function openRecordingSocket(action: string) {
-    if (closingRef.current || wsRef.current) return;
+    if (closingRef.current) {
+      setConnecting(false);
+      return;
+    }
+    if (wsRef.current) {
+      const leftover = wsRef.current;
+      wsRef.current = null;
+      if (leftover.readyState < WebSocket.CLOSING) leftover.close(1000, "replace");
+    }
     setConnecting(true);
     const socket = new WebSocket(recorderWebSocketUrl());
     wsRef.current = socket;
@@ -1015,8 +1028,7 @@ export default function PageRecorder({
         if (row.action === actionRef.current) {
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
-          setKeepResult(true);
-          setViewStage(2);
+          if (!resumeOnlyRef.current) enterCapabilityResults();
         }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);
@@ -1101,11 +1113,22 @@ export default function PageRecorder({
       message.error("请填写业务页地址和录制目标");
       return;
     }
+    const previous = wsRef.current;
+    if (previous && previous.readyState === WebSocket.OPEN) {
+      try {
+        previous.send(JSON.stringify({ type: "cancel" }));
+      } catch {
+        // A new recording must still start even if the old cancel frame is lost.
+      }
+    }
+    cancellingRef.current = false;
+    setCancelling(false);
     closeRecordingSocket();
     const action = newActionName();
     actionRef.current = action;
     activeResultIdRef.current = "";
     setActiveResultId("");
+    resumeOnlyRef.current = false;
     setResumeOnly(false);
     setAnalysisRequested(false);
     setStageSevenOpen(false);
@@ -1178,6 +1201,7 @@ export default function PageRecorder({
     actionRef.current = item.action;
     activeResultIdRef.current = item.id;
     setActiveResultId(item.id);
+    resumeOnlyRef.current = true;
     setResumeOnly(true);
     machineVerificationRef.current = true;
     setMachineVerification(true);
@@ -1197,6 +1221,7 @@ export default function PageRecorder({
       message.error("打开录制结果失败");
       setKeepResult(false);
       setViewStage(0);
+      resumeOnlyRef.current = false;
       setResumeOnly(false);
     } finally {
       setOpeningId("");
@@ -1221,6 +1246,7 @@ export default function PageRecorder({
       actionRef.current = item.action;
       activeResultIdRef.current = item.id;
       setActiveResultId(item.id);
+      resumeOnlyRef.current = true;
       setResumeOnly(true);
       machineVerificationRef.current = true;
       setMachineVerification(true);
@@ -1299,6 +1325,7 @@ export default function PageRecorder({
         closeRecordingSocket();
         activeResultIdRef.current = "";
         setActiveResultId("");
+        resumeOnlyRef.current = false;
         setResumeOnly(false);
         setKeepResult(false);
         setViewStage(0);
@@ -1321,8 +1348,6 @@ export default function PageRecorder({
     if (finishRequestedRef.current || status !== "recording") return;
     finishRequestedRef.current = true;
     setFinishRequested(true);
-    setKeepResult(true);
-    setViewStage(2);
     if (!send({ type: "finish",
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
@@ -1711,7 +1736,6 @@ export default function PageRecorder({
               <Button
                 type="primary"
                 loading={connecting && !resumeOnly}
-                disabled={processing && !resumeOnly}
                 onClick={startRecording}
                 style={{ flexShrink: 0 }}
               >
@@ -1830,14 +1854,24 @@ export default function PageRecorder({
               />
               <Text>编译并进行机器验证</Text>
             </Space>
-            <Button
-              type="primary"
-              loading={finishRequested || status === "processing"}
-              disabled={processing || (status !== "recording" && !canRetryPublish)}
-              onClick={requestPublish}
-            >
-              停止并发布
-            </Button>
+            {status === "recording" || finishRequested || processing ? (
+              <Button
+                type="primary"
+                loading={finishRequested || status === "processing"}
+                disabled={processing || (status !== "recording" && !canRetryPublish)}
+                onClick={requestPublish}
+              >
+                停止并发布
+              </Button>
+            ) : (
+              <Button
+                type="primary"
+                loading={connecting}
+                onClick={startRecording}
+              >
+                {connecting ? "正在连接" : "重新连接"}
+              </Button>
+            )}
             {processing || cancelling ? (
               <Button danger icon={<StopOutlined />} loading={cancelling} onClick={cancelProcessing}>一键终止</Button>
             ) : null}
@@ -2625,6 +2659,8 @@ export default function PageRecorder({
               <Text style={{
                 fontSize: 13,
                 lineHeight: 1.6,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
                 color: isBlocked ? "#cf1322" : isResolved ? "#389e0d" : isWaiting ? "#d46b08" : undefined,
               }}>
                 {act.label}
