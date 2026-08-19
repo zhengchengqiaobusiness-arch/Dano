@@ -125,10 +125,70 @@ def test_field_evidence_keeps_snapshot_value_and_alias_after_empty_control_event
     assert customer[0]["field_aliases"] == ["customerId"]
 
 
+def test_recorded_field_evidence_keeps_dialog_fields_after_list_snapshot() -> None:
+    recorder = RecordSession()
+    page_context = {"path": "/erp/sale/order"}
+    recorder.form_snapshots = [
+        {
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": page_context,
+            "fields": [{
+                "field": "客户", "label": "客户", "value": "鲜生",
+                "field_aliases": ["customerId"], "control_kind": "select",
+                "in_dialog": False, "surface": "page",
+            }],
+        },
+        {
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": page_context,
+            "required_fields": ["订单时间", "客户"],
+            "fields": [
+                {
+                    "field": "客户", "label": "客户", "value": "鲜生",
+                    "field_aliases": ["customerId"], "control_kind": "select",
+                    "in_dialog": False, "surface": "page",
+                },
+                {
+                    "field": "客户", "label": "客户", "value": "鲜生",
+                    "field_aliases": ["customerId"], "control_kind": "select",
+                    "in_dialog": True, "surface": "dialog",
+                    "required": True,
+                },
+                {
+                    "field": "订单时间", "label": "订单时间", "value": "2026-07-28",
+                    "field_aliases": ["orderTime"], "control_kind": "date",
+                    "in_dialog": True, "surface": "dialog",
+                    "required": True,
+                },
+            ],
+        },
+        {
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": page_context,
+            "fields": [{
+                "field": "客户", "label": "客户", "value": "鲜生",
+                "field_aliases": ["customerId"], "control_kind": "select",
+                "in_dialog": False, "surface": "page",
+            }],
+        },
+    ]
+
+    evidence = recorder.recorded_field_evidence()
+    customers = [item for item in evidence if item.get("label") == "客户"]
+    assert {item.get("surface") for item in customers} == {"page", "dialog"}
+    assert any(item.get("label") == "订单时间" and item.get("surface") == "dialog" for item in evidence)
+    assert {"订单时间", "客户"} <= recorder.recorded_required_labels()
+
+
 def test_browser_snapshot_reads_framework_select_value_and_deep_form_alias() -> None:
     assert "vi < 12" in _RECORDER_JS
     assert "evidence.control_kind === 'select'" in _RECORDER_JS
     assert "pickVal(selectHost || el)" in _RECORDER_JS
+    assert "function inDialog(el)" in _RECORDER_JS
+    assert "in_dialog:" in _RECORDER_JS
 
 
 def test_business_query_keeps_pagination_in_runtime_context() -> None:

@@ -2022,7 +2022,7 @@ def _build_step_from_capture(
     if body is not None:
         for path, tokens, _sv, raw in _leaf_paths(body):
             key = path.split(".")[-1].split("[")[0]
-            if _is_system_timestamp(key, raw):
+            if _is_system_timestamp(key, raw) and _timestamp_is_near_request(raw, req):
                 kind = "now_ms" if len(str(raw)) == 13 else "now_s"
                 sys_values.append(SystemValue(path=path, tokens=tokens, kind=kind))
     system_paths = {sv.path for sv in sys_values}
@@ -6763,7 +6763,9 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
         target_param = _resolve_param_reference(target, target_path)
         for p in [target_param] if target_param is not None else []:
             captured_binding_overrides_agent_input = bool(
-                p.source_kind in {"user_input", "page_default", "unknown"}
+                p.source_kind in {
+                    "user_input", "page_default", "unknown", *_OPTION_SOURCE_KINDS,
+                }
                 and not _param_was_caller_typed(p)
                 and lk.confirmed
                 and float(lk.confidence or 0.0) >= 0.95
@@ -6790,6 +6792,7 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
             caller_editable = _param_has_editable_control_evidence(p)
+            option_source = dict(p.source or {}) if p.source_kind in _OPTION_SOURCE_KINDS else {}
             p.category = "user_param" if caller_editable else "runtime_var"
             p.source_kind = "previous_response"
             p.source = {
@@ -6800,6 +6803,7 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 "target_path": target_path,
                 "link_id": lk.link_id,
                 "allow_caller_override": caller_editable,
+                **({"option_source": option_source} if option_source else {}),
             }
             p.editable = True
             p.exposed_to_user = caller_editable
@@ -8496,6 +8500,24 @@ def _derive_title(
     return last
 
 
+def _timestamp_is_near_request(value: Any, request: dict[str, Any] | None) -> bool:
+    """True only when a captured timestamp is the request's own 'now'.
+
+    Edit hydration reuses the record's create/update time. Treating that as
+    ``now_ms`` because the field is named createTime overwrites the upstream
+    value at replay.
+    """
+    actual = _date_like_epoch_seconds(value)
+    if actual is None or not isinstance(request, dict):
+        return False
+    captured = _date_like_epoch_seconds(
+        request.get("timestamp") or request.get("captured_at") or request.get("observed_at")
+    )
+    if captured is None:
+        return False
+    return abs(actual - captured) <= 120.0
+
+
 def _date_like_epoch_seconds(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -8550,16 +8572,41 @@ _ARITHMETIC_STRATEGIES: tuple[tuple[str, Any, bool], ...] = (
 )
 _IDENTITY_ARITHMETIC_EPS = 1e-9
 _INPUT_OPERAND_KINDS = frozenset({
-    "selected_option_field", "user_input", "api_option", "form_option", "page_enum",
+    "selected_option_field", "user_input",
 })
 _STABLE_OPERAND_KINDS = _INPUT_OPERAND_KINDS | frozenset({
-    "computed", "previous_response", "page_default", "page_rule", "constant",
+    "computed", "previous_response", "page_default", "page_rule",
 })
+
+
+def _param_control_kinds(param: ParamField) -> set[str]:
+    return {
+        str(item.get("control_kind") or "").lower()
+        for item in (param.evidence or [])
+        if isinstance(item, dict) and item.get("kind") == "page_control"
+    }
+
+
+def _is_numeric_formula_operand(param: ParamField) -> bool:
+    """Selects, enums and record IDs can numerically coincide; they are not quantities."""
+    if _looks_pagination_field(param.key, param.path):
+        return False
+    if param.source_kind in _OPTION_SOURCE_KINDS or param.type in {"enum", "list-enum"}:
+        return False
+    if _param_control_kinds(param) & {"select", "combobox", "radio"}:
+        return False
+    if _is_document_record_identity_path(param.key, param.path):
+        return False
+    if param.source_kind == "previous_response" and "number" not in _param_control_kinds(param):
+        return False
+    return True
 
 
 def _is_stable_operand(param: ParamField) -> bool:
-    if _looks_pagination_field(param.key, param.path):
+    if not _is_numeric_formula_operand(param):
         return False
+    if "number" in _param_control_kinds(param):
+        return True
     return _param_was_caller_typed(param) or param.source_kind in _STABLE_OPERAND_KINDS
 
 
@@ -16757,6 +16804,8 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
                         return changed
                 return ""
 
+            if start_name and start_name == end_name:
+                start_name, end_name = f"{start_name}开始", f"{end_name}结束"
             if not start_name and end_name:
                 start_name = paired_name(end_name, to_end=False)
             if not end_name and start_name:

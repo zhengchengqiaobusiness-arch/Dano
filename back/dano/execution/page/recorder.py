@@ -380,8 +380,24 @@ _RECORDER_JS = r"""() => {
     } catch (_) {}
     return 'unknown';
   }
+  function inDialog(el) {
+    // List filters and dialog/drawer forms commonly share the same label.
+    // The input stays in its form; dropdown poppers are not the surface.
+    try {
+      return !!(el && el.closest && el.closest(
+        '[role="dialog"],[role="alertdialog"],' +
+        '.el-dialog,.el-overlay-dialog,.el-drawer,' +
+        '.ant-modal,.ant-drawer,' +
+        '.van-dialog,' +
+        '.mat-mdc-dialog-container,.mat-dialog-container,' +
+        '.q-dialog,.q-dialog__inner,' +
+        '.v-dialog,.modal,.drawer'
+      ));
+    } catch (_) { return false; }
+  }
   function fieldEvidence(el) {
     if (!el) return {};
+    var dialog = inDialog(el);
     return {
       field_aliases: controlAliases(el),
       control_kind: controlKind(el),
@@ -389,7 +405,9 @@ _RECORDER_JS = r"""() => {
       disabled: !!(el.disabled || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
       read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null)),
       minimum: el.getAttribute && el.getAttribute('min') !== null ? Number(el.getAttribute('min')) : null,
-      maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null
+      maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null,
+      in_dialog: !!dialog,
+      surface: dialog ? 'dialog' : 'page'
     };
   }
   window.__danoRequiredFields = function () {
@@ -463,6 +481,7 @@ _RECORDER_JS = r"""() => {
           value = clean(pickVal(selectHost || el));
         }
         if (!label && !field) continue;
+        var dialog = inDialog(el);
         out.push({
           field: field, label: label, value: value, required: requiredOf(el),
           field_aliases: evidence.field_aliases || [],
@@ -471,7 +490,9 @@ _RECORDER_JS = r"""() => {
           disabled: !!evidence.disabled,
           read_only: !!evidence.read_only,
           minimum: evidence.minimum,
-          maximum: evidence.maximum
+          maximum: evidence.maximum,
+          in_dialog: !!dialog,
+          surface: dialog ? 'dialog' : 'page'
         });
       }
     } catch (e) {}
@@ -660,6 +681,8 @@ _RECORDER_JS = r"""() => {
         read_only: !!(evidence && evidence.read_only),
         minimum: evidence && evidence.minimum,
         maximum: evidence && evidence.maximum,
+        in_dialog: !!(evidence && evidence.in_dialog),
+        surface: (evidence && evidence.surface) || (evidence && evidence.in_dialog ? 'dialog' : 'page'),
         enum_source: (evidence && evidence.enum_source) || '',
         mapping_complete: !!(evidence && evidence.mapping_complete),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
@@ -3062,16 +3085,21 @@ class RecordSession:
             url = str(context.get("url") or "").strip()
             return (urlparse(url).path.rstrip("/") or "/") if url else ""
 
+        def field_surface(item: dict) -> str:
+            if item.get("in_dialog") is True:
+                return "dialog"
+            surface = str(item.get("surface") or "").strip().lower()
+            if surface in {"dialog", "modal", "drawer"}:
+                return "dialog"
+            return "page"
+
         evidence: list[dict] = []
-        latest_snapshot_by_scope: dict[tuple[str, str, str], dict] = {}
         for snapshot in self.form_snapshots:
             scope = (
                 str(snapshot.get("page_id") or ""),
                 str(snapshot.get("frame_id") or ""),
                 route_identity(snapshot),
             )
-            latest_snapshot_by_scope[scope] = snapshot
-        for scope, snapshot in latest_snapshot_by_scope.items():
             for field in [
                 *(snapshot.get("fields") or []),
                 *(snapshot.get("output_fields") or []),
@@ -3084,6 +3112,8 @@ class RecordSession:
                     "frame_id": scope[1],
                     "page_context": dict(snapshot.get("page_context") or {}),
                     "op": "snapshot",
+                    "in_dialog": bool(field.get("in_dialog")),
+                    "surface": field_surface(field),
                 })
         for step in self.steps:
             if step.get("op") not in {"fill", "select", "pick"}:
@@ -3106,6 +3136,8 @@ class RecordSession:
                 "action_id": str(step.get("action_id") or ""),
                 "transaction_id": str(step.get("transaction_id") or ""),
                 "observed_at": step.get("observed_at"),
+                "in_dialog": bool(step.get("in_dialog")),
+                "surface": str(step.get("surface") or ("dialog" if step.get("in_dialog") else "page")),
             })
         deduped: list[dict] = []
         for item in evidence:
@@ -3117,6 +3149,7 @@ class RecordSession:
                 str(item.get("page_id") or ""), str(item.get("frame_id") or ""),
                 route_identity(item), str(item.get("label") or item.get("field") or ""),
                 str(item.get("control_kind") or ""),
+                field_surface(item),
             )
             matches = []
             for index, previous in enumerate(deduped):
@@ -3125,6 +3158,7 @@ class RecordSession:
                     route_identity(previous),
                     str(previous.get("label") or previous.get("field") or ""),
                     str(previous.get("control_kind") or ""),
+                    field_surface(previous),
                 )
                 if previous_identity != identity:
                     continue
@@ -3164,8 +3198,7 @@ class RecordSession:
             if self.steps[i].get("required")
             and self.steps[i].get("op") in ("fill", "select", "pick")
         }
-        snapshots = self.form_snapshots[-1:] if self.form_snapshots else []
-        for snapshot in snapshots:
+        for snapshot in self.form_snapshots or []:
             out.update(
                 str(label or "").strip()
                 for label in (snapshot.get("required_fields") or [])
@@ -3177,18 +3210,24 @@ class RecordSession:
         """Return submit-time label/value evidence, preserving range members."""
         out: dict[str, str] = {}
         counters: dict[str, int] = {}
-        snapshots = self.form_snapshots[-1:] if self.form_snapshots else []
-        for snapshot in snapshots:
-            for field in snapshot.get("fields") or []:
-                if not isinstance(field, dict):
-                    continue
-                label = str(field.get("label") or field.get("field") or "").strip()
-                value = str(field.get("value") or "").strip()
-                if not label or not value:
-                    continue
-                counters[label] = counters.get(label, 0) + 1
-                key = label if counters[label] == 1 else f"{label}#{counters[label]}"
-                out[key] = value
+        page_fields: list[dict] = []
+        dialog_fields: list[dict] = []
+        for snapshot in self.form_snapshots or []:
+            fields = [item for item in (snapshot.get("fields") or []) if isinstance(item, dict)]
+            page = [item for item in fields if not item.get("in_dialog")]
+            dialog = [item for item in fields if item.get("in_dialog")]
+            if page:
+                page_fields = page
+            if dialog:
+                dialog_fields = dialog
+        for field in [*page_fields, *dialog_fields]:
+            label = str(field.get("label") or field.get("field") or "").strip()
+            value = str(field.get("value") or "").strip()
+            if not label or not value:
+                continue
+            counters[label] = counters.get(label, 0) + 1
+            key = label if counters[label] == 1 else f"{label}#{counters[label]}"
+            out[key] = value
         return out
 
     async def observed_required_labels(self) -> set[str]:

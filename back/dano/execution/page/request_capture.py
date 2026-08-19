@@ -2318,8 +2318,10 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 标 system_values 填 now,而非焊死)。
         #  判据用系统类 key(create/submit/update…),**用户挑的日期(startTime/endTime…)不命中**,
         #  且即便对不上样例也只当参数、绝不被 now 覆盖。用户真选的日期另经 match_label 跨格式对样例命名。
-        sys_time = label is None and _is_system_timestamp(key, sv)
-        const = sys_time or internal
+        # A system-like key plus a 13-digit stamp is not enough to hide the
+        # leaf. Edit writes reuse the record's create/update time; whether that
+        # stamp is the request's own "now" is decided later with proximity.
+        const = internal
         is_param = bool(label is not None or (not const and sv != ""))
         conf = _field_confidence(label, confident, key, is_param)
         control = structural.get(i)
@@ -2373,7 +2375,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                         if str((control or {}).get("op") or "").lower() == "snapshot"
                         else None
                     ),
-                    "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
+                    "system_value": False})
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):
         pref = ap + "["

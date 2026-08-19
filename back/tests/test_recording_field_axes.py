@@ -10,6 +10,7 @@ from dano.execution.page.flow_spec import (
     flow_spec_to_client,
     to_flow_spec,
 )
+from dano.execution.page.recording_field_evidence import bind_field_evidence
 
 
 PAGE = {"path": "/desk/document/new"}
@@ -1073,3 +1074,411 @@ def test_page_rule_does_not_steal_option_projection_or_formula() -> None:
     assert params["itemCode"].source_kind == "selected_option_field"
     assert params["lineAmount"].source_kind == "computed"
     assert params["qty"].source_kind == "user_input"
+
+
+def _snapshot_control(
+    *,
+    path: str,
+    label: str,
+    aliases: list[str],
+    kind: str,
+    value: str,
+    in_dialog: bool | None = None,
+) -> dict:
+    """Unbound form snapshot: the recorder saw the control, not a typed fill."""
+    return {
+        "label": label,
+        "value": value,
+        "control_kind": kind,
+        "field_aliases": aliases,
+        "required": False,
+        "read_only": False,
+        "wire_path": path if path.startswith(("body.", "query.")) else f"body.{path}",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        **({
+            "in_dialog": in_dialog,
+            "surface": "dialog" if in_dialog else "page",
+        } if in_dialog is not None else {}),
+    }
+
+
+def test_select_and_id_values_are_not_arithmetic_operands() -> None:
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/sale-order/update",
+        params=[
+            ParamField(
+                path="status", key="status", label="状态", value="10",
+                source_kind="form_option", type="enum",
+                evidence=[{"kind": "page_control", "control_kind": "select", "editable": True}],
+            ),
+            ParamField(
+                path="saleUserId", key="saleUserId", label="销售人员", value="100",
+                source_kind="form_option", type="enum",
+                evidence=[{"kind": "page_control", "control_kind": "select", "editable": True}],
+            ),
+            ParamField(
+                path="discountPercent", key="discountPercent", label="优惠率", value="110",
+            ),
+            ParamField(
+                path="accountId", key="accountId", value="2",
+                source_kind="api_option", type="enum",
+            ),
+            ParamField(
+                path="items[0].productUnitId", key="productUnitId", value="3",
+                source_kind="api_option", type="enum",
+            ),
+            ParamField(path="items[0].count", key="count", value="1"),
+            ParamField(
+                path="creator", key="creator", value="1",
+                source_kind="previous_response",
+            ),
+            ParamField(
+                path="productUnitNameId", key="productUnitNameId", value="2",
+                source_kind="previous_response",
+            ),
+        ],
+    )])
+
+    _infer_arithmetic_computed_fields(spec)
+    params = {param.path: param for param in spec.steps[0].params}
+    assert params["discountPercent"].source_kind != "computed"
+    assert params["items[0].count"].source_kind != "computed"
+    assert params["creator"].source_kind == "previous_response"
+
+
+def test_unbound_edit_snapshot_binds_to_write_not_query() -> None:
+    evidence = bind_field_evidence(
+        [
+            {
+                "request_id": "req_query",
+                "method": "GET",
+                "url": "http://example.test/api/doc/page?customerId=8&remark=1",
+                "query": {"customerId": ["8"], "remark": ["1"]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_get", "keep": True},
+            },
+            {
+                "request_id": "req_write",
+                "method": "PUT",
+                "url": "http://example.test/api/doc/update",
+                "post_data": json.dumps({"customerId": 8, "remark": "1"}, ensure_ascii=False),
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_write", "keep": True},
+            },
+        ],
+        [],
+        [
+            _snapshot_control(
+                path="body.customerId", label="客户", aliases=["customerId"],
+                kind="select", value="鲜生",
+            ),
+            _snapshot_control(
+                path="body.remark", label="备注", aliases=["remark"],
+                kind="textarea", value="1",
+            ),
+        ],
+    )
+
+    by_label = {item["label"]: item for item in evidence}
+    assert by_label["客户"]["binding_status"] == "bound"
+    assert by_label["客户"]["request_id"] == "req_write"
+    assert by_label["客户"]["wire_path"] == "body.customerId"
+    assert by_label["备注"]["binding_status"] == "bound"
+    assert by_label["备注"]["request_id"] == "req_write"
+
+
+def test_edit_hydration_keeps_page_labels_and_rejects_false_formulas() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_query",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/api/sale-order/page?customerId=8&status=10",
+                "query": {"customerId": ["8"], "status": ["10"]},
+                "response_status": 200,
+                "response_json": {"data": {"list": [{"id": 39}]}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000000000,
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_detail",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://example.test/api/sale-order/get?id=39",
+                "query": {"id": ["39"]},
+                "response_status": 200,
+                "response_json": {"data": {
+                    "id": 39,
+                    "no": "XSDD20260818000003",
+                    "status": 10,
+                    "customerId": 8,
+                    "remark": "1",
+                    "saleUserId": 100,
+                    "accountId": 2,
+                    "orderTime": 1785513600000,
+                    "createTime": 1787050958000,
+                    "discountPercent": 0,
+                    "depositPrice": 0,
+                    "items": [{
+                        "id": 7, "productId": 3, "count": 1, "productPrice": 5000,
+                        "taxPercent": 13, "taxPrice": 650, "totalPrice": 5650,
+                    }],
+                }},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000001000,
+                "_request_role": {"role": "read_context", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_write",
+                "sequence": 3,
+                "method": "PUT",
+                "url": "http://example.test/api/sale-order/update",
+                "post_data": json.dumps({
+                    "id": 39,
+                    "no": "XSDD20260818000003",
+                    "status": 10,
+                    "customerId": 8,
+                    "remark": "1",
+                    "saleUserId": 100,
+                    "accountId": 2,
+                    "orderTime": 1785513600000,
+                    "createTime": 1787050958000,
+                    "discountPercent": 0,
+                    "depositPrice": 0,
+                    "items": [{
+                        "id": 7, "productId": 3, "count": 1, "productPrice": 5000,
+                        "taxPercent": 13, "taxPrice": 650, "totalPrice": 5650,
+                    }],
+                }, ensure_ascii=False),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000002000,
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+        ],
+        field_evidence=[
+            _snapshot_control(
+                path="body.customerId", label="客户", aliases=["customerId"],
+                kind="select", value="鲜生",
+            ),
+            _snapshot_control(
+                path="body.remark", label="备注", aliases=["remark"],
+                kind="textarea", value="1",
+            ),
+            _snapshot_control(
+                path="body.orderTime", label="订单时间", aliases=["orderTime"],
+                kind="date", value="2026-07-28",
+            ),
+            _snapshot_control(
+                path="body.discountPercent", label="优惠率", aliases=["discountPercent"],
+                kind="number", value="0",
+            ),
+            _snapshot_control(
+                path="body.items[0].count", label="数量", aliases=["count"],
+                kind="number", value="1",
+            ),
+            _snapshot_control(
+                path="body.items[0].taxPercent", label="税率", aliases=["taxPercent"],
+                kind="number", value="13",
+            ),
+        ],
+    )
+
+    params = {param.path: param for param in next(
+        step for step in spec.steps if (step.method or "").upper() == "PUT"
+    ).params}
+    assert params["customerId"].label == "客户"
+    assert params["customerId"].source_kind == "previous_response"
+    assert params["customerId"].exposed_to_user is True
+    assert params["customerId"].source.get("allow_caller_override") is True
+    assert params["remark"].label == "备注"
+    assert params["remark"].source_kind == "previous_response"
+    assert params["remark"].exposed_to_user is True
+    assert params["orderTime"].label == "订单时间"
+    assert params["orderTime"].source_kind == "previous_response"
+    assert params["createTime"].source_kind != "system_time"
+    assert params["createTime"].source_kind == "previous_response"
+    assert params["discountPercent"].label == "优惠率"
+    assert params["discountPercent"].source_kind != "computed"
+    assert params["discountPercent"].exposed_to_user is True
+    assert params["items[0].count"].label == "数量"
+    assert params["items[0].count"].source_kind != "computed"
+
+
+def _surface_snapshot(*, label: str, aliases: list[str], kind: str, value: str, in_dialog: bool) -> dict:
+    """Recorder snapshot: aliases only, no query./body. wire hint."""
+    return {
+        "label": label,
+        "value": value,
+        "control_kind": kind,
+        "field_aliases": aliases,
+        "required": kind == "date",
+        "read_only": False,
+        "in_dialog": in_dialog,
+        "surface": "dialog" if in_dialog else "page",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+    }
+
+
+def test_page_and_dialog_snapshots_bind_to_query_and_write() -> None:
+    evidence = bind_field_evidence(
+        [
+            {
+                "request_id": "req_query",
+                "method": "GET",
+                "url": "http://example.test/api/doc/page?customerId=8&remark=1",
+                "query": {"customerId": ["8"], "remark": ["1"]},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_get", "keep": True},
+            },
+            {
+                "request_id": "req_write",
+                "method": "PUT",
+                "url": "http://example.test/api/doc/update",
+                "post_data": json.dumps({"customerId": 8, "remark": "1", "orderTime": 1}, ensure_ascii=False),
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "_request_role": {"role": "business_write", "keep": True},
+            },
+        ],
+        [],
+        [
+            _surface_snapshot(
+                label="客户", aliases=["customerId"], kind="select", value="鲜生",
+                in_dialog=False,
+            ),
+            _surface_snapshot(
+                label="客户", aliases=["customerId"], kind="select", value="鲜生",
+                in_dialog=True,
+            ),
+            _surface_snapshot(
+                label="订单时间", aliases=["orderTime"], kind="date", value="2026-07-28",
+                in_dialog=True,
+            ),
+        ],
+    )
+
+    page_customer = next(
+        item for item in evidence
+        if item["label"] == "客户" and item.get("in_dialog") is False
+    )
+    dialog_customer = next(
+        item for item in evidence
+        if item["label"] == "客户" and item.get("in_dialog") is True
+    )
+    assert page_customer["binding_status"] == "bound"
+    assert page_customer["request_id"] == "req_query"
+    assert page_customer["wire_path"] == "query.customerId"
+    assert dialog_customer["binding_status"] == "bound"
+    assert dialog_customer["request_id"] == "req_write"
+    assert dialog_customer["wire_path"] == "body.customerId"
+
+
+def test_query_and_edit_keep_page_labels_and_upstream_defaults() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_query",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://example.test/api/sale-order/page?customerId=8&remark=1",
+                "query": {"customerId": ["8"], "remark": ["1"]},
+                "response_status": 200,
+                "response_json": {"data": {"list": [{"id": 39}]}},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000000000,
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_detail",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://example.test/api/sale-order/get?id=39",
+                "query": {"id": ["39"]},
+                "response_status": 200,
+                "response_json": {"data": {
+                    "id": 39, "customerId": 8, "remark": "1",
+                    "orderTime": 1785513600000, "createTime": 1787050958000,
+                }},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000001000,
+                "_request_role": {"role": "read_context", "keep": True, "confidence": 0.99},
+            },
+            {
+                "request_id": "req_write",
+                "sequence": 3,
+                "method": "PUT",
+                "url": "http://example.test/api/sale-order/update",
+                "post_data": json.dumps({
+                    "id": 39, "customerId": 8, "remark": "1",
+                    "orderTime": 1785513600000, "createTime": 1787050958000,
+                }, ensure_ascii=False),
+                "response_status": 200,
+                "response_json": {"code": 0},
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+                "timestamp": 1788000002000,
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 0.99},
+            },
+        ],
+        field_evidence=[
+            _surface_snapshot(
+                label="客户", aliases=["customerId"], kind="select", value="鲜生",
+                in_dialog=False,
+            ),
+            _surface_snapshot(
+                label="客户", aliases=["customerId"], kind="select", value="鲜生",
+                in_dialog=True,
+            ),
+            _surface_snapshot(
+                label="备注", aliases=["remark"], kind="textarea", value="1",
+                in_dialog=True,
+            ),
+            _surface_snapshot(
+                label="订单时间", aliases=["orderTime"], kind="date", value="2026-07-28",
+                in_dialog=True,
+            ),
+        ],
+    )
+
+    query = next(step for step in spec.steps if (step.method or "").upper() == "GET" and "page" in (step.path or step.url or ""))
+    write = next(step for step in spec.steps if (step.method or "").upper() == "PUT")
+    query_params = {param.path: param for param in query.params}
+    write_params = {param.path: param for param in write.params}
+    assert query_params["query.customerId"].label == "客户"
+    assert query_params["query.customerId"].type == "enum"
+    assert query_params["query.customerId"].exposed_to_user is True
+    assert write_params["customerId"].label == "客户"
+    assert write_params["customerId"].source_kind == "previous_response"
+    assert write_params["customerId"].exposed_to_user is True
+    assert write_params["orderTime"].label == "订单时间"
+    assert write_params["orderTime"].required is True
+    assert write_params["createTime"].source_kind == "previous_response"
+    assert write_params["createTime"].source_kind != "system_time"

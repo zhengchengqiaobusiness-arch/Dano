@@ -260,16 +260,98 @@ def _causal_match(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
     )
 
 
+def _request_role_name(request: dict[str, Any]) -> str:
+    role = request.get("role") or request.get("request_role")
+    nested = request.get("_request_role")
+    if isinstance(nested, dict):
+        role = role or nested.get("role")
+    return str(role or "")
+
+
 def _request_binding_priority(request: dict[str, Any]) -> int:
     """Prefer the business request caused by a form action over background reads."""
-    role = str(request.get("role") or request.get("request_role") or "")
+    role = _request_role_name(request)
     if role in {"business_write", "submit_anchor"}:
         return 3
     if role == "business_get":
         return 2
-    if role in {"read_context", "read_option"}:
+    if role in {"read_context", "read_option", "option", "option_source"}:
         return 1
     return 2 if str(request.get("method") or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"} else 1
+
+
+def _wire_container(wire_path: str) -> str:
+    text = str(wire_path or "")
+    if text.startswith("query."):
+        return "query"
+    if text.startswith("body."):
+        return "body"
+    return ""
+
+
+def _evidence_container_hint(evidence: dict[str, Any]) -> str:
+    """Honor an already recorded query./body. path before request-role priority."""
+    for key in ("wire_path", "path"):
+        text = str(evidence.get(key) or "").strip().removeprefix("request.")
+        container = _wire_container(text)
+        if container:
+            return container
+    return ""
+
+
+def _evidence_surface(evidence: dict[str, Any]) -> str:
+    if evidence.get("in_dialog") is True:
+        return "dialog"
+    if evidence.get("in_dialog") is False:
+        return "page"
+    surface = str(evidence.get("surface") or "").strip().lower()
+    if surface in {"dialog", "modal", "drawer"}:
+        return "dialog"
+    if surface in {"page", "list", "filter"}:
+        return "page"
+    return ""
+
+
+def _narrow_candidates_by_surface(
+    evidence: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    request_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep list filters on the query request and dialog fields on the write.
+
+    The same leaf (customerId, remark) commonly exists on both the search GET
+    and the later edit PUT. Request-role priority alone steals every list-page
+    label onto the write and leaves the query contract unnamed.
+    """
+    if not candidates:
+        return candidates
+    hint = _evidence_container_hint(evidence)
+    if hint:
+        narrowed = [
+            item for item in candidates
+            if _wire_container(str(item.get("wire_path") or "")) == hint
+        ]
+        if narrowed:
+            return narrowed
+    surface = _evidence_surface(evidence)
+    if surface == "dialog":
+        narrowed = [
+            item for item in candidates
+            if _wire_container(str(item.get("wire_path") or "")) == "body"
+            or _request_binding_priority(
+                request_by_id.get(str(item.get("request_id") or ""), {}),
+            ) >= 3
+        ]
+        if narrowed:
+            return narrowed
+    if surface == "page":
+        narrowed = [
+            item for item in candidates
+            if _wire_container(str(item.get("wire_path") or "")) == "query"
+        ]
+        if narrowed:
+            return narrowed
+    return candidates
 
 
 def _timestamp(value: Any) -> float | None:
@@ -419,7 +501,13 @@ def bind_field_evidence(
             # business submission. Prefer the business request before using
             # action timing; otherwise a textarea value can be bound to an
             # unrelated helper request's pageNo merely because both equal 1.
-            preferred_candidates = value_candidates
+            request_by_id = {
+                str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
+                for request in requests
+            }
+            preferred_candidates = _narrow_candidates_by_surface(
+                evidence, value_candidates, request_by_id,
+            )
             if preferred_candidates:
                 priority = max(int(item["request_priority"]) for item in preferred_candidates)
                 preferred_candidates = [
@@ -440,9 +528,28 @@ def bind_field_evidence(
                     aligned = [item for item in aligned if float(item["time_delta"]) == nearest]
             if len({(item["request_id"], item["wire_path"]) for item in aligned}) == 1:
                 candidates = aligned
+        request_by_id = {
+            str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
+            for request in requests
+        }
         if candidates:
             best_score = max(int(item["match_score"]) for item in candidates)
             candidates = [item for item in candidates if int(item["match_score"]) == best_score]
+            # The same leaf often appears on a list query and the later write.
+            # Prefer the form surface (list vs dialog, query. vs body.) before
+            # falling back to write-over-query priority for unhinted snapshots.
+            candidates = _narrow_candidates_by_surface(evidence, candidates, request_by_id)
+            for item in candidates:
+                item["request_priority"] = _request_binding_priority(
+                    request_by_id.get(str(item.get("request_id") or ""), {}),
+                )
+            best_priority = max(int(item["request_priority"]) for item in candidates)
+            preferred = [
+                item for item in candidates
+                if int(item["request_priority"]) == best_priority
+            ]
+            if len({(item["request_id"], item["wire_path"]) for item in preferred}) == 1:
+                candidates = preferred
         exact_causal = [item for item in candidates if item["causal_match"]]
         ordered_causal = [
             item for item in candidates
@@ -465,6 +572,9 @@ def bind_field_evidence(
                 if aliases and candidates[0]["match_score"]
                 else "unique_value_same_scope_causal_order"
             )
+        elif len({(item["request_id"], item["wire_path"]) for item in candidates}) == 1:
+            selected = candidates
+            binding_method = "exact_alias_preferred_business_request"
         else:
             selected = []
             binding_method = ""

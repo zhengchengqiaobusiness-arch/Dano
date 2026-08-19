@@ -163,6 +163,16 @@ plausible. `category` is not an editable field axis and must not be submitted.
 - Extra request leaves with no control, no upstream, and no formula stay `unknown`. Show them
   as 未知. Keep the recorded wire value so the original request still works. Do not invent
   `constant`, `session`, or `page_default` from a field name.
+- An option API is the source of a select only when that control used it: the selected
+  value or label appears in that response, and the request is the one that populated the
+  control. A page-load `simple-list` for tenants, users, or products is not automatically
+  every nearby dropdown.
+- The same visible label on a list filter and in an add/edit dialog is two fields. Keep
+  both surfaces. Bind the list control to the query request and the dialog control to the
+  write. Do not let one steal the other's name, type, requiredness, or option list.
+- Numeric coincidence is not a formula. Do not mark `computed` from IDs, status codes, or
+  unrelated selects just because three numbers happen to add or multiply. Python only keeps
+  sample-proven arithmetic between quantity/money operands.
 
 ## Assign executable sources
 
@@ -255,8 +265,11 @@ new dependency types.
   object; never expose the dynamic internal keys or require the caller to construct that object.
 - For an edit/update action, an earlier record read may hydrate the later write only when the same
   record identity and several exact same-path values are observed in both response and request.
-  Keep the record identity as the caller selector, bind unchanged fields from that response, and
-  leave genuinely edited fields caller-owned. One coincidental equal value is not hydration proof.
+  Keep the record identity as the caller selector. Unchanged editable fields keep that response as
+  their initial value and stay caller-overridable; their page label, type, requiredness, and
+  option list stay on the field. Leave genuinely edited fields caller-owned. One coincidental
+  equal value is not hydration proof. A record create/update timestamp copied from the detail
+  response is upstream data, not `generated`/`now_ms`.
 - Prefer exact candidates in `heuristic_candidates.response_key_maps` only after checking them
   against captured source rows and target keys.
 - Never confirm a dependency or claim machine verification during recording analysis.
