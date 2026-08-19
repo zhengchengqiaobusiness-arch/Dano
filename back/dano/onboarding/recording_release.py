@@ -217,9 +217,20 @@ def _passed_verification(spec: FlowSpec, verification_id: str, *, kind: str) -> 
     return bool(record and record.get("status") == "passed" and record.get("kind") == kind)
 
 
+def _unverified_target_ids(spec: FlowSpec, *kinds: str) -> set[str]:
+    return {
+        str(item.get("target_id") or "")
+        for item in (spec.meta or {}).get("unverified") or []
+        if isinstance(item, dict) and str(item.get("target_kind") or "") in kinds
+    }
+
+
 def _active_link_issues(spec: FlowSpec, capability_id: str = "") -> list[ReleaseIssue]:
     issues: list[ReleaseIssue] = []
+    skipped = _unverified_target_ids(spec, "dependency", "dependency_candidate")
     for link in spec.links:
+        if link.link_id in skipped:
+            continue
         verification_id = str((link.meta or {}).get("verification_id") or "")
         if not (
             link.confirmed
@@ -310,7 +321,7 @@ def _dynamic_structure_issues(spec: FlowSpec, capability: FlowCapability) -> lis
                 capability_id=capability.capability_id,
                 step_id=link.target_step_id,
                 wire_path=container,
-                suggested_operations=("reconcile_dynamic_structure",),
+                suggested_operations=(),
             ))
         prefix = container.removeprefix("body.").rstrip(".*") + "."
         stale_fields = [
@@ -326,7 +337,7 @@ def _dynamic_structure_issues(spec: FlowSpec, capability: FlowCapability) -> lis
                 capability_id=capability.capability_id,
                 step_id=link.target_step_id,
                 wire_path=container,
-                suggested_operations=("reconcile_dynamic_structure",),
+                suggested_operations=(),
             ))
     return issues
 
@@ -412,7 +423,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                     field_id=str(param.field_id or ""),
                     wire_path=str(param.path or ""),
                     evidence_refs=_param_evidence_refs(param),
-                    suggested_operations=("reconcile_capability_membership",),
+                    suggested_operations=(),
                 ))
             if is_write and step_id in execute_step_ids and _param_exposed_to_caller(param):
                 state = str((param.source or {}).get("required_state") or "")
@@ -451,7 +462,7 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
                     field_id=str(param.field_id or ""),
                     wire_path=str(param.path or ""),
                     evidence_refs=_param_evidence_refs(param),
-                    suggested_operations=("submit_recording_repair",),
+                    suggested_operations=(),
                 ))
     return issues
 
@@ -459,7 +470,10 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
 def _write_verification_issues(spec: FlowSpec, capability: FlowCapability) -> list[ReleaseIssue]:
     steps = {step.step_id: step for step in spec.steps}
     issues: list[ReleaseIssue] = []
+    skipped = _unverified_target_ids(spec, "write_verify")
     for step_id in _member_step_ids(capability):
+        if step_id in skipped:
+            continue
         step = steps.get(step_id)
         if step is None or (step.method or "GET").upper() in _READ_METHODS:
             continue
@@ -497,7 +511,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             message="capability 必须有且仅有一个绑定 call 节点的公共 execute anchor",
             resolver="machine_repair",
             capability_id=selected.capability_id,
-            suggested_operations=("reconcile_capability_membership",),
+            suggested_operations=(),
         ))
 
     illegal = sorted({ref.usage for ref in selected.request_refs if ref.usage not in _LEGAL_USAGES})
@@ -508,7 +522,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             message=f"capability 包含非法 request usage: {illegal}",
             resolver="machine_repair",
             capability_id=selected.capability_id,
-            suggested_operations=("reconcile_capability_membership",),
+            suggested_operations=(),
         ))
 
     report = validate_flow_spec(scoped)
@@ -519,7 +533,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             message=str(item),
             resolver="machine_repair",
             capability_id=selected.capability_id,
-            suggested_operations=("submit_recording_repair",),
+            suggested_operations=(),
         ) for item in (report.get("errors") or ["capability_validation failed"]))
 
     compiled, build_errors = flow_spec_to_api_request(scoped)
@@ -530,7 +544,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             message=str(item),
             resolver="machine_repair",
             capability_id=selected.capability_id,
-            suggested_operations=("submit_recording_repair",),
+            suggested_operations=(),
         ) for item in (build_errors or ["FlowSpec 无法编译"]))
     else:
         issues.extend(_field_issues(scoped, selected, compiled))
@@ -567,7 +581,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             message="；".join(dict.fromkeys(dry_run_details)) or "dry run 未通过",
             resolver="machine_repair",
             capability_id=selected.capability_id,
-            suggested_operations=("submit_recording_repair",),
+            suggested_operations=(),
         ))
 
     unique_issues = {

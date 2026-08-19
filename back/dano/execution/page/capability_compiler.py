@@ -215,12 +215,55 @@ def _verified_fact_check_request_id(spec: FlowSpec, anchor: FlowStep) -> str:
     return ""
 
 
+def _normalized_request_path(url_or_path: str) -> str:
+    raw = str(url_or_path or "").strip()
+    if not raw:
+        return ""
+    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
+    path = (path or raw.split("?", 1)[0]).strip()
+    return path.rstrip("/") or path
+
+
+def _step_matching_request(
+    spec: FlowSpec,
+    request_id: str,
+    by_request: dict[str, FlowStep],
+    by_step: dict[str, FlowStep],
+) -> FlowStep | None:
+    if request_id.startswith("__step__:"):
+        return by_step.get(request_id.removeprefix("__step__:"))
+    step = by_request.get(request_id)
+    if step is not None:
+        return step
+    fact = next(
+        (
+            item for item in spec.request_facts.requests
+            if str(item.request_id or "") == request_id
+        ),
+        None,
+    )
+    if fact is None:
+        return None
+    method = (fact.method or "GET").upper()
+    path = _normalized_request_path(fact.path or fact.url)
+    return next(
+        (
+            item for item in spec.steps
+            if (item.method or "").upper() == method
+            and _normalized_request_path(item.path or item.url) == path
+        ),
+        None,
+    )
+
+
 def _compiled_nodes_from_refs(
     refs: list[CapabilityRequestRef],
     anchor_step_id: str,
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     for index, ref in enumerate(refs, 1):
+        if ref.usage == "option_source" and not ref.step_id:
+            continue
         node = {
             "id": f"call_{index}",
             "type": "call",
@@ -430,13 +473,12 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         for request_id in _option_source_request_ids(current, member_steps, plan):
             if request_id in occupied_ids:
                 continue
-            step_only_id = request_id.removeprefix("__step__:") if request_id.startswith("__step__:") else ""
-            option_step = by_step.get(step_only_id) if step_only_id else by_request.get(request_id)
+            option_step = _step_matching_request(current, request_id, by_request, by_step)
             refs.append(_request_ref(
                 current,
                 option_step,
                 usage="option_source",
-                request_id="" if step_only_id else request_id,
+                request_id="" if request_id.startswith("__step__:") else request_id,
             ))
             occupied_ids.add(request_id)
         fact_check_request_id = _verified_fact_check_request_id(current, anchor)

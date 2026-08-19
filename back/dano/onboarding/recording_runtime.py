@@ -19,8 +19,16 @@ from dano.onboarding.recording_release import (
     evaluate_recording_release,
 )
 from dano.onboarding.recording_verify import (
+    AUTH_EXPIRED_MESSAGE,
+    FLOW_GROUP_KEY,
+    _REPLAY_ISSUE_CODES,
     apply_recorded_evidence_fixes,
+    assign_unassigned_internal_steps,
     finalize_verification_state,
+    machine_repair_disposition,
+    mark_issues_unverified,
+    select_preflight_probe,
+    replay_auth_failed,
     verification_report,
 )
 from dano.onboarding.recording_workflow import (
@@ -36,6 +44,8 @@ from dano.onboarding.recording_workflow import (
 PiProvider = Callable[[bool], Awaitable[Any]]
 Materializer = Callable[[bool, PipelineContext], Awaitable[FlowSpec]]
 Publisher = Callable[[FlowSpec, dict[str, Any], PipelineContext], Awaitable[dict[str, Any]]]
+ReplayExecutor = Callable[[dict[str, Any], FlowSpec], Awaitable[dict[str, Any]]]
+_CAPABILITY_REPAIR_BUDGET = 2
 _PROTOCOL_ATTEMPTS = 3
 _SUBMISSION_TOOLS = {
     "plan": "submit_recording_plan",
@@ -246,6 +256,17 @@ def _todo_issue(todo: dict[str, Any], spec: FlowSpec | None = None) -> WorkflowI
         target["field_label"] = field_label
     if step_id:
         target["step_id"] = step_id
+    allowed_operations = [
+        str(value)
+        for value in (
+            todo.get("suggested_operations")
+            or todo.get("completion_ops")
+            or [todo.get("completion_op") or todo.get("suggested_tool")]
+        )
+        if value
+    ]
+    if resolver == "machine_repair" and machine_repair_disposition(code) != "skill":
+        allowed_operations = []
     return WorkflowIssue(
         issue_id=issue_id or f"{code}:{step_id or wire_path or 'draft'}",
         code=code,
@@ -253,15 +274,7 @@ def _todo_issue(todo: dict[str, Any], spec: FlowSpec | None = None) -> WorkflowI
         resolver=resolver,
         target=target,
         evidence=[dict(todo)],
-        allowed_operations=[
-            str(value)
-            for value in (
-                todo.get("suggested_operations")
-                or todo.get("completion_ops")
-                or [todo.get("completion_op") or todo.get("suggested_tool")]
-            )
-            if value
-        ],
+        allowed_operations=allowed_operations,
     )
 
 
@@ -445,6 +458,49 @@ def _capability_repair_prompt(
     )
 
 
+def _dispatchable_issue(issue: WorkflowIssue) -> bool:
+    if issue.resolver == "machine_repair":
+        return machine_repair_disposition(issue.code) == "skill"
+    return issue.resolver in {"collect_evidence", "operator"}
+
+
+def _record_capability_verification(
+    spec: FlowSpec,
+    group_key: str,
+    *,
+    status: str,
+    resolved: list[str],
+    pending: list[str],
+    reason: str,
+) -> None:
+    existing = dict((spec.meta or {}).get("capability_verification") or {})
+    existing[group_key] = {
+        "status": status,
+        "resolved": list(resolved),
+        "pending": list(pending),
+        "reason": reason,
+    }
+    spec.meta = {**(spec.meta or {}), "capability_verification": existing}
+
+
+async def _default_replay_executor(request: dict[str, Any], spec: FlowSpec) -> dict[str, Any]:
+    from dano.execution.page.replay import replay_request
+    from dano.execution.page.request_capture import extract_auth_headers
+    from dano.execution.page.sessions import load_session_state
+    from dano.infra.token_store import get_token_headers, normalize_headers
+
+    headers = normalize_headers(await get_token_headers(spec.tenant, spec.subsystem))
+    headers = normalize_headers({
+        **headers,
+        **extract_auth_headers(request.get("headers")),
+    })
+    return await replay_request(
+        request,
+        auth_headers=headers,
+        storage_state=load_session_state(spec.tenant, spec.subsystem),
+    )
+
+
 @dataclass
 class ProductionRecordingServices:
     """Bridge stable FlowSpec/Pi modules into the one workflow runtime."""
@@ -453,6 +509,7 @@ class ProductionRecordingServices:
     materializer: Materializer
     pi_provider: PiProvider
     publisher: Publisher
+    replay_executor: ReplayExecutor | None = None
 
     def pipeline_services(self) -> RecordingPipelineServices:
         return RecordingPipelineServices(
@@ -477,22 +534,80 @@ class ProductionRecordingServices:
     ) -> tuple[dict[str, Any], tuple[WorkflowIssue, ...]]:
         context.ensure_active()
         spec = apply_recorded_evidence_fixes(FlowSpec.model_validate(draft))
+        spec = assign_unassigned_internal_steps(spec)
         spec, report = finalize_verification_state(
             spec,
             rounds=0,
             max_rounds=0,
         )
-        if report["todos"]:
-            return spec.model_dump(mode="json"), _dedupe_workflow_issues(tuple(
-                _todo_issue(todo, spec) for todo in report["todos"]
-            ))
-        decision = evaluate_recording_release(spec)
+        spec = assign_unassigned_internal_steps(spec)
+        report = verification_report(spec)
+        preflight = await self._preflight_replay_health(spec)
+        verification_run = dict((spec.meta or {}).get("verification_run") or {})
+        verification_run["preflight"] = preflight
+        verification_run["summary"] = {
+            **dict(verification_run.get("summary") or {}),
+            "by_capability": dict((spec.meta or {}).get("capability_verification") or {}),
+        }
+        spec.meta = {**(spec.meta or {}), "verification_run": verification_run}
+
         issues = _dedupe_workflow_issues(tuple(
-            _workflow_issue(issue, spec)
-            for capability in decision.capabilities
-            for issue in capability.issues
+            _todo_issue(todo, spec) for todo in report.get("todos") or []
         ))
+        if not issues:
+            decision = evaluate_recording_release(spec)
+            issues = _dedupe_workflow_issues(tuple(
+                _workflow_issue(issue, spec)
+                for capability in decision.capabilities
+                for issue in capability.issues
+            ))
+
+        if preflight.get("auth_failed"):
+            blocked = [
+                issue.model_copy(update={
+                    "resolver": "external_blocked",
+                    "message": AUTH_EXPIRED_MESSAGE,
+                })
+                for issue in issues
+                if issue.code in _REPLAY_ISSUE_CODES
+            ]
+            if not blocked:
+                blocked = [
+                    WorkflowIssue(
+                        issue_id="replay_auth_expired",
+                        code="replay_auth",
+                        message=AUTH_EXPIRED_MESSAGE,
+                        resolver="external_blocked",
+                        target={"kind": "session"},
+                    )
+                ]
+            return spec.model_dump(mode="json"), _dedupe_workflow_issues(tuple(blocked))
         return spec.model_dump(mode="json"), issues
+
+    async def _preflight_replay_health(self, spec: FlowSpec) -> dict[str, Any]:
+        probe = select_preflight_probe(spec)
+        if probe is None:
+            return {"skipped": True, "ok": True}
+        executor = self.replay_executor or _default_replay_executor
+        try:
+            result = await executor(probe, spec)
+        except Exception as exc:  # noqa: BLE001 - network failures must not block Skill
+            return {
+                "ok": True,
+                "auth_failed": False,
+                "error": type(exc).__name__,
+                "path": str(probe.get("path") or probe.get("url") or ""),
+            }
+        status = result.get("status")
+        body = result.get("response") if "response" in result else result.get("body")
+        failed = replay_auth_failed(status, body)
+        return {
+            "ok": not failed,
+            "auth_failed": failed,
+            "status": status,
+            "path": str(probe.get("path") or probe.get("url") or ""),
+            "request_id": str(probe.get("request_id") or ""),
+        }
 
     async def repair(
         self,
@@ -547,12 +662,13 @@ class ProductionRecordingServices:
             report.applied.append(issue.issue_id)
             report.resolved.append(issue.issue_id)
         remaining = still_open
+        dispatchable = tuple(issue for issue in remaining if _dispatchable_issue(issue))
 
-        if remaining:
+        if dispatchable:
             try:
                 spec = await self._repair_capability_groups(
                     spec,
-                    tuple(remaining),
+                    dispatchable,
                     kept_capabilities,
                     report,
                     context,
@@ -560,7 +676,7 @@ class ProductionRecordingServices:
             except WorkflowCancelled:
                 raise
             except Exception:  # noqa: BLE001 - protocol errors keep the current draft
-                report.still_pending.extend(issue.issue_id for issue in remaining)
+                report.still_pending.extend(issue.issue_id for issue in dispatchable)
         else:
             report.skipped.extend(
                 issue.issue_id for issue in issues if issue.issue_id not in report.applied
@@ -592,11 +708,40 @@ class ProductionRecordingServices:
         pi = await self.pi_provider(False)
         for index, (capability, group_issues) in enumerate(groups, start=1):
             context.ensure_active()
+            group_key = (
+                capability.capability_id
+                if capability is not None
+                else FLOW_GROUP_KEY
+            )
             label = (
                 f"「{capability.title or capability.name}」"
                 if capability is not None
                 else "整体流程"
             )
+            dispatched = int((context.capability_rounds or {}).get(group_key) or 0)
+            if dispatched >= _CAPABILITY_REPAIR_BUDGET:
+                mark_issues_unverified(
+                    spec,
+                    group_issues,
+                    reason="能力修复轮次已用尽",
+                )
+                report.still_pending.extend(issue.issue_id for issue in group_issues)
+                _record_capability_verification(
+                    spec,
+                    group_key,
+                    status="blocked",
+                    resolved=[],
+                    pending=[issue.issue_id for issue in group_issues],
+                    reason="能力修复轮次已用尽",
+                )
+                await context.record(WorkflowActivity(
+                    step=WorkflowStep.RESOLVING,
+                    round=context.current_round,
+                    status="blocked",
+                    label=f"能力{label}已用尽 {_CAPABILITY_REPAIR_BUDGET} 轮修复预算，已标为未验证",
+                ))
+                continue
+            context.capability_rounds[group_key] = dispatched + 1
             await context.record(WorkflowActivity(
                 step=WorkflowStep.RESOLVING,
                 round=context.current_round,
@@ -629,6 +774,14 @@ class ProductionRecordingServices:
                 raise
             except Exception as exc:  # noqa: BLE001 - one capability must not sink the rest
                 report.still_pending.extend(issue.issue_id for issue in group_issues)
+                _record_capability_verification(
+                    spec,
+                    group_key,
+                    status="blocked",
+                    resolved=[],
+                    pending=[issue.issue_id for issue in group_issues],
+                    reason=str(exc),
+                )
                 await context.record(WorkflowActivity(
                     step=WorkflowStep.RESOLVING,
                     round=context.current_round,
@@ -664,6 +817,26 @@ class ProductionRecordingServices:
                 report.applied.append(f"capability_repair:{group_name}")
             elif not changed and not resolved_now:
                 report.skipped.append(f"pi_repair:{group_name}")
+            pending_ids = [
+                issue.issue_id for issue in group_issues if issue.issue_id not in resolved_now
+            ]
+            if not pending_ids:
+                verification_status = "verified"
+                verification_reason = ""
+            elif resolved_now:
+                verification_status = "partially_verified"
+                verification_reason = "本组仍有未关闭问题"
+            else:
+                verification_status = "blocked"
+                verification_reason = "本组问题仍未关闭"
+            _record_capability_verification(
+                spec,
+                group_key,
+                status=verification_status,
+                resolved=resolved_now,
+                pending=pending_ids,
+                reason=verification_reason,
+            )
             await context.record(WorkflowActivity(
                 step=WorkflowStep.RESOLVING,
                 round=context.current_round,
@@ -692,6 +865,7 @@ class ProductionRecordingServices:
         verification = {
             "enabled": context.machine_verification,
             "status": "passed" if context.machine_verification else "skipped_by_operator",
+            "capability_verification": dict((spec.meta or {}).get("capability_verification") or {}),
         }
         publishable_spec.meta = {
             **(publishable_spec.meta or {}),

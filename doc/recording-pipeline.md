@@ -96,15 +96,12 @@ flowchart TB
 
     D5 --> E1 --> E2 --> E3 --> E4 --> E5 --> E6
 
-    subgraph P6["阶段六：能力编译与存档"]
-        F1["代码·compile_capabilities<br/>业务锚点映射到真实步骤"]
-        F2["代码·名称/锚点不重复<br/>类型符合真实读写"]
-        F3["代码·依赖图与 option_source / fact_check"]
-        F4["代码·response_binding / links"]
-        F5["产物·标准 FlowSpec<br/>写入 recording-result 历史"]
+    subgraph P6["阶段六：存档（不再二次编译）"]
+        F1["代码·persist_stage_six<br/>快照阶段五已编译 FlowSpec"]
+        F5["产物·recording-result 历史<br/>空能力停在可编辑，不发布"]
     end
 
-    E6 --> F1 --> F2 --> F3 --> F4 --> F5
+    E6 --> F1 --> F5
 
     subgraph P7["阶段七：机器验证"]
         G0{"代码·机器验证开关"}
@@ -236,7 +233,7 @@ flowchart TB
   - `workflow_submit` → `submit_candidate`
   - 其他有角色的业务请求 → `business_request`
 - `_on_capture_count`：相对上次已分析请求数累计 ≥ 15 → `request_batch`
-- 同时只跑一个 `_drain_live`。忙时只记住**第一个**未处理原因，不并行开第二轮
+- 同时只跑一个 `_drain_live`。忙时保留优先级更高的原因（`submit_candidate` / `final_request_tail` 高于 `request_batch`），不并行开第二轮
 - 前端每 1 / 每 5 个请求额外推一次录制进度，这只更新 UI，不单独唤醒 Skill
 
 ### 2. 代码处理 · Pi 隔离
@@ -247,14 +244,14 @@ flowchart TB
 - `noTools: "builtin"`，只注册录制工具
 - 实时阶段工具白名单：`get_recording_state`、`get_recording_delta`、`submit_recording_plan`、`ask_operator`
 - `analysis_phase` 仅允许 `base_state_analysis` / `request_batch` / `final_request_tail`
-- 提交预算默认 2 次；接受后 `abort` 结束本轮
+- 提交预算默认 2 次；已存下 `semantic_plan.capabilities` 即本轮提交成功，字段 op 的 `must_retry` 不吞掉计划。接受后 `abort` 结束本轮
 
 ### 3–8. 识别 Skill 处理
 
 Skill 内部顺序（必须整包思考，不能只看本批新增）：
 
 1. 读 `goal_text`，用 `set_goal` 固化公开能力标题顺序。
-2. `get_recording_state`，再按 `since_seq` 翻 `get_recording_delta` 直到 `has_more=false`。
+2. `get_recording_state`（字段证据取最新切片，请求投影优先 keep/身份/业务锚点），再按 `since_seq` 翻 `get_recording_delta`（含本批 `field_evidence`）直到 `has_more=false`。`final_request_tail` 从 `since_seq=0` 回翻。
 3. 判定请求角色：`auth / support / option / context / business_read / business_write`。
 4. 对字段各轴独立判断：名称、类型、必填、枚举、来源。不得互相覆盖。
 5. 判定来源：`caller_input / constant / session / context / response_binding / computed / generated`。不得擦掉代码已绑定的 origin。
@@ -305,29 +302,29 @@ Skill 内部顺序（必须整包思考，不能只看本批新增）：
 
 ### 内部顺序（代码，尾部一轮含 Skill）
 
-1. **停止并分析**：`RecordingWorkflow.finish` → `SelfHealingPipeline` seed=`recording`。
-2. **排空**：`flush_recording`、`pause_recording`，等待在途 `_drain_live`。
-3. **final_request_tail**（代码触发 + Skill 执行）：同一 Pi、同一 Skill，再提交一次当前完整能力计划。缺提交则本轮协议失败。
+1. **停止并分析**：`RecordingWorkflow.finish` 立刻把 UI 打成「正在完成尾部分析并冻结录制事实」，然后 `SelfHealingPipeline` seed=`recording`。
+2. **排空**：`flush_recording`、`pause_recording`，等待在途 `_drain_live`。在途批次失败不阻断冻结。
+3. **final_request_tail**（代码强制触发 + 同一 Skill）：再提交一次当前完整能力计划。本轮 `since_seq` 允许从 0 回翻。缺提交则阶段五协议失败，不继续物化。
 4. **冻结**：页面事件、HAR、字段证据、枚举、登录态（`save_session` → `back/.dano-sessions`）。
-5. **基础 FlowSpec**：`to_flow_spec(...)`。网络角色由 `classify_network_request` 确定性分类。
-6. **重放 LiveNotebook**：`LiveNotebook.apply_to(spec)`。实时结论只能加速，不能自证。失去证据的结论不得进入正式草稿。无能力则 `meta.capability_model.status = "missing_semantic_plan"`，代码不兜底造能力。
+5. **基础 FlowSpec**：`to_flow_spec(..., request_role_overrides=Skill 已接受的 keep/角色)`。分类器不再单独覆盖 Skill 已 keep 的业务读。同一 path 但记录身份不同的 GET（如 `id=36` / `id=37`）分别物化。
+6. **重放 LiveNotebook**：`LiveNotebook.apply_to(spec)`。`compile_capabilities` **在这一步完成**，不是阶段六再编一次。实时结论只能加速，不能自证。失去证据的结论不得进入正式草稿。无能力则 `meta.capability_model.status = "missing_semantic_plan"`，代码不兜底造能力。
 
 实现：`recording_gateway._freeze_capture`、`_materialize`；`CanonicalRecordingRuntime.prepare`。
+
+实时 `capability_count` 在物化前读 `semantic_plan.capabilities`，不是 `spec.capabilities`（实时阶段本来就不会物化能力）。
 
 ---
 
 ## 阶段六：能力编译与存档
 
-全程代码。输入是阶段五冻结事实 + 已接受 semantic_plan。
+全程代码。输入是阶段五已经编译好的 FlowSpec。阶段六**不再第二次** `compile_capabilities`，只把阶段五产物写入历史。
 
 ### 内部顺序
 
-1. `compile_capabilities`：把 Skill 选的业务锚点映射到真实步骤。
-2. 约束：能力名不重复、执行锚点不重复、kind 符合真实读写。
-3. 依赖图：已确认依赖算出前置顺序，附加 `option_source`、`fact_check`。
-4. 编排：`response_binding`、`links`、`structure_links`。
-5. **产物**：标准 FlowSpec（完整能力、字段、依赖、节点顺序）。
-6. **立刻存档**（无论机器验证开或关）：`SelfHealingPipeline` 在 `prepare` 之后、验证/发布之前调用 `persist_stage_six` → `asset_drafts`，`asset_key=recording-result:{action}`。前端收 `recording_result_saved`，准备页历史出现该条。阶段七只改内存工作副本，不回写这份阶段六存档。
+1. 阶段五 `apply_to` / `merge_live_agent_state` 已经跑过 `compile_capabilities`（锚点映射、读写家族、依赖图、links）。
+2. 依赖环上的能力写入 `errors` 且**不进入** `compiled`；kind 与结构动词不一致时只 warning，读写家族不匹配才拒绝。
+3. **立刻存档**（无论机器验证开或关）：`SelfHealingPipeline` 在 `prepare` 之后、验证/发布之前调用 `persist_stage_six` → `asset_drafts`，`asset_key=recording-result:{action}`。前端收 `recording_result_saved`，准备页历史出现该条。阶段七只改内存工作副本，不回写这份阶段六存档。
+4. `draft.capabilities` 为空则停在可编辑，文案「尚未生成可发布能力」，不发布。
 
 此后准备页：
 
@@ -350,14 +347,18 @@ Skill 内部顺序（必须整包思考，不能只看本批新增）：
 文件：`recording_workflow.py`、`recording_verify.py`、`recording_runtime.py`
 
 1. **代码 · check**  
-   `apply_recorded_evidence_fixes`（只用已有证据补 unknown，不重编阶段一～六）→ `finalize_verification_state`（消费执行器 `verification_id`，Pi 超时也不丢）→ `verification_report`。  
-   待办类型：`dependency`、`dependency_candidate`、`write_verify`、`enum`、`release_issue`、以及需真人的 `required_axis_unconfirmed` / `field_source_unknown`。
+   `apply_recorded_evidence_fixes`（只用已有证据补 unknown，不重编阶段一～六；录制空值且无 fill/select/pick 时写成 FlowSpec `user_input`，Skill 侧对应 `caller_input`）→ 未归属步骤分配（确认依赖进能力 `preflight`，选项源进 `option_source`，其余标 `meta.internal_step_ids`，**不新建公开能力**）→ `finalize_verification_state`（消费执行器 `verification_id`，Pi 超时也不丢；`compile_capabilities` 重跑）。  
+   回放健康预检：在能力闭包 `execute`/`preflight` 里选一条业务 GET（禁止 tenant / get-by-website / IM / telemetry）。HTTP 401/403、JSON `code==401` 或正文含「未登录」「登录已过期」则把回放类 issue 标 `external_blocked`，文案要求刷新凭证后重新「开始分析」；**当轮不调 Pi**。非鉴权网络失败不阻塞。确定性修补必须发生在 `verify()` 返回之前。  
+   待办类型：`dependency`、`dependency_candidate`、`write_verify`（候选读请求收窄为同资源 GET）、`enum`、`release_issue`、以及需真人的 `required_axis_unconfirmed` / `field_source_unknown`。  
+   `machine_repair` 按 `MACHINE_REPAIR_DISPOSITION` 分诊：能 Python 修的不派 Skill；修不了的 `dead_end` 进最终报告；只有真实 Skill op（如 `propose_dependency`）才进分组修复。
 2. **真人处理**  
    `resolver=operator` 才 `WAITING_OPERATOR`。回答由代码写回（必填/可选、用户参数/固定值），不交给模型自由解释。
-3. **代码先修，再 Skill**  
-   `auto_fix_flow_spec`；剩余 issue 才交给同一 Pi。  
+3. **代码先修，再 Skill（按能力分组）**  
+   `auto_fix_flow_spec`；剩余 issue 由代码按阶段六能力列表分组（issue 的 `capability_id`，否则用 `step_id` 反查能力成员；无归属的进最后一个「整体流程」组，rounds/meta 的 key 固定 `__flow__`），**一个能力一组、按阶段六顺序逐组交给同一 Pi**。每个能力整个 run 最多派发 **2** 次，超预算由编排器写 `spec.meta.unverified`（`actor: orchestrator`），不依赖 Skill `mark_unverified`。每组结束写 `spec.meta.capability_verification[id] = {status, resolved, pending, reason}`，发布时并入 `machine_verification`。每组提示词注入该能力的阶段六契约（执行锚点、成员步骤、相关依赖），并明确「本组只修此能力，不要顺手处理其他能力」。一组提交后立刻重算 `verification_report` 复查本组 issue 是否消失；仅改 `fact_check`/验证日志这类不进执行指纹的进展也会被保留。单组失败只记 `still_pending`，不阻塞后续组。  
+   编译器绑定：option_source 的 request_id 对不上 step 时按 METHOD + 去 query 的 path 匹配已有步骤；仍无 step（如 dict-data/simple-list）只保留 `request_refs`，**不造公开步骤、不生成缺 `step_id` 的 call 节点**。更新/删除类能力的执行锚点 `query.id` / `query.ids` / path id 不再报 `capability_internal_field_exposed` error。  
+   质量门：`mark_unverified` 和只改 meta 的 op 跳过 `_semantic_candidate_gate`。非法 `constant` 只拒该 op，`rejected` 带 `allowed_values`。`flow_version` 上涨不是整批成功。  
    修复工具：`get_validation_report`、`get_recording_state`、`replay_request`、`perturb_replay`、`verify_dependency`、`execute_write_with_verify`、`browser_*`（仅当场录制会话）、`list_link_candidates`、`get_verification`、`submit_recording_repair`。  
-   Skill 不得降低规则、不得猜测事实、不得清空能力。
+   Skill 不得降低规则、不得猜测事实、不得清空能力。前端活动日志按「能力 → 轮次 → 问题」折叠。
 4. **代码 · 退出**  
    - 无 issue → 进入阶段八发布  
    - `resolver=external_blocked` → 立刻 `EDITABLE`  

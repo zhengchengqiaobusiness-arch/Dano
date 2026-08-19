@@ -289,3 +289,77 @@ async def test_repair_continues_after_one_capability_fails() -> None:
     labels = [activity.label for activity in activities]
     assert any("修复未落地" in label for label in labels)
     assert any("删除销售订单" in label for label in labels)
+
+
+class _NoopPi(_FakePi):
+    async def prompt(self, text: str) -> None:
+        self.prompts.append(text)
+        self.last_submission_kind = "repair"
+
+
+@pytest.mark.asyncio
+async def test_capability_repair_budget_marks_unverified() -> None:
+    spec = _spec()
+    pi = _NoopPi()
+
+    async def pi_provider(fresh: bool) -> _FakePi:  # noqa: FBT001
+        return pi
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    services = ProductionRecordingServices(
+        recording_id="rec_budget",
+        materializer=unused,
+        pi_provider=pi_provider,
+        publisher=unused,
+    )
+    activities: list[WorkflowActivity] = []
+    context = _context(activities)
+    issues = (_issue("write_verify:step_edit", "step_edit"),)
+    payload = spec.model_dump(mode="json")
+    await services.repair(payload, issues, {}, context)
+    await services.repair(payload, issues, {}, context)
+    repaired = await services.repair(payload, issues, {}, context)
+
+    assert len(pi.prompts) == 2
+    unverified = repaired["meta"]["unverified"]
+    assert any(
+        item["target_kind"] == "write_verify"
+        and item["target_id"] == "step_edit"
+        and item["actor"] == "orchestrator"
+        for item in unverified
+    )
+    assert repaired["meta"]["capability_verification"]["cap_edit"]["status"] == "blocked"
+    assert any("修复预算" in activity.label for activity in activities)
+
+
+@pytest.mark.asyncio
+async def test_repair_records_capability_verification_and_flow_group_key() -> None:
+    spec = _spec()
+    spec.steps.append(FlowStep(step_id="step_orphan", method="DELETE", path="/erp/sale-order/delete-batch"))
+    pi = _FakePi()
+
+    async def pi_provider(fresh: bool) -> _FakePi:  # noqa: FBT001
+        return pi
+
+    async def unused(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("not used")
+
+    services = ProductionRecordingServices(
+        recording_id="rec_flow",
+        materializer=unused,
+        pi_provider=pi_provider,
+        publisher=unused,
+    )
+    context = _context([])
+    issues = (
+        _issue("write_verify:step_edit", "step_edit"),
+        _issue("write_verify:step_orphan", "step_orphan"),
+    )
+    repaired = await services.repair(spec.model_dump(mode="json"), issues, {}, context)
+    verification = repaired["meta"]["capability_verification"]
+    assert verification["cap_edit"]["status"] == "verified"
+    assert "__flow__" in verification
+    assert context.capability_rounds["cap_edit"] == 1
+    assert context.capability_rounds["__flow__"] == 1

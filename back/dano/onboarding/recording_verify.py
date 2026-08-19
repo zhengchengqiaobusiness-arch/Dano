@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from typing import Any
+
+from urllib.parse import urlparse
 
 from dano.execution.page.recording_field_identity import canonical_wire_path
 from dano.execution.page.value_tracing import discover_response_key_maps, discover_value_links
@@ -13,6 +16,357 @@ from dano.execution.page.value_tracing import discover_response_key_maps, discov
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _CALLER_OPS = frozenset({"fill", "select", "pick"})
 _ENUM_TYPES = frozenset({"enum", "list-enum"})
+_REPLAY_TODO_KINDS = frozenset({"dependency", "dependency_candidate", "write_verify", "enum"})
+_REPLAY_ISSUE_CODES = frozenset({
+    "dependency",
+    "dependency_candidate",
+    "write_verify",
+    "enum",
+    "write_readback_missing",
+    "dependency_verification_missing",
+    "dependency_verification_stale",
+    "enum_options_unverified",
+})
+FLOW_GROUP_KEY = "__flow__"
+AUTH_EXPIRED_MESSAGE = "录制会话登录态已过期，回放验证无法进行；请刷新凭证后重新点『开始分析』"
+_NOISE_PATH_MARKERS = (
+    "/tenant/",
+    "get-by-website",
+    "/im/",
+    "online-status",
+    "/telemetry",
+    "/metrics",
+    "/actuator",
+)
+# machine_repair check_code → python patch, leftover dead_end, or a real Skill op.
+MACHINE_REPAIR_DISPOSITION = {
+    "capability_validation_failed": "python",
+    "unassigned_business_step": "python",
+    "unassigned_materialized_step": "python",
+    "capability_internal_field_exposed": "python",
+    "caller_field_not_compiled": "dead_end",
+    "public_execute_anchor_invalid": "dead_end",
+    "capability_usage_invalid": "dead_end",
+    "request_compilation_failed": "dead_end",
+    "dry_run_failed": "dead_end",
+    "dynamic_structure_binding_missing": "skill",
+    "dynamic_structure_recorded_key_exposed": "dead_end",
+    "dynamic_structure_stale_leaf": "dead_end",
+}
+
+
+def normalized_request_path(url_or_path: str) -> str:
+    raw = str(url_or_path or "").strip()
+    if not raw:
+        return ""
+    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
+    path = (path or raw.split("?", 1)[0]).strip()
+    return path.rstrip("/") or path
+
+
+def replay_auth_failed(status: Any, body: Any) -> bool:
+    """True only for login expiry, not an arbitrary token mention in a payload."""
+    if status in {401, 403, "401", "403"}:
+        return True
+    payload = body
+    text = ""
+    if isinstance(body, str):
+        text = body
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = body
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if code in {401, 403, "401", "403"}:
+            return True
+        text = str(payload.get("msg") or payload.get("message") or payload.get("error") or text or "")
+    return "未登录" in text or "登录已过期" in text
+
+
+def _is_noise_path(path: str) -> bool:
+    lowered = normalized_request_path(path).lower()
+    return any(marker in lowered for marker in _NOISE_PATH_MARKERS)
+
+
+def _fact_as_replay_request(fact) -> dict[str, Any]:  # noqa: ANN001
+    payload = fact.model_dump(mode="json") if hasattr(fact, "model_dump") else dict(fact)
+    payload.setdefault("method", getattr(fact, "method", None) or payload.get("method") or "GET")
+    payload.setdefault("path", getattr(fact, "path", None) or payload.get("path") or "")
+    payload.setdefault("url", getattr(fact, "url", None) or payload.get("url") or payload.get("path") or "")
+    payload.setdefault("headers", getattr(fact, "headers", None) or payload.get("headers") or {})
+    payload.setdefault("query", getattr(fact, "query", None) or payload.get("query") or {})
+    return payload
+
+
+def select_preflight_probe(spec) -> dict[str, Any] | None:  # noqa: ANN001
+    """Pick a capability-closure business GET; never a tenant/public probe."""
+    facts_by_id = {
+        str(fact.request_id or ""): fact
+        for fact in spec.request_facts.requests
+        if str(fact.request_id or "")
+    }
+
+    def from_request_id(request_id: str, method: str, path: str) -> dict[str, Any] | None:
+        if (method or "GET").upper() != "GET" or _is_noise_path(path):
+            return None
+        fact = facts_by_id.get(request_id)
+        if fact is not None and (fact.method or "GET").upper() == "GET" and not _is_noise_path(fact.path or fact.url):
+            return _fact_as_replay_request(fact)
+        return None
+
+    for capability in spec.capabilities:
+        for node in capability.nodes or []:
+            if not isinstance(node, dict) or str(node.get("type") or "") != "call":
+                continue
+            if str(node.get("usage") or "") not in {"execute", "preflight"}:
+                continue
+            probe = from_request_id(
+                str(node.get("request_id") or ""),
+                str(node.get("method") or "GET"),
+                str(node.get("path") or ""),
+            )
+            if probe is not None:
+                return probe
+            step_id = str(node.get("step_id") or "")
+            step = next((item for item in spec.steps if item.step_id == step_id), None)
+            if step is None:
+                continue
+            probe = from_request_id(
+                str((step.source_meta or {}).get("request_id") or ""),
+                step.method,
+                step.path or step.url,
+            )
+            if probe is not None:
+                return probe
+
+    for capability in spec.capabilities:
+        for step_id in capability.step_ids:
+            step = next((item for item in spec.steps if item.step_id == step_id), None)
+            if step is None:
+                continue
+            probe = from_request_id(
+                str((step.source_meta or {}).get("request_id") or ""),
+                step.method,
+                step.path or step.url,
+            )
+            if probe is not None:
+                return probe
+    return None
+
+
+def _same_resource_family(write_path: str, read_path: str) -> bool:
+    write = normalized_request_path(write_path)
+    read = normalized_request_path(read_path)
+    if not write or not read:
+        return False
+    write_parent = write.rsplit("/", 1)[0]
+    read_parent = read.rsplit("/", 1)[0]
+    return bool(write_parent and (read.startswith(write_parent) or write.startswith(read_parent)))
+
+
+def candidate_read_request_ids(spec, write_step) -> list[str]:  # noqa: ANN001
+    """Same-resource GET/HEAD reads, excluding tenant/IM/telemetry noise."""
+    write_path = str(write_step.path or write_step.url or "")
+    write_request_id = str((write_step.source_meta or {}).get("request_id") or "")
+    ranked: list[tuple[int, int, str]] = []
+    for fact in spec.request_facts.requests:
+        method = (fact.method or "GET").upper()
+        if method not in {"GET", "HEAD"}:
+            continue
+        if str(fact.request_id or "") == write_request_id:
+            continue
+        path = str(fact.path or fact.url or "")
+        if _is_noise_path(path):
+            continue
+        if not _same_resource_family(write_path, path):
+            continue
+        lowered = normalized_request_path(path).lower()
+        name_rank = 0 if lowered.endswith("/get") else 1 if lowered.endswith("/page") else 2
+        ranked.append((name_rank, str(fact.request_id or "")))
+    ranked.sort()
+    return [request_id for _name, request_id in ranked if request_id][:8]
+
+
+def machine_repair_disposition(check_code: str) -> str:
+    return MACHINE_REPAIR_DISPOSITION.get(str(check_code or ""), "dead_end")
+
+
+def _append_unverified(spec, *, target_kind: str, target_id: str, reason: str) -> None:  # noqa: ANN001
+    if not target_kind or not target_id:
+        return
+    existing = [
+        item for item in (spec.meta or {}).get("unverified") or [] if isinstance(item, dict)
+    ]
+    if any(
+        str(item.get("target_kind") or "") == target_kind
+        and str(item.get("target_id") or "") == target_id
+        for item in existing
+    ):
+        return
+    spec.meta = {
+        **(spec.meta or {}),
+        "unverified": [
+            *existing,
+            {
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "reason": reason,
+                "actor": "orchestrator",
+            },
+        ],
+    }
+
+
+def mark_issues_unverified(spec, issues, *, reason: str) -> None:  # noqa: ANN001
+    for issue in issues:
+        code = str(issue.code or "")
+        target = issue.target or {}
+        if code in {"write_verify", "write_readback_missing"}:
+            _append_unverified(
+                spec,
+                target_kind="write_verify",
+                target_id=str(target.get("step_id") or target.get("target_id") or issue.issue_id),
+                reason=reason,
+            )
+        elif code in {"dependency", "dependency_verification_missing", "dependency_verification_stale"}:
+            _append_unverified(
+                spec,
+                target_kind="dependency",
+                target_id=str(target.get("target_id") or issue.issue_id),
+                reason=reason,
+            )
+        elif code == "dependency_candidate":
+            _append_unverified(
+                spec,
+                target_kind="dependency_candidate",
+                target_id=str(target.get("target_id") or issue.issue_id),
+                reason=reason,
+            )
+        elif code in {"enum", "enum_options_unverified"}:
+            wire = str(target.get("wire_path") or target.get("path") or "")
+            step_id = str(target.get("step_id") or "")
+            _append_unverified(
+                spec,
+                target_kind="enum",
+                target_id=str(target.get("target_id") or (f"{step_id}:{wire}" if step_id and wire else issue.issue_id)),
+                reason=reason,
+            )
+        else:
+            _append_unverified(
+                spec,
+                target_kind="release_issue",
+                target_id=str(issue.issue_id),
+                reason=reason,
+            )
+
+
+def assign_unassigned_internal_steps(spec):  # noqa: ANN001, ANN202
+    """Attach orphaned steps to a capability as preflight/option_source, else mark internal."""
+    current = spec.model_copy(deep=True)
+    owned: set[str] = set()
+    for capability in current.capabilities:
+        owned.update(str(item) for item in capability.step_ids if item)
+        owned.update(
+            str(node.get("step_id") or "")
+            for node in capability.nodes or []
+            if isinstance(node, dict) and node.get("step_id")
+        )
+        owned.update(str(ref.step_id or "") for ref in capability.request_refs if ref.step_id)
+    owned.discard("")
+    internal_ids = {
+        str(item)
+        for item in (current.meta or {}).get("internal_step_ids") or []
+        if item
+    }
+    member_sets = [
+        (
+            capability,
+            {
+                str(item) for item in capability.step_ids if item
+            } | {
+                str(node.get("step_id") or "")
+                for node in capability.nodes or []
+                if isinstance(node, dict) and node.get("step_id")
+            },
+        )
+        for capability in current.capabilities
+    ]
+    for step in current.steps:
+        if step.step_id in owned or step.step_id in internal_ids:
+            continue
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        assigned = False
+        for capability, members in member_sets:
+            if any(
+                (link.confirmed or (link.meta or {}).get("verified") is True)
+                and link.source_step_id == step.step_id
+                and link.target_step_id in members
+                for link in current.links
+            ):
+                _attach_capability_step(capability, step, request_id, usage="preflight")
+                assigned = True
+                break
+            if request_id and any(
+                str(binding.source_request_id or "") == request_id
+                for member_id in members
+                for member in current.steps if member.step_id == member_id
+                for binding in member.selects
+            ):
+                _attach_capability_step(capability, step, request_id, usage="option_source")
+                assigned = True
+                break
+        if assigned:
+            owned.add(step.step_id)
+        else:
+            internal_ids.add(step.step_id)
+            _append_unverified(
+                current,
+                target_kind="release_issue",
+                target_id=f"unassigned:{step.step_id}",
+                reason="步骤未归属公开能力，已标为内部用途",
+            )
+    if internal_ids:
+        current.meta = {**(current.meta or {}), "internal_step_ids": sorted(internal_ids)}
+    return current
+
+
+def _attach_capability_step(capability, step, request_id: str, *, usage: str) -> None:  # noqa: ANN001
+    if step.step_id not in capability.step_ids:
+        capability.step_ids = [*capability.step_ids, step.step_id]
+    if not any(str(ref.step_id or "") == step.step_id for ref in capability.request_refs):
+        from dano.execution.page.flow_spec import CapabilityRequestRef
+
+        capability.request_refs = [
+            *capability.request_refs,
+            CapabilityRequestRef(
+                request_id=request_id,
+                step_id=step.step_id,
+                method=step.method,
+                path=step.path or step.url,
+                usage=usage,
+                origin="repair",
+                confirmed=True,
+                reason="阶段七按依赖或选项源归属内部步骤",
+            ),
+        ]
+    if usage != "option_source" or step.step_id:
+        if not any(
+            isinstance(node, dict) and str(node.get("step_id") or "") == step.step_id
+            for node in capability.nodes or []
+        ):
+            capability.nodes = [
+                *list(capability.nodes or []),
+                {
+                    "id": f"{usage}_{step.step_id[:8]}",
+                    "type": "call",
+                    "usage": usage,
+                    "request_id": request_id,
+                    "method": step.method,
+                    "path": step.path or step.url,
+                    "step_id": step.step_id,
+                },
+            ]
 
 
 def _field_key(step_id: str, path: str) -> tuple[str, str]:
@@ -117,7 +471,21 @@ def apply_recorded_evidence_fixes(spec):  # noqa: ANN001, ANN202
                     None,
                 )
             if param.source_kind == "unknown":
-                if binding is not None or _evidence_is_caller_edit(evidence):
+                empty_recorded = param.value in (None, "") and param.default_value in (None, "")
+                if empty_recorded and binding is None and not _evidence_is_caller_edit(evidence):
+                    _set_param_from_evidence(
+                        param,
+                        "user_input",
+                        exposed=True,
+                        editable=True,
+                        reason="录制值为空，调用方可选提供，默认空",
+                    )
+                    param.required = False
+                    param.source = {
+                        **(param.source or {}),
+                        "required_state": "optional",
+                    }
+                elif binding is not None or _evidence_is_caller_edit(evidence):
                     _set_param_from_evidence(
                         param,
                         "user_input",
@@ -306,12 +674,7 @@ def verification_todos(spec) -> list[dict[str, Any]]:  # noqa: ANN001
                 "step_id": step.step_id,
                 "message": f"写操作 `{step.step_id}` 还没有回读校验，不能证明提交已生效",
                 "write_request_id": str((step.source_meta or {}).get("request_id") or ""),
-                "candidate_read_request_ids": [
-                    fact.request_id
-                    for fact in spec.request_facts.requests
-                    if (fact.method or "GET").upper() in {"GET", "HEAD", "POST"}
-                    and fact.request_id != str((step.source_meta or {}).get("request_id") or "")
-                ][:25],
+                "candidate_read_request_ids": candidate_read_request_ids(spec, step),
                 "suggested_tool": "execute_write_with_verify",
                 "completion_op": "bind_verify_read",
             }
@@ -587,13 +950,16 @@ def finalize_verification_state(
             "max_rounds": max_rounds,
             "errors": list(errors or []),
             "summary": {
-                key: final_report[key]
-                for key in (
-                    "confirmed_links",
-                    "link_count",
-                    "verify_coverage",
-                    "write_count",
-                )
+                **{
+                    key: final_report[key]
+                    for key in (
+                        "confirmed_links",
+                        "link_count",
+                        "verify_coverage",
+                        "write_count",
+                    )
+                },
+                "by_capability": dict((current.meta or {}).get("capability_verification") or {}),
             },
         },
     }

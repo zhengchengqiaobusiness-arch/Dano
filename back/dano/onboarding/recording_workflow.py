@@ -207,6 +207,7 @@ class PipelineContext:
     machine_verification: bool = False
     last_repair_report: RepairReport | None = None
     current_round: int = 0
+    capability_rounds: dict[str, int] = field(default_factory=dict)
 
     def ensure_active(self) -> None:
         if self.cancelled():

@@ -328,6 +328,26 @@ new dependency types.
    is a protocol failure. Drain all deltas, rebuild the complete current capability array, submit
    it once, and inspect the returned result before producing any final text.
 
+## Repair submissions in stage seven
+
+Stage seven repair uses `submit_recording_repair`, not a new capability plan.
+
+1. Read `op_results` item by item after every repair submission. `flow_version`
+   advancing is not proof that every op applied.
+2. `applied`: keep that conclusion. `deferred`: keep it and wait for
+   materialization. `rejected` or `rolled_back`: correct **only that op** using
+   `reason` and `allowed_values` when present (for example
+   `source_kind` must be one of `caller_input`, `constant`, `session`,
+   `context`, `response_binding`, `computed`, `generated`).
+3. `mark_unverified` is not the default strategy. The orchestrator marks a
+   capability unverified after two repair dispatches. Do not spend a turn
+   marking items unverified just to clear the queue.
+4. Do not create new public capabilities, rebuild the FlowSpec, or empty the
+   capability list. Option sources and supporting reads stay members of the
+   existing execute capability (`preflight` / `option_source`).
+5. For caller-supplied fields, the Skill op value is `caller_input`. Do not
+   write FlowSpec `user_input` in ops.
+
 ## Ask the operator only for irreducible business decisions
 
 Use `ask_operator` only for equal-strength evidence conflicts, multiple reasonable business
