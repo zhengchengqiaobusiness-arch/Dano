@@ -495,7 +495,7 @@ function isStageSevenProgress(progress?: { step?: string; round?: number } | nul
 function pageStage(status: WorkflowStatus, resumeOnly = false, _verificationLive = false) {
   if (resumeOnly) return 2;
   if (status === "idle") return 0;
-  if (status === "recording") return 1;
+  if (["recording", "processing", "waiting_operator"].includes(status)) return 1;
   return 2;
 }
 
@@ -948,8 +948,13 @@ export default function PageRecorder({
     setSnapshot(next);
     actionRef.current = next.action;
     if (next.title !== undefined) setTitle(next.title);
-    if (next.status !== "recording" && next.status !== "idle" && !resumeOnlyRef.current) {
+    if (
+      ["published", "editable", "failed", "cancelled"].includes(next.status)
+      && !resumeOnlyRef.current
+    ) {
       enterCapabilityResults();
+    } else if (next.status === "waiting_operator") {
+      setAssistantOpen(true);
     }
     if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
@@ -1028,7 +1033,6 @@ export default function PageRecorder({
         if (row.action === actionRef.current) {
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
-          if (!resumeOnlyRef.current) enterCapabilityResults();
         }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);
@@ -1059,6 +1063,7 @@ export default function PageRecorder({
             };
             snapshotRef.current = failed;
             setSnapshot(failed);
+            if (!resumeOnlyRef.current) enterCapabilityResults();
           }
           message.error(detail);
         }
