@@ -1,4 +1,4 @@
-"""Shared FlowSpec core: models, fingerprints, serialization."""
+"""Shared FlowSpec core: models, fingerprints, serialization, request contracts."""
 from dano.execution.page.flow_spec_core.models import (
     CapabilityDependency,
     CapabilityField,
@@ -25,6 +25,47 @@ from dano.execution.page.flow_spec_core.fingerprints import (
     flow_spec_fingerprint,
 )
 from dano.execution.page.flow_spec_core.serialization import flow_spec_release_payload
+from dano.execution.page.flow_spec_core.request_contract import (
+    dry_run_flow_spec,
+    flow_spec_required_params,
+    flow_spec_to_api_request,
+    flow_spec_user_params,
+)
+from dano.execution.page.flow_spec_core.versioning import (
+    append_flow_version,
+    ensure_flow_version,
+)
+
+__all__ = [
+    "CapabilityDependency",
+    "CapabilityField",
+    "CapabilityRelation",
+    "CapabilityRequestRef",
+    "FlowCapability",
+    "FlowLink",
+    "FlowSpec",
+    "FlowSpecConflictError",
+    "FlowStep",
+    "IdentityBinding",
+    "ParamField",
+    "RecordedGoal",
+    "RequestAnalysis",
+    "RequestFact",
+    "RequestFacts",
+    "RequestUsage",
+    "ReviewItem",
+    "SelectBinding",
+    "SystemValue",
+    "append_flow_version",
+    "dry_run_flow_spec",
+    "ensure_flow_version",
+    "flow_spec_fingerprint",
+    "flow_spec_release_payload",
+    "flow_spec_required_params",
+    "flow_spec_to_api_request",
+    "flow_spec_user_params",
+    "register_sync_flow_spec_models",
+]
 
 __all__ = [
     "CapabilityDependency",
