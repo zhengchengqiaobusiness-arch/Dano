@@ -12,10 +12,7 @@ from dano.execution.page.flow_spec import (
     _step_has_stable_record_identity,
     to_flow_spec,
 )
-from dano.execution.page.recording_live import (
-    _semantic_plan_from_live_boundaries,
-    compile_recorded_capabilities,
-)
+from dano.execution.page.recording_live import merge_live_agent_state
 
 
 SALE_PAGE = {
@@ -99,12 +96,55 @@ def _enum(label: str, aliases: list[str], selected: str, page_context: dict | No
     }
 
 
-def _compile(spec: FlowSpec) -> FlowSpec:
-    plan = _semantic_plan_from_live_boundaries(spec)
-    assert plan.get("unresolved_items") in (None, [])
+def _step_id_for_request(spec: FlowSpec, request_id: str) -> str:
+    for step in spec.steps:
+        if str((step.source_meta or {}).get("request_id") or "") == request_id:
+            return step.step_id
+    raise AssertionError(f"missing materialized step for {request_id}")
+
+
+def _cap(
+    spec: FlowSpec,
+    name: str,
+    title: str,
+    kind: str,
+    request_id: str,
+) -> dict:
+    step_id = _step_id_for_request(spec, request_id)
+    return {
+        "name": name,
+        "title": title,
+        "kind": kind,
+        "anchor_step_id": step_id,
+        "request_refs": [{"step_id": step_id, "usage": "execute"}],
+    }
+
+
+def _compile(spec: FlowSpec, capabilities: list[dict], business_name: str = "") -> FlowSpec:
+    plan = {
+        "business_understanding": {
+            "business_name": business_name or str(spec.title or ""),
+            "summary": str(spec.title or business_name or ""),
+        },
+        "capabilities": capabilities,
+        "unresolved_items": [],
+    }
     compiled = compile_capabilities(spec, plan)
-    assert compiled.errors == []
+    assert compiled.errors == [], compiled.errors
     return compiled.spec
+
+
+def _sale_order_plan(spec: FlowSpec, *, include_inspect: bool = False) -> list[dict]:
+    capabilities = [
+        _cap(spec, "query_sale_orders", "查询销售订单", "query_status", "req_query"),
+        _cap(spec, "export_sale_orders", "导出销售订单", "export", "req_export"),
+        _cap(spec, "create_sale_order", "新增销售订单", "create", "req_write"),
+    ]
+    if include_inspect:
+        capabilities.append(
+            _cap(spec, "inspect_sale_order", "查看销售订单", "inspect", "req_detail"),
+        )
+    return capabilities
 
 
 def _by_kind(spec: FlowSpec) -> dict[str, object]:
@@ -460,7 +500,11 @@ def test_line_item_id_is_not_document_record_identity() -> None:
 
 
 def test_repeated_delete_clicks_compile_one_caller_identity_capability() -> None:
-    spec = compile_recorded_capabilities(_sale_order_search_and_deletes("39", "38"))
+    raw = _sale_order_search_and_deletes("39", "38")
+    spec = _compile(raw, [
+        _cap(raw, "query_sale_orders", "查询销售订单", "query_status", "req_query"),
+        _cap(raw, "delete_sale_order", "删除销售订单", "delete", "req_delete_39"),
+    ], "销售订单")
     deletes = [capability for capability in spec.capabilities if capability.kind == "delete"]
     queries = [capability for capability in spec.capabilities if capability.kind == "query_status"]
 
@@ -485,7 +529,7 @@ def test_repeated_delete_clicks_compile_one_caller_identity_capability() -> None
 
 
 def test_similar_delete_contracts_stay_distinct() -> None:
-    spec = compile_recorded_capabilities(to_flow_spec(
+    raw = to_flow_spec(
         captured_requests=[
             _delete_request("req_order", sequence=1, ids="39"),
             _delete_request(
@@ -497,7 +541,11 @@ def test_similar_delete_contracts_stay_distinct() -> None:
             ),
         ],
         page_context=SALE_PAGE,
-    ))
+    )
+    spec = _compile(raw, [
+        _cap(raw, "delete_sale_order", "删除销售订单", "delete", "req_order"),
+        _cap(raw, "delete_sale_order_item", "删除销售订单明细", "delete", "req_item"),
+    ], "销售订单")
     deletes = [capability for capability in spec.capabilities if capability.kind == "delete"]
     assert len(deletes) == 2
     assert sorted(_execute_paths(capability)[0] for capability in deletes) == [
@@ -507,10 +555,13 @@ def test_similar_delete_contracts_stay_distinct() -> None:
 
 
 def test_single_delete_without_page_control_still_exposes_ids() -> None:
-    spec = compile_recorded_capabilities(to_flow_spec(
+    raw = to_flow_spec(
         captured_requests=[_delete_request("req_delete", sequence=1, ids="39")],
         page_context=SALE_PAGE,
-    ))
+    )
+    spec = _compile(raw, [
+        _cap(raw, "delete_sale_order", "删除销售订单", "delete", "req_delete"),
+    ], "销售订单")
     delete = next(capability for capability in spec.capabilities if capability.kind == "delete")
     props, required = _schema(delete)
     assert set(props) == {"ids"}
@@ -522,28 +573,25 @@ def test_single_delete_without_page_control_still_exposes_ids() -> None:
     assert "record_identity" in str((step.params[0].source or {}).get("kind") or "")
 
 
-def test_materialize_without_live_plan_still_compiles_capabilities() -> None:
+def test_materialize_without_skill_plan_does_not_invent_capabilities() -> None:
     raw = _sale_order_spec()
     assert raw.capabilities == []
 
-    compiled = compile_recorded_capabilities(raw)
-    assert {capability.kind for capability in compiled.capabilities} == {
-        "query_status", "export", "create",
-    }
-    assert (compiled.meta or {}).get("capability_model", {}).get("source") == (
-        "recorded_request_graph"
-    )
+    merged = merge_live_agent_state(FlowSpec(meta={}), raw)
+    assert merged.capabilities == []
     gateway = (
         Path(__file__).resolve().parents[1]
         / "dano"
         / "onboarding"
         / "recording_gateway.py"
     ).read_text(encoding="utf-8")
-    assert "compile_recorded_capabilities" in gateway
+    assert "compile_recorded_capabilities" not in gateway
+    assert "missing_semantic_plan" in gateway
 
 
 def test_sale_order_page_compiles_query_export_and_create() -> None:
-    spec = _compile(_sale_order_spec())
+    raw = _sale_order_spec()
+    spec = _compile(raw, _sale_order_plan(raw), "销售订单")
     by_kind = _by_kind(spec)
 
     assert spec.title == "销售订单"
@@ -571,7 +619,8 @@ def test_sale_order_page_compiles_query_export_and_create() -> None:
 
 
 def test_sale_order_query_schema_keeps_filters_not_pagination() -> None:
-    spec = _compile(_sale_order_spec())
+    raw = _sale_order_spec()
+    spec = _compile(raw, _sale_order_plan(raw), "销售订单")
     props, required = _schema(_by_kind(spec)["query_status"])
 
     assert "pageNo" not in props
@@ -591,7 +640,8 @@ def test_sale_order_query_schema_keeps_filters_not_pagination() -> None:
 
 
 def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
-    spec = _compile(_sale_order_spec())
+    raw = _sale_order_spec()
+    spec = _compile(raw, _sale_order_plan(raw), "销售订单")
     write = next(step for step in spec.steps if (step.method or "").upper() == "POST")
     params = {param.path: param for param in write.params}
     props, required = _schema(_by_kind(spec)["create"])
@@ -635,7 +685,8 @@ def test_sale_order_create_schema_exposes_only_caller_fields() -> None:
 
 
 def test_edited_unit_price_stays_caller_input() -> None:
-    spec = _compile(_sale_order_spec(price_op="fill"))
+    raw = _sale_order_spec(price_op="fill")
+    spec = _compile(raw, _sale_order_plan(raw), "销售订单")
     write = next(step for step in spec.steps if (step.method or "").upper() == "POST")
     params = {param.path: param for param in write.params}
     props, _required = _schema(_by_kind(spec)["create"])
@@ -646,7 +697,8 @@ def test_edited_unit_price_stays_caller_input() -> None:
 
 
 def test_sale_order_detail_compiles_inspect() -> None:
-    spec = _compile(_sale_order_spec(include_inspect=True))
+    raw = _sale_order_spec(include_inspect=True)
+    spec = _compile(raw, _sale_order_plan(raw, include_inspect=True), "销售订单")
     by_kind = _by_kind(spec)
     assert set(by_kind) >= {"query_status", "export", "create", "inspect"}
     assert _execute_paths(by_kind["inspect"]) == ["/admin-api/erp/sale-order/get"]
@@ -657,7 +709,7 @@ def test_sale_order_detail_compiles_inspect() -> None:
 def test_leave_page_still_splits_query_and_create() -> None:
     begin = 1_785_513_600_000
     finish = begin + 3 * 86_400_000
-    spec = _compile(to_flow_spec(
+    raw = to_flow_spec(
         captured_requests=[
             {
                 "request_id": "req_kind",
@@ -748,7 +800,11 @@ def test_leave_page_still_splits_query_and_create() -> None:
         page_enum_options={"请假类型": _enum("请假类型", ["kindId"], "年假", LEAVE_PAGE)},
         page_context=LEAVE_PAGE,
         samples={"请假类型": "年假", "事由": "回家"},
-    ))
+    )
+    spec = _compile(raw, [
+        _cap(raw, "query_leave", "查询请假申请", "query_status", "req_query"),
+        _cap(raw, "submit_leave", "提交请假申请", "submit", "req_write"),
+    ], "请假申请")
     by_kind = _by_kind(spec)
 
     assert spec.title == "请假申请"

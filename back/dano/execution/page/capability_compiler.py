@@ -337,8 +337,10 @@ def _normalize_compiled_call_keys(
 def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> CapabilityCompilation:
     """Return a copy whose generated abilities use only verified graph membership.
 
-    The semantic plan may name a capability and select its public anchor. Any
-    model-supplied request membership is deliberately ignored.
+    The Skill plan names the capability, public copy, and public anchor. Kind
+    and title stay Skill-owned when they match the recorded read/write family.
+    Model-supplied request membership is ignored; the grounded graph supplies
+    members.
     """
     current = spec.model_copy(deep=True)
     plan = semantic_plan if isinstance(semantic_plan, dict) else {}
@@ -378,19 +380,14 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         grounded_goal_update = _goal_update_is_grounded_by_sibling_create(
             plan_items, by_step, item, anchor, grounded_kind,
         )
-        if (
-            kind != grounded_kind
-            and not (kind == "submit_batch" and grounded_batch)
-            and not grounded_goal_update
-        ):
+        if grounded_batch:
+            kind = "submit_batch"
+        elif grounded_goal_update:
+            kind = "update"
+        elif kind != grounded_kind:
             warnings.append(
-                f"{prefix}: model kind {kind!r} replaced by grounded kind {grounded_kind!r}"
+                f"{prefix}: skill kind {kind!r} differs from structural hint {grounded_kind!r}"
             )
-        kind = (
-            "submit_batch"
-            if grounded_batch
-            else kind if grounded_goal_update else grounded_kind
-        )
 
         step_ids, dependency_errors = _grounded_dependency_order(
             current,

@@ -439,9 +439,15 @@ class RecordingGatewaySession:
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
         if not spec.capabilities:
-            from dano.execution.page.recording_live import compile_recorded_capabilities
-
-            spec = compile_recorded_capabilities(spec)
+            capability_model = dict((spec.meta or {}).get("capability_model") or {})
+            spec.meta = {
+                **(spec.meta or {}),
+                "capability_model": {
+                    **capability_model,
+                    "status": "missing_semantic_plan",
+                    "source": "skill_required",
+                },
+            }
         return spec
 
     async def _freeze_capture(self) -> None:

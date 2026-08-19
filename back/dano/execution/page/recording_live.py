@@ -1,4 +1,14 @@
-"""Live recording facts and agent-authored semantic annotations."""
+"""Live recording facts and Skill-authored semantic annotations.
+
+Stages 1-6 split:
+
+* Skill (`analyze-recording-evidence`) is the only author of capability
+  boundaries, public names/titles/kinds, request roles, field sources, and
+  relations.
+* Python captures, freezes, validates references, and compiles the submitted
+  plan. It must not invent or relabel public capabilities when the Skill plan
+  is missing or incomplete.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -14,6 +24,7 @@ from dano.execution.page.recording_field_identity import (
     FieldReferenceDeferred,
     resolve_field_ref,
     stored_container_path,
+    _known_request_id,
 )
 from dano.execution.page.value_tracing import (
     discover_response_key_maps,
@@ -147,14 +158,6 @@ class LiveNotebook:
         return [
             deepcopy(item)
             for item in self.meta.get("agent_insights") or []
-            if isinstance(item, dict)
-        ]
-
-    @property
-    def pending_questions(self) -> list[dict]:
-        return [
-            deepcopy(item)
-            for item in self.meta.get("live_pending_questions") or []
             if isinstance(item, dict)
         ]
 
@@ -413,17 +416,6 @@ def _canonical_request_role(spec, request_id: str, role: str) -> str:  # noqa: A
             return "business_read"
     raise ValueError(
         f"unsupported request role {role!r}; use one of {sorted(_CANONICAL_REQUEST_ROLES)}"
-    )
-
-
-def _known_request_id(spec, request_id: str) -> bool:  # noqa: ANN001
-    return bool(
-        request_id
-        and (
-            any(fact.request_id == request_id for fact in spec.request_facts.requests)
-            or request_id in (spec.request_facts.usage or {})
-            or request_id in set((spec.meta or {}).get("live_request_ids") or [])
-        )
     )
 
 
@@ -1529,15 +1521,7 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             if value not in (None, "", [], {}):
                 merged_goal[key] = value
         spec.goal = merged_goal
-        goal_text_grounded = any(
-            str(item.get("source") or "") == "goal_text"
-            or str(item.get("ref") or "") == "recording_goal_text"
-            for item in goal.evidence
-            if isinstance(item, dict)
-        )
-        if goal.capabilities and goal_text_grounded and not _GOAL_CAPABILITY_COUNT_RE.search(
-            str((spec.meta or {}).get("recording_goal_text") or "")
-        ):
+        if goal.capabilities:
             spec.meta = {
                 **(spec.meta or {}),
                 "recording_goal_contract": {
@@ -2705,458 +2689,23 @@ def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
     _apply_link_sources(spec.steps, spec.links)
 
 
-def _is_auto_capability_kind_slug(name: str) -> bool:
-    """Family slugs written by ``ensure_recorded_goal`` are not operator names."""
-    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
-
-    normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
-    if not normalized:
-        return False
-    return normalized in {
-        re.sub(r"[^a-z0-9]+", "", item.casefold())
-        for item in (*ALLOWED_CAPABILITY_KINDS, "query")
-    }
-
-
-def _live_capability_kind_hint(name: str) -> str:
-    """Read an operation hint from a Pi-authored public capability name."""
-    from dano.execution.page.flow_spec import ALLOWED_CAPABILITY_KINDS
-
-    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").casefold()).strip("_")
-    if slug == "query":
-        return "query_status"
-    if slug in ALLOWED_CAPABILITY_KINDS:
-        return slug
-    value = str(name or "").casefold()
-    hints = (
-        ("withdraw", ("withdraw", "revoke", "cancel", "撤回", "撤销")),
-        ("delete", ("delete", "remove", "删除")),
-        ("reject", ("reject", "驳回")),
-        ("export", ("export", "download", "导出", "下载")),
-        # Read intent must win before the noun ``approval``.  For example,
-        # "view approval progress" is an inspection, not an approve command.
-        ("inspect", ("inspect", "detail", "view", "progress", "详情", "查看", "进度")),
-        ("approve", ("approve", "approval", "同意", "审批")),
-        ("preview", ("preview", "预览")),
-        ("query_status", ("query", "search", "list", "status", "查询", "搜索", "列表")),
-        ("update", ("update", "edit", "modify", "更新", "编辑")),
-        ("create", ("create", "insert", "add", "新增", "创建")),
-        ("save_draft", ("draft", "暂存", "草稿")),
-        ("submit", ("submit", "commit", "apply", "提交", "申请")),
-    )
-    return next((kind for kind, tokens in hints if any(token in value for token in tokens)), "")
-
-
-def _unique_live_capability_name(value: str, kind: str, used: set[str]) -> str:
-    base = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_").lower()
-    base = base[:64] or kind
-    name = base
-    suffix = 2
-    while name in used:
-        ending = f"_{suffix}"
-        name = f"{base[:64 - len(ending)]}{ending}"
-        suffix += 1
-    used.add(name)
-    return name
-
-
-_GOAL_CAPABILITY_COUNT_RE = re.compile(
-    r"(?:预期|预计|需要)?\s*产出(?:的)?\s*能力(?:数量|数)?\s*[:：=]?\s*(\d+)",
-    re.IGNORECASE,
-)
-_GOAL_CAPABILITY_LINE_RE = re.compile(
-    r"^[ \t]*(?:(?:能力|capability)[ \t]*)?(\d+)"
-    r"(?:[ \t]*[:：.．、)）-][ \t]*|[ \t]+)"
-    r"([^\t\r\n]+?)[ \t]*(?:\t+.*)?$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
 def _recording_goal_contract(spec) -> dict:  # noqa: ANN001
-    """Parse the operator's editable target into an executable boundary.
-
-    Only an explicit count activates the strong boundary.  This keeps legacy
-    free-form targets readable while making the setup template deterministic.
-    """
-    raw = str((spec.meta or {}).get("recording_goal_text") or "").strip()
-    count_match = _GOAL_CAPABILITY_COUNT_RE.search(raw)
-    if count_match is None:
-        normalized = (spec.meta or {}).get("recording_goal_contract")
-        if not isinstance(normalized, dict) or normalized.get("source") != "pi_normalized_goal":
-            return {}
-        expected_count = int(normalized.get("expected_count") or 0)
-        capabilities = [
-            deepcopy(item)
-            for item in normalized.get("capabilities") or []
-            if isinstance(item, dict) and str(item.get("name") or "").strip()
-        ]
-        if expected_count <= 0 or len(capabilities) != expected_count:
-            return {}
-        return {
-            "source": "pi_normalized_goal",
-            "expected_count": expected_count,
-            "capabilities": capabilities,
-        }
-    expected_count = int(count_match.group(1))
+    """Return the Skill-authored goal contract, if one was accepted."""
+    normalized = (spec.meta or {}).get("recording_goal_contract")
+    if not isinstance(normalized, dict) or normalized.get("source") != "pi_normalized_goal":
+        return {}
+    expected_count = int(normalized.get("expected_count") or 0)
     if expected_count <= 0:
         return {}
-    named = sorted(
-        (
-            (int(match.group(1)), str(match.group(2) or "").strip())
-            for match in _GOAL_CAPABILITY_LINE_RE.finditer(raw)
-            if str(match.group(2) or "").strip()
-        ),
-        key=lambda item: item[0],
-    )
     capabilities = [
-        {"ordinal": ordinal, "name": name}
-        for ordinal, name in named[:expected_count]
-    ]
-    return {
-        "source": "recording_goal_text",
-        "expected_count": expected_count,
-        "capabilities": capabilities,
-    }
-
-
-def _goal_capability_names(spec, contract: dict) -> list[str]:  # noqa: ANN001
-    """Return ordered target names, filling only from the accepted live goal."""
-    expected_count = int(contract.get("expected_count") or 0)
-    names = [
-        str(item.get("name") or "").strip()
-        for item in (contract.get("capabilities") or [])
+        deepcopy(item)
+        for item in normalized.get("capabilities") or []
         if isinstance(item, dict) and str(item.get("name") or "").strip()
     ]
-    goal = spec.goal if isinstance(spec.goal, dict) else {}
-    for value in goal.get("capabilities") or []:
-        name = str(value or "").strip()
-        if not name or name in names or _is_auto_capability_kind_slug(name):
-            continue
-        names.append(name)
-        if expected_count and len(names) >= expected_count:
-            break
-    return names[:expected_count] if expected_count else names
-
-
-def _semantic_plan_from_live_boundaries(spec) -> dict:  # noqa: ANN001
-    """Materialize only abilities whose recorded anchor is unambiguous."""
-    from dano.execution.page.flow_spec import (
-        _capability_operation_kind,
-        _generalize_capability_title,
-        _grounded_read_operation_steps,
-        _is_technical_business_title,
-        _page_context_business_name,
-        _public_capability_anchor_step_ids,
-        _read_status_steps,
-        _step_has_stable_record_identity,
-    )
-
-    anchor_ids = _public_capability_anchor_step_ids(spec)
-    if not anchor_ids:
-        return {}
-    steps = {step.step_id: step for step in spec.steps}
-    goal = spec.goal if isinstance(spec.goal, dict) else {}
-    contract = _recording_goal_contract(spec)
-    proposed_names = (
-        _goal_capability_names(spec, contract)
-        if contract else [
-            str(value).strip()
-            for value in (goal.get("capabilities") or [])
-            if str(value).strip() and not _is_auto_capability_kind_slug(str(value))
-        ]
-    )
-    expected_count = int(contract.get("expected_count") or 0)
-    target_slots = proposed_names or ([""] * expected_count if expected_count else [])
-    remaining_anchors = list(anchor_ids)
-    used_names: set[str] = set()
-    capabilities: list[dict] = []
-    unresolved_items: list[dict] = []
-    action_labels = {
-        "query_status": "查询", "inspect": "查看", "preview": "预览",
-        "export": "导出", "create": "新增", "update": "更新",
-        "save_draft": "暂存", "submit": "提交", "approve": "审批",
-        "reject": "驳回", "withdraw": "撤回", "delete": "删除",
-    }
-    page_business = _page_context_business_name(spec)
-    spec_title = str(spec.title or "").strip()
-    business = (
-        page_business
-        or (spec_title if spec_title and not _is_technical_business_title(spec_title) else "")
-        or "业务"
-    )
-    # The strong target may have come from ``spec.goal.capabilities`` even
-    # when the editable goal text only supplied a count.  Those accepted
-    # target slots are equally authoritative for public titles.
-    contract_names = {str(name).strip() for name in target_slots if str(name).strip()}
-    if not target_slots:
-        target_slots = [""] * len(remaining_anchors)
-
-    def semantic_evidence(step) -> str:  # noqa: ANN001
-        meta = step.source_meta or {}
-        request_id = str(meta.get("request_id") or "")
-        parts = [
-            str(meta.get("trigger_locator") or ""),
-            str(meta.get("trigger_action_id") or ""),
-            str(step.name or ""),
-        ]
-        for operation in (spec.meta or {}).get("recording_agent_ops") or []:
-            if (
-                isinstance(operation, dict)
-                and operation.get("op") == "set_request_role"
-                and str(operation.get("request_id") or "") == request_id
-            ):
-                parts.append(str(operation.get("reason") or ""))
-        return " ".join(part for part in parts if part).casefold()
-
-    def semantic_terms(value: str) -> set[str]:
-        """Return stable words and CJK pairs without depending on one UI."""
-        text = str(value or "").casefold()
-        terms = set(re.findall(r"[a-z0-9]{2,}", text))
-        for sequence in re.findall(r"[\u4e00-\u9fff]+", text):
-            terms.update(
-                sequence[index:index + 2]
-                for index in range(max(0, len(sequence) - 1))
-            )
-        return terms
-
-    def semantic_match_position(target: str) -> int | None:
-        if not target:
-            return 0
-        normalized_target = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", target.casefold())
-        hinted_kind = _live_capability_kind_hint(target)
-        candidate_steps = [steps[anchor_id] for anchor_id in remaining_anchors]
-        write_positions = [
-            position for position, step in enumerate(candidate_steps)
-            if str(step.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}
-            and _capability_operation_kind(step) in {
-                "create", "update", "save_draft", "submit",
-            }
-        ]
-        stable_write_positions = [
-            position for position in write_positions
-            if _step_has_stable_record_identity(candidate_steps[position])
-        ]
-        new_write_positions = [
-            position for position in write_positions
-            if not _step_has_stable_record_identity(candidate_steps[position])
-        ]
-        # A stable record identity separates editing an existing record from
-        # creating/submitting a new one even when both commands share the same
-        # HTTP endpoint and visible button text.
-        if hinted_kind == "update" and len(stable_write_positions) == 1:
-            return stable_write_positions[0]
-        if hinted_kind in {"create", "submit"} and len(new_write_positions) == 1:
-            return new_write_positions[0]
-        scored: list[tuple[int, int]] = []
-        for position, anchor_id in enumerate(remaining_anchors):
-            step = steps[anchor_id]
-            evidence = semantic_evidence(step)
-            normalized_evidence = re.sub(
-                r"[^a-z0-9\u4e00-\u9fff]+", "", evidence,
-            )
-            score = 0
-            if normalized_target and normalized_target in normalized_evidence:
-                score += 100
-            shared_terms = semantic_terms(target) & semantic_terms(evidence)
-            score += min(24, len(shared_terms) * 4)
-            if hinted_kind and _live_capability_kind_hint(evidence) == hinted_kind:
-                score += 30
-            if hinted_kind and _capability_operation_kind(step) == hinted_kind:
-                score += 10
-            if hinted_kind == "update" and _step_has_stable_record_identity(step):
-                score += 40
-            elif (
-                hinted_kind in {"create", "submit"}
-                and _capability_operation_kind(step) == "submit"
-                and not _step_has_stable_record_identity(step)
-            ):
-                score += 8
-            scored.append((score, position))
-        best_score = max((score for score, _ in scored), default=0)
-        best_positions = [position for score, position in scored if score == best_score]
-        return best_positions[0] if best_score > 0 and len(best_positions) == 1 else None
-
-    for proposed_name in target_slots:
-        if not remaining_anchors:
-            break
-        hinted_kind = _live_capability_kind_hint(proposed_name)
-        matching_positions = [
-            position
-            for position, anchor_id in enumerate(remaining_anchors)
-            if _capability_operation_kind(steps[anchor_id]) == hinted_kind
-        ] if hinted_kind else []
-        semantic_position = semantic_match_position(proposed_name)
-        if semantic_position is not None:
-            match_position = semantic_position
-        elif len(matching_positions) == 1:
-            match_position = matching_positions[0]
-        elif not hinted_kind and len(remaining_anchors) == 1:
-            match_position = 0
-        else:
-            unresolved_items.append({
-                "kind": "capability_anchor",
-                "target": proposed_name,
-                "reason": (
-                    "recording evidence does not identify exactly one matching public anchor"
-                ),
-            })
-            continue
-        anchor_id = remaining_anchors.pop(match_position)
-        step = steps[anchor_id]
-        observed_kind = _capability_operation_kind(step)
-        method = str(step.method or "GET").upper()
-        read_kinds = {"query_status", "inspect", "preview", "export"}
-        write_kinds = {
-            "create", "update", "save_draft", "submit", "approve",
-            "reject", "withdraw", "delete",
-        }
-        kind = (
-            hinted_kind
-            if (
-                hinted_kind in read_kinds and method in {"GET", "HEAD"}
-            ) or (
-                hinted_kind in write_kinds and method not in {"GET", "HEAD", "OPTIONS"}
-            )
-            else observed_kind
-        )
-        request_steps = [step]
-        read_steps = _read_status_steps(spec)
-        if step in read_steps:
-            request_steps = _grounded_read_operation_steps(spec, step)
-        name = _unique_live_capability_name(proposed_name, kind, used_names)
-        title = _generalize_capability_title(
-            proposed_name
-            if proposed_name in contract_names
-            else f"{action_labels.get(kind, '执行')}{business}"
-        )
-        capabilities.append({
-            "name": name,
-            "title": title,
-            "intent": title,
-            "kind": kind,
-            "kind_source": "recording_goal" if proposed_name else "recording_fact",
-            "anchor_step_id": anchor_id,
-            "request_refs": [
-                {
-                    "step_id": request_step.step_id,
-                    "usage": (
-                        "execute" if request_step.step_id == anchor_id else "preflight"
-                    ),
-                }
-                for request_step in request_steps
-            ],
-        })
     return {
-        "business_understanding": {
-            "business_name": business,
-            "summary": str(goal.get("intent") or "").strip(),
-        },
+        "source": "pi_normalized_goal",
+        "expected_count": expected_count,
         "capabilities": capabilities,
-        "unresolved_items": unresolved_items,
-    }
-
-
-def compile_recorded_capabilities(spec):  # noqa: ANN001, ANN202
-    """Compile public capabilities from recorded anchors without a live Pi plan."""
-    from dano.execution.page.capability_compiler import compile_capabilities
-
-    plan = _semantic_plan_from_live_boundaries(spec)
-    planned = [
-        item for item in (plan.get("capabilities") or [])
-        if isinstance(item, dict) and item.get("name") and item.get("anchor_step_id")
-    ]
-    if not planned:
-        return spec
-    current = spec.model_copy(deep=True)
-    current.meta = {
-        **(current.meta or {}),
-        "capability_model": {
-            "status": "ready",
-            "source": "recorded_request_graph",
-            "semantic_plan": plan,
-        },
-    }
-    compilation = compile_capabilities(current, plan)
-    return compilation.spec if compilation.capabilities else current
-
-
-def _constrain_semantic_plan_to_goal(spec, semantic_plan: dict) -> dict:  # noqa: ANN001
-    """Apply goal count/names without inventing or positionally relabeling anchors."""
-    contract = _recording_goal_contract(spec)
-    if not contract:
-        return semantic_plan
-    expected_count = int(contract.get("expected_count") or 0)
-    target_names = _goal_capability_names(spec, contract)
-    candidates = [
-        deepcopy(item)
-        for item in (semantic_plan.get("capabilities") or [])
-        if isinstance(item, dict)
-    ]
-    selected: list[dict] = []
-    used_names: set[str] = set()
-
-    def normalized_identity(value: object) -> str:
-        return re.sub(
-            r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").casefold(),
-        )
-
-    for index in range(expected_count):
-        if not candidates:
-            break
-        target_name = target_names[index] if index < len(target_names) else ""
-        target_kind = _live_capability_kind_hint(target_name)
-        target_identity = normalized_identity(target_name)
-        exact_positions = [
-            position
-            for position, candidate in enumerate(candidates)
-            if target_identity and target_identity in {
-                normalized_identity(candidate.get("name")),
-                normalized_identity(candidate.get("title")),
-                normalized_identity(candidate.get("intent")),
-            }
-        ]
-        matching_positions = [
-            position
-            for position, candidate in enumerate(candidates)
-            if target_kind and (
-                str(candidate.get("kind") or "") == target_kind
-                or _live_capability_kind_hint(str(candidate.get("name") or "")) == target_kind
-            )
-        ]
-        if len(exact_positions) == 1:
-            match_position = exact_positions[0]
-        elif len(matching_positions) == 1:
-            match_position = matching_positions[0]
-        elif not target_name and candidates:
-            match_position = 0
-        else:
-            # Missing evidence must stay missing. Taking the first remaining
-            # candidate here used to rename submit as detail, withdraw as
-            # progress, and delete as edit after one unresolved goal slot.
-            continue
-        candidate = candidates.pop(match_position)
-        if target_name:
-            candidate["name"] = _unique_live_capability_name(
-                target_name,
-                str(candidate.get("kind") or "capability"),
-                used_names,
-            )
-            candidate["title"] = target_name
-            candidate["intent"] = target_name
-        else:
-            candidate["name"] = _unique_live_capability_name(
-                str(candidate.get("name") or ""),
-                str(candidate.get("kind") or "capability"),
-                used_names,
-            )
-        selected.append(candidate)
-    return {
-        **deepcopy(semantic_plan),
-        "business_understanding": deepcopy(
-            semantic_plan.get("business_understanding")
-            or {}
-        ),
-        "capabilities": selected,
     }
 
 
@@ -3269,105 +2818,18 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 request_ref["step_id"] = merged_step_id_by_request_id.get(
                     ref_request_id, identifier,
                 )
-    boundary_semantic_plan = _semantic_plan_from_live_boundaries(merged)
-    # A submitted semantic plan is the sole owner of public business meaning.
-    # Request-boundary recovery remains a compatibility fallback only when no
-    # strict live plan exists; supplementing a partial plan from goal slots can
-    # relabel submit as detail or merge distinct edit/save operations.
-    if (
-        goal_contract
-        and not (
-            isinstance(live_semantic_plan, dict)
-            and live_semantic_plan.get("capabilities")
-        )
-        and boundary_semantic_plan.get("capabilities")
-    ):
-        derived_capabilities = [
-            deepcopy(item)
-            for item in boundary_semantic_plan.get("capabilities") or []
-            if isinstance(item, dict)
-        ]
-        derived_anchors = {
-            str(item.get("anchor_step_id") or "") for item in derived_capabilities
-        }
-        expected_count = int(goal_contract.get("expected_count") or 0)
-        if len(derived_capabilities) < expected_count:
-            live_request_id_by_step_id = {
-                str(step_id): str(request_id)
-                for step_id, request_id in (
-                    getattr(live_spec, "step_request_ids", None) or {}
-                ).items()
-                if str(step_id) and str(request_id)
-            }
-            for step in (getattr(live_spec, "steps", None) or []):
-                request_id = str((step.source_meta or {}).get("request_id") or "")
-                if request_id:
-                    live_request_id_by_step_id.setdefault(
-                        str(step.step_id), request_id,
-                    )
-            merged_step_id_by_request_id = {
-                str((step.source_meta or {}).get("request_id") or ""): step.step_id
-                for step in merged.steps
-                if str((step.source_meta or {}).get("request_id") or "")
-            }
-            for item in (
-                live_semantic_plan.get("capabilities") or []
-                if isinstance(live_semantic_plan, dict) else []
-            ):
-                if not isinstance(item, dict):
-                    continue
-                raw_anchor = str(item.get("anchor_step_id") or "")
-                request_id = live_request_id_by_step_id.get(raw_anchor, raw_anchor)
-                anchor = merged_step_id_by_request_id.get(request_id, raw_anchor)
-                if not anchor or anchor in derived_anchors:
-                    continue
-                supplement = deepcopy(item)
-                supplement["anchor_step_id"] = anchor
-                for request_ref in supplement.get("request_refs") or []:
-                    if not isinstance(request_ref, dict):
-                        continue
-                    identifier = str(request_ref.get("step_id") or "")
-                    ref_request_id = live_request_id_by_step_id.get(identifier, identifier)
-                    request_ref["step_id"] = merged_step_id_by_request_id.get(
-                        ref_request_id, identifier,
-                    )
-                derived_capabilities.append(supplement)
-                derived_anchors.add(anchor)
-        live_semantic_plan = {
-            **deepcopy(boundary_semantic_plan),
-            "business_understanding": deepcopy(
-                (live_semantic_plan or {}).get("business_understanding")
-                or boundary_semantic_plan.get("business_understanding")
-                or {}
-            ),
-            "capabilities": derived_capabilities,
-            "unresolved_items": [
-                *deepcopy(boundary_semantic_plan.get("unresolved_items") or []),
-                *deepcopy(
-                    (live_semantic_plan or {}).get("unresolved_items") or []
-                    if isinstance(live_semantic_plan, dict) else []
-                ),
-            ],
-        }
-    elif not (
+    if not (
         isinstance(live_semantic_plan, dict)
         and live_semantic_plan.get("capabilities")
     ):
-        live_semantic_plan = boundary_semantic_plan
+        live_semantic_plan = None
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         live_capability_model = {
             **(live_capability_model if isinstance(live_capability_model, dict) else {}),
             "status": "ready",
-            "source": "live_goal_request_roles",
+            "source": "skill_semantic_plan",
             "semantic_plan": live_semantic_plan,
         }
-    if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
-        live_semantic_plan = _constrain_semantic_plan_to_goal(merged, live_semantic_plan)
-        if isinstance(live_capability_model, dict):
-            live_capability_model = {
-                **live_capability_model,
-                "semantic_plan": deepcopy(live_semantic_plan),
-            }
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         materialized_plan = deepcopy(live_semantic_plan)
         step_ids = {step.step_id for step in merged.steps}
@@ -3428,15 +2890,21 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             else:
                 merged = compilation.spec
 
-    if goal_contract:
-        actual_count = len(merged.capabilities)
-        expected_count = int(goal_contract.get("expected_count") or 0)
-        goal_contract = {
-            **goal_contract,
-            "materialized_count": actual_count,
-            "satisfied": actual_count == expected_count,
+    submitted_count = (
+        len(live_semantic_plan.get("capabilities") or [])
+        if isinstance(live_semantic_plan, dict) else 0
+    )
+    expected_count = int((goal_contract or {}).get("expected_count") or submitted_count)
+    if expected_count:
+        merged.meta = {
+            **(merged.meta or {}),
+            "recording_goal_contract": {
+                **(goal_contract or {"source": "submitted_semantic_plan"}),
+                "expected_count": expected_count,
+                "materialized_count": len(merged.capabilities),
+                "satisfied": len(merged.capabilities) == expected_count,
+            },
         }
-        merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
 
     merged.meta = {**(merged.meta or {})}
     if unresolved:

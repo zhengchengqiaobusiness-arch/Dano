@@ -607,10 +607,6 @@ def _resolved_thought(issue: WorkflowIssue) -> str:
     return f"已经处理好了：{issue.message}"
 
 
-def _issue_resolution_label(issue: WorkflowIssue) -> str:
-    return _plan_thought((issue,))
-
-
 def _operator_question(issue: WorkflowIssue) -> WorkflowQuestion:
     if issue.code == "required_axis_unconfirmed":
         field = str(
