@@ -1,6 +1,44 @@
 import { api } from "./client";
 
 export const EXPORT_DIR_LS = "dano.exportDir";
+export const SKILL_EXPORT_DRAFT_LS = "dano.skillExportDrafts";
+
+export interface SkillExportDraft {
+  title?: string;
+  description?: string;
+}
+
+export function rememberedSkillExportDraft(resultId: string): SkillExportDraft {
+  const key = String(resultId || "").trim();
+  if (!key) return {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILL_EXPORT_DRAFT_LS) || "{}");
+    const row = parsed && typeof parsed === "object" ? parsed[key] : null;
+    if (!row || typeof row !== "object") return {};
+    return {
+      title: typeof row.title === "string" ? row.title : "",
+      description: typeof row.description === "string" ? row.description : "",
+    };
+  } catch {
+    return {};
+  }
+}
+
+export function rememberSkillExportDraft(resultId: string, draft: SkillExportDraft) {
+  const key = String(resultId || "").trim();
+  if (!key) return;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILL_EXPORT_DRAFT_LS) || "{}");
+    const all = parsed && typeof parsed === "object" ? parsed : {};
+    all[key] = {
+      title: String(draft.title || ""),
+      description: String(draft.description || ""),
+    };
+    localStorage.setItem(SKILL_EXPORT_DRAFT_LS, JSON.stringify(all));
+  } catch {
+    // ignore quota / private mode
+  }
+}
 
 export function rememberedExportDir() {
   try {
@@ -51,6 +89,8 @@ export interface RecordingResultSummary {
   skill_export_path?: string;
   skill_lifecycle?: RecordingSkillLifecycle;
   skill_needs_reexport?: boolean;
+  skill_export_title?: string;
+  skill_export_description?: string;
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {

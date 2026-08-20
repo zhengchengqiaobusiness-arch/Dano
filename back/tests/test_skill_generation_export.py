@@ -20,6 +20,7 @@ from dano.export.skill_package.validator import _check_skill, validate_skill_pac
 from dano.onboarding.recording_stage_seven import working_fingerprint
 from dano.onboarding.recording_results import recording_skill_lifecycle
 from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
+from dano.execution.page.flow_spec_core.models import ParamField
 from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import PlanningMode, SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
@@ -464,6 +465,67 @@ async def test_generated_package_contains_only_selected_capabilities(tmp_path: P
     view = build_export_view(spec, outcome.plan["selected_capability_ids"])
     assert {cap.capability_id for cap in view.capabilities} == {"cap_query", "cap_submit"}
     assert spec.capabilities[1].capability_id == "cap_option"
+
+
+def test_promote_unconfirmed_write_fields_for_export() -> None:
+    spec = _three_cap_spec()
+    spec.meta["stage_1_6_contract_version"] = 2
+    spec.steps[2].name = "POST_create"
+    spec.steps[2].params = [
+        ParamField(
+            path="body.items[0].productId",
+            key="productId",
+            value="P001",
+            category="internal",
+            source_kind="unknown",
+            exposed_to_user=False,
+        )
+    ]
+    spec.capabilities[2].step_ids = ["s3"]
+    view = build_export_view(spec, ["cap_submit"])
+    param = next(item for item in view.steps[0].params if item.key == "productId")
+    assert param.source_kind == "user_input"
+    assert param.exposed_to_user is True
+    assert param.category == "user_param"
+    original = spec.steps[2].params[0]
+    assert original.source_kind == "unknown"
+    assert original.exposed_to_user is False
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_write_fields_do_not_block_export(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    spec.meta["stage_1_6_contract_version"] = 2
+    spec.steps[2].name = "POST_create"
+    spec.steps[2].params = [
+        ParamField(
+            path="body.items[0].productId",
+            key="productId",
+            value="P001",
+            category="internal",
+            source_kind="unknown",
+            exposed_to_user=False,
+        )
+    ]
+    spec.capabilities[2].step_ids = ["s3"]
+    stored: list[dict] = []
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec),
+        tenant="tenant",
+        request=_request(
+            out_dir=str(tmp_path),
+            title="点狮ERP销售订单操作能力录制",
+            business_description="销售订单操作流程：新增订单后，可搜索筛选、查看详情或编辑修改。",
+        ),
+        persist=stored.append,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported"
+    assert stored[-1]["skill_export_title"] == "点狮ERP销售订单操作能力录制"
+    assert "销售订单操作流程" in stored[-1]["skill_export_description"]
 
 
 def test_existing_single_capability_package_still_works(tmp_path: Path) -> None:

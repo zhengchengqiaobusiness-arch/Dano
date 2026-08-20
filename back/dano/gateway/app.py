@@ -1639,6 +1639,31 @@ async def export_recording_result_skill(
         raise HTTPException(status_code=404, detail="录制结果不存在")
     request = SkillGenerationRequest.model_validate(req.model_dump())
     request.out_dir = str(request.out_dir or "").strip() or _current_export_dir()
+    body = dict(saved.body or {})
+    bind_run_context(
+        run_id=f"skill-export-{parsed}",
+        recording_id=str(parsed),
+        action=str(body.get("action") or ""),
+        tenant=tenant,
+        subsystem=str(body.get("subsystem") or "oa"),
+        skill_id=str(body.get("skill_id") or ""),
+    )
+    emit_run_event(
+        "skill.export.accepted",
+        stage="export",
+        status="started",
+        summary="收到手动导出 Skill 请求",
+        details={
+            "result_id": str(parsed),
+            "title": request.title or str(body.get("title") or ""),
+            "planning_mode": str(request.planning_mode),
+            "out_dir": request.out_dir,
+            "description_chars": len(request.business_description or ""),
+            "description_preview": (request.business_description or "")[:240],
+            "capability_count": len((body.get("flow_spec") or {}).get("capabilities") or [])
+            if isinstance(body.get("flow_spec"), dict) else 0,
+        },
+    )
 
     async def persist(next_body: dict) -> None:
         await store.patch_recording_result_body(parsed, next_body)
@@ -1660,14 +1685,45 @@ async def export_recording_result_skill(
     try:
         outcome = await export_recording_skill(
             result_id=parsed,
-            body=dict(saved.body or {}),
+            body=body,
             tenant=tenant,
             request=request,
             persist=persist,
             publish=publish,
         )
     except SkillExportError as exc:
+        emit_run_event(
+            "skill.export.summary",
+            stage="export",
+            status="failed",
+            level="error",
+            summary=exc.detail,
+            details={"result_id": str(parsed), "status_code": exc.status_code},
+            error={"code": "SKILL_EXPORT_ERROR", "type": "SkillExportError", "message": exc.detail},
+        )
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    emit_run_event(
+        "skill.export.summary",
+        stage="export",
+        status="succeeded" if outcome.status == "exported" else "failed",
+        level="info" if outcome.status == "exported" else "error",
+        summary=(
+            "Skill 导出完成"
+            if outcome.status == "exported"
+            else "Skill 导出未完成"
+        ),
+        skill_id=outcome.skill_id,
+        details={
+            "result_id": str(parsed),
+            "status": outcome.status,
+            "skill_id": outcome.skill_id,
+            "export_path": outcome.export_path,
+            "version": outcome.version,
+            "idempotent": outcome.idempotent,
+            "errors": list(outcome.errors or []),
+            "clarification_questions": list(outcome.clarification_questions or []),
+        },
+    )
     if outcome.status == "exported" and request.out_dir:
         save_export_dir(request.out_dir)
     return outcome.model_dump(mode="json")

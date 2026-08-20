@@ -7,6 +7,8 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import structlog
+
 from dano.execution.page.capability_kinds import READ_CAPABILITY_KINDS
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
 from dano.onboarding.skill_generation.catalog import (
@@ -29,6 +31,28 @@ from dano.onboarding.skill_generation.models import (
     UnusedCapability,
 )
 from dano.onboarding.skill_generation.validate import validate_skill_plan
+
+log = structlog.get_logger(__name__)
+
+
+def _log_plan(event: str, *, summary: str, status: str = "progress", level: str = "info", **details: Any) -> None:
+    payload = {key: value for key, value in details.items() if value is not None}
+    writer = log.error if level in {"error", "exception"} else log.warning if level == "warning" else log.info
+    writer(event, summary=summary, status=status, **payload)
+    try:
+        from dano.infra.run_logging import emit_run_event
+
+        emit_run_event(
+            event,
+            stage="plan",
+            status=status,
+            summary=summary,
+            level=level,
+            details=payload,
+        )
+    except Exception:  # noqa: BLE001 - planning logs must not fail export
+        pass
+
 
 PlanProposer = Callable[[FlowSpec, SkillGenerationRequest, set[str], str], Awaitable[SkillPlan | dict[str, Any]]]
 
@@ -359,6 +383,19 @@ def propose_deterministic_plan(
                         bindings=bindings,
                         request=request,
                     ))
+        used_in_routes = {cap_id for route in routes for cap_id in route.capability_sequence}
+        leftovers = [cap for cap in selected if capability_ref(cap) not in used_in_routes]
+        for cap in leftovers:
+            cap_id = capability_ref(cap)
+            title = cap.title or cap.name or cap_id
+            routes.append(_route(
+                route_id=f"solo_{cap_id}",
+                name=title,
+                when_to_use=f"用户要求执行「{title}」，不要串联其他未确认关系的能力",
+                sequence=[cap],
+                bindings=[],
+                request=request,
+            ))
         if not routes:
             routes.append(_route(
                 route_id="single",
@@ -404,13 +441,23 @@ def propose_deterministic_plan(
     )
 
 
+def _plan_is_usable(plan: SkillPlan) -> bool:
+    if not plan.selected_capability_ids or not plan.routes:
+        return False
+    return all(bool(route.capability_sequence) and bool(route.examples) for route in plan.routes)
+
+
 def _parse_proposed_plan(raw: SkillPlan | dict[str, Any], fallback: SkillPlan) -> SkillPlan:
     if isinstance(raw, SkillPlan):
-        return raw
-    payload = dict(raw or {})
-    payload.setdefault("source_flow_fingerprint", fallback.source_flow_fingerprint)
-    payload.setdefault("planning_mode", fallback.planning_mode)
-    return SkillPlan.model_validate(payload)
+        plan = raw
+    else:
+        payload = dict(raw or {})
+        payload.setdefault("source_flow_fingerprint", fallback.source_flow_fingerprint)
+        payload.setdefault("planning_mode", fallback.planning_mode)
+        plan = SkillPlan.model_validate(payload)
+    if not _plan_is_usable(plan):
+        return fallback
+    return plan
 
 
 async def _llm_propose(
@@ -485,16 +532,19 @@ async def generate_skill_plan(
     proposer: PlanProposer | None = None,
 ) -> SkillGenerationResult:
     if not str(request.business_description or "").strip():
+        _log_plan("skill.plan.failed", summary="业务描述为空", status="failed", level="error")
         return SkillGenerationResult(
             status="generation_failed",
             errors=["业务描述不能为空"],
         )
     if _SECRET_RE.search(_text(request)):
+        _log_plan("skill.plan.failed", summary="业务描述包含敏感字段", status="failed", level="error")
         return SkillGenerationResult(
             status="generation_failed",
             errors=["业务描述或示例不得包含 token、cookie、storage_state 或密码"],
         )
     if not verified_capability_ids:
+        _log_plan("skill.plan.failed", summary="没有可导出能力", status="failed", level="error")
         return SkillGenerationResult(
             status="generation_failed",
             errors=["没有可导出能力，不能生成 Skill"],
@@ -504,6 +554,22 @@ async def generate_skill_plan(
     proposed: SkillPlan = fallback
     errors: list[str] = []
     used_llm = False
+    _log_plan(
+        "skill.plan.deterministic",
+        summary="已生成确定性规划草案",
+        fingerprint=source_flow_fingerprint,
+        selected_capability_ids=list(fallback.selected_capability_ids),
+        unused_capability_ids=[item.capability_id for item in fallback.unused_capabilities],
+        routes=[
+            {
+                "route_id": route.route_id,
+                "sequence": list(route.capability_sequence),
+                "bindings": len(route.bindings),
+                "user_inputs": list(route.required_user_inputs),
+            }
+            for route in fallback.routes
+        ],
+    )
     if proposer is not None:
         try:
             proposed = _parse_proposed_plan(
@@ -511,6 +577,13 @@ async def generate_skill_plan(
                 fallback,
             )
         except Exception as exc:  # noqa: BLE001 - proposer failure is reported, not guessed
+            _log_plan(
+                "skill.plan.failed",
+                summary="规划提案失败",
+                status="failed",
+                level="error",
+                error=str(exc) or "规划提案失败",
+            )
             return SkillGenerationResult(
                 status="generation_failed",
                 errors=[str(exc) or "规划提案失败"],
@@ -524,13 +597,30 @@ async def generate_skill_plan(
             api_key = ""
         if api_key:
             try:
-                proposed = await _llm_propose(
-                    spec, request, verified_capability_ids, source_flow_fingerprint,
+                proposed = _parse_proposed_plan(
+                    await _llm_propose(
+                        spec, request, verified_capability_ids, source_flow_fingerprint,
+                    ),
+                    fallback,
                 )
                 used_llm = True
             except Exception as exc:  # noqa: BLE001 - deterministic plan is the fallback candidate
                 errors.append(str(exc) or "模型规划失败")
                 proposed = fallback
+                _log_plan(
+                    "skill.plan.llm_fallback",
+                    summary="模型规划失败，回退确定性草案",
+                    status="warning",
+                    level="warning",
+                    error=str(exc) or "模型规划失败",
+                )
+            else:
+                _log_plan(
+                    "skill.plan.llm",
+                    summary="模型已返回规划草案",
+                    selected_capability_ids=list(proposed.selected_capability_ids),
+                    route_ids=[route.route_id for route in proposed.routes],
+                )
 
     checked = validate_skill_plan(
         proposed,
@@ -539,8 +629,25 @@ async def generate_skill_plan(
         expected_fingerprint=source_flow_fingerprint,
     )
     if checked.ok:
+        _log_plan(
+            "skill.plan.validated",
+            summary="规划校验通过",
+            status="succeeded",
+            used_llm=used_llm,
+            selected_capability_ids=list(proposed.selected_capability_ids),
+            route_ids=[route.route_id for route in proposed.routes],
+        )
         return SkillGenerationResult(status="planned", plan=proposed)
 
+    _log_plan(
+        "skill.plan.validation_failed",
+        summary="规划校验未通过，尝试修复或回退",
+        status="warning",
+        level="warning",
+        used_llm=used_llm,
+        errors=list(checked.errors),
+        clarifications=list(checked.clarifications),
+    )
     if used_llm:
         try:
             proposed = await _llm_propose(
@@ -553,6 +660,7 @@ async def generate_skill_plan(
         except Exception as exc:  # noqa: BLE001 - one repair only, then report
             errors.append(str(exc) or "规划修复失败")
         else:
+            proposed = _parse_proposed_plan(proposed, fallback)
             checked = validate_skill_plan(
                 proposed,
                 spec,
@@ -560,9 +668,44 @@ async def generate_skill_plan(
                 expected_fingerprint=source_flow_fingerprint,
             )
             if checked.ok:
+                _log_plan(
+                    "skill.plan.validated",
+                    summary="模型修复后规划校验通过",
+                    status="succeeded",
+                    used_llm=True,
+                    repaired=True,
+                    selected_capability_ids=list(proposed.selected_capability_ids),
+                    route_ids=[route.route_id for route in proposed.routes],
+                )
                 return SkillGenerationResult(status="planned", plan=proposed)
 
+    if used_llm:
+        fallback_checked = validate_skill_plan(
+            fallback,
+            spec,
+            verified_capability_ids=verified_capability_ids,
+            expected_fingerprint=source_flow_fingerprint,
+        )
+        if fallback_checked.ok:
+            _log_plan(
+                "skill.plan.llm_fallback",
+                summary="模型规划无效，已回退确定性规划",
+                status="warning",
+                level="warning",
+                selected_capability_ids=list(fallback.selected_capability_ids),
+                route_ids=[route.route_id for route in fallback.routes],
+            )
+            return SkillGenerationResult(status="planned", plan=fallback)
+
     if checked.clarifications and not checked.errors:
+        _log_plan(
+            "skill.plan.needs_clarification",
+            summary="规划需要补充说明",
+            status="warning",
+            level="warning",
+            clarifications=list(checked.clarifications),
+            errors=list(errors),
+        )
         return SkillGenerationResult(
             status="needs_clarification",
             plan=proposed,
@@ -570,12 +713,27 @@ async def generate_skill_plan(
             errors=errors,
         )
     if checked.clarifications:
+        _log_plan(
+            "skill.plan.needs_clarification",
+            summary="规划校验失败且需要补充说明",
+            status="failed",
+            level="error",
+            clarifications=list(checked.clarifications),
+            errors=list(checked.errors) + list(errors),
+        )
         return SkillGenerationResult(
             status="needs_clarification",
             plan=None,
             clarification_questions=checked.clarifications,
             errors=checked.errors + errors,
         )
+    _log_plan(
+        "skill.plan.failed",
+        summary="规划校验失败",
+        status="failed",
+        level="error",
+        errors=list(checked.errors) + list(errors),
+    )
     return SkillGenerationResult(
         status="generation_failed",
         errors=checked.errors + errors,

@@ -414,6 +414,75 @@ async def test_incomplete_relation_plans_independent_routes() -> None:
     assert "id" in write.required_user_inputs
 
 
+@pytest.mark.asyncio
+async def test_empty_proposed_plan_falls_back_to_deterministic() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假",
+        business_description="用户可以查询待办记录，也可以直接提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+
+    async def proposer(*_args, **_kwargs):
+        return {
+            "source_flow_fingerprint": "fp",
+            "planning_mode": "dynamic",
+            "selected_capability_ids": [],
+            "routes": [
+                {"route_id": f"route_{index}", "name": f"路线{index}", "when_to_use": "x", "done_when": "y"}
+                for index in range(1, 6)
+            ],
+        }
+
+    result = await generate_skill_plan(
+        spec,
+        request,
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp",
+        proposer=proposer,
+    )
+    assert result.status == "planned"
+    assert result.plan is not None
+    assert result.plan.selected_capability_ids
+    assert all(route.capability_sequence and route.examples for route in result.plan.routes)
+    checked = validate_skill_plan(result.plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+
+
+def test_dynamic_plan_keeps_all_mentioned_capabilities() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    spec.capabilities.append(
+        _cap(
+            capability_id="cap_delete",
+            name="delete_leave",
+            title="删除请假",
+            kind="delete",
+            required=["id"],
+            confirm=True,
+        )
+    )
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="可以查询待办、提交请假，也可以删除请假。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        {"cap_query", "cap_option", "cap_submit", "cap_delete"},
+        "fp",
+    )
+    checked = validate_skill_plan(
+        plan,
+        spec,
+        verified_capability_ids={"cap_query", "cap_option", "cap_submit", "cap_delete"},
+        expected_fingerprint="fp",
+    )
+    assert checked.ok, checked.errors
+    used = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
+    assert used >= {"cap_query", "cap_submit", "cap_delete"}
+    assert any(route.route_id.startswith("solo_") for route in plan.routes)
+
+
 def test_fixed_plan_without_relation_uses_user_inputs() -> None:
     spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
     plan = propose_deterministic_plan(

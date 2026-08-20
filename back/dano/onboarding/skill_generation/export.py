@@ -5,16 +5,21 @@ from __future__ import annotations
 import inspect
 import json
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import structlog
 from pydantic import BaseModel, Field
 
 from dano.execution.page.flow_spec_core.models import FlowSpec
 from dano.onboarding.skill_generation.catalog import capability_ref
-from dano.onboarding.skill_generation.export_view import build_export_view
+from dano.onboarding.skill_generation.export_view import (
+    build_export_view,
+    promote_unconfirmed_write_fields,
+)
 from dano.onboarding.skill_generation.models import (
     SkillGenerationRequest,
     SkillPlan,
@@ -22,6 +27,8 @@ from dano.onboarding.skill_generation.models import (
 )
 from dano.onboarding.skill_generation.planner import generate_skill_plan
 from dano.onboarding.skill_generation.validate import plan_to_contract_payload
+
+log = structlog.get_logger(__name__)
 
 PublishSkill = Callable[..., Awaitable[dict[str, Any]]]
 RenderSkill = Callable[..., str]
@@ -50,6 +57,73 @@ class SkillExportError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+def _preview(text: str, limit: int = 240) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "…"
+
+
+def _capability_rows(spec: FlowSpec) -> list[dict[str, Any]]:
+    return [
+        {
+            "capability_id": capability_ref(cap),
+            "name": cap.name,
+            "title": cap.title or cap.name,
+            "kind": cap.kind,
+        }
+        for cap in spec.capabilities
+        if capability_ref(cap)
+    ]
+
+
+def _route_rows(plan: SkillPlan | None) -> list[dict[str, Any]]:
+    if plan is None:
+        return []
+    return [
+        {
+            "route_id": route.route_id,
+            "name": route.name,
+            "sequence": list(route.capability_sequence),
+            "bindings": len(route.bindings),
+            "user_inputs": list(route.required_user_inputs),
+        }
+        for route in plan.routes
+    ]
+
+
+def _log_export(
+    event: str,
+    *,
+    summary: str,
+    status: str = "progress",
+    level: str = "info",
+    duration_ms: int | float | None = None,
+    error: dict[str, Any] | None = None,
+    next_action: str = "",
+    **details: Any,
+) -> None:
+    payload = {key: value for key, value in details.items() if value is not None}
+    writer = log.error if level in {"error", "exception"} else log.warning if level == "warning" else log.info
+    writer(event, summary=summary, status=status, **payload)
+    try:
+        from dano.infra.run_logging import emit_run_event
+
+        emit_run_event(
+            event,
+            stage="export",
+            status=status,
+            summary=summary,
+            level=level,
+            duration_ms=duration_ms,
+            details=payload,
+            error=error,
+            next_action=next_action,
+        )
+    except Exception:  # noqa: BLE001 - export logging must not fail the request
+        pass
 
 
 def _current_spec(body: dict[str, Any]) -> FlowSpec:
@@ -117,6 +191,7 @@ def build_export_skill_spec(
     from dano.shared.enums import RiskLevel, Subsystem
 
     release_spec, candidate = prepare_flow_release_candidate(view)
+    release_spec = promote_unconfirmed_write_fields(release_spec)
     api_request, errors = flow_spec_to_api_request(release_spec, _prepared=True)
     if errors or not api_request:
         raise SkillExportError(409, "导出视图无法编译为 Skill 包：" + "；".join(errors or ["未知错误"]))
@@ -225,16 +300,58 @@ async def export_recording_skill(
     persist: PersistBody | None = None,
     build_skill: BuildSkill | None = None,
 ) -> SkillExportOutcome:
+    started = time.monotonic()
+    title = str(request.title or body.get("title") or "").strip()
     if not str(request.business_description or "").strip():
+        _log_export(
+            "skill.export.failed",
+            summary="业务描述为空，拒绝导出",
+            status="failed",
+            level="error",
+            result_id=str(result_id),
+            title=title,
+        )
         raise SkillExportError(400, "业务描述不能为空")
     if not str(request.out_dir or "").strip():
+        _log_export(
+            "skill.export.failed",
+            summary="导出目录为空，拒绝导出",
+            status="failed",
+            level="error",
+            result_id=str(result_id),
+            title=title,
+        )
         raise SkillExportError(400, "导出目录不能为空")
     spec = _current_spec(body)
     from dano.onboarding.recording_stage_seven import working_fingerprint
 
     fingerprint = working_fingerprint(spec)
+    capabilities = _capability_rows(spec)
     verified = {capability_ref(cap) for cap in spec.capabilities if capability_ref(cap)}
+    _log_export(
+        "skill.export.started",
+        summary="开始按阶段6能力规划并导出 Skill",
+        status="started",
+        result_id=str(result_id),
+        action=str(body.get("action") or ""),
+        title=title or spec.title,
+        planning_mode=str(request.planning_mode),
+        out_dir=str(request.out_dir),
+        fingerprint=fingerprint,
+        capability_count=len(capabilities),
+        capabilities=capabilities,
+        description_preview=_preview(request.business_description),
+        existing_skill_id=str(body.get("skill_id") or ""),
+    )
     if not verified:
+        _log_export(
+            "skill.export.failed",
+            summary="录制结果没有可导出能力",
+            status="failed",
+            level="error",
+            result_id=str(result_id),
+            fingerprint=fingerprint,
+        )
         raise SkillExportError(409, "尚未生成可导出能力，不能生成 Skill")
     request_fp = generation_request_fingerprint(
         result_id=str(result_id),
@@ -249,16 +366,29 @@ async def export_recording_skill(
                 used = _used_capability_rows(spec, SkillPlan.model_validate(plan))
             except Exception:  # noqa: BLE001 - idempotent path still returns the stored plan
                 used = []
+        skill_id = str(body.get("skill_id") or "")
+        export_path = str(body.get("export_path") or body.get("skill_export_path") or "")
+        _log_export(
+            "skill.export.completed",
+            summary="请求未变化，直接返回已导出 Skill",
+            status="succeeded",
+            duration_ms=(time.monotonic() - started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            export_path=export_path,
+            idempotent=True,
+            used_capabilities=used,
+        )
         return SkillExportOutcome(
             status="exported",
-            skill_id=str(body.get("skill_id") or ""),
+            skill_id=skill_id,
             skill_name=str(request.title or body.get("title") or ""),
             version=int(body.get("skill_version") or 1),
             planning_mode=str((plan or {}).get("planning_mode") or request.planning_mode),
             used_capabilities=used,
             unused_capabilities=list((plan or {}).get("unused_capabilities") or []),
             routes=list((plan or {}).get("routes") or []),
-            export_path=str(body.get("export_path") or body.get("skill_export_path") or ""),
+            export_path=export_path,
             plan=plan,
             idempotent=True,
         )
@@ -267,8 +397,17 @@ async def export_recording_skill(
         **body,
         "skill_export_status": "generating",
         "skill_plan_valid": False,
+        "skill_export_title": title,
+        "skill_export_description": str(request.business_description or "").strip(),
     })
-
+    _log_export(
+        "skill.export.planning",
+        summary="开始规划 Skill 路线",
+        result_id=str(result_id),
+        fingerprint=fingerprint,
+        capability_ids=sorted(verified),
+    )
+    plan_started = time.monotonic()
     planned = await generate_skill_plan(
         spec,
         request,
@@ -276,13 +415,28 @@ async def export_recording_skill(
         source_flow_fingerprint=fingerprint,
         proposer=proposer,
     )
+    plan_ms = (time.monotonic() - plan_started) * 1000
     if planned.status != "planned" or planned.plan is None:
+        _log_export(
+            "skill.export.failed",
+            summary="Skill 规划未通过，停止导出",
+            status="failed",
+            level="error",
+            duration_ms=plan_ms,
+            result_id=str(result_id),
+            plan_status=planned.status,
+            errors=list(planned.errors or []),
+            clarification_questions=list(planned.clarification_questions or []),
+            routes=_route_rows(planned.plan),
+        )
         await _call_persist(persist, {
             **body,
             "skill_export_status": planned.status,
             "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
             "skill_plan_valid": False,
             "published": bool(body.get("published")),
+            "skill_export_title": title,
+            "skill_export_description": str(request.business_description or "").strip(),
         })
         return SkillExportOutcome(
             status=planned.status,
@@ -294,7 +448,27 @@ async def export_recording_skill(
     plan = planned.plan
     title = str(request.title or body.get("title") or spec.title or "").strip()
     skill_id = _stable_skill_id(body, title)
+    _log_export(
+        "skill.export.planned",
+        summary="Skill 规划完成",
+        status="succeeded",
+        duration_ms=plan_ms,
+        result_id=str(result_id),
+        skill_id=skill_id,
+        selected_capability_ids=list(plan.selected_capability_ids),
+        unused_capabilities=[item.capability_id for item in plan.unused_capabilities],
+        routes=_route_rows(plan),
+        planning_mode=str(plan.planning_mode),
+    )
     view = build_export_view(spec, plan.selected_capability_ids)
+    _log_export(
+        "skill.export.view_ready",
+        summary="已按规划裁剪导出视图",
+        result_id=str(result_id),
+        skill_id=skill_id,
+        view_capability_count=len(view.capabilities or []),
+        view_step_count=len(view.steps or []),
+    )
     if build_skill is not None:
         skill = build_skill(view, tenant=tenant, skill_id=skill_id, title=title, plan=plan)
     else:
@@ -302,9 +476,16 @@ async def export_recording_skill(
             skill = build_export_skill_spec(
                 view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
             )
-        except SkillExportError:
-            if render is None:
-                raise
+        except SkillExportError as exc:
+            _log_export(
+                "skill.export.build_fallback",
+                summary="正式编译失败，改用最小导出包",
+                status="warning",
+                level="warning",
+                result_id=str(result_id),
+                skill_id=skill_id,
+                reason=exc.detail,
+            )
             skill = _minimal_export_skill(
                 view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
             )
@@ -314,9 +495,33 @@ async def export_recording_skill(
     published_report: dict[str, Any] | None = None
     export_path = ""
     try:
+        render_started = time.monotonic()
+        _log_export(
+            "skill.export.rendering",
+            summary="开始写出 Skill 包",
+            result_id=str(result_id),
+            skill_id=skill_id,
+            out_dir=out_dir,
+        )
         slug = render_fn(skill, out_dir, tenant=tenant)
         export_path = str(Path(out_dir) / slug)
         _assert_package_matches_plan(export_path, plan)
+        _log_export(
+            "skill.export.rendered",
+            summary="Skill 包已写出并通过对齐校验",
+            status="succeeded",
+            duration_ms=(time.monotonic() - render_started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            export_path=export_path,
+        )
+        publish_started = time.monotonic()
+        _log_export(
+            "skill.export.publishing",
+            summary="开始发布导出后的 Skill 资产",
+            result_id=str(result_id),
+            skill_id=skill_id,
+        )
         published_report = await publish_fn(
             tenant=tenant,
             subsystem=str(body.get("subsystem") or view.subsystem or "oa"),
@@ -330,6 +535,16 @@ async def export_recording_skill(
         if published_report and published_report.get("ok") is False:
             raise RuntimeError(str(published_report.get("reason") or "录制资产发布失败"))
         version = int((published_report or {}).get("asset_version") or _next_version(body))
+        _log_export(
+            "skill.export.published",
+            summary="Skill 资产发布成功",
+            status="succeeded",
+            duration_ms=(time.monotonic() - publish_started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            asset_id=str((published_report or {}).get("asset_id") or ""),
+            version=version,
+        )
         plan_payload = plan.model_dump(mode="json")
         used_rows = _used_capability_rows(spec, plan)
         plan_payload["used_capabilities"] = used_rows
@@ -347,8 +562,24 @@ async def export_recording_skill(
             "skill_export_path": export_path,
             "skill_request_fingerprint": request_fp,
             "skill_needs_reexport": False,
+            "skill_export_title": title,
+            "skill_export_description": str(request.business_description or "").strip(),
         }
         await _call_persist(persist, next_body)
+        _log_export(
+            "skill.export.completed",
+            summary="Skill 导出完成",
+            status="succeeded",
+            duration_ms=(time.monotonic() - started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            skill_name=title,
+            version=version,
+            export_path=export_path,
+            used_capabilities=used_rows,
+            unused_capabilities=[item.capability_id for item in plan.unused_capabilities],
+            routes=_route_rows(plan),
+        )
         return SkillExportOutcome(
             status="exported",
             skill_id=skill_id,
@@ -361,10 +592,32 @@ async def export_recording_skill(
             export_path=export_path,
             plan=plan_payload,
         )
-    except SkillExportError:
+    except SkillExportError as exc:
+        _log_export(
+            "skill.export.failed",
+            summary=exc.detail or "Skill 导出失败",
+            status="failed",
+            level="error",
+            duration_ms=(time.monotonic() - started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            export_path=export_path,
+            error={"code": "SKILL_EXPORT_ERROR", "type": "SkillExportError", "message": exc.detail},
+        )
         await _fail_export(body, persist, export_path, published_report)
         raise
     except Exception as exc:  # noqa: BLE001 - export failure must not look published
+        _log_export(
+            "skill.export.failed",
+            summary=str(exc) or "Skill 导出失败",
+            status="failed",
+            level="error",
+            duration_ms=(time.monotonic() - started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            export_path=export_path,
+            error={"code": type(exc).__name__, "type": type(exc).__name__, "message": str(exc) or "Skill 导出失败"},
+        )
         await _fail_export(body, persist, export_path, published_report)
         return SkillExportOutcome(
             status="export_failed",
@@ -474,9 +727,13 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
     skill_id = str(kwargs["skill_id"])
     sub_str, _, action = skill_id.partition(".")
     action = action or public_skill_action(title, str(kwargs.get("action") or ""))
-    api_request, errors = flow_spec_to_api_request(view)
-    if errors or not api_request:
-        raise RuntimeError("发布导出视图失败：" + "；".join(errors or ["未知错误"]))
+    api_request = dict(getattr(skill, "api_request", None) or {})
+    if not api_request:
+        promoted = promote_unconfirmed_write_fields(view.model_copy(deep=True))
+        api_request, errors = flow_spec_to_api_request(promoted)
+        if errors or not api_request:
+            raise RuntimeError("发布导出视图失败：" + "；".join(errors or ["未知错误"]))
+        view = promoted
     plan_payload = dict((skill.call_metadata or {}).get("skill_plan") or {})
     api_request["_skill_plan"] = plan_payload
     api_request["_release_snapshot"] = {

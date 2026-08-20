@@ -9,7 +9,6 @@ import {
   Input,
   List,
   Modal,
-  Radio,
   Select,
   Space,
   Spin,
@@ -56,7 +55,9 @@ import {
   getRecordingResult,
   listRecordingResults,
   rememberExportDir,
+  rememberSkillExportDraft,
   rememberedExportDir,
+  rememberedSkillExportDraft,
 } from "../api/recording";
 import type {
   RecordingResultDetail,
@@ -579,17 +580,26 @@ function safeString(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function schemaFieldNames(schema?: Record<string, unknown> | null) {
-  const properties = schema?.properties;
-  if (!properties || typeof properties !== "object") return [];
-  return Object.keys(properties as Record<string, unknown>);
+function capabilityFlowName(capability: FlowCapability, index: number) {
+  return String(capability.title || capability.intent || capability.name || `操作${index + 1}`).trim();
 }
 
-function capabilityIsWrite(capability: FlowCapability) {
-  const kind = String(capability.kind || "").toLowerCase();
-  return Boolean(capability.requires_human_confirm) || [
-    "submit", "delete", "withdraw", "approve", "reject", "submit_batch", "create", "update", "edit",
-  ].includes(kind);
+function defaultSkillDescription(capabilities: FlowCapability[], steps: FlowStep[] = []) {
+  const ordered = capabilities.map((capability, index) => {
+    const refs = capability.request_refs || [];
+    const stepIndexes = refs
+      .map((ref) => steps.findIndex((step) => step.step_id && step.step_id === ref.step_id))
+      .filter((stepIndex) => stepIndex >= 0);
+    const order = stepIndexes.length ? Math.min(...stepIndexes) : index;
+    return { name: capabilityFlowName(capability, index), order, index };
+  }).filter((item) => item.name);
+  ordered.sort((left, right) => left.order - right.order || left.index - right.index);
+  const names = ordered.map((item) => item.name);
+  if (!names.length) return "";
+  if (names.length === 1) {
+    return `本页面的实际操作流程：${names[0]}。`;
+  }
+  return `本页面的实际操作流程：${names.join(" → ")}。用户可按业务需要执行其中一项或多项操作。`;
 }
 
 function historyLifecycleView(item: RecordingResultSummary) {
@@ -696,10 +706,6 @@ export default function PageRecorder({
   const [skillExportErrors, setSkillExportErrors] = useState<string[]>([]);
   const [skillTitle, setSkillTitle] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
-  const [skillPlanningMode, setSkillPlanningMode] = useState<"dynamic" | "fixed">("dynamic");
-  const [skillExamples, setSkillExamples] = useState("");
-  const [skillSuccess, setSkillSuccess] = useState("");
-  const [skillForbidden, setSkillForbidden] = useState("");
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
 
@@ -1548,6 +1554,8 @@ export default function PageRecorder({
         skill_version: detail.skill_version,
         skill_export_status: detail.skill_export_status,
         skill_export_path: detail.skill_export_path,
+        skill_export_title: detail.skill_export_title,
+        skill_export_description: detail.skill_export_description,
         skill_lifecycle: detail.skill_lifecycle,
         skill_needs_reexport: detail.skill_needs_reexport,
       });
@@ -1556,14 +1564,24 @@ export default function PageRecorder({
     }
   }
 
+  function persistSkillDraft(nextTitle = skillTitle, nextDescription = skillDescription) {
+    const resultId = currentResultId();
+    if (!resultId) return;
+    rememberSkillExportDraft(resultId, { title: nextTitle, description: nextDescription });
+  }
+
   function openSkillExport() {
     if (!canProduceSkill) return;
-    setSkillTitle((title || snapshot?.title || "").trim());
-    setSkillDescription("");
-    setSkillPlanningMode("dynamic");
-    setSkillExamples("");
-    setSkillSuccess("");
-    setSkillForbidden("");
+    const resultId = currentResultId();
+    const saved = rememberedSkillExportDraft(resultId);
+    const defaultTitle = (title || snapshot?.title || "").trim();
+    const defaultDescription = defaultSkillDescription(capabilities, draft?.steps || []);
+    setSkillTitle(saved.title?.trim() || resultMeta?.skill_export_title?.trim() || defaultTitle);
+    setSkillDescription(
+      saved.description?.trim()
+      || resultMeta?.skill_export_description?.trim()
+      || defaultDescription,
+    );
     setSkillOutDir(rememberedExportDir());
     setSkillExportOutcome(null);
     setSkillClarifications([]);
@@ -1579,6 +1597,7 @@ export default function PageRecorder({
       return;
     }
     const description = skillDescription.trim();
+    persistSkillDraft(skillTitle, skillDescription);
     if (!skillTitle.trim()) {
       message.error("请填写 Skill 显示名称");
       return;
@@ -1605,10 +1624,10 @@ export default function PageRecorder({
       const outcome = await exportRecordingSkill(resultId, {
         title: skillTitle.trim(),
         business_description: description,
-        planning_mode: skillPlanningMode,
-        example_requests: skillExamples.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
-        success_criteria: skillSuccess.trim(),
-        forbidden_actions: skillForbidden.trim(),
+        planning_mode: "dynamic",
+        example_requests: [],
+        success_criteria: "",
+        forbidden_actions: "",
         out_dir: outDir,
         require_stage_seven: false,
       });
@@ -2573,29 +2592,37 @@ export default function PageRecorder({
             />
           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有执行接口" />}
           {links.length ? (
-            <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 10 }}>
-              <Text strong>参数传递</Text>
-              <List
-                size="small"
-                dataSource={links}
-                renderItem={(link, linkIndex) => {
-                  const sourceId = linkStepId(link, "source");
-                  const targetId = linkStepId(link, "target");
-                  return (
-                    <List.Item key={`${sourceId}:${targetId}:${linkIndex}`}>
-                      <Space wrap>
-                        <Text>{stepById.get(sourceId)?.name || sourceId || "上游响应"}</Text>
-                        <Text code>{linkPath(link, "source") || "返回值"}</Text>
-                        <Text>→</Text>
-                        <Text>{stepById.get(targetId)?.name || targetId || "下游请求"}</Text>
-                        <Text code>{linkPath(link, "target") || "请求字段"}</Text>
-                        {link.confirmed ? <Tag color="success">已确认</Tag> : null}
-                      </Space>
-                    </List.Item>
-                  );
-                }}
-              />
-            </div>
+            <Collapse
+              ghost
+              defaultActiveKey={[]}
+              style={{ marginTop: 10, borderTop: "1px solid #f0f0f0" }}
+              items={[{
+                key: "links",
+                label: `参数传递 ${links.length}`,
+                children: (
+                  <List
+                    size="small"
+                    dataSource={links}
+                    renderItem={(link, linkIndex) => {
+                      const sourceId = linkStepId(link, "source");
+                      const targetId = linkStepId(link, "target");
+                      return (
+                        <List.Item key={`${sourceId}:${targetId}:${linkIndex}`}>
+                          <Space wrap>
+                            <Text>{stepById.get(sourceId)?.name || sourceId || "上游响应"}</Text>
+                            <Text code>{linkPath(link, "source") || "返回值"}</Text>
+                            <Text>→</Text>
+                            <Text>{stepById.get(targetId)?.name || targetId || "下游请求"}</Text>
+                            <Text code>{linkPath(link, "target") || "请求字段"}</Text>
+                            {link.confirmed ? <Tag color="success">已确认</Tag> : null}
+                          </Space>
+                        </List.Item>
+                      );
+                    }}
+                  />
+                ),
+              }]}
+            />
           ) : null}
         </Card>
         {(evidence.length || links.some((link) => link.reason)) ? (
@@ -3176,18 +3203,6 @@ export default function PageRecorder({
             <Text strong>{editingResult ? "修改能力结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
             {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
             {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
-            <Space size={6}>
-              <Switch
-                size="small"
-                checked={machineVerification}
-                disabled={processing || editingResult}
-                onChange={(checked) => {
-                  machineVerificationRef.current = checked;
-                  setMachineVerification(checked);
-                }}
-              />
-              <Text type="secondary">机器验证</Text>
-            </Space>
           </Space>
           {editingResult ? (
             <Space>
@@ -3395,7 +3410,6 @@ export default function PageRecorder({
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Text>Skill ID：{skillExportOutcome.skill_id || "—"}</Text>
             <Text>Skill 名称：{skillExportOutcome.skill_name || skillTitle || "—"}</Text>
-            <Text>规划方式：{skillExportOutcome.planning_mode === "fixed" ? "固定业务步骤" : "按用户需求动态选择"}</Text>
             <Text>使用的能力：{(skillExportOutcome.used_capabilities || []).map((item) => String(item.title || item.name || item.capability_id || "")).filter(Boolean).join("、") || "—"}</Text>
             <div>
               <Text>未使用的能力：</Text>
@@ -3458,7 +3472,11 @@ export default function PageRecorder({
               <Input
                 style={{ marginTop: 6 }}
                 value={skillTitle}
-                onChange={(event) => setSkillTitle(event.target.value)}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setSkillTitle(next);
+                  persistSkillDraft(next, skillDescription);
+                }}
                 placeholder="例如：请假办理"
                 disabled={skillExporting}
               />
@@ -3468,103 +3486,14 @@ export default function PageRecorder({
               <Input.TextArea
                 style={{ marginTop: 6 }}
                 value={skillDescription}
-                onChange={(event) => setSkillDescription(event.target.value)}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setSkillDescription(next);
+                  persistSkillDraft(skillTitle, next);
+                }}
                 autoSize={{ minRows: 6, maxRows: 12 }}
                 disabled={skillExporting}
                 placeholder="请描述这个页面在业务上用来做什么、用户通常会提出什么要求、哪些操作需要组合、什么结果代表完成。例如：用户可以查询待办记录，也可以查询后选择一条记录进行提交；如果用户只要求查询，不要执行提交。"
-              />
-            </div>
-            <div>
-              <Text strong>规划方式</Text>
-              <Radio.Group
-                style={{ display: "block", marginTop: 8 }}
-                value={skillPlanningMode}
-                onChange={(event) => setSkillPlanningMode(event.target.value)}
-                disabled={skillExporting}
-              >
-                <Space direction="vertical">
-                  <Radio value="dynamic">
-                    <Space direction="vertical" size={0}>
-                      <Text>按用户需求动态选择（推荐）</Text>
-                      <Text type="secondary">Skill 在实际使用时，根据用户请求从有效能力组合中选择最少且足够的能力。适用于页面具有查询、选项、提交等多种能力，用户每次需求不同的情况。</Text>
-                    </Space>
-                  </Radio>
-                  <Radio value="fixed">
-                    <Space direction="vertical" size={0}>
-                      <Text>固定业务步骤</Text>
-                      <Text type="secondary">根据当前业务描述生成一条确定的主要调用顺序。适用于该页面始终按照固定步骤完成同一业务的情况。</Text>
-                    </Space>
-                  </Radio>
-                </Space>
-              </Radio.Group>
-            </div>
-            <Collapse
-              items={[{
-                key: "more",
-                label: "更多设置",
-                children: (
-                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                    <div>
-                      <Text>用户请求示例，一行一个</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillExamples}
-                        onChange={(event) => setSkillExamples(event.target.value)}
-                        autoSize={{ minRows: 3, maxRows: 8 }}
-                        disabled={skillExporting}
-                      />
-                    </div>
-                    <div>
-                      <Text>成功条件</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillSuccess}
-                        onChange={(event) => setSkillSuccess(event.target.value)}
-                        autoSize={{ minRows: 2, maxRows: 5 }}
-                        disabled={skillExporting}
-                      />
-                    </div>
-                    <div>
-                      <Text>禁止或限制的操作</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillForbidden}
-                        onChange={(event) => setSkillForbidden(event.target.value)}
-                        autoSize={{ minRows: 2, maxRows: 5 }}
-                        disabled={skillExporting}
-                      />
-                    </div>
-                    <div>
-                      <Text>导出目录</Text>
-                      <Input
-                        style={{ marginTop: 6 }}
-                        value={skillOutDir}
-                        onChange={(event) => setSkillOutDir(event.target.value)}
-                        placeholder="默认使用系统已记忆的导出目录"
-                        disabled={skillExporting}
-                      />
-                    </div>
-                  </Space>
-                ),
-              }]}
-            />
-            <div>
-              <Text strong>可导出能力</Text>
-              <Table
-                size="small"
-                style={{ marginTop: 8 }}
-                pagination={false}
-                rowKey={(row) => String(row.capability_id || row.name)}
-                dataSource={capabilities}
-                columns={[
-                  { title: "能力名称", render: (_, cap) => cap.title || cap.name || cap.capability_id },
-                  { title: "类型", width: 110, render: (_, cap) => cap.kind || "—" },
-                  { title: "输入字段", render: (_, cap) => schemaFieldNames(cap.input_schema).join("、") || "—" },
-                  { title: "输出字段", render: (_, cap) => schemaFieldNames(cap.output_schema).join("、") || "—" },
-                  { title: "写操作", width: 80, render: (_, cap) => (capabilityIsWrite(cap) ? "是" : "否") },
-                  { title: "需确认", width: 80, render: (_, cap) => (cap.requires_human_confirm || capabilityIsWrite(cap) ? "是" : "否") },
-                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : "已跳过") },
-                ]}
               />
             </div>
           </Space>

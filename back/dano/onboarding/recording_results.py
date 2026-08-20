@@ -202,6 +202,8 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "skill_export_path": str(body.get("export_path") or body.get("skill_export_path") or ""),
         "skill_lifecycle": recording_skill_lifecycle(body),
         "skill_needs_reexport": bool(body.get("skill_needs_reexport")),
+        "skill_export_title": str(body.get("skill_export_title") or ""),
+        "skill_export_description": str(body.get("skill_export_description") or ""),
     }
 
 
