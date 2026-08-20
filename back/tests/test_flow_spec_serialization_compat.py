@@ -35,6 +35,19 @@ def _canonicalize(value: Any) -> Any:
 def _metrics(spec: FlowSpec) -> dict[str, Any]:
     dump = spec.model_dump(mode="json")
     fingerprint = flow_spec_fingerprint(spec)
+    source_kinds = [
+        {
+            "step": step.path,
+            "path": param.path,
+            "source_kind": param.source_kind,
+            "source_contract_kind": str((param.source or {}).get("kind") or ""),
+            "structure_kind": str((param.source or {}).get("structure_kind") or ""),
+            "type": param.type,
+            "required": param.required,
+        }
+        for step in spec.steps
+        for param in step.params
+    ]
     request_contract, errors = flow_spec_to_api_request(spec)
     return _canonicalize({
         "fingerprint": fingerprint,
@@ -55,11 +68,7 @@ def _metrics(spec: FlowSpec) -> dict[str, Any]:
         ],
         "input_schema": [cap.input_schema for cap in spec.capabilities],
         "output_schema": [cap.output_schema for cap in spec.capabilities],
-        "source_kinds": [
-            {"step": step.path, "path": param.path, "source_kind": param.source_kind, "required": param.required}
-            for step in spec.steps
-            for param in step.params
-        ],
+        "source_kinds": source_kinds,
         "request_contract": request_contract,
         "request_contract_errors": errors,
         "dump": dump,
@@ -225,9 +234,33 @@ def test_frozen_json_roundtrip_and_fingerprint() -> None:
 
 def _source_kind_rows(metrics: dict[str, Any]) -> list[dict[str, Any]]:
     return [
-        {key: item[key] for key in ("path", "source_kind", "required")}
+        {key: item[key] for key in ("step", "path", "source_kind", "required")}
         for item in metrics["source_kinds"]
+        if not (
+            item.get("source_contract_kind") == "dynamic_structure_input"
+            and item.get("structure_kind") == "array_object"
+        )
     ]
+
+
+def _expected_rebuilt_source_kind_rows(
+    name: str,
+    golden: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows = _source_kind_rows(golden)
+    if name != "capability_compilation":
+        return rows
+    target = next(
+        row for row in rows
+        if row == {
+            "step": "/admin-api/doc/update",
+            "path": "lineTotal",
+            "source_kind": "constant",
+            "required": False,
+        }
+    )
+    target["source_kind"] = "computed"
+    return rows
 
 
 def test_rebuild_from_recording_keeps_semantic_contracts() -> None:
@@ -244,4 +277,11 @@ def test_rebuild_from_recording_keeps_semantic_contracts() -> None:
         golden = _load_golden(name)
         current = _metrics(_stabilize(spec))
         assert current["capability_names"] == golden["capability_names"], name
-        assert _source_kind_rows(current) == _source_kind_rows(golden), name
+        assert _source_kind_rows(current) == _expected_rebuilt_source_kind_rows(name, golden), name
+        dynamic_inputs = [
+            item for item in current["source_kinds"]
+            if item.get("source_contract_kind") == "dynamic_structure_input"
+            and item.get("structure_kind") == "array_object"
+        ]
+        assert len(dynamic_inputs) == (1 if name == "create" else 0), name
+        assert all(item.get("type") == "array" for item in dynamic_inputs), name

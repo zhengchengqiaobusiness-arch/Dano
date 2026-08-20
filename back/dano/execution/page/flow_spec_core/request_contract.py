@@ -25,12 +25,32 @@ from dano.execution.page.flow_spec_core.normalization import (
 )
 
 
+def _dynamic_array_containers(step: FlowStep) -> set[str]:
+    return {
+        str((param.source or {}).get("array_container_path") or param.path or "")
+        for param in step.params or []
+        if (
+            str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
+            and str((param.source or {}).get("structure_kind") or "") == "array_object"
+        )
+    }
+
+
+def _param_is_dynamic_array_leaf(step: FlowStep, param: ParamField) -> bool:
+    return bool(
+        (param.source or {}).get("array_item_public") is True
+        and str((param.source or {}).get("array_container_path") or "")
+        in _dynamic_array_containers(step)
+    )
+
+
 def _step_samples(step: FlowStep) -> dict:
     samples = dict(step.sample_inputs or {})
     for p in step.params:
         if (
             p.key
             and p.value not in (None, "")
+            and not _param_is_dynamic_array_leaf(step, p)
             and p.source_kind != "dynamic_structure"
             and str((p.source or {}).get("kind") or "") != "dynamic_structure_leaf"
         ):
@@ -42,6 +62,8 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
     """只把 user_param 暴露给 Skill 调用者；常量/运行期变量保留在流程内部。"""
     out: dict[str, str] = {}
     for p in step.params:
+        if _param_is_dynamic_array_leaf(step, p):
+            continue
         if not _param_exposed_to_caller(p):
             continue
         key = (p.key or "").strip()
@@ -55,7 +77,12 @@ def _step_wire_formats(step: FlowStep) -> dict[str, str]:
     return {
         str(param.key): str(param.wire_format)
         for param in step.params
-        if _param_exposed_to_caller(param) and param.key and param.wire_format
+        if (
+            _param_exposed_to_caller(param)
+            and not _param_is_dynamic_array_leaf(step, param)
+            and param.key
+            and param.wire_format
+        )
     }
 
 
@@ -105,6 +132,26 @@ def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
     for item in values:
         deduped[(str(item.get("path") or ""), str(item.get("source") or ""))] = item
     return list(deduped.values())
+
+
+def _dynamic_array_aggregate_for_path(
+    step: FlowStep,
+    path: str,
+) -> tuple[ParamField, str] | None:
+    normalized = _strip_body_prefix(str(path or ""))
+    for param in step.params or []:
+        source = param.source or {}
+        if not (
+            str(source.get("kind") or "") == "dynamic_structure_input"
+            and str(source.get("structure_kind") or "") == "array_object"
+        ):
+            continue
+        container = str(source.get("array_container_path") or param.path or "")
+        prefix = f"{container}["
+        if not normalized.startswith(prefix) or "]." not in normalized:
+            continue
+        return param, normalized.split("].", 1)[1]
+    return None
 
 
 def _flow_step_query_template(
@@ -208,6 +255,8 @@ def flow_spec_required_params(spec: FlowSpec) -> list[str]:
         if active_step_ids is not None and st.step_id not in active_step_ids:
             continue
         for p in st.params:
+            if _param_is_dynamic_array_leaf(st, p):
+                continue
             if not _param_requires_caller_input(p):
                 continue
             key = (p.key or "").strip()
@@ -400,6 +449,19 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
         ):
             continue
         runtime_name = f"__dano_runtime_{hashlib.sha1((step.step_id + ':' + param.path).encode()).hexdigest()[:10]}"
+        array_target = _dynamic_array_aggregate_for_path(step, param.path)
+        if array_target is not None:
+            aggregate, relative_result = array_target
+            runtime_field = {
+                "name": runtime_name,
+                **dict(param.source or {}),
+                "kind": "array_item_formula",
+                "strategy": str((param.source or {}).get("strategy") or ""),
+                "container_field": str(aggregate.key or aggregate.path),
+                "result_field": relative_result,
+            }
+            body_runtime_fields.append(runtime_field)
+            continue
         if not _flow_path_set(
             apir.get("body_template"),
             _strip_body_prefix(param.path),

@@ -70,6 +70,9 @@ from dano.execution.page.flow_materialization.field_contracts.required import (
     _apply_successful_omit_optional,
     _param_required_agent_classified,
 )
+from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+    _materialize_dynamic_array_inputs,
+)
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _audit_step_param_contracts,
     _param_field_manually_edited,
@@ -1225,12 +1228,14 @@ def to_flow_spec(
             "page_context": page_context,
             "field_evidence": list(field_evidence or []),
             "schema_version": 1,
+            "stage_1_6_contract_version": 2,
         },
     )
     _mark_repeated_write_observations(spec)
     # ponytail: reuse the existing grounded matcher before the first projection.
     _repair_structural_option_bindings(spec)
     _apply_mechanical_field_contracts(spec)
+    _materialize_dynamic_array_inputs(spec)
     return ensure_flow_version(refresh_review_items(ensure_recorded_goal(spec)), "recorded", reason="录制生成 FlowSpec 初版")
 
 

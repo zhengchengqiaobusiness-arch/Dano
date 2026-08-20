@@ -309,6 +309,23 @@ def test_file_control_becomes_a_caller_file_input_in_flow_spec() -> None:
     assert document.source_kind == "user_input"
     assert document.source["kind"] == "file_input"
     assert document.exposed_to_user is True
+    from dano.execution.page.capability_compiler import compile_capabilities
+
+    compilation = compile_capabilities(spec, {
+        "business_understanding": {"business_name": "Generic upload"},
+        "capabilities": [{
+            "name": "submit_document",
+            "title": "Submit document",
+            "kind": "create",
+            "anchor_step_id": upload.step_id,
+        }],
+        "unresolved_items": [],
+    })
+    assert compilation.errors == []
+    file_schema = next(iter(compilation.capabilities[0].input_schema["properties"].values()))
+    assert file_schema["x-dano-business-type"] == "file"
+    assert file_schema["type"] == "string"
+    assert file_schema["format"] == "binary"
 
 
 def test_two_step_upload_response_is_linked_to_the_business_request() -> None:

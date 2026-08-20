@@ -164,6 +164,10 @@ def _schema_for_param_type(ptype: str) -> dict[str, Any]:
         return {"type": "string", "format": "date-time"}
     if t == "object":
         return {"type": "object"}
+    if t == "file":
+        return {"type": "string", "format": "binary"}
+    if t in {"file-list", "files"}:
+        return {"type": "array", "items": {"type": "string", "format": "binary"}}
     if t in {"list-enum", "array"}:
         return {"type": "array", "items": {"type": "string"}}
     return {"type": "string"}
@@ -192,6 +196,9 @@ def _business_type_for_param(param: ParamField) -> str:
         "boolean": "boolean",
         "array": "array",
         "object": "object",
+        "file": "file",
+        "file-list": "file_list",
+        "files": "file_list",
     }.get(ptype, "text")
 
 
@@ -291,13 +298,55 @@ def _apply_param_schema_default(prop: dict[str, Any], param: ParamField) -> None
         prop["x-dano-apply-default"] = True
 
 
+def _dynamic_array_item_params(
+    params: list[ParamField],
+    aggregate: ParamField,
+) -> list[ParamField]:
+    container = str((aggregate.source or {}).get("array_container_path") or aggregate.path or "")
+    out: list[ParamField] = []
+    for param in params:
+        source = dict(param.source or {})
+        if (
+            source.get("array_item_public") is not True
+            or str(source.get("array_container_path") or "") != container
+        ):
+            continue
+        item = param.model_copy(deep=True)
+        item.path = str(source.get("array_item_path") or param.path)
+        item.key = str(source.get("array_item_key") or param.key or item.path)
+        item.required = bool(source.get("array_item_required"))
+        item.source = {
+            key: value for key, value in source.items()
+            if not key.startswith("array_item_") and key != "array_container_path"
+        }
+        out.append(item)
+    return out
+
+
+def _is_dynamic_array_input(param: ParamField) -> bool:
+    source = param.source or {}
+    return bool(
+        str(source.get("kind") or "") == "dynamic_structure_input"
+        and str(source.get("structure_kind") or "") == "array_object"
+    )
+
+
 def _capability_input_schema(
     params: list[ParamField],
     capability_step_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
+    dynamic_containers = {
+        str((param.source or {}).get("array_container_path") or param.path or "")
+        for param in params
+        if _is_dynamic_array_input(param)
+    }
     for p in params:
+        if str((p.source or {}).get("array_container_path") or "") in dynamic_containers and (
+            p.source or {}
+        ).get("array_item_public") is True:
+            continue
         if not _param_exposed_to_caller(p, capability_step_ids):
             continue
         key = p.key or p.path
@@ -355,6 +404,13 @@ def _capability_input_schema(
         if isinstance(option_source, dict) and option_source:
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
         _apply_param_schema_default(props[key], p)
+        if _is_dynamic_array_input(p):
+            item_params = _dynamic_array_item_params(params, p)
+            props[key]["items"] = _capability_input_schema(
+                item_params,
+                capability_step_ids,
+            )
+            props[key]["minItems"] = 1
         grounded_constraints = next((
             item for item in (p.evidence or [])
             if isinstance(item, dict)
@@ -675,6 +731,11 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                         reason="上游依赖已重定向，字段已恢复为调用输入",
                     )
     _apply_link_sources(spec.steps, executable_flow_links(spec))
+    # Link materialization restores origin/defaults, then the field owner makes
+    # the final caller-ownership decision. In particular, hydration must not
+    # turn document IDs, row IDs or audit fields back into public inputs.
+    if int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2:
+        _apply_mechanical_field_contracts(spec)
     _normalize_capability_references(spec)
     _normalize_actionable_placeholder_param_names(spec)
 

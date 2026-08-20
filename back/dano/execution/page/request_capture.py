@@ -2947,6 +2947,51 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
                 else:
                     out[name] = days
                 progressed = True
+            elif kind == "array_item_formula":
+                container_name = str(field.get("container_field") or "")
+                rows = out.get(container_name)
+                strategy = str(field.get("strategy") or "")
+                left_name = str(field.get("left_field") or "")
+                right_name = str(field.get("right_field") or "")
+                result_name = str(field.get("result_field") or "")
+                if (
+                    not isinstance(rows, list)
+                    or not rows
+                    or strategy not in {
+                        "product", "sum", "difference", "percent_of", "remainder_after_percent",
+                    }
+                    or not left_name
+                    or not right_name
+                    or not result_name
+                ):
+                    still.append(field)
+                    continue
+                computed_rows = copy.deepcopy(rows)
+                missing_operand = False
+                for row in computed_rows:
+                    if not isinstance(row, dict):
+                        missing_operand = True
+                        break
+                    left = _path_lookup(row, left_name)
+                    right = _path_lookup(row, right_name)
+                    if left is _PATH_MISSING or right is _PATH_MISSING:
+                        missing_operand = True
+                        break
+                    left_number = float(left)
+                    right_number = float(right)
+                    computed = {
+                        "product": left_number * right_number,
+                        "sum": left_number + right_number,
+                        "difference": left_number - right_number,
+                        "percent_of": left_number * right_number / 100.0,
+                        "remainder_after_percent": left_number * (1.0 - right_number / 100.0),
+                    }[strategy]
+                    _set_by_path(row, result_name, computed)
+                if missing_operand:
+                    still.append(field)
+                    continue
+                out[container_name] = computed_rows
+                progressed = True
             elif kind in {"product", "sum", "difference", "percent_of", "remainder_after_percent"}:
                 left_name = str(field.get("left_field") or "")
                 right_name = str(field.get("right_field") or "")
@@ -3640,8 +3685,9 @@ def _build_element(item: dict | None, template: dict, name: str, label_subkey: s
     for sk, m in (template or {}).items():
         if isinstance(m, dict) and "const" in m:
             elem[sk] = m["const"]
-        elif item is not None and isinstance(m, dict) and m.get("item_key") in (item or {}):
-            elem[sk] = item.get(m["item_key"])
+        elif item is not None and isinstance(m, dict) and m.get("item_key"):
+            projected = _get_by_path(item, str(m["item_key"]))
+            elem[sk] = projected if projected is not None else (name if sk == label_subkey else "")
         else:
             elem[sk] = name if sk == label_subkey else ""
     return elem
@@ -3659,8 +3705,14 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
         if param not in fields:
             continue
         val = fields[param]
+        rows = val if isinstance(val, list) and all(isinstance(item, dict) for item in val) else None
         if isinstance(val, str):
             names = [x.strip() for x in val.split(",") if x.strip()]
+        elif rows is not None:
+            label_sub = str(s.get("label_subkey") or "")
+            if not label_sub or any(_get_by_path(row, label_sub) in (None, "") for row in rows):
+                raise ValueError(f"选择字段 {param} 的数组元素缺少选择器 `{label_sub or 'label_subkey'}`")
+            names = [str(_get_by_path(row, label_sub)) for row in rows]
         elif isinstance(val, list):
             names = [x if isinstance(x, str) else str(x) for x in val]
         else:
@@ -3684,14 +3736,33 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
         if not items:
             raise RuntimeError(f"选择字段 {param} 的实时候选接口未返回数据，已拒绝猜测多选对象")
         built = []
-        for nm in names:
-            matches = [x for x in items if isinstance(x, dict) and str(x.get(lk)) == str(nm)]
+        value_key = str(s.get("value_key") or "")
+        for index, nm in enumerate(names):
+            matches = [
+                item for item in items
+                if isinstance(item, dict)
+                and (
+                    str(_get_by_path(item, str(lk or ""))) == str(nm)
+                    or (
+                        value_key
+                        and str(_get_by_path(item, value_key)) == str(nm)
+                    )
+                )
+            ]
             if len(matches) > 1:
                 raise ValueError(f"选择字段 {param} 的候选名称 {nm!r} 不唯一，已拒绝猜测内部值")
             if not matches:
                 raise ValueError(f"选择字段 {param} 的值 {nm!r} 不在实时候选接口中")
             it = matches[0]
-            built.append(_build_element(it, tmpl, nm, label_sub))
+            projected = _build_element(it, tmpl, nm, label_sub)
+            if rows is None:
+                built.append(projected)
+                continue
+            row = copy.deepcopy(rows[index])
+            for key, value in projected.items():
+                if key == label_sub or _get_by_path(row, key) in (None, ""):
+                    _set_by_path(row, key, value)
+            built.append(row)
         fields[param] = built
     return fields
 
@@ -3930,6 +4001,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
         # 列表多选:名字列表 → 对象数组(参会人[]:每个名字经来源接口拼成整份元素);须在 substitute 前
         fields = await _resolve_list_selects(api_request, fields, base_url=base_url,
                                              storage_state=storage_state, token_key=token_key, verify=verify)
+        fields = _apply_runtime_fields(fields, api_request)
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
     method = (api_request.get("method") or "POST").upper()

@@ -966,6 +966,30 @@ def test_hydration_detail_id_stays_required_caller_selected_record() -> None:
     assert _param_exposed_to_caller(record_id)
 
 
+def test_edit_capability_uses_one_caller_record_identity() -> None:
+    spec = _edit_and_command_spec()
+    update = _step_by_suffix(spec, "/doc/update")
+    compiled = _compile(spec, [{
+        "name": "edit_record",
+        "title": "Edit record",
+        "kind": "update",
+        "anchor_step_id": update.step_id,
+    }])
+    properties = compiled.capabilities[0].input_schema["properties"]
+    identity_fields = {
+        name: field
+        for name, field in properties.items()
+        if str(field.get("x-flow-path") or "").removeprefix("query.") == "id"
+    }
+    assert list(identity_fields) == ["id"]
+    assert identity_fields["id"]["x-flow-path"] == "query.id"
+    assert all(field.get("x-flow-path") != "query.status" for field in properties.values())
+    assert not any(
+        str(ref.path or "").endswith("/doc/page")
+        for ref in compiled.capabilities[0].request_refs
+    )
+
+
 def _create_form_spec():
     catalog_url = "http://example.test/admin-api/item/simple-list"
     catalog = [
@@ -1076,6 +1100,201 @@ def test_create_form_projects_option_row_and_computes_line_total() -> None:
     chooser = _param(create, "items[0].productId")
     assert chooser.source_kind != "unknown"
     assert _param_exposed_to_caller(chooser) or chooser.source_kind in {"form_option", "user_input", "api_option"}
+
+
+def test_create_capability_keeps_repeating_rows_as_array_objects() -> None:
+    import asyncio
+
+    from dano.execution.page.flow_spec_core.request_contract import flow_spec_to_api_request
+    from dano.execution.page.request_capture import execute_api_request
+
+    spec = _create_form_spec()
+    create = _step_by_suffix(spec, "/doc/create")
+    compiled = _compile(spec, [{
+        "name": "create_record",
+        "title": "Create record",
+        "kind": "create",
+        "anchor_step_id": create.step_id,
+    }])
+    properties = compiled.capabilities[0].input_schema["properties"]
+    assert "items" in properties
+    array_param = _param(_step_by_suffix(compiled, "/doc/create"), "items")
+    assert (array_param.source or {}).get("kind") == "dynamic_structure_input"
+    assert (array_param.source or {}).get("structure_kind") == "array_object"
+    assert properties["items"]["type"] == "array"
+    item_properties = properties["items"]["items"]["properties"]
+    assert {"productId", "count"}.issubset(item_properties)
+    assert not {"productId", "count"}.intersection(set(properties) - {"items"})
+
+    api_request, errors = flow_spec_to_api_request(compiled, _prepared=True)
+    assert errors == []
+    assert api_request is not None
+    workflow_steps = api_request.get("steps") or [api_request]
+    create_request = next(step for step in workflow_steps if str(step.get("path") or "").endswith("/doc/create"))
+    assert "items" in create_request["params"]
+    assert create_request["body_template"]["items"] == "{{items}}"
+    dry = asyncio.run(execute_api_request(
+        create_request,
+        {
+            "partyId": 5,
+            "accountId": 2,
+            "remark": "two rows",
+            "items": [
+                {"productId": 4, "productPrice": 10, "count": 2},
+                {"productId": 7, "productPrice": 3, "count": 4},
+            ],
+        },
+        send=False,
+    ))
+    assert dry["ok"] is True, dry
+    assert len(dry["body"]["items"]) == 2
+    assert dry["body"]["items"][0]["totalPrice"] == 20
+    assert dry["body"]["items"][1]["totalPrice"] == 12
+
+
+def test_dynamic_array_schema_identity_does_not_include_recorded_row_indexes() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_repeat",
+                method="POST",
+                url="http://example.test/v3/records",
+                sequence=1,
+                role="business_write",
+                action="act_repeat",
+                locator="text=Submit",
+                body={
+                    "rows": [
+                        {"code": "A", "amount": 2},
+                        {"code": "B", "amount": 4},
+                    ],
+                },
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="Code",
+                aliases=["code"],
+                kind="text",
+                value="A",
+                request_id="req_repeat",
+                path="body.rows[0].code",
+                in_dialog=True,
+                required=True,
+            ),
+            _control(
+                label="Amount",
+                aliases=["amount"],
+                kind="number",
+                value=2,
+                request_id="req_repeat",
+                path="body.rows[0].amount",
+                in_dialog=True,
+                required=True,
+            ),
+            _control(
+                label="Code",
+                aliases=["code"],
+                kind="text",
+                value="B",
+                request_id="req_repeat",
+                path="body.rows[1].code",
+                in_dialog=True,
+                required=True,
+            ),
+            _control(
+                label="Amount",
+                aliases=["amount"],
+                kind="number",
+                value=4,
+                request_id="req_repeat",
+                path="body.rows[1].amount",
+                in_dialog=True,
+                required=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_repeat", "kind": "click", "action_id": "act_repeat"}],
+        page_context=PAGE,
+    )
+    create = _step_by_suffix(spec, "/v3/records")
+    compiled = _compile(spec, [{
+        "name": "submit_rows",
+        "title": "Submit rows",
+        "kind": "create",
+        "anchor_step_id": create.step_id,
+    }])
+    item_properties = compiled.capabilities[0].input_schema["properties"]["rows"]["items"]["properties"]
+    assert set(item_properties) == {"code", "amount"}
+    assert all("[" not in key and "#" not in key for key in item_properties)
+    row_leaves = [
+        param for param in _step_by_suffix(compiled, "/v3/records").params
+        if (param.source or {}).get("array_item_public") is True
+    ]
+    assert {(param.source or {}).get("schema_identity_path") for param in row_leaves} == {
+        "rows[].code",
+        "rows[].amount",
+    }
+    assert {param.path for param in row_leaves} == {
+        "rows[0].code",
+        "rows[0].amount",
+        "rows[1].code",
+        "rows[1].amount",
+    }
+
+
+def test_repeating_option_rows_project_each_selected_record(monkeypatch) -> None:
+    import asyncio
+
+    from dano.execution.page import request_capture
+
+    async def fake_fetch(*_args, **_kwargs):
+        return [
+            {"id": 4, "name": "Alpha", "price": 10},
+            {"id": 7, "name": "Beta", "price": 3},
+        ]
+
+    monkeypatch.setattr(request_capture, "_fetch_select_list", fake_fetch)
+    api_request = {
+        "auth_headers": {},
+        "selects": [{
+            "param": "items",
+            "path": "items",
+            "multi": True,
+            "source_url": "http://options.invalid/v1/catalog",
+            "value_key": "id",
+            "label_key": "name",
+            "label_subkey": "productId",
+            "element_template": {
+                "productId": {"item_key": "id"},
+                "productPrice": {"item_key": "price"},
+            },
+        }],
+        "runtime_fields": [{
+            "name": "__row_total",
+            "kind": "array_item_formula",
+            "strategy": "product",
+            "container_field": "items",
+            "left_field": "productPrice",
+            "right_field": "count",
+            "result_field": "totalPrice",
+        }],
+    }
+    fields = asyncio.run(request_capture._resolve_list_selects(
+        api_request,
+        {"items": [
+            {"productId": "Alpha", "count": 2},
+            {"productId": "Beta", "count": 4, "productPrice": 5},
+        ]},
+        base_url="",
+        storage_state=None,
+        token_key=None,
+        verify=True,
+    ))
+    fields = request_capture._apply_runtime_fields(fields, api_request)
+    assert fields["items"] == [
+        {"productId": 4, "count": 2, "productPrice": 10, "totalPrice": 20},
+        {"productId": 7, "count": 4, "productPrice": 5, "totalPrice": 20},
+    ]
 
 
 def test_create_form_unbound_manual_fields_are_caller_not_unknown() -> None:

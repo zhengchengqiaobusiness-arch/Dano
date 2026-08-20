@@ -553,6 +553,16 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             str(binding.enum_source or "") == "manual"
             and (binding.option_map or binding.options)
         )
+        # A repeating object container is the caller-owned transport shape,
+        # while this binding only resolves a selector inside each row.  Keep
+        # the binding executable without projecting its enum contract onto the
+        # array container itself; row leaf contracts carry that option source.
+        if (
+            str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
+            and str((param.source or {}).get("structure_kind") or "") == "array_object"
+        ):
+            grounded_bindings.append(binding)
+            continue
         if not (api_contract or static_contract or dom_contract or manual_contract):
             # A field name, a numeric sample, or a URL without a captured
             # label/value contract is not enum evidence. Preserve the binding
