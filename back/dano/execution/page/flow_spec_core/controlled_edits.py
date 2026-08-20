@@ -191,6 +191,15 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             continue
         target_param = _resolve_param_reference(target, target_path)
         for p in [target_param] if target_param is not None else []:
+            existing_source = dict(p.source or {})
+            if (
+                p.source_kind == "previous_response"
+                and str(existing_source.get("link_id") or "") == str(lk.link_id or "")
+                and str(existing_source.get("step_id") or "") == str(source.step_id or "")
+                and str(existing_source.get("response_path") or "") == str(lk.source_path or "")
+                and str(existing_source.get("target_path") or target_path) == target_path
+            ):
+                continue
             hydration = bool(
                 (lk.meta or {}).get("captured_record_hydration")
                 or (lk.evidence or {}).get("kind") == "record_hydration"
@@ -225,11 +234,14 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 continue
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
+            if p.source_kind in {
+                "constant", "page_context", "system_time", "system_generated", "computed", "current_user",
+            } or (p.category == "system_const" and p.source_kind != "page_default"):
+                continue
             caller_editable = (
                 not _param_control_is_readonly(p)
                 and (
                     _param_has_editable_control_evidence(p)
-                    or hydration
                     or _param_was_caller_typed(p)
                 )
             )
@@ -246,9 +258,10 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 "target_path": target_path,
                 "link_id": lk.link_id,
                 "allow_caller_override": caller_editable,
+                "required_state": "optional",
                 **({"option_source": option_source} if option_source else {}),
             }
-            p.editable = True
+            p.editable = caller_editable
             p.exposed_to_user = caller_editable
             if not caller_editable:
                 p.default_value = None

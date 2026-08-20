@@ -5819,15 +5819,11 @@
               "x-dano-option-source": {
                 "category_key": null,
                 "category_value": null,
-                "enum_confirmed": true,
-                "enum_source": "api",
                 "id_path": "query.status",
                 "kind": "api_option",
                 "label_key": "label",
-                "path": "query.status",
-                "required_state": "optional",
-                "source_method": "GET",
                 "source_request_id": "req_dict",
+                "source_step_id": "",
                 "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
                 "value_key": "value"
               },
@@ -5851,15 +5847,11 @@
               "x-options-source-meta": {
                 "category_key": null,
                 "category_value": null,
-                "enum_confirmed": true,
-                "enum_source": "api",
                 "id_path": "query.status",
                 "kind": "api_option",
                 "label_key": "label",
-                "path": "query.status",
-                "required_state": "optional",
-                "source_method": "GET",
                 "source_request_id": "req_dict",
+                "source_step_id": "",
                 "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
                 "value_key": "value"
               }
@@ -5932,6 +5924,16 @@
                 "reason": "能力调用键与请求 wire 叶子保持稳定，显示名继续使用页面业务名称",
                 "source": "capability_compiler",
                 "value": "status"
+              },
+              {
+                "category_key": null,
+                "category_value": null,
+                "label_key": "label",
+                "source": "option_source",
+                "source_request_id": "req_dict",
+                "source_step_id": "",
+                "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
+                "value_key": "value"
               }
             ],
             "exposed_to_caller": true,
@@ -5945,15 +5947,11 @@
             "source": {
               "category_key": null,
               "category_value": null,
-              "enum_confirmed": true,
-              "enum_source": "api",
               "id_path": "query.status",
               "kind": "api_option",
               "label_key": "label",
-              "path": "query.status",
-              "required_state": "optional",
-              "source_method": "GET",
               "source_request_id": "req_dict",
+              "source_step_id": "",
               "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
               "value_key": "value"
             },
@@ -6238,6 +6236,16 @@
                 "reason": "能力调用键与请求 wire 叶子保持稳定，显示名继续使用页面业务名称",
                 "source": "capability_compiler",
                 "value": "status"
+              },
+              {
+                "category_key": null,
+                "category_value": null,
+                "label_key": "label",
+                "source": "option_source",
+                "source_request_id": "req_dict",
+                "source_step_id": "",
+                "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
+                "value_key": "value"
               }
             ],
             "exposed_to_caller": true,
@@ -6251,15 +6259,11 @@
             "source": {
               "category_key": null,
               "category_value": null,
-              "enum_confirmed": true,
-              "enum_source": "api",
               "id_path": "query.status",
               "kind": "api_option",
               "label_key": "label",
-              "path": "query.status",
-              "required_state": "optional",
-              "source_method": "GET",
               "source_request_id": "req_dict",
+              "source_step_id": "",
               "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
               "value_key": "value"
             },
@@ -6738,8 +6742,10 @@
             "scope": "input",
             "source": {
               "allow_caller_override": true,
+              "collision_resolved": true,
               "kind": "previous_response",
               "link_id": "d63c33d2",
+              "original_key": "id",
               "response_path": "data.id",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -6801,6 +6807,7 @@
                 "path": "partyId",
                 "required_state": "optional"
               },
+              "required_state": "optional",
               "response_path": "data.partyId",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -6856,6 +6863,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "18e6a4d2",
+              "required_state": "optional",
               "response_path": "data.qty",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -6911,6 +6919,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "498eb18c",
+              "required_state": "optional",
               "response_path": "data.unitPrice",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -6966,6 +6975,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "66e79c84",
+              "required_state": "optional",
               "response_path": "data.note",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -7020,16 +7030,15 @@
             "required": false,
             "scope": "internal",
             "source": {
-              "allow_caller_override": false,
-              "kind": "previous_response",
-              "link_id": "03d3e1aa",
-              "required_state": "optional",
-              "response_path": "data.lineTotal",
-              "step_id": "00541e200d03",
-              "step_name": "GET_get",
-              "target_path": "lineTotal"
+              "kind": "computed",
+              "left_field": "qty",
+              "path": "lineTotal",
+              "result_field": "lineTotal",
+              "right_field": "unitPrice",
+              "sample_verified": true,
+              "strategy": "product"
             },
-            "source_kind": "previous_response",
+            "source_kind": "computed",
             "step_id": "a514dcd5c7fd",
             "type": "number",
             "wire_format": "",
@@ -7181,8 +7190,10 @@
             "scope": "request_field",
             "source": {
               "allow_caller_override": true,
+              "collision_resolved": true,
               "kind": "previous_response",
               "link_id": "d63c33d2",
+              "original_key": "id",
               "response_path": "data.id",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -7244,6 +7255,7 @@
                 "path": "partyId",
                 "required_state": "optional"
               },
+              "required_state": "optional",
               "response_path": "data.partyId",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -7299,6 +7311,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "18e6a4d2",
+              "required_state": "optional",
               "response_path": "data.qty",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -7354,6 +7367,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "498eb18c",
+              "required_state": "optional",
               "response_path": "data.unitPrice",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -7405,16 +7419,15 @@
             "required": false,
             "scope": "request_field",
             "source": {
-              "allow_caller_override": false,
-              "kind": "previous_response",
-              "link_id": "03d3e1aa",
-              "required_state": "optional",
-              "response_path": "data.lineTotal",
-              "step_id": "00541e200d03",
-              "step_name": "GET_get",
-              "target_path": "lineTotal"
+              "kind": "computed",
+              "left_field": "qty",
+              "path": "lineTotal",
+              "result_field": "lineTotal",
+              "right_field": "unitPrice",
+              "sample_verified": true,
+              "strategy": "product"
             },
-            "source_kind": "previous_response",
+            "source_kind": "computed",
             "step_id": "a514dcd5c7fd",
             "type": "number",
             "wire_format": "",
@@ -7464,6 +7477,7 @@
               "allow_caller_override": true,
               "kind": "previous_response",
               "link_id": "66e79c84",
+              "required_state": "optional",
               "response_path": "data.note",
               "step_id": "00541e200d03",
               "step_name": "GET_get",
@@ -8204,10 +8218,9 @@
                   "id_path": "query.status",
                   "kind": "api_option",
                   "label_key": "label",
-                  "path": "query.status",
-                  "required_state": "optional",
                   "source_method": "GET",
                   "source_request_id": "req_dict",
+                  "source_step_id": "",
                   "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
                   "value_key": "value"
                 },
@@ -8236,10 +8249,9 @@
                   "id_path": "query.status",
                   "kind": "api_option",
                   "label_key": "label",
-                  "path": "query.status",
-                  "required_state": "optional",
                   "source_method": "GET",
                   "source_request_id": "req_dict",
+                  "source_step_id": "",
                   "source_url": "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status",
                   "value_key": "value"
                 }
@@ -8770,7 +8782,7 @@
               "request_index": null,
               "required": false,
               "scope": "request_field",
-              "source_kind": "previous_response",
+              "source_kind": "computed",
               "step_id": "a514dcd5c7fd",
               "type": "number"
             },
@@ -8804,7 +8816,7 @@
               "request_index": null,
               "required": false,
               "scope": "internal",
-              "source_kind": "previous_response",
+              "source_kind": "computed",
               "step_id": "a514dcd5c7fd",
               "type": "number"
             },
@@ -8858,7 +8870,7 @@
               "request_index": null,
               "required": false,
               "scope": "internal",
-              "source_kind": "previous_response",
+              "source_kind": "computed",
               "step_id": "a514dcd5c7fd",
               "type": "number"
             }
@@ -8962,7 +8974,7 @@
               "request_index": null,
               "required": false,
               "scope": "request_field",
-              "source_kind": "previous_response",
+              "source_kind": "computed",
               "step_id": "a514dcd5c7fd",
               "type": "number"
             },
@@ -9797,6 +9809,7 @@
             "count": 2,
             "enum_confirmed": true,
             "enum_source": "api",
+            "id_path": "query.status",
             "label_key": "label",
             "multi": false,
             "option_map": {
@@ -9804,8 +9817,14 @@
               "待审": 10
             },
             "options": [
-              "待审",
-              "已审"
+              {
+                "label": "待审",
+                "value": 10
+              },
+              {
+                "label": "已审",
+                "value": 20
+              }
             ],
             "param": "status",
             "path": "query.status",
@@ -9903,7 +9922,7 @@
         "auth_headers": {},
         "body_template": {
           "id": "{{id#2}}",
-          "lineTotal": 12000,
+          "lineTotal": "{{__dano_runtime_a747c2965a}}",
           "note": "{{note}}",
           "partyId": "{{partyId}}",
           "qty": "{{qty}}",
@@ -9990,6 +10009,18 @@
           "code": 0,
           "data": true
         },
+        "runtime_fields": [
+          {
+            "kind": "product",
+            "left_field": "qty",
+            "name": "__dano_runtime_a747c2965a",
+            "path": "lineTotal",
+            "result_field": "lineTotal",
+            "right_field": "unitPrice",
+            "sample_verified": true,
+            "strategy": "product"
+          }
+        ],
         "sample_inputs": {
           "id#2": 32,
           "note": "keep",

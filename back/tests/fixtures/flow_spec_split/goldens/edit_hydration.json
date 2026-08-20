@@ -3478,6 +3478,7 @@
             "count": 2,
             "enum_confirmed": true,
             "enum_source": "api",
+            "id_path": "query.status",
             "label_key": "label",
             "multi": false,
             "option_map": {
@@ -3485,8 +3486,14 @@
               "待审": 10
             },
             "options": [
-              "待审",
-              "已审"
+              {
+                "label": "待审",
+                "value": 10
+              },
+              {
+                "label": "已审",
+                "value": 20
+              }
             ],
             "param": "status",
             "path": "query.status",
@@ -3583,8 +3590,8 @@
       {
         "auth_headers": {},
         "body_template": {
-          "id": "{{id}}",
-          "lineTotal": 12000,
+          "id": 32,
+          "lineTotal": "{{__dano_runtime_b6aa8ec382}}",
           "note": "{{note}}",
           "partyId": "{{partyId}}",
           "qty": "{{qty}}",
@@ -3592,7 +3599,6 @@
         },
         "content_type": "application/json",
         "field_types": {
-          "id": "number",
           "note": "string",
           "partyId": "number",
           "qty": "number",
@@ -3660,7 +3666,6 @@
         ],
         "method": "PUT",
         "params": [
-          "id",
           "partyId",
           "qty",
           "unitPrice",
@@ -3671,8 +3676,20 @@
           "code": 0,
           "data": true
         },
+        "runtime_fields": [
+          {
+            "kind": "product",
+            "left_field": "qty",
+            "name": "__dano_runtime_b6aa8ec382",
+            "path": "lineTotal",
+            "required_state": "optional",
+            "result_field": "lineTotal",
+            "right_field": "unitPrice",
+            "sample_verified": true,
+            "strategy": "product"
+          }
+        ],
         "sample_inputs": {
-          "id": 32,
           "note": "keep",
           "partyId": 5,
           "qty": 2,
