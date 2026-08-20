@@ -9,6 +9,7 @@ from dano.execution.page.flow_spec_core.models import (
     FlowLink,
     FlowSpec,
     FlowStep,
+    ParamField,
     RecordedGoal,
     RequestUsage,
 )
@@ -140,6 +141,7 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _canonicalize_materialized_request_identities(spec)
     _enrich_materialized_response_shapes(spec)
     _rebind_saved_field_evidence(spec)
+    _materialize_saved_unsupported_file_inputs(spec)
     _repair_readonly_control_defaults(spec)
     _ground_saved_page_enums(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
@@ -251,6 +253,15 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
     rebound = list(evidence)
     for index, item in zip(unresolved_indexes, rebound_unresolved, strict=True):
         rebound[index] = item
+    # File controls absent from the request body need already-bound siblings
+    # from the same form as ownership evidence.  The normal rebinding pass only
+    # recalculates unresolved items, so perform this association once against
+    # the complete saved evidence set.
+    from dano.execution.page.recording_field_evidence import (
+        _associate_unsubmitted_file_controls,
+    )
+
+    _associate_unsubmitted_file_controls(rebound, requests)
     spec.request_facts.field_evidence = rebound
     for step in spec.steps:
         request_id = str((step.source_meta or {}).get("request_id") or "")
@@ -351,6 +362,79 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                         **(param.source or {}),
                         "required_state": "required" if observed else "optional",
                     }
+
+
+def _materialize_saved_unsupported_file_inputs(spec: FlowSpec) -> None:
+    """Project saved unsubmitted file controls into existing FlowSteps."""
+    evidence = list(getattr(spec.request_facts, "field_evidence", []) or [])
+    for step in spec.steps:
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        existing_paths = {str(param.path or "") for param in step.params}
+        for item in evidence:
+            if (
+                not isinstance(item, dict)
+                or str(item.get("binding_status") or "") != "bound_unsupported"
+                or str(item.get("request_id") or "") != request_id
+                or str(item.get("control_kind") or "").lower() != "file"
+                or item.get("unsupported_execution") is not True
+            ):
+                continue
+            path = str(item.get("wire_path") or "").removeprefix("body.")
+            if not path or path in existing_paths:
+                continue
+            key = path.rsplit(".", 1)[-1]
+            required_observed = item.get("required_observed")
+            step.params.append(ParamField(
+                path=path,
+                key=key,
+                label=str(item.get("label") or item.get("field") or key),
+                value="",
+                type="file-list" if item.get("multiple") else "file",
+                wire_type="file",
+                required=required_observed is True,
+                confidence=1.0,
+                confidence_tier="grounded",
+                name_source="dom",
+                category="user_param",
+                source_kind="user_input",
+                source={
+                    "kind": "file_input",
+                    "wire_path": f"body.{path}",
+                    "wire_path_observed": False,
+                    "unsupported_execution": True,
+                    "required_state": (
+                        "required" if required_observed is True
+                        else "optional" if required_observed is False
+                        else "unknown"
+                    ),
+                    "filename": str(item.get("filename") or ""),
+                    "mime_type": str(item.get("mime_type") or ""),
+                    "multiple": bool(item.get("multiple")),
+                    "file_count": int(item.get("file_count") or 0),
+                },
+                editable=True,
+                exposed_to_user=True,
+                need_human_confirm=False,
+                reason=(
+                    "页面表单包含调用方文件输入，但录制未提交文件，"
+                    "保留能力输入并明确标记执行不支持"
+                ),
+                evidence=[{
+                    "kind": "page_control",
+                    "source": "recorder_dom",
+                    "control_kind": "file",
+                    "request_path": path,
+                    "binding_status": "bound_unsupported",
+                    "occurrence_id": str(item.get("evidence_id") or ""),
+                    "surface": str(item.get("surface") or ""),
+                    "in_dialog": bool(item.get("in_dialog")),
+                    "action_id": str(item.get("action_id") or ""),
+                    "transaction_id": str(item.get("transaction_id") or ""),
+                    "page_id": str(item.get("page_id") or ""),
+                    "frame_id": str(item.get("frame_id") or ""),
+                }],
+            ))
+            existing_paths.add(path)
 
 
 _DEFAULT_RECORDED_FORBIDDEN_ACTIONS = [

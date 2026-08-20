@@ -9,6 +9,7 @@ import pytest
 from dano.execution.page.flow_materialization.field_contracts.computed import (
     _infer_computed_runtime_fields,
 )
+from dano.execution.page.flow_materialization.builder import sync_flow_spec_models
 from dano.execution.page.flow_spec import to_flow_spec
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
@@ -405,3 +406,69 @@ def test_unselected_file_control_uses_exact_form_siblings_without_action_ids() -
     ]
     assert [param.key for param in beta_files] == ["attachment"]
     assert beta_files[0].source.get("wire_path_observed") is False
+
+
+def test_reanalysis_repairs_saved_unbound_file_control() -> None:
+    fact, analysis = _request_fact(
+        "req_saved", sequence=1, path="/v8/saved", role="business_write",
+        response_json={"id": 7},
+    )
+    fact.method = "POST"
+    fact.post_data = json.dumps({"title": "saved"})
+    step = FlowStep(
+        step_id="step_saved",
+        method="POST",
+        path="/v8/saved",
+        url="http://generic.invalid/v8/saved",
+        body_source=fact.post_data,
+        source_meta={
+            "request_id": "req_saved",
+            "page_id": "page_saved",
+            "frame_id": "frame_saved",
+            "role": "business_write",
+        },
+        params=[ParamField(
+            path="title", key="title", label="Title", value="saved",
+            type="string", wire_type="string", source_kind="user_input",
+            category="user_param", exposed_to_user=True,
+        )],
+    )
+    spec = FlowSpec(tenant="t", subsystem="generic", steps=[step])
+    spec.request_facts.requests = [fact]
+    spec.request_facts.analysis = {"req_saved": analysis}
+    spec.request_facts.field_evidence = [
+        {
+            "evidence_id": "field-evidence-title",
+            "binding_status": "bound",
+            "request_id": "req_saved",
+            "wire_path": "body.title",
+            "field_aliases": ["title"],
+            "control_kind": "text",
+            "form_root": "saved editor",
+            "surface": "dialog",
+            "in_dialog": True,
+            "page_id": "page_saved",
+            "frame_id": "frame_saved",
+        },
+        {
+            "evidence_id": "field-evidence-saved-file",
+            "binding_status": "unbound",
+            "field_aliases": ["document"],
+            "label": "Document",
+            "control_kind": "file",
+            "filename": "",
+            "file_count": 0,
+            "form_root": "saved editor",
+            "surface": "dialog",
+            "in_dialog": True,
+            "page_id": "page_saved",
+            "frame_id": "frame_saved",
+        },
+    ]
+
+    repaired = sync_flow_spec_models(spec)
+
+    document = next(param for param in repaired.steps[0].params if param.key == "document")
+    assert document.type == "file"
+    assert document.source.get("kind") == "file_input"
+    assert document.source.get("unsupported_execution") is True
