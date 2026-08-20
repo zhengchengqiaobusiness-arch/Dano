@@ -1563,6 +1563,13 @@ export default function PageRecorder({
     setSkillExportProgress("正在规划并导出 Skill…");
     setSkillClarifications([]);
     setSkillExportErrors([]);
+    if (resultMeta) {
+      setResultMeta({ ...resultMeta, skill_lifecycle: "generating", skill_export_status: "generating" });
+    }
+    const historyRow = history.find((row) => row.id === resultId);
+    if (historyRow) {
+      upsertHistory({ ...historyRow, skill_lifecycle: "generating", skill_export_status: "generating" });
+    }
     try {
       const outDir = skillOutDir.trim();
       if (outDir) rememberExportDir(outDir);
@@ -1579,6 +1586,7 @@ export default function PageRecorder({
         setSkillClarifications(outcome.clarification_questions || []);
         setSkillExportProgress("");
         message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
+        await refreshResultMeta(resultId);
         return;
       }
       if (outcome.status !== "exported") {
@@ -3131,7 +3139,7 @@ export default function PageRecorder({
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
-            <Text strong>{editingResult ? "修改结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
+            <Text strong>{editingResult ? "修改能力结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
             {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
             {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
           </Space>

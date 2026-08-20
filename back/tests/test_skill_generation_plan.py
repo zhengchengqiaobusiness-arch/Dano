@@ -264,6 +264,42 @@ def test_plan_rejects_unconfirmed_relation() -> None:
     assert any("未确认关系" in item for item in checked.errors)
 
 
+def test_plan_rejects_incompatible_binding_cardinality() -> None:
+    spec = _three_cap_spec()
+    spec.capabilities[2].input_schema["properties"]["payload"] = {"type": "object"}
+    spec.capability_relations[0].from_output = "records"
+    spec.capability_relations[0].to_input = "payload"
+    spec.capability_relations[0].source_selector = "records"
+    spec.capability_relations[0].target_path = "payload"
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="查询待办后提交",
+            planning_mode=PlanningMode.FIXED,
+        ),
+        VERIFIED,
+        "fp",
+    )
+    plan.routes[0].bindings = [
+        RouteBinding(
+            from_capability="cap_query",
+            from_output="records",
+            to_capability="cap_submit",
+            to_input="payload",
+            source_selector="records",
+            target_path="payload",
+            transform_owner="caller",
+        )
+    ]
+    plan.routes[0].required_user_inputs = list(dict.fromkeys(
+        [*plan.routes[0].required_user_inputs, "id", "status"]
+    ))
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert not checked.ok
+    assert any("基数不兼容" in item for item in checked.errors)
+
+
 def test_plan_rejects_incompatible_binding_types() -> None:
     spec = _three_cap_spec()
     spec.capability_relations[0].from_output = "records"
@@ -348,6 +384,91 @@ def test_every_route_has_example_and_done_when() -> None:
         assert route.examples[0].user_request
         assert route.examples[0].done_when
     checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+
+
+@pytest.mark.asyncio
+async def test_incomplete_relation_needs_clarification_and_does_not_plan() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    result = await generate_skill_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp",
+        proposer=lambda *_args, **_kwargs: _async_plan(
+            propose_deterministic_plan(
+                spec,
+                SkillGenerationRequest(
+                    title="请假",
+                    business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
+                    planning_mode=PlanningMode.DYNAMIC,
+                ),
+                VERIFIED,
+                "fp",
+            )
+        ),
+    )
+    assert result.status == "needs_clarification"
+    assert result.plan is None
+    assert any("查询" in item and "关系" in item for item in result.clarification_questions)
+
+
+def test_fixed_lookup_uses_independent_step_ids() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="先查询待办记录，用户选择一条记录后提交，最后查询状态确认提交成功。",
+            planning_mode=PlanningMode.FIXED,
+            success_criteria="提交后状态已回查确认",
+        ),
+        VERIFIED,
+        "fp",
+    )
+    assert plan.routes[0].capability_sequence == ["cap_query", "cap_submit", "cap_query"]
+    assert plan.routes[0].step_ids == ["query_before", "submit_selected", "query_after"]
+    assert all(binding.from_step and binding.to_step for binding in plan.routes[0].bindings)
+    assert plan.routes[0].bindings[0].from_step == "query_before"
+    assert plan.routes[0].bindings[0].to_step == "submit_selected"
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+
+
+@pytest.mark.asyncio
+async def test_dynamic_lookup_appends_to_write_routes_not_standalone_c3_c1() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="用户可以只查询待办，也可以直接提交，也可以先查询再提交；提交后执行已有回查确认成功。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    result = await generate_skill_plan(
+        spec,
+        request,
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp-lookup",
+        proposer=lambda *_args, **_kwargs: _async_plan(
+            propose_deterministic_plan(spec, request, VERIFIED, "fp-lookup")
+        ),
+    )
+    assert result.status == "planned"
+    plan = result.plan
+    assert plan is not None
+    route_ids = {route.route_id for route in plan.routes}
+    assert "write_then_query" not in route_ids
+    sequences = [tuple(route.capability_sequence) for route in plan.routes]
+    assert ("cap_query",) in sequences
+    write_direct = next(route for route in plan.routes if route.route_id == "write_direct")
+    assert write_direct.capability_sequence == ["cap_submit", "cap_query"]
+    query_then_write = next(route for route in plan.routes if route.route_id == "query_then_write")
+    assert query_then_write.capability_sequence == ["cap_query", "cap_submit", "cap_query"]
+    assert query_then_write.step_ids == ["query_before", "submit_selected", "query_after"]
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-lookup")
     assert checked.ok, checked.errors
 
 

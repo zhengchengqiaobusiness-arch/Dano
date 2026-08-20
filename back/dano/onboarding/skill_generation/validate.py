@@ -8,6 +8,7 @@ from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
 from dano.onboarding.skill_generation.catalog import (
     capability_by_id,
     capability_ref,
+    cardinality_compatible,
     confirmed_fixed_or_system_inputs,
     field_type,
     is_risk_write,
@@ -110,6 +111,13 @@ def _validate_route(
         result.error(f"路线 {route.route_id} 没有能力调用顺序")
     if route.step_ids and len(route.step_ids) != len(route.capability_sequence):
         result.error(f"路线 {route.route_id} 的步骤身份数量与能力顺序不一致")
+    if route.step_ids and len(set(route.step_ids)) != len(route.step_ids):
+        result.error(f"路线 {route.route_id} 的步骤身份必须独立，不能只用能力名称作为引用键")
+    repeated = {
+        cap_id
+        for cap_id in route.capability_sequence
+        if route.capability_sequence.count(cap_id) > 1
+    }
     write_caps: list[FlowCapability] = []
     for cap_id in route.capability_sequence:
         cap = caps.get(cap_id)
@@ -129,7 +137,7 @@ def _validate_route(
                 f"路线 {route.route_id} 的风险操作 {cap.title or cap.name} 必须明确提示确认"
             )
     for binding in route.bindings:
-        _validate_binding(result, binding, route, spec, caps)
+        _validate_binding(result, binding, route, spec, caps, repeated)
     _validate_required_inputs(result, route, caps)
     for example in route.examples:
         if not str(example.user_request or "").strip():
@@ -165,6 +173,7 @@ def _validate_binding(
     route: SkillRoute,
     spec: FlowSpec,
     caps: dict[str, FlowCapability],
+    repeated: set[str] | None = None,
 ) -> None:
     if binding.source == "user_input":
         if binding.to_input and binding.to_input not in route.required_user_inputs:
@@ -197,6 +206,25 @@ def _validate_binding(
         result.error(
             f"绑定类型不兼容: {binding.from_capability}.{binding.from_output}({source_type}) "
             f"-> {binding.to_capability}.{binding.to_input}({target_type})"
+        )
+    if not cardinality_compatible(
+        source.output_schema,
+        binding.from_output,
+        target.input_schema,
+        binding.to_input,
+        source_selector=binding.source_selector,
+    ):
+        result.error(
+            f"绑定基数不兼容: {binding.from_capability}.{binding.from_output} "
+            f"-> {binding.to_capability}.{binding.to_input}"
+        )
+    repeated_caps = repeated or set()
+    if (
+        binding.from_capability in repeated_caps or binding.to_capability in repeated_caps
+    ) and not (binding.from_step and binding.to_step):
+        result.error(
+            f"同一能力多次调用时，绑定必须使用独立步骤身份: "
+            f"{binding.from_capability}->{binding.to_capability}"
         )
     if not _binding_has_confirmed_relation(spec, binding):
         result.error(

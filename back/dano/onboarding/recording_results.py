@@ -151,7 +151,11 @@ def recording_skill_lifecycle(body: dict[str, Any] | None) -> str:
         return "needs_reexport"
     if export_status in {"exported", "succeeded"} and payload.get("published"):
         return "exported"
-    if export_status in {"failed", "generation_failed"}:
+    if export_status in {"failed", "generation_failed", "export_failed"}:
+        if payload.get("published") or (payload.get("skill_id") and payload.get("skill_needs_reexport")):
+            return "export_failed"
+        if stage_status == "verified":
+            return "verified_not_exported"
         return "export_failed"
     if export_status in {"generating", "planning"}:
         return "generating"

@@ -1176,6 +1176,9 @@ class RecordingWorkflow:
                 self.snapshot.operator_answers = {
                     str(key): str(value) for key, value in answers.items()
                 }
+            checkpoint_status = str(checkpoint.get("status") or "")
+            if checkpoint_status:
+                self.snapshot.machine_verification_status = checkpoint_status
 
         context.persist_stage_seven = persist_and_track  # type: ignore[method-assign]
         self._active_persist_stage_seven = persist_and_track

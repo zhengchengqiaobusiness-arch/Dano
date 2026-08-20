@@ -86,6 +86,46 @@ def types_compatible(source_type: str, target_type: str) -> bool:
     return _capability_types_compatible(source_type, target_type)
 
 
+def field_cardinality(schema: dict[str, Any] | None, path: str) -> str:
+    """Return one/many for a schema path. Empty means unknown."""
+
+    node = schema_node(schema, path)
+    if node is None:
+        raw = str(path or "")
+        if "[]" in raw or "[*]" in raw:
+            return "many" if raw.rstrip(".").endswith(("[]", "[*]")) else "one"
+        return ""
+    typ = str(node.get("type") or "").strip().lower()
+    if typ == "array":
+        return "many"
+    return "one"
+
+
+def cardinality_compatible(
+    source_schema: dict[str, Any] | None,
+    source_path: str,
+    target_schema: dict[str, Any] | None,
+    target_path: str,
+    *,
+    source_selector: str = "",
+) -> bool:
+    """Array values cannot bind to a scalar (or the reverse) without an item selector."""
+
+    resolved_source = str(source_selector or source_path or "").strip()
+    source_card = field_cardinality(source_schema, resolved_source)
+    if not source_card:
+        source_card = field_cardinality(source_schema, source_path)
+    target_card = field_cardinality(target_schema, target_path)
+    if not source_card or not target_card:
+        return True
+    if source_card == target_card:
+        return True
+    extracts_item = "[]" in resolved_source or "[*]" in resolved_source
+    if source_card == "many" and target_card == "one":
+        return extracts_item
+    return False
+
+
 def confirmed_fixed_or_system_inputs(cap: FlowCapability) -> dict[str, str]:
     """Return required inputs already satisfied by the capability contract."""
 

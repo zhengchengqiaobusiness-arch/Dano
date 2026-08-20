@@ -36,6 +36,8 @@ _QUERY_HINTS = ("查询", "查看", "列表", "待办", "记录", "检索", "筛
 _OPTION_HINTS = ("选项", "字典", "下拉", "候选")
 _SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
 _LOOKUP_HINTS = ("回查", "确认提交", "确认成功", "再查询", "查询状态")
+_QUERY_WRITE_COMBINE_HINTS = ("查询后", "先查询", "先查再", "选择一条", "选中记录", "查询后选择")
+_OPTION_WRITE_COMBINE_HINTS = ("从选项中选择", "从选项选择", "选项中选择")
 _SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
 
 
@@ -148,20 +150,66 @@ def _required_user_inputs(cap: FlowCapability, bound_inputs: set[str]) -> list[s
     ]
 
 
-def _step_ids(sequence: list[str]) -> list[str]:
+def _step_ids_for(sequence: list[FlowCapability]) -> list[str]:
+    families = [_family(cap) for cap in sequence]
+    totals = {family: families.count(family) for family in set(families)}
     seen: dict[str, int] = {}
     ids: list[str] = []
-    for cap_id in sequence:
-        count = seen.get(cap_id, 0) + 1
-        seen[cap_id] = count
-        suffix = "before" if count == 1 and sequence.count(cap_id) > 1 else "after" if count > 1 else "once"
-        if sequence.count(cap_id) == 1:
-            ids.append(cap_id)
-        elif count == 1:
-            ids.append(f"{cap_id}_query_before" if suffix == "before" else f"{cap_id}_{count}")
+    for index, cap in enumerate(sequence):
+        family = families[index]
+        seen[family] = seen.get(family, 0) + 1
+        count = seen[family]
+        total = totals[family]
+        if family == "query":
+            if total > 1:
+                ids.append("query_before" if count == 1 else "query_after")
+            else:
+                ids.append("query")
+        elif family == "write":
+            ids.append("submit_selected" if "query" in families else "submit")
+        elif family == "option":
+            ids.append("option" if total == 1 else f"option_{count}")
         else:
-            ids.append(f"{cap_id}_query_after")
+            cap_id = capability_ref(cap) or f"step_{index + 1}"
+            ids.append(cap_id if total == 1 else f"{cap_id}_{count}")
     return ids
+
+
+def _annotate_bindings(
+    sequence: list[FlowCapability],
+    step_ids: list[str],
+    bindings: list[RouteBinding],
+) -> list[RouteBinding]:
+    first_step: dict[str, str] = {}
+    last_step: dict[str, str] = {}
+    for cap, step_id in zip(sequence, step_ids, strict=False):
+        cap_id = capability_ref(cap)
+        first_step.setdefault(cap_id, step_id)
+        last_step[cap_id] = step_id
+    annotated: list[RouteBinding] = []
+    for binding in bindings:
+        payload = binding.model_dump()
+        if not payload.get("from_step"):
+            payload["from_step"] = first_step.get(binding.from_capability, "")
+        if not payload.get("to_step"):
+            payload["to_step"] = last_step.get(binding.to_capability, "")
+        annotated.append(RouteBinding.model_validate(payload))
+    return annotated
+
+
+def _append_lookup(
+    sequence: list[FlowCapability],
+    queries: list[FlowCapability],
+    text: str,
+) -> list[FlowCapability]:
+    if not _mentions(text, _LOOKUP_HINTS) or not queries:
+        return list(sequence)
+    lookup = queries[0]
+    if not sequence:
+        return [lookup]
+    if sequence[-1] is lookup or capability_ref(sequence[-1]) == capability_ref(lookup):
+        return list(sequence)
+    return [*sequence, lookup]
 
 
 def _route(
@@ -175,8 +223,10 @@ def _route(
     extra_preconditions: list[str] | None = None,
 ) -> SkillRoute:
     cap_ids = [capability_ref(cap) for cap in sequence]
+    step_ids = _step_ids_for(sequence)
+    annotated = _annotate_bindings(sequence, step_ids, bindings)
     bound_by_cap: dict[str, set[str]] = {}
-    for binding in bindings:
+    for binding in annotated:
         bound_by_cap.setdefault(binding.to_capability, set()).add(binding.to_input)
     required: list[str] = []
     for cap in sequence:
@@ -198,9 +248,9 @@ def _route(
         name=name,
         when_to_use=when_to_use,
         capability_sequence=cap_ids,
-        step_ids=_step_ids(cap_ids),
+        step_ids=step_ids,
         required_user_inputs=required,
-        bindings=bindings,
+        bindings=annotated,
         preconditions=list(extra_preconditions or []),
         requires_confirmation=bool(writes),
         done_when=done,
@@ -211,12 +261,43 @@ def _route(
                 route_id=route_id,
                 collected_fields=required,
                 capability_sequence=cap_ids,
-                bindings=list(bindings),
+                bindings=list(annotated),
                 confirmation_points=confirmation,
                 done_when=done,
             )
         ],
     )
+
+
+def _required_relation_clarifications(
+    spec: FlowSpec,
+    request: SkillGenerationRequest,
+    verified_ids: set[str],
+) -> list[str]:
+    """If the description requires a combination that has no confirmed relation, do not publish."""
+
+    selected, _unused = _select_capabilities(spec, request, verified_ids)
+    text = _text(request)
+    by_family: dict[str, list[FlowCapability]] = {"query": [], "option": [], "write": []}
+    for cap in selected:
+        by_family.setdefault(_family(cap), []).append(cap)
+    questions: list[str] = []
+    queries = by_family.get("query") or []
+    options = by_family.get("option") or []
+    writes = by_family.get("write") or []
+    if _mentions(text, _QUERY_WRITE_COMBINE_HINTS) and queries and writes:
+        if not _relation_pair(spec, queries[0], writes[0]):
+            questions.append(
+                "业务描述要求将查询结果用于提交，但阶段7没有已确认的查询→提交关系。"
+                "请先确认该能力关系，或改为说明提交字段由用户提供、不要自动带入查询结果。"
+            )
+    if _mentions(text, _OPTION_WRITE_COMBINE_HINTS) and options and writes:
+        if not _relation_pair(spec, options[0], writes[0]):
+            questions.append(
+                "业务描述要求从选项中选择后再提交，但阶段7没有已确认的选项→提交关系。"
+                "请先确认该能力关系，或改为由用户直接提供提交字段。"
+            )
+    return questions
 
 
 def propose_deterministic_plan(
@@ -241,11 +322,15 @@ def propose_deterministic_plan(
         if queries and (_mentions(text, _QUERY_HINTS) or writes):
             sequence.append(queries[0])
         if writes:
+            write = writes[0]
             if sequence:
-                bindings.extend(_relation_pair(spec, sequence[-1], writes[0]))
-            sequence.append(writes[0])
-        if _mentions(text, _LOOKUP_HINTS) and queries:
-            sequence.append(queries[0])
+                pair = _relation_pair(spec, sequence[-1], write)
+                if pair:
+                    bindings.extend(pair)
+                    sequence.append(write)
+            else:
+                sequence.append(write)
+        sequence = _append_lookup(sequence, queries, text)
         if not sequence:
             sequence = list(selected[:1] or spec.capabilities[:1])
         routes.append(_route(
@@ -255,6 +340,11 @@ def propose_deterministic_plan(
             sequence=sequence,
             bindings=bindings,
             request=request,
+            extra_preconditions=(
+                ["回查使用独立步骤身份 query_before / submit_selected / query_after"]
+                if _mentions(text, _LOOKUP_HINTS) and queries
+                else None
+            ),
         ))
     else:
         if queries:
@@ -268,24 +358,31 @@ def propose_deterministic_plan(
             ))
         if writes:
             write = writes[0]
+            write_direct = _append_lookup([write], queries, text)
             routes.append(_route(
                 route_id="write_direct",
                 name="直接提交",
                 when_to_use="用户已经提供完整提交字段，不需要先查询",
-                sequence=[write],
+                sequence=write_direct,
                 bindings=[],
                 request=request,
+                extra_preconditions=(
+                    ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
+                    if len(write_direct) > 1
+                    else None
+                ),
             ))
             if queries:
                 bindings = _relation_pair(spec, queries[0], write)
-                routes.append(_route(
-                    route_id="query_then_write",
-                    name="查询后提交",
-                    when_to_use="需要先查询记录，再对选中记录执行提交",
-                    sequence=[queries[0], write],
-                    bindings=bindings,
-                    request=request,
-                ))
+                if bindings:
+                    routes.append(_route(
+                        route_id="query_then_write",
+                        name="查询后提交",
+                        when_to_use="需要先查询记录，再对选中记录执行提交",
+                        sequence=_append_lookup([queries[0], write], queries, text),
+                        bindings=bindings,
+                        request=request,
+                    ))
             if options:
                 bindings = _relation_pair(spec, options[0], write)
                 if bindings:
@@ -293,20 +390,10 @@ def propose_deterministic_plan(
                         route_id="option_then_write",
                         name="选项后提交",
                         when_to_use="提交字段需要从选项中选择",
-                        sequence=[options[0], write],
+                        sequence=_append_lookup([options[0], write], queries, text),
                         bindings=bindings,
                         request=request,
                     ))
-            if _mentions(text, _LOOKUP_HINTS) and queries:
-                routes.append(_route(
-                    route_id="write_then_query",
-                    name="提交后回查",
-                    when_to_use="提交后需要再查询状态确认完成",
-                    sequence=[write, queries[0]],
-                    bindings=[],
-                    request=request,
-                    extra_preconditions=["回查使用独立步骤身份，不得用能力名当作结果键"],
-                ))
         if not routes:
             routes.append(_route(
                 route_id="single",
@@ -397,6 +484,9 @@ async def _llm_propose(
             "每条 route 必须有 when_to_use、done_when 和至少一个 example",
             "fixed 模式只能一条 route，dynamic 可以多条有效路线",
             "unused_capabilities 必须写明原因",
+            "组合路线必须有已确认 bindings，不得按字段同名猜测",
+            "不要单独生成写后查询路线；回查应追加到写路线末尾并使用 query_before/submit_selected/query_after",
+            "同一能力多次调用必须有独立 step_ids，绑定必须带 from_step/to_step",
         ],
         "request": request.model_dump(mode="json"),
         "source_flow_fingerprint": source_flow_fingerprint,
@@ -443,6 +533,14 @@ async def generate_skill_plan(
         return SkillGenerationResult(
             status="generation_failed",
             errors=["未运行阶段7或没有已验证能力，禁止生成 Skill"],
+        )
+    relation_questions = _required_relation_clarifications(
+        spec, request, verified_capability_ids,
+    )
+    if relation_questions:
+        return SkillGenerationResult(
+            status="needs_clarification",
+            clarification_questions=relation_questions,
         )
 
     fallback = propose_deterministic_plan(spec, request, verified_capability_ids, source_flow_fingerprint)

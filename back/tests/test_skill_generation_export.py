@@ -18,6 +18,7 @@ from dano.export.skill_package.renderer import (
 )
 from dano.export.skill_package.validator import _check_skill, validate_skill_package
 from dano.onboarding.recording_stage_seven import working_fingerprint
+from dano.onboarding.recording_results import recording_skill_lifecycle
 from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
 from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import PlanningMode, SkillGenerationRequest
@@ -219,6 +220,7 @@ async def test_export_failure_does_not_mark_published(tmp_path: Path) -> None:
     assert outcome.status == "export_failed"
     assert stored[-1]["published"] is False
     assert stored[-1]["skill_export_status"] == "failed"
+    assert recording_skill_lifecycle(stored[-1]) == "verified_not_exported"
     assert not list(tmp_path.glob("dano-*-package"))
 
 
@@ -276,6 +278,33 @@ async def test_repeated_identical_export_is_idempotent(tmp_path: Path) -> None:
     assert second.idempotent is True
     assert second.skill_id == first.skill_id
     assert publishes["count"] == 1
+    assert second.used_capabilities
+    assert {item.get("capability_id") for item in second.used_capabilities} >= {"cap_query", "cap_submit"}
+
+
+@pytest.mark.asyncio
+async def test_incomplete_relation_export_does_not_publish(tmp_path: Path) -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    stored: list[dict] = []
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec),
+        tenant="tenant",
+        request=_request(
+            out_dir=str(tmp_path),
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
+        ),
+        persist=stored.append,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "needs_clarification"
+    assert outcome.clarification_questions
+    assert not outcome.export_path
+    assert stored[-1]["published"] is False
+    assert recording_skill_lifecycle(stored[-1]) == "verified_not_exported"
 
 
 @pytest.mark.asyncio

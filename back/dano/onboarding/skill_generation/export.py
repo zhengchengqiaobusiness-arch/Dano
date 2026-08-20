@@ -264,13 +264,19 @@ async def export_recording_skill(
     )
     if str(body.get("skill_request_fingerprint") or "") == request_fp and _already_exported(body):
         plan = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else {}
+        used = list((plan or {}).get("used_capabilities") or [])
+        if not used and plan:
+            try:
+                used = _used_capability_rows(spec, SkillPlan.model_validate(plan))
+            except Exception:  # noqa: BLE001 - idempotent path still returns the stored plan
+                used = []
         return SkillExportOutcome(
             status="exported",
             skill_id=str(body.get("skill_id") or ""),
             skill_name=str(request.title or body.get("title") or ""),
             version=int(body.get("skill_version") or 1),
             planning_mode=str((plan or {}).get("planning_mode") or request.planning_mode),
-            used_capabilities=list((plan or {}).get("used_capabilities") or []),
+            used_capabilities=used,
             unused_capabilities=list((plan or {}).get("unused_capabilities") or []),
             routes=list((plan or {}).get("routes") or []),
             export_path=str(body.get("export_path") or body.get("skill_export_path") or ""),
@@ -346,6 +352,8 @@ async def export_recording_skill(
             raise RuntimeError(str(published_report.get("reason") or "录制资产发布失败"))
         version = int((published_report or {}).get("asset_version") or _next_version(body))
         plan_payload = plan.model_dump(mode="json")
+        used_rows = _used_capability_rows(spec, plan)
+        plan_payload["used_capabilities"] = used_rows
         next_body = {
             **body,
             "published": True,
@@ -367,7 +375,7 @@ async def export_recording_skill(
             skill_name=title,
             version=version,
             planning_mode=str(plan.planning_mode),
-            used_capabilities=_used_capability_rows(spec, plan),
+            used_capabilities=used_rows,
             unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
             routes=[route.model_dump(mode="json") for route in plan.routes],
             export_path=export_path,
