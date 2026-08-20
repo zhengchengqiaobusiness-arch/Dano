@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from urllib.parse import urlparse
 
 from dano.execution.page.capability_compiler import (
@@ -127,6 +128,79 @@ def test_unique_path_candidate_with_conflicting_transaction_stays_unresolved() -
     assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == []
 
 
+def test_unique_path_candidate_with_conflicting_query_signature_stays_unresolved() -> None:
+    spec = _spec(
+        _get(
+            "step_other_query", "http://random.invalid/v9/choices?scope=other", "req_other_query",
+            page_id="page_a", frame_id="frame_a", trigger_transaction_id="tx_a",
+        ),
+        _write({
+            "source_url": "http://random.invalid/v9/choices?scope=expected",
+            "source_method": "GET",
+            "page_id": "page_a",
+            "frame_id": "frame_a",
+            "transaction_id": "tx_a",
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == []
+
+
+def test_request_id_does_not_override_a_conflicting_host_constraint() -> None:
+    spec = _spec(
+        _get("step_a", "http://a.invalid/v9/choices", "req_a"),
+        _write({
+            "source_request_id": "req_a",
+            "source_url": "http://b.invalid/v9/choices",
+            "source_method": "GET",
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == []
+
+
+def test_body_signature_matches_independent_of_json_serialization() -> None:
+    option_step = FlowStep(
+        step_id="step_body",
+        method="POST",
+        url="http://random.invalid/v9/choices",
+        path="/v9/choices",
+        body_source=json.dumps({"scope": "expected", "active": True}),
+        source_meta={"request_id": "req_body"},
+    )
+    spec = _spec(
+        option_step,
+        _write({
+            "source_url": "http://random.invalid/v9/choices",
+            "source_method": "POST",
+            "source_body": {"active": True, "scope": "expected"},
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == ["req_body"]
+
+
+def test_unique_path_candidate_with_conflicting_body_signature_stays_unresolved() -> None:
+    option_step = FlowStep(
+        step_id="step_body",
+        method="POST",
+        url="http://random.invalid/v9/choices",
+        path="/v9/choices",
+        body_source=json.dumps({"scope": "other"}),
+        source_meta={"request_id": "req_body"},
+    )
+    spec = _spec(
+        option_step,
+        _write({
+            "source_url": "http://random.invalid/v9/choices",
+            "source_method": "POST",
+            "source_body": {"scope": "expected"},
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == []
+
+
 def test_request_id_wins_over_path() -> None:
     spec = _spec(
         _get("step_a", "http://a.test/api/options", "req_a"),
@@ -188,8 +262,8 @@ def test_confirmed_flow_link_option_source_is_used() -> None:
 
 def test_step_matching_request_does_not_use_first_same_path() -> None:
     spec = _spec(
-        _get("step_b", "http://b.test/api/options", "req_b"),
-        _get("step_a", "http://a.test/api/options", "req_a"),
+        _get("step_b", "http://b.test/api/options", "req_b", page_id="p1", frame_id="f1"),
+        _get("step_a", "http://a.test/api/options", "req_a", page_id="p1", frame_id="f1"),
         facts=[
             RequestFact(
                 request_id="req_missing_step",

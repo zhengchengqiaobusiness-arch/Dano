@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -210,30 +211,24 @@ def _query_signature(url_or_query: str | dict | None) -> tuple[tuple[str, tuple[
 def _body_signature(value: Any) -> str:
     if value in (None, "", {}, []):
         return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in {"{", "["}:
+            try:
+                value = json.loads(text)
+            except (TypeError, ValueError):
+                pass
     return _stable_json_hash(value)
 
 
 def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowStep | None:
     """Resolve one option-source step; return None instead of guessing."""
     request_id = str(source.get("request_id") or source.get("source_request_id") or "")
-    if request_id:
-        step = next(
-            (item for item in spec.steps if _request_id_for_step(spec, item) == request_id),
-            None,
-        )
-        if step is not None:
-            return step
     step_id = str(source.get("step_id") or source.get("source_step_id") or "")
-    if step_id:
-        step = next((item for item in spec.steps if item.step_id == step_id), None)
-        if step is not None:
-            return step
     source_url = str(source.get("source_url") or source.get("url") or source.get("path") or "")
-    if not source_url:
+    if not any((request_id, step_id, source_url)):
         return None
-    source_path = _normalized_request_path(source_url)
-    if not source_path:
-        return None
+    source_path = _normalized_request_path(source_url) if source_url else ""
     parsed = urlparse(source_url) if "://" in source_url else None
     source_host = (parsed.netloc.casefold() if parsed is not None else str(source.get("host") or "").casefold())
     source_method = str(source.get("source_method") or source.get("method") or "").upper()
@@ -245,12 +240,26 @@ def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowSte
         or source.get("source_transaction_id")
         or ""
     )
+    query_provided = "?" in source_url or "query" in source
     source_query = _query_signature(source_url if "?" in source_url else source.get("query"))
-    source_body = _body_signature(source.get("source_body") or source.get("body"))
-    candidates = [
-        step for step in spec.steps
-        if _normalized_request_path(step.path or step.url) == source_path
-    ]
+    body_key = "source_body" if "source_body" in source else "body"
+    body_provided = body_key in source and source.get(body_key) is not None
+    source_body = _body_signature(source.get(body_key))
+    candidates = list(spec.steps)
+    if request_id:
+        candidates = [
+            step for step in candidates
+            if _request_id_for_step(spec, step) == request_id
+        ]
+    if step_id:
+        candidates = [step for step in candidates if step.step_id == step_id]
+    if source_url:
+        if not source_path:
+            return None
+        candidates = [
+            step for step in candidates
+            if _normalized_request_path(step.path or step.url) == source_path
+        ]
     if source_host:
         candidates = [step for step in candidates if _step_host(step) == source_host]
     if source_method:
@@ -259,43 +268,25 @@ def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowSte
             if (step.method or "GET").upper() == source_method
         ]
     if source_page:
-        narrowed = [
+        candidates = [
             step for step in candidates
             if str((step.source_meta or {}).get("page_id") or "") == source_page
         ]
-        if narrowed:
-            candidates = narrowed
     if source_frame:
-        narrowed = [
+        candidates = [
             step for step in candidates
             if str((step.source_meta or {}).get("frame_id") or "") == source_frame
         ]
-        if narrowed:
-            candidates = narrowed
     if source_tx:
-        narrowed = [step for step in candidates if _step_transaction_id(step) == source_tx]
-        if narrowed:
-            candidates = narrowed
-    if len(candidates) > 1 and source_query:
-        narrowed = [step for step in candidates if _query_signature(step.url) == source_query]
-        if len(narrowed) == 1:
-            candidates = narrowed
-        elif narrowed:
-            candidates = narrowed
-        else:
-            return None
-    if len(candidates) > 1 and source_body:
-        narrowed = [
+        candidates = [step for step in candidates if _step_transaction_id(step) == source_tx]
+    if query_provided:
+        candidates = [step for step in candidates if _query_signature(step.url) == source_query]
+    if body_provided:
+        candidates = [
             step for step in candidates
             if _body_signature(getattr(step, "body_source", None) or (step.source_meta or {}).get("post_data"))
             == source_body
         ]
-        if len(narrowed) == 1:
-            candidates = narrowed
-        elif not narrowed:
-            return None
-        else:
-            candidates = narrowed
     if len(candidates) != 1:
         return None
     return candidates[0]
@@ -316,13 +307,9 @@ def _option_source_request_ids(
     def add_source(source: object) -> None:
         if not isinstance(source, dict):
             return
-        request_id = str(source.get("request_id") or source.get("source_request_id") or "")
-        step_id = str(source.get("step_id") or source.get("source_step_id") or "")
+        request_id = ""
         capability_name = str(source.get("capability") or "")
-        if not request_id and step_id:
-            step = next((item for item in spec.steps if item.step_id == step_id), None)
-            request_id = _request_id_for_step(spec, step) if step is not None else ""
-        if not request_id and capability_name in plan_by_name:
+        if capability_name in plan_by_name:
             anchor = str(plan_by_name[capability_name].get("anchor_step_id") or "")
             step = next((item for item in spec.steps if item.step_id == anchor), None)
             request_id = _request_id_for_step(spec, step) if step is not None else ""
