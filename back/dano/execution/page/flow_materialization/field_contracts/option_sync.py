@@ -5,7 +5,7 @@ from typing import Any
 import copy
 import json
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
     FlowStep,
@@ -814,6 +814,39 @@ def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | N
     return None
 
 
+def _source_url_matches_request(source_url: str, request_url: str, request_path: str) -> bool:
+    """Treat every identity component supplied by the caller as a hard constraint."""
+    expected = urlparse(str(source_url or ""))
+    actual = urlparse(str(request_url or ""))
+    actual_path = actual.path or str(request_path or "")
+    if expected.scheme and expected.scheme.casefold() != actual.scheme.casefold():
+        return False
+    if expected.netloc and expected.netloc.casefold() != actual.netloc.casefold():
+        return False
+    if expected.path and expected.path.rstrip("/") != actual_path.rstrip("/"):
+        return False
+    if expected.query:
+        return sorted(parse_qsl(expected.query, keep_blank_values=True)) == sorted(
+            parse_qsl(actual.query, keep_blank_values=True)
+        )
+    return True
+
+
+def _page_control_source_request_ids(param: ParamField) -> set[str]:
+    owned: set[str] = set()
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or item.get("kind") != "page_control":
+            continue
+        if str(item.get("binding_status") or "bound") != "bound":
+            continue
+        values = item.get("source_request_ids") or []
+        if not isinstance(values, list):
+            values = [values]
+        values = [*values, item.get("source_request_id")]
+        owned.update(str(value) for value in values if value)
+    return owned
+
+
 def _bind_option_source(
     spec: FlowSpec,
     *,
@@ -843,7 +876,26 @@ def _bind_option_source(
     ):
         return
     source_step = _find_step(spec, source_step_id) if source_step_id else None
+    step_request_id = str((source_step.source_meta or {}).get("request_id") or "") if source_step else ""
+    if source_request_id and step_request_id and source_request_id != step_request_id:
+        raise ValueError("bind_option_source source step and request identities conflict")
+    resolved_request_id = source_request_id or step_request_id
+    source_fact = next(
+        (fact for fact in spec.request_facts.requests or [] if fact.request_id == resolved_request_id),
+        None,
+    ) if resolved_request_id else None
+    if resolved_request_id and source_fact is None and not source_step:
+        raise ValueError("bind_option_source source request does not belong to FlowSpec")
+    if source_fact is not None and source_url and not _source_url_matches_request(
+        source_url, source_fact.url, source_fact.path,
+    ):
+        raise ValueError("bind_option_source source request conflicts with source_url")
+    owned_request_ids = _page_control_source_request_ids(param)
+    if resolved_request_id and owned_request_ids and resolved_request_id not in owned_request_ids:
+        raise ValueError("bind_option_source source request does not own target field")
     src_url = source_url or (source_step.path or source_step.url if source_step else "")
+    if not src_url and source_fact is not None:
+        src_url = source_fact.path or source_fact.url
     if not src_url:
         raise ValueError("bind_option_source missing source_url/source_step")
 
@@ -861,7 +913,7 @@ def _bind_option_source(
     option_contract = {
         "kind": "api_option",
         "source_step_id": source_step_id,
-        "source_request_id": source_request_id,
+        "source_request_id": resolved_request_id,
         "source_url": src_url,
         "value_key": value_key,
         "label_key": label_key,
@@ -904,7 +956,7 @@ def _bind_option_source(
     option_evidence = {
         "source": "option_source",
         "source_step_id": source_step_id,
-        "source_request_id": source_request_id,
+        "source_request_id": resolved_request_id,
         "source_url": src_url,
         "value_key": value_key,
         "label_key": label_key,
@@ -921,7 +973,7 @@ def _bind_option_source(
     sel.param = param.key
     sel.path = param.path
     sel.source_url = src_url
-    sel.source_request_id = source_request_id or sel.source_request_id
+    sel.source_request_id = resolved_request_id or sel.source_request_id
     sel.value_key = value_key or sel.value_key
     sel.label_key = label_key or sel.label_key
     sel.category_key = category_key
@@ -955,15 +1007,23 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     if not binding.source_url:
         return
     target_path = urlparse(binding.source_url).path.rstrip("/")
-    candidates = [
-        fact for fact in (spec.request_facts.requests or [])
-        if (fact.url == binding.source_url)
-        or (fact.path and fact.path.rstrip("/") == target_path)
-        or (fact.url and urlparse(fact.url).path.rstrip("/") == target_path)
-    ]
+    if binding.source_request_id:
+        candidates = [
+            fact for fact in (spec.request_facts.requests or [])
+            if fact.request_id == binding.source_request_id
+        ]
+    else:
+        candidates = [
+            fact for fact in (spec.request_facts.requests or [])
+            if (fact.url == binding.source_url)
+            or (fact.path and fact.path.rstrip("/") == target_path)
+            or (fact.url and urlparse(fact.url).path.rstrip("/") == target_path)
+        ]
     if not candidates:
         return
-    fact = next((item for item in reversed(candidates) if item.response_json is not None), candidates[-1])
+    if len(candidates) != 1:
+        return
+    fact = candidates[0]
     source_changed = bool(binding.source_request_id and binding.source_request_id != (fact.request_id or ""))
     analysis = spec.request_facts.analysis.get(fact.request_id) if fact.request_id else None
     role = analysis.role if analysis is not None else ""

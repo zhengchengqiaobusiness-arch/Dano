@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from urllib.parse import urlparse
 
+import pytest
+
 from dano.execution.page.capability_compiler import (
     _option_source_request_ids,
     _step_matching_request,
 )
 from dano.execution.page.flow_spec import (
+    apply_flow_edits,
     FlowLink,
     FlowSpec,
     FlowStep,
@@ -280,3 +283,87 @@ def test_step_matching_request_does_not_use_first_same_path() -> None:
     matched = _step_matching_request(spec, "req_missing_step", by_request, by_step)
     assert matched is spec.steps[1]
     assert matched is not spec.steps[0]
+
+
+def test_public_option_binding_preserves_exact_request_identity() -> None:
+    shared_url = "http://random.invalid/v9/choices"
+    target = _write({"kind": "unknown"})
+    target.params[0].source_kind = "unknown"
+    spec = _spec(
+        _get("step_first", shared_url, "req_first", trigger_transaction_id="tx_first"),
+        _get("step_later", shared_url, "req_later", trigger_transaction_id="tx_later"),
+        target,
+        facts=[
+            RequestFact(
+                request_id="req_first",
+                method="GET",
+                url=shared_url,
+                path="/v9/choices",
+                response_json={"items": [{"id": 1, "label": "A"}]},
+                sequence=1,
+                transaction_id="tx_first",
+            ),
+            RequestFact(
+                request_id="req_later",
+                method="GET",
+                url=shared_url,
+                path="/v9/choices",
+                response_json={"items": [{"id": 2, "label": "B"}]},
+                sequence=2,
+                transaction_id="tx_later",
+            ),
+        ],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "bind_option_source",
+        "target_step_id": "step_write",
+        "target_path": "typeId",
+        "source_request_id": "req_first",
+        "source_url": shared_url,
+        "actor": "user",
+    }])
+
+    param = edited.steps[-1].params[0]
+    assert (param.source or {}).get("source_request_id") == "req_first"
+    assert edited.steps[-1].selects[0].source_request_id == "req_first"
+
+
+def test_public_option_binding_rejects_request_owned_by_another_control() -> None:
+    shared_url = "http://random.invalid/v9/choices"
+    target = _write({"kind": "unknown"})
+    target.params[0].source_kind = "unknown"
+    target.params[0].evidence = [{
+        "kind": "page_control",
+        "binding_status": "bound",
+        "source_request_ids": ["req_owned"],
+        "page_id": "page_target",
+        "surface": "drawer",
+    }]
+    spec = _spec(
+        _get("step_owned", shared_url, "req_owned", trigger_transaction_id="tx_target"),
+        _get("step_other", shared_url, "req_other", trigger_transaction_id="tx_other"),
+        target,
+        facts=[
+            RequestFact(
+                request_id="req_owned", method="GET", url=shared_url,
+                path="/v9/choices", response_json={"items": []},
+                transaction_id="tx_target",
+            ),
+            RequestFact(
+                request_id="req_other", method="GET", url=shared_url,
+                path="/v9/choices", response_json={"items": []},
+                transaction_id="tx_other",
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="does not own target field"):
+        apply_flow_edits(spec, [{
+            "op": "bind_option_source",
+            "target_step_id": "step_write",
+            "target_path": "typeId",
+            "source_request_id": "req_other",
+            "source_url": shared_url,
+            "actor": "user",
+        }])

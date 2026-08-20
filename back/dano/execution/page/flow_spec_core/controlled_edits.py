@@ -989,6 +989,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 target_path=str(edit.get("target_path") or edit.get("param_path") or ""),
                 source_step_id=str(edit.get("source_step") or edit.get("source_step_id") or ""),
                 source_url=str(edit.get("source_url") or ""),
+                source_request_id=str(edit.get("source_request_id") or ""),
                 value_key=str(edit.get("value_key") or ""),
                 label_key=str(edit.get("label_key") or ""),
                 id_path=str(edit.get("id_path") or ""),
