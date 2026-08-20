@@ -168,3 +168,28 @@ async def test_terminal_snapshot_still_releases_capture() -> None:
 
     assert capture.stopped is True
     assert session.capture is None
+
+
+async def test_failed_snapshot_keeps_capture_for_diagnosis() -> None:
+    session = RecordingGatewaySession(
+        config=_config("action_failed"),
+        send=_silent_send,
+        pi_factory=_unused,
+        publisher=_unused,
+    )
+    capture = FakeCapture()
+    session.capture = capture
+    session.workflow = FakeWorkflow(
+        action="action_failed",
+        status=WorkflowStatus.RECORDING,
+    )
+
+    await session._on_snapshot(WorkflowSnapshot(
+        run_id="run_action_failed",
+        action="action_failed",
+        status=WorkflowStatus.FAILED,
+        error="analysis failed",
+    ))
+
+    assert capture.stopped is False
+    assert session.capture is capture

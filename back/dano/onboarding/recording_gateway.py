@@ -1071,7 +1071,11 @@ class RecordingGatewaySession:
                 )
             except Exception:  # noqa: BLE001 - terminal flags must not abort the snapshot
                 pass
-            await self._release_capture()
+            # Keep a failed frozen page available for diagnosis/retry. It is
+            # still released by explicit close/cancel or when the registry
+            # starts another recording and cleans terminal leftovers.
+            if snapshot.status != WorkflowStatus.FAILED:
+                await self._release_capture()
 
     async def _emit_snapshot(self, snapshot: WorkflowSnapshot | None = None) -> None:
         if self.workflow is None:
