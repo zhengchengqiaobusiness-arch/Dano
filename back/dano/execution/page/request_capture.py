@@ -2447,10 +2447,8 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
     def type_from_control(item: dict | None, fallback: str) -> str:
         kind = str((item or {}).get("control_kind") or "").lower()
-        if kind == "textarea":
+        if kind in {"text", "search", "textarea", "contenteditable"}:
             return "string"
-        if kind == "text":
-            return "number" if fallback == "number" else "string"
         if kind == "number":
             return "number"
         if kind == "date":
@@ -2465,8 +2463,6 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             return "boolean"
         if kind == "radio":
             return "enum"
-        if kind in {"contenteditable", "textarea"}:
-            return "string"
         if kind == "file":
             return "file"
         return fallback

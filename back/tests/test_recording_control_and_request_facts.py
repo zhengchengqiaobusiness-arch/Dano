@@ -311,6 +311,49 @@ def test_file_control_becomes_a_caller_file_input_in_flow_spec() -> None:
     assert document.exposed_to_user is True
 
 
+def test_text_control_keeps_text_business_type_for_numeric_wire_sample() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_code",
+            "method": "POST",
+            "url": "http://types.invalid/v2/records",
+            "content_type": "application/json",
+            "post_data": json.dumps({"code": 1}),
+            "response_status": 200,
+            "response_json": {"ok": True},
+            "page_id": "page_code",
+            "frame_id": "frame_main",
+            "trigger_action_id": "action_save",
+            "trigger_transaction_id": "tx_save",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+        }],
+        field_evidence=[{
+            "field": "code",
+            "label": "Record code",
+            "value": "1",
+            "field_aliases": ["code"],
+            "control_kind": "text",
+            "action_id": "action_save",
+            "transaction_id": "tx_save",
+            "page_id": "page_code",
+            "frame_id": "frame_main",
+            "op": "fill",
+            "binding_status": "bound",
+            "request_id": "req_code",
+            "wire_path": "body.code",
+            "editable": True,
+            "required_state": "unknown",
+        }],
+        page_events=[{"event_id": "event_save", "kind": "click", "action_id": "action_save"}],
+        page_context={"url": "http://types.invalid/editor", "path": "/editor"},
+    )
+    code = next(param for step in spec.steps for param in step.params if param.path == "code")
+    assert code.type == "string"
+    assert code.wire_type == "number"
+
+
 def test_checkbox_false_binds_to_body_field() -> None:
     request = {
         "request_id": "req_save",
