@@ -11,7 +11,10 @@ import sys
 import yaml
 
 
-_REQUIRED_SKILL_SECTIONS = ("适用场景", "不适用场景", "操作路由", "操作步骤", "失败处理", "安全边界")
+_REQUIRED_SKILL_SECTIONS = (
+    "适用场景", "不适用场景", "能力关系", "操作路由", "输入",
+    "操作步骤", "工具", "输出", "完成标准", "失败处理", "安全边界",
+)
 _WORKFLOW_SECTION = "操作步骤"
 _VERIFICATION_ID_RE = re.compile(
     r"\bverification_id\s*[:=]?\s*[`\[]?(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",

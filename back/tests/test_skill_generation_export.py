@@ -695,8 +695,13 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
     text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, None)
     assert "## 适用场景" in text
     assert "## 不适用场景" in text
+    assert "## 能力关系" in text
     assert "## 操作路由" in text
+    assert "## 输入" in text
     assert "## 操作步骤" in text
+    assert "## 工具" in text
+    assert "## 输出" in text
+    assert "## 完成标准" in text
     assert "## 失败处理" in text
     assert "## 安全边界" in text
     assert "generator-guides" not in text
@@ -705,9 +710,12 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
     assert "提交请假" in text
     assert "python scripts/query_leave.py" in text
     assert "python scripts/submit_leave.py" in text
+    assert "查询后" in text or "组合路线" in text
     issues: list[dict] = []
     _check_skill(Path("SKILL.md"), text, issues)
     assert issues == []
+    assert any(len(route.capability_sequence) > 1 for route in plan.routes)
+    assert "已确认绑定" in text or "组合路线" in text
 
 
 def test_renderer_planning_fields_and_selected_filter() -> None:
@@ -898,9 +906,16 @@ def test_export_keeps_stage_six_contract_and_writes_business_triggers() -> None:
     assert "用户要新增销售订单时使用" in text
     assert "本页面的实际操作流程" not in text
     assert "name: sale-order-operations" in text
+    assert "使用时机" in text
+    assert "不要用于" in text
+    assert "不得把录制样例" not in text
+    assert "## 能力关系" in text
+    description = text.split("description:", 1)[1].split("\n", 1)[0]
+    assert "。不要用于" in description or "不要用于" in description
 
     operations = _operations_md(skill, plans, None)
     assert "customerId=8" in operations
+    assert "页面操作" not in operations.split("\n", 1)[0]
 
 
 def test_dynamic_plan_skips_recording_title_triggers() -> None:
@@ -918,3 +933,8 @@ def test_dynamic_plan_skips_recording_title_triggers() -> None:
     assert all("录制" not in item for item in plan.trigger_phrases)
     assert "本页面的实际操作流程" not in plan.summary
     assert not any(route.route_id.startswith("solo_") for route in plan.routes)
+    assert plan.composition_notes
+    for route in plan.routes:
+        assert "本页面的实际操作流程" not in route.when_to_use
+        assert route.examples
+        assert "本页面的实际操作流程" not in route.examples[0].user_request

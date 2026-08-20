@@ -12,7 +12,6 @@ import structlog
 from dano.execution.page.capability_kinds import READ_CAPABILITY_KINDS
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
 from dano.onboarding.skill_generation.catalog import (
-    capability_by_id,
     capability_ref,
     confirmed_fixed_or_system_inputs,
     is_write_capability,
@@ -231,6 +230,79 @@ def _annotate_bindings(
     return annotated
 
 
+def _clean_when(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if text and not _is_recording_copy(text):
+        return text
+    return fallback
+
+
+def _example_request(
+    request: SkillGenerationRequest,
+    when_to_use: str,
+    sequence: list[FlowCapability],
+) -> str:
+    for item in request.example_requests:
+        text = str(item).strip()
+        if text and not _is_recording_copy(text):
+            return text
+    if when_to_use and not _is_recording_copy(when_to_use):
+        return when_to_use
+    titles = "、".join(cap.title or cap.name for cap in sequence if cap.title or cap.name)
+    return f"请{titles}" if titles else "按本页已打包操作办理"
+
+
+def _cap_title(cap: FlowCapability) -> str:
+    return str(cap.title or cap.name or capability_ref(cap) or "该操作")
+
+
+def _build_composition(
+    request: SkillGenerationRequest,
+    selected: list[FlowCapability],
+    routes: list[SkillRoute],
+) -> tuple[str, list[str]]:
+    titles = [_cap_title(cap) for cap in selected]
+    summary = _clean_when(
+        request.business_description,
+        f"本页原子能力：{'、'.join(titles)}。按用户意图选择一项，或按已规划路线组合。",
+    )
+    notes: list[str] = [
+        "一页面对应一个 Skill；阶段 6/7 产出的是原子能力，本 Skill 用自然语言规划它们如何组合。",
+    ]
+    reads = [cap for cap in selected if not is_write_capability(cap)]
+    writes = [cap for cap in selected if is_write_capability(cap)]
+    if reads and writes:
+        notes.append("用户只要只读操作时，只执行对应只读能力，不得执行写入。")
+    combinations = [route for route in routes if len(route.capability_sequence) > 1]
+    if combinations:
+        for route in combinations:
+            sequence = " → ".join(f"`{cap_id}`" for cap_id in route.capability_sequence)
+            if route.bindings:
+                bound = "；".join(
+                    f"{binding.from_output} → {binding.to_input}"
+                    for binding in route.bindings
+                    if binding.from_output and binding.to_input
+                )
+                notes.append(
+                    f"组合路线「{route.name}」按 {sequence} 执行"
+                    + (f"，已确认绑定：{bound}" if bound else "，使用已确认绑定传值")
+                    + "。"
+                )
+            else:
+                notes.append(
+                    f"组合路线「{route.name}」按 {sequence} 执行，但没有已确认绑定；"
+                    "下一步输入向用户收集，不得按字段同名猜测。"
+                )
+    elif reads and writes:
+        notes.append(
+            "本页同时有只读和写入能力，但没有已确认绑定，不能生成自动传值的组合路线。"
+            "需要先后办理时，先执行只读能力，再请用户指定记录后执行写入。"
+        )
+    else:
+        notes.append("未规划自动传值的组合路线。一次对话只执行用户当前要求的那条路线。")
+    return summary, notes
+
+
 def _append_lookup(
     sequence: list[FlowCapability],
     queries: list[FlowCapability],
@@ -267,20 +339,22 @@ def _route(
         required.extend(_required_user_inputs(cap, bound_by_cap.get(capability_ref(cap), set())))
     required = list(dict.fromkeys(required))
     writes = [cap for cap in sequence if is_write_capability(cap)]
-    confirmation = [cap.title or cap.name for cap in writes]
+    confirmation = [_cap_title(cap) for cap in writes]
     done = str(request.success_criteria or "").strip() or (
         "写操作已确认并执行成功" if writes else "已返回查询结果"
     )
-    example_request = next((item for item in request.example_requests if str(item).strip()), "")
-    if not example_request:
-        example_request = f"{when_to_use}。{request.business_description}".strip()
+    cleaned_when = _clean_when(
+        when_to_use,
+        " → ".join(_cap_title(cap) for cap in sequence) or "按本页已打包操作办理",
+    )
+    example_request = _example_request(request, cleaned_when, sequence)
     failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。"
     if request.forbidden_actions:
         failure = f"{failure} 禁止：{request.forbidden_actions}"
     return SkillRoute(
         route_id=route_id,
         name=name,
-        when_to_use=when_to_use,
+        when_to_use=cleaned_when,
         capability_sequence=cap_ids,
         step_ids=step_ids,
         required_user_inputs=required,
@@ -336,8 +410,11 @@ def propose_deterministic_plan(
             sequence = list(selected[:1] or spec.capabilities[:1])
         routes.append(_route(
             route_id="main",
-            name="主要业务步骤",
-            when_to_use=request.business_description or "按固定步骤完成该页面业务",
+            name=" → ".join(_cap_title(cap) for cap in sequence) or "主要业务步骤",
+            when_to_use=_clean_when(
+                request.business_description,
+                "按用户描述的顺序组合本页已选原子能力",
+            ),
             sequence=sequence,
             bindings=bindings,
             request=request,
@@ -349,11 +426,12 @@ def propose_deterministic_plan(
         ))
     else:
         if queries:
+            query = queries[0]
             routes.append(_route(
                 route_id="query_only",
-                name="只查询记录",
-                when_to_use="用户只要求查看或查询记录，不要执行提交或其他写操作",
-                sequence=[queries[0]],
+                name=_cap_title(query),
+                when_to_use=f"用户只要{_cap_title(query)}，不要执行提交或其他写操作",
+                sequence=[query],
                 bindings=[],
                 request=request,
             ))
@@ -363,8 +441,8 @@ def propose_deterministic_plan(
                 write_direct = _append_lookup([write], queries, text)
                 routes.append(_route(
                     route_id="write_direct",
-                    name="直接提交",
-                    when_to_use="用户已经提供完整提交字段，不需要先查询",
+                    name=_cap_title(write),
+                    when_to_use=f"用户要{_cap_title(write)}，且已提供完整字段，不需要先查询",
                     sequence=write_direct,
                     bindings=[],
                     request=request,
@@ -400,8 +478,8 @@ def propose_deterministic_plan(
         if not routes:
             routes.append(_route(
                 route_id="single",
-                name=selected[0].title or selected[0].name or "页面能力",
-                when_to_use=request.business_description or "使用该页面已验证能力",
+                name=_cap_title(selected[0]),
+                when_to_use=_clean_when(request.business_description, f"用户要{_cap_title(selected[0])}"),
                 sequence=selected[:1],
                 bindings=[],
                 request=request,
@@ -469,9 +547,10 @@ def propose_deterministic_plan(
         title_trigger = str(request.title).strip()
         if title_trigger and title_trigger not in triggers:
             triggers.insert(0, f"用户要{title_trigger}时使用")
+    composition_summary, composition_notes = _build_composition(request, selected, routes)
     summary = request.business_description.strip()
     if _is_recording_copy(summary):
-        summary = "、".join(cap.title or cap.name for cap in selected)
+        summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)
     return SkillPlan(
         source_flow_fingerprint=source_flow_fingerprint,
         planning_mode=request.planning_mode,
@@ -481,6 +560,8 @@ def propose_deterministic_plan(
         unused_capabilities=unused,
         routes=routes,
         safety_rules=safety,
+        composition_summary=composition_summary,
+        composition_notes=composition_notes,
     )
 
 
@@ -544,6 +625,10 @@ async def _llm_propose(
             "同一能力多次调用必须有独立 step_ids，绑定必须带 from_step/to_step",
             "不要生成 solo_ 路线；未进入组合路线的能力仍留在 selected_capability_ids，作为独立操作",
             "多写能力时不要只为第一个写能力生成 write_direct",
+            "一页面对应一个 Skill：用业务描述说明原子能力如何组合，并写进 composition_notes",
+            "组合路线必须出现在 routes 里，when_to_use 用自然语言说明何时走这条组合",
+            "没有已确认绑定仍可写推荐顺序，但 bindings 必须为空，不得按字段同名猜测",
+            "route.examples.user_request 必须是业务例句，禁止使用录制套话",
         ],
         "request": request.model_dump(mode="json"),
         "source_flow_fingerprint": source_flow_fingerprint,

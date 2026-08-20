@@ -364,6 +364,38 @@ def test_write_route_requires_confirmation() -> None:
     assert any("确认" in item for item in checked.errors)
 
 
+def test_composition_notes_describe_confirmed_and_handoff_routes() -> None:
+    confirmed = propose_deterministic_plan(
+        _three_cap_spec(),
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="用户可以只查询待办，也可以查询后选择一条记录进行提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-compose",
+    )
+    assert any("组合路线" in item and "已确认绑定" in item for item in confirmed.composition_notes)
+    assert any(len(route.capability_sequence) > 1 and route.bindings for route in confirmed.routes)
+    for route in confirmed.routes:
+        assert "本页面的实际操作流程" not in route.when_to_use
+        assert "本页面的实际操作流程" not in route.examples[0].user_request
+
+    handoff = propose_deterministic_plan(
+        _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False),
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。只要求查询时不要提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-handoff",
+    )
+    assert "query_then_write" not in {route.route_id for route in handoff.routes}
+    assert any("没有已确认绑定" in item for item in handoff.composition_notes)
+    assert any("只读" in item and "不得执行写入" in item for item in handoff.composition_notes)
+
+
 def test_every_route_has_example_and_done_when() -> None:
     spec = _three_cap_spec()
     plan = propose_deterministic_plan(

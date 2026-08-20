@@ -82,6 +82,8 @@ class SkillPlan(BaseModel):
     routes: list[SkillRoute] = Field(default_factory=list)
     safety_rules: list[str] = Field(default_factory=list)
     clarification_questions: list[str] = Field(default_factory=list)
+    composition_summary: str = ""
+    composition_notes: list[str] = Field(default_factory=list)
 
 
 class SkillGenerationResult(BaseModel):

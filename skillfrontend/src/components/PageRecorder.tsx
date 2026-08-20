@@ -597,9 +597,14 @@ function defaultSkillDescription(capabilities: FlowCapability[], steps: FlowStep
   const names = ordered.map((item) => item.name);
   if (!names.length) return "";
   if (names.length === 1) {
-    return `本页面的实际操作流程：${names[0]}。`;
+    return `本页原子能力：${names[0]}。用户要${names[0]}时使用该操作。`;
   }
-  return `本页面的实际操作流程：${names.join(" → ")}。用户可按业务需要执行其中一项或多项操作。`;
+  return (
+    `本页原子能力：${names.join("、")}。`
+    + "用户可以只执行其中一项；也可以按业务需要先查找再办理。"
+    + "只要求查询时不要执行写入。"
+    + "先查找再办理时，按已确认绑定传递字段；没有已确认绑定则向用户收集下一步输入，不得按字段同名猜测。"
+  );
 }
 
 function historyLifecycleView(item: RecordingResultSummary) {
@@ -3493,7 +3498,7 @@ export default function PageRecorder({
                 }}
                 autoSize={{ minRows: 6, maxRows: 12 }}
                 disabled={skillExporting}
-                placeholder="请描述这个页面在业务上用来做什么、用户通常会提出什么要求、哪些操作需要组合、什么结果代表完成。例如：用户可以查询待办记录，也可以查询后选择一条记录进行提交；如果用户只要求查询，不要执行提交。"
+                placeholder="用自然语言说明这个页面有哪些原子能力、用户通常怎么组合它们、什么结果算完成。例如：用户可以只查询待办；也可以查询后选一条再提交。只要求查询时不要提交。没有已确认绑定时，先查再请用户指定记录。"
               />
             </div>
           </Space>
