@@ -5,7 +5,6 @@ from typing import Any
 import copy
 import json
 import re
-from urllib.parse import parse_qsl, urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
     FlowStep,
@@ -34,6 +33,10 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
 )
 from dano.execution.page.flow_materialization.request_steps import (
     _step_sequence,
+)
+from dano.execution.page.request_identity import (
+    request_identity_matches,
+    unique_request_identity_match,
 )
 
 
@@ -816,20 +819,10 @@ def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | N
 
 def _source_url_matches_request(source_url: str, request_url: str, request_path: str) -> bool:
     """Treat every identity component supplied by the caller as a hard constraint."""
-    expected = urlparse(str(source_url or ""))
-    actual = urlparse(str(request_url or ""))
-    actual_path = actual.path or str(request_path or "")
-    if expected.scheme and expected.scheme.casefold() != actual.scheme.casefold():
-        return False
-    if expected.netloc and expected.netloc.casefold() != actual.netloc.casefold():
-        return False
-    if expected.path and expected.path.rstrip("/") != actual_path.rstrip("/"):
-        return False
-    if expected.query:
-        return sorted(parse_qsl(expected.query, keep_blank_values=True)) == sorted(
-            parse_qsl(actual.query, keep_blank_values=True)
-        )
-    return True
+    return request_identity_matches(
+        {"source_url": source_url},
+        {"url": request_url or request_path, "path": request_path},
+    )
 
 
 def _page_control_source_request_ids(param: ParamField) -> set[str]:
@@ -1006,24 +999,29 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     """把界面选择的捕获接口补成可执行选项源，而不是只保存一个 URL。"""
     if not binding.source_url:
         return
-    target_path = urlparse(binding.source_url).path.rstrip("/")
-    if binding.source_request_id:
-        candidates = [
-            fact for fact in (spec.request_facts.requests or [])
-            if fact.request_id == binding.source_request_id
-        ]
-    else:
-        candidates = [
-            fact for fact in (spec.request_facts.requests or [])
-            if (fact.url == binding.source_url)
-            or (fact.path and fact.path.rstrip("/") == target_path)
-            or (fact.url and urlparse(fact.url).path.rstrip("/") == target_path)
-        ]
-    if not candidates:
+    source_identity: dict[str, Any] = {
+        "source_url": binding.source_url,
+        "source_request_id": binding.source_request_id,
+        "source_method": binding.source_method,
+    }
+    if binding.source_body is not None:
+        source_identity["source_body"] = binding.source_body
+    if binding.source_content_type:
+        source_identity["source_content_type"] = binding.source_content_type
+    fact = unique_request_identity_match(source_identity, (
+        (candidate, {
+            **candidate.model_dump(exclude_none=True),
+            "request_id": candidate.request_id,
+            "method": candidate.method,
+            "url": candidate.url or candidate.path,
+            "path": candidate.path,
+            "post_data": candidate.post_data,
+            "content_type": candidate.content_type,
+        })
+        for candidate in (spec.request_facts.requests or [])
+    ))
+    if fact is None:
         return
-    if len(candidates) != 1:
-        return
-    fact = candidates[0]
     source_changed = bool(binding.source_request_id and binding.source_request_id != (fact.request_id or ""))
     analysis = spec.request_facts.analysis.get(fact.request_id) if fact.request_id else None
     role = analysis.role if analysis is not None else ""

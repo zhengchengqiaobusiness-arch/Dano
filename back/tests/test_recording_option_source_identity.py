@@ -114,6 +114,60 @@ def test_same_path_different_transaction_does_not_pick_first() -> None:
     assert ids == ["req_tx2"]
 
 
+def test_same_path_different_action_uses_exact_action_identity() -> None:
+    spec = _spec(
+        _get(
+            "step_action_a", "http://a.test/api/options", "req_action_a",
+            page_id="p1", frame_id="f1", trigger_action_id="action_a",
+        ),
+        _get(
+            "step_action_b", "http://a.test/api/options", "req_action_b",
+            page_id="p1", frame_id="f1", trigger_action_id="action_b",
+        ),
+        _write({
+            "source_url": "http://a.test/api/options",
+            "kind": "api_option",
+            "page_id": "p1",
+            "frame_id": "f1",
+            "action_id": "action_b",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == ["req_action_b"]
+
+
+def test_same_post_identity_uses_content_type_as_hard_constraint() -> None:
+    json_step = FlowStep(
+        step_id="step_json",
+        method="POST",
+        url="http://a.test/api/options",
+        path="/api/options",
+        content_type="application/json",
+        body_source=json.dumps({"scope": "active"}),
+        source_meta={"request_id": "req_json"},
+    )
+    form_step = FlowStep(
+        step_id="step_form",
+        method="POST",
+        url="http://a.test/api/options",
+        path="/api/options",
+        content_type="application/x-www-form-urlencoded",
+        body_source=json.dumps({"scope": "active"}),
+        source_meta={"request_id": "req_form"},
+    )
+    spec = _spec(
+        json_step,
+        form_step,
+        _write({
+            "source_url": "http://a.test/api/options",
+            "source_method": "POST",
+            "source_body": {"scope": "active"},
+            "source_content_type": "application/json",
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == ["req_json"]
+
+
 def test_unique_path_candidate_with_conflicting_transaction_stays_unresolved() -> None:
     spec = _spec(
         _get(

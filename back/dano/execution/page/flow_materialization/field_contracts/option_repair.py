@@ -38,6 +38,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _param_has_editable_control_evidence,
 )
+from dano.execution.page.request_identity import request_identity_matches
 
 
 def _option_binding_tokens(value: Any) -> set[str]:
@@ -619,24 +620,27 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         source_frame = str(source.get("frame_id") or "")
         target_page = str(target_meta.get("page_id") or "")
         target_frame = str(target_meta.get("frame_id") or "")
-        if source_page and target_page and source_page != target_page:
-            return False
-        if source_frame and target_frame and source_frame != target_frame:
-            return False
+        ownership_scope: dict[str, Any] = {
+            "page_id": target_page,
+            "frame_id": target_frame,
+        }
         if page_contract is not None:
             raw = page_contract.get("raw") or {}
             page_id = str(raw.get("page_id") or "")
             frame_id = str(raw.get("frame_id") or "")
-            if source_page and page_id and source_page != page_id:
-                return False
-            if source_frame and frame_id and source_frame != frame_id:
-                return False
             page_tx = str(raw.get("trigger_transaction_id") or raw.get("transaction_id") or "")
             page_action = str(raw.get("trigger_action_id") or raw.get("action_id") or "")
-            if source_tx and page_tx and source_tx != page_tx:
-                return False
-            if source_action and page_action and source_action != page_action:
-                return False
+            ownership_scope = {
+                "page_id": page_id or target_page,
+                "frame_id": frame_id or target_frame,
+                "transaction_id": page_tx,
+                "action_id": page_action,
+            }
+        if not request_identity_matches(
+            {key: value for key, value in ownership_scope.items() if value},
+            source,
+        ):
+            return False
         if semantic_match:
             return True
         same_action_context = bool(

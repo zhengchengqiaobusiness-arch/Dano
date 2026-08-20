@@ -3,10 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from dano.execution.page.flow_spec_core.models import (
     CapabilityRequestRef,
@@ -45,6 +44,7 @@ from dano.execution.page.capability_io import (
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _step_has_stable_record_identity,
 )
+from dano.execution.page.request_identity import unique_request_identity_match
 
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -171,128 +171,26 @@ def _step_by_request_id(spec: FlowSpec) -> dict[str, FlowStep]:
     return out
 
 
-def _normalized_request_path(url_or_path: str) -> str:
-    raw = str(url_or_path or "").strip()
-    if not raw:
-        return ""
-    path = urlparse(raw).path if "://" in raw else raw.split("?", 1)[0]
-    path = (path or raw.split("?", 1)[0]).strip()
-    if path and not path.startswith("/"):
-        path = "/" + path
-    return path.rstrip("/") or path
-
-
-def _step_host(step: FlowStep) -> str:
-    raw = str(step.url or "")
-    if "://" in raw:
-        return urlparse(raw).netloc.casefold()
-    return str((step.source_meta or {}).get("host") or "").casefold()
-
-
-def _step_transaction_id(step: FlowStep) -> str:
-    meta = step.source_meta or {}
-    return str(
-        meta.get("trigger_transaction_id")
-        or meta.get("transaction_id")
-        or ""
-    )
-
-
-def _query_signature(url_or_query: str | dict | None) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    if isinstance(url_or_query, dict):
-        items = {
-            str(key): tuple(str(item) for item in (value if isinstance(value, list) else [value]))
-            for key, value in url_or_query.items()
-        }
-        return tuple(sorted((key, items[key]) for key in items))
-    raw = str(url_or_query or "")
-    query = raw.split("?", 1)[1] if "?" in raw else (urlparse(raw).query if "://" in raw else "")
-    parsed = parse_qs(query, keep_blank_values=True) if query else {}
-    return tuple(sorted((key, tuple(values)) for key, values in parsed.items()))
-
-
-def _body_signature(value: Any) -> str:
-    if value in (None, "", {}, []):
-        return ""
-    if isinstance(value, str):
-        text = value.strip()
-        if text[:1] in {"{", "["}:
-            try:
-                value = json.loads(text)
-            except (TypeError, ValueError):
-                pass
-    return _stable_json_hash(value)
-
-
 def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowStep | None:
     """Resolve one option-source step; return None instead of guessing."""
-    request_id = str(source.get("request_id") or source.get("source_request_id") or "")
-    step_id = str(source.get("step_id") or source.get("source_step_id") or "")
-    source_url = str(source.get("source_url") or source.get("url") or source.get("path") or "")
-    if not any((request_id, step_id, source_url)):
+    if not any(source.get(key) for key in (
+        "request_id", "source_request_id", "step_id", "source_step_id",
+        "source_url", "url", "path",
+    )):
         return None
-    source_path = _normalized_request_path(source_url) if source_url else ""
-    parsed = urlparse(source_url) if "://" in source_url else None
-    source_host = (parsed.netloc.casefold() if parsed is not None else str(source.get("host") or "").casefold())
-    source_method = str(source.get("source_method") or source.get("method") or "").upper()
-    source_page = str(source.get("page_id") or "")
-    source_frame = str(source.get("frame_id") or "")
-    source_tx = str(
-        source.get("transaction_id")
-        or source.get("trigger_transaction_id")
-        or source.get("source_transaction_id")
-        or ""
-    )
-    query_provided = "?" in source_url or "query" in source
-    source_query = _query_signature(source_url if "?" in source_url else source.get("query"))
-    body_key = "source_body" if "source_body" in source else "body"
-    body_provided = body_key in source and source.get(body_key) is not None
-    source_body = _body_signature(source.get(body_key))
-    candidates = list(spec.steps)
-    if request_id:
-        candidates = [
-            step for step in candidates
-            if _request_id_for_step(spec, step) == request_id
-        ]
-    if step_id:
-        candidates = [step for step in candidates if step.step_id == step_id]
-    if source_url:
-        if not source_path:
-            return None
-        candidates = [
-            step for step in candidates
-            if _normalized_request_path(step.path or step.url) == source_path
-        ]
-    if source_host:
-        candidates = [step for step in candidates if _step_host(step) == source_host]
-    if source_method:
-        candidates = [
-            step for step in candidates
-            if (step.method or "GET").upper() == source_method
-        ]
-    if source_page:
-        candidates = [
-            step for step in candidates
-            if str((step.source_meta or {}).get("page_id") or "") == source_page
-        ]
-    if source_frame:
-        candidates = [
-            step for step in candidates
-            if str((step.source_meta or {}).get("frame_id") or "") == source_frame
-        ]
-    if source_tx:
-        candidates = [step for step in candidates if _step_transaction_id(step) == source_tx]
-    if query_provided:
-        candidates = [step for step in candidates if _query_signature(step.url) == source_query]
-    if body_provided:
-        candidates = [
-            step for step in candidates
-            if _body_signature(getattr(step, "body_source", None) or (step.source_meta or {}).get("post_data"))
-            == source_body
-        ]
-    if len(candidates) != 1:
-        return None
-    return candidates[0]
+    return unique_request_identity_match(source, (
+        (step, {
+            **dict(step.source_meta or {}),
+            "request_id": _request_id_for_step(spec, step),
+            "step_id": step.step_id,
+            "method": step.method,
+            "url": step.url or step.path,
+            "path": step.path,
+            "body": step.body_source,
+            "content_type": step.content_type,
+        })
+        for step in spec.steps
+    ))
 
 
 def _option_source_request_ids(
