@@ -361,6 +361,23 @@ def _param_source_guess(
     control_locked = bool(field.get("control_disabled")) if control_kind in {
         "select", "combobox",
     } else bool(field.get("control_disabled") or field.get("control_read_only"))
+    if has_control and control_kind == "file" and not control_locked:
+        return {
+            "category": "user_param",
+            "source_kind": "user_input",
+            "source": {
+                "kind": "file_input",
+                "path": path,
+                "filename": str(field.get("filename") or ""),
+                "mime_type": str(field.get("mime_type") or ""),
+                "multiple": bool(field.get("multiple")),
+                "file_count": int(field.get("file_count") or 0),
+            },
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "页面文件控件由调用方提供文件；只保留安全元数据，不复用录制机器路径",
+            "need_human_confirm": False,
+        }
     if has_control and control_kind in {"select", "combobox"} and not control_locked:
         return {
             "category": "user_param",

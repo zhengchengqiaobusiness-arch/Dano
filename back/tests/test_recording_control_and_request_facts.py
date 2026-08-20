@@ -253,6 +253,64 @@ def test_multipart_file_request_remains_in_the_recorded_business_flow() -> None:
     assert role["role"] in {"business_write", "submit_anchor"}
 
 
+def test_file_control_becomes_a_caller_file_input_in_flow_spec() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    body = (
+        "--file-boundary\r\n"
+        'Content-Disposition: form-data; name="document"; filename="note.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "hello\r\n"
+        "--file-boundary--"
+    )
+    spec = to_flow_spec(
+        captured_requests=[{
+            "request_id": "req_file",
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://files.invalid/v3/blobs",
+            "content_type": "multipart/form-data; boundary=file-boundary",
+            "post_data": body,
+            "response_status": 200,
+            "response_json": {"key": "blob-key"},
+            "page_id": "page_file",
+            "frame_id": "frame_main",
+            "trigger_action_id": "action_file",
+            "trigger_transaction_id": "tx_file",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+        }],
+        field_evidence=[{
+            "field": "document",
+            "label": "Document",
+            "filename": "note.txt",
+            "mime_type": "text/plain",
+            "size": 5,
+            "file_count": 1,
+            "multiple": False,
+            "field_aliases": ["document"],
+            "control_kind": "file",
+            "action_id": "action_file",
+            "transaction_id": "tx_file",
+            "page_id": "page_file",
+            "frame_id": "frame_main",
+            "op": "upload",
+            "binding_status": "bound",
+            "request_id": "req_file",
+            "wire_path": "body.document",
+            "editable": True,
+            "required_state": "unknown",
+        }],
+        page_events=[{"event_id": "event_file", "kind": "upload", "action_id": "action_file"}],
+        page_context={"url": "http://files.invalid/form", "path": "/form"},
+    )
+    upload = next(step for step in spec.steps if step.path == "/v3/blobs")
+    document = next(param for param in upload.params if param.path == "document")
+    assert document.type == "file"
+    assert document.source_kind == "user_input"
+    assert document.source["kind"] == "file_input"
+    assert document.exposed_to_user is True
+
+
 def test_checkbox_false_binds_to_body_field() -> None:
     request = {
         "request_id": "req_save",

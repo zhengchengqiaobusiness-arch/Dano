@@ -947,15 +947,6 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
                          reason="SDK 事件上报包只记录页面行为，不进入业务流程",
                          confidence=0.98, semantic=semantic)
 
-    ct = (req.get("content_type") or (req.get("headers") or {}).get("content-type") or "").lower()
-    if (
-        (ct.startswith("multipart/") and _multipart_contains_file(str(req.get("post_data") or "")))
-        or _request_segments(req) & {"upload", "file", "files", "attachment", "attachments"}
-    ):
-        return _role_row(req, role="unsupported_upload", keep=False,
-                         reason="文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
-                         confidence=0.96, semantic=semantic)
-
     if _looks_graphql_request(req):
         return _role_row(req, role="unsupported_graphql", keep=False,
                          reason="GraphQL 请求可能包含多操作与动态 selection set；当前 FlowSpec 暂不自动复用",
@@ -1070,11 +1061,28 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
 
     sample_hits = _sample_hit_count(req, samples)
     body = _parse_body(req.get("post_data"))
-    if sample_hits > 0 or _request_has_write_hint(req) or _request_has_command_anchor(req):
+    has_file_input = _multipart_contains_file(req.get("post_data"))
+    if (
+        sample_hits > 0
+        or has_file_input
+        or _request_has_write_hint(req)
+        or _request_has_command_anchor(req)
+    ):
         role = "submit_anchor" if sample_hits > 0 else "business_write"
-        reason = ("请求体包含用户录制输入值，判定为提交锚点"
-                  if sample_hits > 0 else "写请求具有明确提交动作或业务命令语义，保留为业务步骤")
-        evidence = {"sample_hits": sample_hits} if sample_hits > 0 else None
+        reason = (
+            "请求体包含用户录制输入值，判定为提交锚点"
+            if sample_hits > 0
+            else (
+                "multipart 请求包含调用方文件输入，保留为业务步骤"
+                if has_file_input
+                else "写请求具有明确提交动作或业务命令语义，保留为业务步骤"
+            )
+        )
+        evidence = (
+            {"sample_hits": sample_hits}
+            if sample_hits > 0
+            else ({"file_input": True} if has_file_input else None)
+        )
         return _role_row(req, role=role, keep=True, reason=reason,
                          confidence=0.93 if sample_hits > 0 else 0.86,
                          semantic=semantic, evidence=evidence)
