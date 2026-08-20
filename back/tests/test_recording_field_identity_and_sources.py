@@ -166,6 +166,39 @@ def test_array_rows_are_not_forced_onto_first_index() -> None:
     assert path in {"body.items[1].count", "body.items[].count"} or item.get("binding_status") == "ambiguous"
 
 
+def test_explicit_request_and_wire_path_bind_each_array_occurrence() -> None:
+    request = {
+        "request_id": "req_rows",
+        "method": "POST",
+        "url": "http://occurrence.invalid/v2/submit",
+        "post_data": '{"rows":[{"value":"A"},{"value":"B"}]}',
+        "response_status": 200,
+        "page_id": "page_rows",
+        "frame_id": "frame_rows",
+    }
+    evidence = [
+        {
+            "label": "Value",
+            "field_aliases": ["value"],
+            "value": value,
+            "request_id": "req_rows",
+            "wire_path": f"body.rows[{index}].value",
+            "binding_status": "bound",
+            "page_id": "page_rows",
+            "frame_id": "frame_rows",
+        }
+        for index, value in enumerate(("A", "B"))
+    ]
+
+    bound = bind_field_evidence([request], [], evidence)
+
+    assert [item.get("binding_status") for item in bound] == ["bound", "bound"]
+    assert [item.get("wire_path") for item in bound] == [
+        "body.rows[0].value",
+        "body.rows[1].value",
+    ]
+
+
 def test_retry_requests_in_same_transaction_are_not_fake_ambiguity() -> None:
     failed = {
         "request_id": "req_fail",

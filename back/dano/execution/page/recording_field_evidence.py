@@ -795,16 +795,24 @@ def bind_field_evidence(
         evidence["evidence_id"] = _evidence_id(evidence, index)
         structural_aliases = _structural_evidence_aliases(evidence)
         aliases = structural_aliases
+        declared_request_id = str(evidence.get("request_id") or "").strip()
+        declared_wire_path = str(evidence.get("wire_path") or "").strip().removeprefix(
+            "request."
+        )
         candidates: list[dict[str, Any]] = []
-        if aliases:
+        if aliases or declared_wire_path:
             for request in requests:
                 if not _same_scope(request, evidence):
                     continue
                 request_id = str(request.get("request_id") or request.get("id") or request.get("index") or "")
-                if not request_id:
+                if not request_id or (
+                    declared_request_id and request_id != declared_request_id
+                ):
                     continue
                 for wire_path in _request_fields(request):
-                    match_score = _field_match_score(aliases, wire_path)
+                    if declared_wire_path and wire_path != declared_wire_path:
+                        continue
+                    match_score = 3 if declared_wire_path else _field_match_score(aliases, wire_path)
                     if match_score:
                         request_time = _timestamp(request.get("timestamp") or request.get("captured_at"))
                         evidence_time = _timestamp(evidence.get("observed_at"))
