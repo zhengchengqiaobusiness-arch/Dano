@@ -347,6 +347,7 @@ def capability_to_flow_spec_view(
             for param in (step.params or [])
         ],
         set(selected_cap.step_ids or []),
+        include_required_state=_schema_emits_required_state(selected_cap.input_schema),
     )
     return sync_capability_scoped_views(view)
 
@@ -363,7 +364,7 @@ def flow_spec_capability_contracts(
         capability_name=capability_name,
     )
 
-_PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
+_PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_schema_emits_required_state': 'dano.execution.page.capability_io', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:

@@ -354,9 +354,29 @@ def _merge_required_states(left: str, right: str) -> str:
     return "optional"
 
 
+def _schema_emits_required_state(schema: dict[str, Any] | None) -> bool:
+    """Keep frozen pre-tristate contracts byte-compatible when reloaded."""
+    if not isinstance(schema, dict) or not (schema.get("properties") or {}):
+        return True
+    stack = [schema]
+    while stack:
+        current = stack.pop()
+        if "x-dano-required-state" in current:
+            return True
+        properties = current.get("properties") or {}
+        if isinstance(properties, dict):
+            stack.extend(item for item in properties.values() if isinstance(item, dict))
+        items = current.get("items")
+        if isinstance(items, dict):
+            stack.append(items)
+    return False
+
+
 def _capability_input_schema(
     params: list[ParamField],
     capability_step_ids: set[str] | None = None,
+    *,
+    include_required_state: bool = True,
 ) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
@@ -375,10 +395,11 @@ def _capability_input_schema(
         key = p.key or p.path
         if key in props:
             existing = props[key]
-            existing["x-dano-required-state"] = _merge_required_states(
-                str(existing.get("x-dano-required-state") or "unknown"),
-                _required_state_for_param(p, capability_step_ids),
-            )
+            if include_required_state:
+                existing["x-dano-required-state"] = _merge_required_states(
+                    str(existing.get("x-dano-required-state") or "unknown"),
+                    _required_state_for_param(p, capability_step_ids),
+                )
             candidate_business = _business_type_for_param(p)
             candidate_wire = p.wire_type or _infer_type_from_value(p.value) or "string"
             if (
@@ -401,9 +422,10 @@ def _capability_input_schema(
         props[key]["x-flow-path"] = p.path
         props[key]["x-dano-business-type"] = _business_type_for_param(p)
         props[key]["x-dano-wire-type"] = p.wire_type or _infer_type_from_value(p.value) or "string"
-        props[key]["x-dano-required-state"] = _required_state_for_param(
-            p, capability_step_ids,
-        )
+        if include_required_state:
+            props[key]["x-dano-required-state"] = _required_state_for_param(
+                p, capability_step_ids,
+            )
         wire_format = p.wire_format or _infer_wire_format(p.value)
         if wire_format:
             props[key]["x-dano-wire-format"] = wire_format
@@ -439,6 +461,7 @@ def _capability_input_schema(
             props[key]["items"] = _capability_input_schema(
                 item_params,
                 capability_step_ids,
+                include_required_state=include_required_state,
             )
             props[key]["minItems"] = 1
         grounded_constraints = next((
@@ -901,10 +924,18 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         }
         _disambiguate_capability_param_keys(cap_steps)
         params = [p for st in cap_steps for p in (st.params or [])]
-        derived_input = _capability_input_schema(params, set(cap.step_ids or []))
+        include_required_state = _schema_emits_required_state(cap.input_schema)
+        derived_input = _capability_input_schema(
+            params,
+            set(cap.step_ids or []),
+            include_required_state=include_required_state,
+        )
         derived_input = _expand_response_key_map_inputs(spec, cap, derived_input)
         if _capability_is_batch(spec, cap):
-            derived_input = _batch_capability_input_schema(cap_steps)
+            derived_input = _batch_capability_input_schema(
+                cap_steps,
+                include_required_state=include_required_state,
+            )
         cap.input_schema = reconcile_schema(derived_input, cap.input_schema or {})
         if cap.kind == "query_status":
             cap.output_mapping = _query_output_mappings(cap_steps)
@@ -1133,7 +1164,11 @@ def _capability_schema_field_type(schema: dict[str, Any], field: str) -> str:
     return ""
 
 
-def _batch_capability_input_schema(steps: list[FlowStep]) -> dict[str, Any]:
+def _batch_capability_input_schema(
+    steps: list[FlowStep],
+    *,
+    include_required_state: bool = True,
+) -> dict[str, Any]:
     """批量能力只把逐条字段放进 entries，能力级共享字段保留在顶层。"""
     item_params: list[ParamField] = []
     shared_params: list[ParamField] = []
@@ -1158,8 +1193,12 @@ def _batch_capability_input_schema(steps: list[FlowStep]) -> dict[str, Any]:
         write_ids = {id(param) for param in write_user_params}
         shared_params = [param for param in shared_params if id(param) not in write_ids]
 
-    item_schema = _capability_input_schema(item_params)
-    shared_schema = _capability_input_schema(shared_params)
+    item_schema = _capability_input_schema(
+        item_params, include_required_state=include_required_state,
+    )
+    shared_schema = _capability_input_schema(
+        shared_params, include_required_state=include_required_state,
+    )
     properties = dict(shared_schema.get("properties") or {})
     properties["entries"] = {
         "type": "array",
