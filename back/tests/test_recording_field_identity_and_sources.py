@@ -566,6 +566,78 @@ def test_successful_omit_can_mark_query_filter_optional() -> None:
     assert str((status.source or {}).get("required_state") or "unknown") == "unknown"
 
 
+def test_successful_omit_does_not_cross_http_method() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_get_full",
+                "sequence": 1,
+                "method": "GET",
+                "url": "http://scope.invalid/v2/resources?state=open&note=seen",
+                "query": {"state": ["open"], "note": ["seen"]},
+                "response_status": 200,
+                "response_json": {"ok": True},
+                "page_id": "page_query",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_query_a",
+                "trigger_transaction_id": "tx_query_a",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+            },
+            {
+                "request_id": "req_get_omit",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://scope.invalid/v2/resources?state=open",
+                "query": {"state": ["open"]},
+                "response_status": 200,
+                "response_json": {"ok": True},
+                "page_id": "page_query",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_query_b",
+                "trigger_transaction_id": "tx_query_b",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+            },
+            {
+                "request_id": "req_post",
+                "sequence": 3,
+                "method": "POST",
+                "url": "http://scope.invalid/v2/resources",
+                "post_data": json.dumps({"note": "required value"}),
+                "response_status": 200,
+                "response_json": {"ok": True},
+                "page_id": "page_editor",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_create",
+                "trigger_transaction_id": "tx_create",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+            },
+        ],
+        field_evidence=[{
+            "label": "Memo",
+            "field": "note",
+            "value": "required value",
+            "field_aliases": ["note"],
+            "control_kind": "text",
+            "required_state": "unknown",
+            "required_observed": None,
+            "page_id": "page_editor",
+            "frame_id": "frame_main",
+            "action_id": "action_create",
+            "transaction_id": "tx_create",
+            "op": "fill",
+            "binding_status": "bound",
+            "request_id": "req_post",
+            "wire_path": "body.note",
+            "editable": True,
+        }],
+        page_events=[{"event_id": "event_create", "kind": "click", "action_id": "action_create"}],
+        page_context={"url": "http://scope.invalid/editor", "path": "/editor"},
+    )
+    write = next(step for step in spec.steps if step.method == "POST")
+    note = next(param for param in write.params if param.path == "note")
+    assert str((note.source or {}).get("required_state") or "unknown") == "unknown"
+
+
 def test_required_state_does_not_mix_across_surfaces() -> None:
     session = RecordSession()
     _feed(session, {

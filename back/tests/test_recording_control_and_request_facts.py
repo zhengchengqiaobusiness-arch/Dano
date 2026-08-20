@@ -15,6 +15,7 @@ from dano.execution.page.recording_field_evidence import (
     _request_fields,
     bind_field_evidence,
 )
+from dano.execution.page.recording_facts import classify_network_request
 from dano.execution.page.request_capture import _parse_body as capture_parse_body
 from dano.execution.page.request_capture import parse_recorded_request_body
 
@@ -229,6 +230,27 @@ def test_shared_body_parser_multipart_text_and_file() -> None:
     fields = _request_fields({"post_data": body, "content_type": "multipart/form-data; boundary=abc123", "url": "http://example.test/upload"})
     assert "body.title" in fields
     assert "body.attachment" in fields
+
+
+def test_multipart_file_request_remains_in_the_recorded_business_flow() -> None:
+    body = (
+        "--boundary-x\r\n"
+        'Content-Disposition: form-data; name="document"; filename="note.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "hello\r\n"
+        "--boundary-x--"
+    )
+    role = classify_network_request({
+        "request_id": "req_file",
+        "method": "POST",
+        "url": "http://files.invalid/v3/blobs",
+        "content_type": "multipart/form-data; boundary=boundary-x",
+        "post_data": body,
+        "trigger_action_id": "action_file",
+        "trigger_transaction_id": "tx_file",
+    })
+    assert role["keep"] is True
+    assert role["role"] in {"business_write", "submit_anchor"}
 
 
 def test_checkbox_false_binds_to_body_field() -> None:

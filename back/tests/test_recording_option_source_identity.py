@@ -109,6 +109,24 @@ def test_same_path_different_transaction_does_not_pick_first() -> None:
     assert ids == ["req_tx2"]
 
 
+def test_unique_path_candidate_with_conflicting_transaction_stays_unresolved() -> None:
+    spec = _spec(
+        _get(
+            "step_other_tx", "http://random.invalid/v9/choices", "req_other_tx",
+            page_id="page_a", frame_id="frame_a", trigger_transaction_id="tx_other",
+        ),
+        _write({
+            "source_url": "http://random.invalid/v9/choices",
+            "source_method": "GET",
+            "page_id": "page_a",
+            "frame_id": "frame_a",
+            "transaction_id": "tx_expected",
+            "kind": "api_option",
+        }),
+    )
+    assert _option_source_request_ids(spec, [spec.steps[-1]], {}) == []
+
+
 def test_request_id_wins_over_path() -> None:
     spec = _spec(
         _get("step_a", "http://a.test/api/options", "req_a"),

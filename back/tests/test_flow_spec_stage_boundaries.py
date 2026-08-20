@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 BACK = Path(__file__).resolve().parent.parent
@@ -310,3 +312,20 @@ def test_flow_spec_facade_import_has_no_cycle() -> None:
     assert hasattr(module, "to_flow_spec")
     assert module.to_flow_spec.__module__ != "dano.execution.page.flow_spec"
     assert module.FlowSpec.__module__ == "dano.execution.page.flow_spec_core.models"
+
+
+def test_versioning_owner_executes_without_facade_import_side_effects() -> None:
+    code = """
+from dano.execution.page.flow_spec_core.models import FlowSpec
+from dano.execution.page.flow_spec_core.versioning import append_flow_version
+spec = append_flow_version(FlowSpec(), "owner-runtime-check")
+assert spec.meta["current_version"] == 1
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=BACK,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

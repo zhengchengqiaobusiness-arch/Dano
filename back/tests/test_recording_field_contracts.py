@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import _param_exposed_to_caller
 from dano.execution.page.flow_spec import to_flow_spec
+from dano.execution.page.flow_spec_core.models import FlowLink, FlowSpec, FlowStep, ParamField
 
 
 PAGE = {
@@ -323,6 +324,69 @@ def test_list_filter_keeps_its_own_enum_and_does_not_rename_edit_fields() -> Non
     party = _param(_step_by_suffix(spec, "/doc/update"), "partyId")
     assert party.label in {"往来单位", "partyId"}
     assert party.path.endswith("partyId")
+
+
+def test_same_leaf_and_type_from_different_actions_do_not_share_one_input() -> None:
+    def caller_param(path: str, action_id: str) -> ParamField:
+        return ParamField(
+            path=path,
+            key="token",
+            label="Token",
+            value="x",
+            type="string",
+            wire_type="string",
+            required=False,
+            category="user_param",
+            source_kind="user_input",
+            source={"kind": "control_default", "required_state": "unknown"},
+            exposed_to_user=True,
+            editable=True,
+            evidence=[{
+                "kind": "page_control",
+                "binding_status": "bound",
+                "control_kind": "text",
+                "action_id": action_id,
+            }],
+        )
+
+    lookup = FlowStep(
+        step_id="step_lookup",
+        method="GET",
+        url="http://contract.invalid/v4/records?token=x",
+        path="/v4/records",
+        params=[caller_param("query.token", "action_lookup")],
+        source_meta={"request_id": "req_lookup", "role": "business_get"},
+    )
+    update = FlowStep(
+        step_id="step_update",
+        method="PUT",
+        url="http://contract.invalid/v4/records/current",
+        path="/v4/records/current",
+        params=[caller_param("token", "action_update")],
+        source_meta={"request_id": "req_update", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        tenant="tenant",
+        subsystem="subsystem",
+        steps=[lookup, update],
+        links=[FlowLink(
+            source_step_id="step_lookup",
+            source_path="data.unrelated",
+            target_step_id="step_update",
+            target_path="unrelated",
+            confirmed=True,
+            meta={"captured_structure_match": True},
+        )],
+    )
+    compiled = _compile(spec, [{
+        "name": "update_record",
+        "title": "Update record",
+        "kind": "update",
+        "anchor_step_id": "step_update",
+    }])
+    properties = compiled.capabilities[0].input_schema["properties"]
+    assert len(properties) == 2
+    assert all("x-flow-paths" not in schema for schema in properties.values())
 
 
 def test_write_query_command_keeps_status_constant() -> None:
