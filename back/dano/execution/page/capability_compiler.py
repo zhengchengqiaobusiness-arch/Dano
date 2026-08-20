@@ -197,6 +197,7 @@ def _option_source_request_ids(
     spec: FlowSpec,
     member_steps: list[FlowStep],
     semantic_plan: dict[str, Any],
+    capability_plan: dict[str, Any] | None = None,
 ) -> list[str]:
     ids: list[str] = []
     plan_by_name = {
@@ -219,6 +220,30 @@ def _option_source_request_ids(
             if step is not None:
                 request_id = _request_id_for_step(spec, step) or f"__step__:{step.step_id}"
         if request_id and request_id not in ids:
+            ids.append(request_id)
+
+    # The planner cannot add executable members, but an explicitly named
+    # option-source request is part of the public field contract.  Retain it
+    # only by exact materialized step/request identity; never replace it with
+    # another capture merely because the endpoint path is the same.
+    by_step_id = {step.step_id: step for step in spec.steps}
+    by_request_id = _step_by_request_id(spec)
+    for request_ref in (capability_plan or {}).get("request_refs") or []:
+        if (
+            not isinstance(request_ref, dict)
+            or str(request_ref.get("usage") or "") != "option_source"
+        ):
+            continue
+        identifier = str(
+            request_ref.get("step_id")
+            or request_ref.get("request_id")
+            or ""
+        )
+        option_step = by_step_id.get(identifier) or by_request_id.get(identifier)
+        if option_step is None:
+            continue
+        request_id = _request_id_for_step(spec, option_step) or f"__step__:{option_step.step_id}"
+        if request_id not in ids:
             ids.append(request_id)
 
     for step in member_steps:
@@ -500,7 +525,9 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             for step in member_steps
         ]
         occupied_ids = {ref.request_id for ref in refs if ref.request_id}
-        for request_id in _option_source_request_ids(current, member_steps, plan):
+        for request_id in _option_source_request_ids(
+            current, member_steps, plan, capability_plan=item,
+        ):
             if request_id in occupied_ids:
                 continue
             option_step = _step_matching_request(current, request_id, by_request, by_step)

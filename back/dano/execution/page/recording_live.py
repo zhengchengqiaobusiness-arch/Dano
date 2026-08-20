@@ -2974,107 +2974,87 @@ def _recording_goal_contract(spec) -> dict:  # noqa: ANN001
     }
 
 
-def _finalize_request_signature(method: str, path: str) -> tuple[str, str]:
-    return (str(method or "").upper(), str(path or "").split("?", 1)[0].rstrip("/") or "/")
-
-
-def _finalize_identity_pairs(query: Any) -> tuple[tuple[str, str], ...]:
-    if not isinstance(query, dict):
-        return ()
-    from dano.execution.page.recording_facts import _looks_pagination_field
-
-    pairs: list[tuple[str, str]] = []
-    for key, raw in query.items():
-        if _looks_pagination_field(str(key), f"query.{key}"):
-            continue
-        values = raw if isinstance(raw, list) else [raw]
-        text = ",".join(
-            str(item).strip()
-            for item in values
-            if item not in (None, "")
-        )
-        if text:
-            pairs.append((str(key).casefold(), text))
-    return tuple(sorted(pairs))
-
-
-def _step_query_values(step, request_facts) -> dict[str, Any]:  # noqa: ANN001
-    request_id = str((getattr(step, "source_meta", None) or {}).get("request_id") or "")
-    facts = list(getattr(request_facts, "requests", None) or [])
-    if request_id:
-        fact = next(
-            (
-                item for item in facts
-                if str(getattr(item, "request_id", "") or "") == request_id
-            ),
-            None,
-        )
-        query = getattr(fact, "query", None) if fact is not None else None
-        if isinstance(query, dict) and query:
-            return query
-    meta_query = (getattr(step, "source_meta", None) or {}).get("query")
-    if isinstance(meta_query, dict) and meta_query:
-        return meta_query
-    return dict(parse_qsl(urlparse(str(
-        getattr(step, "url", "") or getattr(step, "path", "") or ""
-    )).query, keep_blank_values=True))
-
-
 def _resolve_live_plan_step_id(
     identifier: str,
     *,
     step_ids: set[str],
     step_id_by_request_id: dict[str, str],
-    steps: list,
-    request_facts,
 ) -> str:
-    """Map a live request/step id onto one finalized FlowStep.
+    """Resolve only the exact request/step named by the semantic plan.
 
-    Preflight/detail GETs are often collapsed into a later equivalent capture
-    of the same method+path+identity.  The Skill plan still names the earlier
-    request; recover that public boundary instead of discarding the whole plan.
+    Endpoint equality is not request identity.  A same-path request can belong
+    to a different action, transaction, option selection, or response sample;
+    silently substituting it corrupts capability membership and field links.
     """
     raw = str(identifier or "").strip()
     if raw in step_ids:
         return raw
-    mapped = str(step_id_by_request_id.get(raw) or "")
-    if mapped:
-        return mapped
-    if not raw:
-        return ""
-    fact = next(
-        (
-            item for item in (getattr(request_facts, "requests", None) or [])
-            if str(getattr(item, "request_id", "") or "") == raw
-        ),
-        None,
-    )
-    if fact is None:
-        return ""
-    signature = _finalize_request_signature(
-        getattr(fact, "method", ""),
-        getattr(fact, "path", "") or getattr(fact, "url", ""),
-    )
-    identity = _finalize_identity_pairs(getattr(fact, "query", None))
-    same_path: list = []
-    same_identity: list = []
-    for step in steps:
-        step_signature = _finalize_request_signature(
-            getattr(step, "method", ""),
-            getattr(step, "path", "") or getattr(step, "url", ""),
-        )
-        if step_signature != signature:
+    return str(step_id_by_request_id.get(raw) or "")
+
+
+def _live_plan_request_id_map(live_spec) -> dict[str, str]:  # noqa: ANN001
+    mapping = {
+        str(step_id): str(request_id)
+        for step_id, request_id in (
+            getattr(live_spec, "step_request_ids", None) or {}
+        ).items()
+        if str(step_id) and str(request_id)
+    }
+    for step in (getattr(live_spec, "steps", None) or []):
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        if request_id:
+            mapping.setdefault(str(step.step_id), request_id)
+    return mapping
+
+
+def _materialize_exact_live_plan_requests(
+    live_spec, merged, semantic_plan: dict,
+) -> list[dict]:  # noqa: ANN001
+    """Materialize every captured request explicitly named by the plan."""
+    from dano.execution.page.flow_materialization.request_steps import promote_request_to_step
+
+    live_request_ids = _live_plan_request_id_map(live_spec)
+    captured_ids = {
+        str(getattr(fact, "request_id", "") or "")
+        for fact in (getattr(merged.request_facts, "requests", None) or [])
+        if str(getattr(fact, "request_id", "") or "")
+    }
+    materialized_ids = {
+        str((step.source_meta or {}).get("request_id") or "")
+        for step in merged.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    requested: list[str] = []
+    for capability in semantic_plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
             continue
-        same_path.append(step)
-        if identity and _finalize_identity_pairs(_step_query_values(step, request_facts)) == identity:
-            same_identity.append(step)
-    if len(same_identity) == 1:
-        return str(same_identity[0].step_id)
-    if identity:
-        return ""
-    if not same_identity and len(same_path) == 1:
-        return str(same_path[0].step_id)
-    return ""
+        identifiers = [capability.get("anchor_step_id")]
+        identifiers.extend(
+            ref.get("step_id")
+            for ref in capability.get("request_refs") or []
+            if isinstance(ref, dict)
+        )
+        for identifier in identifiers:
+            raw = str(identifier or "").strip()
+            request_id = live_request_ids.get(raw, raw)
+            if request_id in captured_ids and request_id not in requested:
+                requested.append(request_id)
+
+    failures: list[dict] = []
+    for request_id in requested:
+        if request_id in materialized_ids:
+            continue
+        try:
+            step = promote_request_to_step(merged, request_id=request_id)
+            materialized_ids.add(str((step.source_meta or {}).get("request_id") or request_id))
+        except (TypeError, ValueError) as exc:
+            failures.append({
+                "op": "materialize_plan_request",
+                "status": "rejected",
+                "requested_target": {"request_id": request_id},
+                "reason": str(exc),
+            })
+    return failures
 
 
 def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
@@ -3097,7 +3077,18 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     goal_contract = _recording_goal_contract(merged)
     if goal_contract:
         merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
-    unresolved: list[dict] = []
+    live_capability_model = live_meta.get("capability_model")
+    live_semantic_plan = (
+        deepcopy(live_capability_model.get("semantic_plan"))
+        if isinstance(live_capability_model, dict)
+        and isinstance(live_capability_model.get("semantic_plan"), dict)
+        else None
+    )
+    unresolved: list[dict] = (
+        _materialize_exact_live_plan_requests(live_spec, merged, live_semantic_plan)
+        if isinstance(live_semantic_plan, dict)
+        else []
+    )
     discarded_hypotheses: list[dict] = []
     for operation in live_meta.get("recording_agent_ops") or []:
         if not isinstance(operation, dict):
@@ -3159,29 +3150,13 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     _apply_create_form_field_contracts(merged)
     _apply_edit_form_field_contracts(merged)
     _apply_row_command_field_contracts(merged)
-    live_capability_model = live_meta.get("capability_model")
-    live_semantic_plan = (
-        live_capability_model.get("semantic_plan")
-        if isinstance(live_capability_model, dict) else None
-    )
     if isinstance(live_semantic_plan, dict):
-        live_request_id_by_step_id = {
-            str(step_id): str(request_id)
-            for step_id, request_id in (
-                getattr(live_spec, "step_request_ids", None) or {}
-            ).items()
-            if str(step_id) and str(request_id)
-        }
-        for step in (getattr(live_spec, "steps", None) or []):
-            request_id = str((step.source_meta or {}).get("request_id") or "")
-            if request_id:
-                live_request_id_by_step_id.setdefault(str(step.step_id), request_id)
+        live_request_id_by_step_id = _live_plan_request_id_map(live_spec)
         merged_step_id_by_request_id = {
             str((step.source_meta or {}).get("request_id") or ""): step.step_id
             for step in merged.steps
             if str((step.source_meta or {}).get("request_id") or "")
         }
-        live_semantic_plan = deepcopy(live_semantic_plan)
         merged_step_ids = {step.step_id for step in merged.steps}
         for item in live_semantic_plan.get("capabilities") or []:
             if not isinstance(item, dict):
@@ -3192,8 +3167,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 request_id,
                 step_ids=merged_step_ids,
                 step_id_by_request_id=merged_step_id_by_request_id,
-                steps=merged.steps,
-                request_facts=merged.request_facts,
             ) or request_id
             for request_ref in item.get("request_refs") or []:
                 if not isinstance(request_ref, dict):
@@ -3204,8 +3177,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                     ref_request_id,
                     step_ids=merged_step_ids,
                     step_id_by_request_id=merged_step_id_by_request_id,
-                    steps=merged.steps,
-                    request_facts=merged.request_facts,
                 ) or ref_request_id
     if not (
         isinstance(live_semantic_plan, dict)
@@ -3241,8 +3212,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 anchor,
                 step_ids=step_ids,
                 step_id_by_request_id=step_id_by_request_id,
-                steps=merged.steps,
-                request_facts=merged.request_facts,
             )
             if not resolved_anchor:
                 unresolved_anchors.append(anchor or "<missing>")
@@ -3256,8 +3225,6 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                     identifier,
                     step_ids=step_ids,
                     step_id_by_request_id=step_id_by_request_id,
-                    steps=merged.steps,
-                    request_facts=merged.request_facts,
                 )
                 if resolved:
                     request_ref["step_id"] = resolved

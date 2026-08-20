@@ -1207,16 +1207,18 @@ def _add_request_step_from_fact(spec: FlowSpec, entry: dict[str, Any]) -> FlowSt
         "confidence": entry.get("confidence") or 0.8,
         "evidence": entry.get("evidence") or {},
     }
+    # Promotion is an identity-preserving materialization, not a synthetic
+    # replacement request.  Keep every captured routing/scope fact (including
+    # action and transaction ids carried as RequestFact extras) so later field
+    # and option matching remains scoped to this exact observation.
     req = {
+        **copy.deepcopy(entry),
         "index": entry.get("request_index"),
         "request_id": entry.get("request_id"),
         "method": entry.get("method") or "GET",
         "url": entry.get("url") or entry.get("path") or "",
         "headers": entry.get("headers") or {},
         "content_type": entry.get("content_type") or "application/json",
-        "post_data": entry.get("post_data"),
-        "response_status": entry.get("response_status"),
-        "response_json": entry.get("response_json"),
     }
     reads_for_candidate = [
         {"url": s.url or s.path, "json": s.response_json}
@@ -1233,7 +1235,11 @@ def _add_request_step_from_fact(spec: FlowSpec, entry: dict[str, Any]) -> FlowSt
         storage_state=None,
         required_labels=set(),
         page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
-        field_evidence=list((spec.meta or {}).get("field_evidence") or []),
+        field_evidence=list(
+            getattr(spec.request_facts, "field_evidence", None)
+            or (spec.meta or {}).get("field_evidence")
+            or []
+        ),
         step_index=len(spec.steps),
     )
     st.path = _request_path(entry)
@@ -1245,6 +1251,9 @@ def _add_request_step_from_fact(spec: FlowSpec, entry: dict[str, Any]) -> FlowSt
         "request_id": entry.get("request_id"),
         "page_id": entry.get("page_id"),
         "frame_id": entry.get("frame_id"),
+        "trigger_action_id": entry.get("trigger_action_id"),
+        "trigger_transaction_id": entry.get("trigger_transaction_id"),
+        "query": copy.deepcopy(entry.get("query") or {}),
         "sequence": entry.get("sequence"),
         "promoted_at": datetime.now(timezone.utc).isoformat(),
     }
