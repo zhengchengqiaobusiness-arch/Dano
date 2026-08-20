@@ -135,6 +135,7 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 param.source_kind == "previous_response"
                 and param.value in (None, "")
                 and not _param_has_command_local_control(step, param)
+                and not _param_has_editable_control_evidence(param)
             ):
                 _mark_system_hydrated_field(
                     param,

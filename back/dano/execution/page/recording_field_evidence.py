@@ -1065,7 +1065,12 @@ def bind_field_evidence(
             evidence["required_observed"] = None
         elif "required" in evidence and isinstance(evidence.get("required"), bool):
             evidence["required_observed"] = bool(evidence["required"])
-        evidence["editable"] = not bool(evidence.get("disabled") or evidence.get("read_only"))
+        control_kind = str(evidence.get("control_kind") or evidence.get("kind") or "").lower()
+        evidence["editable"] = bool(
+            control_kind != "table_column"
+            and not evidence.get("disabled")
+            and not evidence.get("read_only")
+        )
         evidence["axes"] = [
             axis for axis, present in (
                 ("name", bool(evidence.get("label") or evidence.get("field"))),

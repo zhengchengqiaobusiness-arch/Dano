@@ -472,10 +472,15 @@ def _build_step_from_capture(
                 "interacted": bool(f.get("recorded_user_input")),
                 "disabled": bool(f.get("control_disabled")),
                 "read_only": bool(f.get("control_read_only")),
-                "editable": not bool(f.get("control_disabled")) if str(
-                    f.get("control_kind") or ""
-                ).lower() in {"select", "combobox"} else not bool(
-                    f.get("control_disabled") or f.get("control_read_only")
+                "editable": (
+                    str(f.get("control_kind") or "").lower() != "table_column"
+                    and (
+                        not bool(f.get("control_disabled")) if str(
+                            f.get("control_kind") or ""
+                        ).lower() in {"select", "combobox"} else not bool(
+                            f.get("control_disabled") or f.get("control_read_only")
+                        )
+                    )
                 ),
                 "request_path": path,
                 "required": (

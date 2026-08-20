@@ -552,6 +552,84 @@ def test_edit_without_control_evidence_keeps_hydrated_fields_system_owned() -> N
     assert not _param_exposed_to_caller(total)
 
 
+def test_list_table_column_does_not_make_hydrated_write_field_caller_owned() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://random.invalid/v8/entity/get?id=41",
+                sequence=1, role="business_get", action="act_edit", locator="text=Edit",
+                response={"data": {
+                    "id": 41, "aggregateValue": 12, "stableOne": "a", "stableTwo": "b",
+                }},
+            ),
+            _req(
+                "req_update", method="PATCH",
+                url="http://random.invalid/v8/entity/update",
+                sequence=2, role="business_write", action="act_save", locator="text=Save",
+                body={"id": 41, "aggregateValue": 12, "stableOne": "a", "stableTwo": "b"},
+            ),
+        ],
+        field_evidence=[{
+            "kind": "table_column",
+            "label": "Aggregate",
+            "field": "aggregateValue",
+            "field_aliases": ["aggregateValue"],
+            "control_kind": "table_column",
+            "request_id": "req_update",
+            "wire_path": "body.aggregateValue",
+            "binding_status": "bound",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "surface": "page",
+            "in_dialog": False,
+            "editable": True,
+            "page_context": PAGE,
+        }],
+        page_events=[{"event_id": "ev_save", "kind": "click", "action_id": "act_save"}],
+        page_context=PAGE,
+    )
+
+    aggregate = _param(_step_by_suffix(spec, "/entity/update"), "aggregateValue")
+    assert aggregate.source_kind == "previous_response"
+    assert not _param_exposed_to_caller(aggregate)
+    assert not bool((aggregate.source or {}).get("allow_caller_override"))
+
+
+def test_empty_hydrated_value_keeps_exact_dialog_control_caller_owned() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_get", method="GET",
+                url="http://random.invalid/v8/entity/get?id=41",
+                sequence=1, role="business_get", action="act_edit", locator="text=Edit",
+                response={"data": {
+                    "id": 41, "freeNote": None, "stableOne": "a", "stableTwo": "b",
+                }},
+            ),
+            _req(
+                "req_update", method="PATCH",
+                url="http://random.invalid/v8/entity/update",
+                sequence=2, role="business_write", action="act_save", locator="text=Save",
+                body={"id": 41, "freeNote": None, "stableOne": "a", "stableTwo": "b"},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="Free note", aliases=["freeNote"], kind="textarea", value="",
+                request_id="req_update", path="body.freeNote", in_dialog=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_save", "kind": "click", "action_id": "act_save"}],
+        page_context=PAGE,
+    )
+
+    note = _param(_step_by_suffix(spec, "/entity/update"), "freeNote")
+    assert note.source_kind == "previous_response"
+    assert _param_exposed_to_caller(note)
+    assert bool((note.source or {}).get("allow_caller_override"))
+
+
 def test_formatted_dialog_number_binds_to_write_field() -> None:
     spec = to_flow_spec(
         captured_requests=[
