@@ -321,3 +321,87 @@ def test_unselected_file_control_remains_a_caller_file_input() -> None:
     assert file_params[0].type == "file"
     assert file_params[0].exposed_to_user is True
     assert (file_params[0].source or {}).get("unsupported_execution") is True
+
+
+def test_unselected_file_control_uses_exact_form_siblings_without_action_ids() -> None:
+    requests = [
+        {
+            "request_id": "req_alpha",
+            "request_index": 1,
+            "sequence": 1,
+            "method": "POST",
+            "url": "http://generic.invalid/v8/alpha",
+            "content_type": "application/json",
+            "post_data": json.dumps({"alphaTitle": "first"}),
+            "response_status": 200,
+            "response_json": {"id": 1},
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+        },
+        {
+            "request_id": "req_beta",
+            "request_index": 2,
+            "sequence": 2,
+            "method": "POST",
+            "url": "http://generic.invalid/v8/beta",
+            "content_type": "application/json",
+            "post_data": json.dumps({"betaTitle": "second"}),
+            "response_status": 200,
+            "response_json": {"id": 2},
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+        },
+    ]
+    evidence = [
+        {
+            "field_aliases": ["alphaTitle"],
+            "control_kind": "text",
+            "value": "first",
+            "surface": "dialog",
+            "in_dialog": True,
+            "form_root": "alpha editor",
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+        },
+        {
+            "field_aliases": ["betaTitle"],
+            "control_kind": "text",
+            "value": "second",
+            "surface": "dialog",
+            "in_dialog": True,
+            "form_root": "beta editor",
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+        },
+        {
+            "field_aliases": ["attachment"],
+            "label": "Attachment",
+            "control_kind": "file",
+            "filename": "",
+            "file_count": 0,
+            "surface": "dialog",
+            "in_dialog": True,
+            "form_root": "beta editor",
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+        },
+    ]
+
+    spec = to_flow_spec(
+        captured_requests=requests,
+        field_evidence=evidence,
+        page_events=[{"event_id": "snapshot_generic", "kind": "snapshot"}],
+        page_context={"url": "http://generic.invalid/editor", "path": "/editor"},
+    )
+
+    alpha = next(step for step in spec.steps if step.path == "/v8/alpha")
+    beta = next(step for step in spec.steps if step.path == "/v8/beta")
+    assert not any((param.source or {}).get("kind") == "file_input" for param in alpha.params)
+    beta_files = [
+        param for param in beta.params
+        if (param.source or {}).get("kind") == "file_input"
+    ]
+    assert [param.key for param in beta_files] == ["attachment"]
+    assert beta_files[0].source.get("wire_path_observed") is False

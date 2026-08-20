@@ -512,7 +512,7 @@ def _recording_evidence_matches_request(req: dict, item: dict) -> bool:
     """Keep DOM facts on the page/frame that produced the network request."""
     binding_status = str(item.get("binding_status") or "")
     if binding_status:
-        if binding_status != "bound":
+        if binding_status not in {"bound", "bound_unsupported"}:
             return False
         request_id = _request_fact_key(_request_fact_entry(req, {}))
         return bool(request_id and request_id == str(item.get("request_id") or ""))

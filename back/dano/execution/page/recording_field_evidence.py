@@ -777,6 +777,105 @@ def _evidence_id(evidence: dict[str, Any], index: int = 0) -> str:
     return f"field-evidence-{digest}"
 
 
+def _file_form_identity(evidence: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Return the structural form scope shared by sibling controls."""
+    return (
+        str(evidence.get("page_id") or ""),
+        str(evidence.get("frame_id") or ""),
+        _route_identity(evidence),
+        _evidence_surface(evidence),
+        str(evidence.get("form_root") or "").strip(),
+    )
+
+
+def _synthetic_file_wire_leaf(evidence: dict[str, Any]) -> str:
+    aliases = [
+        *(evidence.get("field_aliases") or []),
+        evidence.get("path"),
+        evidence.get("key"),
+        evidence.get("name"),
+    ]
+    for raw in aliases:
+        value = str(raw or "").strip().removeprefix("request.").removeprefix("body.")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", value):
+            return value
+    return "file"
+
+
+def _associate_unsubmitted_file_controls(
+    evidence_items: list[dict[str, Any]],
+    requests: list[dict[str, Any]],
+) -> None:
+    """Attach an empty file picker to its form request without inventing I/O.
+
+    An unselected file input has no multipart/body leaf to value-match.  Its
+    request ownership can still be proved by an exact action/transaction or by
+    bound sibling controls in the same page/frame/form root.  The resulting
+    synthetic path is explicitly marked unobserved and unsupported, so later
+    stages may expose the caller input without claiming the captured JSON
+    request already knows how to upload it.
+    """
+    request_by_id = {
+        str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
+        for request in requests
+    }
+    write_ids = {
+        request_id
+        for request_id, request in request_by_id.items()
+        if request_id
+        and str(request.get("method") or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    }
+    used_paths = {
+        (request_id, wire_path)
+        for request_id, request in request_by_id.items()
+        for wire_path in _request_fields(request)
+    }
+    for evidence in evidence_items:
+        if (
+            _control_kind(evidence) != "file"
+            or str(evidence.get("binding_status") or "") == "bound"
+            or evidence.get("disabled") is True
+        ):
+            continue
+        candidates = {
+            str(item.get("request_id") or "")
+            for item in evidence_items
+            if item is not evidence
+            and str(item.get("binding_status") or "") == "bound"
+            and _file_form_identity(item) == _file_form_identity(evidence)
+            and str(item.get("request_id") or "") in write_ids
+        }
+        if len(candidates) != 1:
+            candidates = {
+                request_id
+                for request_id in write_ids
+                if _same_scope(request_by_id[request_id], evidence)
+                and _causal_match(request_by_id[request_id], evidence)
+            }
+        if len(candidates) != 1:
+            continue
+        request_id = next(iter(candidates))
+        leaf = _synthetic_file_wire_leaf(evidence)
+        wire_path = f"body.{leaf}"
+        suffix = 2
+        while (request_id, wire_path) in used_paths:
+            wire_path = f"body.{leaf}_{suffix}"
+            suffix += 1
+        used_paths.add((request_id, wire_path))
+        evidence.update({
+            "binding_status": "bound_unsupported",
+            "binding_method": "exact_form_scope_unsubmitted_file",
+            "binding_reason": (
+                "file control belongs to the exact captured form, but no file "
+                "part was submitted during recording"
+            ),
+            "request_id": request_id,
+            "wire_path": wire_path,
+            "wire_path_observed": False,
+            "unsupported_execution": True,
+        })
+
+
 def bind_field_evidence(
     captured_requests: list[dict[str, Any]],
     page_events: list[dict[str, Any]] | None,
@@ -1155,4 +1254,5 @@ def bind_field_evidence(
                 else "no exact control alias matches a request field in scope"
             )
         results.append(evidence)
+    _associate_unsubmitted_file_controls(results, requests)
     return results
