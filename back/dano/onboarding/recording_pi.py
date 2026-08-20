@@ -392,8 +392,17 @@ class RecordingPiSession:
                     details={"analysis_phase": analysis_phase, "prompt_mode": prompt_mode},
                 )
             try:
+                # Live recording analysis already runs inside the workflow's
+                # operation budget. A second, shorter Pi timeout used to abort
+                # valid large recordings and turn the browser terminal while
+                # the sidecar was still completing the accepted plan.
+                command_timeout = (
+                    0
+                    if prompt_mode == "recording_analysis" and timeout_s is None
+                    else timeout_s
+                )
                 event = await self._prompt_command(
-                    timeout_s=timeout_s,
+                    timeout_s=command_timeout,
                     text=text,
                     prompt_mode=prompt_mode,
                     analysis_phase=analysis_phase,
