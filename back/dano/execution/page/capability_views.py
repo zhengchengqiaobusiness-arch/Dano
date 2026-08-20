@@ -177,12 +177,16 @@ def _capability_contract_view(
     *,
     capability_id: str | None = None,
     capability_name: str | None = None,
+    _prepared: bool = False,
 ) -> dict[str, Any]:
     """Build a capability-centric contract view for manifest/runtime consumers."""
-    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
-        spec.model_copy(deep=True),
-    )))
-    _normalize_capability_references(current)
+    if _prepared:
+        current = spec
+    else:
+        current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+            spec.model_copy(deep=True),
+        )))
+        _normalize_capability_references(current)
     cap = capability.model_copy(deep=True) if capability is not None else _select_flow_capability(
         current,
         capability_id=capability_id,
@@ -244,8 +248,13 @@ def _capability_contract_views(
     *,
     capability_id: str | None = None,
     capability_name: str | None = None,
+    _prepared: bool = False,
 ) -> list[dict[str, Any]]:
     """Return capability contract summaries, optionally scoped to one capability."""
+    # Capability-scoped schemas are a derived view on top of the prepared
+    # flow. Build that derived layer once for the whole collection, then reuse
+    # it for every capability. The former implementation repeated this same
+    # full-spec pass once per capability.
     current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
         spec.model_copy(deep=True),
     )))
@@ -254,8 +263,11 @@ def _capability_contract_views(
         cap = _select_flow_capability(current, capability_id=capability_id, capability_name=capability_name)
         if cap is None:
             return []
-        return [_capability_contract_view(current, cap)]
-    return [_capability_contract_view(current, cap) for cap in (current.capabilities or [])]
+        return [_capability_contract_view(current, cap, _prepared=True)]
+    return [
+        _capability_contract_view(current, cap, _prepared=True)
+        for cap in (current.capabilities or [])
+    ]
 
 
 def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, Any]:
@@ -357,11 +369,13 @@ def flow_spec_capability_contracts(
     *,
     capability_id: str | None = None,
     capability_name: str | None = None,
+    _prepared: bool = False,
 ) -> list[dict[str, Any]]:
     return _capability_contract_views(
         spec,
         capability_id=capability_id,
         capability_name=capability_name,
+        _prepared=_prepared,
     )
 
 _PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_schema_emits_required_state': 'dano.execution.page.capability_io', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}

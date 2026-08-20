@@ -222,8 +222,8 @@ async def test_refresh_live_evidence_only_binds_new_occurrences(monkeypatch) -> 
     assert occ == {"field-occ-1", "field-occ-2"}
 
 
-async def test_live_recording_analysis_is_not_cut_off_by_the_generic_pi_timeout() -> None:
-    """A valid slow analysis must finish instead of making the browser terminal."""
+async def test_live_recording_analysis_keeps_the_configured_pi_timeout() -> None:
+    """An analysis cannot outlive the workflow and leave its sidecar running."""
     from dano.onboarding.recording_pi import RecordingPiSession
 
     session = RecordingPiSession(
@@ -238,13 +238,7 @@ async def test_live_recording_analysis_is_not_cut_off_by_the_generic_pi_timeout(
     observed_timeouts: list[float | None] = []
 
     async def fake_command(command_type: str, *, timeout_s=None, **_payload):  # noqa: ANN001
-        if command_type == "cancel":
-            return {"status": "cancelled"}
         observed_timeouts.append(timeout_s)
-        await asyncio.sleep(0.02)
-        effective_timeout = session.timeout_s if timeout_s is None else timeout_s
-        if effective_timeout > 0 and effective_timeout < 0.02:
-            raise asyncio.TimeoutError
         return {
             "status": "submitted",
             "accepted_submission": "submit_recording_plan",
@@ -258,5 +252,5 @@ async def test_live_recording_analysis_is_not_cut_off_by_the_generic_pi_timeout(
     )
 
     assert result["status"] == "submitted"
-    assert observed_timeouts == [0]
+    assert observed_timeouts == [None]
 

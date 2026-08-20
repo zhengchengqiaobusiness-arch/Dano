@@ -349,9 +349,13 @@ def _complete_semantic_plan_from_spec(
     return plan
 
 
-def _semantic_mutable_context(spec: FlowSpec) -> dict[str, Any]:
+def _semantic_mutable_context(
+    spec: FlowSpec,
+    *,
+    validation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Current contract delta; immutable request facts live in the prompt prefix."""
-    context = _orchestration_context(spec)
+    context = _orchestration_context(spec, validation=validation)
     for key in (
         "complete_field_index", "complete_response_path_index", "steps",
         "links", "captured_requests",

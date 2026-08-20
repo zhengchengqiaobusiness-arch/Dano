@@ -243,25 +243,14 @@ def _validate_recording_agent_ops(ops: list[dict[str, Any]]) -> None:
             raise ValueError(f"recording op[{index}] is not allowed: {kind or '<empty>'}")
 
 
-def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
-    """Return the deterministic validation/repair evidence for Pi tools."""
-    current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
-    report = validate_flow_spec(current)
-    structural_valid = bool(report.get("passed"))
-    from dano.execution.page.recording_live import recording_agent_evidence_issues
-    from dano.onboarding.recording_verify import verification_report
-    evidence_issues = recording_agent_evidence_issues(current)
-    report["agent_evidence"] = {"ok": not evidence_issues, "issues": evidence_issues}
-    verification = verification_report(current)
-    report["recording_verification"] = verification
-    if evidence_issues:
-        report["errors"] = [
-            *(report.get("errors") or []),
-            *(f"agent evidence missing: {item['kind']} {item['target']}" for item in evidence_issues),
-        ]
-        report["passed"] = False
-    session_audit = dict((current.meta or {}).get("recording_agent_session") or {})
-    from dano.execution.page.recording_live import compact_model_payload
+def recording_agent_submission_status(spec: FlowSpec) -> dict[str, Any]:
+    """Return only the Stage 1–6 tool-acceptance state.
+
+    Accepting a plan depends on grounded operation results and capability-plan
+    coverage.  It must not run release preparation or Stage 7 verification;
+    those belong to the explicit validation tool and the later workflow.
+    """
+    session_audit = dict((spec.meta or {}).get("recording_agent_session") or {})
     op_results = list(session_audit.get("op_results") or [])
     must_retry = [
         int(item.get("index") or 0)
@@ -282,16 +271,14 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         )
         and item.get("requested_target")
     ]
-    from dano.onboarding.recording_release import evaluate_recording_release
-    release_ready = evaluate_recording_release(current).callable_spec is not None
-    capability_plan_complete = recording_capability_plan_complete(current)
-    capability_model = dict((current.meta or {}).get("capability_model") or {})
+    capability_plan_complete = recording_capability_plan_complete(spec)
+    capability_model = dict((spec.meta or {}).get("capability_model") or {})
     semantic_plan = (
         capability_model.get("semantic_plan")
         if isinstance(capability_model.get("semantic_plan"), dict)
         else {}
     )
-    capability_plan_received = capability_plan_complete or bool(current.capabilities) or any(
+    capability_plan_received = capability_plan_complete or bool(spec.capabilities) or any(
         isinstance(item, dict) for item in (semantic_plan.get("capabilities") or [])
     )
     capability_retry_reasons = [] if capability_plan_complete else list(dict.fromkeys([
@@ -300,14 +287,7 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         *list(capability_model.get("capability_compilation_errors") or []),
     ]))[:20]
     return {
-        "flow_version": int((current.meta or {}).get("current_version") or 0),
-        "structural_valid": structural_valid,
-        "verification_complete": bool(verification.get("all_verified")),
-        "release_ready": release_ready,
-        "report": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
-        "repair_context": compact_model_payload(
-            _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
-        ),
+        "flow_version": int((spec.meta or {}).get("current_version") or 0),
         "op_results": op_results,
         "all_applied": all(
             str(item.get("status") or "") == "applied"
@@ -316,12 +296,50 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
         "capability_plan_received": capability_plan_received,
         "capability_plan_complete": capability_plan_complete,
         "capability_retry_reasons": capability_retry_reasons,
-        # capability_plan_received means the Skill boundary was stored.
-        # submission_complete is only about the current op batch: rejected /
-        # must_retry / rolled_back / version conflict still need a Skill retry.
         "submission_complete": not must_retry,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
+    }
+
+
+def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
+    """Return the deterministic validation/repair evidence for Pi tools."""
+    from dano.execution.page.flow_release import prepare_flow_spec_for_publish
+
+    # Canonicalize once, then share that immutable validation view with every
+    # downstream check.  Previously review, validation, release and dry-run
+    # each rebuilt the same large recording independently.
+    current = prepare_flow_spec_for_publish(spec)
+    current = refresh_review_items(current, prepared=True)
+    report = validate_flow_spec(current, _prepared=True)
+    structural_valid = bool(report.get("passed"))
+    from dano.execution.page.recording_live import recording_agent_evidence_issues
+    from dano.onboarding.recording_verify import verification_report
+    evidence_issues = recording_agent_evidence_issues(current)
+    report["agent_evidence"] = {"ok": not evidence_issues, "issues": evidence_issues}
+    verification = verification_report(current)
+    report["recording_verification"] = verification
+    if evidence_issues:
+        report["errors"] = [
+            *(report.get("errors") or []),
+            *(f"agent evidence missing: {item['kind']} {item['target']}" for item in evidence_issues),
+        ]
+        report["passed"] = False
+    from dano.execution.page.recording_live import compact_model_payload
+    from dano.onboarding.recording_release import evaluate_recording_release
+    release_ready = evaluate_recording_release(
+        current, _prepared=True,
+    ).callable_spec is not None
+    submission_status = recording_agent_submission_status(current)
+    return {
+        **submission_status,
+        "structural_valid": structural_valid,
+        "verification_complete": bool(verification.get("all_verified")),
+        "release_ready": release_ready,
+        "report": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
+        "repair_context": compact_model_payload(
+            _flow_autofix_context(current, report), max_depth=6, max_items=40, max_string=500,
+        ),
     }
 
 

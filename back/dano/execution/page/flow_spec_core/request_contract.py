@@ -587,7 +587,9 @@ def compile_capability_to_api_request(
                 "capability_id": cap.capability_id,
                 "kind": cap.kind,
             }
-            contracts = flow_spec_capability_contracts(view, capability_id=cap.capability_id)
+            contracts = flow_spec_capability_contracts(
+                view, capability_id=cap.capability_id, _prepared=True,
+            )
             if contracts:
                 api_request["compiled_capability"] = contracts[0]
     return api_request, errors
@@ -600,6 +602,7 @@ def flow_spec_to_api_request(
     capability_id: str | None = None,
     capability_name: str | None = None,
     _prepared: bool = False,
+    _include_capability_contracts: bool = True,
 ) -> tuple[dict | None, list[str]]:
     """把编辑后的 FlowSpec 转成 run_request_onboarding 可消费的 api_request。
 
@@ -724,7 +727,10 @@ def flow_spec_to_api_request(
             "nodes": [c.name or c.capability_id for c in caps],
             "relations": [relation.model_dump(exclude_none=True) for relation in spec.capability_relations],
         }
-        out["capability_contracts"] = flow_spec_capability_contracts(spec)
+        if _include_capability_contracts:
+            out["capability_contracts"] = flow_spec_capability_contracts(
+                spec, _prepared=True,
+            )
         out["capability_protocol"] = "dano.capability_plan.v1"
         out["workflow_nodes"] = {
             c.name: _capability_execution_contract(spec, c)
@@ -846,9 +852,14 @@ def dry_run_flow_spec(
     fields: dict[str, Any] | None = None,
     *,
     _prepared: bool = False,
+    _compiled: tuple[dict | None, list[str]] | None = None,
 ) -> dict:
     """静态 dry-run：不触网，只验证 FlowSpec 能否构造为可执行请求计划。"""
-    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=_prepared)
+    api_request, build_errors = (
+        _compiled
+        if _compiled is not None
+        else flow_spec_to_api_request(spec, _prepared=_prepared)
+    )
     if build_errors or api_request is None:
         return {
             "ok": False,

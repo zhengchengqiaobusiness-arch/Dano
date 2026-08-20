@@ -392,17 +392,8 @@ class RecordingPiSession:
                     details={"analysis_phase": analysis_phase, "prompt_mode": prompt_mode},
                 )
             try:
-                # Live recording analysis already runs inside the workflow's
-                # operation budget. A second, shorter Pi timeout used to abort
-                # valid large recordings and turn the browser terminal while
-                # the sidecar was still completing the accepted plan.
-                command_timeout = (
-                    0
-                    if prompt_mode == "recording_analysis" and timeout_s is None
-                    else timeout_s
-                )
                 event = await self._prompt_command(
-                    timeout_s=command_timeout,
+                    timeout_s=timeout_s,
                     text=text,
                     prompt_mode=prompt_mode,
                     analysis_phase=analysis_phase,
@@ -1033,7 +1024,7 @@ class RecordingPiSession:
     ) -> dict[str, Any]:
         from dano.execution.page.flow_spec import (
     apply_recording_agent_submission,
-    recording_agent_validation,
+    recording_agent_submission_status,
 )
 
         async with self._state_lock:
@@ -1078,7 +1069,7 @@ class RecordingPiSession:
                 # The gateway checkpoint is part of accepting the tool result,
                 # not a best-effort action after the Pi prompt response.
                 self._on_submission_accepted(updated.model_copy(deep=True), mode)
-            validation = recording_agent_validation(updated)
+            validation = recording_agent_submission_status(updated)
             if submitted_capabilities or validation.get("capability_plan_complete"):
                 validation["capability_plan_received"] = True
             submission_complete = bool(validation.get("submission_complete", True))

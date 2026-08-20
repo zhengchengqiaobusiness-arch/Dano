@@ -511,7 +511,10 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             suggested_operations=(),
         ))
 
-    report = validate_flow_spec(scoped)
+    # ``evaluate_recording_release`` prepared the complete source once before
+    # scoping it.  Re-preparing here made release cost grow with capability
+    # count and repeatedly rebuilt the same field/capability model.
+    report = validate_flow_spec(scoped, _prepared=True)
     checks["capability_validation"] = bool(report.get("passed"))
     if not report.get("passed"):
         issues.extend(ReleaseIssue(
@@ -522,7 +525,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
             suggested_operations=(),
         ) for item in (report.get("errors") or ["capability_validation failed"]))
 
-    compiled, build_errors = flow_spec_to_api_request(scoped)
+    compiled, build_errors = flow_spec_to_api_request(scoped, _prepared=True)
     checks["request_compilation"] = compiled is not None and not build_errors
     if compiled is None or build_errors:
         issues.extend(ReleaseIssue(
@@ -545,7 +548,7 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
     checks["write_readback"] = not write_issues
     issues.extend(write_issues)
 
-    dry_run = dry_run_flow_spec(scoped)
+    dry_run = dry_run_flow_spec(scoped, _prepared=True)
     checks["dry_run"] = bool(dry_run.get("ok"))
     if not dry_run.get("ok"):
         dry_run_details = [
@@ -585,13 +588,17 @@ def _evaluate_capability(spec: FlowSpec, capability: FlowCapability) -> Capabili
     )
 
 
-def evaluate_recording_release(spec: FlowSpec) -> ReleaseDecision:
+def evaluate_recording_release(
+    spec: FlowSpec,
+    *,
+    _prepared: bool = False,
+) -> ReleaseDecision:
     """Evaluate the complete capability plan without mutating the draft."""
     # All release checks must inspect the exact canonical contract consumed by
     # request compilation.  Looking at the pre-sync draft here could reject a
     # field as unconfirmed even though bound recorder evidence had already
     # normalized that same field for execution.
-    source = prepare_flow_spec_for_publish(spec)
+    source = spec if _prepared else prepare_flow_spec_for_publish(spec)
     decisions = tuple(_evaluate_capability(source, cap) for cap in source.capabilities)
     from dano.onboarding.recording_stage_seven import (
         VERIFICATION_UNRESOLVED,

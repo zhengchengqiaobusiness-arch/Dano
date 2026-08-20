@@ -262,15 +262,19 @@ def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
-def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
+def _orchestration_context(
+    spec: FlowSpec,
+    *,
+    validation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     request_facts = _request_fact_items(spec)
     validation_findings: dict[str, Any] = {}
     try:
-        validation = validate_flow_spec(spec)
-        cap_validation = validation.get("capability_validation") or {}
+        current_validation = validation if validation is not None else validate_flow_spec(spec)
+        cap_validation = current_validation.get("capability_validation") or {}
         validation_findings = {
-            "errors": list(validation.get("errors") or [])[:40],
-            "warnings": list(validation.get("warnings") or [])[:40],
+            "errors": list(current_validation.get("errors") or [])[:40],
+            "warnings": list(current_validation.get("warnings") or [])[:40],
             "unused_high_confidence_requests": list(cap_validation.get("unused_high_confidence_requests") or [])[:80],
             "capability_internal": cap_validation.get("capability_internal") or {},
             "capability_relations": cap_validation.get("capability_relations") or {},
@@ -871,6 +875,11 @@ async def orchestrate_flow_capabilities(
         if strict_semantic_submission
         else previous_semantic_plan if previous_strict_plan else {}
     )
+    if current.steps and strict_semantic_submission:
+        # A frozen graph may receive later exact request IDs while earlier
+        # capabilities already use stable step IDs. Promote those facts before
+        # deciding whether the new public anchors are valid.
+        _materialize_semantic_plan_request_refs(current, effective_semantic_plan)
     pre_materialization_candidate = bool(
         strict_semantic_submission
         and not current.steps
@@ -1176,7 +1185,7 @@ async def orchestrate_flow_capabilities(
     }
     return append_flow_version(refresh_review_items(current), "orchestrate_flow", reason=f"生成能力编排: {source}")
 
-_PENDING_FLOW_SPEC_HELPERS = {'_apply_semantic_business_understanding': 'dano.execution.page.capability_semantic', '_capability_call_step_ids_from_nodes': 'dano.execution.page.capability_refs', '_capability_dependency_from_link': 'dano.execution.page.capability_contracts', '_capability_field_from_param': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_inputs_from_top_level_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_kind_family': 'dano.execution.page.capability_kinds', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_output_fields': 'dano.execution.page.capability_io', '_capability_request_ref_from_step': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_scoped_step_ids': 'dano.execution.page.capability_refs', '_capability_step_allowed': 'dano.execution.page.capability_refs', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_step_was_removed': 'dano.execution.page.capability_contracts', '_complete_semantic_plan_from_spec': 'dano.execution.page.capability_semantic', '_ensure_external_transform_relations': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_mark_repeated_write_observations': 'dano.execution.page.capability_contracts', '_merge_capability_scoped_dependencies': 'dano.execution.page.capability_contracts', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_ordered_capability_request_refs': 'dano.execution.page.capability_refs', '_planned_capability_has_public_anchor': 'dano.execution.page.capability_contracts', '_pre_materialization_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_remove_capability_step_nodes': 'dano.execution.page.capability_nodes', '_removed_capability_names': 'dano.execution.page.capability_refs', '_repair_generated_capability_contracts': 'dano.execution.page.capability_repair', '_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_upsert_capability_relation': 'dano.execution.page.capability_nodes', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
+_PENDING_FLOW_SPEC_HELPERS = {'_apply_semantic_business_understanding': 'dano.execution.page.capability_semantic', '_capability_call_step_ids_from_nodes': 'dano.execution.page.capability_refs', '_capability_dependency_from_link': 'dano.execution.page.capability_contracts', '_capability_field_from_param': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_inputs_from_top_level_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_kind_family': 'dano.execution.page.capability_kinds', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_output_fields': 'dano.execution.page.capability_io', '_capability_request_ref_from_step': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_scoped_step_ids': 'dano.execution.page.capability_refs', '_capability_step_allowed': 'dano.execution.page.capability_refs', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_step_was_removed': 'dano.execution.page.capability_contracts', '_complete_semantic_plan_from_spec': 'dano.execution.page.capability_semantic', '_ensure_external_transform_relations': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_mark_repeated_write_observations': 'dano.execution.page.capability_contracts', '_materialize_semantic_plan_request_refs': 'dano.execution.page.flow_materialization.builder', '_merge_capability_scoped_dependencies': 'dano.execution.page.capability_contracts', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_ordered_capability_request_refs': 'dano.execution.page.capability_refs', '_planned_capability_has_public_anchor': 'dano.execution.page.capability_contracts', '_pre_materialization_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_remove_capability_step_nodes': 'dano.execution.page.capability_nodes', '_removed_capability_names': 'dano.execution.page.capability_refs', '_repair_generated_capability_contracts': 'dano.execution.page.capability_repair', '_semantic_plan_coverage': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_upsert_capability_relation': 'dano.execution.page.capability_nodes', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:

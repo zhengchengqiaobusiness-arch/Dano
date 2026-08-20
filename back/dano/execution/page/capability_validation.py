@@ -89,7 +89,12 @@ def _capability_param_enum_warning(param: ParamField) -> str:
 
 
 def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> dict[str, Any]:
-    spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
+    current = spec.model_copy(deep=True)
+    spec = (
+        ensure_recorded_goal(current)
+        if prepared
+        else ensure_recorded_goal(_sync_capability_io_schemas(current))
+    )
     _normalize_capability_references(spec)
     errors: list[str] = []
     warnings: list[str] = []

@@ -97,6 +97,7 @@ from dano.execution.page.flow_spec_validate import (
 )
 from dano.execution.page.recording_agent_contract import (
     apply_recording_agent_submission,
+    recording_agent_submission_status,
     recording_agent_validation,
     recording_capability_plan_complete,
 )
@@ -157,6 +158,7 @@ __all__ = (
     "promote_request_to_step",
     "rebuild_flow_dependencies",
     "recording_agent_state",
+    "recording_agent_submission_status",
     "recording_agent_validation",
     "recording_capability_plan_complete",
     "refresh_review_items",

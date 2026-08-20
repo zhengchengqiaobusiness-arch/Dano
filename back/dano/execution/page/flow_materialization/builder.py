@@ -208,6 +208,56 @@ def _semantic_plan(spec: FlowSpec) -> dict[str, Any] | None:
     return plan if isinstance(plan, dict) else None
 
 
+def _materialize_semantic_plan_request_refs(
+    spec: FlowSpec,
+    plan: dict[str, Any],
+) -> bool:
+    """Promote exact fact-addressed plan members and retarget them to steps.
+
+    Live plans legitimately use immutable request IDs before freeze.  Once a
+    stable step graph exists, every exact request reference must be promoted
+    before public-boundary filtering; otherwise newly observed commands are
+    discarded merely because earlier capabilities already have step IDs.
+    """
+    facts_by_id = {
+        str(fact.request_id or ""): fact
+        for fact in (spec.request_facts.requests or [])
+        if str(fact.request_id or "")
+    }
+    if not facts_by_id:
+        return False
+    changed = False
+    materialized_by_request = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    for capability in plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        nodes = [capability]
+        nodes.extend(
+            ref for ref in capability.get("request_refs") or [] if isinstance(ref, dict)
+        )
+        for node in nodes:
+            key = "anchor_step_id" if node is capability else "step_id"
+            identifier = str(node.get("request_id") or node.get(key) or "")
+            if identifier not in facts_by_id:
+                continue
+            step = materialized_by_request.get(identifier)
+            if step is None:
+                step = promote_request_to_step(spec, request_id=identifier)
+                materialized_by_request[identifier] = step
+                changed = True
+            if node.get(key) != step.step_id:
+                node[key] = step.step_id
+                changed = True
+            if node is not capability and node.get("request_id") != identifier:
+                node["request_id"] = identifier
+                changed = True
+    return changed
+
+
 def _sync_saved_semantic_plan_requests(spec: FlowSpec) -> bool:
     """Restore exact request occurrences lost by legacy same-path substitution.
 
@@ -297,35 +347,7 @@ def _sync_saved_semantic_plan_requests(spec: FlowSpec) -> bool:
                 "reason": "unique_transport_match_in_exact_option_causal_cohort",
             })
 
-    changed = bool(migrations)
-    materialized_by_request = {
-        str((step.source_meta or {}).get("request_id") or ""): step
-        for step in spec.steps
-        if str((step.source_meta or {}).get("request_id") or "")
-    }
-    for capability in plan.get("capabilities") or []:
-        if not isinstance(capability, dict):
-            continue
-        nodes = [capability]
-        nodes.extend(
-            ref for ref in capability.get("request_refs") or [] if isinstance(ref, dict)
-        )
-        for node in nodes:
-            key = "anchor_step_id" if node is capability else "step_id"
-            identifier = str(node.get("request_id") or node.get(key) or "")
-            if identifier not in facts_by_id:
-                continue
-            step = materialized_by_request.get(identifier)
-            if step is None:
-                step = promote_request_to_step(spec, request_id=identifier)
-                materialized_by_request[identifier] = step
-                changed = True
-            if node.get(key) != step.step_id:
-                node[key] = step.step_id
-                changed = True
-            if node is not capability and node.get("request_id") != identifier:
-                node["request_id"] = identifier
-                changed = True
+    changed = _materialize_semantic_plan_request_refs(spec, plan) or bool(migrations)
 
     if migrations:
         spec.meta = {

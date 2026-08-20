@@ -461,7 +461,10 @@ def _compiled_contract_review_items(
     """
     if not spec.capabilities:
         return []
-    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=prepared)
+    # Review projection must describe the caller's current model.  Running the
+    # release preparation pipeline here both mutates a discarded copy and makes
+    # every read-only recording poll repeat the full materialization pass.
+    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=True)
     if api_request is None or build_errors:
         return []
     from dano.execution.page.repair_ops import collect_repair_findings

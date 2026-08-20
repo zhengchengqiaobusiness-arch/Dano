@@ -42,12 +42,18 @@ from dano.execution.page.flow_materialization.builder import (
 )
 
 
-def validate_flow_spec(spec: FlowSpec) -> dict:
+def validate_flow_spec(
+    spec: FlowSpec,
+    *,
+    _prepared: bool = False,
+    _projection: bool = False,
+) -> dict:
     from dano.execution.page.repair_ops import collect_repair_findings
 
     # 校验只面对规范化后的当前事实。字段、接口顺序或能力范围改变后产生的旧
     # input/map/return/link 由同步层确定性清理，不能继续作为“用户待处理”告警。
-    spec = prepare_flow_spec_for_publish(spec)
+    if not _prepared:
+        spec = prepare_flow_spec_for_publish(spec)
     for capability in spec.capabilities or []:
         capability.nodes = _sanitize_capability_nodes(spec, capability)
     spec = _prune_empty_capabilities(spec)
@@ -60,9 +66,13 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
         step for step in spec.steps
         if active_step_ids is None or step.step_id in active_step_ids
     ]
-    review_items = refresh_review_items(
-        spec.model_copy(deep=True), prepared=True,
-    ).review_items
+    review_items = (
+        list(spec.review_items)
+        if _projection
+        else refresh_review_items(
+            spec.model_copy(deep=True), prepared=True,
+        ).review_items
+    )
     blocking_reviews = [
         item for item in review_items
         if item.severity == "high" and not item.resolved and item.type in _PUBLISH_BLOCKING_REVIEW_TYPES
@@ -107,7 +117,11 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
             cap_steps = [by_step_id[sid] for sid in _capability_node_step_ids(capability) if sid in by_step_id]
             if cap_steps and not any(_is_business_query_step(step) for step in cap_steps):
                 suggestions.append(f"Capability `{cap_label}` 没有返回业务记录/状态的查询接口，仅包含配置或前置接口")
-    api_request, build_errors = flow_spec_to_api_request(spec, _prepared=True)
+    api_request, build_errors = flow_spec_to_api_request(
+        spec,
+        _prepared=True,
+        _include_capability_contracts=not _projection,
+    )
     errors.extend(build_errors)
     if not flow_spec_user_params(spec):
         suggestions.append("FlowSpec 没有 user_param，发布后的 Skill 不会要求用户输入参数")
@@ -203,7 +217,11 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 continue
             session_errors.append(detail)
         suggestions.extend(session_errors)
-    dry_run = dry_run_flow_spec(spec, _prepared=True)
+    dry_run = dry_run_flow_spec(
+        spec,
+        _prepared=True,
+        _compiled=(api_request, build_errors),
+    )
     errors = list(dict.fromkeys(str(item) for item in errors if item))
     warnings = list(dict.fromkeys(str(item) for item in warnings if item))
     suggestions = list(dict.fromkeys(str(item) for item in suggestions if item))

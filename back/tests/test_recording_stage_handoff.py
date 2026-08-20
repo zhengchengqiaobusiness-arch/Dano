@@ -7,6 +7,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from dano.execution.page.recording_facts import _preread_dedupe_key
 from dano.execution.page.flow_spec import (
+    CapabilityRequestRef,
+    FlowCapability,
+    flow_spec_capability_contracts,
     recording_agent_state,
     to_flow_spec,
 )
@@ -220,6 +223,350 @@ def test_recording_state_keeps_newest_field_evidence() -> None:
         if isinstance(item, dict)
     ]
     assert "备注" in labels
+
+
+def test_recording_state_does_not_run_release_preparation(monkeypatch) -> None:
+    """A read-only Pi poll must not rebuild the release contract."""
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    spec.capabilities = [FlowCapability(
+        name="query_docs",
+        title="查询单据",
+        kind="query",
+        step_ids=[spec.steps[0].step_id],
+        request_refs=[CapabilityRequestRef(
+            request_id="req_query",
+            step_id=spec.steps[0].step_id,
+            usage="execute",
+        )],
+        nodes=[{
+            "id": "call_query",
+            "type": "call",
+            "step_id": spec.steps[0].step_id,
+            "request_id": "req_query",
+            "usage": "execute",
+        }],
+    )]
+
+    def _unexpected_release_preparation(*_args, **_kwargs):
+        raise AssertionError("recording state triggered release preparation")
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec_core.request_contract.prepare_flow_spec_for_publish",
+        _unexpected_release_preparation,
+    )
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec_validate.prepare_flow_spec_for_publish",
+        _unexpected_release_preparation,
+    )
+
+    def _unexpected_release_contracts(*_args, **_kwargs):
+        raise AssertionError("recording state built release capability contracts")
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec_core.request_contract.flow_spec_capability_contracts",
+        _unexpected_release_contracts,
+    )
+
+    state = recording_agent_state(spec)
+    assert state["projection"]["bounded"] is True
+
+
+def test_capability_contract_projection_normalizes_once(monkeypatch) -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    spec.capabilities = [
+        FlowCapability(
+            name=name,
+            title=title,
+            kind="query",
+            step_ids=[spec.steps[0].step_id],
+        )
+        for name, title in (("query_docs", "查询单据"), ("export_docs", "导出单据"))
+    ]
+    calls = 0
+
+    def _count_sync(current):
+        nonlocal calls
+        calls += 1
+        return current
+
+    monkeypatch.setattr(
+        "dano.execution.page.capability_views.sync_flow_spec_models",
+        _count_sync,
+    )
+
+    contracts = flow_spec_capability_contracts(spec)
+    assert len(contracts) == 2
+    assert calls == 1
+
+
+def test_recording_state_reuses_its_validation_report(monkeypatch) -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    calls = 0
+
+    def _validation(_spec, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"passed": True, "errors": [], "warnings": []}
+
+    monkeypatch.setattr(
+        "dano.execution.page.recording_analysis_state.validate_flow_spec",
+        _validation,
+    )
+    monkeypatch.setattr(
+        "dano.execution.page.capability_orchestration.validate_flow_spec",
+        _validation,
+    )
+
+    recording_agent_state(spec)
+    assert calls == 1
+
+
+def test_recording_state_does_not_rebuild_review_items(monkeypatch) -> None:
+    from dano.execution.page import recording_analysis_state as state_module
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+
+    def _unexpected_review_refresh(_spec, **_kwargs):
+        raise AssertionError("recording state rebuilt review items")
+
+    monkeypatch.setattr(
+        state_module,
+        "refresh_review_items",
+        _unexpected_review_refresh,
+        raising=False,
+    )
+
+    state = recording_agent_state(spec)
+    assert state["projection"]["bounded"] is True
+
+
+def test_prepared_capability_validation_does_not_resync_schemas(monkeypatch) -> None:
+    from dano.execution.page.capability_validation import _capability_validation_report
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+
+    def _unexpected_schema_sync(_spec):
+        raise AssertionError("prepared capability validation resynced schemas")
+
+    monkeypatch.setattr(
+        "dano.execution.page.capability_validation._sync_capability_io_schemas",
+        _unexpected_schema_sync,
+    )
+
+    report = _capability_validation_report(spec, prepared=True)
+    assert report["passed"] is False
+
+
+def test_dry_run_reuses_a_compiled_request(monkeypatch) -> None:
+    from dano.execution.page.flow_spec_core.request_contract import dry_run_flow_spec
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_query",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    compiled = {
+        "method": "GET",
+        "url": "http://example.test/admin-api/doc/page",
+        "path": "/admin-api/doc/page",
+        "query_template": {"pageNo": "1"},
+        "params": [],
+        "sample_inputs": {},
+    }
+
+    def _unexpected_compile(*_args, **_kwargs):
+        raise AssertionError("dry run compiled the same request twice")
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec_core.request_contract.flow_spec_to_api_request",
+        _unexpected_compile,
+    )
+
+    result = dry_run_flow_spec(
+        spec,
+        _prepared=True,
+        _compiled=(compiled, []),
+    )
+    assert result["ok"] is True
+
+
+def test_semantic_plan_exact_request_ids_materialize_before_compilation() -> None:
+    from dano.execution.page.flow_materialization.builder import (
+        _materialize_semantic_plan_request_refs,
+    )
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_existing",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+            _req(
+                "req_new_command",
+                method="DELETE",
+                url="http://example.test/admin-api/doc/delete?ids=7",
+                sequence=2,
+                role="support",
+                keep=False,
+                action="act_delete",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    assert not any(
+        (step.source_meta or {}).get("request_id") == "req_new_command"
+        for step in spec.steps
+    )
+    plan = {
+        "capabilities": [{
+            "name": "delete_doc",
+            "title": "删除单据",
+            "kind": "delete",
+            "anchor_step_id": "req_new_command",
+            "request_refs": [{"step_id": "req_new_command", "usage": "execute"}],
+        }],
+    }
+
+    assert _materialize_semantic_plan_request_refs(spec, plan) is True
+    promoted = next(
+        step for step in spec.steps
+        if (step.source_meta or {}).get("request_id") == "req_new_command"
+    )
+    capability = plan["capabilities"][0]
+    assert capability["anchor_step_id"] == promoted.step_id
+    assert capability["request_refs"][0] == {
+        "request_id": "req_new_command",
+        "step_id": promoted.step_id,
+        "usage": "execute",
+    }
+
+
+async def test_incremental_plan_compiles_new_exact_request_anchor() -> None:
+    from dano.execution.page.flow_spec import orchestrate_flow_capabilities
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_existing",
+                method="GET",
+                url="http://example.test/admin-api/doc/page?pageNo=1",
+                sequence=1,
+                role="business_get",
+            ),
+            _req(
+                "req_new_command",
+                method="DELETE",
+                url="http://example.test/admin-api/doc/delete?ids=7",
+                sequence=2,
+                role="support",
+                keep=False,
+                action="act_delete",
+            ),
+        ],
+        page_context=PAGE,
+    )
+    spec.request_facts.analysis["req_new_command"].role = "business_write"
+    spec.request_facts.analysis["req_new_command"].keep = True
+    existing_step_id = spec.steps[0].step_id
+    plan = {
+        "business_understanding": {
+            "business_name": "单据管理",
+            "summary": "查询和删除单据",
+        },
+        "capabilities": [
+            {
+                "name": "query_docs",
+                "title": "查询单据",
+                "kind": "query",
+                "anchor_step_id": existing_step_id,
+                "request_refs": [{"step_id": existing_step_id, "usage": "execute"}],
+            },
+            {
+                "name": "delete_doc",
+                "title": "删除单据",
+                "kind": "delete",
+                "anchor_step_id": "req_new_command",
+                "request_refs": [{"step_id": "req_new_command", "usage": "execute"}],
+            },
+        ],
+        "unresolved_items": [],
+    }
+
+    updated = await orchestrate_flow_capabilities(
+        spec,
+        submission={"semantic_plan": plan, "ops": []},
+        generation_mode="initial",
+    )
+
+    assert {capability.name for capability in updated.capabilities} == {
+        "query_docs",
+        "delete_doc",
+    }
 
 
 def test_recording_delta_includes_related_field_evidence() -> None:

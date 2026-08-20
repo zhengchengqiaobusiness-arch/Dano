@@ -47,8 +47,10 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
     """Return the authoritative, redacted state available to Pi tools."""
     from dano.execution.page.recording_live import compact_model_payload
 
-    current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
-    report = validate_flow_spec(current)
+    current = _sync_capability_io_schemas(spec.model_copy(deep=True))
+    # A state poll is a projection of the current draft, not a release build.
+    # Release preparation is intentionally reserved for mutation/finalization.
+    report = validate_flow_spec(current, _prepared=True, _projection=True)
     return {
         "flow_version": int((current.meta or {}).get("current_version") or 0),
         "facts": compact_model_payload(
@@ -59,7 +61,10 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
             list_keep="tail",
         ),
         "current_contract": compact_model_payload(
-            _semantic_mutable_context(current), max_depth=6, max_items=40, max_string=500,
+            _semantic_mutable_context(current, validation=report),
+            max_depth=6,
+            max_items=40,
+            max_string=500,
         ),
         "validation": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
         "projection": {
@@ -68,7 +73,7 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
         },
     }
 
-_PENDING_FLOW_SPEC_HELPERS = {'_semantic_fact_snapshot': 'dano.execution.page.recording_agent_contract', '_semantic_mutable_context': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
+_PENDING_FLOW_SPEC_HELPERS = {'_semantic_fact_snapshot': 'dano.execution.page.recording_agent_contract', '_semantic_mutable_context': 'dano.execution.page.capability_semantic', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}
 
 
 def _bind_flow_spec_helpers() -> None:

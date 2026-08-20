@@ -75,6 +75,14 @@ async def test_plan_mode_does_not_force_complete_when_field_ops_fail(monkeypatch
         "dano.execution.page.flow_spec.apply_recording_agent_submission",
         fake_apply,
     )
+
+    def unexpected_full_validation(_spec):  # noqa: ANN001
+        raise AssertionError("submission acceptance ran full release validation")
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_spec.recording_agent_validation",
+        unexpected_full_validation,
+    )
     session = RecordingPiSession(
         tenant="t",
         subsystem="oa",
