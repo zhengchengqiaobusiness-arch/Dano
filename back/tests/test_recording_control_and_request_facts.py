@@ -845,6 +845,10 @@ def test_delete_json_and_204_and_text_and_xml_responses_are_kept() -> None:
         method="GET", url="http://example.test/broken.json", status=500,
         content_type="application/json", payload="not-json",
     )))
+    asyncio.run(_ingest(session, _FakeResponse(
+        method="GET", url="http://example.test/report/download", status=200,
+        content_type="", payload=b"PK\x03\x04\x00\xff\x00\x80",
+    )))
     by_url = {item["url"]: item for item in session.all_requests}
     assert by_url["http://example.test/doc/1"]["response_json"] == {"ok": True}
     assert by_url["http://example.test/doc/1"]["response_kind"] == "json"
@@ -856,6 +860,10 @@ def test_delete_json_and_204_and_text_and_xml_responses_are_kept() -> None:
     assert broken["status"] == 500
     assert "json" in str(broken.get("content_type") or "").lower()
     assert broken.get("response_json") in (None, "")
+    binary = by_url["http://example.test/report/download"]
+    assert binary["response_kind"] == "binary"
+    assert binary["response_size"] == 8
+    assert binary.get("response_text") in (None, "")
 
 
 def test_resp_dispatch_includes_delete() -> None:

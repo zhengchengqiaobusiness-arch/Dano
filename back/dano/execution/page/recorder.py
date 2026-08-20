@@ -2166,12 +2166,17 @@ class RecordSession:
             request_index = self._request_fact_index.get(id(response.request))
             json_data = None
             text = None
+            body_bytes = None
             if "json" in (ct or "").lower() or not ct:
                 try:
                     json_data = await response.json()
                 except Exception:  # noqa: BLE001
                     json_data = None
             if json_data is None:
+                try:
+                    body_bytes = await response.body()
+                except Exception:  # noqa: BLE001
+                    body_bytes = None
                 try:
                     text = await response.text()
                 except Exception:  # noqa: BLE001
@@ -2195,6 +2200,7 @@ class RecordSession:
                 content_type=ct,
                 json_data=json_data,
                 text=text,
+                body_bytes=body_bytes,
             )
             self._attach_response(
                 url=url, method=m, request_index=request_index, **fields,
