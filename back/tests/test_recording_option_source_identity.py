@@ -18,6 +18,7 @@ from dano.execution.page.flow_spec import (
     FlowStep,
     ParamField,
     RequestFact,
+    to_flow_spec,
 )
 
 
@@ -367,3 +368,72 @@ def test_public_option_binding_rejects_request_owned_by_another_control() -> Non
             "source_url": shared_url,
             "actor": "user",
         }])
+
+
+def test_repeated_option_endpoint_does_not_invent_latest_request_ownership() -> None:
+    """Equivalent source snapshots may share a contract, not false identity."""
+    shared_url = "http://repeat.invalid/v3/members/options"
+    option_rows = {
+        "data": [
+            {"id": 7, "name": "Seven"},
+            {"id": 9, "name": "Nine"},
+        ]
+    }
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_before",
+                "sequence": 1,
+                "method": "GET",
+                "url": shared_url,
+                "response_status": 200,
+                "response_json": option_rows,
+                "page_id": "page_shared",
+                "frame_id": "frame_main",
+                "_request_role": {"role": "read_option", "keep": False, "confidence": 1.0},
+            },
+            {
+                "request_id": "req_search",
+                "sequence": 2,
+                "method": "GET",
+                "url": "http://repeat.invalid/v3/resources?memberId=7",
+                "query": {"memberId": ["7"]},
+                "response_status": 200,
+                "response_json": {"items": []},
+                "page_id": "page_shared",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_search",
+                "trigger_transaction_id": "tx_search",
+                "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+            },
+            {
+                "request_id": "req_later",
+                "sequence": 3,
+                "method": "GET",
+                "url": shared_url,
+                "response_status": 200,
+                "response_json": option_rows,
+                "page_id": "page_shared",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_editor",
+                "trigger_transaction_id": "tx_editor",
+                "_request_role": {"role": "read_option", "keep": False, "confidence": 1.0},
+            },
+        ],
+        page_events=[{
+            "event_id": "event_search",
+            "kind": "click",
+            "action_id": "action_search",
+            "transaction_id": "tx_search",
+        }],
+        page_context={"url": "http://repeat.invalid/resources", "path": "/resources"},
+    )
+
+    search = next(
+        step for step in spec.steps
+        if (step.source_meta or {}).get("request_id") == "req_search"
+    )
+    member = next(param for param in search.params if param.path == "query.memberId")
+    assert member.source_kind == "api_option"
+    assert (member.source or {}).get("source_url") == shared_url
+    assert (member.source or {}).get("source_request_id") in {None, ""}

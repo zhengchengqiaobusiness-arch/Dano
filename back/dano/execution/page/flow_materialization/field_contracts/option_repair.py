@@ -131,6 +131,92 @@ def _looks_quantitative_option_target(param: ParamField) -> bool:
     )
 
 
+def _independent_option_request_ids(param: ParamField) -> set[str]:
+    """Return request identities proved by the owning control, not inference."""
+    owned: set[str] = set()
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "page_control":
+            continue
+        if str(item.get("binding_status") or "bound") != "bound":
+            continue
+        values = item.get("source_request_ids") or []
+        if not isinstance(values, list):
+            values = [values]
+        values = [*values, item.get("source_request_id")]
+        owned.update(str(value) for value in values if value)
+    return owned
+
+
+def _option_control_context(param: ParamField) -> tuple[set[str], set[str]]:
+    transactions: set[str] = set()
+    actions: set[str] = set()
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "page_control":
+            continue
+        if str(item.get("binding_status") or "bound") != "bound":
+            continue
+        transaction_id = str(
+            item.get("trigger_transaction_id") or item.get("transaction_id") or ""
+        )
+        action_id = str(item.get("trigger_action_id") or item.get("action_id") or "")
+        if transaction_id:
+            transactions.add(transaction_id)
+        if action_id:
+            actions.add(action_id)
+    return transactions, actions
+
+
+def _source_owned_by_param(source: dict[str, Any], param: ParamField) -> bool:
+    request_id = str(source.get("source_request_id") or "")
+    if request_id and request_id in _independent_option_request_ids(param):
+        return True
+    transactions, actions = _option_control_context(param)
+    source_transaction = str(source.get("trigger_transaction_id") or "")
+    source_action = str(source.get("trigger_action_id") or "")
+    return bool(
+        (source_transaction and source_transaction in transactions)
+        or (source_action and source_action in actions)
+    )
+
+
+def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
+    """Drop false precision when repeated captures share one source contract."""
+    facts_by_endpoint: dict[str, list[Any]] = {}
+    for fact in spec.request_facts.requests or []:
+        endpoint = _option_source_contract_endpoint(str(fact.url or fact.path or ""))
+        if endpoint and fact.request_id:
+            facts_by_endpoint.setdefault(endpoint, []).append(fact)
+    for step in spec.steps:
+        step_meta = step.source_meta or {}
+        for param in step.params or []:
+            if param.source_kind != "api_option" or _param_has_manual_contract(param):
+                continue
+            source = dict(param.source or {})
+            request_id = str(source.get("source_request_id") or "")
+            endpoint = _option_source_contract_endpoint(str(source.get("source_url") or ""))
+            if not request_id or not endpoint or _independent_option_request_ids(param):
+                continue
+            candidates = []
+            for fact in facts_by_endpoint.get(endpoint, []):
+                if (
+                    fact.page_id and step_meta.get("page_id")
+                    and str(fact.page_id) != str(step_meta.get("page_id"))
+                ):
+                    continue
+                if (
+                    fact.frame_id and step_meta.get("frame_id")
+                    and str(fact.frame_id) != str(step_meta.get("frame_id"))
+                ):
+                    continue
+                candidates.append(fact)
+            if len({str(fact.request_id) for fact in candidates}) <= 1:
+                continue
+            param.source = {**source, "source_request_id": ""}
+            for binding in step.selects or []:
+                if _strip_body_prefix(binding.path or binding.id_path or "") == _strip_body_prefix(param.path):
+                    binding.source_request_id = ""
+
+
 def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     """Recover grounded enum/reference bindings, including captured-only reads.
 
@@ -141,6 +227,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     Repeated captures of the same endpoint/contract are one source, not an
     ambiguity.
     """
+    _clear_ambiguous_automatic_option_request_ids(spec)
     candidates: list[dict[str, Any]] = []
     materialized_request_ids: set[str] = set()
     for source in spec.steps:
@@ -523,8 +610,6 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         semantic_match: bool,
     ) -> bool:
         """Require a causal, explicit, or semantic bridge; value equality is never enough."""
-        if semantic_match:
-            return True
         source_tx = str(source.get("trigger_transaction_id") or "")
         source_action = str(source.get("trigger_action_id") or "")
         target_meta = target.source_meta or {}
@@ -534,6 +619,26 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         source_frame = str(source.get("frame_id") or "")
         target_page = str(target_meta.get("page_id") or "")
         target_frame = str(target_meta.get("frame_id") or "")
+        if source_page and target_page and source_page != target_page:
+            return False
+        if source_frame and target_frame and source_frame != target_frame:
+            return False
+        if page_contract is not None:
+            raw = page_contract.get("raw") or {}
+            page_id = str(raw.get("page_id") or "")
+            frame_id = str(raw.get("frame_id") or "")
+            if source_page and page_id and source_page != page_id:
+                return False
+            if source_frame and frame_id and source_frame != frame_id:
+                return False
+            page_tx = str(raw.get("trigger_transaction_id") or raw.get("transaction_id") or "")
+            page_action = str(raw.get("trigger_action_id") or raw.get("action_id") or "")
+            if source_tx and page_tx and source_tx != page_tx:
+                return False
+            if source_action and page_action and source_action != page_action:
+                return False
+        if semantic_match:
+            return True
         same_action_context = bool(
             source_action
             and source_action == target_action
@@ -673,7 +778,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         items, value, page_contract, allow_single=allow_single,
                     ):
                         matches.append({**source, **contract})
-            unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+            grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
             for match in matches:
                 endpoint = _option_source_contract_endpoint(
                     str(match.get("source_url") or "")
@@ -690,8 +795,6 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     str(match.get("category_value") or ""),
                     selected_labels,
                 )
-                previous = unique.get(fingerprint)
-
                 def rank(item: dict[str, Any]) -> tuple[int, int, int, float]:
                     try:
                         sequence = float(item.get("sequence"))
@@ -704,8 +807,27 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         sequence,
                     )
 
-                if previous is None or rank(match) > rank(previous):
-                    unique[fingerprint] = match
+                grouped.setdefault(fingerprint, []).append(match)
+            unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+            for fingerprint, equivalent in grouped.items():
+                owned = [item for item in equivalent if _source_owned_by_param(item, param)]
+                owned_ids = {
+                    str(item.get("source_request_id") or "") for item in owned
+                    if item.get("source_request_id")
+                }
+                pool = owned if len(owned_ids) == 1 else equivalent
+                selected = max(pool, key=rank)
+                request_ids = {
+                    str(item.get("source_request_id") or "") for item in equivalent
+                    if item.get("source_request_id")
+                }
+                if len(owned_ids) != 1 and len(request_ids) > 1:
+                    selected = {
+                        **selected,
+                        "source_request_id": "",
+                        "source_step_id": "",
+                    }
+                unique[fingerprint] = selected
             if len(unique) != 1:
                 continue
             match = next(iter(unique.values()))
