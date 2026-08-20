@@ -485,7 +485,12 @@ def _build_step_from_capture(
                 "binding_status": "bound",
                 "surface": str(f.get("surface") or ""),
                 "in_dialog": bool(f.get("in_dialog")),
+                "field_identity_id": str(f.get("field_identity_id") or ""),
+                "occurrence_id": str(f.get("occurrence_id") or f.get("evidence_id") or ""),
                 "action_id": str(f.get("action_id") or ""),
+                "transaction_id": str(f.get("transaction_id") or ""),
+                "page_id": str(f.get("page_id") or ""),
+                "frame_id": str(f.get("frame_id") or ""),
                 **dict(f.get("constraints") or {}),
             })
         if (str(f.get("required_state") or "") == "required" or f.get("required") is True) and f.get("required_state_grounded"):

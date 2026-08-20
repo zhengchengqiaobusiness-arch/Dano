@@ -238,66 +238,159 @@ def _param_path_leaf(path: str) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", tokens[-1].lower()) if tokens else ""
 
 
+def _param_identity_values(param: ParamField, key: str) -> set[str]:
+    values = {
+        str(item.get(key) or "")
+        for item in (param.evidence or [])
+        if isinstance(item, dict) and item.get(key)
+    }
+    source_value = (param.source or {}).get(key)
+    if source_value:
+        values.add(str(source_value))
+    return {value for value in values if value}
+
+
 def _params_can_share_caller_key(left: ParamField, right: ParamField) -> bool:
-    """同名字段仅在请求叶子与类型都一致时复用一个调用参数。"""
-    return bool(
-        _param_path_leaf(left.path) == _param_path_leaf(right.path)
-        and _business_type_for_param(left) == _business_type_for_param(right)
+    """Only explicit field/control identity may share one public caller key."""
+    compatible_type = bool(
+        _business_type_for_param(left) == _business_type_for_param(right)
         and (left.wire_type or _infer_type_from_value(left.value) or "string")
         == (right.wire_type or _infer_type_from_value(right.value) or "string")
     )
+    if not compatible_type:
+        return False
+    if left is right or (left.field_id and left.field_id == right.field_id):
+        return True
+    return any(
+        _param_identity_values(left, identity_key)
+        & _param_identity_values(right, identity_key)
+        for identity_key in (
+            "field_identity_id",
+            "occurrence_id",
+            "caller_input_id",
+            "shared_input_id",
+        )
+    )
+
+
+def _caller_key_location(param: ParamField) -> str:
+    path = str(param.path or "").casefold()
+    for location in ("query", "header", "path", "body"):
+        if path.startswith(f"{location}."):
+            return location
+    return "body"
+
+
+def _caller_key_token(value: str, fallback: str) -> str:
+    token = re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", "_", str(value or "")).strip("_")
+    return token or fallback
+
+
+def _contextual_caller_key(step: FlowStep, param: ParamField, base: str, *, rich: bool) -> str:
+    location = _caller_key_location(param)
+    if not rich:
+        return f"{location}_{base}"
+    route = _strip_body_prefix(str(step.path or step.url or "")).split("?", 1)[0]
+    route_token = _caller_key_token("_".join(re.split(r"[/\[\].]+", route)[-2:]), "request")
+    method = _caller_key_token(str(step.method or "request").casefold(), "request")
+    return f"{method}_{route_token}_{location}_{base}"
+
+
+def _apply_contextual_param_key(
+    step: FlowStep,
+    param: ParamField,
+    *,
+    base: str,
+    candidate: str,
+    changes: list[dict[str, Any]],
+) -> None:
+    if param.key == candidate:
+        return
+    old_key = param.key
+    param.key = candidate
+    param.source = {
+        **(param.source or {}),
+        "original_key": old_key or base,
+        "collision_resolved": True,
+        "name_disambiguation": "structural_context",
+    }
+    param.need_human_confirm = True
+    param.evidence = [*(param.evidence or []), {
+        "kind": "field_key_collision_resolved",
+        "original_key": old_key or base,
+        "resolved_key": candidate,
+        "path": param.path,
+        "step_id": step.step_id,
+        "actor": "heuristic",
+        "reason": "同名字段缺少共享 caller input 的强身份；使用请求结构上下文消歧",
+    }]
+    for binding in step.selects or []:
+        if binding.path and _strip_body_prefix(binding.path) == _strip_body_prefix(param.path):
+            binding.param = candidate
+    changes.append({
+        "step_id": step.step_id,
+        "path": param.path,
+        "original_key": old_key or base,
+        "resolved_key": candidate,
+    })
 
 
 def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str, Any]]:
-    """为能力闭包中的同名异义字段生成稳定 ``#2`` 别名。
-
-    同一个业务叶子跨接口复用时保留共享输入；不同请求叶子不能继续争用同一个
-    caller key，否则 schema、sample_inputs 和请求编译会互相覆盖。
-    """
+    """Disambiguate same-name caller inputs from stable request structure."""
     entries = [(step, param) for step in steps for param in (step.params or []) if _param_exposed_to_caller(param)]
-    used = {str(param.key or param.path or "").strip() for _step, param in entries if str(param.key or param.path or "").strip()}
-    canonical_by_key: dict[str, ParamField] = {}
-    changes: list[dict[str, Any]] = []
-    # 锁定字段优先占用原名，自动字段围绕它消歧，避免覆盖人工契约。
-    ordered = sorted(enumerate(entries), key=lambda item: (not bool(item[1][1].locked), item[0]))
-    for _position, (step, param) in ordered:
+    grouped: dict[str, list[tuple[FlowStep, ParamField]]] = {}
+    for step, param in entries:
         key = str(param.key or param.path or "").strip() or "field"
-        canonical = canonical_by_key.get(key)
-        if canonical is None:
-            canonical_by_key[key] = param
+        grouped.setdefault(key, []).append((step, param))
+    used = set(grouped)
+    changes: list[dict[str, Any]] = []
+    for base, same_name in grouped.items():
+        clusters: list[list[tuple[FlowStep, ParamField]]] = []
+        for entry in same_name:
+            cluster = next((
+                item for item in clusters
+                if _params_can_share_caller_key(item[0][1], entry[1])
+            ), None)
+            if cluster is None:
+                clusters.append([entry])
+            else:
+                cluster.append(entry)
+        if len(clusters) < 2:
             continue
-        if _params_can_share_caller_key(canonical, param):
-            continue
-        if param.locked:
-            # 两个互相冲突的人工锁定字段不擅自改名，仅作为生成建议展示。
-            continue
-        base = key
-        suffix = 2
-        candidate = f"{base}#{suffix}"
-        while candidate in used:
-            suffix += 1
-            candidate = f"{base}#{suffix}"
-        old_key = param.key
-        param.key = candidate
-        param.source = {**(param.source or {}), "original_key": old_key or base, "collision_resolved": True}
-        param.evidence = [*(param.evidence or []), {
-            "kind": "field_key_collision_resolved",
-            "original_key": old_key or base,
-            "resolved_key": candidate,
-            "path": param.path,
-            "step_id": step.step_id,
-        }]
-        used.add(candidate)
-        canonical_by_key[candidate] = param
-        for binding in step.selects or []:
-            if binding.path and _strip_body_prefix(binding.path) == _strip_body_prefix(param.path):
-                binding.param = candidate
-        changes.append({
-            "step_id": step.step_id,
-            "path": param.path,
-            "original_key": old_key or base,
-            "resolved_key": candidate,
-        })
+        locked_cluster = next((
+            cluster for cluster in clusters
+            if any(param.locked for _step, param in cluster)
+        ), None)
+        pending = [cluster for cluster in clusters if cluster is not locked_cluster]
+        simple_keys = [
+            _contextual_caller_key(cluster[0][0], cluster[0][1], base, rich=False)
+            for cluster in pending
+        ]
+        for cluster, simple_key in zip(pending, simple_keys):
+            candidate = simple_key
+            if simple_keys.count(simple_key) > 1 or candidate in used:
+                candidate = _contextual_caller_key(cluster[0][0], cluster[0][1], base, rich=True)
+            if candidate in used:
+                identity = "\0".join(
+                    str(value or "")
+                    for value in (
+                        cluster[0][0].method,
+                        cluster[0][0].url or cluster[0][0].path,
+                        cluster[0][1].path,
+                        cluster[0][0].source_meta.get("request_id"),
+                    )
+                )
+                candidate = f"{candidate}_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:8]}"
+            used.add(candidate)
+            for step, param in cluster:
+                if not param.locked:
+                    _apply_contextual_param_key(
+                        step,
+                        param,
+                        base=base,
+                        candidate=candidate,
+                        changes=changes,
+                    )
     for step in steps:
         step.sample_inputs = {
             str(param.key or param.path): param.value

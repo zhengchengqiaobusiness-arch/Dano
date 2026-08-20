@@ -386,7 +386,73 @@ def test_same_leaf_and_type_from_different_actions_do_not_share_one_input() -> N
     }])
     properties = compiled.capabilities[0].input_schema["properties"]
     assert len(properties) == 2
+    assert all("#" not in name for name in properties)
     assert all("x-flow-paths" not in schema for schema in properties.values())
+
+
+def test_same_field_identity_can_share_one_input_across_member_steps() -> None:
+    def shared_param(path: str) -> ParamField:
+        return ParamField(
+            path=path,
+            key="recordCode",
+            label="Record code",
+            value="A-1",
+            type="string",
+            wire_type="string",
+            required=False,
+            category="user_param",
+            source_kind="user_input",
+            source={"kind": "user_input", "required_state": "unknown"},
+            exposed_to_user=True,
+            editable=True,
+            evidence=[{
+                "kind": "page_control",
+                "binding_status": "bound",
+                "field_identity_id": "field_shared_record_code",
+                "occurrence_id": "occurrence_shared_record_code",
+            }],
+        )
+
+    prepare = FlowStep(
+        step_id="step_prepare",
+        method="POST",
+        url="http://contract.invalid/v4/prepare",
+        path="/v4/prepare",
+        params=[shared_param("recordCode")],
+        source_meta={"request_id": "req_prepare", "role": "business_write"},
+    )
+    commit = FlowStep(
+        step_id="step_commit",
+        method="PUT",
+        url="http://contract.invalid/v4/commit",
+        path="/v4/commit",
+        params=[shared_param("recordCode")],
+        source_meta={"request_id": "req_commit", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        tenant="tenant",
+        subsystem="subsystem",
+        steps=[prepare, commit],
+        links=[FlowLink(
+            source_step_id="step_prepare",
+            source_path="response.ticket",
+            target_step_id="step_commit",
+            target_path="ticket",
+            confirmed=True,
+        )],
+    )
+    compiled = _compile(spec, [{
+        "name": "commit_record",
+        "title": "Commit record",
+        "kind": "update",
+        "anchor_step_id": "step_commit",
+    }])
+    properties = compiled.capabilities[0].input_schema["properties"]
+    assert list(properties) == ["recordCode"]
+    assert [param.key for step in compiled.steps for param in step.params] == [
+        "recordCode",
+        "recordCode",
+    ]
 
 
 def test_write_query_command_keeps_status_constant() -> None:
