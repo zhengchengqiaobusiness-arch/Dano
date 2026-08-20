@@ -1,5 +1,35 @@
 import { api } from "./client";
 
+export const EXPORT_DIR_LS = "dano.exportDir";
+
+export function rememberedExportDir() {
+  try {
+    return localStorage.getItem(EXPORT_DIR_LS) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function rememberExportDir(value: string) {
+  const next = String(value || "").trim();
+  if (!next) return;
+  try {
+    localStorage.setItem(EXPORT_DIR_LS, next);
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+export type RecordingSkillLifecycle =
+  | "stage_six_done"
+  | "verifying"
+  | "verified_not_exported"
+  | "generating"
+  | "exported"
+  | "export_failed"
+  | "needs_reexport"
+  | string;
+
 export interface RecordingResultSummary {
   id: string;
   action: string;
@@ -13,6 +43,13 @@ export interface RecordingResultSummary {
   machine_verification_status?: string;
   stage_seven_attempt_id?: string;
   stage_seven_updated_at?: string;
+  stage_seven_fingerprint?: string;
+  skill_id?: string;
+  skill_version?: number;
+  skill_export_status?: string;
+  skill_export_path?: string;
+  skill_lifecycle?: RecordingSkillLifecycle;
+  skill_needs_reexport?: boolean;
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {
@@ -20,8 +57,17 @@ export async function listRecordingResults(subsystem: string): Promise<Recording
   return Array.isArray(data) ? data : [];
 }
 
+export interface RecordingStageSevenSummary {
+  status?: string;
+  working_fingerprint?: string;
+  publishable?: boolean;
+}
+
 export interface RecordingResultDetail extends RecordingResultSummary {
   draft?: Record<string, unknown> | null;
+  draft_fingerprint?: string;
+  stage_seven?: RecordingStageSevenSummary | null;
+  skill_plan?: Record<string, unknown> | null;
 }
 
 export async function getRecordingResult(id: string): Promise<RecordingResultDetail> {
@@ -31,4 +77,41 @@ export async function getRecordingResult(id: string): Promise<RecordingResultDet
 
 export async function deleteRecordingResult(id: string): Promise<void> {
   await api.delete(`/v1/recording-results/${id}`);
+}
+
+export interface SkillGenerationRequest {
+  title: string;
+  business_description: string;
+  planning_mode: "dynamic" | "fixed";
+  example_requests?: string[];
+  success_criteria?: string;
+  forbidden_actions?: string;
+  out_dir?: string;
+}
+
+export interface SkillExportOutcome {
+  status: string;
+  skill_id?: string;
+  skill_name?: string;
+  version?: number;
+  planning_mode?: string;
+  used_capabilities?: Array<Record<string, unknown>>;
+  unused_capabilities?: Array<Record<string, unknown>>;
+  routes?: Array<Record<string, unknown>>;
+  export_path?: string;
+  plan?: Record<string, unknown> | null;
+  clarification_questions?: string[];
+  errors?: string[];
+  idempotent?: boolean;
+}
+
+export async function exportRecordingSkill(
+  resultId: string,
+  request: SkillGenerationRequest,
+): Promise<SkillExportOutcome> {
+  const { data } = await api.post(
+    `/v1/recording-results/${encodeURIComponent(resultId)}/export-skill`,
+    request,
+  );
+  return data as SkillExportOutcome;
 }

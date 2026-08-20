@@ -8,6 +8,8 @@ import {
   Empty,
   Input,
   List,
+  Modal,
+  Radio,
   Select,
   Space,
   Spin,
@@ -26,6 +28,7 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   CodeOutlined,
+  CopyOutlined,
   DeleteOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
@@ -47,8 +50,19 @@ import type {
   PointerEvent,
   WheelEvent,
 } from "react";
-import { deleteRecordingResult, getRecordingResult, listRecordingResults } from "../api/recording";
-import type { RecordingResultSummary } from "../api/recording";
+import {
+  deleteRecordingResult,
+  exportRecordingSkill,
+  getRecordingResult,
+  listRecordingResults,
+  rememberExportDir,
+  rememberedExportDir,
+} from "../api/recording";
+import type {
+  RecordingResultDetail,
+  RecordingResultSummary,
+  SkillExportOutcome,
+} from "../api/recording";
 
 const { Text, Title } = Typography;
 
@@ -168,6 +182,8 @@ interface FlowCapability {
   nodes?: Array<Record<string, unknown>>;
   dependencies?: Array<Record<string, unknown>>;
   input_schema?: Record<string, unknown>;
+  output_schema?: Record<string, unknown>;
+  requires_human_confirm?: boolean;
 }
 
 interface FlowLink {
@@ -411,9 +427,19 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
   processing: "分析中",
   waiting_operator: "等待确认",
   editable: "能力草稿待处理",
-  published: "发布完成",
+  published: "能力已验证，Skill 未产出",
   cancelled: "分析已终止",
   failed: "处理失败",
+};
+
+const SKILL_LIFECYCLE_LABELS: Record<string, { label: string; color: string }> = {
+  stage_six_done: { label: "阶段1—6已完成", color: "default" },
+  verifying: { label: "阶段7验证中", color: "processing" },
+  verified_not_exported: { label: "能力已验证，Skill 未产出", color: "blue" },
+  generating: { label: "Skill 生成中", color: "processing" },
+  exported: { label: "Skill 已导出", color: "success" },
+  export_failed: { label: "Skill 导出失败", color: "error" },
+  needs_reexport: { label: "能力已修改，Skill 需要重新产出", color: "warning" },
 };
 
 const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
@@ -481,11 +507,11 @@ function dedupeAnalysisActivities(activities: WorkflowActivity[]) {
 function analysisStatusView(status: WorkflowStatus, cancelling: boolean, _snapshot: WorkflowSnapshot | null) {
   if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "正在终止" };
   if (status === "cancelled") return { color: "default" as const, label: "已终止" };
-  if (status === "published") return { color: "success" as const, label: "已发布" };
+  if (status === "published") return { color: "success" as const, label: "能力已验证，Skill 未产出" };
   if (status === "failed") return { color: "error" as const, label: "失败" };
   if (status === "waiting_operator") return { color: "warning" as const, label: "需要确认" };
   if (status === "processing") return { color: "processing" as const, label: "分析中" };
-  if (status === "editable") return { color: "default" as const, label: "待继续" };
+  if (status === "editable") return { color: "default" as const, label: "能力草稿待处理" };
   return { color: "default" as const, label: STATUS_LABELS[status] };
 }
 
@@ -551,6 +577,31 @@ function parseStorageState(value: string): Record<string, unknown> | undefined {
 function safeString(value: unknown) {
   if (value === null || value === undefined) return "";
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function schemaFieldNames(schema?: Record<string, unknown> | null) {
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object") return [];
+  return Object.keys(properties as Record<string, unknown>);
+}
+
+function capabilityIsWrite(capability: FlowCapability) {
+  const kind = String(capability.kind || "").toLowerCase();
+  return Boolean(capability.requires_human_confirm) || [
+    "submit", "delete", "withdraw", "approve", "reject", "submit_batch", "create", "update", "edit",
+  ].includes(kind);
+}
+
+function historyLifecycleView(item: RecordingResultSummary) {
+  const key = String(item.skill_lifecycle || "");
+  if (SKILL_LIFECYCLE_LABELS[key]) return SKILL_LIFECYCLE_LABELS[key];
+  if (item.skill_needs_reexport) return SKILL_LIFECYCLE_LABELS.needs_reexport;
+  if (item.published) return SKILL_LIFECYCLE_LABELS.exported;
+  if (item.machine_verification_status === "verified") return SKILL_LIFECYCLE_LABELS.verified_not_exported;
+  if (["running", "waiting_operator"].includes(String(item.machine_verification_status || ""))) {
+    return SKILL_LIFECYCLE_LABELS.verifying;
+  }
+  return SKILL_LIFECYCLE_LABELS.stage_six_done;
 }
 
 function releaseUsedMachineVerification(release?: Record<string, unknown> | null) {
@@ -635,6 +686,20 @@ export default function PageRecorder({
   const deletingIdRef = useRef("");
   const acceptNextSnapshotRef = useRef(false);
   const [stageSevenOpen, setStageSevenOpen] = useState(false);
+  const [skillExportOpen, setSkillExportOpen] = useState(false);
+  const [skillExporting, setSkillExporting] = useState(false);
+  const [skillExportProgress, setSkillExportProgress] = useState("");
+  const [skillExportOutcome, setSkillExportOutcome] = useState<SkillExportOutcome | null>(null);
+  const [skillClarifications, setSkillClarifications] = useState<string[]>([]);
+  const [skillExportErrors, setSkillExportErrors] = useState<string[]>([]);
+  const [skillTitle, setSkillTitle] = useState("");
+  const [skillDescription, setSkillDescription] = useState("");
+  const [skillPlanningMode, setSkillPlanningMode] = useState<"dynamic" | "fixed">("dynamic");
+  const [skillExamples, setSkillExamples] = useState("");
+  const [skillSuccess, setSkillSuccess] = useState("");
+  const [skillForbidden, setSkillForbidden] = useState("");
+  const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
+  const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -650,6 +715,44 @@ export default function PageRecorder({
     || stageSevenOpen;
   const analysisMode = analysisSessionLive;
   const reachedStage = pageStage(status, resumeOnly, analysisSessionLive);
+  const stageSevenStatus = String(
+    snapshot?.machine_verification_status
+    || resultMeta?.machine_verification_status
+    || resultMeta?.stage_seven?.status
+    || "",
+  );
+  const stageSevenFingerprint = String(
+    resultMeta?.stage_seven_fingerprint
+    || resultMeta?.stage_seven?.working_fingerprint
+    || "",
+  );
+  const currentDraftFingerprint = String(
+    snapshot?.draft_fingerprint
+    || resultMeta?.draft_fingerprint
+    || "",
+  );
+  const stageSevenVerified = stageSevenStatus === "verified";
+  const fingerprintMatches = !stageSevenFingerprint || !currentDraftFingerprint
+    || stageSevenFingerprint === currentDraftFingerprint;
+  const canProduceSkill = Boolean(
+    (activeResultId || history.find((row) => row.action === (snapshot?.action || ""))?.id)
+    && capabilities.length
+    && stageSevenVerified
+    && fingerprintMatches
+    && !pendingEdits.length
+    && !patchInFlightRef.current
+    && !processing
+    && !connecting
+    && !cancelling
+    && !skillExporting,
+  );
+  const verificationButtonLabel = (
+    stageSevenStatus === "stale"
+    || stageSevenStatus === "running"
+    || stageSevenStatus === "waiting_operator"
+    || (stageSevenVerified && !fingerprintMatches)
+    || Boolean(resultMeta?.skill_needs_reexport && !stageSevenVerified)
+  ) ? "继续验证" : "开始机器验证";
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -724,6 +827,13 @@ export default function PageRecorder({
       cancelled = true;
     };
   }, [tenant, subsystem]);
+
+  useEffect(() => {
+    if (!["editable", "published"].includes(status) || processing) return;
+    const resultId = activeResultId || history.find((row) => row.action === (snapshot?.action || ""))?.id;
+    if (!resultId) return;
+    void refreshResultMeta(resultId);
+  }, [status, snapshot?.machine_verification_status, snapshot?.draft_fingerprint]);
 
   useEffect(() => {
     if (analysisRequested || isStageSevenProgress(snapshot?.progress) || status === "waiting_operator") {
@@ -1198,20 +1308,34 @@ export default function PageRecorder({
     openRecordingSocket(action);
   }
 
-  function applyViewedDraft(item: RecordingResultSummary, draft: FlowSpec | null) {
+  function applyViewedDraft(item: RecordingResultSummary, draft: FlowSpec | null, detail?: RecordingResultDetail | null) {
+    const stageStatus = String(
+      detail?.machine_verification_status
+      || detail?.stage_seven?.status
+      || item.machine_verification_status
+      || "",
+    );
     const next: WorkflowSnapshot = {
       run_id: "",
       action: item.action,
       title: item.title,
       revision: 0,
       status: "editable",
-      progress: { step: "ready", label: "已打开录制结果，尚未开始机器验证" },
+      progress: {
+        step: "ready",
+        label: stageStatus === "verified"
+          ? (item.skill_lifecycle === "exported" ? "Skill 已导出" : "能力已验证，Skill 未产出")
+          : "已打开录制结果，尚未开始机器验证",
+      },
       draft,
+      draft_fingerprint: detail?.draft_fingerprint,
+      machine_verification_status: stageStatus,
       capture_frozen: true,
     };
     snapshotRef.current = next;
     setSnapshot(next);
     if (item.title) setTitle(item.title);
+    if (detail) setResultMeta(detail);
   }
 
   async function openResult(item: RecordingResultSummary) {
@@ -1244,7 +1368,7 @@ export default function PageRecorder({
     socketInitRef.current = null;
     try {
       const detail = await getRecordingResult(item.id);
-      applyViewedDraft(item, (detail.draft || null) as FlowSpec | null);
+      applyViewedDraft(item, (detail.draft || null) as FlowSpec | null, detail);
     } catch {
       message.error("打开录制结果失败");
       setKeepResult(false);
@@ -1371,7 +1495,127 @@ export default function PageRecorder({
   }
 
   function historyPublishLabel(item: RecordingResultSummary) {
-    return item.published ? "已发布" : "";
+    return historyLifecycleView(item);
+  }
+
+  async function refreshResultMeta(resultId = currentResultId()) {
+    if (!resultId) return;
+    try {
+      const detail = await getRecordingResult(resultId);
+      setResultMeta(detail);
+      upsertHistory({
+        id: detail.id,
+        action: detail.action,
+        title: detail.title,
+        goal_summary: detail.goal_summary,
+        capability_count: detail.capability_count,
+        request_count: detail.request_count,
+        created_at: detail.created_at,
+        published: detail.published,
+        machine_verification_ran: detail.machine_verification_ran,
+        machine_verification_status: detail.machine_verification_status,
+        stage_seven_fingerprint: detail.stage_seven_fingerprint,
+        skill_id: detail.skill_id,
+        skill_version: detail.skill_version,
+        skill_export_status: detail.skill_export_status,
+        skill_export_path: detail.skill_export_path,
+        skill_lifecycle: detail.skill_lifecycle,
+        skill_needs_reexport: detail.skill_needs_reexport,
+      });
+    } catch {
+      // keep the last known meta
+    }
+  }
+
+  function openSkillExport() {
+    if (!canProduceSkill) return;
+    setSkillTitle((title || snapshot?.title || "").trim());
+    setSkillDescription("");
+    setSkillPlanningMode("dynamic");
+    setSkillExamples("");
+    setSkillSuccess("");
+    setSkillForbidden("");
+    setSkillOutDir(rememberedExportDir());
+    setSkillExportOutcome(null);
+    setSkillClarifications([]);
+    setSkillExportErrors([]);
+    setSkillExportProgress("");
+    setSkillExportOpen(true);
+  }
+
+  async function submitSkillExport() {
+    const resultId = currentResultId();
+    if (!resultId) {
+      message.error("没有可导出的录制结果");
+      return;
+    }
+    const description = skillDescription.trim();
+    if (!skillTitle.trim()) {
+      message.error("请填写 Skill 显示名称");
+      return;
+    }
+    if (!description) {
+      message.error("请填写业务描述");
+      return;
+    }
+    if (skillExporting) return;
+    setSkillExporting(true);
+    setSkillExportProgress("正在规划并导出 Skill…");
+    setSkillClarifications([]);
+    setSkillExportErrors([]);
+    try {
+      const outDir = skillOutDir.trim();
+      if (outDir) rememberExportDir(outDir);
+      const outcome = await exportRecordingSkill(resultId, {
+        title: skillTitle.trim(),
+        business_description: description,
+        planning_mode: skillPlanningMode,
+        example_requests: skillExamples.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+        success_criteria: skillSuccess.trim(),
+        forbidden_actions: skillForbidden.trim(),
+        out_dir: outDir,
+      });
+      if (outcome.status === "needs_clarification") {
+        setSkillClarifications(outcome.clarification_questions || []);
+        setSkillExportProgress("");
+        message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
+        return;
+      }
+      if (outcome.status !== "exported") {
+        setSkillExportErrors(outcome.errors || ["Skill 导出失败"]);
+        setSkillExportProgress("");
+        message.error("Skill 导出失败");
+        await refreshResultMeta(resultId);
+        return;
+      }
+      setSkillExportOutcome(outcome);
+      setSkillExportProgress("");
+      if (outcome.export_path) rememberExportDir(outcome.export_path.replace(/[\\/][^\\/]+$/, "") || outDir);
+      await refreshResultMeta(resultId);
+      message.success(outcome.idempotent ? "已返回现有 Skill 导出结果" : "Skill 已导出");
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setSkillExportErrors([typeof detail === "string" ? detail : "Skill 导出失败"]);
+      setSkillExportProgress("");
+      message.error(typeof detail === "string" ? detail : "Skill 导出失败");
+      await refreshResultMeta(resultId);
+    } finally {
+      setSkillExporting(false);
+    }
+  }
+
+  async function copySkillDir(pathValue?: string) {
+    const target = String(pathValue || skillExportOutcome?.export_path || "").trim();
+    if (!target) {
+      message.warning("没有可打开的 Skill 目录");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(target);
+      message.success("Skill 目录已复制，请在资源管理器中打开");
+    } catch {
+      message.info(target);
+    }
   }
 
   function finishRecording() {
@@ -1802,12 +2046,12 @@ export default function PageRecorder({
             {
               title: "Skill",
               render: (_, item) => {
-                const published = historyPublishLabel(item);
+                const lifecycle = historyPublishLabel(item);
                 return (
                   <div>
                     <div>
                       {(item.title || "").trim() || (item.goal_summary || "").trim() || "未命名录制"}
-                      {published ? <Tag color="success" style={{ marginLeft: 8 }}>{published}</Tag> : null}
+                      <Tag color={lifecycle.color as "success"} style={{ marginLeft: 8 }}>{lifecycle.label}</Tag>
                     </div>
                     <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>
                   </div>
@@ -1891,7 +2135,7 @@ export default function PageRecorder({
                 disabled={processing || (status !== "recording" && !canRetryPublish)}
                 onClick={requestPublish}
               >
-                停止并发布
+                结束录制并分析
               </Button>
             ) : (
               <Button
@@ -2433,8 +2677,8 @@ export default function PageRecorder({
             key: capability.capability_id || capability.name || String(index),
             label: (
               <Space wrap>
-                <Tag color={status === "published" || capability.confirmed ? "success" : "processing"}>
-                  {status === "published" ? "已发布" : capability.confirmed ? "已确认" : "分析结果"}
+                <Tag color={stageSevenVerified || status === "published" || capability.confirmed ? "success" : "processing"}>
+                  {stageSevenVerified || status === "published" ? "已验证" : capability.confirmed ? "已确认" : "分析结果"}
                 </Tag>
                 <Tag color="blue">{capability.kind || "capability"}</Tag>
                 <Text strong>{capability.title || capability.name || `能力 ${index + 1}`}</Text>
@@ -2604,7 +2848,7 @@ export default function PageRecorder({
         size={size}
         icon={<PlayCircleOutlined />}
         onClick={() => startAnalysis()}
-      >开始分析</Button>
+      >{verificationButtonLabel}</Button>
     );
   }
 
@@ -2825,7 +3069,7 @@ export default function PageRecorder({
             type="warning"
             style={{ marginBottom: 8 }}
             message="分析已终止"
-            description="草稿已保留，确认后可再次开始分析。"
+            description="草稿已保留，确认后可继续机器验证。"
           />
         ) : null}
         {replaySkipped && status !== "cancelled" ? (
@@ -2854,7 +3098,7 @@ export default function PageRecorder({
               description={
                 connecting || runBusy
                   ? "正在连接…"
-                  : "尚未开始机器验证，确认能力后点击开始分析"
+                  : "尚未开始机器验证，确认能力后点击开始机器验证"
               }
               style={{ marginTop: 24 }}
             />
@@ -2899,33 +3143,54 @@ export default function PageRecorder({
                 loading={processing || Boolean(patchInFlightRef.current)}
                 disabled={!draft || processing || (status === "published" && !pendingEdits.length)}
                 onClick={republish}
-              >修改后再次发布</Button>
+                >保存并重新验证</Button>
             </Space>
           ) : (
             <Space>
-              {draft && !analysisMode && !processing && !connecting && !cancelling ? (
-                <Button
-                  type="primary"
-                  icon={<PlayCircleOutlined />}
-                  onClick={() => startAnalysis()}
-                >开始分析</Button>
-              ) : null}
-              <Button
-                disabled={!draft || processing}
-                onClick={() => setEditingResult(true)}
-              >修改结果</Button>
-              {canRetryPublish && !analysisMode ? (
-                <Button
-                  type="primary"
-                  loading={processing || Boolean(patchInFlightRef.current)}
-                  disabled={!draft || processing}
-                  onClick={republish}
-                >停止并发布</Button>
-              ) : null}
+              {!stageSevenVerified || !fingerprintMatches ? (
+                draft && !analysisMode && !processing && !connecting && !cancelling ? (
+                  <Button
+                    type="primary"
+                    icon={<PlayCircleOutlined />}
+                    onClick={() => startAnalysis()}
+                  >{verificationButtonLabel}</Button>
+                ) : null
+              ) : (
+                <>
+                  <Button
+                    disabled={!draft || processing || skillExporting}
+                    onClick={() => setEditingResult(true)}
+                  >修改能力结果</Button>
+                  <Button
+                    type="primary"
+                    disabled={!canProduceSkill}
+                    onClick={openSkillExport}
+                  >产出 Skill</Button>
+                </>
+              )}
             </Space>
           )}
         </div>
         {renderCapabilities()}
+        {resultMeta?.skill_lifecycle === "exported" || skillExportOutcome?.status === "exported" ? (
+          <Alert
+            style={{ marginTop: 16 }}
+            type="success"
+            showIcon
+            message="Skill 已导出"
+            description={
+              <Space direction="vertical" size={4}>
+                <Text>Skill ID：{skillExportOutcome?.skill_id || resultMeta?.skill_id || "—"}</Text>
+                <Text>导出路径：{skillExportOutcome?.export_path || resultMeta?.skill_export_path || "—"}</Text>
+                <Text>版本：{skillExportOutcome?.version || resultMeta?.skill_version || "—"}</Text>
+                <Space>
+                  <Button size="small" icon={<CopyOutlined />} onClick={() => copySkillDir(skillExportOutcome?.export_path || resultMeta?.skill_export_path)}>打开 Skill 目录</Button>
+                  <Button size="small" onClick={openSkillExport} disabled={!canProduceSkill}>重新产出 Skill</Button>
+                </Space>
+              </Space>
+            }
+          />
+        ) : null}
         <Collapse
           style={{ marginTop: 16 }}
           items={[{
@@ -3055,6 +3320,208 @@ export default function PageRecorder({
       <div style={{ display: viewStage === 0 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderSetup()}</div>
       {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
       {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
+      <Modal
+        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "配置并导出 Skill"}
+        open={skillExportOpen}
+        onCancel={() => {
+          if (!skillExporting) setSkillExportOpen(false);
+        }}
+        width={760}
+        destroyOnClose={false}
+        footer={
+          skillExportOutcome?.status === "exported" ? (
+            <Space>
+              <Button icon={<CopyOutlined />} onClick={() => copySkillDir()}>打开 Skill 目录</Button>
+              <Button onClick={() => { setSkillExportOutcome(null); setSkillClarifications([]); setSkillExportErrors([]); }}>重新产出 Skill</Button>
+              <Button type="primary" onClick={() => setSkillExportOpen(false)}>完成</Button>
+            </Space>
+          ) : (
+            <Space>
+              <Button disabled={skillExporting} onClick={() => setSkillExportOpen(false)}>取消</Button>
+              <Button type="primary" loading={skillExporting} disabled={skillExporting} onClick={() => void submitSkillExport()}>导出 Skill</Button>
+            </Space>
+          )
+        }
+      >
+        {skillExportOutcome?.status === "exported" ? (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Text>Skill ID：{skillExportOutcome.skill_id || "—"}</Text>
+            <Text>Skill 名称：{skillExportOutcome.skill_name || skillTitle || "—"}</Text>
+            <Text>规划方式：{skillExportOutcome.planning_mode === "fixed" ? "固定业务步骤" : "按用户需求动态选择"}</Text>
+            <Text>使用的能力：{(skillExportOutcome.used_capabilities || []).map((item) => String(item.title || item.name || item.capability_id || "")).filter(Boolean).join("、") || "—"}</Text>
+            <div>
+              <Text>未使用的能力：</Text>
+              {(skillExportOutcome.unused_capabilities || []).length ? (
+                <List
+                  size="small"
+                  dataSource={skillExportOutcome.unused_capabilities || []}
+                  renderItem={(item) => (
+                    <List.Item>
+                      <Text>{String(item.title || item.name || item.capability_id || "")}</Text>
+                      <Text type="secondary">{String(item.reason || "")}</Text>
+                    </List.Item>
+                  )}
+                />
+              ) : <Text type="secondary">无</Text>}
+            </div>
+            <div>
+              <Text>有效调用路线：</Text>
+              <List
+                size="small"
+                dataSource={skillExportOutcome.routes || []}
+                renderItem={(route) => (
+                  <List.Item>
+                    <Space direction="vertical" size={0}>
+                      <Text>{String(route.name || route.route_id || "")}</Text>
+                      <Text type="secondary">{Array.isArray(route.capability_sequence) ? route.capability_sequence.join(" → ") : ""}</Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </div>
+            <Text>导出路径：{skillExportOutcome.export_path || "—"}</Text>
+            <Text>Skill 版本：{skillExportOutcome.version || 1}</Text>
+          </Space>
+        ) : (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在规划和导出 Skill…"} /> : null}
+            {skillClarifications.length ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="需要补充说明"
+                description={(
+                  <List size="small" dataSource={skillClarifications} renderItem={(item) => <List.Item>{item}</List.Item>} />
+                )}
+              />
+            ) : null}
+            {skillExportErrors.length ? (
+              <Alert
+                type="error"
+                showIcon
+                message="导出失败"
+                description={(
+                  <List size="small" dataSource={skillExportErrors} renderItem={(item) => <List.Item>{item}</List.Item>} />
+                )}
+              />
+            ) : null}
+            <div>
+              <Text strong>Skill 显示名称</Text>
+              <Input
+                style={{ marginTop: 6 }}
+                value={skillTitle}
+                onChange={(event) => setSkillTitle(event.target.value)}
+                placeholder="例如：请假办理"
+                disabled={skillExporting}
+              />
+            </div>
+            <div>
+              <Text strong>业务描述</Text>
+              <Input.TextArea
+                style={{ marginTop: 6 }}
+                value={skillDescription}
+                onChange={(event) => setSkillDescription(event.target.value)}
+                autoSize={{ minRows: 6, maxRows: 12 }}
+                disabled={skillExporting}
+                placeholder="请描述这个页面在业务上用来做什么、用户通常会提出什么要求、哪些操作需要组合、什么结果代表完成。例如：用户可以查询待办记录，也可以查询后选择一条记录进行提交；如果用户只要求查询，不要执行提交。"
+              />
+            </div>
+            <div>
+              <Text strong>规划方式</Text>
+              <Radio.Group
+                style={{ display: "block", marginTop: 8 }}
+                value={skillPlanningMode}
+                onChange={(event) => setSkillPlanningMode(event.target.value)}
+                disabled={skillExporting}
+              >
+                <Space direction="vertical">
+                  <Radio value="dynamic">
+                    <Space direction="vertical" size={0}>
+                      <Text>按用户需求动态选择（推荐）</Text>
+                      <Text type="secondary">Skill 在实际使用时，根据用户请求从有效能力组合中选择最少且足够的能力。适用于页面具有查询、选项、提交等多种能力，用户每次需求不同的情况。</Text>
+                    </Space>
+                  </Radio>
+                  <Radio value="fixed">
+                    <Space direction="vertical" size={0}>
+                      <Text>固定业务步骤</Text>
+                      <Text type="secondary">根据当前业务描述生成一条确定的主要调用顺序。适用于该页面始终按照固定步骤完成同一业务的情况。</Text>
+                    </Space>
+                  </Radio>
+                </Space>
+              </Radio.Group>
+            </div>
+            <Collapse
+              items={[{
+                key: "more",
+                label: "更多设置",
+                children: (
+                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                    <div>
+                      <Text>用户请求示例，一行一个</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillExamples}
+                        onChange={(event) => setSkillExamples(event.target.value)}
+                        autoSize={{ minRows: 3, maxRows: 8 }}
+                        disabled={skillExporting}
+                      />
+                    </div>
+                    <div>
+                      <Text>成功条件</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillSuccess}
+                        onChange={(event) => setSkillSuccess(event.target.value)}
+                        autoSize={{ minRows: 2, maxRows: 5 }}
+                        disabled={skillExporting}
+                      />
+                    </div>
+                    <div>
+                      <Text>禁止或限制的操作</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillForbidden}
+                        onChange={(event) => setSkillForbidden(event.target.value)}
+                        autoSize={{ minRows: 2, maxRows: 5 }}
+                        disabled={skillExporting}
+                      />
+                    </div>
+                    <div>
+                      <Text>导出目录</Text>
+                      <Input
+                        style={{ marginTop: 6 }}
+                        value={skillOutDir}
+                        onChange={(event) => setSkillOutDir(event.target.value)}
+                        placeholder="默认使用系统已记忆的导出目录"
+                        disabled={skillExporting}
+                      />
+                    </div>
+                  </Space>
+                ),
+              }]}
+            />
+            <div>
+              <Text strong>已验证能力</Text>
+              <Table
+                size="small"
+                style={{ marginTop: 8 }}
+                pagination={false}
+                rowKey={(row) => String(row.capability_id || row.name)}
+                dataSource={capabilities}
+                columns={[
+                  { title: "能力名称", render: (_, cap) => cap.title || cap.name || cap.capability_id },
+                  { title: "类型", width: 110, render: (_, cap) => cap.kind || "—" },
+                  { title: "输入字段", render: (_, cap) => schemaFieldNames(cap.input_schema).join("、") || "—" },
+                  { title: "输出字段", render: (_, cap) => schemaFieldNames(cap.output_schema).join("、") || "—" },
+                  { title: "写操作", width: 80, render: (_, cap) => (capabilityIsWrite(cap) ? "是" : "否") },
+                  { title: "需确认", width: 80, render: (_, cap) => (cap.requires_human_confirm || capabilityIsWrite(cap) ? "是" : "否") },
+                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : stageSevenStatus || "未验证") },
+                ]}
+              />
+            </div>
+          </Space>
+        )}
+      </Modal>
       <Drawer
         title="录制助手"
         placement="right"
