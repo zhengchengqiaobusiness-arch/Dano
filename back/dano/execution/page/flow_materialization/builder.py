@@ -126,9 +126,13 @@ from dano.execution.page.value_tracing import (
 from dano.execution.page.flow_spec_core.versioning import (
     ensure_flow_version,
 )
+from dano.execution.page.flow_spec_core.owner_runtime import (
+    bind_owner_runtime,
+)
 
 
 def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
+    bind_owner_runtime()
     _canonicalize_materialized_request_identities(spec)
     _upgrade_materialized_query_facts(spec)
     # Upgrading an initial list request to the richer searched fact can make it
@@ -379,6 +383,7 @@ def to_flow_spec(
     form_samples_by_transaction: dict | None = None,
 ) -> FlowSpec:
     """收敛：把 record_ws 现有产物 → FlowSpec（包含 GET 业务请求）。"""
+    bind_owner_runtime()
     reads = reads or []
     samples = samples or {}
     required_labels = required_labels or set()

@@ -23,6 +23,9 @@ from dano.execution.page.flow_spec_core.normalization import (
     _flow_path_set,
     _strip_body_prefix,
 )
+from dano.execution.page.flow_spec_core.owner_runtime import (
+    bind_owner_runtime,
+)
 
 
 def _dynamic_array_containers(step: FlowStep) -> set[str]:
@@ -265,6 +268,7 @@ def _flow_step_url_template(
 
 
 def flow_spec_user_params(spec: FlowSpec) -> list[str]:
+    bind_owner_runtime()
     names: list[str] = []
     active_step_ids = _active_capability_step_ids(spec)
     for st in spec.steps:
@@ -277,6 +281,7 @@ def flow_spec_user_params(spec: FlowSpec) -> list[str]:
 
 
 def flow_spec_required_params(spec: FlowSpec) -> list[str]:
+    bind_owner_runtime()
     names: list[str] = []
     active_step_ids = _active_capability_step_ids(spec)
     for st in spec.steps:
@@ -600,6 +605,7 @@ def flow_spec_to_api_request(
 
     支持有 body 的写请求，也支持无 body 的 GET 前置步骤(query_template)。
     """
+    bind_owner_runtime()
     if capability is not None or capability_id or capability_name:
         return compile_capability_to_api_request(
             spec,

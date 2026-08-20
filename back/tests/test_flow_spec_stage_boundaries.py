@@ -329,3 +329,41 @@ assert spec.meta["current_version"] == 1
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_materialization_owner_executes_without_facade_import_side_effects() -> None:
+    code = r'''
+import json
+from dano.execution.page.flow_materialization.builder import to_flow_spec
+
+page = {"url": "http://example.test/app/records", "path": "/app/records"}
+requests = [
+    {
+        "request_id": "req_detail", "sequence": 1, "method": "GET",
+        "url": "http://example.test/api/records/get?id=7",
+        "response_status": 200,
+        "response_json": {"data": {"id": 7, "name": "alpha", "amount": 3}},
+        "page_id": "page_1", "frame_id": "frame_1", "page_context": page,
+        "_request_role": {"role": "business_get", "keep": True, "confidence": 0.95},
+    },
+    {
+        "request_id": "req_update", "sequence": 2, "method": "PUT",
+        "url": "http://example.test/api/records/update",
+        "post_data": json.dumps({"id": 7, "name": "alpha", "amount": 3}),
+        "response_status": 200, "response_json": {"code": 0},
+        "page_id": "page_1", "frame_id": "frame_1", "page_context": page,
+        "_request_role": {"role": "business_write", "keep": True, "confidence": 0.95},
+    },
+]
+spec = to_flow_spec(requests, page_context=page, tenant="tenant", subsystem="records")
+assert any(step.path == "/api/records/update" for step in spec.steps)
+assert spec.meta["stage_1_6_contract_version"] == 2
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=BACK,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

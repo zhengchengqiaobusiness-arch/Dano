@@ -12,6 +12,10 @@ from dano.execution.page.recording_facts import (
     _request_order_value,
     _request_precedes,
 )
+from dano.execution.page.flow_materialization.field_contracts.option_projection import (
+    _composite_values_match,
+    _recorded_scalar_values_match,
+)
 
 
 def _discover_record_hydration_links(
@@ -111,18 +115,3 @@ def _discover_record_hydration_links(
             key=lambda item: (len(item["matches"]), item["source_order"]),
         ))
     return selected
-
-_PENDING_FLOW_SPEC_HELPERS = {'_composite_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection'}
-
-
-def _bind_flow_spec_helpers() -> None:
-    import sys
-    module_globals = globals()
-    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
-        mod = sys.modules.get(owner)
-        if mod is None or not hasattr(mod, name):
-            continue
-        module_globals[name] = getattr(mod, name)
-
-
-_bind_flow_spec_helpers()

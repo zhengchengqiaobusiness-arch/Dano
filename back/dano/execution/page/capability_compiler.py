@@ -17,6 +17,9 @@ from dano.execution.page.flow_spec_core.models import (
 from dano.execution.page.flow_spec_core.fingerprints import (
     _stable_json_hash,
 )
+from dano.execution.page.flow_spec_core.owner_runtime import (
+    bind_owner_runtime,
+)
 from dano.execution.page.capability_kinds import (
     READ_CAPABILITY_KINDS,
     WRITE_CAPABILITY_KINDS,
@@ -531,6 +534,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
     Model-supplied request membership is ignored; the grounded graph supplies
     members.
     """
+    bind_owner_runtime()
     current = spec.model_copy(deep=True)
     plan = semantic_plan if isinstance(semantic_plan, dict) else {}
     plan_items = [item for item in plan.get("capabilities") or [] if isinstance(item, dict)]
