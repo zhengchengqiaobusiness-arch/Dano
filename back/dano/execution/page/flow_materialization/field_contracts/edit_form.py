@@ -97,6 +97,7 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
     to load the record, audit timestamps, and label echoes of a chosen *Id stay
     on the system side even when their values came from the detail GET.
     """
+    strict_edit_evidence = int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2
     for step in spec.steps or []:
         if not _step_is_record_edit_form(step):
             continue
@@ -145,6 +146,12 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 and not _param_control_is_readonly(param)
                 and not _looks_audit_system_leaf(param.key, param.path)
             ):
+                if strict_edit_evidence and not _param_has_editable_control_evidence(param):
+                    _mark_system_hydrated_field(
+                        param,
+                        "该字段来自详情响应，但没有可编辑控件证据，保留为上游回填字段",
+                    )
+                    continue
                 param.category = "user_param"
                 param.exposed_to_user = True
                 param.editable = True

@@ -536,17 +536,17 @@ def test_line_item_identity_product_is_computed() -> None:
     line_total = _param(update, "items[0].totalPrice")
     assert line_total.source_kind == "computed", (line_total.source_kind, line_total.reason)
     party = _param(update, "partyId")
-    assert _param_exposed_to_caller(party)
     assert party.source_kind == "previous_response"
+    assert not _param_exposed_to_caller(party)
 
 
-def test_edit_without_dialog_snapshot_still_exposes_hydrated_form_fields() -> None:
+def test_edit_without_control_evidence_keeps_hydrated_fields_system_owned() -> None:
     spec = _edit_and_command_spec(include_dialog_controls=False)
     update = _step_by_suffix(spec, "/doc/update")
     for item in (_param(update, "partyId"), _param(update, "note")):
-        assert _param_exposed_to_caller(item), (item.path, item.source_kind, item.reason)
         assert item.source_kind == "previous_response"
-        assert bool((item.source or {}).get("allow_caller_override"))
+        assert not _param_exposed_to_caller(item), (item.path, item.source_kind, item.reason)
+        assert not bool((item.source or {}).get("allow_caller_override"))
     total = _param(update, "lineTotal")
     assert total.source_kind == "computed"
     assert not _param_exposed_to_caller(total)
