@@ -755,7 +755,8 @@ _LOGIN_HINTS = ("username", "loginname", "account", "loginid", "useraccount")
 # 容易在 _pick_label_key 里被错当 label
 _CONTEXT_ID_HINTS = ("deptid", "orgid", "companyid", "unitid", "tenantid", "teamid",
                       "positionid", "roleid", "groupid", "postid", "deptname",
-                      "orgname", "companyname", "unitname")
+                      "orgname", "companyname", "unitname", "categoryname",
+                      "groupname", "typename", "classname", "parentname")
 
 
 def _pick_label_key(item: dict, value_key: str) -> str:

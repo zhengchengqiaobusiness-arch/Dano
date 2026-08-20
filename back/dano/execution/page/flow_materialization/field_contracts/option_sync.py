@@ -40,7 +40,7 @@ from dano.execution.page.request_identity import (
 )
 
 
-def _ground_saved_page_enums(spec: FlowSpec) -> None:
+def _ground_saved_page_enums(spec: FlowSpec) -> bool:
     """Recover enum contracts from immutable DOM evidence.
 
     Older or partially inferred specs can retain RequestFacts.option_sources
@@ -51,10 +51,20 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
     """
     page_options = _page_enum_options_from_request_facts(spec.request_facts)
     if not page_options:
-        return
+        return False
+    changed = False
 
     def norm(value: Any) -> str:
         return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
+
+    def visible_field_name(value: Any) -> str:
+        """Remove only recorder-added duplicate-label ordinals.
+
+        ``#2`` is collection identity, not part of the visible field name.
+        The suffix is ignored only while joining a page enum to an already
+        bound control; wire identity still comes from that bound evidence.
+        """
+        return re.sub(r"#\d+$", "", str(value or "").strip())
 
     def wire_identity(value: Any) -> str:
         path = str(value or "").strip().removeprefix("request.")
@@ -66,9 +76,9 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             norm(value) for value in (raw.get("field_aliases") or [])
             if norm(value)
         }
-        if not aliases:
+        field_name = norm(visible_field_name(raw.get("field_key")))
+        if not aliases and not field_name:
             return []
-        field_name = norm(raw.get("field_key"))
         observations = [
             item for item in (raw.get("request_value_observations") or [])
             if isinstance(item, dict)
@@ -98,13 +108,26 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
                     norm(param.key), norm(param.label), norm(param.path),
                     norm(wire_identity(param.path).split(".")[-1]),
                 }
-                if not aliases.intersection(param_names):
-                    continue
                 target = {
                     "step_id": step.step_id,
                     "request_id": request_id,
                     "wire_path": param.path,
                 }
+                exact_controls = [
+                    item for item in matching_controls
+                    if request_id == str(item.get("request_id") or "")
+                    and wire_identity(param.path) == wire_identity(item.get("wire_path"))
+                ]
+                if aliases:
+                    if not aliases.intersection(param_names):
+                        continue
+                elif exact_controls:
+                    # A duplicate visible label is safe only after the field
+                    # evidence has already resolved it to one request path.
+                    direct.append(target)
+                    continue
+                else:
+                    continue
                 if any(
                     request_id == str(item.get("request_id") or "")
                     and wire_identity(param.path) == wire_identity(item.get("wire_path"))
@@ -218,7 +241,9 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
                 ]
                 normalized_names = {norm(name) for name in names if str(name or "")}
                 semantic_score = 0
-                if field_aliases:
+                if isinstance(grounded_target, dict):
+                    semantic_score = 12
+                elif field_aliases:
                     if any(norm(alias) in normalized_names for alias in field_aliases if norm(alias)):
                         semantic_score = 10
                 elif strict_control_identity:
@@ -254,6 +279,20 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             item for item in (step.selects or [])
             if _strip_body_prefix(item.path or item.id_path or "") == _strip_body_prefix(param.path)
         ), None)
+        existing_param_source = dict(param.source or {})
+        if (
+            source_kind == "dom"
+            and not mapping_complete
+            and param.source_kind == "api_option"
+            and existing_param_source.get("source_url")
+            and existing_param_source.get("value_key")
+            and existing_param_source.get("label_key")
+            and param.enum_value_map
+        ):
+            # A label-only popup snapshot proves the visible control but not
+            # its wire mapping. It cannot replace an already executable API
+            # contract merely because the SelectBinding was absent or stale.
+            continue
         if (
             existing_binding is not None
             and str(existing_binding.enum_source or "") == "api"
@@ -264,6 +303,12 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             # values. A later incomplete DOM snapshot is display evidence, not
             # authority to erase that stronger renewable source contract.
             continue
+        before_state = (
+            existing_binding.model_dump(mode="json") if existing_binding is not None else None,
+            param.key,
+            param.label,
+            copy.deepcopy(step.sample_inputs),
+        )
         option_map = dict(explicit_map)
         for option in options:
             # A bare string proves only a visible label, not that the backend
@@ -302,6 +347,10 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         binding.options = options
         binding.option_map = option_map or None
         if source_kind == "script_dictionary":
+            source_changed = (
+                _request_path({"url": str(binding.source_url or "")})
+                != _request_path({"url": str(raw.get("source_url") or "")})
+            )
             binding.source_url = str(raw.get("source_url") or "")
             binding.source_method = "GET"
             binding.value_key = "value"
@@ -309,6 +358,15 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             binding.category_key = "dictType"
             binding.category_value = str(raw.get("dict_type") or "")
             binding.enum_source = "api"
+            if source_changed:
+                # Transport identity belongs to the old endpoint. Keeping its
+                # request id while replacing only the URL creates a hybrid
+                # source that never existed in the recording.
+                binding.source_request_id = ""
+                binding.source_headers = {}
+                binding.source_body = None
+                binding.source_content_type = ""
+                binding.source_role = ""
             _hydrate_select_source_contract(spec, binding)
         elif source_kind == "script_static":
             binding.source_url = ""
@@ -339,6 +397,15 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
                 param.label = field_key
                 if old_key in step.sample_inputs and field_key not in step.sample_inputs:
                     step.sample_inputs[field_key] = step.sample_inputs.pop(old_key)
+        after_state = (
+            binding.model_dump(mode="json"),
+            param.key,
+            param.label,
+            step.sample_inputs,
+        )
+        changed = changed or before_state != after_state
+
+    return changed
 
 
 def _page_enum_contract_for_param(

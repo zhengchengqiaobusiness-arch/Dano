@@ -18,6 +18,7 @@ from dano.execution.page.flow_spec_core.models import (
     ParamField,
     RequestAnalysis,
     RequestFact,
+    SelectBinding,
 )
 from dano.execution.page.recording_live import (
     apply_recording_agent_edit,
@@ -579,6 +580,206 @@ def test_reanalysis_invalidates_legacy_false_computed_and_constant_sources() -> 
     assert state.exposed_to_user is True
     assert account.source_kind == "previous_response"
     assert account.source.get("step_id") == detail.step_id
+
+
+def test_reanalysis_rebinds_suffixed_page_choices_to_bound_query_controls() -> None:
+    """Repeated visible labels and preloaded catalogs must not cross-wire enums."""
+    page_id = "page_generic"
+    frame_id = "frame_generic"
+    state_url = "http://generic.invalid/v6/dictionaries/simple-list"
+    owner_url = "http://generic.invalid/v6/principals/simple-list"
+    wrong_url = "http://generic.invalid/v6/inventory/simple-list"
+    state_options = [
+        {"label": "Pending", "value": "10", "dictType": "review_state"},
+        {"label": "Accepted", "value": "20", "dictType": "review_state"},
+    ]
+    owner_rows = [
+        {"id": 7, "displayName": "Avery", "categoryName": "Long contextual A"},
+        {"id": 8, "displayName": "Blake", "categoryName": "Long contextual B"},
+        {"id": 9, "displayName": "Blake", "categoryName": "Long contextual C"},
+    ]
+
+    def option_fact(request_id: str, sequence: int, url: str, rows: list[dict]) -> RequestFact:
+        return RequestFact(
+            request_id=request_id,
+            request_index=sequence,
+            sequence=sequence,
+            method="GET",
+            url=url,
+            path=url.split("generic.invalid", 1)[-1],
+            page_id=page_id,
+            frame_id=frame_id,
+            response_status=200,
+            response_json={"code": 0, "data": rows},
+        )
+
+    wrong_fact = option_fact(
+        "req_wrong", 1, wrong_url,
+        [{"id": 20, "name": "Foreign value"}, {"id": 30, "name": "Other"}],
+    )
+    state_fact = option_fact("req_state", 2, state_url, state_options)
+    owner_fact = option_fact("req_owner", 3, owner_url, owner_rows)
+    owner_repeat_fact = option_fact("req_owner_repeat", 4, owner_url, owner_rows)
+    collision_fact = option_fact(
+        "req_collision", 5, "http://generic.invalid/v6/records/page", [
+            {"referenceId": 7, "displayName": "Avery", "phase": "open"},
+            {"referenceId": 8, "displayName": "Blake", "phase": "closed"},
+            {"referenceId": 10, "displayName": "Foreign", "phase": "open"},
+        ],
+    )
+    search_fact = RequestFact(
+        request_id="req_search",
+        request_index=6,
+        sequence=6,
+        method="GET",
+        url="http://generic.invalid/v6/records?pageNo=1&reviewCode=20&ownerId=7",
+        path="/v6/records",
+        query={"pageNo": "1", "reviewCode": "20", "ownerId": "7"},
+        page_id=page_id,
+        frame_id=frame_id,
+        response_status=200,
+        response_json={"code": 0, "data": {"list": []}},
+    )
+    step = FlowStep(
+        step_id="step_search",
+        method="GET",
+        path=search_fact.path,
+        url=search_fact.url,
+        semantic_role="business_get",
+        source_meta={
+            "request_id": search_fact.request_id,
+            "sequence": search_fact.sequence,
+            "page_id": page_id,
+            "frame_id": frame_id,
+        },
+        params=[
+            ParamField(
+                path="query.reviewCode", key="Review state", label="Review state",
+                value="20", type="enum", wire_type="string", source_kind="api_option",
+                source={
+                    "kind": "api_option", "source_url": wrong_url,
+                    "source_request_id": "req_wrong", "value_key": "id", "label_key": "name",
+                },
+                enum_options=[{"label": "Foreign value", "value": 20}],
+            ),
+            ParamField(
+                path="query.ownerId", key="Owner", label="Owner",
+                value="7", type="number", wire_type="string", source_kind="user_input",
+                source={"kind": "user_input", "actor": "agent"},
+                category="user_param", exposed_to_user=True,
+            ),
+        ],
+        selects=[SelectBinding(
+            path="query.reviewCode",
+            source_url=wrong_url,
+            source_request_id="req_wrong",
+            value_key="id",
+            label_key="name",
+            options=[{"label": "Foreign value", "value": 20}],
+            option_map={"Foreign value": 20},
+            enum_source="api",
+            enum_confirmed=True,
+        )],
+    )
+    spec = FlowSpec(tenant="t", subsystem="generic", steps=[step])
+    spec.request_facts.requests = [
+        wrong_fact, state_fact, owner_fact, owner_repeat_fact, collision_fact, search_fact,
+    ]
+    spec.request_facts.analysis = {
+        request_id: RequestAnalysis(
+            request_id=request_id,
+            role="read_option" if request_id != "req_search" else "business_get",
+            keep=True,
+            confidence=0.95,
+        )
+        for request_id in (
+            "req_wrong", "req_state", "req_owner", "req_owner_repeat", "req_search",
+            "req_collision",
+        )
+    }
+    spec.request_facts.field_evidence = [
+        {
+            "evidence_id": f"field-evidence-state-{index}",
+            "occurrence_id": f"field-occ-state-{index}",
+            "binding_status": "bound",
+            "request_id": "req_search",
+            "wire_path": "query.reviewCode",
+            "label": "Review state",
+            "field_aliases": ["reviewCode"],
+            "control_kind": "select",
+            "axes": ["name", "type"],
+            "editable": True,
+            "op": "snapshot",
+            "page_id": page_id,
+            "frame_id": frame_id,
+            "observed_at": index,
+        }
+        for index in (1, 2)
+    ] + [
+        {
+            "evidence_id": f"field-evidence-owner-{index}",
+            "occurrence_id": f"field-occ-owner-{index}",
+            "binding_status": "bound",
+            "request_id": "req_search",
+            "wire_path": "query.ownerId",
+            "label": "Owner",
+            "field_aliases": ["ownerId"],
+            "control_kind": "select",
+            "axes": ["name", "type"],
+            "editable": True,
+            "op": "snapshot",
+            "page_id": page_id,
+            "frame_id": frame_id,
+            "observed_at": index,
+        }
+        for index in (1, 2)
+    ]
+    spec.request_facts.option_sources = [{
+        "kind": "page_enum_options",
+        "options": {
+            "Review state#2": {
+                "field_key": "Review state#2",
+                "field_aliases": [],
+                "control_kind": "select",
+                "page_id": page_id,
+                "frame_id": frame_id,
+                "action_id": "action_pick_state",
+                "transaction_id": "tx_pick_state",
+                "enum_source": "script_dictionary",
+                "mapping_complete": True,
+                "source_url": state_url,
+                "dict_type": "review_state",
+                "options": state_options,
+            },
+            "Owner#2": {
+                "field_key": "Owner#2",
+                "field_aliases": [],
+                "control_kind": "select",
+                "page_id": page_id,
+                "frame_id": frame_id,
+                "action_id": "action_pick_owner",
+                "transaction_id": "tx_pick_owner",
+                "enum_source": "dom",
+                "mapping_complete": False,
+                "options": [{"label": "Avery"}, {"label": "Blake"}],
+            },
+        },
+    }]
+
+    repaired = sync_flow_spec_models(spec)
+
+    by_path = {param.path: param for param in repaired.steps[0].params}
+    state = by_path["query.reviewCode"]
+    owner = by_path["query.ownerId"]
+    assert state.source_kind == "api_option"
+    assert state.source.get("source_url") == state_url
+    assert state.source.get("source_request_id") == "req_state"
+    assert state.enum_value_map == {"Pending": "10", "Accepted": "20"}
+    assert owner.source_kind == "api_option", owner.model_dump(mode="json")
+    assert owner.source.get("source_url") == owner_url
+    assert owner.source.get("source_request_id") == ""
+    assert set(owner.enum_value_map or {}) == {"Avery", "Blake [8]", "Blake [9]"}
+    assert set((owner.enum_value_map or {}).values()) == {7, 8, 9}
 
 
 def test_reanalysis_restores_exact_option_request_cohort() -> None:

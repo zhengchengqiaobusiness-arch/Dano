@@ -225,7 +225,6 @@ def _sync_saved_semantic_plan_requests(spec: FlowSpec) -> bool:
     }
     if not facts_by_id:
         return False
-    steps_by_id = {step.step_id: step for step in spec.steps}
     request_id_by_step = {
         step.step_id: str((step.source_meta or {}).get("request_id") or "")
         for step in spec.steps
@@ -463,7 +462,13 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
         _materialize_dynamic_array_inputs(spec)
     _apply_query_form_field_contracts(spec)
     _repair_readonly_control_defaults(spec)
-    _ground_saved_page_enums(spec)
+    page_enum_changed = _ground_saved_page_enums(spec)
+    # Saved drafts may already have a stable semantic capability plan while
+    # their field contracts still predate newer recorder evidence rules. If
+    # immutable page facts repaired an enum projection, finish its structural
+    # API-source binding without rewriting already-stable field contracts.
+    if page_enum_changed:
+        _repair_structural_option_bindings(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
     for step in spec.steps:
@@ -558,6 +563,8 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
     server steps instead of freezing an old ``unbound`` result forever.
     """
     evidence = list(getattr(spec.request_facts, "field_evidence", []) or [])
+    if not evidence:
+        return
     unresolved_indexes = [
         index
         for index, item in enumerate(evidence)
@@ -571,11 +578,12 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
             or str(item.get("binding_method") or "").startswith("unique_value_")
         )
     ]
-    if not unresolved_indexes:
-        return
     from dano.execution.page.recording_field_identity import (
         bind_field_evidence,
         canonical_wire_path,
+    )
+    from dano.execution.page.recording_field_selection import (
+        select_field_contract_evidence,
     )
 
     requests: list[dict[str, Any]] = []
@@ -613,18 +621,17 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
             "query": query,
             "role": analysis.role if analysis is not None else meta.get("role") or "",
         })
-    if not requests:
-        return
-    unresolved = [evidence[index] for index in unresolved_indexes]
-    rebound_unresolved = bind_field_evidence(
-        requests,
-        list(spec.request_facts.page_events or []),
-        unresolved,
-        page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
-    )
     rebound = list(evidence)
-    for index, item in zip(unresolved_indexes, rebound_unresolved, strict=True):
-        rebound[index] = item
+    if unresolved_indexes and requests:
+        unresolved = [evidence[index] for index in unresolved_indexes]
+        rebound_unresolved = bind_field_evidence(
+            requests,
+            list(spec.request_facts.page_events or []),
+            unresolved,
+            page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
+        )
+        for index, item in zip(unresolved_indexes, rebound_unresolved, strict=True):
+            rebound[index] = item
     # File controls absent from the request body need already-bound siblings
     # from the same form as ownership evidence.  The normal rebinding pass only
     # recalculates unresolved items, so perform this association once against
@@ -633,7 +640,8 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
         _associate_unsubmitted_file_controls,
     )
 
-    _associate_unsubmitted_file_controls(rebound, requests)
+    if requests:
+        _associate_unsubmitted_file_controls(rebound, requests)
     spec.request_facts.field_evidence = rebound
     for step in spec.steps:
         request_id = str((step.source_meta or {}).get("request_id") or "")
@@ -646,9 +654,20 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
         for param in step.params:
             wire_path = canonical_wire_path(step, param.path)
             matches = [item for item in controls if str(item.get("wire_path") or "") == wire_path]
-            if len(matches) != 1:
+            control = select_field_contract_evidence(matches, wire_path)
+            if control is None:
                 continue
-            control = matches[0]
+            if any(
+                isinstance(item, dict)
+                and item.get("kind") == "page_control"
+                and _strip_body_prefix(str(item.get("request_path") or param.path))
+                == _strip_body_prefix(str(param.path))
+                for item in (param.evidence or [])
+            ):
+                # This evidence was already projected when the spec was first
+                # materialized. Reanalysis must be idempotent; only fill the
+                # historical gap where bound facts never reached the Param.
+                continue
             label = str(control.get("label") or control.get("field") or "").strip()
             if (
                 label
@@ -692,38 +711,49 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                 param.editable = True
                 param.need_human_confirm = False
                 param.reason = "查询页上的可编辑筛选控件；调用方可省略或覆盖录制时的筛选值"
-            if not any(
-                isinstance(item, dict) and item.get("kind") == "page_control"
-                for item in (param.evidence or [])
-            ):
-                param.evidence = [
-                    *(param.evidence or []),
-                    {
-                        "kind": "page_control",
-                        "source": "recorder_dom",
-                        "control_kind": control_kind,
-                        "interacted": str(control.get("op") or "").lower() in {"fill", "select", "pick"},
-                        "request_path": param.path,
-                        "binding_status": "bound",
-                        "required": bool(control.get("required") or control.get("required_observed")),
-                        "surface": str(control.get("surface") or ""),
-                        "in_dialog": bool(control.get("in_dialog")),
-                        "action_id": str(control.get("action_id") or ""),
-                    },
-                ]
+            projected_control = {
+                "kind": "page_control",
+                "source": "recorder_dom",
+                "control_kind": control_kind,
+                "interacted": str(control.get("op") or "").lower() in {"fill", "select", "pick"},
+                "request_path": param.path,
+                "binding_status": "bound",
+                "evidence_id": str(control.get("evidence_id") or ""),
+                "occurrence_id": str(control.get("occurrence_id") or ""),
+                "field_identity_id": str(control.get("field_identity_id") or ""),
+                "field_aliases": list(control.get("field_aliases") or []),
+                "axes": list(control.get("axes") or []),
+                "required": bool(control.get("required") or control.get("required_observed")),
+                "editable": bool(control.get("editable")),
+                "disabled": bool(control.get("disabled")),
+                "read_only": bool(control.get("read_only")),
+                "page_id": str(control.get("page_id") or ""),
+                "frame_id": str(control.get("frame_id") or ""),
+                "surface": str(control.get("surface") or ""),
+                "in_dialog": bool(control.get("in_dialog")),
+                "form_root": str(control.get("form_root") or ""),
+                "action_id": str(control.get("action_id") or ""),
+                "transaction_id": str(control.get("transaction_id") or ""),
+            }
+            param.evidence = [*(param.evidence or []), projected_control]
             if isinstance(control.get("required_observed"), bool):
-                param.evidence = [
-                    item for item in (param.evidence or [])
-                    if not (isinstance(item, dict) and item.get("kind") == "page_required")
-                ]
                 if control["required_observed"]:
-                    param.evidence.append({
-                        "kind": "page_required",
-                        "source": "recorder_dom",
-                        "request_path": param.path,
-                        "binding_status": "bound",
-                        "evidence_id": control.get("evidence_id") or "",
-                    })
+                    if not any(
+                        isinstance(item, dict) and item.get("kind") == "page_required"
+                        for item in (param.evidence or [])
+                    ):
+                        param.evidence.append({
+                            "kind": "page_required",
+                            "source": "recorder_dom",
+                            "request_path": param.path,
+                            "binding_status": "bound",
+                            "evidence_id": control.get("evidence_id") or "",
+                        })
+                else:
+                    param.evidence = [
+                        item for item in (param.evidence or [])
+                        if not (isinstance(item, dict) and item.get("kind") == "page_required")
+                    ]
                 if (
                     not _param_field_manually_edited(param, "required")
                     and not _param_required_agent_classified(param)

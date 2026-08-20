@@ -183,10 +183,34 @@ def _source_owned_by_param(source: dict[str, Any], param: ParamField) -> bool:
 def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
     """Drop false precision when repeated captures share one source contract."""
     facts_by_endpoint: dict[str, list[Any]] = {}
+    facts_by_request_id: dict[str, Any] = {}
     for fact in spec.request_facts.requests or []:
         endpoint = _option_source_contract_endpoint(str(fact.url or fact.path or ""))
         if endpoint and fact.request_id:
             facts_by_endpoint.setdefault(endpoint, []).append(fact)
+            facts_by_request_id[str(fact.request_id)] = fact
+    request_id_by_step_id = {
+        str(step.step_id): str((step.source_meta or {}).get("request_id") or "")
+        for step in spec.steps
+        if step.step_id
+    }
+    exact_request_ids_by_target: dict[str, set[str]] = {}
+    for capability in spec.capabilities or []:
+        exact_request_ids = {
+            str(ref.request_id or "")
+            for ref in capability.request_refs or []
+            if ref.usage == "option_source" and str(ref.request_id or "")
+        }
+        exact_request_ids.update(
+            request_id_by_step_id.get(str(ref.step_id or ""), "")
+            for ref in capability.request_refs or []
+            if ref.usage == "option_source" and str(ref.step_id or "")
+        )
+        exact_request_ids.discard("")
+        for target_step_id in capability.step_ids or []:
+            exact_request_ids_by_target.setdefault(str(target_step_id), set()).update(
+                exact_request_ids
+            )
     for step in spec.steps:
         step_meta = step.source_meta or {}
         for param in step.params or []:
@@ -196,6 +220,21 @@ def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
             request_id = str(source.get("source_request_id") or "")
             endpoint = _option_source_contract_endpoint(str(source.get("source_url") or ""))
             if not request_id or not endpoint or _independent_option_request_ids(param):
+                continue
+            exact_same_endpoint = {
+                exact_request_id
+                for exact_request_id in exact_request_ids_by_target.get(str(step.step_id), set())
+                if exact_request_id in facts_by_request_id
+                and _option_source_contract_endpoint(str(
+                    facts_by_request_id[exact_request_id].url
+                    or facts_by_request_id[exact_request_id].path
+                    or ""
+                )) == endpoint
+            }
+            if exact_same_endpoint == {request_id}:
+                # The capability plan narrowed this endpoint to one recorded
+                # request. Repeated observations outside that exact cohort do
+                # not make the selected source identity ambiguous.
                 continue
             candidates = []
             for fact in facts_by_endpoint.get(endpoint, []):
@@ -435,6 +474,12 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     def normalized(value: Any) -> str:
         return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
 
+    def normalized_control_name(value: Any) -> str:
+        # Recorder duplicate-label ordinals distinguish snapshot entries, not
+        # business fields.  They may be ignored only for a semantic join that
+        # is subsequently proven by one bound control path and option rows.
+        return normalized(re.sub(r"#\d+$", "", str(value or "").strip()))
+
     def option_labels(raw: dict[str, Any]) -> set[str]:
         labels = set()
         for option in list(raw.get("options") or raw.get("values") or []):
@@ -504,9 +549,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             if target_meta.get("page_id") and raw.get("page_id") and str(target_meta.get("page_id")) != str(raw.get("page_id")):
                 continue
             raw_names = {
-                normalized(str(name).split(":", 1)[-1])
+                normalized_control_name(str(name).split(":", 1)[-1])
                 for name in (raw_key, raw.get("field_key"), *(raw.get("field_aliases") or []))
-                if normalized(str(name).split(":", 1)[-1])
+                if normalized_control_name(str(name).split(":", 1)[-1])
             }
             contract = {
                 "raw": raw,
@@ -620,8 +665,20 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         records.append({"label": public_label, "value": raw_value})
                     if page_contract:
                         record_labels = {label for label, _ in raw_records}
-                        required_overlap = min(2, len(visible_labels))
-                        if len(record_labels & visible_labels) < required_overlap:
+                        raw_page_contract = page_contract.get("raw") or {}
+                        snapshot_truncated = bool(
+                            raw_page_contract.get("snapshot_truncated")
+                            or raw_page_contract.get("truncated")
+                        )
+                        if snapshot_truncated:
+                            required_overlap = min(2, len(visible_labels))
+                            if len(record_labels & visible_labels) < required_overlap:
+                                continue
+                        elif record_labels != visible_labels:
+                            # A complete control snapshot is an exact option-set
+                            # contract. Partial label overlap is common in
+                            # unrelated business lists and cannot establish an
+                            # option-source relationship.
                             continue
                         if selected_label and (
                             not any(
@@ -672,20 +729,30 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             raw = page_contract.get("raw") or {}
             page_id = str(raw.get("page_id") or "")
             frame_id = str(raw.get("frame_id") or "")
-            page_tx = str(raw.get("trigger_transaction_id") or raw.get("transaction_id") or "")
-            page_action = str(raw.get("trigger_action_id") or raw.get("action_id") or "")
+            # A select's action/transaction identifies the caller's selection,
+            # not necessarily the request that loaded its candidates. Many
+            # applications preload option catalogs before the popup is opened.
+            # Enforce transaction/action only when capture explicitly marked
+            # them as source-request identity.
+            page_tx = str(raw.get("source_transaction_id") or "")
+            page_action = str(raw.get("source_action_id") or "")
             ownership_scope = {
                 "page_id": page_id or target_page,
                 "frame_id": frame_id or target_frame,
-                "transaction_id": page_tx,
-                "action_id": page_action,
+                **({"transaction_id": page_tx} if page_tx else {}),
+                **({"action_id": page_action} if page_action else {}),
             }
         if not request_identity_matches(
             {key: value for key, value in ownership_scope.items() if value},
             source,
         ):
             return False
-        if semantic_match:
+        if semantic_match or bool((page_contract or {}).get("semantic_match")):
+            # Field-local page evidence identifies the control. The caller's
+            # row-contract check still has to prove that this candidate API
+            # supplies the same visible option set and selected wire value.
+            # This permits catalogs preloaded before the control interaction
+            # without accepting an unrelated same-value request.
             return True
         same_action_context = bool(
             source_action
@@ -776,7 +843,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 )
             )
             rebindable_option = bool(
-                param.source_kind == "api_option" and has_screenshot_choice(param)
+                param.source_kind == "api_option" and has_recorded_choice(param)
             ) or bool(
                 param.source_kind == "page_enum"
                 and (
