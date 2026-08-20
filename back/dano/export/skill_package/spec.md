@@ -1,36 +1,57 @@
 # Self-contained skill package specification
 
 A package is a directory that runs against the recorded business API without a
-Dano runtime or an LLM.
+Dano runtime or an LLM. It follows Agent Skill progressive disclosure:
+`SKILL.md` is the only always-read entry; `scripts/` and `references/` load on demand.
 
 ## Required layout
 
 ```text
 <package>/
   SKILL.md
-  reference.md
   scripts/
     client.py
     <capability>.py
-    verify_<capability>.py
+    verify_<capability>.py   # only when the write operation requires verify
+    format_list.py
+    wire_format.py
+  references/
+    CONTRACT.json
+    OPERATIONS.md
 ```
 
+Do not pack `references/generator-guides/`. Those files are generator-internal
+and must not enter a consumer Skill.
+
 `SKILL.md` must have YAML frontmatter with non-empty `name` and `description`.
-Its body must contain the sections `Transport`, `Preconditions`, `Steps`,
-`Branch exit`, and `Pitfalls`. Every item in `Steps` must state a `Done when`
+The description must say what the Skill does, when to use it, and when not to
+use it. The body must contain `适用场景`, `不适用场景`, `操作路由`, `操作步骤`,
+`失败处理`, and `安全边界`. Every item in `操作步骤` must state a `Done when`
 condition.
 
-`reference.md` must contain an `API chain` section. Every described chain must
-name its executor-generated `verification_id`; a chain that exhausted automatic
-verification must be marked `unverified` instead.
+`references/OPERATIONS.md` must contain an `API chain` section. Every described
+chain must name its executor-generated `verification_id`; a chain that exhausted
+automatic verification must be marked `unverified` instead. API chain lines
+must use method + path only; recorded query strings and sample IDs stay out.
+
+`SKILL.md` `name` is a short business slug (max 64 characters), not the export
+folder name. `description` and `适用场景` name the packed operations; they must
+not reuse a recording title or “本页面的实际操作流程” dump.
+
+Scripts keep path + query/body templates. They must not embed recorded sample
+query strings in `url`/`path`, must not pack `sample_inputs` or schema
+`default` values, and must not keep recorded body literals. Write operations
+get `verify_*.py` only when executor-owned `fact_checks` exist. A success rule
+may only use ordinary business-success values such as `0` / `200`.
 
 ## Script contract
 
 `client.py` owns base URL, authentication assembly, HTTP JSON transport, success
-rules, and settle waits. Each capability has one command script and one matching
-`verify_<capability>.py` read-back script. Every Python script must accept
-`--help`, must not require Dano at runtime, and must print machine-readable JSON
-for operational results. Runtime dependencies are limited to Python and httpx.
+rules, and settle waits. Each capability has one command script. Write
+capabilities that require read-back also get `verify_<capability>.py`. Every
+Python script must accept `--help`, must not require Dano at runtime, and must
+print machine-readable JSON for operational results. Runtime dependencies are
+limited to Python and httpx.
 
 Credentials come from environment variables or the documented local session
 cache. A package must never contain a recorded token, cookie, password, session,
@@ -49,4 +70,6 @@ When a recording result is exported through manual Skill planning, `references/C
 
 Public scripts and `SKILL.md` may only name selected capabilities. Unused capabilities stay in the original FlowSpec but must not appear as packed scripts. Packages without these fields remain valid single-capability exports.
 
-A planned `SKILL.md` still requires `Transport`, `Preconditions`, `Steps`, `Branch exit`, `Pitfalls`, and a `Done when` for every step. It additionally describes business purpose, when to use, routing, bindings, confirmation, verification, failure handling, and one example per valid route.
+A planned `SKILL.md` lists every packed operation in `操作路由`. Combination
+routes appear only when a confirmed binding exists. Standalone leftover
+capabilities stay as operations; they must not become `solo_*` routes.

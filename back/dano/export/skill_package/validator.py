@@ -11,7 +11,8 @@ import sys
 import yaml
 
 
-_REQUIRED_SKILL_SECTIONS = ("Transport", "Preconditions", "Steps", "Branch exit", "Pitfalls")
+_REQUIRED_SKILL_SECTIONS = ("适用场景", "不适用场景", "操作路由", "操作步骤", "失败处理", "安全边界")
+_WORKFLOW_SECTION = "操作步骤"
 _VERIFICATION_ID_RE = re.compile(
     r"\bverification_id\s*[:=]?\s*[`\[]?(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
     re.I,
@@ -70,7 +71,7 @@ def _check_skill(path: Path, text: str, issues: list[dict]) -> None:
     for title in _REQUIRED_SKILL_SECTIONS:
         if not _section(text, title):
             issues.append(_issue("skill_section", f"SKILL.md requires section: {title}", path))
-    steps = _section(text, "Steps")
+    steps = _section(text, _WORKFLOW_SECTION)
     step_markers = re.findall(r"(?m)^(?:###\s+|\s*\d+[.)]\s+)", steps)
     done_when = re.findall(r"(?im)\bDone\s+when\s*:", steps)
     if steps and (not done_when or len(done_when) < max(1, len(step_markers))):
@@ -84,14 +85,13 @@ def _check_reference(
     *,
     missing_as_warnings: bool = False,
 ) -> None:
-    for title in ("Business hard rules", "Fallback browser steps"):
-        if not _section(text, title):
-            issues.append(_issue(
-                "reference_section",
-                f"reference.md requires section: {title}",
-                path,
-                warning=missing_as_warnings,
-            ))
+    if not _section(text, "Business hard rules"):
+        issues.append(_issue(
+            "reference_section",
+            "reference.md requires section: Business hard rules",
+            path,
+            warning=missing_as_warnings,
+        ))
     chain = _section(text, "API chain")
     if not chain:
         issues.append(_issue(
@@ -117,6 +117,12 @@ def _check_reference(
                 path,
                 warning=missing_as_warnings,
             ))
+        if "?" in line:
+            issues.append(_issue(
+                "recorded_query",
+                f"API chain must not include recorded query strings: {line}",
+                path,
+            ))
 
 
 def _api_chain_lines(text: str) -> list[str]:
@@ -139,9 +145,13 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
     ]
     if not capabilities:
         issues.append(_issue("missing_capability", "at least one capability script is required", scripts, warning=missing_as_warnings))
+    required_verify = _required_verify_scripts(scripts.parent)
     for capability in capabilities:
         verify = scripts / f"verify_{capability.name}"
-        if not verify.is_file():
+        if required_verify is None:
+            if not verify.is_file():
+                issues.append(_issue("missing_verify", f"missing verifier for {capability.name}", verify))
+        elif verify.name in required_verify and not verify.is_file():
             issues.append(_issue("missing_verify", f"missing verifier for {capability.name}", verify))
     for script in python_scripts:
         source = _read(script, issues, missing_as_warnings=False)
@@ -170,6 +180,31 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()[-500:]
             issues.append(_issue("script_help", f"--help exited {completed.returncode}: {detail}", script))
+
+
+def _required_verify_scripts(root: Path) -> set[str] | None:
+    """Return verify script names that CONTRACT marks as required, or None for legacy packages."""
+    contract_path = root / "references" / "CONTRACT.json"
+    if not contract_path.is_file():
+        return None
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(contract, dict) or not isinstance(contract.get("capabilities"), list):
+        return None
+    required: set[str] = set()
+    saw_flag = False
+    for item in contract["capabilities"]:
+        if not isinstance(item, dict):
+            continue
+        if "requires_verify" in item:
+            saw_flag = True
+        if item.get("requires_verify"):
+            verify = Path(str(item.get("verify_script") or "")).name
+            if verify:
+                required.add(verify)
+    return required if saw_flag else None
 
 
 def _script_slug(value: str) -> str:
@@ -220,12 +255,6 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
         route_id = str(route.get("route_id") or "").strip()
         if route_id:
             route_ids.append(route_id)
-            if skill_text and route_id not in skill_text:
-                issues.append(_issue(
-                    "planning_route_mismatch",
-                    f"SKILL.md is missing planned route {route_id}",
-                    Path("SKILL.md"),
-                ))
         for cap_id in route.get("capability_sequence") or []:
             if str(cap_id) not in selected and selected:
                 issues.append(_issue(
@@ -261,6 +290,21 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
                     f"SKILL.md must not reference unused script scripts/{hint}.py",
                     Path("SKILL.md"),
                 ))
+    for item in contract.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        labels = [
+            str(item.get("name") or "").strip(),
+            str(item.get("title") or "").strip(),
+            Path(str(item.get("script") or "")).stem,
+        ]
+        labels = [label for label in labels if label]
+        if labels and skill_text and not any(label in skill_text for label in labels):
+            issues.append(_issue(
+                "planning_operation_mismatch",
+                f"SKILL.md is missing packed operation {labels[0]}",
+                Path("SKILL.md"),
+            ))
     if selected:
         support = {"client.py", "wire_format.py", "format_list.py"}
         scripts_dir = root / "scripts"
@@ -356,7 +400,7 @@ def validate_skill_documents(
     else:
         _check_skill(skill_path, skill_md, issues)
     if not isinstance(reference_md, str) or not reference_md.strip():
-        issues.append(_issue("missing_file", "missing required file: reference.md", reference_path))
+        issues.append(_issue("missing_file", "missing required file: reference.md", reference_path, warning=True))
     else:
         _check_reference(reference_path, reference_md, issues)
         chain_lines = _api_chain_lines(reference_md)
@@ -403,18 +447,36 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
     if not root.is_dir():
         return {"ok": False, "issues": [_issue("missing_package", "package directory does not exist", root)]}
     skill_path = root / "SKILL.md"
+    operations_path = root / "references" / "OPERATIONS.md"
     reference_path = root / "reference.md"
     skill = _read(skill_path, issues, missing_as_warnings=missing_as_warnings)
-    reference = _read(reference_path, issues, missing_as_warnings=missing_as_warnings)
+    operations = _read(operations_path, issues, missing_as_warnings=True) if operations_path.is_file() else ""
+    reference = ""
+    if not operations and reference_path.is_file():
+        reference = _read(reference_path, issues, missing_as_warnings=missing_as_warnings)
     if skill:
         _check_skill(skill_path, skill, issues)
-    if reference:
+    chain_source = operations_path if operations else reference_path
+    chain_text = operations or reference
+    if chain_text:
         _check_reference(
-            reference_path,
-            reference,
+            chain_source,
+            chain_text,
             issues,
             missing_as_warnings=missing_as_warnings,
         )
+    elif not missing_as_warnings:
+        issues.append(_issue(
+            "missing_file",
+            "missing references/OPERATIONS.md",
+            operations_path,
+        ))
+    if (root / "references" / "generator-guides").exists():
+        issues.append(_issue(
+            "generator_guides_leaked",
+            "references/generator-guides must not appear in a consumer Skill package",
+            root / "references" / "generator-guides",
+        ))
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
     _check_credentials(root, issues)
     if skill:

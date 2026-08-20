@@ -479,8 +479,9 @@ def test_dynamic_plan_keeps_all_mentioned_capabilities() -> None:
     )
     assert checked.ok, checked.errors
     used = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
-    assert used >= {"cap_query", "cap_submit", "cap_delete"}
-    assert any(route.route_id.startswith("solo_") for route in plan.routes)
+    assert set(plan.selected_capability_ids) >= {"cap_query", "cap_submit", "cap_delete"}
+    assert "cap_query" in used
+    assert not any(route.route_id.startswith("solo_") for route in plan.routes)
 
 
 def test_fixed_plan_without_relation_uses_user_inputs() -> None:

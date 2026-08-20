@@ -10,9 +10,11 @@ from uuid import uuid4
 import pytest
 
 from dano.export.skill_package.renderer import (
+    _capability_plans,
     _contract_planning_fields,
     _fallback_skill_md,
     _filter_plans_for_export,
+    _operations_md,
     _skill_plan_payload,
     package_slug,
 )
@@ -100,11 +102,11 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
     ]
     skill_md = _fallback_skill_md(skill, package_slug(skill.skill_id), plans, None)
     (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
-    (root / "reference.md").write_text(
+    operations = (
         "## Business hard rules\n\n- none\n\n## Fallback browser steps\n\n- none\n\n"
-        "## API chain\n\n- GET /oa/leave/page verification_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\n",
-        encoding="utf-8",
+        "## API chain\n\n- GET /oa/leave/page verification_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\n"
     )
+    (references / "OPERATIONS.md").write_text(operations, encoding="utf-8")
     contract = {
         "protocol": "dano.skill_package.contract.v1",
         "skill": {"id": skill.skill_id, "name": package_slug(skill.skill_id)},
@@ -308,6 +310,94 @@ async def test_repeated_identical_export_is_idempotent(tmp_path: Path) -> None:
     assert publishes["count"] == 1
     assert second.used_capabilities
     assert {item.get("capability_id") for item in second.used_capabilities} >= {"cap_query", "cap_submit"}
+
+
+@pytest.mark.asyncio
+async def test_reexport_deletes_previous_package_and_stale_stage(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    first = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec),
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path), business_description="查询待办并提交一条"),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert first.status == "exported"
+    old = Path(first.export_path)
+    (old / "STALE.txt").write_text("old-output", encoding="utf-8")
+    stale_stage = old.parent / f".{old.name}-leftover"
+    stale_stage.mkdir()
+    (stale_stage / "tmp").write_text("tmp", encoding="utf-8")
+
+    second = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec, extra={"skill_id": first.skill_id, "export_path": first.export_path}),
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path), business_description="只查询待办，不要提交"),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert second.status == "exported"
+    assert second.idempotent is False
+    assert Path(second.export_path).is_dir()
+    assert not (Path(second.export_path) / "STALE.txt").exists()
+    assert not stale_stage.exists()
+
+
+@pytest.mark.asyncio
+async def test_stale_package_is_rewritten_instead_of_idempotent(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    result_id = uuid4()
+    request = _request(out_dir=str(tmp_path))
+    first = await export_recording_skill(
+        result_id=result_id,
+        body=_verified_body(spec),
+        tenant="tenant",
+        request=request,
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    (Path(first.export_path) / "SKILL.md").write_text(
+        "---\nname: stale\ndescription: old\n---\n# stale\n",
+        encoding="utf-8",
+    )
+    from dano.onboarding.skill_generation.models import generation_request_fingerprint
+
+    next_body = _verified_body(spec, extra={
+        "published": True,
+        "skill_id": first.skill_id,
+        "skill_version": first.version,
+        "skill_plan": first.plan,
+        "skill_export_status": "exported",
+        "export_path": first.export_path,
+    })
+    next_body["skill_request_fingerprint"] = generation_request_fingerprint(
+        result_id=str(result_id),
+        stage_seven_fingerprint=next_body["stage_seven_fingerprint"],
+        request=request,
+    )
+    second = await export_recording_skill(
+        result_id=result_id,
+        body=next_body,
+        tenant="tenant",
+        request=request,
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert second.status == "exported"
+    assert second.idempotent is False
+    text = (Path(second.export_path) / "SKILL.md").read_text(encoding="utf-8")
+    assert "## 适用场景" in text
+    assert "query_leave" in text
 
 
 @pytest.mark.asyncio
@@ -603,14 +693,18 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
          "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     ]
     text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, None)
-    assert "## Business purpose" in text
-    assert "## When to use" in text
-    assert "## Planning or routing rules" in text
-    assert "## Examples" in text
-    for route in plan.routes:
-        assert route.route_id in text
-        assert route.examples[0].user_request in text
-    assert "Transport" in text and "Preconditions" in text and "Pitfalls" in text
+    assert "## 适用场景" in text
+    assert "## 不适用场景" in text
+    assert "## 操作路由" in text
+    assert "## 操作步骤" in text
+    assert "## 失败处理" in text
+    assert "## 安全边界" in text
+    assert "generator-guides" not in text
+    assert "solo_" not in text
+    assert "查询待办" in text
+    assert "提交请假" in text
+    assert "python scripts/query_leave.py" in text
+    assert "python scripts/submit_leave.py" in text
     issues: list[dict] = []
     _check_skill(Path("SKILL.md"), text, issues)
     assert issues == []
@@ -696,3 +790,137 @@ def test_credentials_are_not_written_to_skill_package(tmp_path: Path) -> None:
     assert result["ok"], result["issues"]
     leaked = [issue for issue in result["issues"] if issue["code"] == "credential_leak"]
     assert leaked == []
+
+
+def test_export_strips_recorded_samples_and_writes_business_triggers() -> None:
+    skill = SimpleNamespace(
+        skill_id="admin.erp_sale",
+        title="点狮ERP销售订单操作能力录制",
+        action="action_abc",
+        risk_level="",
+        call_metadata={
+            "skill_plan": {
+                "summary": "本页面的实际操作流程：搜索/筛选销售订单 → 新增销售订单。",
+                "trigger_phrases": ["点狮ERP销售订单操作能力录制"],
+                "selected_capability_ids": ["cap_search", "cap_create"],
+                "routes": [],
+                "planning_mode": "dynamic",
+            }
+        },
+        api_request={
+            "steps": [
+                {
+                    "step_id": "s1",
+                    "method": "GET",
+                    "url": "http://admin.example.com/admin-api/erp/sale-order/page?pageNo=1&no=1&customerId=8",
+                    "path": "/admin-api/erp/sale-order/page?pageNo=1&no=1&customerId=8",
+                    "url_template": "",
+                    "query_template": {
+                        "pageNo": "1",
+                        "pageSize": "10",
+                        "no": "{{订单单号}}",
+                        "customerId": "{{客户}}",
+                        "outStatus": "0",
+                    },
+                    "params": ["订单单号", "客户"],
+                    "success_rule": {"field": "code", "ok_values": ["0"]},
+                    "sample_inputs": {"订单单号": "1", "客户": "8"},
+                },
+                {
+                    "step_id": "s2",
+                    "method": "POST",
+                    "url": "http://admin.example.com/admin-api/erp/sale-order/create",
+                    "path": "/admin-api/erp/sale-order/create",
+                    "body_template": {
+                        "customerId": "{{customerId}}",
+                        "discountPrice": 117105,
+                        "items": "{{items}}",
+                    },
+                    "success_rule": {"field": "code", "ok_values": ["1020201001"]},
+                    "sample_inputs": {"customerId": 8},
+                },
+            ],
+            "capabilities": [
+                {
+                    "capability_id": "cap_search",
+                    "name": "search-sale-orders",
+                    "title": "搜索/筛选销售订单",
+                    "kind": "query",
+                    "compiled_step_ids": ["s1"],
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "订单单号": {"type": "string"},
+                            "客户": {"type": "string"},
+                        },
+                        "required": [],
+                    },
+                },
+                {
+                    "capability_id": "cap_create",
+                    "name": "create-sale-order",
+                    "title": "新增销售订单",
+                    "kind": "create",
+                    "compiled_step_ids": ["s2"],
+                    "requires_human_confirm": True,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "customerId": {"type": "string"},
+                            "post_sale_order_create_body_totalPrice": {
+                                "type": "number",
+                                "default": -106555,
+                            },
+                            "items": {"type": "array"},
+                        },
+                        "required": ["customerId", "items"],
+                    },
+                },
+            ],
+        },
+    )
+    plans = _capability_plans(skill, None, skill.api_request)
+    search = next(item for item in plans if item["name"] == "search-sale-orders")
+    create = next(item for item in plans if item["name"] == "create-sale-order")
+    assert "?" not in search["steps"][0]["path"]
+    assert "?" not in search["steps"][0]["url"]
+    assert "sample_inputs" not in search["steps"][0]
+    assert "outStatus" not in (search["steps"][0].get("query_template") or {})
+    assert search["steps"][0]["query_template"]["no"] == "{{订单单号}}"
+    assert create["steps"][0]["body_template"]["discountPrice"] == "{{discountPrice}}"
+    assert create["steps"][0]["success_rule"]["ok_values"] == ["0"]
+    assert create["requires_verify"] is False
+    assert "post_sale_order_create_body_totalPrice" not in create["input_schema"]["properties"]
+    assert "totalPrice" in create["input_schema"]["properties"]
+    assert "default" not in create["input_schema"]["properties"]["totalPrice"]
+
+    text = _fallback_skill_md(skill, "dano-admin-erp-package", plans, None)
+    applicable = text.split("## 适用场景", 1)[1].split("##", 1)[0]
+    assert "点狮ERP销售订单操作能力录制" not in applicable
+    assert "用户要搜索/筛选销售订单时使用" in text
+    assert "用户要新增销售订单时使用" in text
+    assert "本页面的实际操作流程" not in text
+    assert "name: sale-order-operations" in text
+
+    operations = _operations_md(skill, plans, None)
+    assert "Fallback browser" not in operations
+    assert "customerId=8" not in operations
+    assert "?pageNo" not in operations
+    assert "1020201001" not in operations
+
+
+def test_dynamic_plan_skips_recording_title_triggers() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="点狮ERP销售订单操作能力录制",
+            business_description="本页面的实际操作流程：查询待办 → 提交请假。用户可按业务需要执行其中一项或多项操作。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-copy",
+    )
+    assert all("录制" not in item for item in plan.trigger_phrases)
+    assert "本页面的实际操作流程" not in plan.summary
+    assert not any(route.route_id.startswith("solo_") for route in plan.routes)

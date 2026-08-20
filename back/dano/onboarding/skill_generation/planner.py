@@ -61,6 +61,18 @@ _OPTION_HINTS = ("选项", "字典", "下拉", "候选")
 _SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
 _LOOKUP_HINTS = ("回查", "确认提交", "确认成功", "再查询", "查询状态")
 _SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
+_RECORDING_COPY_MARKERS = ("本页面的实际操作流程", "能力录制", "录制结果", "阶段1")
+
+
+def _is_recording_copy(value: Any) -> bool:
+    text = str(value or "")
+    return any(marker in text for marker in _RECORDING_COPY_MARKERS)
+
+
+def _operation_route_id(cap: FlowCapability) -> str:
+    raw = str(cap.name or capability_ref(cap) or "operation")
+    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
+    return f"op_{slug or capability_ref(cap)}"
 
 
 def _text(request: SkillGenerationRequest) -> str:
@@ -346,56 +358,45 @@ def propose_deterministic_plan(
                 request=request,
             ))
         if writes:
-            write = writes[0]
-            write_direct = _append_lookup([write], queries, text)
-            routes.append(_route(
-                route_id="write_direct",
-                name="直接提交",
-                when_to_use="用户已经提供完整提交字段，不需要先查询",
-                sequence=write_direct,
-                bindings=[],
-                request=request,
-                extra_preconditions=(
-                    ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
-                    if len(write_direct) > 1
-                    else None
-                ),
-            ))
-            if queries:
-                bindings = _relation_pair(spec, queries[0], write)
-                if bindings:
-                    routes.append(_route(
-                        route_id="query_then_write",
-                        name="查询后提交",
-                        when_to_use="需要先查询记录，再对选中记录执行提交",
-                        sequence=_append_lookup([queries[0], write], queries, text),
-                        bindings=bindings,
-                        request=request,
-                    ))
-            if options:
-                bindings = _relation_pair(spec, options[0], write)
-                if bindings:
-                    routes.append(_route(
-                        route_id="option_then_write",
-                        name="选项后提交",
-                        when_to_use="提交字段需要从选项中选择",
-                        sequence=_append_lookup([options[0], write], queries, text),
-                        bindings=bindings,
-                        request=request,
-                    ))
-        used_in_routes = {cap_id for route in routes for cap_id in route.capability_sequence}
-        leftovers = [cap for cap in selected if capability_ref(cap) not in used_in_routes]
-        for cap in leftovers:
-            cap_id = capability_ref(cap)
-            title = cap.title or cap.name or cap_id
-            routes.append(_route(
-                route_id=f"solo_{cap_id}",
-                name=title,
-                when_to_use=f"用户要求执行「{title}」，不要串联其他未确认关系的能力",
-                sequence=[cap],
-                bindings=[],
-                request=request,
-            ))
+            if len(writes) == 1:
+                write = writes[0]
+                write_direct = _append_lookup([write], queries, text)
+                routes.append(_route(
+                    route_id="write_direct",
+                    name="直接提交",
+                    when_to_use="用户已经提供完整提交字段，不需要先查询",
+                    sequence=write_direct,
+                    bindings=[],
+                    request=request,
+                    extra_preconditions=(
+                        ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
+                        if len(write_direct) > 1
+                        else None
+                    ),
+                ))
+            for write in writes:
+                if queries:
+                    bindings = _relation_pair(spec, queries[0], write)
+                    if bindings:
+                        routes.append(_route(
+                            route_id="query_then_write" if len(writes) == 1 else f"query_then_{capability_ref(write)}",
+                            name=f"查询后{write.title or write.name}",
+                            when_to_use=f"需要先查询记录，再对选中记录执行「{write.title or write.name}」",
+                            sequence=_append_lookup([queries[0], write], queries, text),
+                            bindings=bindings,
+                            request=request,
+                        ))
+                if options:
+                    bindings = _relation_pair(spec, options[0], write)
+                    if bindings:
+                        routes.append(_route(
+                            route_id="option_then_write" if len(writes) == 1 else f"option_then_{capability_ref(write)}",
+                            name=f"选项后{write.title or write.name}",
+                            when_to_use=f"「{write.title or write.name}」字段需要从选项中选择",
+                            sequence=_append_lookup([options[0], write], queries, text),
+                            bindings=bindings,
+                            request=request,
+                        ))
         if not routes:
             routes.append(_route(
                 route_id="single",
@@ -405,22 +406,51 @@ def propose_deterministic_plan(
                 bindings=[],
                 request=request,
             ))
+        existing_singles = {
+            route.capability_sequence[0]
+            for route in routes
+            if len(route.capability_sequence) == 1
+        }
+        for cap in selected:
+            cap_id = capability_ref(cap)
+            if cap_id in existing_singles:
+                continue
+            routes.append(_route(
+                route_id=_operation_route_id(cap),
+                name=cap.title or cap.name or cap_id,
+                when_to_use=f"用户要{cap.title or cap.name}",
+                sequence=[cap],
+                bindings=[],
+                request=request,
+            ))
+            existing_singles.add(cap_id)
 
-    used_ids = {cap_id for route in routes for cap_id in route.capability_sequence}
-    selected = [cap for cap in selected if capability_ref(cap) in used_ids]
+    if request.planning_mode == PlanningMode.FIXED:
+        used_ids = {cap_id for route in routes for cap_id in route.capability_sequence}
+        dropped = [cap for cap in selected if capability_ref(cap) not in used_ids]
+        selected = [cap for cap in selected if capability_ref(cap) in used_ids]
+        unused.extend(
+            UnusedCapability(
+                capability_id=capability_ref(cap),
+                name=cap.name,
+                title=cap.title or cap.name,
+                reason="已规划路线未使用该能力",
+            )
+            for cap in dropped
+            if capability_ref(cap) not in {item.capability_id for item in unused}
+        )
+    selected_ids = {capability_ref(cap) for cap in selected}
     unused.extend(
         UnusedCapability(
             capability_id=capability_ref(cap),
             name=cap.name,
             title=cap.title or cap.name,
-            reason="已规划路线未使用该能力",
+            reason="业务描述未要求该能力",
         )
-        for cap in [
-            cap for cap in spec.capabilities
-            if (capability_ref(cap) in verified_ids or cap.name in verified_ids)
-            and capability_ref(cap) not in used_ids
-        ]
-        if capability_ref(cap) not in {item.capability_id for item in unused}
+        for cap in spec.capabilities
+        if (capability_ref(cap) in verified_ids or cap.name in verified_ids)
+        and capability_ref(cap) not in selected_ids
+        and capability_ref(cap) not in {item.capability_id for item in unused}
     )
     safety = [
         "只使用当前页面已识别能力，不得发明字段、接口或输出。",
@@ -429,11 +459,24 @@ def propose_deterministic_plan(
     ]
     if request.forbidden_actions:
         safety.append(f"禁止或限制：{request.forbidden_actions}")
+    triggers = [f"用户要{cap.title or cap.name}时使用" for cap in selected]
+    triggers.extend(
+        str(item).strip()
+        for item in request.example_requests
+        if str(item).strip() and not _is_recording_copy(item)
+    )
+    if request.title and not _is_recording_copy(request.title):
+        title_trigger = str(request.title).strip()
+        if title_trigger and title_trigger not in triggers:
+            triggers.insert(0, f"用户要{title_trigger}时使用")
+    summary = request.business_description.strip()
+    if _is_recording_copy(summary):
+        summary = "、".join(cap.title or cap.name for cap in selected)
     return SkillPlan(
         source_flow_fingerprint=source_flow_fingerprint,
         planning_mode=request.planning_mode,
-        summary=request.business_description.strip() or (selected[0].title if selected else ""),
-        trigger_phrases=[request.title] + list(request.example_requests),
+        summary=summary or (selected[0].title if selected else ""),
+        trigger_phrases=triggers,
         selected_capability_ids=[capability_ref(cap) for cap in selected],
         unused_capabilities=unused,
         routes=routes,
@@ -499,6 +542,8 @@ async def _llm_propose(
             "组合路线必须有已确认 bindings，不得按字段同名猜测",
             "不要单独生成写后查询路线；回查应追加到写路线末尾并使用 query_before/submit_selected/query_after",
             "同一能力多次调用必须有独立 step_ids，绑定必须带 from_step/to_step",
+            "不要生成 solo_ 路线；未进入组合路线的能力仍留在 selected_capability_ids，作为独立操作",
+            "多写能力时不要只为第一个写能力生成 write_direct",
         ],
         "request": request.model_dump(mode="json"),
         "source_flow_fingerprint": source_flow_fingerprint,

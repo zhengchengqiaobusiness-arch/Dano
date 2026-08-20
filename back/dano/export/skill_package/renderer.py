@@ -16,12 +16,6 @@ import structlog
 
 from dano.infra.run_logging import emit_run_exception, note_run_fact
 
-from dano.export.agent_skills import (
-    _configured_reference_dir,
-    _load_reference_markdown,
-    _validate_reference_markdown,
-    _write_generation_guides,
-)
 from dano.export.skill_package.validator import (
     flow_spec_unverified_capability_names,
     flow_spec_verification_ids,
@@ -223,7 +217,7 @@ def _safe_step(step: dict) -> dict:
     }
     projected = {key: step.get(key) for key in keep if step.get(key) is not None}
     projected["selects"] = [
-        {
+        _sanitize_select({
             key: item.get(key)
             for key in (
                 "param", "path", "option_map", "multi", "element_template",
@@ -232,10 +226,256 @@ def _safe_step(step: dict) -> dict:
                 "category_value", "id_path",
             )
             if item.get(key) is not None
-        }
+        })
         for item in step.get("selects") or [] if isinstance(item, dict)
     ]
-    return _scrub(projected)
+    return _sanitize_export_step(_scrub(projected))
+
+
+_PLACEHOLDER_RE = re.compile(r"^\{\{[^{}]+\}\}$")
+_INTERNAL_FIELD_RE = re.compile(r"^post_.+_body_(.+?)(?:_[0-9a-f]{6,})?$")
+_SUCCESS_OK_VALUES = {"0", "200", "00000", "true", "success", "ok", "1"}
+_PAGINATION_KEYS = {"pageno", "pagesize", "page", "page_no", "page_size", "limit", "offset", "size"}
+_RECORDING_COPY_MARKERS = ("本页面的实际操作流程", "能力录制", "录制结果", "阶段1")
+
+
+def _is_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and bool(_PLACEHOLDER_RE.fullmatch(value.strip()))
+
+
+def _is_recording_copy(value: Any) -> bool:
+    text = str(value or "")
+    return any(marker in text for marker in _RECORDING_COPY_MARKERS)
+
+
+def _endpoint_path(url_or_path: str) -> str:
+    raw = str(url_or_path or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.path:
+        return parsed.path
+    return raw.split("?", 1)[0] or "/"
+
+
+def _endpoint_origin(url_or_path: str) -> str:
+    parsed = urlparse(str(url_or_path or ""))
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
+def _sanitize_success_rule(rule: Any) -> dict[str, Any]:
+    payload = dict(rule) if isinstance(rule, dict) else {}
+    ok_values = [str(item) for item in (payload.get("ok_values") or []) if str(item)]
+    if not ok_values or not any(item.casefold() in _SUCCESS_OK_VALUES for item in ok_values):
+        payload["field"] = str(payload.get("field") or "code")
+        payload["ok_values"] = ["0"]
+    return payload
+
+
+def _option_map_looks_recorded(option_map: dict[str, Any]) -> bool:
+    if not option_map:
+        return False
+    return any(
+        str(label).isdigit() and str(value).isdigit() and str(label) != str(value)
+        for label, value in option_map.items()
+    )
+
+
+def _sanitize_select(binding: dict[str, Any]) -> dict[str, Any]:
+    option_map = binding.get("option_map")
+    if isinstance(option_map, dict) and (
+        binding.get("source_url") or _option_map_looks_recorded(option_map)
+    ):
+        binding = dict(binding)
+        binding.pop("option_map", None)
+    return binding
+
+
+def _sanitize_query_template(query: Any, step: dict) -> Any:
+    if not isinstance(query, dict):
+        return query
+    params = {str(item) for item in (step.get("params") or [])}
+    cleaned: dict[str, Any] = {}
+    for key, value in query.items():
+        name = str(key)
+        if _is_placeholder(value):
+            cleaned[name] = value
+            continue
+        compact = name.replace("_", "").casefold()
+        if compact in _PAGINATION_KEYS:
+            cleaned[name] = value
+            continue
+        if name not in params and not _is_placeholder(value):
+            # Operation constants such as approve status=20 stay; recorded filters drop.
+            if name.casefold() in {"status"} or compact in {"status"}:
+                cleaned[name] = value
+            continue
+    return cleaned
+
+
+def _placeholder_for_key(key: str) -> str:
+    return "{{" + str(key) + "}}"
+
+
+def _sanitize_template_literals(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {
+            str(key): (
+                value if _is_placeholder(value) else _placeholder_for_key(key)
+            ) if not isinstance(value, (dict, list)) and value is not None
+            else _sanitize_template_literals(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_sanitize_template_literals(item) for item in node]
+    return node
+
+
+def _sanitize_export_step(step: dict) -> dict:
+    raw_url = str(step.get("url") or step.get("path") or "")
+    path = _endpoint_path(raw_url) or _endpoint_path(str(step.get("path") or "")) or "/"
+    origin = _endpoint_origin(raw_url)
+    step["path"] = path
+    step["url"] = f"{origin}{path}" if origin else path
+    step["url_template"] = path
+    step.pop("sample_inputs", None)
+    if step.get("success_rule") is not None:
+        step["success_rule"] = _sanitize_success_rule(step.get("success_rule"))
+    if step.get("query_template") is not None:
+        step["query_template"] = _sanitize_query_template(step.get("query_template"), step)
+    if step.get("body_template") is not None:
+        step["body_template"] = _sanitize_template_literals(step.get("body_template"))
+    return step
+
+
+def _strip_schema_defaults(node: Any) -> Any:
+    if isinstance(node, dict):
+        cleaned = {
+            str(key): _strip_schema_defaults(value)
+            for key, value in node.items()
+            if key != "default"
+        }
+        return cleaned
+    if isinstance(node, list):
+        return [_strip_schema_defaults(item) for item in node]
+    return node
+
+
+def _public_field_name(name: str) -> str:
+    match = _INTERNAL_FIELD_RE.fullmatch(str(name))
+    return match.group(1) if match else str(name)
+
+
+def _unique_public_names(names: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    taken = set(names)
+    for name in names:
+        public = _public_field_name(name)
+        if public == name or public in taken or public in mapping.values():
+            continue
+        mapping[name] = public
+        taken.add(public)
+    return mapping
+
+
+def _rewrite_placeholders(node: Any, mapping: dict[str, str]) -> Any:
+    if not mapping:
+        return node
+    if isinstance(node, dict):
+        return {key: _rewrite_placeholders(value, mapping) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_rewrite_placeholders(item, mapping) for item in node]
+    if isinstance(node, str):
+        text = node
+        for old, new in mapping.items():
+            text = text.replace("{{" + old + "}}", "{{" + new + "}}")
+        return text
+    return node
+
+
+def _collect_field_mapping(schema: dict) -> dict[str, str]:
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    mapping = _unique_public_names([str(name) for name in properties])
+    for field in properties.values():
+        if not isinstance(field, dict):
+            continue
+        if isinstance(field.get("properties"), dict):
+            mapping.update(_collect_field_mapping(field))
+        items = field.get("items")
+        if isinstance(items, dict):
+            mapping.update(_collect_field_mapping(items))
+    return mapping
+
+
+def _rename_schema_fields(schema: dict, mapping: dict[str, str]) -> dict:
+    properties = dict(schema.get("properties") or {})
+    renamed: dict[str, Any] = {}
+    for name, field in properties.items():
+        public = mapping.get(str(name), str(name))
+        next_field = field
+        if isinstance(field, dict) and isinstance(field.get("properties"), dict):
+            next_field = _rename_schema_fields(field, mapping)
+        elif isinstance(field, dict) and isinstance(field.get("items"), dict):
+            next_field = dict(field)
+            next_field["items"] = _rename_schema_fields(field["items"], mapping)
+        renamed[public] = next_field
+    required = [mapping.get(str(name), str(name)) for name in (schema.get("required") or [])]
+    next_schema = dict(schema)
+    next_schema["properties"] = renamed
+    if required:
+        next_schema["required"] = required
+    return next_schema
+
+
+def _sanitize_export_plan(plan: dict) -> dict:
+    schema = _strip_schema_defaults(dict(plan.get("input_schema") or {"type": "object", "properties": {}}))
+    mapping = _collect_field_mapping(schema)
+    schema = _rename_schema_fields(schema, mapping)
+    steps = [_rewrite_placeholders(step, mapping) for step in (plan.get("steps") or [])]
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        params = [mapping.get(str(name), str(name)) for name in (step.get("params") or [])]
+        if params:
+            step["params"] = params
+        for binding in step.get("selects") or []:
+            if isinstance(binding, dict) and binding.get("param"):
+                binding["param"] = mapping.get(str(binding["param"]), str(binding["param"]))
+    plan["input_schema"] = schema
+    plan["steps"] = steps
+    plan["links"] = _rewrite_placeholders(list(plan.get("links") or []), mapping)
+    plan["requires_verify"] = bool(plan.get("fact_checks"))
+    return plan
+
+
+def _norm_name_token(token: str) -> str:
+    item = str(token or "").strip("-")
+    if item.endswith("s") and len(item) > 3 and not item.endswith("ss"):
+        return item[:-1]
+    return item
+
+
+def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
+    slugs = [_slug(str(plan.get("name") or "")) for plan in plans if str(plan.get("name") or "")]
+    token_sets = [{_norm_name_token(part) for part in item.split("-") if part} for item in slugs]
+    shared: set[str] = set.intersection(*token_sets) if token_sets else set()
+    shared.discard("")
+    ordered = [
+        _norm_name_token(part)
+        for part in (slugs[0].split("-") if slugs else [])
+        if _norm_name_token(part) in shared
+    ]
+    ordered = list(dict.fromkeys(ordered))
+    if len(ordered) >= 2:
+        return _slug("-".join(ordered) + "-operations")[:64]
+    if len(shared) == 1:
+        return _slug(next(iter(shared)) + "-operations")[:64]
+    action = _slug(str(getattr(skill, "action", "") or ""))
+    if action and action not in {"skill", "action"}:
+        return action[:64]
+    return (_slug(slugs[0]) if slugs else "page-operations")[:64]
 
 
 def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
@@ -328,8 +568,9 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
                 is_write
                 and (cap.get("requires_human_confirm") is True or risk in {"L3", "L4", "L5"})
             ),
-            "requires_verify": is_write,
+            "requires_verify": bool(fact_checks),
         })
+        plans[-1] = _sanitize_export_plan(plans[-1])
     return plans
 
 
@@ -362,10 +603,22 @@ def _business_identity(skill, plans: list[dict], spec) -> tuple[str, str]:  # no
     )
     title_text = "、".join(titles) or heading
     description = (
-        f"当用户要{title_text}时使用。根据已发布能力契约原生调用 ask_user_question "
-        "收集业务参数、校验并转换为接口线格式，确认写操作后执行；未列出的业务动作不要触发。"
+        f"当用户要{title_text}时使用。"
+        "不要用于其他业务对象、未列出的动作，或需要编造字段、接口、凭证的请求。"
     )
     return heading, description
+
+
+def _skill_description(skill, plans: list[dict], spec) -> tuple[str, str]:  # noqa: ANN001
+    heading, generated = _business_identity(skill, plans, spec)
+    plan = _skill_plan_payload(skill)
+    summary = _safe_text(plan.get("summary"))
+    if summary and not _is_recording_copy(summary):
+        description = summary
+        if "不要" not in description and "不用于" not in description:
+            description += "不要用于其他业务对象或未列出的动作。"
+        return heading, description
+    return heading, generated
 
 
 def _field_label(name: str, field: dict) -> str:
@@ -579,218 +832,236 @@ def _input_forms_md(plans: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+
+def _required_fields(plan: dict) -> list[str]:
+    schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
+    return [str(name) for name in (schema.get("required") or []) if str(name)]
+
+
+def _combination_routes(skill) -> list[dict]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    routes = [item for item in (plan.get("routes") or []) if isinstance(item, dict)]
+    combinations: list[dict] = []
+    for route in routes:
+        sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+        bindings = [item for item in (route.get("bindings") or []) if isinstance(item, dict)]
+        if len(sequence) > 1 and bindings:
+            combinations.append(route)
+    return combinations
+
+
 def _planning_skill_md_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
-    if not plan:
-        return []
-    mode = str(plan.get("planning_mode") or "dynamic")
-    summary = _safe_text(plan.get("summary") or "")
     unused = [item for item in (plan.get("unused_capabilities") or []) if isinstance(item, dict)]
-    routes = [item for item in (plan.get("routes") or []) if isinstance(item, dict)]
-    triggers = [str(item) for item in (plan.get("trigger_phrases") or []) if str(item).strip()]
-    safety = [str(item) for item in (plan.get("safety_rules") or []) if str(item).strip()]
-    lines = [
-        "## Business purpose", "",
-        summary or "按用户当前请求，使用本页面已验证能力完成业务目标。", "",
-        "## When to use", "",
+    triggers = [
+        str(item) for item in (plan.get("trigger_phrases") or [])
+        if str(item).strip() and not _is_recording_copy(item)
     ]
-    if triggers:
-        lines.extend(f"- {_safe_text(item)}" for item in triggers)
+    titles = [_safe_text(item.get("title") or item.get("name")) for item in plans]
+    lines = ["## 适用场景", ""]
+    if titles:
+        lines.extend(f"- 用户要{title}时使用。" for title in titles)
+    for item in triggers:
+        if item not in "\n".join(lines):
+            lines.append(f"- {_safe_text(item)}")
+    if len(lines) == 2:
+        lines.append("- 用户请求与本页面已打包操作一致时使用。")
+    lines.extend(["", "## 不适用场景", ""])
+    if titles:
+        lines.append(f"- 用户目标不是{'、'.join(titles)}时停止，不得用相近操作代替。")
     else:
-        lines.append("- 用户请求与本页面业务对象一致，且可用 Capability summary 中的能力完成时使用。")
-    lines.extend(["", "## When not to use", ""])
-    if unused:
-        for item in unused:
-            title = _safe_text(item.get("title") or item.get("name") or item.get("capability_id"))
-            reason = _safe_text(item.get("reason") or "当前业务描述未要求")
-            lines.append(f"- 不要执行未打包能力 `{title}`：{reason}。")
-    else:
-        lines.append("- 用户目标与本页面业务对象或动作不一致时停止，不得用相近能力代替。")
-    lines.extend(["", "## Available operations", ""])
+        lines.append("- 用户目标与本页面业务对象或动作不一致时停止，不得用相近操作代替。")
+    lines.append("- 不得用于其他业务对象，不得编造字段、接口、输出或未确认的能力关系。")
+    lines.append("- 不得把录制样例、内部字段名或默认值当作本次输入。")
+    for item in unused:
+        title = _safe_text(item.get("title") or item.get("name") or item.get("capability_id"))
+        reason = _safe_text(item.get("reason") or "当前业务描述未要求")
+        lines.append(f"- 不要执行未打包能力 `{title}`：{reason}。")
+    lines.extend([
+        "", "## 操作路由", "",
+        "| 用户意图 | 操作 | 脚本 | 必填输入 | 写前确认 | 写后验证 |",
+        "|---|---|---|---|---|---|",
+    ])
     for item in plans:
+        required = ", ".join(f"`{name}`" for name in _required_fields(item)) or "无"
         lines.append(
-            f"- `{item['name']}`：{_safe_text(item.get('title') or item['name'])}；"
-            f"脚本 `scripts/{item['script']}.py`；"
-            f"写前确认 {'是' if item.get('requires_confirmation') else '否'}。"
+            f"| {_safe_text(item.get('title') or item['name'])} | "
+            f"`{item['name']}` | `python scripts/{item['script']}.py` | {required} | "
+            f"{'是' if item.get('requires_confirmation') else '否'} | "
+            f"{'是' if item.get('requires_verify') else '否'} |"
         )
-    lines.extend([
-        "", "## Input collection", "",
-        "- 先按所选路线列出 `required_user_inputs`，再用 `ask_user_question` 一次收集。",
-        "- 已有上游公开输出或契约固定值/系统值的字段不要再问用户。",
-        "- 缺少必填来源时询问用户，不得编造关联或猜测内部 ID。",
-        "", "## Planning or routing rules", "",
-        f"- 规划方式：`{mode}`。",
-    ])
-    if mode == "fixed":
-        lines.append("- 固定模式只走下面这一条主要路线，不要改换能力顺序。")
+    combinations = _combination_routes(skill)
+    if combinations:
+        lines.extend(["", "只有存在已确认绑定时才串联操作，不要自行排列："])
+        for route in combinations:
+            sequence = " → ".join(f"`{cap}`" for cap in (route.get("capability_sequence") or []))
+            lines.append(f"- {_safe_text(route.get('name') or route.get('route_id'))}：{sequence}")
     else:
-        lines.extend([
-            "- 动态模式根据用户请求选择最少且足够的一条有效路线。",
-            "- 用户只要求查询时不要执行提交；用户已提供完整提交字段时不要强制先查询。",
-            "- 不要生成或执行未列出的能力排列。",
-        ])
-    for route in routes:
-        sequence = " → ".join(f"`{cap}`" for cap in (route.get("capability_sequence") or [])) or "无"
-        lines.extend([
-            f"- `{route.get('route_id')}` {_safe_text(route.get('name') or route.get('route_id'))}：",
-            f"  何时使用：{_safe_text(route.get('when_to_use'))}",
-            f"  调用顺序：{sequence}",
-            f"  完成条件：{_safe_text(route.get('done_when'))}",
-        ])
-        if route.get("requires_confirmation"):
-            lines.append("  写操作执行前必须取得用户确认。")
-    lines.extend(["", "## Valid capability combinations", ""])
-    if not routes:
-        lines.append("- 只使用 Capability summary 中的能力，不要自行组合未声明路线。")
-    for route in routes:
-        sequence = " → ".join(f"`{cap}`" for cap in (route.get("capability_sequence") or [])) or "无"
-        lines.append(f"- `{route.get('route_id')}`：{sequence}")
-    lines.extend(["", "## Data binding", ""])
-    bindings = [
-        binding
-        for route in routes
-        for binding in (route.get("bindings") or [])
-        if isinstance(binding, dict)
-    ]
-    if not bindings:
-        lines.append("- 本 Skill 没有已确认的能力间映射；缺字段时向用户收集，不得按字段同名猜测。")
-    for binding in bindings:
-        lines.append(
-            f"- `{binding.get('from_capability')}.{binding.get('from_output')}` → "
-            f"`{binding.get('to_capability')}.{binding.get('to_input')}`"
-            + (f"（transform_owner=`{binding.get('transform_owner')}`）" if binding.get("transform_owner") else "")
-        )
-    lines.extend(["", "## Confirmation and safety", ""])
-    if safety:
-        lines.extend(f"- {_safe_text(item)}" for item in safety)
-    else:
-        lines.append("- 写能力、删除、撤回、提交或批量写必须在执行前明确确认；查询不需要确认。")
-    lines.extend([
-        "", "## Verification", "",
-        "- 写能力执行后调用对应 `verify_script`；只有执行和验证都成功才能报告完成。",
-        "", "## Failure handling", "",
-        "- 任一能力失败立即停止；写结果不明时不得重试同一载荷。",
-        "", "## Examples", "",
-    ])
-    for route in routes:
-        examples = [item for item in (route.get("examples") or []) if isinstance(item, dict)]
-        if not examples:
-            continue
-        example = examples[0]
-        collected = ", ".join(f"`{item}`" for item in (example.get("collected_fields") or [])) or "无"
-        sequence = " → ".join(f"`{item}`" for item in (example.get("capability_sequence") or route.get("capability_sequence") or []))
-        confirm = ", ".join(f"`{item}`" for item in (example.get("confirmation_points") or [])) or "无"
-        mappings = "; ".join(
-            f"`{item.get('from_output')}`→`{item.get('to_input')}`"
-            for item in (example.get("bindings") or route.get("bindings") or [])
-            if isinstance(item, dict)
-        ) or "无已确认映射"
-        lines.extend([
-            f"### {_safe_text(route.get('name') or route.get('route_id'))}",
-            "",
-            f"- 用户请求：{_safe_text(example.get('user_request'))}",
-            f"- 选择路线：`{route.get('route_id')}`",
-            f"- 需要向用户收集：{collected}",
-            f"- 能力调用顺序：{sequence}",
-            f"- 上游输出到下游输入：{mappings}",
-            f"- 写操作确认点：{confirm}",
-            f"- 完成条件：{_safe_text(example.get('done_when') or route.get('done_when'))}",
-            "",
-        ])
+        lines.extend(["", "本 Skill 没有已确认的操作间绑定；一次只执行一个操作。"])
     return lines
 
 
 def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noqa: ANN001
-    heading, description = _business_identity(skill, plans, spec)
+    del slug
+    heading, description = _skill_description(skill, plans, spec)
     plan = _skill_plan_payload(skill)
-    if plan.get("summary"):
-        description = _safe_text(plan.get("summary"))
+    has_write = any(item.get("requires_confirmation") or item.get("requires_verify") for item in plans)
+    skill_name = _skill_frontmatter_name(skill, plans)
     lines = [
-        "---", f"name: {slug}", f"description: {json.dumps(description, ensure_ascii=False)}", "---", "",
-        f"# {heading}", "",
-        "这是录制后发布的自包含 Skill。它保留既有 Skill 的能力选择、一次性收参、字段校验、写前确认、执行后验证和结果处理规则；业务请求由包内脚本直接调用目标系统。", "",
+        "---",
+        f"name: {skill_name}",
+        f"description: {json.dumps(description, ensure_ascii=False)}",
+        'version: "1.0.0"',
+        "compatibility: 需要 Python 3 与 httpx。鉴权只来自运行期 DANO_AUTH_HEADERS 或本地会话缓存。",
+        "metadata:",
+        "  domain: recorded-business",
+        "  category: page-operation",
+        f"  risk: {'high' if has_write else 'low'}",
+        "allowed-tools: Bash Read",
+        "---",
+        "",
+        f"# {heading}",
+        "",
+        "本 Skill 是该页面业务的可复用操作手册：按用户意图选择一个操作，收集输入，写操作先确认再执行。",
+        "",
     ]
     lines.extend(_planning_skill_md_sections(skill, plans))
     if lines[-1] != "":
         lines.append("")
     lines.extend([
-        "## Transport", "",
-        "- 使用 `references/CONTRACT.json` 选择 capability，并调用其中声明的 `scripts/*.py`。",
-        "- 运行期需要 Python 与 `httpx`；业务执行不依赖 Dano 运行时或 LLM。",
-        "- 鉴权只从运行期 `DANO_AUTH_HEADERS`、本地会话缓存或已配置的 Dano token fallback 获取；不得把凭证写进 Skill、参数、回复或日志。", "",
-        "## Preconditions", "",
-        "- `references/CONTRACT.json` 是能力、字段名、类型、必填性、枚举和输出结构的唯一机器契约；不得按录制样例或字段外观猜值。",
-        "- 只执行契约中列出的 capability；用户目标与业务对象或动作不一致时停止，不得用相近能力代替。",
-        "- 写能力必须在执行前取得用户明确确认；查询能力只带用户明确要求的可选筛选条件。", "",
-        "## Steps", "",
-        "1. 根据用户目标选择一个明确的 capability；查询和写入是不同能力，禁止默认选择写能力。",
-        "   Done when: 已选 capability 的业务对象和动作与用户目标完全一致。",
-        "2. 先完整读取 `references/generator-guides/INDEX.md` 列出的全部项目规范，再读取 `references/CONTRACT.json` 中该 capability 的 `input_schema`、脚本路径、`requires_confirmation` 和 `requires_verify`；具体原生表单读取 `references/INPUT_FORMS.md`，选择项读取 `references/OPTIONS.md`。",
-        "   Done when: 已确定全部调用方字段、必填字段、类型、枚举、默认值和内部字段，且没有使用录制样例补空值。",
-        "3. 按 `references/INPUT_FORMS.md` 原生调用 `ask_user_question`，一次性收集相关调用方字段；每个运行时 default 必须由当前用户意图生成，禁止使用录制样本值。写能力收集全部必填字段；查询能力只收集必填字段和用户明确指定的可选筛选条件。",
-        "   Done when: 返回 `status=answered`，答案已按字段 id 映射，或返回 `cancelled` 并立即停止。",
-        "4. 按 schema 校验 required、type、format、enum、pattern 和边界；日期时间、数字、数组与对象按声明转换。无法无歧义转换时只原生调用一次单字段纠错表单。内部字段、常量、上游响应和计算字段不得放进 `questions[]`，不得让用户猜内部 ID。",
-        "   Done when: 输入完整且逐字段满足契约；任何不确定值均未被猜测或静默替换。",
-        "5. 若 `requires_confirmation=true`，使用 `ask_user_question({confirm: true, formIds: [<answered.formId>]})` 对完整输入只确认一次；只有返回 `status=confirmed` 才能继续，并在执行脚本时带 `--confirm`。",
-        "   Done when: 写能力已有有效确认，或当前能力不需要确认。",
-        "6. 把输入作为 JSON 对象传给对应脚本：`python scripts/<capability>.py --input-json '<JSON>'`；需要确认时追加 `--confirm`。同一写请求不得并发、不得在结果不明时自动重试。",
-        "   Done when: stdout 最后一行是 JSON，且 `status=succeeded`、`ok=true`；否则按 Branch exit 停止。",
-        "7. 若 `requires_verify=true`，用完全相同的输入调用 `verify_script`；写操作只有执行和验证都 `ok=true` 才能报告成功。",
-        "   Done when: 验证脚本返回 `ok=true`，或只读能力明确不需要验证。",
-        "8. 按 `output_schema` 解读结果。数组用 Markdown 表格展示；不得把内部 ID、裸 `data` 或未声明字段擅自命名为业务编号。",
-        "   Done when: 最终回复准确区分成功、取消、待确认和失败，且未泄露凭证或内部字段。", "",
-        "## Capability summary", "",
+        "## 操作步骤",
+        "",
+        "1. 根据用户意图只选择「操作路由」中的一个操作；查询和写入是不同操作，禁止默认选择写操作。",
+        "   Done when: 已选操作的业务对象和动作与用户目标完全一致。",
+        "2. 只读取 `references/OPERATIONS.md` 中该操作小节，以及 `references/CONTRACT.json` 中对应 `input_schema`。",
+        "   Done when: 已确定必填字段、类型和枚举，且没有使用录制样例补空值。",
+        "3. 一次性收集该操作的调用方必填字段；已有用户值或已确认上游输出的字段不要再问。缺字段就追问，不得编造。",
+        "   Done when: 必填输入完整，或用户取消并立即停止。",
+        "4. 按契约校验类型、枚举和格式。写操作必须先取得用户确认，再执行 `python scripts/<script>.py --input-json '<JSON>'`；需确认时加 `--confirm`。",
+        "   Done when: 脚本 stdout 最后一行 JSON 为 `status=succeeded` 且 `ok=true`。",
+        "5. 若该操作需要验证，用相同输入调用对应 `verify_script`。列表结果先运行 `python scripts/format_list.py`。",
+        "   Done when: 验证通过或该操作不需要验证，且已按输出格式向用户汇报。",
+        "",
+        "## 输入要求",
+        "",
+        "- 字段名、类型、必填性和候选以 `references/CONTRACT.json` 为准，细节见 `references/OPERATIONS.md`。",
+        "- 没有已确认绑定的字段必须向用户收集，不得按同名猜测。",
+        "- 查询只收集用户明确要求的筛选条件；写操作收集全部必填字段。",
+        "",
+        "## 输出与完成标准",
+        "",
+        "- 查询：返回业务结果；数组用 Markdown 表格，无数据时写“无数据”。",
+        "- 写入：脚本成功即可报告完成；仅当操作路由标明写后验证时，还须验证通过。",
+        "- 准确区分成功、待确认、取消和失败；不得把内部 ID 或裸 `data`/`code`/`msg` 擅自命名为业务编号。",
+        "",
+        "## 失败处理",
+        "",
+        "- 信息不足：停止并追问缺失字段，不得编造。",
+        "- 用户取消或写操作未确认：立即停止，不得执行。",
+        "- 脚本或验证失败：立即停止并报告原因；写结果不明时不得重试同一载荷。",
+        "- 权限或鉴权失败：停止并说明需要运行期登录凭证，不得伪造身份。",
+        "",
+        "## 安全边界",
+        "",
     ])
+    safety = [
+        "不输出 token、cookie、密码或其他凭证。",
+        "不跳过写前确认；有写后验证时不得跳过验证，不绕过权限。",
+        "不把录制样例值当作本次输入，不发明字段、接口或未确认关系。",
+    ]
+    seen = set(safety)
+    lines.extend(f"- {item}" for item in safety)
+    for item in (plan.get("safety_rules") or []):
+        text = _safe_text(item)
+        if text and text not in seen:
+            seen.add(text)
+            lines.append(f"- {text}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _plan_api_chain(plan: dict, spec) -> str:  # noqa: ANN001
+    chain = " -> ".join(
+        f"{str(step.get('method') or 'GET').upper()} {_endpoint_path(str(step.get('path') or step.get('url') or '')) or '/'}"
+        for step in plan.get("steps") or []
+    ) or "GET /"
+    evidence = _evidence_for_plan(plan, spec) if spec is not None else []
+    markers = [f"verification_id: {value}" for value in evidence]
+    if plan.get("requires_verify") and not plan.get("fact_checks"):
+        markers.append("unverified write read-back")
+    marker = "; ".join(markers) if markers else "unverified"
+    return f"{chain}; {marker}"
+
+
+def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
+    lines = [
+        f"# {_safe_text(skill.title if skill.title and not _is_recording_copy(skill.title) else '') or '页面操作'} 操作说明",
+        "",
+        "只在执行某个操作时阅读对应小节。机器契约以 `CONTRACT.json` 为准。",
+        "",
+        "## API chain",
+        "",
+    ]
+    for plan in plans:
+        lines.append(f"- `{plan['name']}`: {_plan_api_chain(plan, spec)}")
+    lines.extend(["", "## Business hard rules", ""])
+    forbidden = list(((spec.goal or {}).get("forbidden_actions") or [])) if spec is not None else []
+    if forbidden:
+        lines.extend(f"- {_safe_text(value)}" for value in forbidden)
+    else:
+        lines.append("- 只执行已打包操作，任一请求失败立即停止。")
+    lines.append("")
     for plan in plans:
         schema = plan.get("input_schema") or {}
-        required = ", ".join(f"`{name}`" for name in schema.get("required") or []) or "无"
-        lines.append(
-            f"- **{_safe_text(plan['title'])}** (`{plan['name']}`): "
-            f"脚本 `scripts/{plan['script']}.py`；必填 {required}；"
-            f"写前确认 {'是' if plan['requires_confirmation'] else '否'}；"
-            f"执行后验证 {'是' if plan['requires_verify'] else '否'}。"
-        )
-    lines.extend([
-        "", "## Result contract", "",
-        "- `succeeded`: 能力执行成功；写能力还必须通过 `verify_script` 后才能向用户报告完成。",
-        "- `need_confirm`: 写能力尚未确认；取得确认后带 `--confirm` 重跑，禁止绕过。",
-        "- `failed`: 停止并报告 `reason`/失败步骤；写操作遇到超时、HTTP 5xx 或结果不明时禁止重复提交，先用只读能力核查。",
-        "- `cancelled`: 用户取消，立即停止。", "",
-        "## Branch exit", "",
-        "- capability 不匹配、字段缺失或校验失败：停止，补齐或修正后再执行。",
-        "- `ask_user_question` 返回 `cancelled`：立即停止。",
-        "- 写能力未确认或脚本返回 `need_confirm`：不得执行，取得有效确认后才可带 `--confirm`。",
-        "- 任一请求、执行脚本或验证脚本返回 `ok=false`：立即停止；不得宣称完成。",
-        "- 写结果不明：不得自动重试同一载荷，先用已发布只读能力核查；无法核实时报告不确定。", "",
-        "## Pitfalls", "",
-        "- 不得把录制样例值当作调用方默认值、固定业务值或本次用户输入。",
-        "- 不得翻译、改名或猜测参数名；`questions[].id` 和提交 JSON 的键必须与契约逐字一致。",
-        "- 不得向用户询问常量、会话头、分页上下文、上游响应、计算值或动态结构键。",
-        "- 不得跳过写前确认或写后验证，也不得因一个写请求失败而自动重试。",
-        "- 不得复用录制凭证、内部 ID 或动态流程节点标识。",
-        "", "## List output", "",
-        "- 查询结果、候选列表或任何数组数据必须先运行 `python scripts/format_list.py --capability <能力名> --json '<output JSON>'`。",
-        "- 最终回复只展示脚本生成的 Markdown 表格；无数据时明确显示“无数据”，不要重复粘贴原始 JSON。",
-        "- Markdown 表头、分隔行和数据行之间不得插入空行；单元格内换行统一使用 `<br>`。",
-        "", "## Field validation", "",
-        "- 优先遵守 schema 的 `type`、`format`、`enum`、`pattern` 和边界，再结合 `title`、`description` 的明确业务语义。",
-        "- 日期时间必须符合声明格式，枚举值必须来自候选；标识、编码、电话号码等字符串不得擅自转成数字或去掉前导零。",
-        "- schema 没有依据时不得臆造长度、精度、范围或业务规则；任何明确冲突都必须在确认和执行前要求修正。",
-        "", "## Identifier fields", "",
-        "- 标识语义只认 `output_schema` 的 `x-dano-identifier-role`；未声明时保留原字段名，禁止按名称或值形状猜成申请编号、流程编号或单据编号。",
-        "- 后续能力只可使用同名字段或契约明确声明的映射；需要内部标识时先用已发布查询能力定位同一记录，不得让用户猜。",
-        "- 面向用户隐藏、排序和标题均以 `output_schema` 展示元数据为准；脚本原始输出保留给后续准确取值。",
-        "", "## Fixed result presentation", "",
-        "- 成功写操作用 capability 标题给出业务化完成结论；不得逐项展示裸 `code`、`data`、`msg`、`true` 或内部 ID。",
-        "- 未类型化结果只能称“接口返回值”；没有契约声明时不得给返回字段发明业务名称。",
-        "- 非成功状态不得显示成功结论；只展示脚本返回的原因和允许的下一步。",
-        "", "## Security", "",
-        "- 不在回复、日志、表单或调用参数中输出完整 token、cookie、密码或其他凭证。",
-        "- 不规避写前确认或写后验证；用户要求绕过时拒绝。",
-        "- 调用者身份由运行期登录凭证决定，不伪造身份、字段值或执行结果。",
-        "", "## Limitations", "",
-        "只支持 Capability summary 中列出的能力；未列出的业务动作必须明确说明不支持，不得选择相近能力代替。",
-    ])
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        lines.extend([
+            f"## {_safe_text(plan['title'])} (`{plan['name']}`)",
+            "",
+            f"- 脚本：`scripts/{plan['script']}.py`",
+        ])
+        if plan.get("requires_verify"):
+            lines.append(f"- 验证脚本：`scripts/verify_{plan['script']}.py`")
+        lines.extend([
+            f"- 写前确认：{'是' if plan.get('requires_confirmation') else '否'}",
+            f"- 写后验证：{'是' if plan.get('requires_verify') else '否'}",
+            f"- API：`{_plan_api_chain(plan, spec)}`",
+            "",
+            "| 字段 | 类型 | 必填 | 说明 |",
+            "|---|---|---|---|",
+        ])
+        if not properties:
+            lines.append("| （无） | object | 否 | 无调用方输入 |")
+        for name, raw in properties.items():
+            field = raw if isinstance(raw, dict) else {}
+            description = _safe_text(field.get("description") or field.get("title") or name).replace("|", "\\|")
+            lines.append(
+                f"| `{name}` | `{field.get('type') or 'string'}` | "
+                f"{'是' if name in required else '否'} | {description} |"
+            )
+        option_lines: list[str] = []
+        for name, raw in properties.items():
+            field = raw if isinstance(raw, dict) else {}
+            live_source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+            values = list(field.get("enum") or [])
+            labels = dict(field.get("x-enum-value-map") or {})
+            if not live_source and not values and not labels:
+                continue
+            option_lines.extend([f"### `{name}` 选项", ""])
+            if isinstance(live_source, dict) and live_source:
+                method = str(live_source.get("source_method") or "GET").upper()
+                endpoint = str(live_source.get("source_url") or "")
+                option_lines.append(f"- 运行时来源：`{method} {endpoint}`")
+            if labels and not _option_map_looks_recorded(labels):
+                option_lines.extend(f"- `{_safe_text(label)}` → `{value}`" for label, value in labels.items())
+            elif live_source:
+                option_lines.append("- 运行时按显示名或 ID 解析，不以录制快照为准。")
+            elif values:
+                option_lines.extend(f"- `{value}`" for value in values)
+            option_lines.append("")
+        if option_lines:
+            lines.extend(option_lines)
+        else:
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -983,7 +1254,7 @@ import os
 from pathlib import Path
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
@@ -997,6 +1268,11 @@ _MISSING = object()
 
 def emit(payload):
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def _url_without_query(url):
+    parsed = urlsplit(str(url or ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
 
 
 def _json_object(raw, label):
@@ -1276,6 +1552,30 @@ def _runtime_values(step, inputs):
                     values[result_field] = computed
                 progressed = True
                 continue
+            if kind == "array_item_formula":
+                container = str(field.get("array_container_path") or field.get("container_field") or "items")
+                item_key = str(field.get("array_item_key") or field.get("result_field") or "")
+                strategy = str(field.get("strategy") or "product")
+                left_name = str(field.get("left_field") or "")
+                right_name = str(field.get("right_field") or "")
+                rows = values.get(container)
+                if not isinstance(rows, list) or not item_key:
+                    still.append(field)
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict) or left_name not in row or right_name not in row:
+                        continue
+                    left = float(row[left_name])
+                    right = float(row[right_name])
+                    row[item_key] = {
+                        "product": left * right,
+                        "sum": left + right,
+                        "difference": left - right,
+                        "percent_of": left * right / 100.0,
+                        "remainder_after_percent": left * (1.0 - right / 100.0),
+                    }.get(strategy, left * right)
+                progressed = True
+                continue
             still.append(field)
         pending = still
     if pending:
@@ -1383,8 +1683,9 @@ def execute_plan(plan, inputs):
                 body = deep_set(body or {}, target.removeprefix("body."), value)
         if isinstance(body, (dict, list)):
             body = _system_values(step, body)
+        url = _url_without_query(url)
         result = http_json(
-            step.get("method") or "GET", step.get("path") or "", url=url,
+            step.get("method") or "GET", _url_without_query(step.get("path") or ""), url=url,
             query=query, body=body, content_type=step.get("content_type") or "application/json",
             success_rule=step.get("success_rule"),
         )
@@ -1611,8 +1912,6 @@ from __CAP_MODULE__ import PLAN, inputs_from_args, parser
 def verify(inputs):
     issues = []
     checks = PLAN.get("fact_checks") or []
-    if PLAN.get("requires_verify") and not checks:
-        issues.append({"step_id": None, "verification_id": "unverified", "reason": "no verified read-back is available"})
     for check in checks:
         settle(check.get("backoff_s", 0.25))
         response = http_json("GET", check.get("endpoint") or "")
@@ -1674,21 +1973,13 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     # and result handling). A structurally valid but minimal model document was
     # previously accepted here and silently discarded all of those rules.
     skill_md = _fallback_skill_md(skill, slug, plans, spec)
-    if not docs_valid:
-        reference_md = _fallback_reference_md(skill, plans, spec)
 
     scripts = folder / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     references = folder / "references"
     references.mkdir(parents=True, exist_ok=True)
-    generation_guides = _load_reference_markdown(_configured_reference_dir())
-    _validate_reference_markdown(generation_guides)
     _write_text(folder / "SKILL.md", skill_md)
-    _write_text(folder / "reference.md", reference_md)
-    _write_text(references / "CAPABILITIES.md", _capabilities_md(skill, plans))
-    _write_text(references / "INPUT_FORMS.md", _input_forms_md(plans))
-    _write_text(references / "OPTIONS.md", _options_md(plans))
-    _write_generation_guides(folder, generation_guides)
+    _write_text(references / "OPERATIONS.md", _operations_md(skill, plans, spec))
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
@@ -1712,7 +2003,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 "title": plan["title"],
                 "kind": plan["kind"],
                 "script": f"scripts/{plan['script']}.py",
-                "verify_script": f"scripts/verify_{plan['script']}.py",
+                "verify_script": f"scripts/verify_{plan['script']}.py" if plan["requires_verify"] else "",
                 "requires_confirmation": plan["requires_confirmation"],
                 "requires_verify": plan["requires_verify"],
                 "input_schema": plan["input_schema"],
@@ -1740,10 +2031,11 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
             scripts / f"{module}.py",
             _CAPABILITY_TEMPLATE.replace("__PLAN__", repr(json.dumps(plan_payload, ensure_ascii=False))),
         )
-        _write_text(
-            scripts / f"verify_{module}.py",
-            _VERIFY_TEMPLATE.replace("__CAP_MODULE__", module),
-        )
+        if plan["requires_verify"]:
+            _write_text(
+                scripts / f"verify_{module}.py",
+                _VERIFY_TEMPLATE.replace("__CAP_MODULE__", module),
+            )
     return plans, not docs_valid
 
 
@@ -1763,7 +2055,7 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
                 skill,
             )
             _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, spec))
-            _write_text(stage / "reference.md", _fallback_reference_md(skill, plans, spec))
+            _write_text(stage / "references" / "OPERATIONS.md", _operations_md(skill, plans, spec))
             fallback_used = True
             validation = validate_skill_package(stage)
         if not validation["ok"]:

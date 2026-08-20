@@ -174,7 +174,48 @@ def _already_exported(body: dict[str, Any]) -> bool:
         and str(body.get("skill_export_status") or "") in {"exported", "succeeded"}
         and path
         and Path(path).exists()
+        and _existing_package_is_current(path)
     )
+
+
+def _existing_package_is_current(export_path: str) -> bool:
+    root = Path(export_path)
+    if not root.is_dir():
+        return False
+    from dano.export.skill_package.validator import validate_skill_package
+
+    return bool(validate_skill_package(root).get("ok"))
+
+
+def _remove_previous_skill_output(out_dir: str, skill_id: str, body: dict[str, Any]) -> None:
+    """Delete the last on-disk package and leftover stage folders before rewriting."""
+    from dano.export.skill_package.renderer import package_slug
+
+    root = Path(out_dir)
+    slug = package_slug(skill_id) if skill_id else ""
+    candidates: list[Path] = []
+    for key in ("export_path", "skill_export_path"):
+        raw = str(body.get(key) or "").strip()
+        if raw:
+            candidates.append(Path(raw))
+    if slug:
+        candidates.append(root / slug)
+    seen: set[Path] = set()
+    for target in candidates:
+        try:
+            resolved = target.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        name = resolved.name
+        if name.endswith("-package") or name.startswith(f".{slug}") or name.startswith(f".{slug}."):
+            seen.add(resolved)
+            shutil.rmtree(resolved, ignore_errors=True)
+    if root.is_dir() and slug:
+        for stale in (*root.glob(f".{slug}-*"), *root.glob(f".{slug}.old-*")):
+            if stale.is_dir():
+                shutil.rmtree(stale, ignore_errors=True)
 
 
 def build_export_skill_spec(
@@ -490,6 +531,7 @@ async def export_recording_skill(
                 view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
             )
     out_dir = str(request.out_dir).strip()
+    _remove_previous_skill_output(out_dir, skill_id, body)
     render_fn = render or _default_render
     publish_fn = publish or _default_publish
     published_report: dict[str, Any] | None = None

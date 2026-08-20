@@ -78,9 +78,6 @@ def validate_skill_plan(
     if used_in_routes - selected_set:
         extra = ", ".join(sorted(used_in_routes - selected_set))
         result.error(f"路线引用了未入选能力: {extra}")
-    if selected_set - used_in_routes:
-        extra = ", ".join(sorted(selected_set - used_in_routes))
-        result.error(f"导出所选能力必须等于有效路线并集，未进入路线: {extra}")
     unused_ids = {item.capability_id for item in plan.unused_capabilities}
     for cap in spec.capabilities:
         cap_id = capability_ref(cap)

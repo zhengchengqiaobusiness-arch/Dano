@@ -315,11 +315,8 @@ def _validate_generated_skill(folder: Path, expected_name: str) -> None:
         raise ValueError("Skill 缺少 agents/openai.yaml")
     if "references/CAPABILITIES.md" in text and not (folder / "references" / "CAPABILITIES.md").is_file():
         raise ValueError("Skill 缺少 references/CAPABILITIES.md")
-    guide_index = folder / "references" / "generator-guides" / "INDEX.md"
-    if not guide_index.is_file():
-        raise ValueError("Skill 缺少 references/generator-guides/INDEX.md")
-    if "references/generator-guides/INDEX.md" not in text:
-        raise ValueError("SKILL.md 未引用项目内 Skill 生成规范")
+    if (folder / "references" / "generator-guides").exists():
+        raise ValueError("Skill 不得包含 references/generator-guides")
 
 
 def _fields(m: SkillManifest) -> tuple[list[str], set[str], dict]:
@@ -1824,7 +1821,6 @@ description: {json.dumps(desc, ensure_ascii=False)}
 {json.dumps(protocol_example, ensure_ascii=False)}
 ```
 
-- 执行或提问前，必须完整阅读 `references/generator-guides/INDEX.md` 列出的全部项目规范。
 - 能力字段和表单控件见 `references/CAPABILITIES.md`；完整机器契约见 `references/CONTRACT.json`；
   选择型字段存在时读取 `references/OPTIONS.md`。
 - 流程句柄、调用者身份与凭证由 Dano 运行期注入，不要向用户索取。
@@ -2858,7 +2854,6 @@ def _write_skill(out_dir: Path, m: SkillManifest,
             _capability_reference_md(m),
             encoding="utf-8",
         )
-        _write_generation_guides(folder, docs)
         opts_md = _options_md(m)
         if opts_md:
             (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
@@ -2977,8 +2972,7 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 ## 操作步骤(SOP)
 1. 根据用户目标从“操作清单”选择一个明确操作和 capability；未列出的动作不要调用相近能力代替。
-2. 先完整阅读 `references/generator-guides/INDEX.md` 列出的全部项目规范，再读取
-   `references/CAPABILITIES.md` 对应操作小节。动态选项先用该行脚本执行
+2. 读取 `references/CAPABILITIES.md` 对应操作小节。动态选项先用该行脚本执行
    `--capability <能力名> --list-options <字段名>`，不得猜候选。
 3. 需要补字段时原生调用一次 `ask_user_question`，用顶层 `title` 和同一 `questions[]`
    一次性收集本次所需字段；字段 id、控件、默认规则和候选必须逐项来自参考小节。用户值优先，
@@ -3049,7 +3043,6 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
             _business_capability_reference_md(manifests),
             encoding="utf-8",
         )
-        _write_generation_guides(folder, docs)
         entry = (manifests[0].action if manifests else "diagnose")
         (folder / "scripts" / "diagnose.sh").write_text(
             _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")
