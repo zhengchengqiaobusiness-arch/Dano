@@ -1194,7 +1194,7 @@ def _request_has_command_anchor(request: dict) -> bool:
 
 def _preread_dedupe_key(
     req: dict,
-) -> tuple[str, str, tuple[str, ...], str, tuple[str, ...]]:
+) -> tuple[str, str, str, str, str, tuple[str, ...], str, tuple[str, ...]]:
     # Same endpoint may serve several workflows. Distinct routing values are
     # different facts and must never collapse into the latest request.
     context = tuple(sorted(_workflow_context_values_for_request(req)))
@@ -1206,7 +1206,18 @@ def _preread_dedupe_key(
     # GETs that only differ by ``id`` are two facts, even when both are short
     # integers and share the same click-less hydration path.
     identity = _record_identity_values_for_request(req)
-    return ((req.get("method") or "GET").upper(), _request_path(req), context, command, identity)
+    parsed = urlparse(str(req.get("url") or ""))
+    origin = f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}" if parsed.netloc else ""
+    return (
+        (req.get("method") or "GET").upper(),
+        origin,
+        _request_path(req),
+        str(req.get("page_id") or req.get("pageId") or ""),
+        str(req.get("frame_id") or req.get("frameId") or ""),
+        context,
+        command,
+        identity,
+    )
 
 
 _TRANSPORT_FILTER_KEYS = frozenset({
@@ -1263,7 +1274,10 @@ def _preread_candidate_score(req: dict) -> tuple[int, int, int, float]:
 
 def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
     """同一路径反复触发时保留业务条件最完整的一次，序号仅作为同分兜底。"""
-    best_by_path: dict[tuple[str, str, tuple[str, ...], str, tuple[str, ...]], dict] = {}
+    best_by_path: dict[
+        tuple[str, str, str, str, str, tuple[str, ...], str, tuple[str, ...]],
+        dict,
+    ] = {}
     for req in preread_cands:
         key = _preread_dedupe_key(req)
         current = best_by_path.get(key)

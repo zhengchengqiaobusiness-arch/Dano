@@ -311,6 +311,139 @@ def test_file_control_becomes_a_caller_file_input_in_flow_spec() -> None:
     assert document.exposed_to_user is True
 
 
+def test_two_step_upload_response_is_linked_to_the_business_request() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    upload_body = (
+        "--upload-boundary\r\n"
+        'Content-Disposition: form-data; name="asset"; filename="proof.pdf"\r\n'
+        "Content-Type: application/pdf\r\n\r\n"
+        "bytes\r\n"
+        "--upload-boundary--"
+    )
+    spec = to_flow_spec(
+        captured_requests=[
+            {
+                "request_id": "req_upload",
+                "sequence": 1,
+                "method": "POST",
+                "url": "http://uploads.invalid/v2/assets",
+                "content_type": "multipart/form-data; boundary=upload-boundary",
+                "post_data": upload_body,
+                "response_status": 200,
+                "response_json": {"data": {"assetKey": "asset-random-42"}},
+                "page_id": "page_editor",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_save",
+                "trigger_transaction_id": "tx_save",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+            },
+            {
+                "request_id": "req_save",
+                "sequence": 2,
+                "method": "POST",
+                "url": "http://business.invalid/v2/records",
+                "content_type": "application/json",
+                "post_data": json.dumps({"title": "Draft", "assetKey": "asset-random-42"}),
+                "response_status": 200,
+                "response_json": {"ok": True},
+                "page_id": "page_editor",
+                "frame_id": "frame_main",
+                "trigger_action_id": "action_save",
+                "trigger_transaction_id": "tx_save",
+                "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+            },
+        ],
+        field_evidence=[{
+            "field": "asset",
+            "label": "Proof",
+            "filename": "proof.pdf",
+            "mime_type": "application/pdf",
+            "file_count": 1,
+            "multiple": False,
+            "field_aliases": ["asset"],
+            "control_kind": "file",
+            "action_id": "action_save",
+            "transaction_id": "tx_save",
+            "page_id": "page_editor",
+            "frame_id": "frame_main",
+            "op": "upload",
+            "binding_status": "bound",
+            "request_id": "req_upload",
+            "wire_path": "body.asset",
+            "editable": True,
+            "required_state": "unknown",
+        }],
+        page_events=[{"event_id": "event_save", "kind": "click", "action_id": "action_save"}],
+        page_context={"url": "http://business.invalid/editor", "path": "/editor"},
+    )
+    upload = next(step for step in spec.steps if step.path == "/v2/assets")
+    save = next(step for step in spec.steps if step.path == "/v2/records")
+    link = next(
+        link for link in spec.links
+        if link.source_step_id == upload.step_id and link.target_step_id == save.step_id
+    )
+    assert link.source_path.endswith("assetKey")
+    assert link.target_path.endswith("assetKey")
+    assert link.confirmed is True
+
+
+def test_same_method_and_path_on_different_origins_remain_distinct_steps() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    requests = [
+        {
+            "request_id": f"req_{host}",
+            "sequence": sequence,
+            "method": "GET",
+            "url": f"http://{host}.invalid/v8/records?scope={host}",
+            "response_status": 200,
+            "response_json": {"source": host},
+            "page_id": "page_records",
+            "frame_id": "frame_main",
+            "trigger_action_id": f"action_{host}",
+            "trigger_transaction_id": f"tx_{host}",
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+        }
+        for sequence, host in enumerate(("alpha", "beta"), 1)
+    ]
+    spec = to_flow_spec(
+        captured_requests=requests,
+        field_evidence=[],
+        page_events=[],
+        page_context={"url": "http://page.invalid/records", "path": "/records"},
+    )
+    matched = [step for step in spec.steps if "/v8/records" in step.path]
+    assert {step.source_meta.get("request_id") for step in matched} == {"req_alpha", "req_beta"}
+
+
+def test_same_origin_and_path_in_different_frames_remain_distinct_steps() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    requests = [
+        {
+            "request_id": f"req_{frame}",
+            "sequence": sequence,
+            "method": "GET",
+            "url": f"http://frames.invalid/v8/records?scope={frame}",
+            "response_status": 200,
+            "response_json": {"source": frame},
+            "page_id": "page_records",
+            "frame_id": frame,
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+        }
+        for sequence, frame in enumerate(("frame_a", "frame_b"), 1)
+    ]
+    spec = to_flow_spec(
+        captured_requests=requests,
+        field_evidence=[],
+        page_events=[],
+        page_context={"url": "http://frames.invalid/records", "path": "/records"},
+    )
+    matched = [step for step in spec.steps if "/v8/records" in step.path]
+    assert {step.source_meta.get("request_id") for step in matched} == {"req_frame_a", "req_frame_b"}
+
+
 def test_text_control_keeps_text_business_type_for_numeric_wire_sample() -> None:
     from dano.execution.page.flow_spec import to_flow_spec
 
