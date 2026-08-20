@@ -673,6 +673,30 @@ def _narrow_candidates_by_surface(
     )
 
 
+def _value_fallback_matches_surface(
+    evidence: dict[str, Any],
+    candidate: dict[str, Any],
+    request_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Do not let an alias-free scalar cross the page/form boundary.
+
+    Structural aliases and explicit wire paths are handled before value
+    fallback. At this weaker tier, a page control can only describe a query
+    field and a dialog/drawer control can only describe a request-body field.
+    An unknown surface remains eligible for the existing causal checks.
+    """
+    surface = _evidence_surface(evidence)
+    wire_path = str(candidate.get("wire_path") or "")
+    container = _wire_container(wire_path)
+    request = request_by_id.get(str(candidate.get("request_id") or ""), {})
+    method = str(request.get("method") or "GET").upper()
+    if surface == "page":
+        return container == "query" and method in {"GET", "HEAD", "OPTIONS"}
+    if surface == "dialog":
+        return container == "body" or method in {"POST", "PUT", "PATCH", "DELETE"}
+    return True
+
+
 def _wire_leaf(wire_path: str) -> str:
     return re.sub(r"\[\d+\]", "", str(wire_path or "").rsplit(".", 1)[-1]).casefold()
 
@@ -872,6 +896,10 @@ def bind_field_evidence(
                 str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
                 for request in requests
             }
+            value_candidates = [
+                item for item in value_candidates
+                if _value_fallback_matches_surface(evidence, item, request_by_id)
+            ]
             preferred_candidates = _narrow_candidates_by_surface(
                 evidence, value_candidates, request_by_id,
             )
@@ -929,6 +957,10 @@ def bind_field_evidence(
                 str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
                 for request in requests
             }
+            distinctive = [
+                item for item in distinctive
+                if _value_fallback_matches_surface(evidence, item, request_by_id)
+            ]
             distinctive = _narrow_candidates_by_surface(evidence, distinctive, request_by_id)
             if len({(item["request_id"], item["wire_path"]) for item in distinctive}) == 1:
                 candidates = distinctive
@@ -971,6 +1003,10 @@ def bind_field_evidence(
                 str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
                 for request in requests
             }
+            range_ends = [
+                item for item in range_ends
+                if _value_fallback_matches_surface(evidence, item, request_by_id)
+            ]
             range_ends = _narrow_candidates_by_surface(evidence, range_ends, request_by_id)
             if len({(item["request_id"], item["wire_path"]) for item in range_ends}) == 1:
                 candidates = range_ends

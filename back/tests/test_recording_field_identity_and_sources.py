@@ -166,6 +166,46 @@ def test_array_rows_are_not_forced_onto_first_index() -> None:
     assert path in {"body.items[1].count", "body.items[].count"} or item.get("binding_status") == "ambiguous"
 
 
+def test_unidentified_page_control_does_not_bind_to_dialog_body_by_value() -> None:
+    """A value match cannot move evidence across the page/dialog boundary.
+
+    This is deliberately free of product-specific labels and routes.  Paging,
+    counters, and unrelated widgets frequently share small scalar values with
+    a later write body; without a structural alias they are not field identity.
+    """
+    requests = [{
+        "request_id": "req_write",
+        "method": "POST",
+        "url": "http://identity.invalid/v3/resources",
+        "post_data": json.dumps({"createdBy": 1}),
+        "response_status": 200,
+        "page_id": "page_shared",
+        "frame_id": "frame_main",
+        "trigger_action_id": "action_save",
+        "trigger_transaction_id": "tx_save",
+        "role": "business_write",
+    }]
+    evidence = [{
+        "label": "Current position",
+        "field": "",
+        "field_aliases": [],
+        "value": 1,
+        "control_kind": "number",
+        "surface": "page",
+        "in_dialog": False,
+        "page_id": "page_shared",
+        "frame_id": "frame_main",
+        "action_id": "action_save",
+        "transaction_id": "tx_save",
+        "op": "snapshot",
+    }]
+
+    item = bind_field_evidence(requests, [], evidence)[0]
+
+    assert item.get("binding_status") != "bound"
+    assert not item.get("wire_path")
+
+
 def test_explicit_request_and_wire_path_bind_each_array_occurrence() -> None:
     request = {
         "request_id": "req_rows",
