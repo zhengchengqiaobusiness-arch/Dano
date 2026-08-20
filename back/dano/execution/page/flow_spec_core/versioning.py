@@ -18,7 +18,6 @@ def append_flow_version(
     actor: str = "system",
 ) -> FlowSpec:
     """在 FlowSpec.meta 中追加轻量版本记录。"""
-    sync_flow_spec_models(spec)
     meta = dict(spec.meta or {})
     versions = list(meta.get("versions") or [])
     current = max(
@@ -36,7 +35,12 @@ def append_flow_version(
             "steps": len(spec.steps),
             "links": len(spec.links),
             "capabilities": len(spec.capabilities or []),
-            "user_params": len(flow_spec_user_params(spec)),
+            "user_params": len({
+                str(param.key or param.path)
+                for step in spec.steps
+                for param in (step.params or [])
+                if param.category == "user_param" and param.exposed_to_user
+            }),
             "review_items": len(spec.review_items),
             "risk_level": spec.risk_level,
         },
@@ -52,18 +56,3 @@ def ensure_flow_version(spec: FlowSpec, action: str, *, reason: str = "") -> Flo
     if spec.meta.get("versions"):
         return spec
     return append_flow_version(spec, action, reason=reason)
-
-_PENDING_FLOW_SPEC_HELPERS = {'flow_spec_user_params': 'dano.execution.page.flow_spec_core.request_contract', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
-
-
-def _bind_flow_spec_helpers() -> None:
-    import sys
-    module_globals = globals()
-    for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
-        mod = sys.modules.get(owner)
-        if mod is None or not hasattr(mod, name):
-            continue
-        module_globals[name] = getattr(mod, name)
-
-
-_bind_flow_spec_helpers()
