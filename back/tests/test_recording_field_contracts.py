@@ -1242,6 +1242,57 @@ def test_dynamic_array_schema_identity_does_not_include_recorded_row_indexes() -
     }
 
 
+def test_dynamic_array_members_exposed_later_stay_inside_item_schema() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_late_row",
+                method="POST",
+                url="http://example.test/v5/rows",
+                sequence=1,
+                role="business_write",
+                action="act_late_row",
+                locator="text=Submit",
+                body={"entries": [{"code": "A", "comment": "recorded"}]},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="Code",
+                aliases=["code"],
+                kind="text",
+                value="A",
+                request_id="req_late_row",
+                path="body.entries[0].code",
+                in_dialog=True,
+                required=True,
+            ),
+        ],
+        page_events=[{"event_id": "ev_late", "kind": "click", "action_id": "act_late_row"}],
+        page_context=PAGE,
+    )
+    create = _step_by_suffix(spec, "/v5/rows")
+    comment = _param(create, "entries[0].comment")
+    assert (comment.source or {}).get("array_item_member") is True
+    assert (comment.source or {}).get("array_item_public") is False
+    comment.category = "user_param"
+    comment.source_kind = "user_input"
+    comment.source = {**(comment.source or {}), "kind": "user_input"}
+    comment.exposed_to_user = True
+    comment.editable = True
+    comment.locked = True
+
+    compiled = _compile(spec, [{
+        "name": "submit_entries",
+        "title": "Submit entries",
+        "kind": "create",
+        "anchor_step_id": create.step_id,
+    }])
+    properties = compiled.capabilities[0].input_schema["properties"]
+    assert "comment" not in properties
+    assert "comment" in properties["entries"]["items"]["properties"]
+
+
 def test_repeating_option_rows_project_each_selected_record(monkeypatch) -> None:
     import asyncio
 

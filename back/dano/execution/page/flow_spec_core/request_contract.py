@@ -38,7 +38,7 @@ def _dynamic_array_containers(step: FlowStep) -> set[str]:
 
 def _param_is_dynamic_array_leaf(step: FlowStep, param: ParamField) -> bool:
     return bool(
-        (param.source or {}).get("array_item_public") is True
+        (param.source or {}).get("array_item_member") is True
         and str((param.source or {}).get("array_container_path") or "")
         in _dynamic_array_containers(step)
     )

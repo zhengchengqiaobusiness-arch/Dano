@@ -29,6 +29,9 @@ from dano.execution.page.flow_materialization.field_contracts.caller_ownership i
     _param_exposed_to_caller,
     _param_requires_caller_input,
 )
+from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+    _sync_dynamic_array_memberships,
+)
 from dano.execution.page.flow_materialization.request_steps import (
     _infer_wire_format,
 )
@@ -301,14 +304,16 @@ def _apply_param_schema_default(prop: dict[str, Any], param: ParamField) -> None
 def _dynamic_array_item_params(
     params: list[ParamField],
     aggregate: ParamField,
+    capability_step_ids: set[str] | None,
 ) -> list[ParamField]:
     container = str((aggregate.source or {}).get("array_container_path") or aggregate.path or "")
     out: list[ParamField] = []
     for param in params:
         source = dict(param.source or {})
         if (
-            source.get("array_item_public") is not True
+            source.get("array_item_member") is not True
             or str(source.get("array_container_path") or "") != container
+            or not _param_exposed_to_caller(param, capability_step_ids)
         ):
             continue
         item = param.model_copy(deep=True)
@@ -345,7 +350,7 @@ def _capability_input_schema(
     for p in params:
         if str((p.source or {}).get("array_container_path") or "") in dynamic_containers and (
             p.source or {}
-        ).get("array_item_public") is True:
+        ).get("array_item_member") is True:
             continue
         if not _param_exposed_to_caller(p, capability_step_ids):
             continue
@@ -405,7 +410,7 @@ def _capability_input_schema(
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
         _apply_param_schema_default(props[key], p)
         if _is_dynamic_array_input(p):
-            item_params = _dynamic_array_item_params(params, p)
+            item_params = _dynamic_array_item_params(params, p, capability_step_ids)
             props[key]["items"] = _capability_input_schema(
                 item_params,
                 capability_step_ids,
@@ -736,6 +741,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     # turn document IDs, row IDs or audit fields back into public inputs.
     if int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2:
         _apply_mechanical_field_contracts(spec)
+        _sync_dynamic_array_memberships(spec)
     _normalize_capability_references(spec)
     _normalize_actionable_placeholder_param_names(spec)
 

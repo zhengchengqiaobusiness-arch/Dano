@@ -41,6 +41,48 @@ def _array_public_key(container: str, occupied: set[str]) -> str:
     return contextual or candidate
 
 
+def _sync_dynamic_array_memberships(spec: FlowSpec) -> None:
+    """Keep array membership metadata orthogonal to changing field ownership."""
+    for step in spec.steps or []:
+        aggregates = [
+            param for param in step.params or []
+            if str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
+            and str((param.source or {}).get("structure_kind") or "") == "array_object"
+        ]
+        for aggregate in aggregates:
+            container = str(
+                (aggregate.source or {}).get("array_container_path")
+                or aggregate.path
+                or ""
+            )
+            item_params = [
+                param for param in step.params or []
+                if param is not aggregate
+                and _array_container_for_path(param.path) == container
+            ]
+            for param in item_params:
+                item_path = _array_item_relative_path(param.path, container)
+                param.source = {
+                    **(param.source or {}),
+                    "array_container_path": container,
+                    "array_item_path": item_path,
+                    "array_item_key": str(param.key or param.path),
+                    "array_item_required": bool(param.required),
+                    "array_item_member": True,
+                    "array_item_public": bool(
+                        param.category == "user_param" and param.exposed_to_user
+                    ),
+                    "schema_identity_path": f"{container}[].{item_path}",
+                }
+            aggregate.source = {
+                **(aggregate.source or {}),
+                "item_paths": [
+                    str((param.source or {}).get("array_item_path") or "")
+                    for param in item_params
+                ],
+            }
+
+
 def _materialize_dynamic_array_inputs(spec: FlowSpec) -> None:
     """Collapse exposed ``rows[n].field`` leaves into one executable array input."""
     for step in spec.steps or []:
@@ -103,7 +145,8 @@ def _materialize_dynamic_array_inputs(spec: FlowSpec) -> None:
                     "occurrence_paths": [param.path for param in item_params],
                 }],
             )
-            for param in caller_params:
+            caller_param_ids = {id(param) for param in caller_params}
+            for param in item_params:
                 item_path = _array_item_relative_path(param.path, container)
                 param.source = {
                     **(param.source or {}),
@@ -111,12 +154,13 @@ def _materialize_dynamic_array_inputs(spec: FlowSpec) -> None:
                     "array_item_path": item_path,
                     "array_item_key": str(param.key or param.path),
                     "array_item_required": bool(param.required),
-                    "array_item_public": True,
+                    "array_item_member": True,
+                    "array_item_public": id(param) in caller_param_ids,
                     "schema_identity_path": f"{container}[].{item_path}",
                 }
             aggregate.source["item_paths"] = [
                 str((param.source or {}).get("array_item_path") or "")
-                for param in caller_params
+                for param in item_params
             ]
             step.params.append(aggregate)
 
@@ -155,3 +199,4 @@ def _materialize_dynamic_array_inputs(spec: FlowSpec) -> None:
                 item.id_tokens = None
                 rewritten_selects.append(item)
             step.selects = rewritten_selects
+    _sync_dynamic_array_memberships(spec)
