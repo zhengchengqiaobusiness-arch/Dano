@@ -1069,7 +1069,10 @@ def bind_field_evidence(
         evidence["editable"] = bool(
             control_kind != "table_column"
             and not evidence.get("disabled")
-            and not evidence.get("read_only")
+            and (
+                control_kind in {"select", "combobox"}
+                or not evidence.get("read_only")
+            )
         )
         evidence["axes"] = [
             axis for axis, present in (

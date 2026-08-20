@@ -2446,9 +2446,9 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             return "date"
         if kind in {"datetime", "time"}:
             return "datetime"
-        if kind in {"select", "combobox"} and not bool(
-            (item or {}).get("disabled") or (item or {}).get("read_only")
-        ):
+        # Component libraries mark the inner text input readonly so typing is
+        # blocked while the surrounding picker remains caller-editable.
+        if kind in {"select", "combobox"} and not bool((item or {}).get("disabled")):
             return "enum"
         if kind in {"checkbox", "switch"}:
             return "boolean"

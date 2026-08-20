@@ -177,6 +177,39 @@ def test_capability_input_schema_preserves_required_optional_unknown_states() ->
     assert schema["properties"]["notObserved"]["x-dano-required-state"] == "unknown"
 
 
+def test_readonly_inner_input_of_select_remains_caller_editable_enum() -> None:
+    spec = to_flow_spec(
+        captured_requests=[_req(
+            "req_write_choice",
+            method="POST",
+            url="http://random.invalid/v7/entities",
+            sequence=1,
+            body={"choiceId": 7},
+            role="business_write",
+            action="action_save",
+            locator="text=Save",
+        )],
+        field_evidence=[_control(
+            label="Choice",
+            aliases=["choiceId"],
+            kind="select",
+            value="Seven",
+            request_id="req_write_choice",
+            path="body.choiceId",
+            in_dialog=True,
+            read_only=True,
+        )],
+        page_events=[{"event_id": "event_save", "kind": "click", "action_id": "action_save"}],
+        page_context={"url": "http://random.invalid/editor", "path": "/editor"},
+    )
+
+    choice = _param(_step_by_suffix(spec, "/v7/entities"), "choiceId")
+    assert choice.type == "enum"
+    assert choice.wire_type == "number"
+    assert choice.source_kind == "form_option"
+    assert _param_exposed_to_caller(choice)
+
+
 def _edit_and_command_spec(*, include_dialog_controls: bool = True):
     dict_url = "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status"
     status_options = [
