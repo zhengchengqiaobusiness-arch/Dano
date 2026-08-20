@@ -617,15 +617,31 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             catalogs.append((str(fact.request_id or ""), rows))
     if not catalogs:
         return
+    exact_option_requests_by_target: dict[str, set[str]] = {}
+    for capability in spec.capabilities or []:
+        request_ids = {
+            str(ref.request_id or "")
+            for ref in capability.request_refs or []
+            if ref.usage == "option_source" and str(ref.request_id or "")
+        }
+        if not request_ids:
+            continue
+        for step_id in capability.step_ids or []:
+            exact_option_requests_by_target.setdefault(step_id, set()).update(request_ids)
     for step in spec.steps or []:
         if str(step.method or "").upper() not in {"POST", "PUT", "PATCH"}:
             continue
+        exact_request_ids = exact_option_requests_by_target.get(step.step_id, set())
+        step_catalogs = [
+            item for item in catalogs
+            if not exact_request_ids or item[0] in exact_request_ids
+        ]
         groups: dict[str, list[ParamField]] = {}
         for param in step.params or []:
             groups.setdefault(_param_group_prefix(param.path), []).append(param)
         for members in groups.values():
             scored: list[tuple[int, str, dict[str, Any]]] = []
-            for request_id, rows in catalogs:
+            for request_id, rows in step_catalogs:
                 hits = [
                     (row, _option_row_match_count(row, members))
                     for row in rows

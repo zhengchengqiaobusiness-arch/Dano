@@ -361,6 +361,27 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
 
+    exact_option_scope_by_target: dict[str, tuple[set[str], set[str]]] = {}
+    for capability in spec.capabilities or []:
+        request_ids = {
+            str(ref.request_id or "")
+            for ref in capability.request_refs or []
+            if ref.usage == "option_source" and str(ref.request_id or "")
+        }
+        step_ids = {
+            str(ref.step_id or "")
+            for ref in capability.request_refs or []
+            if ref.usage == "option_source" and str(ref.step_id or "")
+        }
+        if not request_ids and not step_ids:
+            continue
+        for target_step_id in capability.step_ids or []:
+            current_request_ids, current_step_ids = exact_option_scope_by_target.setdefault(
+                target_step_id, (set(), set()),
+            )
+            current_request_ids.update(request_ids)
+            current_step_ids.update(step_ids)
+
     repaired = 0
 
     def has_screenshot_choice(param: ParamField) -> bool:
@@ -520,9 +541,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         visible_labels = set(page_contract.get("labels") or set()) if page_contract else set()
         selected_label = str(page_contract.get("selected") or "") if page_contract else ""
         for value_key in value_keys:
+            selected_for_value_key = [
+                item for item in matching_items
+                if str(item.get(value_key)) == value
+            ]
             label_keys = {
                 _pick_label_key(item, value_key)
-                for item in matching_items
+                for item in selected_for_value_key
                 if _pick_label_key(item, value_key) != value_key
             }
             for label_key in label_keys:
@@ -561,30 +586,48 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     selected_rows = [item for item in subset if str(item.get(value_key)) == value]
                     if len(selected_rows) != 1:
                         continue
-                    records: list[dict[str, Any]] = []
-                    option_map: dict[str, Any] = {}
+                    raw_records: list[tuple[str, Any]] = []
                     seen_values: set[str] = set()
                     valid = True
                     for item in subset:
                         label = str(item.get(label_key) or "").strip()
                         raw_value = item.get(value_key)
                         value_sig = str(raw_value)
-                        if not label or raw_value in (None, "") or label in option_map or value_sig in seen_values:
+                        if not label or raw_value in (None, "") or value_sig in seen_values:
                             valid = False
                             break
                         seen_values.add(value_sig)
-                        option_map[label] = raw_value
-                        records.append({"label": label, "value": raw_value})
-                    if not valid or len(records) < (1 if allow_single else 2):
+                        raw_records.append((label, raw_value))
+                    if not valid or len(raw_records) < (1 if allow_single else 2):
                         continue
+                    label_counts = {
+                        label: sum(1 for candidate, _ in raw_records if candidate == label)
+                        for label, _ in raw_records
+                    }
+                    records: list[dict[str, Any]] = []
+                    option_map: dict[str, Any] = {}
+                    for label, raw_value in raw_records:
+                        # Duplicate display names are legal in real option
+                        # APIs.  Keep every wire value and make only the public
+                        # choice label unambiguous instead of rejecting the
+                        # entire source or silently mapping to the last row.
+                        public_label = (
+                            label
+                            if label_counts[label] == 1
+                            else f"{label} [{raw_value}]"
+                        )
+                        option_map[public_label] = raw_value
+                        records.append({"label": public_label, "value": raw_value})
                     if page_contract:
-                        record_labels = set(option_map)
+                        record_labels = {label for label, _ in raw_records}
                         required_overlap = min(2, len(visible_labels))
                         if len(record_labels & visible_labels) < required_overlap:
                             continue
                         if selected_label and (
-                            selected_label not in option_map
-                            or str(option_map[selected_label]) != value
+                            not any(
+                                label == selected_label and str(raw_value) == value
+                                for label, raw_value in raw_records
+                            )
                         ):
                             continue
                     contracts.append({
@@ -594,11 +637,12 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         "category_value": category_value,
                         "records": records,
                         "option_map": option_map,
+                        "raw_labels": sorted({label for label, _ in raw_records}),
                     })
         if page_contract:
             exact_label_contracts = [
                 contract for contract in contracts
-                if set(contract["option_map"]) == visible_labels
+                if set(contract.get("raw_labels") or []) == visible_labels
             ]
             if exact_label_contracts:
                 return exact_label_contracts
@@ -684,13 +728,52 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         )
 
     for target in spec.steps:
+        exact_request_ids, exact_step_ids = exact_option_scope_by_target.get(
+            target.step_id, (set(), set()),
+        )
+        has_exact_option_scope = bool(exact_request_ids or exact_step_ids)
+        target_candidates = [
+            source for source in candidates
+            if not has_exact_option_scope
+            or str(source.get("source_request_id") or "") in exact_request_ids
+            or str(source.get("source_step_id") or "") in exact_step_ids
+        ]
         for param in target.params or []:
+            source = dict(param.source or {})
+            primary_source_request_ids = {
+                str(value)
+                for value in (
+                    source.get("source_request_id"),
+                    source.get("origin_request_id"),
+                )
+                if value
+            }
+            primary_source_step_id = str(source.get("source_step_id") or source.get("step_id") or "")
+            if primary_source_step_id:
+                primary_source_request_ids.update(
+                    str(candidate.get("source_request_id") or "")
+                    for candidate in candidates
+                    if str(candidate.get("source_step_id") or "") == primary_source_step_id
+                    and candidate.get("source_request_id")
+                )
+            displaced_automatic_option = bool(
+                has_exact_option_scope
+                and param.source_kind in {"api_option", "previous_response"}
+                and (
+                    not primary_source_request_ids
+                    or primary_source_request_ids.isdisjoint(exact_request_ids)
+                )
+            )
+            leaf = str(param.path or param.key or "").replace("[]", "").split(".")[-1]
             selected_entity_target = bool(
-                str((param.source or {}).get("kind") or "") == "selected_entity_id"
-                and re.sub(
-                    r"[^a-z0-9]+", "",
-                    str(param.path or param.key).split(".")[-1].casefold(),
-                ) == "id"
+                (
+                    str(source.get("kind") or "") == "selected_entity_id"
+                    and re.sub(r"[^a-z0-9]+", "", leaf.casefold()) == "id"
+                )
+                or (
+                    has_exact_option_scope
+                    and _is_idlike(leaf)
+                )
             )
             rebindable_option = bool(
                 param.source_kind == "api_option" and has_screenshot_choice(param)
@@ -700,7 +783,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     (param.source or {}).get("enum_confirmed") is False
                     or not _incomplete_page_enum_is_executable(param)
                 )
-            )
+            ) or displaced_automatic_option
             if (
                 param.locked
                 or param.source_kind in {"dynamic_structure", "selected_option_field"}
@@ -709,6 +792,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 or (
                     param.source_kind == "previous_response"
                     and isinstance((param.source or {}).get("option_source"), dict)
+                    and not displaced_automatic_option
                 )
                 or (
                     param.source_kind in _OPTION_SOURCE_KINDS
@@ -739,7 +823,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             target_families = _option_binding_semantic_families(target_text)
             page_contracts = page_evidence_for(target, param, value)
             matches: list[dict[str, Any]] = []
-            for source in candidates:
+            for source in target_candidates:
                 if source.get("entity_collection_source") is True and not selected_entity_target:
                     continue
                 items = source["items"]
@@ -863,9 +947,16 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     selected_row = selected_rows[0]
                     projected_paths: set[str] = set()
                     for sibling in target.params or []:
-                        if sibling is param or sibling.source_kind != "api_option":
+                        if sibling is param or sibling.source_kind not in {
+                            "api_option", "selected_option_field",
+                        }:
                             continue
                         sibling_source = sibling.source or {}
+                        selector_matches = bool(
+                            sibling.source_kind == "selected_option_field"
+                            and _strip_body_prefix(str(sibling_source.get("selector_path") or ""))
+                            == _strip_body_prefix(param.path or "")
+                        )
                         sibling_endpoint = _option_source_contract_endpoint(
                             str(sibling_source.get("source_url") or "")
                         )
@@ -883,8 +974,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                                 and selected_endpoint
                                 and sibling_endpoint == selected_endpoint
                             )
+                            or selector_matches
                         )
-                        response_path = str(sibling_source.get("value_key") or "")
+                        response_path = str(
+                            sibling_source.get("response_path")
+                            or sibling_source.get("value_key")
+                            or ""
+                        )
                         if not (
                             same_source
                             and response_path
@@ -902,6 +998,8 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             "selector_path": param.path,
                             "selector_param": param.key,
                             "source_url": str(match.get("source_url") or ""),
+                            "source_step_id": str(match.get("source_step_id") or ""),
+                            "source_request_id": str(match.get("source_request_id") or ""),
                             "response_path": response_path,
                             "target_path": sibling.path,
                         }
@@ -943,6 +1041,8 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             "selector_path": param.path,
                             "selector_param": param.key,
                             "source_url": str(match.get("source_url") or ""),
+                            "source_step_id": str(match.get("source_step_id") or ""),
+                            "source_request_id": str(match.get("source_request_id") or ""),
                             "response_path": response_path,
                             "target_path": sibling.path,
                         }

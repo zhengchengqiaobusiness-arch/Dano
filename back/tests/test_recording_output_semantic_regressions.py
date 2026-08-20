@@ -579,3 +579,143 @@ def test_reanalysis_invalidates_legacy_false_computed_and_constant_sources() -> 
     assert state.exposed_to_user is True
     assert account.source_kind == "previous_response"
     assert account.source.get("step_id") == detail.step_id
+
+
+def test_reanalysis_restores_exact_option_request_cohort() -> None:
+    old_fact, old_analysis = _request_fact(
+        "req_old", sequence=1, path="/v4/account-options", role="read_option",
+        response_json={"data": [{"id": 1, "name": "Old"}]},
+    )
+    first_fact, first_analysis = _request_fact(
+        "req_first", sequence=2, path="/v4/customer-options", role="read_option",
+        response_json={"data": [{"id": 11, "name": "Customer"}]},
+    )
+    second_fact, second_analysis = _request_fact(
+        "req_second", sequence=3, path="/v4/user-options", role="read_option",
+        response_json={"data": [{"id": 12, "name": "User"}]},
+    )
+    exact_fact, exact_analysis = _request_fact(
+        "req_exact", sequence=4, path="/v4/account-options", role="read_option",
+        response_json={"data": [
+            {"id": 2, "name": "Current"},
+            {"id": 3, "name": "Duplicate"},
+            {"id": 4, "name": "Duplicate"},
+        ]},
+    )
+    write_fact, write_analysis = _request_fact(
+        "req_write", sequence=5, path="/v4/entities", role="business_write",
+        response_json={"ok": True},
+    )
+    write_fact.post_data = json.dumps({"accountId": 2})
+    old_fact.trigger_event_id = "event_old"
+    old_fact.trigger_action_id = "action_old"
+    old_fact.trigger_transaction_id = "tx_old"
+    for fact in (first_fact, second_fact, exact_fact):
+        fact.trigger_event_id = "event_open"
+        fact.trigger_action_id = "action_open"
+        fact.trigger_transaction_id = "tx_open"
+
+    old_step = FlowStep(
+        step_id="step_old",
+        method="GET",
+        path=old_fact.path,
+        url=old_fact.url,
+        response_json=old_fact.response_json,
+        semantic_role="read_option",
+        source_meta={
+            "request_id": "req_old",
+            "role": "read_option",
+            "sequence": 1,
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+            "trigger_event_id": "event_old",
+            "trigger_action_id": "action_old",
+            "trigger_transaction_id": "tx_old",
+        },
+    )
+    write_step = FlowStep(
+        step_id="step_write",
+        method="POST",
+        path=write_fact.path,
+        url=write_fact.url,
+        body_source=write_fact.post_data,
+        semantic_role="business_write",
+        source_meta={
+            "request_id": "req_write",
+            "role": "business_write",
+            "sequence": 5,
+            "page_id": "page_generic",
+            "frame_id": "frame_generic",
+        },
+        params=[ParamField(
+            path="accountId",
+            key="accountId",
+            value=2,
+            type="enum",
+            wire_type="number",
+            source_kind="previous_response",
+            source={"kind": "previous_response", "step_id": "step_old", "path": "data[0].id"},
+        )],
+    )
+    spec = FlowSpec(tenant="t", subsystem="generic", steps=[old_step, write_step])
+    spec.links = [FlowLink(
+        source_step_id="step_old",
+        source_path="data[0].id",
+        target_step_id="step_write",
+        target_path="accountId",
+        confidence=0.75,
+        confirmed=False,
+        meta={"actor": "agent", "verified": False},
+    )]
+    spec.request_facts.requests = [
+        old_fact, first_fact, second_fact, exact_fact, write_fact,
+    ]
+    spec.request_facts.analysis = {
+        "req_old": old_analysis,
+        "req_first": first_analysis,
+        "req_second": second_analysis,
+        "req_exact": exact_analysis,
+        "req_write": write_analysis,
+    }
+    spec.meta = {
+        "capability_model": {
+            "semantic_plan": {
+                "capabilities": [{
+                    "name": "create_entity",
+                    "title": "Create entity",
+                    "kind": "create",
+                    "anchor_step_id": "step_write",
+                    "request_refs": [
+                        {"step_id": "req_first", "usage": "option_source"},
+                        {"step_id": "req_second", "usage": "option_source"},
+                        {"step_id": "step_old", "usage": "option_source"},
+                        {"step_id": "step_write", "usage": "execute"},
+                    ],
+                }],
+                "unresolved_items": [],
+            },
+        },
+    }
+
+    repaired = sync_flow_spec_models(spec)
+
+    step_by_request = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in repaired.steps
+    }
+    assert {"req_first", "req_second", "req_exact"} <= set(step_by_request)
+    capability = next(cap for cap in repaired.capabilities if cap.name == "create_entity")
+    option_request_ids = {
+        ref.request_id for ref in capability.request_refs if ref.usage == "option_source"
+    }
+    assert option_request_ids == {"req_first", "req_second", "req_exact"}
+    assert not any(
+        link.source_step_id == old_step.step_id
+        and link.target_step_id == write_step.step_id
+        for link in repaired.links
+    )
+    account = next(param for param in step_by_request["req_write"].params if param.path == "accountId")
+    assert account.source_kind == "api_option"
+    assert account.source.get("source_request_id") == "req_exact"
+    assert {item["value"] for item in account.enum_options or []} == {2, 3, 4}
+    assert len({item["label"] for item in account.enum_options or []}) == 3

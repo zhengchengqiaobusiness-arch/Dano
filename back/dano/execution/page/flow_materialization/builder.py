@@ -5,6 +5,7 @@ from typing import Any
 import copy
 import hashlib
 import re
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowLink,
     FlowSpec,
@@ -49,6 +50,7 @@ from dano.execution.page.flow_materialization.request_steps import (
     _append_query_params_to_step,
     _build_step_from_capture,
     _infer_wire_format,
+    promote_request_to_step,
     _samples_for_captured_request,
 )
 from dano.execution.page.flow_materialization.field_contracts.create_form import (
@@ -131,6 +133,297 @@ from dano.execution.page.flow_spec_core.versioning import (
 from dano.execution.page.flow_spec_core.owner_runtime import (
     bind_owner_runtime,
 )
+from dano.execution.page.request_identity import (
+    request_body_signature,
+    request_identity_matches,
+    request_query_signature,
+)
+
+
+def _request_fact_causal_scope(fact: Any) -> tuple[str, ...] | None:
+    scope = (
+        str(getattr(fact, "page_id", None) or ""),
+        str(getattr(fact, "frame_id", None) or ""),
+        str(getattr(fact, "trigger_event_id", None) or ""),
+        str(getattr(fact, "trigger_action_id", None) or ""),
+        str(getattr(fact, "trigger_transaction_id", None) or ""),
+    )
+    return scope if any(scope[2:]) else None
+
+
+def _request_fact_identity(fact: Any) -> dict[str, Any]:
+    return {
+        "request_id": str(getattr(fact, "request_id", None) or ""),
+        "method": str(getattr(fact, "method", None) or ""),
+        "url": str(getattr(fact, "url", None) or getattr(fact, "path", None) or ""),
+        "path": str(getattr(fact, "path", None) or ""),
+        "page_id": str(getattr(fact, "page_id", None) or ""),
+        "frame_id": str(getattr(fact, "frame_id", None) or ""),
+        "trigger_event_id": str(getattr(fact, "trigger_event_id", None) or ""),
+        "trigger_action_id": str(getattr(fact, "trigger_action_id", None) or ""),
+        "trigger_transaction_id": str(
+            getattr(fact, "trigger_transaction_id", None) or ""
+        ),
+        "query": dict(getattr(fact, "query", None) or {}),
+        "body": getattr(fact, "post_data", None),
+        "content_type": str(getattr(fact, "content_type", None) or ""),
+    }
+
+
+def _request_fact_transport_contract(fact: Any) -> dict[str, Any]:
+    """Identity dimensions that remain stable across two causal occurrences."""
+    url = str(getattr(fact, "url", None) or getattr(fact, "path", None) or "")
+    query = dict(getattr(fact, "query", None) or {})
+    contract: dict[str, Any] = {
+        "source_url": url,
+        "source_method": str(getattr(fact, "method", None) or ""),
+        "query": query,
+    }
+    post_data = getattr(fact, "post_data", None)
+    if post_data is not None:
+        contract["source_body"] = post_data
+    content_type = str(getattr(fact, "content_type", None) or "")
+    if content_type:
+        contract["source_content_type"] = content_type
+    return contract
+
+
+def _request_fact_transport_signature(fact: Any) -> tuple[Any, ...]:
+    url = str(getattr(fact, "url", None) or getattr(fact, "path", None) or "")
+    parsed = urlparse(url)
+    return (
+        str(getattr(fact, "method", None) or "").upper(),
+        parsed.scheme.casefold(),
+        parsed.netloc.casefold(),
+        parsed.path.rstrip("/"),
+        request_query_signature(dict(getattr(fact, "query", None) or {})),
+        request_body_signature(getattr(fact, "post_data", None)),
+        str(getattr(fact, "content_type", None) or "").casefold(),
+    )
+
+
+def _semantic_plan(spec: FlowSpec) -> dict[str, Any] | None:
+    model = (spec.meta or {}).get("capability_model")
+    plan = model.get("semantic_plan") if isinstance(model, dict) else None
+    return plan if isinstance(plan, dict) else None
+
+
+def _sync_saved_semantic_plan_requests(spec: FlowSpec) -> bool:
+    """Restore exact request occurrences lost by legacy same-path substitution.
+
+    A replacement is allowed only when at least two exact option references
+    establish one causal cohort and that cohort contains exactly one option
+    request with the displaced reference's full transport signature.
+    """
+    plan = _semantic_plan(spec)
+    if not plan:
+        return False
+    facts_by_id = {
+        str(fact.request_id or ""): fact
+        for fact in (spec.request_facts.requests or [])
+        if str(fact.request_id or "")
+    }
+    if not facts_by_id:
+        return False
+    steps_by_id = {step.step_id: step for step in spec.steps}
+    request_id_by_step = {
+        step.step_id: str((step.source_meta or {}).get("request_id") or "")
+        for step in spec.steps
+    }
+    option_request_ids = {
+        request_id
+        for request_id, analysis in (spec.request_facts.analysis or {}).items()
+        if str(analysis.role or "") in {
+            "read_option", "option", "option_source", "explicit_read_option",
+        }
+    }
+    option_request_ids.update(
+        str(item.get("request_id") or "")
+        for item in (spec.request_facts.option_sources or [])
+        if isinstance(item, dict) and item.get("request_id")
+    )
+    migrations: list[dict[str, Any]] = []
+
+    for capability in plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        option_refs = [
+            ref for ref in capability.get("request_refs") or []
+            if isinstance(ref, dict) and str(ref.get("usage") or "") == "option_source"
+        ]
+        cohorts: dict[tuple[str, ...], list[Any]] = {}
+        for ref in option_refs:
+            direct_request_id = str(ref.get("request_id") or ref.get("step_id") or "")
+            fact = facts_by_id.get(direct_request_id)
+            scope = _request_fact_causal_scope(fact) if fact is not None else None
+            if scope is not None:
+                cohorts.setdefault(scope, []).append(fact)
+        grounded_cohorts = [scope for scope, facts in cohorts.items() if len(facts) >= 2]
+        if len(grounded_cohorts) != 1:
+            continue
+        cohort = grounded_cohorts[0]
+        already_referenced = {
+            str(ref.get("request_id") or ref.get("step_id") or "") for ref in option_refs
+        }
+        for ref in option_refs:
+            identifier = str(ref.get("step_id") or "")
+            if identifier in facts_by_id:
+                continue
+            old_request_id = request_id_by_step.get(identifier, "")
+            old_fact = facts_by_id.get(old_request_id)
+            if old_fact is None:
+                continue
+            transport_contract = _request_fact_transport_contract(old_fact)
+            candidates = [
+                fact for request_id, fact in facts_by_id.items()
+                if request_id not in already_referenced
+                and request_id in option_request_ids
+                and _request_fact_causal_scope(fact) == cohort
+                and request_identity_matches(
+                    transport_contract,
+                    _request_fact_identity(fact),
+                )
+            ]
+            if len(candidates) != 1:
+                continue
+            replacement = candidates[0]
+            replacement_id = str(replacement.request_id or "")
+            ref["request_id"] = replacement_id
+            ref["step_id"] = replacement_id
+            already_referenced.add(replacement_id)
+            migrations.append({
+                "capability": str(capability.get("name") or ""),
+                "from_request_id": old_request_id,
+                "to_request_id": replacement_id,
+                "reason": "unique_transport_match_in_exact_option_causal_cohort",
+            })
+
+    changed = bool(migrations)
+    materialized_by_request = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    for capability in plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        nodes = [capability]
+        nodes.extend(
+            ref for ref in capability.get("request_refs") or [] if isinstance(ref, dict)
+        )
+        for node in nodes:
+            key = "anchor_step_id" if node is capability else "step_id"
+            identifier = str(node.get("request_id") or node.get(key) or "")
+            if identifier not in facts_by_id:
+                continue
+            step = materialized_by_request.get(identifier)
+            if step is None:
+                step = promote_request_to_step(spec, request_id=identifier)
+                materialized_by_request[identifier] = step
+                changed = True
+            if node.get(key) != step.step_id:
+                node[key] = step.step_id
+                changed = True
+            if node is not capability and node.get("request_id") != identifier:
+                node["request_id"] = identifier
+                changed = True
+
+    if migrations:
+        spec.meta = {
+            **(spec.meta or {}),
+            "semantic_plan_request_migrations": [
+                *((spec.meta or {}).get("semantic_plan_request_migrations") or []),
+                *migrations,
+            ],
+        }
+    return changed
+
+
+def _drop_displaced_option_links(spec: FlowSpec) -> int:
+    """Discard unverified option links outside an exact planned request cohort."""
+    plan = _semantic_plan(spec)
+    if not plan:
+        return 0
+    by_step = {step.step_id: step for step in spec.steps}
+    fact_by_request = {
+        str(fact.request_id or ""): fact
+        for fact in (spec.request_facts.requests or [])
+        if str(fact.request_id or "")
+    }
+    fact_by_step = {
+        step_id: fact_by_request.get(str((step.source_meta or {}).get("request_id") or ""))
+        for step_id, step in by_step.items()
+    }
+    allowed_by_target: dict[str, dict[tuple[Any, ...], set[str]]] = {}
+    for capability in plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        anchor = str(capability.get("anchor_step_id") or "")
+        target = by_step.get(anchor)
+        if target is None:
+            continue
+        signatures: dict[tuple[Any, ...], set[str]] = {}
+        for ref in capability.get("request_refs") or []:
+            if not isinstance(ref, dict) or str(ref.get("usage") or "") != "option_source":
+                continue
+            step = by_step.get(str(ref.get("step_id") or ""))
+            fact = fact_by_step.get(step.step_id) if step is not None else None
+            if fact is None:
+                continue
+            signatures.setdefault(_request_fact_transport_signature(fact), set()).add(step.step_id)
+        if signatures:
+            allowed_by_target[target.step_id] = signatures
+
+    removed: list[FlowLink] = []
+    kept: list[FlowLink] = []
+    for link in spec.links or []:
+        allowed = allowed_by_target.get(link.target_step_id)
+        source_fact = fact_by_step.get(link.source_step_id)
+        exact_steps = (
+            allowed.get(_request_fact_transport_signature(source_fact), set())
+            if allowed and source_fact is not None
+            else set()
+        )
+        actor = str((link.meta or {}).get("actor") or (link.evidence or {}).get("actor") or "")
+        displaced = bool(
+            exact_steps
+            and link.source_step_id not in exact_steps
+            and not link.confirmed
+            and not link.locked
+            and actor in {"", "agent", "heuristic", "recorder", "planner"}
+        )
+        if displaced:
+            removed.append(link)
+        else:
+            kept.append(link)
+    if not removed:
+        return 0
+    spec.links = kept
+    for link in removed:
+        target = by_step.get(link.target_step_id)
+        if target is None:
+            continue
+        for param in target.params or []:
+            if (
+                _strip_body_prefix(param.path or "")
+                != _strip_body_prefix(link.target_path or "")
+                or param.source_kind != "previous_response"
+                or str((param.source or {}).get("step_id") or "") != link.source_step_id
+            ):
+                continue
+            param.category = "runtime_var"
+            param.source_kind = "unknown"
+            param.source = {
+                "kind": "unresolved",
+                "path": param.path,
+                "invalidated_contract": "option_request_outside_exact_capability_scope",
+            }
+            param.required = False
+            param.exposed_to_user = False
+            param.editable = False
+            param.need_human_confirm = True
+            param.reason = "旧选项依赖属于另一交互事务，已撤销并按当前能力的精确选项源重新判定"
+    return len(removed)
 
 
 def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
@@ -140,12 +433,34 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     # Upgrading an initial list request to the richer searched fact can make it
     # converge with a step that already owns that durable request identity.
     _canonicalize_materialized_request_identities(spec)
+    semantic_plan_changed = _sync_saved_semantic_plan_requests(spec)
+    if semantic_plan_changed:
+        _canonicalize_materialized_request_identities(spec)
+        displaced_links = _drop_displaced_option_links(spec)
+        if displaced_links:
+            spec.meta = {
+                **(spec.meta or {}),
+                "displaced_option_links_removed": (
+                    int((spec.meta or {}).get("displaced_option_links_removed") or 0)
+                    + displaced_links
+                ),
+            }
+        plan = _semantic_plan(spec)
+        if plan:
+            from dano.execution.page.capability_compiler import compile_capabilities
+
+            compilation = compile_capabilities(spec, plan)
+            spec = compilation.spec
     _enrich_materialized_response_shapes(spec)
     _rebind_saved_field_evidence(spec)
     _materialize_saved_unsupported_file_inputs(spec)
     _repair_invalid_date_span_contracts(spec)
     _repair_ungrounded_saved_agent_constants(spec)
     _sync_link_sources(spec.steps, spec.links)
+    if semantic_plan_changed:
+        _repair_structural_option_bindings(spec)
+        _apply_mechanical_field_contracts(spec)
+        _materialize_dynamic_array_inputs(spec)
     _apply_query_form_field_contracts(spec)
     _repair_readonly_control_defaults(spec)
     _ground_saved_page_enums(spec)
@@ -180,6 +495,14 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
         usage.state = "materialized"
         usage.materialized_step_id = step.step_id
         spec.request_facts.usage[request_id] = usage
+    if semantic_plan_changed:
+        # Exact request migration can change caller ownership and can create a
+        # top-level dynamic-array input after the compiler's first schema pass.
+        # Rebuild the public schema once from the repaired ParamFields so the
+        # capability contract cannot retain the pre-migration field set.
+        from dano.execution.page.capability_io import _sync_capability_io_schemas
+
+        return _sync_capability_io_schemas(spec)
     return sync_capability_scoped_views(spec)
 
 

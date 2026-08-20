@@ -525,10 +525,20 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
     """Refresh derived membership views from the executable node plan."""
     by_id = {step.step_id: step for step in spec.steps}
     legacy_refs = list(cap.request_refs or [])
+    # Option-source calls belong to the capability's supporting evidence and
+    # may be materialized as call nodes so a client can populate choices.  They
+    # are not members of the business operation itself.  Treating every call
+    # node as executable membership silently rewrote exact option refs to
+    # ``preflight`` and exposed their fields as capability inputs.
     cap.step_ids = [
-        step_id for step_id in _capability_call_step_ids_from_nodes(cap.nodes or [])
-        if step_id in by_id
+        str(node.get("step_id") or "")
+        for node in _iter_capability_nodes(cap.nodes or [])
+        if (
+            str(node.get("step_id") or "") in by_id
+            and str(node.get("usage") or "") != "option_source"
+        )
     ]
+    cap.step_ids = list(dict.fromkeys(cap.step_ids))
     existing_memberships = {
         ref.step_id: ref for ref in (cap.request_refs or [])
         if ref.usage in {"execute", "preflight"} and ref.step_id
@@ -574,6 +584,12 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
 
     def keep_auxiliary_ref(ref: CapabilityRequestRef) -> bool:
         if ref.usage != "option_source" or ref.origin in {"manual", "user"}:
+            return True
+        # A confirmed compiler reference is the exact request identity from
+        # the saved semantic plan.  It must survive until field-contract repair
+        # can bind the corresponding target field; requiring a pre-existing
+        # binding here creates a circular dependency and loses the evidence.
+        if ref.origin == "compiler" and ref.confirmed:
             return True
         return bool(
             (ref.step_id and ref.step_id in option_source_step_ids)
