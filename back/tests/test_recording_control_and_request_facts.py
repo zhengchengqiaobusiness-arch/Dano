@@ -278,6 +278,36 @@ async def test_table_inline_snapshot_preserves_header_and_real_row_occurrences()
     assert quantity_paths == ["body.lines[0].quantity", "body.lines[1].quantity"]
 
 
+@pytest.mark.asyncio
+async def test_form_snapshot_keeps_hidden_native_file_control_without_selection() -> None:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.expose_binding("__danoRecord", lambda _source, _raw: None)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="asset editor">
+              <label for="asset-file">Artifact</label>
+              <input id="asset-file" name="asset" type="file" style="display:none" multiple>
+              <button type="button" aria-controls="asset-file">Choose</button>
+            </form>
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await browser.close()
+
+    asset = next(item for item in fields if "asset" in (item.get("field_aliases") or []))
+    assert asset["control_kind"] == "file"
+    assert asset["file_count"] == 0
+    assert asset["multiple"] is True
+    assert asset["value"] == ""
+    assert "asset" in asset["field_aliases"]
+
+
 def test_exact_compiled_label_prop_pair_recovers_missing_dom_alias() -> None:
     session = RecordSession()
     session.script_sources = [{

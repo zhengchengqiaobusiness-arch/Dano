@@ -725,13 +725,16 @@ _RECORDER_JS = r"""() => {
       var controls = document.querySelectorAll('input,select,textarea,[role="textbox"],[role="combobox"],[role="spinbutton"],[role="switch"],[contenteditable="true"]');
       for (var i = 0; i < controls.length; i++) {
         var el = controls[i];
+        var ty = String(el.type || '').toLowerCase();
         var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
-        if (style && (style.display === 'none' || style.visibility === 'hidden')) continue;
+        // Component libraries normally hide the native file input behind a
+        // visible upload button.  It is still the semantic file control and
+        // must remain in submit-time evidence even before a file is selected.
+        if (style && (style.display === 'none' || style.visibility === 'hidden') && ty !== 'file') continue;
         var loc = locateField(el);
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
         var evidence = fieldEvidence(el);
-        var ty = String(el.type || '').toLowerCase();
         if (ty === 'radio') {
           var group = el.name || field || loc;
           if (seenRadio[group]) continue;
