@@ -31,18 +31,12 @@ condition.
 
 `references/OPERATIONS.md` must contain an `API chain` section. Every described
 chain must name its executor-generated `verification_id`; a chain that exhausted
-automatic verification must be marked `unverified` instead. API chain lines
-must use method + path only; recorded query strings and sample IDs stay out.
+automatic verification must be marked `unverified` instead.
 
-`SKILL.md` `name` is a short business slug (max 64 characters), not the export
-folder name. `description` and `适用场景` name the packed operations; they must
-not reuse a recording title or “本页面的实际操作流程” dump.
-
-Scripts keep path + query/body templates. They must not embed recorded sample
-query strings in `url`/`path`, must not pack `sample_inputs` or schema
-`default` values, and must not keep recorded body literals. Write operations
-get `verify_*.py` only when executor-owned `fact_checks` exist. A success rule
-may only use ordinary business-success values such as `0` / `200`.
+Stage 8 packs the Stage 6/7 capability contract as-is: field identity, option
+maps, request templates, sample evidence, defaults, and success rules must not
+be rewritten or dropped. `SKILL.md` may add routing and handbook language, but
+it cannot invent, rename, or delete those facts.
 
 ## Script contract
 

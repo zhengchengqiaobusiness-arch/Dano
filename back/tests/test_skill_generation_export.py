@@ -792,7 +792,7 @@ def test_credentials_are_not_written_to_skill_package(tmp_path: Path) -> None:
     assert leaked == []
 
 
-def test_export_strips_recorded_samples_and_writes_business_triggers() -> None:
+def test_export_keeps_stage_six_contract_and_writes_business_triggers() -> None:
     skill = SimpleNamespace(
         skill_id="admin.erp_sale",
         title="点狮ERP销售订单操作能力录制",
@@ -882,17 +882,14 @@ def test_export_strips_recorded_samples_and_writes_business_triggers() -> None:
     plans = _capability_plans(skill, None, skill.api_request)
     search = next(item for item in plans if item["name"] == "search-sale-orders")
     create = next(item for item in plans if item["name"] == "create-sale-order")
-    assert "?" not in search["steps"][0]["path"]
-    assert "?" not in search["steps"][0]["url"]
-    assert "sample_inputs" not in search["steps"][0]
-    assert "outStatus" not in (search["steps"][0].get("query_template") or {})
-    assert search["steps"][0]["query_template"]["no"] == "{{订单单号}}"
-    assert create["steps"][0]["body_template"]["discountPrice"] == "{{discountPrice}}"
-    assert create["steps"][0]["success_rule"]["ok_values"] == ["0"]
-    assert create["requires_verify"] is False
-    assert "post_sale_order_create_body_totalPrice" not in create["input_schema"]["properties"]
-    assert "totalPrice" in create["input_schema"]["properties"]
-    assert "default" not in create["input_schema"]["properties"]["totalPrice"]
+    assert search["steps"][0]["path"] == "/admin-api/erp/sale-order/page?pageNo=1&no=1&customerId=8"
+    assert search["steps"][0]["sample_inputs"] == {"订单单号": "1", "客户": "8"}
+    assert search["steps"][0]["query_template"]["outStatus"] == "0"
+    assert create["steps"][0]["body_template"]["discountPrice"] == 117105
+    assert create["steps"][0]["success_rule"]["ok_values"] == ["1020201001"]
+    assert create["requires_verify"] is True
+    assert "post_sale_order_create_body_totalPrice" in create["input_schema"]["properties"]
+    assert create["input_schema"]["properties"]["post_sale_order_create_body_totalPrice"]["default"] == -106555
 
     text = _fallback_skill_md(skill, "dano-admin-erp-package", plans, None)
     applicable = text.split("## 适用场景", 1)[1].split("##", 1)[0]
@@ -903,10 +900,7 @@ def test_export_strips_recorded_samples_and_writes_business_triggers() -> None:
     assert "name: sale-order-operations" in text
 
     operations = _operations_md(skill, plans, None)
-    assert "Fallback browser" not in operations
-    assert "customerId=8" not in operations
-    assert "?pageNo" not in operations
-    assert "1020201001" not in operations
+    assert "customerId=8" in operations
 
 
 def test_dynamic_plan_skips_recording_title_triggers() -> None:

@@ -217,7 +217,7 @@ def _safe_step(step: dict) -> dict:
     }
     projected = {key: step.get(key) for key in keep if step.get(key) is not None}
     projected["selects"] = [
-        _sanitize_select({
+        {
             key: item.get(key)
             for key in (
                 "param", "path", "option_map", "multi", "element_template",
@@ -226,228 +226,18 @@ def _safe_step(step: dict) -> dict:
                 "category_value", "id_path",
             )
             if item.get(key) is not None
-        })
+        }
         for item in step.get("selects") or [] if isinstance(item, dict)
     ]
-    return _sanitize_export_step(_scrub(projected))
+    return _scrub(projected)
 
 
-_PLACEHOLDER_RE = re.compile(r"^\{\{[^{}]+\}\}$")
-_INTERNAL_FIELD_RE = re.compile(r"^post_.+_body_(.+?)(?:_[0-9a-f]{6,})?$")
-_SUCCESS_OK_VALUES = {"0", "200", "00000", "true", "success", "ok", "1"}
-_PAGINATION_KEYS = {"pageno", "pagesize", "page", "page_no", "page_size", "limit", "offset", "size"}
 _RECORDING_COPY_MARKERS = ("本页面的实际操作流程", "能力录制", "录制结果", "阶段1")
-
-
-def _is_placeholder(value: Any) -> bool:
-    return isinstance(value, str) and bool(_PLACEHOLDER_RE.fullmatch(value.strip()))
 
 
 def _is_recording_copy(value: Any) -> bool:
     text = str(value or "")
     return any(marker in text for marker in _RECORDING_COPY_MARKERS)
-
-
-def _endpoint_path(url_or_path: str) -> str:
-    raw = str(url_or_path or "").strip()
-    if not raw:
-        return ""
-    parsed = urlparse(raw)
-    if parsed.path:
-        return parsed.path
-    return raw.split("?", 1)[0] or "/"
-
-
-def _endpoint_origin(url_or_path: str) -> str:
-    parsed = urlparse(str(url_or_path or ""))
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
-    return ""
-
-
-def _sanitize_success_rule(rule: Any) -> dict[str, Any]:
-    payload = dict(rule) if isinstance(rule, dict) else {}
-    ok_values = [str(item) for item in (payload.get("ok_values") or []) if str(item)]
-    if not ok_values or not any(item.casefold() in _SUCCESS_OK_VALUES for item in ok_values):
-        payload["field"] = str(payload.get("field") or "code")
-        payload["ok_values"] = ["0"]
-    return payload
-
-
-def _option_map_looks_recorded(option_map: dict[str, Any]) -> bool:
-    if not option_map:
-        return False
-    return any(
-        str(label).isdigit() and str(value).isdigit() and str(label) != str(value)
-        for label, value in option_map.items()
-    )
-
-
-def _sanitize_select(binding: dict[str, Any]) -> dict[str, Any]:
-    option_map = binding.get("option_map")
-    if isinstance(option_map, dict) and (
-        binding.get("source_url") or _option_map_looks_recorded(option_map)
-    ):
-        binding = dict(binding)
-        binding.pop("option_map", None)
-    return binding
-
-
-def _sanitize_query_template(query: Any, step: dict) -> Any:
-    if not isinstance(query, dict):
-        return query
-    params = {str(item) for item in (step.get("params") or [])}
-    cleaned: dict[str, Any] = {}
-    for key, value in query.items():
-        name = str(key)
-        if _is_placeholder(value):
-            cleaned[name] = value
-            continue
-        compact = name.replace("_", "").casefold()
-        if compact in _PAGINATION_KEYS:
-            cleaned[name] = value
-            continue
-        if name not in params and not _is_placeholder(value):
-            # Operation constants such as approve status=20 stay; recorded filters drop.
-            if name.casefold() in {"status"} or compact in {"status"}:
-                cleaned[name] = value
-            continue
-    return cleaned
-
-
-def _placeholder_for_key(key: str) -> str:
-    return "{{" + str(key) + "}}"
-
-
-def _sanitize_template_literals(node: Any) -> Any:
-    if isinstance(node, dict):
-        return {
-            str(key): (
-                value if _is_placeholder(value) else _placeholder_for_key(key)
-            ) if not isinstance(value, (dict, list)) and value is not None
-            else _sanitize_template_literals(value)
-            for key, value in node.items()
-        }
-    if isinstance(node, list):
-        return [_sanitize_template_literals(item) for item in node]
-    return node
-
-
-def _sanitize_export_step(step: dict) -> dict:
-    raw_url = str(step.get("url") or step.get("path") or "")
-    path = _endpoint_path(raw_url) or _endpoint_path(str(step.get("path") or "")) or "/"
-    origin = _endpoint_origin(raw_url)
-    step["path"] = path
-    step["url"] = f"{origin}{path}" if origin else path
-    step["url_template"] = path
-    step.pop("sample_inputs", None)
-    if step.get("success_rule") is not None:
-        step["success_rule"] = _sanitize_success_rule(step.get("success_rule"))
-    if step.get("query_template") is not None:
-        step["query_template"] = _sanitize_query_template(step.get("query_template"), step)
-    if step.get("body_template") is not None:
-        step["body_template"] = _sanitize_template_literals(step.get("body_template"))
-    return step
-
-
-def _strip_schema_defaults(node: Any) -> Any:
-    if isinstance(node, dict):
-        cleaned = {
-            str(key): _strip_schema_defaults(value)
-            for key, value in node.items()
-            if key != "default"
-        }
-        return cleaned
-    if isinstance(node, list):
-        return [_strip_schema_defaults(item) for item in node]
-    return node
-
-
-def _public_field_name(name: str) -> str:
-    match = _INTERNAL_FIELD_RE.fullmatch(str(name))
-    return match.group(1) if match else str(name)
-
-
-def _unique_public_names(names: list[str]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    taken = set(names)
-    for name in names:
-        public = _public_field_name(name)
-        if public == name or public in taken or public in mapping.values():
-            continue
-        mapping[name] = public
-        taken.add(public)
-    return mapping
-
-
-def _rewrite_placeholders(node: Any, mapping: dict[str, str]) -> Any:
-    if not mapping:
-        return node
-    if isinstance(node, dict):
-        return {key: _rewrite_placeholders(value, mapping) for key, value in node.items()}
-    if isinstance(node, list):
-        return [_rewrite_placeholders(item, mapping) for item in node]
-    if isinstance(node, str):
-        text = node
-        for old, new in mapping.items():
-            text = text.replace("{{" + old + "}}", "{{" + new + "}}")
-        return text
-    return node
-
-
-def _collect_field_mapping(schema: dict) -> dict[str, str]:
-    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    mapping = _unique_public_names([str(name) for name in properties])
-    for field in properties.values():
-        if not isinstance(field, dict):
-            continue
-        if isinstance(field.get("properties"), dict):
-            mapping.update(_collect_field_mapping(field))
-        items = field.get("items")
-        if isinstance(items, dict):
-            mapping.update(_collect_field_mapping(items))
-    return mapping
-
-
-def _rename_schema_fields(schema: dict, mapping: dict[str, str]) -> dict:
-    properties = dict(schema.get("properties") or {})
-    renamed: dict[str, Any] = {}
-    for name, field in properties.items():
-        public = mapping.get(str(name), str(name))
-        next_field = field
-        if isinstance(field, dict) and isinstance(field.get("properties"), dict):
-            next_field = _rename_schema_fields(field, mapping)
-        elif isinstance(field, dict) and isinstance(field.get("items"), dict):
-            next_field = dict(field)
-            next_field["items"] = _rename_schema_fields(field["items"], mapping)
-        renamed[public] = next_field
-    required = [mapping.get(str(name), str(name)) for name in (schema.get("required") or [])]
-    next_schema = dict(schema)
-    next_schema["properties"] = renamed
-    if required:
-        next_schema["required"] = required
-    return next_schema
-
-
-def _sanitize_export_plan(plan: dict) -> dict:
-    schema = _strip_schema_defaults(dict(plan.get("input_schema") or {"type": "object", "properties": {}}))
-    mapping = _collect_field_mapping(schema)
-    schema = _rename_schema_fields(schema, mapping)
-    steps = [_rewrite_placeholders(step, mapping) for step in (plan.get("steps") or [])]
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        params = [mapping.get(str(name), str(name)) for name in (step.get("params") or [])]
-        if params:
-            step["params"] = params
-        for binding in step.get("selects") or []:
-            if isinstance(binding, dict) and binding.get("param"):
-                binding["param"] = mapping.get(str(binding["param"]), str(binding["param"]))
-    plan["input_schema"] = schema
-    plan["steps"] = steps
-    plan["links"] = _rewrite_placeholders(list(plan.get("links") or []), mapping)
-    plan["requires_verify"] = bool(plan.get("fact_checks"))
-    return plan
 
 
 def _norm_name_token(token: str) -> str:
@@ -568,9 +358,8 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
                 is_write
                 and (cap.get("requires_human_confirm") is True or risk in {"L3", "L4", "L5"})
             ),
-            "requires_verify": bool(fact_checks),
+            "requires_verify": is_write,
         })
-        plans[-1] = _sanitize_export_plan(plans[-1])
     return plans
 
 
@@ -981,7 +770,7 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
 
 def _plan_api_chain(plan: dict, spec) -> str:  # noqa: ANN001
     chain = " -> ".join(
-        f"{str(step.get('method') or 'GET').upper()} {_endpoint_path(str(step.get('path') or step.get('url') or '')) or '/'}"
+        f"{str(step.get('method') or 'GET').upper()} {step.get('path') or urlparse(str(step.get('url') or '')).path or '/'}"
         for step in plan.get("steps") or []
     ) or "GET /"
     evidence = _evidence_for_plan(plan, spec) if spec is not None else []
@@ -1051,10 +840,8 @@ def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
                 method = str(live_source.get("source_method") or "GET").upper()
                 endpoint = str(live_source.get("source_url") or "")
                 option_lines.append(f"- 运行时来源：`{method} {endpoint}`")
-            if labels and not _option_map_looks_recorded(labels):
+            if labels:
                 option_lines.extend(f"- `{_safe_text(label)}` → `{value}`" for label, value in labels.items())
-            elif live_source:
-                option_lines.append("- 运行时按显示名或 ID 解析，不以录制快照为准。")
             elif values:
                 option_lines.extend(f"- `{value}`" for value in values)
             option_lines.append("")
@@ -1254,7 +1041,7 @@ import os
 from pathlib import Path
 import re
 import time
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin
 from uuid import uuid4
 
 import httpx
@@ -1268,11 +1055,6 @@ _MISSING = object()
 
 def emit(payload):
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
-
-
-def _url_without_query(url):
-    parsed = urlsplit(str(url or ""))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
 
 
 def _json_object(raw, label):
@@ -1683,9 +1465,8 @@ def execute_plan(plan, inputs):
                 body = deep_set(body or {}, target.removeprefix("body."), value)
         if isinstance(body, (dict, list)):
             body = _system_values(step, body)
-        url = _url_without_query(url)
         result = http_json(
-            step.get("method") or "GET", _url_without_query(step.get("path") or ""), url=url,
+            step.get("method") or "GET", step.get("path") or "", url=url,
             query=query, body=body, content_type=step.get("content_type") or "application/json",
             success_rule=step.get("success_rule"),
         )
@@ -1912,6 +1693,8 @@ from __CAP_MODULE__ import PLAN, inputs_from_args, parser
 def verify(inputs):
     issues = []
     checks = PLAN.get("fact_checks") or []
+    if PLAN.get("requires_verify") and not checks:
+        issues.append({"step_id": None, "verification_id": "unverified", "reason": "no verified read-back is available"})
     for check in checks:
         settle(check.get("backoff_s", 0.25))
         response = http_json("GET", check.get("endpoint") or "")

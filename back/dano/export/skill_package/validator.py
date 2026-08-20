@@ -117,12 +117,6 @@ def _check_reference(
                 path,
                 warning=missing_as_warnings,
             ))
-        if "?" in line:
-            issues.append(_issue(
-                "recorded_query",
-                f"API chain must not include recorded query strings: {line}",
-                path,
-            ))
 
 
 def _api_chain_lines(text: str) -> list[str]:
