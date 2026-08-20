@@ -906,12 +906,25 @@ class RecordingWorkflow:
         default=None, init=False, repr=False,
     )
 
-    async def start(self) -> WorkflowSnapshot:
+    async def start(self, *, label: str = "正在打开业务页面") -> WorkflowSnapshot:
         if self.snapshot.status == WorkflowStatus.IDLE:
             await self._set(
                 WorkflowStatus.RECORDING,
-                progress=WorkflowProgress(step=WorkflowStep.CAPTURING, label="正在录制页面操作"),
+                progress=WorkflowProgress(step=WorkflowStep.CAPTURING, label=label),
             )
+        return self.snapshot
+
+    async def mark_page_ready(self) -> WorkflowSnapshot:
+        if self.snapshot.status != WorkflowStatus.RECORDING:
+            return self.snapshot
+        await self._set(
+            WorkflowStatus.RECORDING,
+            progress=WorkflowProgress(
+                step=WorkflowStep.CAPTURING,
+                label="正在录制页面操作",
+                request_count=self.snapshot.progress.request_count,
+            ),
+        )
         return self.snapshot
 
     async def finish(self, *, machine_verification: bool = False) -> WorkflowSnapshot:

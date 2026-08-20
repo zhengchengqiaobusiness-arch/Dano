@@ -914,7 +914,7 @@ export default function PageRecorder({
       return false;
     }
     if (initType === "start") {
-      return ["recording", "processing", "waiting_operator"].includes(status || "recording");
+      return ["recording", "processing", "waiting_operator"].includes(status || "");
     }
     if (initType === "resume_verification") {
       return ["processing", "waiting_operator"].includes(status || "");
@@ -1051,6 +1051,7 @@ export default function PageRecorder({
       src: `data:image/jpeg;base64,${data}`,
       meta: { width, height },
     };
+    setConnecting(false);
     scheduleFrameDecode();
   }
 
@@ -1060,6 +1061,9 @@ export default function PageRecorder({
     acceptNextSnapshotRef.current = false;
     snapshotRef.current = next;
     setSnapshot(next);
+    if (["recording", "processing", "waiting_operator", "editable", "failed", "cancelled", "published"].includes(next.status)) {
+      setConnecting(false);
+    }
     actionRef.current = next.action;
     if (next.stage_seven_attempt_id) {
       stageSevenAttemptIdRef.current = next.stage_seven_attempt_id;
@@ -1121,10 +1125,15 @@ export default function PageRecorder({
     socket.onopen = () => {
       reconnectAttemptRef.current = 0;
       setConnected(true);
-      setConnecting(false);
       const init = socketInitRef.current;
-      if (!init) return;
+      if (!init) {
+        setConnecting(false);
+        return;
+      }
       socket.send(JSON.stringify(init));
+      if (init.type !== "start") {
+        setConnecting(false);
+      }
       if (init.type === "resume_verification") {
         socketInitRef.current = {
           ...init,
@@ -1183,7 +1192,17 @@ export default function PageRecorder({
         } else {
           finishRequestedRef.current = false;
           setFinishRequested(false);
+          setConnecting(false);
           const detail = String(incoming.detail || "录制处理失败");
+          const openingPage = !snapshotRef.current
+            || snapshotRef.current.status === "idle"
+            || snapshotRef.current.progress.label === "正在打开业务页面";
+          if (openingPage) {
+            snapshotRef.current = null;
+            setSnapshot(null);
+            message.error(detail || "业务页面打开失败");
+            return;
+          }
           if (snapshotRef.current?.status === "processing") {
             const failed: WorkflowSnapshot = {
               ...snapshotRef.current,
@@ -2221,7 +2240,11 @@ export default function PageRecorder({
           />
           {!hasFrame ? (
             <Empty
-              description={connecting ? "正在连接业务页面" : "等待页面画面"}
+              description={
+                connecting || status === "idle" || (status === "recording" && !hasFrame)
+                  ? (snapshot?.progress.label || "正在打开业务页面")
+                  : "等待页面画面"
+              }
               style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", margin: 0 }}
             />
           ) : null}

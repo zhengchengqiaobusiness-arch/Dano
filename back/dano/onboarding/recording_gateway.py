@@ -302,13 +302,14 @@ class RecordingGatewaySession:
             run_id=self.config.recording_id,
             action=self.config.action,
         ))
+        await self.workflow.start()
         await self.capture.start(
             self.config.start_url,
             base_url=self.config.base_url,
             storage_state=self.config.storage_state,
             token=self.config.token or None,
         )
-        await self.workflow.start()
+        await self.workflow.mark_page_ready()
         await self.capture.start_screencast(self._on_frame)
         self._machine_verification = self.config.analysis_mode
         self._schedule_live("recording_started")
