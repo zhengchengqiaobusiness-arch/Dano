@@ -819,9 +819,18 @@ def bind_field_evidence(
         evidence["evidence_id"] = _evidence_id(evidence, index)
         structural_aliases = _structural_evidence_aliases(evidence)
         aliases = structural_aliases
-        declared_request_id = str(evidence.get("request_id") or "").strip()
-        declared_wire_path = str(evidence.get("wire_path") or "").strip().removeprefix(
-            "request."
+        derived_value_binding = bool(
+            not structural_aliases
+            and evidence.get("binding_status")
+            and evidence.get("binding_method")
+        )
+        declared_request_id = (
+            "" if derived_value_binding
+            else str(evidence.get("request_id") or "").strip()
+        )
+        declared_wire_path = (
+            "" if derived_value_binding
+            else str(evidence.get("wire_path") or "").strip().removeprefix("request.")
         )
         candidates: list[dict[str, Any]] = []
         if aliases or declared_wire_path:

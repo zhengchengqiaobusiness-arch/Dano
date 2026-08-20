@@ -198,6 +198,12 @@ def test_unidentified_page_control_does_not_bind_to_dialog_body_by_value() -> No
         "action_id": "action_save",
         "transaction_id": "tx_save",
         "op": "snapshot",
+        # Simulate a persisted result produced by the older value-only binder.
+        # Re-analysis must not treat its derived identity as recorder truth.
+        "binding_status": "bound",
+        "binding_method": "exact_alias_preferred_business_request",
+        "request_id": "req_write",
+        "wire_path": "body.createdBy",
     }]
 
     item = bind_field_evidence(requests, [], evidence)[0]
