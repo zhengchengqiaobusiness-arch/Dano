@@ -56,6 +56,7 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
     unless an editable control proves the page lets the operator overwrite
     them. Merely failing to observe readonly/disabled is not edit evidence.
     """
+    strict_edit_evidence = int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2
     for step in spec.steps or []:
         if _step_is_row_command(step):
             continue
@@ -77,7 +78,10 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                 continue
             if (
                 param.source_kind == "selected_option_field"
-                and _param_has_editable_control_evidence(param)
+                and (
+                    _param_has_editable_control_evidence(param)
+                    or not strict_edit_evidence
+                )
             ):
                 _mark_auto_fill_caller_override(param, "所选记录自动带入，页面允许修改")
                 continue

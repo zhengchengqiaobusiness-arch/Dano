@@ -369,11 +369,16 @@ def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
     return out
 
 
-def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
+def _flow_step_to_api_step(
+    step: FlowStep,
+    *,
+    reject_unresolved_literals: bool = False,
+) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
-    unresolved_literal_errors = _unresolved_recorded_literal_errors(step)
-    if unresolved_literal_errors:
-        return None, unresolved_literal_errors
+    if reject_unresolved_literals:
+        unresolved_literal_errors = _unresolved_recorded_literal_errors(step)
+        if unresolved_literal_errors:
+            return None, unresolved_literal_errors
     runtime_errors = [err for p in step.params if (err := _runtime_param_publish_error(p))]
     if runtime_errors:
         return None, runtime_errors
@@ -607,6 +612,9 @@ def flow_spec_to_api_request(
     if not _prepared:
         spec = prepare_flow_spec_for_publish(spec)
     active_step_ids = _active_capability_step_ids(spec)
+    strict_source_contract = int(
+        (spec.meta or {}).get("stage_1_6_contract_version") or 0
+    ) >= 2
 
     built_steps: list[dict] = []
     step_id_to_index: dict[str, int] = {}
@@ -614,7 +622,10 @@ def flow_spec_to_api_request(
     for st in spec.steps:
         if active_step_ids is not None and st.step_id not in active_step_ids:
             continue
-        apir, step_errors = _flow_step_to_api_step(st)
+        apir, step_errors = _flow_step_to_api_step(
+            st,
+            reject_unresolved_literals=strict_source_contract,
+        )
         if step_errors:
             errors.extend(step_errors)
             continue
