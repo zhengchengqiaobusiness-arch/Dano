@@ -1599,6 +1599,79 @@ async def delete_recording_result(
     return {"deleted": True, "id": result_id}
 
 
+class ExportRecordingSkillReq(BaseModel):
+    title: str = ""
+    business_description: str = ""
+    planning_mode: Literal["dynamic", "fixed"] = "dynamic"
+    example_requests: list[str] = Field(default_factory=list)
+    success_criteria: str = ""
+    forbidden_actions: str = ""
+    out_dir: str = ""
+
+
+@app.post("/v1/recording-results/{result_id}/export-skill")
+async def export_recording_result_skill(
+    result_id: str,
+    req: ExportRecordingSkillReq,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """阶段8：按用户业务描述规划、生成、发布并导出一个页面级 Skill。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.assets.drafts import DraftStore
+    from dano.execution.page.sessions import save_export_dir
+    from dano.onboarding.recording_results import is_recording_result_key
+    from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
+    from dano.onboarding.skill_generation.models import SkillGenerationRequest
+    from dano.shared.enums import Subsystem
+
+    try:
+        parsed = uuid.UUID(result_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    store = DraftStore()
+    saved = await store.get_draft(parsed)
+    if (
+        saved is None
+        or saved.tenant != tenant
+        or not is_recording_result_key(saved.asset_key)
+    ):
+        raise HTTPException(status_code=404, detail="录制结果不存在")
+    request = SkillGenerationRequest.model_validate(req.model_dump())
+    request.out_dir = str(request.out_dir or "").strip() or _current_export_dir()
+
+    async def persist(next_body: dict) -> None:
+        await store.patch_recording_result_body(parsed, next_body)
+
+    async def publish(**kwargs):
+        from dano.onboarding.skill_generation.export import _default_publish
+
+        report = await _default_publish(**kwargs)
+        if report.get("ok"):
+            action = str(report.get("action") or "")
+            await _lifecycle_reconciler.register_or_defer(
+                skill_id=str(kwargs["skill_id"]),
+                subsystem=Subsystem(str(kwargs.get("subsystem") or "oa")),
+                action=action,
+                asset_version=int(report.get("asset_version") or 1),
+            )
+        return report
+
+    try:
+        outcome = await export_recording_skill(
+            result_id=parsed,
+            body=dict(saved.body or {}),
+            tenant=tenant,
+            request=request,
+            persist=persist,
+            publish=publish,
+        )
+    except SkillExportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if outcome.status == "exported" and request.out_dir:
+        save_export_dir(request.out_dir)
+    return outcome.model_dump(mode="json")
+
+
 @app.get("/v1/skills")
 async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     tenant = await _auth_tenant(x_tenant_key)

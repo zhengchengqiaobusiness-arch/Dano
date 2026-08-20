@@ -15,13 +15,21 @@ from dano.onboarding.skill_generation.models import (
 )
 from dano.onboarding.skill_generation.planner import generate_skill_plan, propose_deterministic_plan
 from dano.onboarding.skill_generation.validate import plan_to_contract_payload, validate_skill_plan
+from dano.onboarding.skill_generation.export import (
+    SkillExportError,
+    SkillExportOutcome,
+    export_recording_skill,
+)
 
 __all__ = [
     "PlanningMode",
+    "SkillExportError",
+    "SkillExportOutcome",
     "SkillGenerationRequest",
     "SkillGenerationResult",
     "SkillPlan",
     "SkillRoute",
+    "export_recording_skill",
     "generate_skill_plan",
     "generation_request_fingerprint",
     "plan_to_contract_payload",

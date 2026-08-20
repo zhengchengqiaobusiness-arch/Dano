@@ -1,6 +1,7 @@
 """Machine validator for self-contained skill packages."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -171,6 +172,120 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
             issues.append(_issue("script_help", f"--help exited {completed.returncode}: {detail}", script))
 
 
+def _script_slug(value: str) -> str:
+    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", str(value or "").casefold().replace("-", "_"))).strip("_")
+    return slug
+
+
+def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
+    """When CONTRACT has a stage-8 plan, SKILL.md and packed scripts must match it.
+
+    Packages without planning fields keep the original single-capability contract.
+    """
+    contract_path = root / "references" / "CONTRACT.json"
+    if not contract_path.is_file():
+        return
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        issues.append(_issue("contract_json", "references/CONTRACT.json is not valid JSON", contract_path))
+        return
+    if not isinstance(contract, dict):
+        return
+    routes = contract.get("routes") if isinstance(contract.get("routes"), list) else []
+    selected = [str(item) for item in (contract.get("selected_capability_ids") or []) if str(item)]
+    if not contract.get("planning_mode") and not routes and not selected:
+        return
+    packed = {
+        str(item.get("name") or "")
+        for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict)
+    } | {
+        str(item.get("capability_id") or "")
+        for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict)
+    }
+    packed.discard("")
+    for cap_id in selected:
+        if cap_id not in packed:
+            issues.append(_issue(
+                "planning_selected_missing",
+                f"CONTRACT selected capability is not packed: {cap_id}",
+                contract_path,
+            ))
+    route_ids: list[str] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        route_id = str(route.get("route_id") or "").strip()
+        if route_id:
+            route_ids.append(route_id)
+            if skill_text and route_id not in skill_text:
+                issues.append(_issue(
+                    "planning_route_mismatch",
+                    f"SKILL.md is missing planned route {route_id}",
+                    Path("SKILL.md"),
+                ))
+        for cap_id in route.get("capability_sequence") or []:
+            if str(cap_id) not in selected and selected:
+                issues.append(_issue(
+                    "planning_route_capability",
+                    f"route {route_id or '?'} references capability not selected: {cap_id}",
+                    contract_path,
+                ))
+    for item in contract.get("unused_capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        unused_id = str(item.get("capability_id") or "")
+        unused_name = str(item.get("name") or "")
+        if unused_id and unused_id in selected:
+            issues.append(_issue(
+                "planning_unused_selected",
+                f"unused capability is also selected: {unused_id}",
+                contract_path,
+            ))
+        script_hints = [unused_name, unused_id, _script_slug(unused_name), _script_slug(unused_id)]
+        for hint in script_hints:
+            if not hint:
+                continue
+            packed_script = root / "scripts" / f"{hint}.py"
+            if packed_script.is_file():
+                issues.append(_issue(
+                    "planning_unused_script",
+                    f"unused capability script must not be packed: {packed_script.name}",
+                    packed_script,
+                ))
+            if skill_text and f"scripts/{hint}.py" in skill_text:
+                issues.append(_issue(
+                    "planning_unused_script_ref",
+                    f"SKILL.md must not reference unused script scripts/{hint}.py",
+                    Path("SKILL.md"),
+                ))
+    if selected:
+        support = {"client.py", "wire_format.py", "format_list.py"}
+        scripts_dir = root / "scripts"
+        if scripts_dir.is_dir():
+            allowed_scripts = {
+                Path(str(item.get("script") or "")).name
+                for item in (contract.get("capabilities") or [])
+                if isinstance(item, dict)
+            } | {
+                Path(str(item.get("verify_script") or "")).name
+                for item in (contract.get("capabilities") or [])
+                if isinstance(item, dict)
+            }
+            for script in scripts_dir.glob("*.py"):
+                if script.name in support or script.name in allowed_scripts:
+                    continue
+                if script.name.startswith("verify_"):
+                    continue
+                issues.append(_issue(
+                    "planning_extra_script",
+                    f"packed script is not in selected capabilities: {script.name}",
+                    script,
+                ))
+
+
 def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
     for path in pkg_dir.rglob("*"):
         if not path.is_file() or "__pycache__" in path.parts:
@@ -302,4 +417,6 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         )
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
     _check_credentials(root, issues)
+    if skill:
+        _check_planning(root, skill, issues)
     return {"ok": not any(issue["severity"] == "error" for issue in issues), "issues": issues}

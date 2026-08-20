@@ -130,6 +130,59 @@ def _flow_spec(skill):  # noqa: ANN001, ANN202
         ) from exc
 
 
+def _skill_plan_payload(skill) -> dict[str, Any]:  # noqa: ANN001
+    meta = dict(getattr(skill, "call_metadata", None) or {})
+    if isinstance(meta.get("skill_plan"), dict):
+        return dict(meta["skill_plan"])
+    api = dict(getattr(skill, "api_request", None) or {})
+    if isinstance(api.get("_skill_plan"), dict):
+        return dict(api["_skill_plan"])
+    release = dict(api.get("_release_snapshot") or {})
+    if isinstance(release.get("skill_plan"), dict):
+        return dict(release["skill_plan"])
+    return {}
+
+
+def _contract_planning_fields(skill) -> dict[str, Any]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    if not plan:
+        return {}
+    bindings = [
+        dict(binding)
+        for route in (plan.get("routes") or [])
+        if isinstance(route, dict)
+        for binding in (route.get("bindings") or [])
+        if isinstance(binding, dict)
+    ]
+    return {
+        "planning_mode": plan.get("planning_mode") or "",
+        "selected_capability_ids": list(plan.get("selected_capability_ids") or []),
+        "routes": list(plan.get("routes") or []),
+        "bindings": bindings,
+        "unused_capabilities": list(plan.get("unused_capabilities") or []),
+        "source_flow_fingerprint": plan.get("source_flow_fingerprint") or "",
+    }
+
+
+def _plan_keys(plan: dict) -> set[str]:
+    return {
+        str(plan.get("name") or ""),
+        str(plan.get("capability_id") or ""),
+    } - {""}
+
+
+def _filter_plans_for_export(plans: list[dict], skill) -> list[dict]:  # noqa: ANN001
+    payload = _skill_plan_payload(skill)
+    selected = [str(item) for item in (payload.get("selected_capability_ids") or []) if str(item)]
+    if not selected:
+        return plans
+    selected_set = set(selected)
+    kept = [plan for plan in plans if _plan_keys(plan) & selected_set]
+    if not kept:
+        raise ValueError(f"{skill.skill_id} skill plan selected capabilities are not in the compiled contract")
+    return kept
+
+
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
     del spec
     published = dict(skill.api_request or {})
@@ -259,6 +312,7 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
                 fact_checks.append({"step_id": step.get("step_id"), **_scrub(fact_check)})
         plans.append({
             "name": name,
+            "capability_id": str(cap.get("capability_id") or ""),
             "title": str(cap.get("title") or name),
             "kind": str(cap.get("kind") or "operation"),
             "script": script,
@@ -525,12 +579,141 @@ def _input_forms_md(plans: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _planning_skill_md_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    if not plan:
+        return []
+    mode = str(plan.get("planning_mode") or "dynamic")
+    summary = _safe_text(plan.get("summary") or "")
+    unused = [item for item in (plan.get("unused_capabilities") or []) if isinstance(item, dict)]
+    routes = [item for item in (plan.get("routes") or []) if isinstance(item, dict)]
+    triggers = [str(item) for item in (plan.get("trigger_phrases") or []) if str(item).strip()]
+    safety = [str(item) for item in (plan.get("safety_rules") or []) if str(item).strip()]
+    lines = [
+        "## Business purpose", "",
+        summary or "按用户当前请求，使用本页面已验证能力完成业务目标。", "",
+        "## When to use", "",
+    ]
+    if triggers:
+        lines.extend(f"- {_safe_text(item)}" for item in triggers)
+    else:
+        lines.append("- 用户请求与本页面业务对象一致，且可用 Capability summary 中的能力完成时使用。")
+    lines.extend(["", "## When not to use", ""])
+    if unused:
+        for item in unused:
+            title = _safe_text(item.get("title") or item.get("name") or item.get("capability_id"))
+            reason = _safe_text(item.get("reason") or "当前业务描述未要求")
+            lines.append(f"- 不要执行未打包能力 `{title}`：{reason}。")
+    else:
+        lines.append("- 用户目标与本页面业务对象或动作不一致时停止，不得用相近能力代替。")
+    lines.extend(["", "## Available operations", ""])
+    for item in plans:
+        lines.append(
+            f"- `{item['name']}`：{_safe_text(item.get('title') or item['name'])}；"
+            f"脚本 `scripts/{item['script']}.py`；"
+            f"写前确认 {'是' if item.get('requires_confirmation') else '否'}。"
+        )
+    lines.extend([
+        "", "## Input collection", "",
+        "- 先按所选路线列出 `required_user_inputs`，再用 `ask_user_question` 一次收集。",
+        "- 已有上游公开输出或契约固定值/系统值的字段不要再问用户。",
+        "- 缺少必填来源时询问用户，不得编造关联或猜测内部 ID。",
+        "", "## Planning or routing rules", "",
+        f"- 规划方式：`{mode}`。",
+    ])
+    if mode == "fixed":
+        lines.append("- 固定模式只走下面这一条主要路线，不要改换能力顺序。")
+    else:
+        lines.extend([
+            "- 动态模式根据用户请求选择最少且足够的一条有效路线。",
+            "- 用户只要求查询时不要执行提交；用户已提供完整提交字段时不要强制先查询。",
+            "- 不要生成或执行未列出的能力排列。",
+        ])
+    for route in routes:
+        sequence = " → ".join(f"`{cap}`" for cap in (route.get("capability_sequence") or [])) or "无"
+        lines.extend([
+            f"- `{route.get('route_id')}` {_safe_text(route.get('name') or route.get('route_id'))}：",
+            f"  何时使用：{_safe_text(route.get('when_to_use'))}",
+            f"  调用顺序：{sequence}",
+            f"  完成条件：{_safe_text(route.get('done_when'))}",
+        ])
+        if route.get("requires_confirmation"):
+            lines.append("  写操作执行前必须取得用户确认。")
+    lines.extend(["", "## Valid capability combinations", ""])
+    if not routes:
+        lines.append("- 只使用 Capability summary 中的能力，不要自行组合未声明路线。")
+    for route in routes:
+        sequence = " → ".join(f"`{cap}`" for cap in (route.get("capability_sequence") or [])) or "无"
+        lines.append(f"- `{route.get('route_id')}`：{sequence}")
+    lines.extend(["", "## Data binding", ""])
+    bindings = [
+        binding
+        for route in routes
+        for binding in (route.get("bindings") or [])
+        if isinstance(binding, dict)
+    ]
+    if not bindings:
+        lines.append("- 本 Skill 没有已确认的能力间映射；缺字段时向用户收集，不得按字段同名猜测。")
+    for binding in bindings:
+        lines.append(
+            f"- `{binding.get('from_capability')}.{binding.get('from_output')}` → "
+            f"`{binding.get('to_capability')}.{binding.get('to_input')}`"
+            + (f"（transform_owner=`{binding.get('transform_owner')}`）" if binding.get("transform_owner") else "")
+        )
+    lines.extend(["", "## Confirmation and safety", ""])
+    if safety:
+        lines.extend(f"- {_safe_text(item)}" for item in safety)
+    else:
+        lines.append("- 写能力、删除、撤回、提交或批量写必须在执行前明确确认；查询不需要确认。")
+    lines.extend([
+        "", "## Verification", "",
+        "- 写能力执行后调用对应 `verify_script`；只有执行和验证都成功才能报告完成。",
+        "", "## Failure handling", "",
+        "- 任一能力失败立即停止；写结果不明时不得重试同一载荷。",
+        "", "## Examples", "",
+    ])
+    for route in routes:
+        examples = [item for item in (route.get("examples") or []) if isinstance(item, dict)]
+        if not examples:
+            continue
+        example = examples[0]
+        collected = ", ".join(f"`{item}`" for item in (example.get("collected_fields") or [])) or "无"
+        sequence = " → ".join(f"`{item}`" for item in (example.get("capability_sequence") or route.get("capability_sequence") or []))
+        confirm = ", ".join(f"`{item}`" for item in (example.get("confirmation_points") or [])) or "无"
+        mappings = "; ".join(
+            f"`{item.get('from_output')}`→`{item.get('to_input')}`"
+            for item in (example.get("bindings") or route.get("bindings") or [])
+            if isinstance(item, dict)
+        ) or "无已确认映射"
+        lines.extend([
+            f"### {_safe_text(route.get('name') or route.get('route_id'))}",
+            "",
+            f"- 用户请求：{_safe_text(example.get('user_request'))}",
+            f"- 选择路线：`{route.get('route_id')}`",
+            f"- 需要向用户收集：{collected}",
+            f"- 能力调用顺序：{sequence}",
+            f"- 上游输出到下游输入：{mappings}",
+            f"- 写操作确认点：{confirm}",
+            f"- 完成条件：{_safe_text(example.get('done_when') or route.get('done_when'))}",
+            "",
+        ])
+    return lines
+
+
 def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noqa: ANN001
     heading, description = _business_identity(skill, plans, spec)
+    plan = _skill_plan_payload(skill)
+    if plan.get("summary"):
+        description = _safe_text(plan.get("summary"))
     lines = [
         "---", f"name: {slug}", f"description: {json.dumps(description, ensure_ascii=False)}", "---", "",
         f"# {heading}", "",
         "这是录制后发布的自包含 Skill。它保留既有 Skill 的能力选择、一次性收参、字段校验、写前确认、执行后验证和结果处理规则；业务请求由包内脚本直接调用目标系统。", "",
+    ]
+    lines.extend(_planning_skill_md_sections(skill, plans))
+    if lines[-1] != "":
+        lines.append("")
+    lines.extend([
         "## Transport", "",
         "- 使用 `references/CONTRACT.json` 选择 capability，并调用其中声明的 `scripts/*.py`。",
         "- 运行期需要 Python 与 `httpx`；业务执行不依赖 Dano 运行时或 LLM。",
@@ -557,7 +740,7 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
         "8. 按 `output_schema` 解读结果。数组用 Markdown 表格展示；不得把内部 ID、裸 `data` 或未声明字段擅自命名为业务编号。",
         "   Done when: 最终回复准确区分成功、取消、待确认和失败，且未泄露凭证或内部字段。", "",
         "## Capability summary", "",
-    ]
+    ])
     for plan in plans:
         schema = plan.get("input_schema") or {}
         required = ", ".join(f"`{name}`" for name in schema.get("required") or []) or "无"
@@ -1471,7 +1654,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     steps = _steps(api_request)
     if not steps:
         raise ValueError(f"{skill.skill_id} has no executable page request")
-    plans = _capability_plans(skill, spec, api_request)
+    plans = _filter_plans_for_export(_capability_plans(skill, spec, api_request), skill)
     if not plans:
         raise ValueError(f"{skill.skill_id} has no capability")
     slug = package_slug(skill.skill_id)
@@ -1525,6 +1708,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         "capabilities": [
             {
                 "name": plan["name"],
+                "capability_id": plan.get("capability_id") or "",
                 "title": plan["title"],
                 "kind": plan["kind"],
                 "script": f"scripts/{plan['script']}.py",
@@ -1544,6 +1728,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
             for relation in (spec.capability_relations if spec is not None else [])
         ],
     }
+    contract.update(_contract_planning_fields(skill))
     _write_text(
         references / "CONTRACT.json",
         json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -1573,7 +1758,10 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
         validation = validate_skill_package(stage)
         if not validation["ok"] and not fallback_used:
             spec = _flow_spec(skill)
-            plans = _capability_plans(skill, spec, _compiled_request(skill, spec))
+            plans = _filter_plans_for_export(
+                _capability_plans(skill, spec, _compiled_request(skill, spec)),
+                skill,
+            )
             _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, spec))
             _write_text(stage / "reference.md", _fallback_reference_md(skill, plans, spec))
             fallback_used = True
