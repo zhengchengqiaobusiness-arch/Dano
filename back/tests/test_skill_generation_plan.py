@@ -1,0 +1,364 @@
+"""Deterministic stage-8 SkillPlan validation and capability selection."""
+
+from __future__ import annotations
+
+import pytest
+
+from dano.execution.page.flow_spec import CapabilityRelation, FlowCapability, FlowSpec, FlowStep
+from dano.onboarding.skill_generation import (
+    PlanningMode,
+    SkillGenerationRequest,
+    generate_skill_plan,
+    propose_deterministic_plan,
+    validate_skill_plan,
+)
+from dano.onboarding.skill_generation.models import RouteBinding, RouteExample, SkillPlan, SkillRoute, UnusedCapability
+
+
+def _cap(
+    *,
+    capability_id: str,
+    name: str,
+    title: str,
+    kind: str,
+    required: list[str] | None = None,
+    input_props: dict | None = None,
+    output_props: dict | None = None,
+    confirm: bool = False,
+) -> FlowCapability:
+    properties = input_props or {item: {"type": "string"} for item in (required or [])}
+    return FlowCapability(
+        capability_id=capability_id,
+        name=name,
+        title=title,
+        kind=kind,
+        requires_human_confirm=confirm or kind in {"submit", "delete", "withdraw"},
+        input_schema={
+            "type": "object",
+            "properties": properties,
+            "required": list(required or []),
+        },
+        output_schema={
+            "type": "object",
+            "properties": output_props or {},
+        },
+    )
+
+
+def _three_cap_spec(*, confirmed_query_submit: bool = True, confirmed_option_submit: bool = True) -> FlowSpec:
+    relations = []
+    if confirmed_query_submit:
+        relations.append(CapabilityRelation(
+            relation_id="rel_query_submit",
+            type="data_mapping",
+            mode="field_mapping",
+            from_capability="cap_query",
+            from_output="records[].id",
+            to_capability="cap_submit",
+            to_input="id",
+            confirmed=True,
+            transform_owner="caller",
+            source_selector="records[].id",
+            target_path="id",
+        ))
+    if confirmed_option_submit:
+        relations.append(CapabilityRelation(
+            relation_id="rel_option_submit",
+            type="data_mapping",
+            mode="field_mapping",
+            from_capability="cap_option",
+            from_output="options[].value",
+            to_capability="cap_submit",
+            to_input="status",
+            confirmed=True,
+            transform_owner="caller",
+            source_selector="options[].value",
+            target_path="status",
+        ))
+    return FlowSpec(
+        tenant="tenant",
+        subsystem="oa",
+        title="请假管理",
+        steps=[
+            FlowStep(step_id="s1", method="GET", path="/oa/leave/page"),
+            FlowStep(step_id="s2", method="GET", path="/oa/leave/options"),
+            FlowStep(step_id="s3", method="POST", path="/oa/leave/submit"),
+        ],
+        capabilities=[
+            _cap(
+                capability_id="cap_query",
+                name="query_leave",
+                title="查询待办记录",
+                kind="query",
+                output_props={"records": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}}}}},
+            ),
+            _cap(
+                capability_id="cap_option",
+                name="query_leave_options",
+                title="查询请假选项",
+                kind="list_options",
+                output_props={"options": {"type": "array", "items": {"type": "object", "properties": {"value": {"type": "string"}}}}},
+            ),
+            _cap(
+                capability_id="cap_submit",
+                name="submit_leave",
+                title="提交请假",
+                kind="submit",
+                required=["id", "status"],
+                input_props={"id": {"type": "string"}, "status": {"type": "string"}},
+                confirm=True,
+            ),
+        ],
+        capability_relations=relations,
+    )
+
+
+VERIFIED = {"cap_query", "cap_option", "cap_submit"}
+
+
+def test_fixed_plan_can_select_two_of_three_capabilities() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交；不要使用选项字典。",
+        planning_mode=PlanningMode.FIXED,
+        example_requests=["帮我查待办并提交一条"],
+        success_criteria="选中记录已提交",
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-1")
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-1")
+    assert checked.ok, checked.errors
+    assert plan.selected_capability_ids == ["cap_query", "cap_submit"]
+    unused_ids = {item.capability_id for item in plan.unused_capabilities}
+    assert unused_ids == {"cap_option"}
+    assert all("选项" in item.reason or "未要求" in item.reason or "未使用" in item.reason for item in plan.unused_capabilities)
+    assert len(plan.routes) == 1
+    assert plan.routes[0].capability_sequence == ["cap_query", "cap_submit"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_plan_supports_multiple_valid_routes() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="用户可以只查询待办，也可以直接提交，也可以先查询再提交；提交字段也可从选项中选择。",
+        planning_mode=PlanningMode.DYNAMIC,
+        example_requests=["只看待办", "直接提交", "先查再提交"],
+    )
+    result = await generate_skill_plan(
+        spec,
+        request,
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp-dyn",
+        proposer=lambda *_args, **_kwargs: _async_plan(
+            propose_deterministic_plan(spec, request, VERIFIED, "fp-dyn")
+        ),
+    )
+    assert result.status == "planned"
+    plan = result.plan
+    assert plan is not None
+    sequences = [tuple(route.capability_sequence) for route in plan.routes]
+    assert ("cap_query",) in sequences
+    assert ("cap_query", "cap_submit") in sequences
+    assert ("cap_option", "cap_submit") in sequences
+    assert ("cap_submit", "cap_query") not in sequences
+    assert ("cap_option", "cap_query", "cap_option") not in sequences
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-dyn")
+    assert checked.ok, checked.errors
+
+
+async def _async_plan(plan: SkillPlan):
+    return plan
+
+
+@pytest.mark.asyncio
+async def test_plan_rejects_unknown_capability() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假",
+        business_description="查询待办",
+        planning_mode=PlanningMode.FIXED,
+    )
+    bad = propose_deterministic_plan(spec, request, {"cap_query"}, "fp")
+    bad.selected_capability_ids = ["cap_missing"]
+    bad.routes[0].capability_sequence = ["cap_missing"]
+
+    async def proposer(*_args, **_kwargs):
+        return bad
+
+    result = await generate_skill_plan(
+        spec, request, verified_capability_ids={"cap_query"}, source_flow_fingerprint="fp", proposer=proposer,
+    )
+    assert result.status == "generation_failed"
+    assert any("不存在" in item for item in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_plan_rejects_unverified_capability() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假",
+        business_description="查询待办并提交",
+        planning_mode=PlanningMode.FIXED,
+    )
+    bad = propose_deterministic_plan(spec, request, VERIFIED, "fp")
+    bad.selected_capability_ids = ["cap_query", "cap_submit"]
+
+    async def proposer(*_args, **_kwargs):
+        return bad
+
+    result = await generate_skill_plan(
+        spec, request, verified_capability_ids={"cap_query"}, source_flow_fingerprint="fp", proposer=proposer,
+    )
+    assert result.status == "generation_failed"
+    assert any("未通过阶段7" in item or "未验证" in item for item in result.errors)
+
+
+def test_plan_rejects_unconfirmed_relation() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    spec.capability_relations = [
+        CapabilityRelation(
+            relation_id="rel_guess",
+            type="suggested_call_chain",
+            from_capability="cap_query",
+            from_output="records[].id",
+            to_capability="cap_submit",
+            to_input="id",
+            confirmed=False,
+        )
+    ]
+    plan = SkillPlan(
+        source_flow_fingerprint="fp",
+        planning_mode=PlanningMode.FIXED,
+        selected_capability_ids=["cap_query", "cap_submit"],
+        unused_capabilities=[UnusedCapability(capability_id="cap_option", reason="未要求")],
+        routes=[
+            SkillRoute(
+                route_id="main",
+                name="主路线",
+                when_to_use="查询后提交",
+                capability_sequence=["cap_query", "cap_submit"],
+                required_user_inputs=["status"],
+                bindings=[
+                    RouteBinding(
+                        from_capability="cap_query",
+                        from_output="records[].id",
+                        to_capability="cap_submit",
+                        to_input="id",
+                    )
+                ],
+                requires_confirmation=True,
+                done_when="已提交",
+                examples=[
+                    RouteExample(
+                        user_request="查完提交",
+                        capability_sequence=["cap_query", "cap_submit"],
+                        done_when="已提交",
+                    )
+                ],
+            )
+        ],
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert not checked.ok
+    assert any("未确认关系" in item for item in checked.errors)
+
+
+def test_plan_rejects_incompatible_binding_types() -> None:
+    spec = _three_cap_spec()
+    spec.capability_relations[0].from_output = "records"
+    spec.capability_relations[0].source_selector = "records"
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="查询待办后提交",
+            planning_mode=PlanningMode.FIXED,
+        ),
+        VERIFIED,
+        "fp",
+    )
+    plan.routes[0].bindings = [
+        RouteBinding(
+            from_capability="cap_query",
+            from_output="records",
+            to_capability="cap_submit",
+            to_input="id",
+        )
+    ]
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert not checked.ok
+    assert any("类型不兼容" in item for item in checked.errors)
+
+
+def test_missing_required_input_becomes_user_input() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    request = SkillGenerationRequest(
+        title="请假",
+        business_description="用户已经提供完整提交字段，直接提交请假。",
+        planning_mode=PlanningMode.FIXED,
+        example_requests=["帮我提交请假"],
+    )
+    plan = propose_deterministic_plan(spec, request, {"cap_submit"}, "fp")
+    write_routes = [route for route in plan.routes if "cap_submit" in route.capability_sequence]
+    assert write_routes
+    route = write_routes[0]
+    assert "id" in route.required_user_inputs
+    assert "status" in route.required_user_inputs
+    assert not any(binding.source == "capability_output" for binding in route.bindings)
+    checked = validate_skill_plan(plan, spec, verified_capability_ids={"cap_submit"}, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+
+
+def test_write_route_requires_confirmation() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="查询待办后提交",
+            planning_mode=PlanningMode.FIXED,
+        ),
+        VERIFIED,
+        "fp",
+    )
+    assert plan.routes[0].requires_confirmation is True
+    plan.routes[0].requires_confirmation = False
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert any("确认" in item for item in checked.errors)
+
+
+def test_every_route_has_example_and_done_when() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="用户可以查询、从选项选择并提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp",
+    )
+    assert plan.routes
+    for route in plan.routes:
+        assert route.done_when
+        assert route.when_to_use
+        assert route.examples
+        assert route.examples[0].user_request
+        assert route.examples[0].done_when
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+
+
+@pytest.mark.asyncio
+async def test_empty_business_description_fails() -> None:
+    spec = _three_cap_spec()
+    result = await generate_skill_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="   ", planning_mode=PlanningMode.DYNAMIC),
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp",
+    )
+    assert result.status == "generation_failed"
+    assert any("业务描述" in item for item in result.errors)
