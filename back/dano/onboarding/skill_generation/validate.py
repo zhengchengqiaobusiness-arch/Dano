@@ -57,7 +57,7 @@ def validate_skill_plan(
     verified = {str(item) for item in verified_capability_ids}
     selected = [str(item) for item in plan.selected_capability_ids if str(item)]
     if expected_fingerprint and plan.source_flow_fingerprint != expected_fingerprint:
-        result.error("规划指纹与当前阶段7 FlowSpec 不一致")
+        result.error("规划指纹与当前 FlowSpec 不一致")
     if not selected:
         result.error("selected_capability_ids 不能为空")
     for cap_id in selected:
@@ -66,7 +66,7 @@ def validate_skill_plan(
             result.error(f"所选能力不存在: {cap_id}")
             continue
         if capability_ref(cap) not in verified and cap.name not in verified and cap.capability_id not in verified:
-            result.error(f"所选能力未通过阶段7验证: {cap_id}")
+            result.error(f"所选能力不在可导出集合中: {cap_id}")
     if plan.planning_mode == PlanningMode.FIXED and len(plan.routes) != 1:
         result.error("固定规划模式只能有一条主要路线")
     if plan.planning_mode == PlanningMode.DYNAMIC and not plan.routes:
@@ -126,7 +126,7 @@ def _validate_route(
             continue
         used.add(cap.capability_id or cap_id)
         if capability_ref(cap) not in verified and cap.name not in verified:
-            result.error(f"路线 {route.route_id} 引用了未验证能力: {cap_id}")
+            result.error(f"路线 {route.route_id} 引用了不可导出能力: {cap_id}")
         if is_write_capability(cap):
             write_caps.append(cap)
     if write_caps and not route.requires_confirmation:

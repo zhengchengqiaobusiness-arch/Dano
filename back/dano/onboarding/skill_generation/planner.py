@@ -36,8 +36,6 @@ _QUERY_HINTS = ("查询", "查看", "列表", "待办", "记录", "检索", "筛
 _OPTION_HINTS = ("选项", "字典", "下拉", "候选")
 _SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
 _LOOKUP_HINTS = ("回查", "确认提交", "确认成功", "再查询", "查询状态")
-_QUERY_WRITE_COMBINE_HINTS = ("查询后", "先查询", "先查再", "选择一条", "选中记录", "查询后选择")
-_OPTION_WRITE_COMBINE_HINTS = ("从选项中选择", "从选项选择", "选项中选择")
 _SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
 
 
@@ -269,37 +267,6 @@ def _route(
     )
 
 
-def _required_relation_clarifications(
-    spec: FlowSpec,
-    request: SkillGenerationRequest,
-    verified_ids: set[str],
-) -> list[str]:
-    """If the description requires a combination that has no confirmed relation, do not publish."""
-
-    selected, _unused = _select_capabilities(spec, request, verified_ids)
-    text = _text(request)
-    by_family: dict[str, list[FlowCapability]] = {"query": [], "option": [], "write": []}
-    for cap in selected:
-        by_family.setdefault(_family(cap), []).append(cap)
-    questions: list[str] = []
-    queries = by_family.get("query") or []
-    options = by_family.get("option") or []
-    writes = by_family.get("write") or []
-    if _mentions(text, _QUERY_WRITE_COMBINE_HINTS) and queries and writes:
-        if not _relation_pair(spec, queries[0], writes[0]):
-            questions.append(
-                "业务描述要求将查询结果用于提交，但阶段7没有已确认的查询→提交关系。"
-                "请先确认该能力关系，或改为说明提交字段由用户提供、不要自动带入查询结果。"
-            )
-    if _mentions(text, _OPTION_WRITE_COMBINE_HINTS) and options and writes:
-        if not _relation_pair(spec, options[0], writes[0]):
-            questions.append(
-                "业务描述要求从选项中选择后再提交，但阶段7没有已确认的选项→提交关系。"
-                "请先确认该能力关系，或改为由用户直接提供提交字段。"
-            )
-    return questions
-
-
 def propose_deterministic_plan(
     spec: FlowSpec,
     request: SkillGenerationRequest,
@@ -327,9 +294,7 @@ def propose_deterministic_plan(
                 pair = _relation_pair(spec, sequence[-1], write)
                 if pair:
                     bindings.extend(pair)
-                    sequence.append(write)
-            else:
-                sequence.append(write)
+            sequence.append(write)
         sequence = _append_lookup(sequence, queries, text)
         if not sequence:
             sequence = list(selected[:1] or spec.capabilities[:1])
@@ -421,7 +386,7 @@ def propose_deterministic_plan(
         if capability_ref(cap) not in {item.capability_id for item in unused}
     )
     safety = [
-        "只使用阶段7已验证能力，不得发明字段、接口或输出。",
+        "只使用当前页面已识别能力，不得发明字段、接口或输出。",
         "写操作必须先取得用户确认。",
         "不得输出 token、cookie、storage_state 或密码。",
     ]
@@ -532,15 +497,7 @@ async def generate_skill_plan(
     if not verified_capability_ids:
         return SkillGenerationResult(
             status="generation_failed",
-            errors=["未运行阶段7或没有已验证能力，禁止生成 Skill"],
-        )
-    relation_questions = _required_relation_clarifications(
-        spec, request, verified_capability_ids,
-    )
-    if relation_questions:
-        return SkillGenerationResult(
-            status="needs_clarification",
-            clarification_questions=relation_questions,
+            errors=["没有可导出能力，不能生成 Skill"],
         )
 
     fallback = propose_deterministic_plan(spec, request, verified_capability_ids, source_flow_fingerprint)

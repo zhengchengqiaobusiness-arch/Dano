@@ -594,9 +594,11 @@ function capabilityIsWrite(capability: FlowCapability) {
 
 function historyLifecycleView(item: RecordingResultSummary) {
   const key = String(item.skill_lifecycle || "");
+  if (key === "exported" || item.published) {
+    return SKILL_LIFECYCLE_LABELS.stage_six_done;
+  }
   if (SKILL_LIFECYCLE_LABELS[key]) return SKILL_LIFECYCLE_LABELS[key];
   if (item.skill_needs_reexport) return SKILL_LIFECYCLE_LABELS.needs_reexport;
-  if (item.published) return SKILL_LIFECYCLE_LABELS.exported;
   if (item.machine_verification_status === "verified") return SKILL_LIFECYCLE_LABELS.verified_not_exported;
   if (["running", "waiting_operator"].includes(String(item.machine_verification_status || ""))) {
     return SKILL_LIFECYCLE_LABELS.verifying;
@@ -734,12 +736,10 @@ export default function PageRecorder({
   const stageSevenVerified = stageSevenStatus === "verified";
   const fingerprintMatches = !stageSevenFingerprint || !currentDraftFingerprint
     || stageSevenFingerprint === currentDraftFingerprint;
-  const stageSevenRequired = machineVerification;
   const stageSevenReady = stageSevenVerified && fingerprintMatches;
   const canProduceSkill = Boolean(
     (activeResultId || history.find((row) => row.action === (snapshot?.action || ""))?.id)
     && capabilities.length
-    && (stageSevenRequired ? stageSevenReady : true)
     && !pendingEdits.length
     && !patchInFlightRef.current
     && !processing
@@ -1344,7 +1344,7 @@ export default function PageRecorder({
       progress: {
         step: "ready",
         label: stageStatus === "verified"
-          ? (item.skill_lifecycle === "exported" ? "Skill 已导出" : "能力已验证，Skill 未产出")
+          ? "已打开录制结果"
           : "已打开录制结果，尚未开始机器验证",
       },
       draft,
@@ -1610,7 +1610,7 @@ export default function PageRecorder({
         success_criteria: skillSuccess.trim(),
         forbidden_actions: skillForbidden.trim(),
         out_dir: outDir,
-        require_stage_seven: machineVerification,
+        require_stage_seven: false,
       });
       if (outcome.status === "needs_clarification") {
         setSkillClarifications(outcome.clarification_questions || []);
@@ -3201,33 +3201,21 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
-              {stageSevenRequired && !stageSevenReady ? (
-                draft && !analysisMode && !processing && !connecting && !cancelling ? (
-                  <Button
-                    type="primary"
-                    icon={<PlayCircleOutlined />}
-                    onClick={() => startAnalysis()}
-                  >{verificationButtonLabel}</Button>
-                ) : null
-              ) : (
-                <>
-                  <Button
-                    disabled={!draft || processing || skillExporting}
-                    onClick={() => setEditingResult(true)}
-                  >修改能力结果</Button>
-                  <Button
-                    type="primary"
-                    disabled={!canProduceSkill}
-                    onClick={openSkillExport}
-                  >产出 Skill</Button>
-                  {!stageSevenReady && draft && !analysisMode && !processing && !connecting && !cancelling ? (
-                    <Button
-                      icon={<PlayCircleOutlined />}
-                      onClick={() => startAnalysis()}
-                    >{verificationButtonLabel}</Button>
-                  ) : null}
-                </>
-              )}
+              <Button
+                disabled={!draft || processing || skillExporting}
+                onClick={() => setEditingResult(true)}
+              >修改能力结果</Button>
+              <Button
+                type="primary"
+                disabled={!canProduceSkill}
+                onClick={openSkillExport}
+              >产出 Skill</Button>
+              {!stageSevenReady && draft && !analysisMode && !processing && !connecting && !cancelling ? (
+                <Button
+                  icon={<PlayCircleOutlined />}
+                  onClick={() => startAnalysis()}
+                >{verificationButtonLabel}</Button>
+              ) : null}
             </Space>
           )}
         </div>
@@ -3561,7 +3549,7 @@ export default function PageRecorder({
               }]}
             />
             <div>
-              <Text strong>已验证能力</Text>
+              <Text strong>可导出能力</Text>
               <Table
                 size="small"
                 style={{ marginTop: 8 }}
@@ -3575,7 +3563,7 @@ export default function PageRecorder({
                   { title: "输出字段", render: (_, cap) => schemaFieldNames(cap.output_schema).join("、") || "—" },
                   { title: "写操作", width: 80, render: (_, cap) => (capabilityIsWrite(cap) ? "是" : "否") },
                   { title: "需确认", width: 80, render: (_, cap) => (cap.requires_human_confirm || capabilityIsWrite(cap) ? "是" : "否") },
-                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : stageSevenRequired ? (stageSevenStatus || "未验证") : "已跳过") },
+                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : "已跳过") },
                 ]}
               />
             </div>

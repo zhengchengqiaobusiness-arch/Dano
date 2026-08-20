@@ -211,7 +211,7 @@ async def test_plan_rejects_unverified_capability() -> None:
         spec, request, verified_capability_ids={"cap_query"}, source_flow_fingerprint="fp", proposer=proposer,
     )
     assert result.status == "generation_failed"
-    assert any("未通过阶段7" in item or "未验证" in item for item in result.errors)
+    assert any("可导出" in item or "未验证" in item for item in result.errors)
 
 
 def test_plan_rejects_unconfirmed_relation() -> None:
@@ -388,33 +388,49 @@ def test_every_route_has_example_and_done_when() -> None:
 
 
 @pytest.mark.asyncio
-async def test_incomplete_relation_needs_clarification_and_does_not_plan() -> None:
+async def test_incomplete_relation_plans_independent_routes() -> None:
     spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    request = SkillGenerationRequest(
+        title="请假",
+        business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
     result = await generate_skill_plan(
         spec,
-        SkillGenerationRequest(
-            title="请假",
-            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
-            planning_mode=PlanningMode.DYNAMIC,
-        ),
+        request,
         verified_capability_ids=VERIFIED,
         source_flow_fingerprint="fp",
         proposer=lambda *_args, **_kwargs: _async_plan(
-            propose_deterministic_plan(
-                spec,
-                SkillGenerationRequest(
-                    title="请假",
-                    business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
-                    planning_mode=PlanningMode.DYNAMIC,
-                ),
-                VERIFIED,
-                "fp",
-            )
+            propose_deterministic_plan(spec, request, VERIFIED, "fp")
         ),
     )
-    assert result.status == "needs_clarification"
-    assert result.plan is None
-    assert any("查询" in item and "关系" in item for item in result.clarification_questions)
+    assert result.status == "planned"
+    assert result.plan is not None
+    route_ids = {route.route_id for route in result.plan.routes}
+    assert route_ids >= {"query_only", "write_direct"}
+    assert "query_then_write" not in route_ids
+    write = next(route for route in result.plan.routes if route.route_id == "write_direct")
+    assert write.bindings == []
+    assert "id" in write.required_user_inputs
+
+
+def test_fixed_plan_without_relation_uses_user_inputs() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="先查询待办记录，再提交一条记录。",
+            planning_mode=PlanningMode.FIXED,
+        ),
+        VERIFIED,
+        "fp",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp")
+    assert checked.ok, checked.errors
+    assert plan.routes[0].capability_sequence == ["cap_query", "cap_submit"]
+    assert plan.routes[0].bindings == []
+    assert "id" in plan.routes[0].required_user_inputs
 
 
 def test_fixed_lookup_uses_independent_step_ids() -> None:

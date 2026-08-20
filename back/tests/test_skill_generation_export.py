@@ -159,27 +159,26 @@ async def _deterministic_proposer(spec, request, verified_ids, fingerprint):
 
 
 @pytest.mark.asyncio
-async def test_manual_export_requires_stage_seven_verified(tmp_path: Path) -> None:
+async def test_manual_export_does_not_require_stage_seven(tmp_path: Path) -> None:
     spec = _three_cap_spec()
     body = _verified_body(spec)
     body["machine_verification_status"] = "running"
     body["stage_seven"]["status"] = "running"
     stored: list[dict] = []
 
-    with pytest.raises(SkillExportError) as exc:
-        await export_recording_skill(
-            result_id=uuid4(),
-            body=body,
-            tenant="tenant",
-            request=_request(out_dir=str(tmp_path)),
-            persist=stored.append,
-            publish=_ok_publish,
-            render=_render_valid,
-            proposer=_deterministic_proposer,
-        )
-    assert exc.value.status_code == 409
-    assert "阶段7" in exc.value.detail
-    assert not stored or not stored[-1].get("published")
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=body,
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path), require_stage_seven=True),
+        persist=stored.append,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported"
+    assert outcome.plan
+    assert stored[-1].get("published") is True
 
 
 @pytest.mark.asyncio
@@ -311,7 +310,7 @@ async def test_repeated_identical_export_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_incomplete_relation_export_does_not_publish(tmp_path: Path) -> None:
+async def test_incomplete_relation_export_uses_user_inputs(tmp_path: Path) -> None:
     spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
     stored: list[dict] = []
     outcome = await export_recording_skill(
@@ -328,15 +327,74 @@ async def test_incomplete_relation_export_does_not_publish(tmp_path: Path) -> No
         render=_render_valid,
         proposer=_deterministic_proposer,
     )
-    assert outcome.status == "needs_clarification"
-    assert outcome.clarification_questions
-    assert not outcome.export_path
-    assert stored[-1]["published"] is False
-    assert recording_skill_lifecycle(stored[-1]) == "verified_not_exported"
+    assert outcome.status == "exported"
+    assert outcome.export_path
+    assert stored[-1]["published"] is True
+    routes = (outcome.plan or {}).get("routes") or []
+    assert {route.get("route_id") for route in routes} >= {"query_only", "write_direct"}
+    assert "query_then_write" not in {route.get("route_id") for route in routes}
+    write = next(route for route in routes if route.get("route_id") == "write_direct")
+    assert not write.get("bindings")
+    assert "id" in (write.get("required_user_inputs") or [])
 
 
 @pytest.mark.asyncio
-async def test_flow_change_invalidates_old_skill_plan(tmp_path: Path) -> None:
+async def test_stage_six_query_hint_exports_without_stage_seven(tmp_path: Path) -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    body = {
+        "title": spec.title or "点狮ERP销售订单操作能力录制",
+        "subsystem": "oa",
+        "action": "action_stage6_only",
+        "flow_spec": spec.model_dump(mode="json"),
+        "published": False,
+    }
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=body,
+        tenant="tenant",
+        request=_request(
+            out_dir=str(tmp_path),
+            planning_mode=PlanningMode.DYNAMIC,
+            title="点狮ERP销售订单操作能力录制",
+            business_description="先查询 在新建 在编辑 在查看 在审核 在反审核 在删除",
+        ),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported"
+    assert not outcome.clarification_questions
+    assert outcome.used_capabilities
+
+
+@pytest.mark.asyncio
+async def test_export_ignores_stage_seven_working_spec(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    working = spec.model_copy(deep=True)
+    working.title = "阶段7工作副本不应被导出"
+    working.capabilities = list(working.capabilities) + [
+        spec.capabilities[0].model_copy(update={"capability_id": "cap_stage7_only", "name": "stage7_only"}),
+    ]
+    body = _verified_body(spec)
+    body["stage_seven"]["working_flow_spec"] = working.model_dump(mode="json")
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=body,
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path)),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported"
+    used = {item.get("capability_id") for item in outcome.used_capabilities}
+    assert "cap_stage7_only" not in used
+
+
+@pytest.mark.asyncio
+async def test_flow_change_reexports_from_stage_six_spec(tmp_path: Path) -> None:
     spec = _three_cap_spec()
     result_id = uuid4()
     first = await export_recording_skill(
@@ -359,23 +417,23 @@ async def test_flow_change_invalidates_old_skill_plan(tmp_path: Path) -> None:
         "skill_export_status": "exported",
         "export_path": first.export_path,
         "skill_request_fingerprint": "stale-fingerprint",
+        "stage_seven_fingerprint": "old-fp",
     })
-    with pytest.raises(SkillExportError) as exc:
-        stale = _verified_body(spec)
-        stale["stage_seven_fingerprint"] = "old-fp"
-        stale["stage_seven"]["working_fingerprint"] = "old-fp"
-        await export_recording_skill(
-            result_id=result_id,
-            body=stale,
-            tenant="tenant",
-            request=_request(out_dir=str(tmp_path)),
-            publish=_ok_publish,
-            render=_render_valid,
-            proposer=_deterministic_proposer,
-        )
-    assert exc.value.status_code == 409
-    assert "指纹" in exc.value.detail
-    del body
+    body["stage_seven"]["working_fingerprint"] = "old-fp"
+    second = await export_recording_skill(
+        result_id=result_id,
+        body=body,
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path)),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert second.status == "exported"
+    assert second.idempotent is False
+    assert second.plan
+    assert second.plan.get("source_flow_fingerprint") != "old-fp"
 
 
 @pytest.mark.asyncio
