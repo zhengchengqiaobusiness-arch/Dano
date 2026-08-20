@@ -346,6 +346,13 @@ _RECORDER_JS = r"""() => {
       var row = cell.closest('tr,[role="row"]');
       var table = cell.closest('table,[role="table"],[role="grid"]');
       if (!row || !table) return null;
+      // Virtualized/component tables commonly render header and body in two
+      // sibling <table> elements.  Resolve columns and stable identity from
+      // their shared semantic root while retaining the real body row.
+      var tableRoot = table.closest && table.closest(
+        '.el-table,.ant-table,.v-data-table,.q-table,[role="table"],[role="grid"]'
+      );
+      var headerScope = tableRoot || table;
       var cells = row.querySelectorAll(':scope > td,:scope > th,:scope > [role="cell"],:scope > [role="gridcell"]');
       var columnIndex = Array.prototype.indexOf.call(cells, cell);
       var ariaColumn = parseInt(cell.getAttribute('aria-colindex') || '', 10);
@@ -365,7 +372,9 @@ _RECORDER_JS = r"""() => {
         header = firstHeader ? document.getElementById(firstHeader) : null;
       }
       if (!header) {
-        var headers = table.querySelectorAll('thead th,[role="columnheader"]');
+        var headers = headerScope.querySelectorAll(
+          'thead th,[role="columnheader"],.el-table__header th,.ant-table-thead th'
+        );
         for (var h = 0; h < headers.length; h++) {
           var headerColumn = parseInt(headers[h].getAttribute('aria-colindex') || '', 10);
           if ((!isNaN(headerColumn) && headerColumn - 1 === columnIndex) || (isNaN(headerColumn) && h === columnIndex)) {
@@ -379,13 +388,17 @@ _RECORDER_JS = r"""() => {
         if (value) { rowIdentity = value; return true; }
         return false;
       });
-      var tableId = structuralRootIdentity(table);
+      var tableId = structuralRootIdentity(tableRoot || table);
       if (!tableId) {
-        var allTables = document.querySelectorAll('table,[role="table"],[role="grid"]');
-        tableId = 'table_' + Array.prototype.indexOf.call(allTables, table);
+        var allTables = document.querySelectorAll(
+          '.el-table,.ant-table,.v-data-table,.q-table,table,[role="table"],[role="grid"]'
+        );
+        tableId = 'table_' + Array.prototype.indexOf.call(allTables, tableRoot || table);
       }
+      var columnLabel = clean(header && (header.innerText || header.textContent || header.getAttribute('aria-label')));
       return {
-        label: clean(header && (header.innerText || header.textContent || header.getAttribute('aria-label'))),
+        label: columnLabel,
+        column_label: columnLabel,
         field_aliases: header ? controlAliases(header) : [],
         table_id: tableId,
         row_index: rowIndex >= 0 ? rowIndex : null,
@@ -662,7 +675,7 @@ _RECORDER_JS = r"""() => {
       required_state: reqState
     };
     if (table) {
-      ['table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+      ['table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
         evidence[key] = table[key];
       });
     }
@@ -765,7 +778,7 @@ _RECORDER_JS = r"""() => {
             in_dialog: !!evidence.in_dialog,
             surface: evidence.surface || 'page'
           };
-          ['form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+          ['form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
             if (evidence[key] !== undefined && evidence[key] !== '') radioItem[key] = evidence[key];
           });
           out.push(radioItem);
@@ -815,7 +828,7 @@ _RECORDER_JS = r"""() => {
           surface: evidence.surface || 'page'
         };
         ['checked','filename','mime_type','size','multiple','file_count','files',
-         'form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+         'form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
           if (evidence[key] !== undefined) item[key] = evidence[key];
         });
         out.push(item);
@@ -1018,7 +1031,7 @@ _RECORDER_JS = r"""() => {
       };
       if (evidence) {
         ['checked','group_name','selected_label','filename','mime_type','size','multiple','file_count','files',
-         'form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+         'form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
           if (evidence[key] !== undefined) payload[key] = evidence[key];
         });
       }
@@ -1276,7 +1289,7 @@ _RECORDER_JS = r"""() => {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
     if (isContentEditable(el)) { scheduleFill(el); return; }
-    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) {
+    if (controlKind(el) !== 'select' && (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0))) {
       scheduleFill(el);
     }
   }, true);
@@ -1284,7 +1297,7 @@ _RECORDER_JS = r"""() => {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
     if (isContentEditable(el)) { flushElementFill(el); return; }
-    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
+    if (controlKind(el) !== 'select' && (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0))) flushElementFill(el);
     if (tag === 'select') {
       var l1 = locateField(el); var nativeEvidence = fieldEvidence(el);
       nativeEvidence.enum_source = 'dom'; nativeEvidence.mapping_complete = true;
@@ -1300,7 +1313,7 @@ _RECORDER_JS = r"""() => {
   document.addEventListener('blur', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
-    if (isContentEditable(el) || tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
+    if (isContentEditable(el) || (controlKind(el) !== 'select' && (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)))) flushElementFill(el);
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
   // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。

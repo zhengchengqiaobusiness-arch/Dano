@@ -279,6 +279,68 @@ async def test_table_inline_snapshot_preserves_header_and_real_row_occurrences()
 
 
 @pytest.mark.asyncio
+async def test_split_header_table_preserves_all_inline_controls_and_select_is_not_fill() -> None:
+    """Framework tables may render header/body in separate native tables."""
+    from playwright.async_api import async_playwright
+
+    recorded: list[dict] = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+
+        async def receive(_source, raw: str) -> None:
+            recorded.append(json.loads(raw))
+
+        await context.expose_binding("__danoRecord", receive)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="order editor">
+              <div class="el-table" aria-label="line items">
+                <div class="el-table__header-wrapper">
+                  <table class="el-table__header"><thead><tr>
+                    <th data-field="productId">Product</th>
+                    <th data-field="count">Quantity</th>
+                  </tr></thead></table>
+                </div>
+                <div class="el-table__body-wrapper">
+                  <table class="el-table__body"><tbody>
+                    <tr data-row-key="row-1">
+                      <td><input id="product" role="combobox" readonly value="Alpha"></td>
+                      <td><input id="quantity" type="number" value="2"></td>
+                    </tr>
+                  </tbody></table>
+                </div>
+              </div>
+            </form>
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await page.dispatch_event("#product", "input")
+        await page.dispatch_event("#product", "change")
+        await page.dispatch_event("#product", "blur")
+        await page.wait_for_timeout(350)
+        await browser.close()
+
+    product = next(item for item in fields if item.get("label") == "Product")
+    quantity = next(item for item in fields if item.get("label") == "Quantity")
+    assert product["control_kind"] == "select"
+    assert product["column_label"] == "Product"
+    assert product["row_index"] == 0
+    assert product["row_identity"] == "row-1"
+    assert product["table_id"] == "line items"
+    assert "productId" in product["field_aliases"]
+    assert quantity["control_kind"] == "number"
+    assert quantity["column_label"] == "Quantity"
+    assert "count" in quantity["field_aliases"]
+    assert not any(
+        item.get("op") == "fill" and item.get("field") == "Product"
+        for item in recorded
+    )
+
+
+@pytest.mark.asyncio
 async def test_form_snapshot_keeps_hidden_native_file_control_without_selection() -> None:
     from playwright.async_api import async_playwright
 
