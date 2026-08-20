@@ -139,6 +139,44 @@ def _compile(spec, capabilities: list[dict]):
     return compilation.spec
 
 
+def test_capability_input_schema_preserves_required_optional_unknown_states() -> None:
+    step = FlowStep(
+        step_id="step_write_tristate",
+        method="POST",
+        url="http://random.invalid/v7/entities",
+        path="/v7/entities",
+        semantic_role="business_write",
+        source_meta={"request_id": "req_write_tristate", "role": "business_write"},
+        params=[
+            ParamField(
+                path=f"body.{name}", key=name, type="string", wire_type="string",
+                required=state == "required", category="user_param",
+                source_kind="user_input", source={"kind": "user_input", "required_state": state},
+                editable=True, exposed_to_user=True,
+            )
+            for name, state in (
+                ("mustSupply", "required"),
+                ("maySupply", "optional"),
+                ("notObserved", "unknown"),
+            )
+        ],
+    )
+    spec = FlowSpec(tenant="t", subsystem="generic", steps=[step])
+
+    compiled = _compile(spec, [{
+        "name": "create_entity",
+        "title": "Create entity",
+        "kind": "create",
+        "anchor_step_id": step.step_id,
+    }])
+    schema = compiled.capabilities[0].input_schema
+
+    assert schema["required"] == ["mustSupply"]
+    assert schema["properties"]["mustSupply"]["x-dano-required-state"] == "required"
+    assert schema["properties"]["maySupply"]["x-dano-required-state"] == "optional"
+    assert schema["properties"]["notObserved"]["x-dano-required-state"] == "unknown"
+
+
 def _edit_and_command_spec(*, include_dialog_controls: bool = True):
     dict_url = "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status"
     status_options = [

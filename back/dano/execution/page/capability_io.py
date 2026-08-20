@@ -336,6 +336,24 @@ def _is_dynamic_array_input(param: ParamField) -> bool:
     )
 
 
+def _required_state_for_param(
+    param: ParamField,
+    capability_step_ids: set[str] | None,
+) -> str:
+    if _param_requires_caller_input(param, capability_step_ids):
+        return "required"
+    observed = str((param.source or {}).get("required_state") or "").lower()
+    return "optional" if observed == "optional" else "unknown"
+
+
+def _merge_required_states(left: str, right: str) -> str:
+    if "required" in {left, right}:
+        return "required"
+    if "unknown" in {left, right}:
+        return "unknown"
+    return "optional"
+
+
 def _capability_input_schema(
     params: list[ParamField],
     capability_step_ids: set[str] | None = None,
@@ -357,6 +375,10 @@ def _capability_input_schema(
         key = p.key or p.path
         if key in props:
             existing = props[key]
+            existing["x-dano-required-state"] = _merge_required_states(
+                str(existing.get("x-dano-required-state") or "unknown"),
+                _required_state_for_param(p, capability_step_ids),
+            )
             candidate_business = _business_type_for_param(p)
             candidate_wire = p.wire_type or _infer_type_from_value(p.value) or "string"
             if (
@@ -379,6 +401,9 @@ def _capability_input_schema(
         props[key]["x-flow-path"] = p.path
         props[key]["x-dano-business-type"] = _business_type_for_param(p)
         props[key]["x-dano-wire-type"] = p.wire_type or _infer_type_from_value(p.value) or "string"
+        props[key]["x-dano-required-state"] = _required_state_for_param(
+            p, capability_step_ids,
+        )
         wire_format = p.wire_format or _infer_wire_format(p.value)
         if wire_format:
             props[key]["x-dano-wire-format"] = wire_format
