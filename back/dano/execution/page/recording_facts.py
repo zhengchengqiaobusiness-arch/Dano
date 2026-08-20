@@ -26,6 +26,7 @@ from dano.execution.page.request_capture import (
     looks_like_auth_write,
     looks_like_read_request,
 )
+from dano.execution.page.recording_field_selection import select_field_contract_evidence
 
 
 _REQUEST_OBSERVER_KEYS = (
@@ -334,7 +335,9 @@ def _params_from_get_query(
     control_by_key: dict[str, dict] = {}
 
     # All controls (text/date/number/select) can expose the real query property.
-    # This is the primary naming/type source and makes repeated values harmless.
+    # Select one coherent contract per exact wire path before alias fallback;
+    # repeated snapshots must not make the last coincidental value match win.
+    bound_by_key: dict[str, list[dict[str, Any]]] = {}
     for item in field_evidence or []:
         if not isinstance(item, dict):
             continue
@@ -342,13 +345,23 @@ def _params_from_get_query(
         if str(item.get("binding_status") or "") == "bound" and bound_path.startswith("query."):
             bound_key = bound_path.removeprefix("query.")
             if bound_key in raw_keys:
-                key = bound_key
-                label = str(item.get("label") or item.get("field") or "").strip()
-                if label:
-                    labels[key] = label
-                grounded.add(key)
-                control_by_key[key] = item
-                continue
+                bound_by_key.setdefault(bound_key, []).append(item)
+    for key, items in bound_by_key.items():
+        selected = select_field_contract_evidence(items, f"query.{key}")
+        if selected is None:
+            continue
+        label = str(selected.get("label") or selected.get("field") or "").strip()
+        if label:
+            labels[key] = label
+        grounded.add(key)
+        control_by_key[key] = selected
+
+    for item in field_evidence or []:
+        if not isinstance(item, dict):
+            continue
+        bound_path = str(item.get("wire_path") or "").removeprefix("request.")
+        if str(item.get("binding_status") or "") == "bound" and bound_path.startswith("query."):
+            continue
         aliases = [
             str(value).strip() for value in (item.get("field_aliases") or [])
             if str(value or "").strip()
@@ -366,7 +379,7 @@ def _params_from_get_query(
         if label:
             labels[key] = label
         grounded.add(key)
-        control_by_key[key] = item
+        control_by_key.setdefault(key, item)
 
     # Strongest evidence: the opened DOM control reports its actual name/id.
     # Page-wide enums belong to GET filters. A write that reuses ``?status=``

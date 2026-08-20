@@ -33,6 +33,9 @@ def field_surface(item: dict) -> str:
         return "dialog"
     if surface == "drawer":
         return "drawer"
+    control_surface = str(item.get("control_surface") or "").strip().lower()
+    if control_surface == "table_inline":
+        return "table_inline"
     return "page"
 
 
@@ -56,6 +59,8 @@ def field_identity_id(item: dict) -> str:
         "route": route_identity(item),
         "surface": field_surface(item),
         "form_root": form_root_identity(item),
+        "table_id": str(item.get("table_id") or ""),
+        "column_index": item.get("column_index"),
         "locator": str(item.get("locator") or ""),
         "control_kind": str(item.get("control_kind") or ""),
         "aliases": sorted({
@@ -78,6 +83,8 @@ def occurrence_id(item: dict) -> str:
         "transaction_id": str(item.get("transaction_id") or ""),
         "observed_at": item.get("observed_at"),
         "request_id": str(item.get("request_id") or ""),
+        "row_index": item.get("row_index"),
+        "row_identity": str(item.get("row_identity") or ""),
     }
     digest = hashlib.sha1(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -150,6 +157,11 @@ def control_item_from_step(step: dict) -> dict:
         "in_dialog": bool(step.get("in_dialog")),
         "surface": str(step.get("surface") or ("dialog" if step.get("in_dialog") else "page")),
         "form_root": form_root_identity(step),
+        "control_surface": str(step.get("control_surface") or ""),
+        "table_id": str(step.get("table_id") or ""),
+        "row_index": step.get("row_index"),
+        "row_identity": str(step.get("row_identity") or ""),
+        "column_index": step.get("column_index"),
         "checked": step.get("checked"),
         "options": step.get("options"),
         "filename": step.get("filename"),

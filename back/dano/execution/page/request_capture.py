@@ -16,6 +16,7 @@ import re as _re
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlunparse
 
 from dano.execution.page.wire_format import apply_wire_formats, date_span_days
+from dano.execution.page.recording_field_selection import select_field_contract_evidence
 
 _log = logging.getLogger("dano.request_capture")
 
@@ -2382,7 +2383,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             if str(value or "").strip()
         ]
 
-    structural: dict[int, dict] = {}
+    structural_candidates: dict[int, list[dict]] = {}
     for item in field_evidence or []:
         if not isinstance(item, dict):
             continue
@@ -2409,7 +2410,6 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         if len(candidates) != 1:
             continue
         index = candidates[0]
-        previous = structural.get(index)
         evidence_surface = (
             "dialog" if item.get("in_dialog") is True
             else "page" if item.get("in_dialog") is False
@@ -2424,26 +2424,17 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             # List-page filters share leaf names with later row-command bodies.
             # A page-surface snapshot must not become the write field's select.
             continue
-        # Multiple controls can represent one range/object field. Prefer the
-        # evidence with a human label and a concrete control kind; never choose
-        # between conflicting labels by order.
-        if previous:
-            old_label = str(previous.get("label") or previous.get("field") or "").strip()
-            new_label = str(item.get("label") or item.get("field") or "").strip()
-            old_op = str(previous.get("op") or "").lower()
-            new_op = str(item.get("op") or "").lower()
-            interacted = {"fill", "select", "pick", "toggle", "upload"}
-            if old_label and new_label and old_label != new_label:
-                if new_op in interacted and old_op not in interacted:
-                    pass
-                elif old_op in interacted and new_op not in interacted:
-                    continue
-                else:
-                    structural.pop(index, None)
-                    continue
-            if old_label and not new_label:
-                continue
-        structural[index] = item
+        structural_candidates.setdefault(index, []).append(item)
+    structural = {
+        index: selected
+        for index, items in structural_candidates.items()
+        if (
+            selected := select_field_contract_evidence(
+                items,
+                f"body.{leaves[index][0]}",
+            )
+        ) is not None
+    }
 
     def type_from_control(item: dict | None, fallback: str) -> str:
         kind = str((item or {}).get("control_kind") or "").lower()

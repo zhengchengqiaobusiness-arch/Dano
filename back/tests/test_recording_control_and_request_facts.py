@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from dano.execution.page.recorder import (
     _RECORDER_JS,
     RecordSession,
@@ -184,6 +186,96 @@ def test_zero_survives_form_samples() -> None:
     samples = session.recorded_form_samples()
     assert 0 in samples.values() or samples.get("数量") == 0 or samples.get("count") == 0
     assert False in samples.values() or samples.get("同意") is False or samples.get("agree") is False
+
+
+@pytest.mark.asyncio
+async def test_table_inline_snapshot_preserves_header_and_real_row_occurrences() -> None:
+    from playwright.async_api import async_playwright
+
+    recorded: list[dict] = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+
+        async def receive(_source, raw: str) -> None:
+            recorded.append(json.loads(raw))
+
+        await context.expose_binding("__danoRecord", receive)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="line editor">
+              <table aria-label="line items">
+                <thead><tr>
+                  <th scope="col" data-field="catalogId">条目</th>
+                  <th scope="col" data-field="quantity">数值</th>
+                </tr></thead>
+                <tbody>
+                  <tr data-row-key="row-a">
+                    <td><input role="combobox" aria-controls="choices-a" value="Alpha"></td>
+                    <td><input type="number" value="2"></td>
+                  </tr>
+                  <tr data-row-key="row-b">
+                    <td><input role="combobox" aria-controls="choices-b" value="Beta"></td>
+                    <td><input type="number" value="5"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </form>
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await browser.close()
+
+    quantities = [item for item in fields if item.get("label") == "数值"]
+    assert [item["value"] for item in quantities] == ["2", "5"]
+    assert [item["row_index"] for item in quantities] == [0, 1]
+    assert [item["row_identity"] for item in quantities] == ["row-a", "row-b"]
+    assert all(item["column_index"] == 1 for item in quantities)
+    assert all(item["table_id"] == "line items" for item in quantities)
+    assert all(item["control_surface"] == "table_inline" for item in quantities)
+    assert all("quantity" in item["field_aliases"] for item in quantities)
+    assert all(item["form_root"] == "line editor" for item in quantities)
+
+    catalogs = [item for item in fields if item.get("label") == "条目"]
+    assert len(catalogs) == 2
+    assert all("catalogId" in item["field_aliases"] for item in catalogs)
+
+    session = RecordSession()
+    _feed(session, {
+        "op": "form_snapshot",
+        "action_id": "action_rows",
+        "fields": fields,
+        "page_context": PAGE,
+    })
+    occurrences = session.recorded_field_evidence()
+    assert len({item["occurrence_id"] for item in occurrences}) == 4
+    bound = bind_field_evidence(
+        [{
+            "request_id": "req_rows",
+            "method": "POST",
+            "url": "http://example.test/lines/save",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_action_id": "action_rows",
+            "trigger_transaction_id": "page_1|frame_1|action_rows",
+            "post_data": json.dumps({
+                "lines": [
+                    {"catalogId": "a", "quantity": 2},
+                    {"catalogId": "b", "quantity": 5},
+                ]
+            }),
+            "role": "business_write",
+        }],
+        [],
+        occurrences,
+    )
+    quantity_paths = [
+        item.get("wire_path") for item in bound if item.get("label") == "数值"
+    ]
+    assert quantity_paths == ["body.lines[0].quantity", "body.lines[1].quantity"]
 
 
 def test_shared_body_parser_json_and_stringified_json() -> None:
@@ -502,6 +594,89 @@ def test_text_control_keeps_text_business_type_for_numeric_wire_sample() -> None
     code = next(param for step in spec.steps for param in step.params if param.path == "code")
     assert code.type == "string"
     assert code.wire_type == "number"
+
+
+def test_structural_text_evidence_beats_unrelated_numeric_control_on_same_wire_path() -> None:
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    requests = [
+        {
+            "request_id": "req_filter",
+            "method": "GET",
+            "url": "http://types.invalid/v2/records?descriptor=1",
+            "response_status": 200,
+            "response_json": {"items": []},
+            "page_id": "page_types",
+            "frame_id": "frame_main",
+            "trigger_action_id": "action_filter",
+            "trigger_transaction_id": "tx_filter",
+            "_request_role": {"role": "business_get", "keep": True, "confidence": 1.0},
+        },
+        {
+            "request_id": "req_update",
+            "method": "PUT",
+            "url": "http://types.invalid/v2/records/current",
+            "content_type": "application/json",
+            "post_data": json.dumps({"descriptor": 1}),
+            "response_status": 200,
+            "response_json": {"ok": True},
+            "page_id": "page_types",
+            "frame_id": "frame_main",
+            "trigger_action_id": "action_update",
+            "trigger_transaction_id": "tx_update",
+            "_request_role": {"role": "business_write", "keep": True, "confidence": 1.0},
+        },
+    ]
+    evidence = []
+    for request_id, wire_path, surface in (
+        ("req_filter", "query.descriptor", "page"),
+        ("req_update", "body.descriptor", "dialog"),
+    ):
+        evidence.extend([
+            {
+                "field": "descriptor",
+                "label": "Descriptor",
+                "field_aliases": ["descriptor"],
+                "control_kind": "text",
+                "value": "1",
+                "binding_status": "bound",
+                "request_id": request_id,
+                "wire_path": wire_path,
+                "page_id": "page_types",
+                "frame_id": "frame_main",
+                "surface": surface,
+            },
+            {
+                "field": "pageIndex",
+                "label": "Page",
+                "field_aliases": [],
+                "control_kind": "number",
+                "value": "1",
+                "binding_status": "bound",
+                "request_id": request_id,
+                "wire_path": wire_path,
+                "page_id": "page_types",
+                "frame_id": "frame_main",
+                "surface": "page",
+            },
+        ])
+
+    spec = to_flow_spec(
+        captured_requests=requests,
+        field_evidence=evidence,
+        page_events=[],
+        page_context={"url": "http://types.invalid/records", "path": "/records"},
+    )
+    matched = {
+        param.path: param
+        for step in spec.steps
+        for param in step.params
+        if param.path in {"query.descriptor", "descriptor"}
+    }
+    assert matched["query.descriptor"].type == "string"
+    assert matched["query.descriptor"].label == "Descriptor"
+    assert matched["descriptor"].type == "string"
+    assert matched["descriptor"].label == "Descriptor"
 
 
 def test_checkbox_false_binds_to_body_field() -> None:

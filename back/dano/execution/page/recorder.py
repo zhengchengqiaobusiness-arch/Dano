@@ -279,6 +279,8 @@ _RECORDER_JS = r"""() => {
       var lab = item && item.querySelector('.el-form-item__label,.ant-form-item-label,label');
       if (lab) { var lt = clean(lab.innerText).replace(/[:：*]\s*$/, ''); if (lt) return lt; }
     } catch (e) {}
+    var tableContext = tableCellContext(el);
+    if (tableContext && tableContext.label) return tableContext.label;
     return '';
   }
   function accName(el) {                                 // 可访问名(简化 WAI-ARIA),仅用于可点元素
@@ -290,6 +292,109 @@ _RECORDER_JS = r"""() => {
   }
   function esc(s) { try { return CSS.escape(s); } catch (e) { return s; } }
   function stableId(el) { return el.id && !/^[0-9]/.test(el.id) && !/^(el-id|ant|rc_|radix)/i.test(el.id); }
+  function referencedText(raw) {
+    var text = '';
+    String(raw || '').split(/\s+/).forEach(function (id) {
+      var node = id && document.getElementById(id);
+      if (node) text += clean(node.innerText || node.textContent || '') + ' ';
+    });
+    return clean(text);
+  }
+  function structuralRootIdentity(root) {
+    if (!root) return '';
+    var attrs = ['aria-label','name','data-testid','data-test','data-cy','data-form-id','data-dialog-id'];
+    for (var i = 0; i < attrs.length; i++) {
+      var value = root.getAttribute && clean(root.getAttribute(attrs[i]));
+      if (value) return value;
+    }
+    var labelled = root.getAttribute && referencedText(root.getAttribute('aria-labelledby'));
+    if (labelled) return labelled;
+    if (stableId(root)) return String(root.id);
+    // Instance-local structural path keeps two simultaneous anonymous forms
+    // separate without treating framework classes or generated ids as stable.
+    var parts = []; var node = root;
+    while (node && node !== document.body && parts.length < 8) {
+      var tag = String(node.tagName || '').toLowerCase();
+      if (!tag) break;
+      var index = 1; var sibling = node;
+      while ((sibling = sibling.previousElementSibling)) {
+        if (String(sibling.tagName || '').toLowerCase() === tag) index += 1;
+      }
+      parts.unshift(tag + ':nth-of-type(' + index + ')');
+      node = node.parentElement;
+    }
+    return parts.join('>');
+  }
+  function surfaceContext(el) {
+    var dialog = null; var drawer = null; var form = null;
+    try {
+      dialog = el && el.closest && el.closest('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"],.el-dialog,.ant-modal,.van-dialog,.modal');
+      drawer = el && el.closest && el.closest('.el-drawer,.ant-drawer,.drawer,[class*="drawer"]');
+      form = el && el.closest && el.closest('form,[role="form"],fieldset,[data-form-id]');
+    } catch (_) {}
+    var root = form || drawer || dialog;
+    return {
+      in_dialog: !!(dialog || drawer),
+      surface: drawer ? 'drawer' : (dialog ? 'dialog' : 'page'),
+      form_root: structuralRootIdentity(root)
+    };
+  }
+  function tableCellContext(el) {
+    try {
+      var cell = el && el.closest && el.closest('td,th,[role="cell"],[role="gridcell"]');
+      if (!cell) return null;
+      var row = cell.closest('tr,[role="row"]');
+      var table = cell.closest('table,[role="table"],[role="grid"]');
+      if (!row || !table) return null;
+      var cells = row.querySelectorAll(':scope > td,:scope > th,:scope > [role="cell"],:scope > [role="gridcell"]');
+      var columnIndex = Array.prototype.indexOf.call(cells, cell);
+      var ariaColumn = parseInt(cell.getAttribute('aria-colindex') || '', 10);
+      if (!isNaN(ariaColumn) && ariaColumn > 0) columnIndex = ariaColumn - 1;
+      if (columnIndex < 0 && typeof cell.cellIndex === 'number') columnIndex = cell.cellIndex;
+
+      var body = row.closest('tbody,[role="rowgroup"]');
+      var rows = body ? body.querySelectorAll(':scope > tr,:scope > [role="row"]') : table.querySelectorAll('tbody tr,[role="row"]');
+      var rowIndex = Array.prototype.indexOf.call(rows, row);
+      var ariaRow = parseInt(row.getAttribute('aria-rowindex') || '', 10);
+      if (!isNaN(ariaRow) && ariaRow > 0) rowIndex = ariaRow - 1;
+
+      var header = null;
+      var headerIds = cell.getAttribute('headers');
+      if (headerIds) {
+        var firstHeader = String(headerIds).split(/\s+/)[0];
+        header = firstHeader ? document.getElementById(firstHeader) : null;
+      }
+      if (!header) {
+        var headers = table.querySelectorAll('thead th,[role="columnheader"]');
+        for (var h = 0; h < headers.length; h++) {
+          var headerColumn = parseInt(headers[h].getAttribute('aria-colindex') || '', 10);
+          if ((!isNaN(headerColumn) && headerColumn - 1 === columnIndex) || (isNaN(headerColumn) && h === columnIndex)) {
+            header = headers[h]; break;
+          }
+        }
+      }
+      var rowIdentity = '';
+      ['data-row-key','data-key','data-id','aria-rowindex'].some(function (attr) {
+        var value = clean(row.getAttribute && row.getAttribute(attr));
+        if (value) { rowIdentity = value; return true; }
+        return false;
+      });
+      var tableId = structuralRootIdentity(table);
+      if (!tableId) {
+        var allTables = document.querySelectorAll('table,[role="table"],[role="grid"]');
+        tableId = 'table_' + Array.prototype.indexOf.call(allTables, table);
+      }
+      return {
+        label: clean(header && (header.innerText || header.textContent || header.getAttribute('aria-label'))),
+        field_aliases: header ? controlAliases(header) : [],
+        table_id: tableId,
+        row_index: rowIndex >= 0 ? rowIndex : null,
+        row_identity: rowIdentity,
+        column_index: columnIndex >= 0 ? columnIndex : null,
+        control_surface: 'table_inline'
+      };
+    } catch (_) { return null; }
+  }
   function locateField(el) {                             // 表单字段:label > placeholder > name > id(绝不用值当名)
     var lt = labelText(el); if (lt) return 'label=' + lt;
     var ph = el.getAttribute('placeholder'); if (clean(ph)) return 'placeholder=' + clean(ph);
@@ -536,20 +641,32 @@ _RECORDER_JS = r"""() => {
   }
   function fieldEvidence(el) {
     if (!el) return {};
-    var dialog = inDialog(el);
+    var surface = surfaceContext(el);
+    var table = tableCellContext(el);
+    var aliases = controlAliases(el);
+    if (table) aliases = aliases.concat(table.field_aliases || []).filter(function (value, index, all) {
+      return value && all.indexOf(value) === index;
+    });
     var reqState = requiredStateOf(el);
-    return {
-      field_aliases: controlAliases(el),
+    var evidence = {
+      field_aliases: aliases,
       control_kind: controlKind(el),
       input_type: String(el.type || '').toLowerCase(),
       disabled: !!(el.disabled || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
       read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null)),
       minimum: el.getAttribute && el.getAttribute('min') !== null ? Number(el.getAttribute('min')) : null,
       maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null,
-      in_dialog: !!dialog,
-      surface: dialog ? 'dialog' : 'page',
+      in_dialog: !!surface.in_dialog,
+      surface: surface.surface,
+      form_root: surface.form_root,
       required_state: reqState
     };
+    if (table) {
+      ['table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+        evidence[key] = table[key];
+      });
+    }
+    return evidence;
   }
   window.__danoRequiredFields = function () {
     var out = {};
@@ -629,9 +746,8 @@ _RECORDER_JS = r"""() => {
           evidence.selected_label = selected ? selected.label : '';
           var radioValue = selected ? selected.value : '';
           if (!label && !field) continue;
-          var dialogRadio = inDialog(el);
           var reqRadio = requiredStateOf(el);
-          out.push({
+          var radioItem = {
             field: field, label: label, value: radioValue, required: reqRadio === 'required',
             required_state: reqRadio,
             required_observed: reqRadio === 'required' ? true : (reqRadio === 'optional' ? false : null),
@@ -643,9 +759,13 @@ _RECORDER_JS = r"""() => {
             selected_label: evidence.selected_label,
             disabled: !!evidence.disabled,
             read_only: !!evidence.read_only,
-            in_dialog: !!dialogRadio,
-            surface: dialogRadio ? 'dialog' : 'page'
+            in_dialog: !!evidence.in_dialog,
+            surface: evidence.surface || 'page'
+          };
+          ['form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
+            if (evidence[key] !== undefined && evidence[key] !== '') radioItem[key] = evidence[key];
           });
+          out.push(radioItem);
           continue;
         }
         var value;
@@ -676,7 +796,6 @@ _RECORDER_JS = r"""() => {
           }
         }
         if (!label && !field) continue;
-        var dialog = inDialog(el);
         var reqState = requiredStateOf(el);
         var item = {
           field: field, label: label, value: value, required: reqState === 'required',
@@ -689,10 +808,11 @@ _RECORDER_JS = r"""() => {
           read_only: !!evidence.read_only,
           minimum: evidence.minimum,
           maximum: evidence.maximum,
-          in_dialog: !!dialog,
-          surface: dialog ? 'dialog' : 'page'
+          in_dialog: !!evidence.in_dialog,
+          surface: evidence.surface || 'page'
         };
-        ['checked','filename','mime_type','size','multiple','file_count','files'].forEach(function (key) {
+        ['checked','filename','mime_type','size','multiple','file_count','files',
+         'form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
           if (evidence[key] !== undefined) item[key] = evidence[key];
         });
         out.push(item);
@@ -894,7 +1014,8 @@ _RECORDER_JS = r"""() => {
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       };
       if (evidence) {
-        ['checked','group_name','selected_label','filename','mime_type','size','multiple','file_count','files'].forEach(function (key) {
+        ['checked','group_name','selected_label','filename','mime_type','size','multiple','file_count','files',
+         'form_root','table_id','row_index','row_identity','column_index','control_surface'].forEach(function (key) {
           if (evidence[key] !== undefined) payload[key] = evidence[key];
         });
       }
@@ -908,28 +1029,35 @@ _RECORDER_JS = r"""() => {
     if (isContentEditable(el)) return recordedScalar(el.innerText || el.textContent);
     return recordedScalar(el.value);
   }
+  function fillOccurrenceKey(el, loc) {
+    var table = tableCellContext(el);
+    if (!table) return loc;
+    var row = table.row_identity !== '' ? table.row_identity : table.row_index;
+    return loc + '|table=' + table.table_id + '|row=' + row + '|column=' + table.column_index;
+  }
   function scheduleFill(el) {
     try {
       if (isSensitive(el)) return;
       var loc = locateField(el);
       if (!loc) return;
-      var existing = pendingFill[loc];
+      var key = fillOccurrenceKey(el, loc);
+      var existing = pendingFill[key];
       var actionId = existing && existing.actionId ? existing.actionId : null;
       if (!actionId) { actionSeq += 1; actionId = 'action_' + actionSeq; }
-      pendingFill[loc] = { el: el, value: currentFillValue(el), field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el), actionId: actionId };
-      if (fillTimers[loc]) clearTimeout(fillTimers[loc]);
-      fillTimers[loc] = setTimeout(function () { flushFill(loc); }, 300);
+      pendingFill[key] = { el: el, loc: loc, value: currentFillValue(el), field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el), actionId: actionId };
+      if (fillTimers[key]) clearTimeout(fillTimers[key]);
+      fillTimers[key] = setTimeout(function () { flushFill(key); }, 300);
     } catch (e) {}
   }
-  function flushFill(loc) {
+  function flushFill(key) {
     try {
-      var p = pendingFill[loc];
+      var p = pendingFill[key];
       if (!p) return;
-      delete pendingFill[loc];
-      if (fillTimers[loc]) { clearTimeout(fillTimers[loc]); delete fillTimers[loc]; }
+      delete pendingFill[key];
+      if (fillTimers[key]) { clearTimeout(fillTimers[key]); delete fillTimers[key]; }
       var evidence = p.evidence || fieldEvidence(p.el);
       if (isContentEditable(p.el)) evidence.control_kind = 'contenteditable';
-      emit('fill', loc, p.value, p.field, p.required, [], evidence, p.actionId);
+      emit('fill', p.loc || key, p.value, p.field, p.required, [], evidence, p.actionId);
     } catch (e) {}
   }
   function flushElementFill(el) {
@@ -937,16 +1065,17 @@ _RECORDER_JS = r"""() => {
       if (isSensitive(el)) return;
       var loc = locateField(el);
       if (loc) {
-        var pending = pendingFill[loc];
+        var key = fillOccurrenceKey(el, loc);
+        var pending = pendingFill[key];
         if (pending) pending.value = el.value;
-        else pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el) };
-        flushFill(loc);
+        else pendingFill[key] = { el: el, loc: loc, value: el.value, field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el) };
+        flushFill(key);
       }
     } catch (e) {}
   }
   window.__danoFlushRecorder = function () {
     try {
-      Object.keys(pendingFill).forEach(function (loc) { flushFill(loc); });
+      Object.keys(pendingFill).forEach(function (key) { flushFill(key); });
     } catch (e) {}
   };
   // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
