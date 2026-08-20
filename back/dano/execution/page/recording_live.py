@@ -3124,6 +3124,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                     "contradicts field_evidence",
                     "the page captured a required marker",
                     "has no matching select field_evidence and dictionary source",
+                    "one recorded sample is not a constant contract",
                 ))
             ):
                 discarded_hypotheses.append(rejected)

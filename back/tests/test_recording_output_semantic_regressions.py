@@ -13,6 +13,7 @@ from dano.execution.page.flow_materialization.builder import sync_flow_spec_mode
 from dano.execution.page.flow_spec import to_flow_spec
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
+    FlowLink,
     FlowStep,
     ParamField,
     RequestAnalysis,
@@ -488,3 +489,93 @@ def test_reanalysis_repairs_saved_unbound_file_control() -> None:
     assert document.type == "file"
     assert document.source.get("kind") == "file_input"
     assert document.source.get("unsupported_execution") is True
+
+
+def test_reanalysis_invalidates_legacy_false_computed_and_constant_sources() -> None:
+    query = FlowStep(
+        step_id="step_query_saved",
+        method="GET",
+        path="/v8/search",
+        source_meta={"request_id": "req_query_saved", "role": "business_get"},
+        params=[ParamField(
+            path="query.state", key="state", value="0",
+            type="enum", wire_type="string", source_kind="constant",
+            category="system_const", exposed_to_user=False,
+            source={"kind": "constant", "actor": "agent", "required_state": "unknown"},
+            evidence=[
+                {
+                    "kind": "page_control",
+                    "control_kind": "select",
+                    "editable": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "request_path": "query.state",
+                },
+                {
+                    "kind": "param_source",
+                    "source_kind": "constant",
+                    "evidence_refs": ["field-evidence-state"],
+                },
+            ],
+        )],
+    )
+    detail = FlowStep(
+        step_id="step_detail_saved",
+        method="GET",
+        path="/v8/detail",
+        source_meta={"request_id": "req_detail_saved", "role": "business_get"},
+        response_json={"data": {"accountId": 2}},
+    )
+    update = FlowStep(
+        step_id="step_update_saved",
+        method="PUT",
+        path="/v8/update",
+        body_source=json.dumps({"accountId": 2}),
+        source_meta={"request_id": "req_update_saved", "role": "business_write"},
+        params=[ParamField(
+            path="accountId", key="accountId", value=2,
+            type="enum", wire_type="number", source_kind="computed",
+            category="runtime_var", exposed_to_user=False,
+            source={
+                "kind": "computed",
+                "strategy": "date_span_days",
+                "start_field": "startsAt",
+                "end_field": "endsAt",
+                "sample_verified": True,
+            },
+        )],
+    )
+    spec = FlowSpec(
+        tenant="t",
+        subsystem="generic",
+        steps=[query, detail, update],
+        links=[FlowLink(
+            source_step_id=detail.step_id,
+            source_path="data.accountId",
+            target_step_id=update.step_id,
+            target_path="accountId",
+            confirmed=True,
+            confidence=1.0,
+        )],
+    )
+    spec.request_facts.field_evidence = [{
+        "evidence_id": "field-evidence-state",
+        "binding_status": "bound",
+        "request_id": "req_query_saved",
+        "wire_path": "query.state",
+        "control_kind": "select",
+        "editable": True,
+        "disabled": False,
+        "read_only": False,
+        "value": "0",
+    }]
+
+    repaired = sync_flow_spec_models(spec)
+
+    state = repaired.steps[0].params[0]
+    account = repaired.steps[2].params[0]
+    assert state.source_kind != "constant"
+    assert state.category == "user_param"
+    assert state.exposed_to_user is True
+    assert account.source_kind == "previous_response"
+    assert account.source.get("step_id") == detail.step_id

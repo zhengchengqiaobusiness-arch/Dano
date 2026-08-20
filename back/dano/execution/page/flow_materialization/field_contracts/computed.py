@@ -530,6 +530,63 @@ def _param_is_temporal(param: ParamField) -> bool:
     )
 
 
+def _date_span_target_allowed(param: ParamField) -> bool:
+    """Return whether one field has its own structural duration evidence."""
+    if (
+        _looks_pagination_field(param.key, param.path)
+        or _looks_non_quantity_formula_leaf(param.key, param.path)
+        or _param_is_document_record_identity(param)
+        or _param_has_editable_control_evidence(param)
+        or param.source_kind in _OPTION_SOURCE_KINDS
+        or param.type in {"enum", "list-enum"}
+        or _param_control_kinds(param) & {"select", "combobox", "radio"}
+    ):
+        return False
+    raw = param.key or str(param.path or "").split(".")[-1]
+    normalized = re.sub(r"[^a-z0-9]+", "", str(raw).lower())
+    named_duration = bool(
+        re.fullmatch(r"(?:day|days|duration|durationdays)", normalized)
+    )
+    readonly_derived = any(
+        isinstance(item, dict)
+        and item.get("kind") == "page_control"
+        and (item.get("read_only") or item.get("disabled"))
+        for item in (param.evidence or [])
+    )
+    return named_duration or readonly_derived
+
+
+def _repair_invalid_date_span_contracts(spec: FlowSpec) -> int:
+    """Invalidate legacy date-span guesses that fail today's evidence gate."""
+    repaired = 0
+    for step in spec.steps or []:
+        for param in step.params or []:
+            source = dict(param.source or {})
+            if (
+                param.source_kind != "computed"
+                or str(source.get("strategy") or "")
+                not in {"date_span_days", "date_span_days_json"}
+                or _date_span_target_allowed(param)
+            ):
+                continue
+            param.category = "runtime_var"
+            param.source_kind = "unknown"
+            param.source = {
+                "kind": "unresolved",
+                "path": param.path,
+                "invalidated_contract": "unsupported_date_span_inference",
+            }
+            param.required = False
+            param.exposed_to_user = False
+            param.editable = False
+            param.need_human_confirm = True
+            param.reason = (
+                "旧日期跨度结论缺少目标字段自身的时长/只读派生结构证据，已撤销并重新按请求链判定来源"
+            )
+            repaired += 1
+    return repaired
+
+
 def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
     """Hide recorded computed fields only when their samples prove the formula."""
     _apply_date_range_companions(spec)
@@ -635,7 +692,7 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
             # or the page proves that it is a derived, non-editable output.
             # Pagination, identities, codes and audit/state leaves were
             # rejected above so they cannot be hidden as date-span formulas.
-            if not (named or readonly_calc):
+            if not _date_span_target_allowed(param) or not (named or readonly_calc):
                 continue
             matches = [pair for pair in date_pairs if pair[3] == observed_days]
             if not matches:

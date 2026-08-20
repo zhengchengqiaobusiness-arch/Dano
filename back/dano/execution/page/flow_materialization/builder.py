@@ -108,6 +108,7 @@ from dano.execution.page.flow_materialization.field_contracts.option_sync import
 )
 from dano.execution.page.flow_materialization.field_contracts.computed import (
     _infer_computed_runtime_fields,
+    _repair_invalid_date_span_contracts,
 )
 from dano.execution.page.flow_materialization.field_contracts.option_projection import (
     _infer_selected_option_row_fields,
@@ -142,6 +143,10 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _enrich_materialized_response_shapes(spec)
     _rebind_saved_field_evidence(spec)
     _materialize_saved_unsupported_file_inputs(spec)
+    _repair_invalid_date_span_contracts(spec)
+    _repair_ungrounded_saved_agent_constants(spec)
+    _sync_link_sources(spec.steps, spec.links)
+    _apply_query_form_field_contracts(spec)
     _repair_readonly_control_defaults(spec)
     _ground_saved_page_enums(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
@@ -176,6 +181,50 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
         usage.materialized_step_id = step.step_id
         spec.request_facts.usage[request_id] = usage
     return sync_capability_scoped_views(spec)
+
+
+def _repair_ungrounded_saved_agent_constants(spec: FlowSpec) -> int:
+    """Recheck legacy agent constants with the current evidence contract."""
+    from dano.execution.page.recording_live import (
+        _constant_classification_is_grounded,
+    )
+
+    repaired = 0
+    for step in spec.steps:
+        for param in step.params:
+            source = dict(param.source or {})
+            if (
+                param.source_kind != "constant"
+                or str(source.get("kind") or "") != "constant"
+                or str(source.get("actor") or "") != "agent"
+            ):
+                continue
+            refs = [
+                str(ref)
+                for item in (param.evidence or [])
+                if isinstance(item, dict)
+                and item.get("kind") == "param_source"
+                and item.get("source_kind") == "constant"
+                for ref in (item.get("evidence_refs") or [])
+                if str(ref)
+            ]
+            if _constant_classification_is_grounded(spec, step, param, refs):
+                continue
+            param.category = "runtime_var"
+            param.source_kind = "unknown"
+            param.source = {
+                "kind": "unresolved",
+                "path": param.path,
+                "required_state": str(source.get("required_state") or "unknown"),
+                "invalidated_contract": "ungrounded_agent_constant",
+            }
+            param.required = False
+            param.exposed_to_user = False
+            param.editable = False
+            param.need_human_confirm = True
+            param.reason = "旧常量结论只有单次录制样例，已撤销并等待字段级页面或重复观测证据"
+            repaired += 1
+    return repaired
 
 
 def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
