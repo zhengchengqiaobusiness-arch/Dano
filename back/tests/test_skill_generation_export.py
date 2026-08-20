@@ -153,6 +153,10 @@ async def _ok_publish(**_kwargs) -> dict:
     return {"ok": True, "asset_id": str(uuid4()), "asset_version": 1}
 
 
+async def _deterministic_proposer(spec, request, verified_ids, fingerprint):
+    return propose_deterministic_plan(spec, request, verified_ids, fingerprint)
+
+
 @pytest.mark.asyncio
 async def test_manual_export_requires_stage_seven_verified(tmp_path: Path) -> None:
     spec = _three_cap_spec()
@@ -170,6 +174,7 @@ async def test_manual_export_requires_stage_seven_verified(tmp_path: Path) -> No
             persist=stored.append,
             publish=_ok_publish,
             render=_render_valid,
+            proposer=_deterministic_proposer,
         )
     assert exc.value.status_code == 409
     assert "阶段7" in exc.value.detail
@@ -187,6 +192,7 @@ async def test_manual_export_requires_business_description(tmp_path: Path) -> No
             request=_request(business_description="   ", out_dir=str(tmp_path)),
             publish=_ok_publish,
             render=_render_valid,
+            proposer=_deterministic_proposer,
         )
     assert exc.value.status_code == 400
     assert "业务描述" in exc.value.detail
@@ -208,6 +214,7 @@ async def test_export_failure_does_not_mark_published(tmp_path: Path) -> None:
         persist=stored.append,
         publish=boom,
         render=_render_valid,
+        proposer=_deterministic_proposer,
     )
     assert outcome.status == "export_failed"
     assert stored[-1]["published"] is False
@@ -233,6 +240,7 @@ async def test_repeated_identical_export_is_idempotent(tmp_path: Path) -> None:
         persist=lambda _body: None,
         publish=publish,
         render=_render_valid,
+        proposer=_deterministic_proposer,
     )
     assert first.status == "exported"
     assert first.idempotent is False
@@ -262,6 +270,7 @@ async def test_repeated_identical_export_is_idempotent(tmp_path: Path) -> None:
         persist=lambda _body: None,
         publish=publish,
         render=_render_valid,
+        proposer=_deterministic_proposer,
     )
     assert second.status == "exported"
     assert second.idempotent is True
@@ -281,6 +290,7 @@ async def test_flow_change_invalidates_old_skill_plan(tmp_path: Path) -> None:
         persist=lambda _body: None,
         publish=_ok_publish,
         render=_render_valid,
+        proposer=_deterministic_proposer,
     )
     changed = spec.model_copy(deep=True)
     changed.title = "请假办理-已改"
@@ -304,6 +314,7 @@ async def test_flow_change_invalidates_old_skill_plan(tmp_path: Path) -> None:
             request=_request(out_dir=str(tmp_path)),
             publish=_ok_publish,
             render=_render_valid,
+            proposer=_deterministic_proposer,
         )
     assert exc.value.status_code == 409
     assert "指纹" in exc.value.detail
@@ -321,6 +332,7 @@ async def test_generated_package_contains_only_selected_capabilities(tmp_path: P
         persist=lambda _body: None,
         publish=_ok_publish,
         render=_render_valid,
+        proposer=_deterministic_proposer,
     )
     assert outcome.status == "exported"
     assert "cap_query" in outcome.plan["selected_capability_ids"]

@@ -13,9 +13,16 @@ from dano.onboarding.recording_pipeline import CanonicalRecordingRuntime
 from dano.onboarding.recording_release import ReleaseDecision
 from dano.onboarding.recording_runtime import ProductionRecordingServices
 from dano.onboarding.recording_results import (
+    invalidate_skill_after_capability_edit,
     recording_result_summary,
     recording_skill_lifecycle,
     stage_six_result_body,
+)
+from dano.onboarding.recording_stage_seven import (
+    StageSevenPreflightStatus,
+    StageSevenStatus,
+    compute_publishable,
+    working_fingerprint,
 )
 from dano.onboarding.recording_workflow import (
     PipelineCheck,
@@ -284,3 +291,45 @@ def test_verified_recording_result_is_not_exported_until_stage_eight() -> None:
     assert summary["skill_lifecycle"] == "verified_not_exported"
     assert recording_skill_lifecycle(body) == "verified_not_exported"
     assert summary["stage_seven_fingerprint"] == "fp-verified"
+
+
+def test_existing_stage_one_to_seven_contract_is_unchanged() -> None:
+    spec = _query_spec()
+    fingerprint = working_fingerprint(spec)
+    assert compute_publishable(
+        status=StageSevenStatus.VERIFIED,
+        all_verified=True,
+        unverified=[],
+        preflight=StageSevenPreflightStatus.HEALTHY,
+        release_status="ready",
+        callable_spec=spec,
+        baseline=spec,
+        working=spec,
+        working_fp=fingerprint,
+        rechecked_fp=fingerprint,
+    ) is True
+    assert compute_publishable(
+        status=StageSevenStatus.VERIFIED,
+        all_verified=False,
+        unverified=[{"target_kind": "write_verify", "target_id": "step_edit"}],
+        preflight=StageSevenPreflightStatus.HEALTHY,
+        release_status="ready",
+        callable_spec=spec,
+        baseline=spec,
+        working=spec,
+        working_fp=fingerprint,
+        rechecked_fp=fingerprint,
+    ) is False
+    body = {
+        "published": True,
+        "skill_id": "oa.leave",
+        "skill_export_status": "exported",
+        "skill_plan": {"selected_capability_ids": ["cap_list"]},
+        "machine_verification_status": "verified",
+    }
+    stale = invalidate_skill_after_capability_edit(body)
+    assert stale["machine_verification_status"] == "stale"
+    assert stale["skill_plan_valid"] is False
+    assert stale["skill_needs_reexport"] is True
+    assert stale["skill_plan"] == body["skill_plan"]
+    assert recording_skill_lifecycle(stale) == "needs_reexport"
