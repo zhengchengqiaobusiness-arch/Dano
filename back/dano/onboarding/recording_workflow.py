@@ -322,7 +322,7 @@ class SelfHealingPipeline:
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
                     draft=context.latest_draft or draft,
-                    error="尚未生成可发布能力，阶段六结果已保存，可继续分析",
+                    error="尚未生成可验证能力，阶段六结果已保存，可继续分析",
                 )
             emit_run_event(
                 "recording.verification.skipped",
@@ -332,15 +332,13 @@ class SelfHealingPipeline:
                 details={"machine_verification": False},
             )
             await context.progress(
-                WorkflowStep.PUBLISHING,
-                "机器验证已关闭，正在直接导出当前 Skill",
+                WorkflowStep.READY,
+                "第 1～6 阶段已完成，尚未机器验证，Skill 未产出",
                 0,
             )
-            release = await self._bounded(self.runtime.publish(draft, context))
             return PipelineOutcome(
-                status=WorkflowStatus.PUBLISHED,
+                status=WorkflowStatus.EDITABLE,
                 draft=context.latest_draft or draft,
-                release=release,
             )
         unchanged = 0
         previous_fingerprint = ""
@@ -377,20 +375,14 @@ class SelfHealingPipeline:
                         status="resolved",
                         label=f"能力「{title}」验证通过",
                     ))
-                await context.progress(WorkflowStep.PUBLISHING, "正在原子发布能力", round_number)
-                try:
-                    release = await self._bounded(self.runtime.publish(draft, context))
-                except RuntimeError as exc:
-                    return PipelineOutcome(
-                        status=WorkflowStatus.EDITABLE,
-                        draft=context.latest_draft or draft,
-                        issues=issues or (_verification_unresolved_issue(verdict),),
-                        error=str(exc) or "发布前机器验证未全部通过",
-                    )
+                await context.progress(
+                    WorkflowStep.READY,
+                    "能力已验证，可用于产出 Skill",
+                    round_number,
+                )
                 return PipelineOutcome(
-                    status=WorkflowStatus.PUBLISHED,
+                    status=WorkflowStatus.EDITABLE,
                     draft=context.latest_draft or draft,
-                    release=release,
                 )
 
             if not issues and (verdict is None or not verdict.all_verified or not (verdict and verdict.publishable)):
@@ -401,7 +393,7 @@ class SelfHealingPipeline:
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
                     issues=issues,
-                    error="机器验证未全部通过，当前结果不会发布",
+                    error="机器验证未全部通过，当前结果不能产出 Skill",
                 )
 
             current_issue_map = {issue.issue_id: issue for issue in issues}
@@ -452,7 +444,7 @@ class SelfHealingPipeline:
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
                     issues=issues,
-                    error="外部登录态或网络阻塞，当前结果不会发布",
+                    error="外部登录态或网络阻塞，当前结果不能产出 Skill",
                 )
 
             if any(issue.code == STAGE_SIX_CONTRACT_CHANGED for issue in issues):
@@ -460,7 +452,7 @@ class SelfHealingPipeline:
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
                     issues=issues,
-                    error="阶段 6 公开能力契约被改变，当前结果不会发布",
+                    error="阶段 6 公开能力契约被改变，当前结果不能产出 Skill",
                 )
 
             if verdict is not None and verdict.status == StageSevenStatus.INCOMPLETE and context.budget_exhausted:
@@ -468,7 +460,7 @@ class SelfHealingPipeline:
                     status=WorkflowStatus.EDITABLE,
                     draft=draft,
                     issues=issues,
-                    error="能力修复预算已用尽，当前结果不会发布",
+                    error="能力修复预算已用尽，当前结果不能产出 Skill",
                 )
 
             current_issues = _issue_signature(issues)
@@ -563,6 +555,23 @@ def _verification_unresolved_issue(verdict: StageSevenVerdict | None) -> Workflo
         resolver="collect_evidence",
         target={"status": str(verdict.status) if verdict is not None else "incomplete"},
     )
+
+
+def _pipeline_complete_label(
+    status: WorkflowStatus,
+    draft: dict[str, Any] | None,
+    seed: PipelineSeed,
+    *,
+    error: str = "",
+) -> str:
+    del draft
+    if status == WorkflowStatus.PUBLISHED:
+        return "Skill 已导出"
+    if status == WorkflowStatus.EDITABLE and not error:
+        if seed.machine_verification:
+            return "能力已验证，Skill 未产出"
+        return "第 1～6 阶段已完成，Skill 未产出"
+    return "分析已结束，可查看能力结果"
 
 
 def _draft_fingerprint(draft: dict[str, Any] | None) -> str:
@@ -1018,7 +1027,8 @@ class RecordingWorkflow:
             release=None,
             issues=[],
             error="",
-            progress=self._next_progress(WorkflowStep.READY, "修改已保存"),
+            machine_verification_status="stale",
+            progress=self._next_progress(WorkflowStep.READY, "能力已修改，需重新验证后才能产出 Skill"),
         )
         return self.snapshot
 
@@ -1178,9 +1188,10 @@ class RecordingWorkflow:
                 WorkflowStatus.FAILED,
             }:
                 raise ValueError(f"pipeline returned non-terminal state {outcome.status}")
+            complete_draft = outcome.draft if outcome.draft is not None else self.snapshot.draft
             await self._set(
                 outcome.status,
-                draft=(outcome.draft if outcome.draft is not None else self.snapshot.draft),
+                draft=complete_draft,
                 issues=list(outcome.issues),
                 release=outcome.release,
                 error=outcome.error,
@@ -1190,10 +1201,11 @@ class RecordingWorkflow:
                         if outcome.status == WorkflowStatus.PUBLISHED
                         else WorkflowStep.READY
                     ),
-                    label=(
-                        "发布完成"
-                        if outcome.status == WorkflowStatus.PUBLISHED
-                        else "分析已结束，可查看能力结果"
+                    label=_pipeline_complete_label(
+                        outcome.status,
+                        complete_draft,
+                        seed,
+                        error=outcome.error,
                     ),
                     request_count=self.snapshot.progress.request_count,
                 ),

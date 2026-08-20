@@ -416,6 +416,7 @@ class RecordingGatewaySession:
                 updated.model_dump(mode="json"),
                 expected_revision=int(message.get("expected_revision") or -1),
             )
+            await self._invalidate_skill_after_edit(updated.model_dump(mode="json"))
             return
         if command == "answer":
             await self.workflow.answer(
@@ -996,11 +997,31 @@ class RecordingGatewaySession:
             return
         from dano.assets.drafts import DraftStore
 
+        del published
         updated = await DraftStore().patch_recording_result_flags(
             self._stage_six_result_id,
-            published=bool(published and self._machine_verification),
             machine_verification_ran=True if self._machine_verification else None,
         )
+        if updated is not None:
+            await self._notify_recording_result(updated)
+
+    async def _invalidate_skill_after_edit(self, draft: dict[str, Any]) -> None:
+        if self._stage_six_result_id is None:
+            return
+        from dano.assets.drafts import DraftStore
+        from dano.onboarding.recording_results import invalidate_skill_after_capability_edit
+        from dano.onboarding.recording_workflow import _draft_fingerprint
+
+        store = DraftStore()
+        current = await store.get_draft(self._stage_six_result_id)
+        if current is None:
+            return
+        body = invalidate_skill_after_capability_edit(dict(current.body or {}))
+        body["flow_spec"] = draft
+        body["fingerprint"] = _draft_fingerprint(draft)
+        capabilities = list(draft.get("capabilities") or [])
+        body["capability_count"] = len(capabilities)
+        updated = await store.patch_recording_result_body(self._stage_six_result_id, body)
         if updated is not None:
             await self._notify_recording_result(updated)
 

@@ -389,12 +389,13 @@ async def test_query_replay_success_publishes_once(monkeypatch: pytest.MonkeyPat
     )
     await workflow.republish(machine_verification=True)
     await workflow.wait()
-    assert published == [1]
-    assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
+    assert published == []
+    assert workflow.snapshot.status == WorkflowStatus.EDITABLE
     assert workflow.snapshot.stage_seven_attempt_id
+    assert workflow.snapshot.progress.label == "能力已验证，Skill 未产出"
     verdict = workflow.snapshot.draft or {}
     status = ((verdict.get("meta") or {}).get("stage_seven") or {}).get("status")
-    assert status in {"verified", None} or published == [1]
+    assert status in {"verified", None}
 
 
 @pytest.mark.asyncio
@@ -414,8 +415,9 @@ async def test_write_readback_success_executes_write_once_and_publishes_once() -
     await workflow.republish(machine_verification=True)
     await workflow.wait()
     assert writes == [1]
-    assert published == [1]
-    assert workflow.snapshot.status == WorkflowStatus.PUBLISHED
+    assert published == []
+    assert workflow.snapshot.status == WorkflowStatus.EDITABLE
+    assert workflow.snapshot.progress.label == "能力已验证，Skill 未产出"
 
 
 @pytest.mark.asyncio

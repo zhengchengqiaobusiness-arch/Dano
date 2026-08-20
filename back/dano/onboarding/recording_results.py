@@ -136,11 +136,40 @@ def stage_six_result_body(
     }
 
 
+def recording_skill_lifecycle(body: dict[str, Any] | None) -> str:
+    """Stable client-facing status after stage 1–7, independent of auto-publish."""
+
+    payload = body if isinstance(body, dict) else {}
+    export_status = str(payload.get("skill_export_status") or "")
+    stage_status = str(payload.get("machine_verification_status") or "")
+    checkpoint = payload.get("stage_seven") if isinstance(payload.get("stage_seven"), dict) else {}
+    if not stage_status:
+        stage_status = str(checkpoint.get("status") or "")
+    if payload.get("skill_needs_reexport") or (
+        export_status in {"exported", "succeeded"} and payload.get("skill_plan_valid") is False
+    ):
+        return "needs_reexport"
+    if export_status in {"exported", "succeeded"} and payload.get("published"):
+        return "exported"
+    if export_status in {"failed", "generation_failed"}:
+        return "export_failed"
+    if export_status in {"generating", "planning"}:
+        return "generating"
+    if stage_status in {"running", "waiting_operator"}:
+        return "verifying"
+    if stage_status == "verified":
+        return "verified_not_exported"
+    if stage_status == "stale":
+        return "needs_reexport" if payload.get("skill_id") else "stage_six_done"
+    return "stage_six_done"
+
+
 def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
     body = draft.body or {}
     goal = body.get("goal") if isinstance(body.get("goal"), dict) else {}
     goal_text = str(goal.get("intent") or goal.get("text") or "")
     created = draft.created_at.isoformat() if draft.created_at else str(body.get("created_at") or "")
+    checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
     return {
         "id": str(draft.asset_draft_id),
         "action": str(body.get("action") or draft.asset_key.removeprefix(RECORDING_RESULT_KEY_PREFIX)),
@@ -157,6 +186,15 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "machine_verification_status": str(body.get("machine_verification_status") or ""),
         "stage_seven_attempt_id": str(body.get("stage_seven_attempt_id") or ""),
         "stage_seven_updated_at": str(body.get("stage_seven_updated_at") or ""),
+        "stage_seven_fingerprint": str(
+            body.get("stage_seven_fingerprint") or checkpoint.get("working_fingerprint") or ""
+        ),
+        "skill_id": str(body.get("skill_id") or ""),
+        "skill_version": int(body.get("skill_version") or 0),
+        "skill_export_status": str(body.get("skill_export_status") or ""),
+        "skill_export_path": str(body.get("export_path") or body.get("skill_export_path") or ""),
+        "skill_lifecycle": recording_skill_lifecycle(body),
+        "skill_needs_reexport": bool(body.get("skill_needs_reexport")),
     }
 
 
@@ -172,7 +210,32 @@ def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
         payload["draft"] = None
         return payload
     payload["draft"] = client_recording_draft(spec)
+    payload["draft_fingerprint"] = _draft_fingerprint(spec)
+    payload["stage_seven"] = {
+        "status": str((checkpoint or {}).get("status") or body.get("machine_verification_status") or ""),
+        "working_fingerprint": str(
+            (checkpoint or {}).get("working_fingerprint") or body.get("stage_seven_fingerprint") or ""
+        ),
+        "publishable": bool(((checkpoint or {}).get("verdict") or {}).get("publishable")),
+    } if checkpoint or body.get("machine_verification_status") else None
+    payload["skill_plan"] = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else None
     return payload
+
+
+def invalidate_skill_after_capability_edit(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop unpublished plans and mark exported Skills as stale after an edit."""
+
+    next_body = dict(body)
+    next_body["machine_verification_status"] = "stale"
+    next_body["skill_plan_valid"] = False
+    if next_body.get("skill_plan") and not next_body.get("published"):
+        next_body["skill_plan"] = None
+    if next_body.get("published") or str(next_body.get("skill_export_status") or "") in {
+        "exported",
+        "succeeded",
+    }:
+        next_body["skill_needs_reexport"] = True
+    return next_body
 
 
 async def persist_stage_six_result(

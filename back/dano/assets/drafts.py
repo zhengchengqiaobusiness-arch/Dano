@@ -264,6 +264,38 @@ class DraftStore:
             )
         return self._draft(row) if row else None
 
+    async def patch_recording_result_body(
+        self,
+        asset_draft_id: UUID,
+        updates: dict[str, Any],
+    ) -> AssetDraft | None:
+        from dano.onboarding.recording_results import is_recording_result_key
+
+        draft = await self.get_draft(asset_draft_id)
+        if draft is None or not is_recording_result_key(draft.asset_key):
+            return None
+        body = dict(draft.body or {})
+        body.update(updates)
+        if body == draft.body:
+            return draft
+        body = _postgres_safe_json(body)
+        scope = Scope(tenant=draft.tenant, subsystem=draft.subsystem)
+        h = content_hash(
+            asset_type=draft.asset_type,
+            scope=scope,
+            asset_key=draft.asset_key,
+            body=body,
+        )
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE asset_drafts SET body=$2, content_hash=$3
+                   WHERE asset_draft_id=$1 RETURNING *""",
+                asset_draft_id,
+                json.dumps(body),
+                h,
+            )
+        return self._draft(row) if row else None
+
     async def patch_recording_result_stage_seven(
         self,
         asset_draft_id: UUID,

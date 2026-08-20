@@ -1048,8 +1048,11 @@ def apply_stage_seven_checkpoint_patch(
     next_body["machine_verification_status"] = str(stored.get("status") or "")
     next_body["stage_seven_attempt_id"] = str(stored.get("attempt_id") or "")
     next_body["stage_seven_updated_at"] = str(stored.get("updated_at") or "")
+    next_body["stage_seven_fingerprint"] = str(stored.get("working_fingerprint") or "")
     if stored.get("status") != StageSevenStatus.VERIFIED:
-        next_body["published"] = False
+        next_body["skill_plan_valid"] = False
+        if next_body.get("skill_export_status") in {"exported", "succeeded"}:
+            next_body["skill_needs_reexport"] = True
     return next_body
 
 
