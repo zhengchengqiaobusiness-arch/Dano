@@ -52,10 +52,9 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
     """Keep auto-fill origin, but follow the page: editable means caller may change it.
 
     Origin (how the page produced the value) and ownership (who may supply it)
-    are separate. Selected-row echoes default to caller-overridable. Computed
-    totals stay system-owned unless a non-readonly control proves the page
-    lets the operator overwrite the formula. Readonly/disabled locks the field
-    on the system side.
+    are separate. Selected-row echoes and computed totals stay system-owned
+    unless an editable control proves the page lets the operator overwrite
+    them. Merely failing to observe readonly/disabled is not edit evidence.
     """
     for step in spec.steps or []:
         if _step_is_row_command(step):
@@ -76,7 +75,10 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                 continue
             if _param_control_is_readonly(param):
                 continue
-            if param.source_kind == "selected_option_field":
+            if (
+                param.source_kind == "selected_option_field"
+                and _param_has_editable_control_evidence(param)
+            ):
                 _mark_auto_fill_caller_override(param, "所选记录自动带入，页面允许修改")
                 continue
             if _looks_display_echo_field(step, param) and not _param_has_editable_control_evidence(param):

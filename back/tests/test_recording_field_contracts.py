@@ -1089,8 +1089,8 @@ def test_create_form_projects_option_row_and_computes_line_total() -> None:
     ):
         item = _param(create, path)
         assert item.source_kind == "selected_option_field", (path, item.source_kind, item.reason)
-        assert _param_exposed_to_caller(item), (path, item.exposed_to_user, item.reason)
-        assert bool((item.source or {}).get("allow_caller_override"))
+        assert not _param_exposed_to_caller(item), (path, item.exposed_to_user, item.reason)
+        assert not bool((item.source or {}).get("allow_caller_override"))
         assert (item.source or {}).get("response_path") == catalog_leaf
         assert item.source_kind != "unknown"
         assert item.source_kind != "computed"
@@ -1391,6 +1391,44 @@ def test_create_form_unbound_manual_fields_are_caller_not_unknown() -> None:
     assert not _param_exposed_to_caller(total)
 
 
+def test_unresolved_write_field_cannot_be_published_as_recorded_literal() -> None:
+    from dano.execution.page.flow_spec_core.request_contract import flow_spec_to_api_request
+
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_create", method="POST",
+                url="http://example.test/admin-api/doc/create",
+                sequence=1, role="business_write", action="act_create", locator="text=Submit",
+                body={"confirmedName": "alpha", "unresolvedValue": 37},
+            ),
+        ],
+        field_evidence=[
+            _control(
+                label="Confirmed name", aliases=["confirmedName"], kind="text", value="alpha",
+                request_id="req_create", path="body.confirmedName", in_dialog=True, op="fill",
+            ),
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    create = _step_by_suffix(spec, "/doc/create")
+    unresolved = _param(create, "unresolvedValue")
+    assert unresolved.source_kind in {"unknown", "ambiguous", ""}
+    assert not _param_exposed_to_caller(unresolved)
+
+    compiled = _compile(spec, [{
+        "name": "create_record",
+        "title": "Create record",
+        "kind": "create",
+        "anchor_step_id": create.step_id,
+    }])
+    api_request, errors = flow_spec_to_api_request(compiled, _prepared=True)
+
+    assert api_request is None
+    assert any("unresolvedValue" in error and "录制样例" in error for error in errors)
+
+
 def test_option_row_projection_keeps_best_catalog_when_another_list_also_matches() -> None:
     spec = to_flow_spec(
         captured_requests=[
@@ -1601,7 +1639,8 @@ def test_readonly_option_row_echo_stays_system() -> None:
     assert name.source_kind != "user_input"
     price = _param(_step_by_suffix(spec, "/doc/create"), "items[0].productPrice")
     assert price.source_kind == "selected_option_field"
-    assert _param_exposed_to_caller(price)
+    assert not _param_exposed_to_caller(price)
+    assert not bool((price.source or {}).get("allow_caller_override"))
     assert price.source_kind != "computed"
 
 

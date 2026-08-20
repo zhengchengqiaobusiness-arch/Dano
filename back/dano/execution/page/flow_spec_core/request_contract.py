@@ -72,6 +72,34 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
     return out
 
 
+def _unresolved_recorded_literal_errors(step: FlowStep) -> list[str]:
+    """Reject unresolved write leaves before their capture sample becomes executable data."""
+    if str(step.method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return []
+    errors: list[str] = []
+    for param in step.params or []:
+        if param.path.startswith(("query.", "path.")):
+            continue
+        if _param_is_dynamic_array_leaf(step, param):
+            # The caller-owned aggregate replaces the recorded array as a
+            # whole, so its member sample is not retained in body_template.
+            continue
+        if _param_exposed_to_caller(param):
+            continue
+        if str(param.source_kind or "unknown").strip().lower() not in {
+            "",
+            "unknown",
+            "ambiguous",
+        }:
+            continue
+        path = str(param.path or param.key or "").removeprefix("body.")
+        errors.append(
+            f"步骤 `{step.name or step.path or step.step_id}` 的写入字段 `{path}` 来源未确认，"
+            "不能把录制样例作为运行时常量"
+        )
+    return errors
+
+
 def _step_wire_formats(step: FlowStep) -> dict[str, str]:
     """Map stable public input names to their explicit on-wire formats."""
     return {
@@ -343,6 +371,9 @@ def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
 
 def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
+    unresolved_literal_errors = _unresolved_recorded_literal_errors(step)
+    if unresolved_literal_errors:
+        return None, unresolved_literal_errors
     runtime_errors = [err for p in step.params if (err := _runtime_param_publish_error(p))]
     if runtime_errors:
         return None, runtime_errors
