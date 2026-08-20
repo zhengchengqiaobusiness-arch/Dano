@@ -830,10 +830,36 @@ def _associate_unsubmitted_file_controls(
         for request_id, request in request_by_id.items()
         for wire_path in _request_fields(request)
     }
+    latest_by_identity: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for item in evidence_items:
+        identity_id = str(item.get("field_identity_id") or "")
+        if _control_kind(item) != "file" or not identity_id:
+            continue
+        identity = (*_file_form_identity(item), identity_id)
+        previous = latest_by_identity.get(identity)
+        if previous is None or float(item.get("observed_at") or 0) >= float(previous.get("observed_at") or 0):
+            latest_by_identity[identity] = item
+    for item in evidence_items:
+        identity_id = str(item.get("field_identity_id") or "")
+        if _control_kind(item) != "file" or not identity_id:
+            continue
+        representative = latest_by_identity.get((*_file_form_identity(item), identity_id))
+        if representative is None or representative is item:
+            continue
+        item.pop("request_id", None)
+        item.pop("wire_path", None)
+        item.update({
+            "binding_status": "duplicate_observation",
+            "binding_method": "same_field_identity",
+            "binding_reason": "repeated snapshot of the same file control",
+            "duplicate_of": str(representative.get("evidence_id") or identity_id),
+        })
     for evidence in evidence_items:
         if (
             _control_kind(evidence) != "file"
-            or str(evidence.get("binding_status") or "") == "bound"
+            or str(evidence.get("binding_status") or "") in {
+                "bound", "duplicate_observation",
+            }
             or evidence.get("disabled") is True
         ):
             continue
