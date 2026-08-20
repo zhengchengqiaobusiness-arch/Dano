@@ -1049,6 +1049,58 @@ def _reject_source_that_contradicts_cited_page_action(
             )
 
 
+def _constant_classification_is_grounded(
+    spec, step, param, evidence_refs: list[str],
+) -> bool:  # noqa: ANN001
+    """Require structural or repeated evidence before freezing a sample.
+
+    A captured request value is an observation, not proof that the value is a
+    protocol constant.  Mechanical field-contract passes already mark row
+    command literals and request-owned state explicitly; preserve those.  An
+    agent may otherwise freeze a value only when cited observations prove a
+    non-editable fixed control or repeat the same field value in independent
+    requests.
+    """
+    current_kind = str((param.source or {}).get("kind") or "")
+    if param.source_kind == "constant" and current_kind in {
+        "command_literal",
+        "recorded_command_state",
+        "recorded_control_default",
+        "protocol_constant",
+        "system_constant",
+    }:
+        return True
+
+    candidates = [
+        item
+        for item in _field_evidence_candidates(
+            spec, step, param, evidence_refs=evidence_refs,
+        )
+        if not evidence_refs or _evidence_matches_refs(item, evidence_refs)
+    ]
+    if any(_page_control_is_editable(item) for item in candidates):
+        return False
+    if any(
+        item.get("disabled") is True
+        or item.get("control_disabled") is True
+        or item.get("read_only") is True
+        or item.get("control_read_only") is True
+        or item.get("fixed") is True
+        for item in candidates
+    ):
+        return True
+
+    recorded = param.value if param.value not in (None, "") else param.default_value
+    observations = {
+        str(item.get("request_id") or item.get("transaction_id") or item.get("event_id") or "")
+        for item in candidates
+        if str(item.get("request_id") or item.get("transaction_id") or item.get("event_id") or "")
+        and item.get("value") not in (None, "")
+        and str(item.get("value")) == str(recorded)
+    }
+    return len(observations) >= 2
+
+
 def _recorded_enum_contract(  # noqa: ANN001
     spec, step, param, dictionary_source: str = "",
 ) -> dict | None:
@@ -1284,6 +1336,16 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             raise RecordingAgentOpError(
                 f"constant classification for {param.path} requires a recorded value; "
                 "use caller_input when the caller must supply it",
+                field="source_kind",
+                allowed=sorted(_PARAM_SOURCE_KINDS),
+            )
+        if not _constant_classification_is_grounded(
+            spec, step, param, evidence_refs,
+        ):
+            raise RecordingAgentOpError(
+                f"constant classification for {param.path} requires fixed-control, "
+                "request-owned literal, or repeated field evidence; one recorded "
+                "sample is not a constant contract",
                 field="source_kind",
                 allowed=sorted(_PARAM_SOURCE_KINDS),
             )

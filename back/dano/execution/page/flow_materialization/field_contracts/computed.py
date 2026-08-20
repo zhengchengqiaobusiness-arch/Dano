@@ -586,6 +586,8 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
                 param.locked
                 or _param_has_editable_control_evidence(param)
                 or _param_is_temporal(param)
+                or _looks_pagination_field(param.key, param.path)
+                or _looks_non_quantity_formula_leaf(param.key, param.path)
                 or param.source_kind in {
                     "computed", "selected_option_field", "api_option",
                     "form_option", "page_enum", "current_user",
@@ -628,8 +630,12 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
                 and (item.get("read_only") or item.get("disabled"))
                 for item in (param.evidence or [])
             )
-            two_dates = sum(1 for item in step.params or [] if _param_is_temporal(item)) == 2
-            if not (named or readonly_calc or two_dates):
+            # A matching numeric sample next to two dates is only a
+            # coincidence unless the target itself carries duration semantics
+            # or the page proves that it is a derived, non-editable output.
+            # Pagination, identities, codes and audit/state leaves were
+            # rejected above so they cannot be hidden as date-span formulas.
+            if not (named or readonly_calc):
                 continue
             matches = [pair for pair in date_pairs if pair[3] == observed_days]
             if not matches:
