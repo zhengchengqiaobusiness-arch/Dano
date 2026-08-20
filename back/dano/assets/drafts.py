@@ -233,6 +233,7 @@ class DraftStore:
         *,
         published: bool | None = None,
         machine_verification_ran: bool | None = None,
+        machine_verification_required: bool | None = None,
     ) -> AssetDraft | None:
         from dano.onboarding.recording_results import is_recording_result_key
 
@@ -244,6 +245,8 @@ class DraftStore:
             body["published"] = published
         if machine_verification_ran is not None:
             body["machine_verification_ran"] = machine_verification_ran
+        if machine_verification_required is not None:
+            body["machine_verification_required"] = machine_verification_required
         if body == draft.body:
             return draft
         body = _postgres_safe_json(body)

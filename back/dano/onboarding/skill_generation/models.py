@@ -23,6 +23,7 @@ class SkillGenerationRequest(BaseModel):
     success_criteria: str = ""
     forbidden_actions: str = ""
     out_dir: str = ""
+    require_stage_seven: bool | None = None
 
 
 class UnusedCapability(BaseModel):
@@ -105,6 +106,7 @@ def generation_request_fingerprint(
         "examples": [str(item).strip() for item in request.example_requests if str(item).strip()],
         "success_criteria": str(request.success_criteria or "").strip(),
         "forbidden_actions": str(request.forbidden_actions or "").strip(),
+        "require_stage_seven": request.require_stage_seven,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

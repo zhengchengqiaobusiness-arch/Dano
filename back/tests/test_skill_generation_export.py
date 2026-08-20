@@ -183,6 +183,34 @@ async def test_manual_export_requires_stage_seven_verified(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_manual_export_skips_stage_seven_when_switch_off(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    body = {
+        "title": spec.title or "请假办理",
+        "subsystem": "oa",
+        "action": "action_skip_stage7",
+        "flow_spec": spec.model_dump(mode="json"),
+        "machine_verification_status": "",
+        "machine_verification_ran": False,
+        "machine_verification_required": False,
+        "published": False,
+    }
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=body,
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path), require_stage_seven=False),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported"
+    assert outcome.plan
+    assert outcome.used_capabilities
+
+
+@pytest.mark.asyncio
 async def test_manual_export_requires_business_description(tmp_path: Path) -> None:
     spec = _three_cap_spec()
     with pytest.raises(SkillExportError) as exc:

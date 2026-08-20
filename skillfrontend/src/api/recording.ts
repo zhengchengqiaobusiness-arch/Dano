@@ -40,6 +40,7 @@ export interface RecordingResultSummary {
   created_at: string;
   published: boolean;
   machine_verification_ran?: boolean;
+  machine_verification_required?: boolean;
   machine_verification_status?: string;
   stage_seven_attempt_id?: string;
   stage_seven_updated_at?: string;
@@ -87,6 +88,7 @@ export interface SkillGenerationRequest {
   success_criteria?: string;
   forbidden_actions?: string;
   out_dir?: string;
+  require_stage_seven?: boolean;
 }
 
 export interface SkillExportOutcome {

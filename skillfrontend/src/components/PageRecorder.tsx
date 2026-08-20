@@ -734,11 +734,12 @@ export default function PageRecorder({
   const stageSevenVerified = stageSevenStatus === "verified";
   const fingerprintMatches = !stageSevenFingerprint || !currentDraftFingerprint
     || stageSevenFingerprint === currentDraftFingerprint;
+  const stageSevenRequired = machineVerification;
+  const stageSevenReady = stageSevenVerified && fingerprintMatches;
   const canProduceSkill = Boolean(
     (activeResultId || history.find((row) => row.action === (snapshot?.action || ""))?.id)
     && capabilities.length
-    && stageSevenVerified
-    && fingerprintMatches
+    && (stageSevenRequired ? stageSevenReady : true)
     && !pendingEdits.length
     && !patchInFlightRef.current
     && !processing
@@ -1336,6 +1337,16 @@ export default function PageRecorder({
     setSnapshot(next);
     if (item.title) setTitle(item.title);
     if (detail) setResultMeta(detail);
+    const engaged = ["verified", "running", "waiting_operator", "stale"].includes(stageStatus);
+    const required = Boolean(
+      detail?.machine_verification_required
+      || item.machine_verification_required
+      || detail?.machine_verification_ran
+      || item.machine_verification_ran
+      || engaged
+    );
+    machineVerificationRef.current = required;
+    setMachineVerification(required);
   }
 
   async function openResult(item: RecordingResultSummary) {
@@ -1355,8 +1366,6 @@ export default function PageRecorder({
     setActiveResultId(item.id);
     resumeOnlyRef.current = true;
     setResumeOnly(true);
-    machineVerificationRef.current = true;
-    setMachineVerification(true);
     setKeepRecording(false);
     setKeepResult(true);
     setViewStage(2);
@@ -1513,6 +1522,7 @@ export default function PageRecorder({
         created_at: detail.created_at,
         published: detail.published,
         machine_verification_ran: detail.machine_verification_ran,
+        machine_verification_required: detail.machine_verification_required,
         machine_verification_status: detail.machine_verification_status,
         stage_seven_fingerprint: detail.stage_seven_fingerprint,
         skill_id: detail.skill_id,
@@ -1581,6 +1591,7 @@ export default function PageRecorder({
         success_criteria: skillSuccess.trim(),
         forbidden_actions: skillForbidden.trim(),
         out_dir: outDir,
+        require_stage_seven: machineVerification,
       });
       if (outcome.status === "needs_clarification") {
         setSkillClarifications(outcome.clarification_questions || []);
@@ -3142,6 +3153,18 @@ export default function PageRecorder({
             <Text strong>{editingResult ? "修改能力结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
             {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
             {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
+            <Space size={6}>
+              <Switch
+                size="small"
+                checked={machineVerification}
+                disabled={processing || editingResult}
+                onChange={(checked) => {
+                  machineVerificationRef.current = checked;
+                  setMachineVerification(checked);
+                }}
+              />
+              <Text type="secondary">机器验证</Text>
+            </Space>
           </Space>
           {editingResult ? (
             <Space>
@@ -3155,7 +3178,7 @@ export default function PageRecorder({
             </Space>
           ) : (
             <Space>
-              {!stageSevenVerified || !fingerprintMatches ? (
+              {stageSevenRequired && !stageSevenReady ? (
                 draft && !analysisMode && !processing && !connecting && !cancelling ? (
                   <Button
                     type="primary"
@@ -3174,6 +3197,12 @@ export default function PageRecorder({
                     disabled={!canProduceSkill}
                     onClick={openSkillExport}
                   >产出 Skill</Button>
+                  {!stageSevenReady && draft && !analysisMode && !processing && !connecting && !cancelling ? (
+                    <Button
+                      icon={<PlayCircleOutlined />}
+                      onClick={() => startAnalysis()}
+                    >{verificationButtonLabel}</Button>
+                  ) : null}
                 </>
               )}
             </Space>
@@ -3523,7 +3552,7 @@ export default function PageRecorder({
                   { title: "输出字段", render: (_, cap) => schemaFieldNames(cap.output_schema).join("、") || "—" },
                   { title: "写操作", width: 80, render: (_, cap) => (capabilityIsWrite(cap) ? "是" : "否") },
                   { title: "需确认", width: 80, render: (_, cap) => (cap.requires_human_confirm || capabilityIsWrite(cap) ? "是" : "否") },
-                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : stageSevenStatus || "未验证") },
+                  { title: "验证状态", width: 90, render: () => (stageSevenVerified ? "已验证" : stageSevenRequired ? (stageSevenStatus || "未验证") : "已跳过") },
                 ]}
               />
             </div>

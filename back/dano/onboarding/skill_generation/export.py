@@ -13,7 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from dano.execution.page.flow_spec_core.models import FlowSpec
-from dano.onboarding.skill_generation.catalog import verified_capability_ids
+from dano.onboarding.skill_generation.catalog import capability_ref, verified_capability_ids
 from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import (
     SkillGenerationRequest,
@@ -61,22 +61,49 @@ def _current_spec(body: dict[str, Any]) -> FlowSpec:
     return FlowSpec.model_validate(raw)
 
 
-def _stage_seven_ready(body: dict[str, Any], spec: FlowSpec) -> str:
+def _stage_seven_status(body: dict[str, Any]) -> str:
+    checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
+    return str(body.get("machine_verification_status") or checkpoint.get("status") or "")
+
+
+def _stage_seven_is_required(
+    body: dict[str, Any],
+    request: SkillGenerationRequest | None = None,
+) -> bool:
+    """Switch on → stage 7 is mandatory. Switch off → stage 6 result may export."""
+
+    if request is not None and request.require_stage_seven is False:
+        return False
+    if request is not None and request.require_stage_seven is True:
+        return True
+    status = _stage_seven_status(body)
+    if status in {"verified", "running", "waiting_operator", "stale", "failed"}:
+        return True
+    return bool(body.get("machine_verification_required") or body.get("machine_verification_ran"))
+
+
+def _stage_seven_ready(
+    body: dict[str, Any],
+    spec: FlowSpec,
+    request: SkillGenerationRequest | None = None,
+) -> tuple[str, bool]:
     from dano.onboarding.recording_stage_seven import StageSevenStatus, working_fingerprint
 
-    checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
-    status = str(body.get("machine_verification_status") or checkpoint.get("status") or "")
+    current_fp = working_fingerprint(spec)
+    required = _stage_seven_is_required(body, request)
+    if not required:
+        return current_fp, False
+    status = _stage_seven_status(body)
     if status != StageSevenStatus.VERIFIED:
         raise SkillExportError(409, "阶段7未验证通过，不能生成 Skill")
     stored_fp = str(
         body.get("stage_seven_fingerprint")
-        or checkpoint.get("working_fingerprint")
+        or (body.get("stage_seven") or {}).get("working_fingerprint")
         or ""
     )
-    current_fp = working_fingerprint(spec)
     if not stored_fp or stored_fp != current_fp:
         raise SkillExportError(409, "阶段7指纹与当前 FlowSpec 不一致，请重新验证后再产出 Skill")
-    return current_fp
+    return stored_fp, True
 
 
 def _stable_skill_id(body: dict[str, Any], title: str) -> str:
@@ -250,13 +277,18 @@ async def export_recording_skill(
     if not str(request.out_dir or "").strip():
         raise SkillExportError(400, "导出目录不能为空")
     spec = _current_spec(body)
-    fingerprint = _stage_seven_ready(body, spec)
-    verified = verified_capability_ids(
-        spec,
-        stage_seven=body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else None,
-    )
-    if not verified:
-        raise SkillExportError(409, "阶段7没有已验证能力，不能生成 Skill")
+    fingerprint, stage_seven_required = _stage_seven_ready(body, spec, request)
+    if stage_seven_required:
+        verified = verified_capability_ids(
+            spec,
+            stage_seven=body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else None,
+        )
+        if not verified:
+            raise SkillExportError(409, "阶段7没有已验证能力，不能生成 Skill")
+    else:
+        verified = {capability_ref(cap) for cap in spec.capabilities if capability_ref(cap)}
+        if not verified:
+            raise SkillExportError(409, "尚未生成可导出能力，不能生成 Skill")
     request_fp = generation_request_fingerprint(
         result_id=str(result_id),
         stage_seven_fingerprint=fingerprint,
@@ -357,7 +389,8 @@ async def export_recording_skill(
         next_body = {
             **body,
             "published": True,
-            "machine_verification_ran": True,
+            "machine_verification_ran": True if stage_seven_required else bool(body.get("machine_verification_ran")),
+            "machine_verification_required": bool(stage_seven_required or body.get("machine_verification_required")),
             "skill_id": skill_id,
             "skill_version": version,
             "skill_plan": plan_payload,

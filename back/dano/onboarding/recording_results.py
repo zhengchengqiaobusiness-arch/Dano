@@ -109,6 +109,7 @@ def stage_six_result_body(
     draft: dict[str, Any],
     published: bool = False,
     machine_verification_ran: bool = False,
+    machine_verification_required: bool = False,
 ) -> dict[str, Any]:
     if isinstance(goal, dict):
         goal_payload = dict(goal)
@@ -132,6 +133,7 @@ def stage_six_result_body(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "published": published,
         "machine_verification_ran": machine_verification_ran,
+        "machine_verification_required": machine_verification_required,
         "fingerprint": _draft_fingerprint(draft),
     }
 
@@ -185,8 +187,9 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "capability_count": int(body.get("capability_count") or 0),
         "request_count": int(body.get("request_count") or 0),
         "created_at": created,
-        "published": bool(body.get("published")) and bool(body.get("machine_verification_ran")),
+        "published": bool(body.get("published")),
         "machine_verification_ran": bool(body.get("machine_verification_ran")),
+        "machine_verification_required": bool(body.get("machine_verification_required")),
         "machine_verification_status": str(body.get("machine_verification_status") or ""),
         "stage_seven_attempt_id": str(body.get("stage_seven_attempt_id") or ""),
         "stage_seven_updated_at": str(body.get("stage_seven_updated_at") or ""),
@@ -253,6 +256,7 @@ async def persist_stage_six_result(
     draft: dict[str, Any],
     published: bool = False,
     machine_verification_ran: bool = False,
+    machine_verification_required: bool = False,
 ) -> AssetDraft:
     return await store.save_draft(
         run_id=run_id,
@@ -268,6 +272,7 @@ async def persist_stage_six_result(
             draft=draft,
             published=published,
             machine_verification_ran=machine_verification_ran,
+            machine_verification_required=machine_verification_required,
         ),
     )
 

@@ -987,6 +987,7 @@ class RecordingGatewaySession:
             title=title,
             goal=self.config.goal_text,
             draft=draft,
+            machine_verification_required=self._machine_verification,
         )
         self._stage_six_result_id = saved.asset_draft_id
         self._stage_six_baseline = dict(draft)
@@ -1000,7 +1001,8 @@ class RecordingGatewaySession:
         del published
         updated = await DraftStore().patch_recording_result_flags(
             self._stage_six_result_id,
-            machine_verification_ran=True if self._machine_verification else None,
+            machine_verification_ran=True if self._machine_verification else False,
+            machine_verification_required=self._machine_verification,
         )
         if updated is not None:
             await self._notify_recording_result(updated)

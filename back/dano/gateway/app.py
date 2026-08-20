@@ -1607,6 +1607,7 @@ class ExportRecordingSkillReq(BaseModel):
     success_criteria: str = ""
     forbidden_actions: str = ""
     out_dir: str = ""
+    require_stage_seven: bool | None = None
 
 
 @app.post("/v1/recording-results/{result_id}/export-skill")
