@@ -278,6 +278,32 @@ async def test_table_inline_snapshot_preserves_header_and_real_row_occurrences()
     assert quantity_paths == ["body.lines[0].quantity", "body.lines[1].quantity"]
 
 
+def test_exact_compiled_label_prop_pair_recovers_missing_dom_alias() -> None:
+    session = RecordSession()
+    session.script_sources = [{
+        "url": "http://ui.invalid/assets/form.js",
+        "text": 'component(FormItem,{label:"Magnitude",prop:"amount"})',
+    }]
+    _feed(session, {
+        "op": "form_snapshot",
+        "action_id": "action_amount",
+        "fields": [{
+            "field": "Magnitude",
+            "label": "Magnitude",
+            "value": "7",
+            "field_aliases": [],
+            "control_kind": "number",
+            "surface": "dialog",
+            "in_dialog": True,
+        }],
+        "page_context": PAGE,
+    })
+
+    evidence = session.recorded_field_evidence()
+    assert evidence[0]["field_aliases"] == ["amount"]
+    assert "script_form_declaration" in evidence[0]["identity_sources"]
+
+
 def test_shared_body_parser_json_and_stringified_json() -> None:
     parsed = parse_recorded_request_body('{"name":"张三","ok":true}')
     assert parsed["kind"] == "json"

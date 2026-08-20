@@ -3613,6 +3613,38 @@ class RecordSession:
             entry["script_url"] = matches[0]["url"]
             entry["mapping_complete"] = True
 
+    def _supplement_field_aliases_from_scripts(self, evidence: list[dict]) -> list[dict]:
+        """Recover a missing DOM alias from one explicit compiled label/prop pair."""
+        if not evidence or not self.script_sources:
+            return evidence
+        fields_by_label: dict[str, set[str]] = {}
+        for script in self.script_sources:
+            for label, fields in self._script_form_label_fields(
+                str(script.get("text") or ""),
+            ).items():
+                fields_by_label.setdefault(label, set()).update(fields)
+        out: list[dict] = []
+        for raw in evidence:
+            item = dict(raw)
+            aliases = [
+                str(alias).strip()
+                for alias in (item.get("field_aliases") or [])
+                if str(alias or "").strip()
+            ]
+            label = str(item.get("label") or item.get("field") or "").strip()
+            fields = fields_by_label.get(label, set())
+            if not aliases and len(fields) == 1:
+                item["field_aliases"] = [next(iter(fields))]
+                item["identity_sources"] = list(dict.fromkeys([
+                    *list(item.get("identity_sources") or []),
+                    "script_form_declaration",
+                ]))
+                for key in ("field_identity_id", "occurrence_id", "evidence_id"):
+                    item.pop(key, None)
+                stamp_field_identity(item)
+            out.append(item)
+        return out
+
     def recorded_field_evidence(self) -> list[dict]:
         """Return control-identity evidence scoped to the page that emitted it.
 
@@ -3624,7 +3656,9 @@ class RecordSession:
         for step in self.steps:
             if step.get("op") in {"fill", "select", "pick", "toggle", "upload"}:
                 self._semantic.archive_control(control_item_from_step(step))
-        return self._semantic.field_evidence()
+        return self._supplement_field_aliases_from_scripts(
+            self._semantic.field_evidence(),
+        )
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
