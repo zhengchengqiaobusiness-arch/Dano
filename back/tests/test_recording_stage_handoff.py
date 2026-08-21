@@ -225,6 +225,107 @@ def test_recording_state_keeps_newest_field_evidence() -> None:
     assert "备注" in labels
 
 
+def test_recording_state_keeps_semantic_field_facts_across_long_repaints() -> None:
+    evidence = [{
+        "evidence_id": "field-evidence-required-picker",
+        "field_identity_id": "field-id-picker",
+        "label": "Required picker",
+        "field": "picker",
+        "control_kind": "select",
+        "required_state": "required",
+        "required_observed": True,
+        "binding_status": "bound",
+        "request_id": "req_update",
+        "wire_path": "body.pickerId",
+        "op": "select",
+        "observed_at": 1,
+    }]
+    for index in range(600):
+        identity = index % 60
+        evidence.append({
+            "evidence_id": f"field-evidence-repaint-{index}",
+            "field_identity_id": f"field-id-repaint-{identity}",
+            "label": f"Repaint {identity}",
+            "field": f"repaint_{identity}",
+            "control_kind": "text",
+            "required_state": "unknown",
+            "required_observed": None,
+            "binding_status": "unbound",
+            "op": "snapshot",
+            "observed_at": index + 2,
+        })
+    spec = to_flow_spec(
+        captured_requests=[_req(
+            "req_update",
+            method="PATCH",
+            url="http://random.invalid/v9/records/update",
+            sequence=1,
+            role="business_write",
+            body={"pickerId": 7},
+            action="action_update",
+        )],
+        field_evidence=evidence,
+        page_context=PAGE,
+    )
+    state = recording_agent_state(spec)
+    visible = (state.get("facts") or {}).get("field_evidence") or []
+    assert any(
+        item.get("evidence_id") == "field-evidence-required-picker"
+        and item.get("required_state") == "required"
+        for item in visible
+    )
+
+
+def test_recording_state_exposes_distinct_actions_for_same_endpoint() -> None:
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_inspect",
+                method="GET",
+                url="http://random.invalid/v5/records/get?id=7",
+                sequence=1,
+                role="business_get",
+                action="action_inspect",
+            ),
+            _req(
+                "req_hydrate",
+                method="GET",
+                url="http://random.invalid/v5/records/get?id=7",
+                sequence=2,
+                role="business_get",
+                action="action_edit",
+            ),
+        ],
+        page_events=[
+            {
+                "event_id": "event_inspect",
+                "kind": "action",
+                "action_id": "action_inspect",
+                "transaction_id": "action_inspect",
+                "op": "click",
+                "locator": "text=Inspect record",
+            },
+            {
+                "event_id": "event_edit",
+                "kind": "action",
+                "action_id": "action_edit",
+                "transaction_id": "action_edit",
+                "op": "click",
+                "locator": "text=Edit record",
+            },
+        ],
+        page_context=PAGE,
+    )
+    state = recording_agent_state(spec)
+    ledger = (state.get("facts") or {}).get("action_request_ledger") or []
+    rows = {
+        (item.get("action_id"), item.get("request_id"), item.get("locator"))
+        for item in ledger
+    }
+    assert ("action_inspect", "req_inspect", "text=Inspect record") in rows
+    assert ("action_edit", "req_hydrate", "text=Edit record") in rows
+
+
 def test_recording_state_does_not_run_release_preparation(monkeypatch) -> None:
     """A read-only Pi poll must not rebuild the release contract."""
     spec = to_flow_spec(

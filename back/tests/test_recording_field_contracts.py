@@ -6,7 +6,10 @@ import json
 from urllib.parse import parse_qs, urlsplit
 
 from dano.execution.page.capability_compiler import compile_capabilities
-from dano.execution.page.flow_materialization.field_contracts.caller_ownership import _param_exposed_to_caller
+from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _param_exposed_to_caller,
+    _param_has_editable_control_evidence,
+)
 from dano.execution.page.flow_spec import to_flow_spec
 from dano.execution.page.flow_spec_core.models import FlowLink, FlowSpec, FlowStep, ParamField
 
@@ -208,6 +211,22 @@ def test_readonly_inner_input_of_select_remains_caller_editable_enum() -> None:
     assert choice.wire_type == "number"
     assert choice.source_kind == "form_option"
     assert _param_exposed_to_caller(choice)
+
+
+def test_readonly_inner_input_of_select_is_editable_for_hydration_override() -> None:
+    param = ParamField(
+        path="body.choiceId",
+        key="choiceId",
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "select",
+            "disabled": False,
+            "read_only": True,
+            "editable": True,
+            "interacted": False,
+        }],
+    )
+    assert _param_has_editable_control_evidence(param)
 
 
 def _edit_and_command_spec(*, include_dialog_controls: bool = True):

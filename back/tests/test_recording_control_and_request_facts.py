@@ -370,6 +370,63 @@ async def test_form_snapshot_keeps_hidden_native_file_control_without_selection(
     assert "asset" in asset["field_aliases"]
 
 
+@pytest.mark.asyncio
+async def test_action_menu_item_is_recorded_as_its_own_business_action() -> None:
+    """A command menu is not a form picker and must not swallow its item click."""
+    from playwright.async_api import async_playwright
+
+    recorded: list[dict] = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+
+        async def receive(_source, raw: str) -> None:
+            recorded.append(json.loads(raw))
+
+        await context.expose_binding("__danoRecord", receive)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <button id="actions" type="button" aria-haspopup="menu">Actions</button>
+            <div role="menu" aria-label="Record actions">
+              <button id="inspect" role="menuitem" type="button">Inspect record</button>
+            </div>
+            """
+        )
+        await page.click("#actions")
+        await page.click("#inspect")
+        await page.wait_for_timeout(50)
+        await browser.close()
+
+    clicks = [item for item in recorded if item.get("op") == "click"]
+    assert any("Inspect record" in str(item.get("locator") or "") for item in clicks)
+
+
+@pytest.mark.asyncio
+async def test_form_snapshot_exposes_stable_control_order_as_last_resort_evidence() -> None:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.expose_binding("__danoRecord", lambda _source, _raw: None)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="generic editor">
+              <label for="alpha">Alpha</label><input id="alpha">
+              <label for="beta">Beta</label><input id="beta">
+            </form>
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await browser.close()
+
+    assert [item["form_index"] for item in fields] == [0, 1]
+
+
 def test_exact_compiled_label_prop_pair_recovers_missing_dom_alias() -> None:
     session = RecordSession()
     session.script_sources = [{
@@ -871,6 +928,113 @@ def test_file_control_binds_to_multipart_name() -> None:
     )
     assert evidence[0]["binding_status"] == "bound"
     assert evidence[0]["wire_path"] == "body.attachment"
+
+
+def test_unsubmitted_file_control_uses_unique_existing_file_field() -> None:
+    request = {
+        "request_id": "req_save_asset",
+        "method": "PATCH",
+        "url": "http://random.invalid/v2/assets/save",
+        "post_data": json.dumps({"title": "sample", "attachmentUrl": ""}),
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "trigger_action_id": "action_save_asset",
+        "trigger_transaction_id": "tx_save_asset",
+        "role": "business_write",
+    }
+    form_root = "generic asset editor"
+    bound = bind_field_evidence(
+        [request],
+        [],
+        [
+            {
+                "label": "Title",
+                "field_aliases": ["title"],
+                "control_kind": "text",
+                "value": "sample",
+                "form_root": form_root,
+                "surface": "dialog",
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "action_id": "action_save_asset",
+                "transaction_id": "tx_save_asset",
+            },
+            {
+                "label": "Artifact",
+                "field_aliases": [],
+                "control_kind": "file",
+                "value": "",
+                "form_root": form_root,
+                "surface": "dialog",
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "action_id": "action_save_asset",
+                "transaction_id": "tx_save_asset",
+            },
+        ],
+    )
+    artifact = next(item for item in bound if item.get("control_kind") == "file")
+    assert artifact["binding_status"] == "bound_unsupported"
+    assert artifact["wire_path"] == "body.attachmentUrl"
+    assert artifact["wire_path_observed"] is True
+
+
+def test_table_row_field_does_not_bind_to_same_named_form_field() -> None:
+    request = {
+        "request_id": "req_nested_save",
+        "method": "POST",
+        "url": "http://random.invalid/v3/records/save",
+        "post_data": json.dumps({
+            "note": "header",
+            "lines": [{"note": "line"}],
+        }),
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "trigger_action_id": "action_nested_save",
+        "trigger_transaction_id": "tx_nested_save",
+        "role": "business_write",
+    }
+    evidence = bind_field_evidence([request], [], [{
+        "label": "Line note",
+        "field_aliases": ["note"],
+        "control_kind": "text",
+        "control_surface": "table_inline",
+        "table_id": "line-grid",
+        "row_index": 0,
+        "column_index": 2,
+        "value": "line",
+        "surface": "dialog",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "action_id": "action_nested_save",
+        "transaction_id": "tx_nested_save",
+    }])
+    assert evidence[0]["binding_status"] == "bound"
+    assert evidence[0]["wire_path"] == "body.lines[0].note"
+
+
+def test_same_event_same_label_in_different_structures_has_distinct_evidence_ids() -> None:
+    base = {
+        "label": "Comment",
+        "field_aliases": [],
+        "control_kind": "text",
+        "event_id": "event_snapshot",
+        "observed_at": 10,
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+    }
+    items = bind_field_evidence([], [], [
+        {**base, "form_root": "header-form"},
+        {
+            **base,
+            "form_root": "line-form",
+            "table_id": "line-grid",
+            "row_index": 0,
+            "column_index": 1,
+            "control_surface": "table_inline",
+        },
+    ])
+    assert len({item["evidence_id"] for item in items}) == 2
 
 
 class _FakeRequest:
