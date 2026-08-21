@@ -17,9 +17,7 @@ import structlog
 from dano.infra.run_logging import emit_run_exception, note_run_fact
 
 from dano.export.skill_package.validator import (
-    flow_spec_unverified_capability_names,
     flow_spec_verification_ids,
-    validate_skill_documents,
     validate_skill_package,
 )
 from dano.onboarding.skill_generation.validate import handbook_text_is_banned
@@ -94,7 +92,15 @@ def _export_failure_details(skill, out_dir: str, exc: BaseException) -> dict[str
         "asset_found": True,
         "published_status": getattr(skill, "lifecycle_state", None) or "published",
         "capability_count": len(capabilities),
-        "canonical_contract_present": bool(capabilities and _steps(api)),
+        "canonical_contract_present": bool(
+            capabilities
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("execution_contract"), dict)
+                and bool(item["execution_contract"].get("steps"))
+                for item in capabilities
+            )
+        ),
         "capability_model_status": meta.get("capability_model"),
         "flow_version": meta.get("current_version"),
         "release_identity": {
@@ -184,7 +190,16 @@ def _filter_plans_for_export(plans: list[dict], skill) -> list[dict]:  # noqa: A
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
     del spec
     published = dict(skill.api_request or {})
-    if not _steps(published) or not isinstance(published.get("capabilities"), list):
+    capabilities = [
+        item for item in (published.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    if not capabilities or any(
+        not isinstance(item.get("execution_contract"), dict)
+        or not isinstance(item["execution_contract"].get("steps"), list)
+        or not item["execution_contract"]["steps"]
+        for item in capabilities
+    ):
         raise ValueError(f"{skill.skill_id} has no canonical published capability contract")
     return published
 
@@ -377,12 +392,20 @@ def restore_compiled_capability_schemas(api_request: dict, spec) -> dict:  # noq
 
 
 def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
-    all_steps = _steps(api_request)
-    by_id = {str(step.get("step_id") or f"step-{index}"): step for index, step in enumerate(all_steps)}
     plans: list[dict] = []
     used_scripts: set[str] = set()
-    trusted_ids = flow_spec_verification_ids(spec) if spec is not None else set()
     for index, cap in enumerate(_capabilities(skill, spec, api_request), 1):
+        execution = dict(cap.get("execution_contract") or {})
+        owned_steps = [
+            dict(step) for step in (execution.get("steps") or [])
+            if isinstance(step, dict)
+        ]
+        capability_owned = bool(owned_steps)
+        all_steps = owned_steps if capability_owned else _steps(api_request)
+        by_id = {
+            str(step.get("step_id") or f"step-{step_index}"): step
+            for step_index, step in enumerate(all_steps)
+        }
         name = str(cap.get("name") or cap.get("capability_id") or f"capability_{index}")
         script = _script_slug(name)
         if script in used_scripts:
@@ -390,14 +413,22 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         used_scripts.add(script)
         schema = consume_upstream_input_schema(
             cap.get("input_schema") or cap.get("parameters") or {},
-            _upstream_capability_schema(spec, skill, cap),
+            {} if capability_owned else _upstream_capability_schema(spec, skill, cap),
         )
-        step_ids = _capability_call_step_ids(cap, by_id)
+        step_ids = (
+            list(by_id)
+            if capability_owned
+            else _capability_call_step_ids(cap, by_id)
+        )
         if not step_ids:
             raise ValueError(
                 f"capability {name!r} does not reference any compiled request step"
             )
-        links = _verified_links(spec, step_ids)
+        links = (
+            [dict(item) for item in (execution.get("links") or []) if isinstance(item, dict)]
+            if capability_owned
+            else _verified_links(spec, step_ids)
+        )
         cap_steps = [
             _project_capability_step(
                 _safe_step(by_id[step_id]),
@@ -413,6 +444,11 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             for step in cap_steps
         )
         fact_checks = []
+        trusted_ids = (
+            {str(item) for item in (execution.get("verification_ids") or []) if str(item)}
+            if capability_owned
+            else (flow_spec_verification_ids(spec) if spec is not None else set())
+        )
         for step in cap_steps:
             fact_check = step.get("fact_check")
             if (
@@ -435,8 +471,14 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             "steps": cap_steps,
             "links": links,
             "fact_checks": fact_checks,
-            "requires_confirmation": _capability_confirm_flag(cap, spec),
+            "requires_confirmation": (
+                bool(cap.get("requires_human_confirm"))
+                if capability_owned
+                else _capability_confirm_flag(cap, spec)
+            ),
             "requires_verify": is_write,
+            "execution_contract": execution,
+            "contract": _scrub(cap),
         })
     return plans
 
@@ -595,7 +637,11 @@ def _option_source(field: dict) -> dict | None:
 
 
 def _field_options(field: dict) -> list[dict]:
-    raw_options = field.get("x-enum-options") or field.get("x-options-snapshot")
+    raw_options = (
+        field.get("x-enum-options")
+        or field.get("x-options")
+        or field.get("x-options-snapshot")
+    )
     if isinstance(raw_options, list):
         options: list[dict] = []
         for raw in raw_options:
@@ -1587,6 +1633,24 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
     return "\n".join(lines).rstrip() + "\n"
 
 
+_HANDBOOK_PROCESS_KEYS = frozenset({
+    "evidence", "verification_id", "verification_ids", "confirmation_hash",
+    "confidence", "confidence_tier", "actor", "updated_by",
+})
+
+
+def _handbook_contract(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {
+            str(key): _handbook_contract(value)
+            for key, value in node.items()
+            if str(key) not in _HANDBOOK_PROCESS_KEYS
+        }
+    if isinstance(node, list):
+        return [_handbook_contract(item) for item in node]
+    return node
+
+
 def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
     lines = [
         "# 业务能力",
@@ -1611,6 +1675,37 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
             f"| {_safe_text(item.get('title') or item.get('name'))} | {_intent_for_plan(skill, item)} | "
             f"{'变更' if write else '只读'} | {required} | 业务结果 | {done} | {risk} |"
         )
+    lines.extend([
+        "",
+        "## 完整能力契约",
+        "",
+        "以下 JSON 是生成脚本使用的完整契约；字段、来源、规则、步骤和依赖均不省略。",
+    ])
+    for item in plans:
+        execution = dict(item.get("execution_contract") or {})
+        execution.setdefault("steps", list(item.get("steps") or []))
+        execution.setdefault("links", list(item.get("links") or []))
+        payload = {
+            **dict(item.get("contract") or {}),
+            "name": item.get("name"),
+            "capability_id": item.get("capability_id"),
+            "title": item.get("title"),
+            "kind": item.get("kind"),
+            "input_schema": item.get("input_schema") or {},
+            "output_schema": item.get("output_schema") or {},
+            "preconditions": item.get("preconditions") or [],
+            "caller_responsibilities": item.get("caller_responsibilities") or [],
+            "skill_responsibilities": item.get("skill_responsibilities") or [],
+            "execution_contract": execution,
+        }
+        lines.extend([
+            "",
+            f"### {_safe_text(item.get('title') or item.get('name'))}",
+            "",
+            "```json",
+            json.dumps(_handbook_contract(_scrub(payload)), ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+        ])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1624,27 +1719,56 @@ def _options_md(plans: list[dict]) -> str:
         "|---|---|---|---|---|---|---|",
     ]
     rows = 0
+    contracts: list[tuple[str, str, dict[str, Any]]] = []
     for item in plans:
         schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
-        for name, _field_name, raw in _iter_schema_fields(schema):
+        for name, field_name, raw in _iter_schema_fields(schema):
             source = _option_source(raw)
             options = _field_options(raw)
-            if not source and not options:
+            raw_source = raw.get("x-dano-option-source") or raw.get("x-options-source-meta")
+            if not source and not options and not isinstance(raw_source, dict):
                 continue
             kind = "动态" if source else "固定枚举"
             origin = (
                 f"`{source.get('method') or 'GET'} {source.get('endpoint')}`"
                 if source
-                else "、".join(_safe_text(option.get("label") or option.get("id")) for option in options[:8] if isinstance(option, dict))
+                else f"完整契约共 {len(options)} 项"
             )
             lines.append(
                 f"| `{name}` / {_safe_text(item.get('title') or item.get('name'))} | {kind} | {origin or '契约候选'} | "
                 f"{'需要选择该字段时' if source else '读取本表即可'} | 按指南允许自由输入、重试或停止 | "
                 f"停问，不得默认第一条 | {'允许一个自定义其他' if any(str((option or {}).get('label') or '') in {'其他', 'Other'} for option in options if isinstance(option, dict)) else '否'} |"
             )
+            contracts.append((
+                _safe_text(item.get("title") or item.get("name")),
+                str(name),
+                {
+                    "field": field_name,
+                    "schema": _scrub(raw),
+                    "source": _scrub(raw_source) if isinstance(raw_source, dict) else None,
+                    "options": _scrub(options),
+                    "count": len(options),
+                },
+            ))
             rows += 1
     if not rows:
         lines.append("| （当前没有独立候选字段） | — | 运行时按输入表单收集 | 缺字段时 | 停问 | 停问 | 视字段而定 |")
+    else:
+        lines.extend([
+            "",
+            "## 完整候选契约",
+            "",
+            "固定枚举逐项保留显示值与提交值；接口候选保留完整来源契约，不截断。",
+        ])
+        for title, name, contract in contracts:
+            lines.extend([
+                "",
+                f"### {title} / `{name}`",
+                "",
+                "```json",
+                json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True),
+                "```",
+            ])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -2000,6 +2124,7 @@ _CLIENT_TEMPLATE = r'''from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import os
 from pathlib import Path
@@ -2234,7 +2359,17 @@ def _apply_selects(step, values, cache):
                     owned.append(item)
                     continue
                 row = dict(item)
-                row[field], _selected = _selected_option(binding, row[field], live_rows)
+                row[field], selected_row = _selected_option(binding, row[field], live_rows)
+                for target_path, response_path in (binding.get("field_projections") or {}).items():
+                    target = _nested_array_field(str(target_path))
+                    if selected_row is None or target is None or target[0] != container:
+                        continue
+                    projected = get_path(selected_row, response_path)
+                    if projected is None:
+                        raise RuntimeError(
+                            f"live option field {response_path!r} is missing for {param or container}"
+                        )
+                    deep_set(row, target[1], projected)
                 owned.append(row)
             current[container] = owned
             continue
@@ -2302,6 +2437,25 @@ def _runtime_values(step, inputs):
                     )
                     if kind == "date_span_days_json" else days
                 )
+                progressed = True
+                continue
+            if kind == "date_range_end":
+                start_name = str(field.get("start_field") or "")
+                if start_name not in values:
+                    still.append(field)
+                    continue
+                output_format = str(field.get("output_format") or "%Y-%m-%d 23:59:59")
+                start = values[start_name]
+                if output_format == "epoch_ms":
+                    values[name] = int(start) + 86_399_999
+                elif output_format == "epoch_s":
+                    values[name] = int(start) + 86_399
+                else:
+                    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", str(start or ""))
+                    if match is None:
+                        raise RuntimeError("date_range_end requires a calendar date or epoch value")
+                    day = datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                    values[name] = day.strftime(output_format)
                 progressed = True
                 continue
             if kind in {"product", "sum", "difference", "percent_of", "remainder_after_percent"}:
@@ -2734,31 +2888,13 @@ def _clean_runtime_artifacts(folder: Path) -> None:
 
 
 def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], bool]:  # noqa: ANN001
-    spec = _flow_spec(skill)
-    api_request = _compiled_request(skill, spec)
-    steps = _steps(api_request)
-    if not steps:
-        raise ValueError(f"{skill.skill_id} has no executable page request")
-    plans = _filter_plans_for_export(_capability_plans(skill, spec, api_request), skill)
+    api_request = _compiled_request(skill, None)
+    plans = _filter_plans_for_export(_capability_plans(skill, None, api_request), skill)
     if not plans:
         raise ValueError(f"{skill.skill_id} has no capability")
+    steps = [step for plan in plans for step in (plan.get("steps") or [])]
     slug = package_slug(skill.skill_id)
-    docs = dict(((spec.meta or {}).get("skill_docs") or {})) if spec is not None else {}
-    model_skill_md = str(docs.get("skill_md") or "")
-    reference_md = str(docs.get("reference_md") or "")
-    docs_valid = validate_skill_documents(
-        model_skill_md,
-        reference_md,
-        allowed_verification_ids=flow_spec_verification_ids(spec),
-        required_chain_names={str(plan["name"]) for plan in plans},
-        required_unverified_chains=flow_spec_unverified_capability_names(spec),
-    )["ok"]
-    # The model may enrich business facts in reference.md, but it must never
-    # replace the deterministic operational contract inherited from the
-    # original Skill exporter (collection, validation, confirmation, verify,
-    # and result handling). A structurally valid but minimal model document was
-    # previously accepted here and silently discarded all of those rules.
-    skill_md = _fallback_skill_md(skill, slug, plans, spec)
+    skill_md = _fallback_skill_md(skill, slug, plans, None)
 
     scripts = folder / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -2792,7 +2928,8 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         "protocol": "dano.skill_package.contract.v1",
         "skill": {"id": skill.skill_id, "name": slug, "title": skill.title or skill.action},
         "capabilities": [
-            {
+            _scrub({
+                **dict(plan.get("contract") or {}),
                 "name": plan["name"],
                 "capability_id": plan.get("capability_id") or "",
                 "title": plan["title"],
@@ -2806,12 +2943,18 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 "preconditions": plan["preconditions"],
                 "caller_responsibilities": plan["caller_responsibilities"],
                 "skill_responsibilities": plan["skill_responsibilities"],
-            }
+                "execution_contract": plan.get("execution_contract") or {
+                    "protocol": "dano.capability_plan.v2",
+                    "steps": plan.get("steps") or [],
+                    "links": plan.get("links") or [],
+                },
+            })
             for plan in plans
         ],
         "capability_relations": [
-            relation.model_dump(mode="json", exclude_none=True)
-            for relation in (spec.capability_relations if spec is not None else [])
+            _scrub(dict(relation))
+            for relation in (api_request.get("capability_relations") or [])
+            if isinstance(relation, dict)
         ],
     }
     contract.update(_contract_planning_fields(skill))
@@ -2832,7 +2975,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 _VERIFY_TEMPLATE.replace("__CAP_MODULE__", module),
             )
     _clean_runtime_artifacts(folder)
-    return plans, not docs_valid
+    return plans, True
 
 
 def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001
@@ -2846,12 +2989,11 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
         _clean_runtime_artifacts(stage)
         validation = validate_skill_package(stage)
         if not validation["ok"] and not fallback_used:
-            spec = _flow_spec(skill)
             plans = _filter_plans_for_export(
-                _capability_plans(skill, spec, _compiled_request(skill, spec)),
+                _capability_plans(skill, None, _compiled_request(skill, None)),
                 skill,
             )
-            _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, spec))
+            _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, None))
             fallback_used = True
             validation = validate_skill_package(stage)
         _clean_runtime_artifacts(stage)

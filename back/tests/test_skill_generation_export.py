@@ -1456,7 +1456,7 @@ def test_option_facts_live_only_in_options_md() -> None:
     table = forms.split("| 字段 |", 1)[1].split("回答处理", 1)[0]
     assert "/oa/leave/unique-options" in options
     assert "/oa/leave/unique-options" not in table
-    assert "/oa/leave/unique-options" not in capabilities
+    assert "/oa/leave/unique-options" in capabilities
     assert "OPTIONS.md" in table
 
 

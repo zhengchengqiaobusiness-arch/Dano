@@ -319,7 +319,9 @@ def build_export_skill_spec(
 
     release_spec, candidate = prepare_flow_release_candidate(view)
     release_spec = promote_unconfirmed_write_fields(release_spec)
-    api_request, errors = flow_spec_to_api_request(release_spec, _prepared=True)
+    api_request, errors = flow_spec_to_api_request(
+        release_spec, _prepared=True, _embed_capability_steps=True,
+    )
     if errors or not api_request:
         raise SkillExportError(409, "导出视图无法编译为 Skill 包：" + "；".join(errors or ["未知错误"]))
     api_request = restore_compiled_capability_schemas(api_request, view)
@@ -870,7 +872,9 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
     api_request = dict(getattr(skill, "api_request", None) or {})
     if not api_request:
         promoted = promote_unconfirmed_write_fields(view.model_copy(deep=True))
-        api_request, errors = flow_spec_to_api_request(promoted)
+        api_request, errors = flow_spec_to_api_request(
+            promoted, _embed_capability_steps=True,
+        )
         if errors or not api_request:
             raise RuntimeError("发布导出视图失败：" + "；".join(errors or ["未知错误"]))
         view = promoted

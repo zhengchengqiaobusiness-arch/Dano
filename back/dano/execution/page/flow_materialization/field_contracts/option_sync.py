@@ -777,6 +777,49 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         param.description = _upsert_option_description(param.description, option_description)
         param.reason = _upsert_option_description(param.reason or source_reason, option_description)
     step.selects = grounded_bindings
+    if int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2:
+        _sync_selected_option_field_projections(step)
+
+
+def _sync_selected_option_field_projections(step: FlowStep) -> None:
+    """Keep field origin and executable option projection as one contract."""
+    bindings = list(step.selects or [])
+    for param in step.params or []:
+        if param.source_kind != "selected_option_field":
+            continue
+        source = dict(param.source or {})
+        target_path = str(source.get("target_path") or param.path or "")
+        response_path = str(source.get("response_path") or "")
+        selector_path = str(source.get("selector_path") or "")
+        selector_param = str(source.get("selector_param") or "")
+        source_request_id = str(source.get("source_request_id") or "")
+        source_url = str(source.get("source_url") or "")
+        if not target_path or not response_path:
+            continue
+        matches = [
+            binding for binding in bindings
+            if (
+                selector_path
+                and selector_path in {str(binding.path or ""), str(binding.id_path or "")}
+            ) or (
+                selector_param
+                and selector_param == str(binding.param or "")
+            )
+        ]
+        if not matches and source_request_id:
+            matches = [
+                binding for binding in bindings
+                if source_request_id == str(binding.source_request_id or "")
+            ]
+        if not matches and source_url:
+            source_path = _request_path({"url": source_url})
+            matches = [
+                binding for binding in bindings
+                if source_path == _request_path({"url": str(binding.source_url or "")})
+            ]
+        if len(matches) != 1:
+            continue
+        matches[0].field_projections[target_path] = response_path
 
 
 def _refresh_api_option_display_labels(spec: FlowSpec) -> int:

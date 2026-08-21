@@ -392,16 +392,19 @@ def _param_source_guess(
         if control_locked:
             return {
                 "category": "runtime_var",
-                "source_kind": "page_rule",
+                "source_kind": "unknown",
                 "source": {
-                    "kind": "page_rule",
+                    "kind": "unresolved",
+                    "candidate_kind": "page_rule",
                     "path": path,
                     "control_kind": control_kind,
+                    "executable": False,
+                    "reason": "frontend_formula_not_observed",
                 },
                 "editable": False,
                 "exposed_to_user": False,
-                "reason": "页面只读或禁用控件上的值由前端规则写入，运行期沿用页面结果，不作为调用方输入",
-                "need_human_confirm": False,
+                "reason": "页面只读或禁用值疑似由前端生成，但录制证据没有公式，不能标记为可执行页面规则",
+                "need_human_confirm": True,
             }
         if method == "GET" and path.startswith("query."):
             return {

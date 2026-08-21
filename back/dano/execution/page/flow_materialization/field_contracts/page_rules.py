@@ -67,6 +67,33 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
         for param in step.params or []:
             if param.locked or _param_has_manual_contract(param):
                 continue
+            if param.source_kind == "page_rule":
+                source = dict(param.source or {})
+                formula = source.get("formula")
+                rule = dict(formula) if isinstance(formula, dict) else source
+                kind = str(rule.get("strategy") or rule.get("kind") or "")
+                if kind in {
+                    "date_range_end", "date_span_days", "date_span_days_json",
+                    "product", "sum", "difference", "percent_of",
+                    "remainder_after_percent",
+                }:
+                    source["formula"] = {
+                        key: value for key, value in rule.items()
+                        if key not in {"formula", "path"}
+                    }
+                    source["executable"] = True
+                    param.source = source
+                else:
+                    param.source_kind = "unknown"
+                    param.source = {
+                        "kind": "unresolved",
+                        "candidate_kind": "page_rule",
+                        "path": param.path,
+                        "executable": False,
+                        "reason": "frontend_formula_not_observed",
+                    }
+                    param.need_human_confirm = True
+                    param.reason = "页面只读值疑似由前端生成，但录制证据没有公式，不能标记为可执行页面规则"
             if _looks_pagination_field(param.key, param.path):
                 continue
             if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
@@ -149,10 +176,23 @@ def _apply_date_range_companions(spec: FlowSpec) -> None:
                 continue
             end.category = "runtime_var"
             end.source_kind = "page_rule"
+            output_format = (
+                "epoch_ms" if re.fullmatch(r"-?\d{13}", end_text)
+                else "epoch_s" if re.fullmatch(r"-?\d{10}", end_text)
+                else "%Y-%m-%d 23:59:59" if re.search(r"23:59:59$", end_text)
+                else "%Y-%m-%d 23:59"
+            )
             end.source = {
                 "kind": "date_range_end",
                 "start_field": start.key,
                 "path": end.path,
+                "output_format": output_format,
+                "formula": {
+                    "kind": "date_range_end",
+                    "start_field": start.key,
+                    "output_format": output_format,
+                },
+                "executable": True,
             }
             end.exposed_to_user = False
             end.editable = False

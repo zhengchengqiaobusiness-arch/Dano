@@ -2916,6 +2916,18 @@ def _apply_system_values(body, api_request: dict) -> None:
         _set_by_path(body, sv.get("tokens") or sv.get("path", ""), val)
 
 
+def _date_range_end_value(value, output_format: str):  # noqa: ANN001
+    if output_format == "epoch_ms":
+        return int(value) + 86_399_999
+    if output_format == "epoch_s":
+        return int(value) + 86_399
+    match = _re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", str(value or ""))
+    if match is None:
+        raise ValueError("date_range_end requires a calendar date or epoch value")
+    day = _dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return day.strftime(output_format or "%Y-%m-%d 23:59:59")
+
+
 def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
     out = dict(fields)
     pending = list(api_request.get("runtime_fields") or [])
@@ -2944,6 +2956,15 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
                     )
                 else:
                     out[name] = days
+                progressed = True
+            elif kind == "date_range_end":
+                start_name = str(field.get("start_field") or "")
+                if start_name not in out:
+                    still.append(field)
+                    continue
+                out[name] = _date_range_end_value(
+                    out[start_name], str(field.get("output_format") or ""),
+                )
                 progressed = True
             elif kind == "array_item_formula":
                 container_name = str(field.get("container_field") or "")
@@ -3691,6 +3712,19 @@ def _build_element(item: dict | None, template: dict, name: str, label_subkey: s
     return elem
 
 
+def _apply_list_option_projections(
+    row: dict, selected: dict, binding: dict, container: str,
+) -> None:
+    prefix = _re.compile(rf"^{_re.escape(container)}\[(?:\d+|\*)\]\.(.+)$")
+    for target_path, source_path in (binding.get("field_projections") or {}).items():
+        match = prefix.fullmatch(str(target_path or ""))
+        if match is None:
+            continue
+        value = _get_by_path(selected, source_path)
+        if value is not None:
+            _set_by_path(row, match.group(1), value)
+
+
 async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: str, storage_state,
                                 token_key: str | None, verify: bool) -> dict:
     """列表多选:参数传的是**名字列表**(["亚历山大大帝","狗蛋",…])→ 每个名字经来源接口查到整项,
@@ -3754,12 +3788,14 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             it = matches[0]
             projected = _build_element(it, tmpl, nm, label_sub)
             if rows is None:
+                _apply_list_option_projections(projected, it, s, str(param))
                 built.append(projected)
                 continue
             row = copy.deepcopy(rows[index])
             for key, value in projected.items():
                 if key == label_sub or _get_by_path(row, key) in (None, ""):
                     _set_by_path(row, key, value)
+            _apply_list_option_projections(row, it, s, str(param))
             built.append(row)
         fields[param] = built
     return fields
