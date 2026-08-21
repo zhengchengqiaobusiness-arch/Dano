@@ -701,9 +701,6 @@ def _with_toc_if_long(text: str, headings: list[str]) -> str:
     return "\n".join(toc) + "\n" + text
 
 
-_FORM_SPLIT_LINES = 40
-
-
 def _capability_form_section(plan: dict) -> list[str]:
     schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
     properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
@@ -760,14 +757,8 @@ def _capability_form_section(plan: dict) -> list[str]:
     return lines
 
 
-def _form_file_slug(plan: dict) -> str:
-    raw = str(plan.get("script") or plan.get("name") or plan.get("title") or "form")
-    slug = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]+", "_", raw)).strip("_")
-    return slug or "form"
-
-
 def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
-    """Return INPUT_FORMS.md plus optional long-form files under forms/."""
+    """Return INPUT_FORMS.md. Keep every capability form in this file."""
     header = [
         "# Native input forms",
         "",
@@ -783,27 +774,15 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
-    extras: dict[str, str] = {}
     body: list[str] = []
     headings: list[str] = []
     for plan in plans:
         title = _safe_text(plan.get("title") or plan.get("name"))
         if title:
             headings.append(title)
-        section = _capability_form_section(plan)
-        if "\n".join(section).count("\n") + 1 >= _FORM_SPLIT_LINES:
-            rel = f"forms/{_form_file_slug(plan)}.md"
-            extras[rel] = f"# {title}\n\n当前操作是「{title}」且缺少必填字段时阅读本文件。\n\n" + "\n".join(section).rstrip() + "\n"
-            body.extend([
-                f"## {title}",
-                "",
-                f"当前操作是「{title}」且缺少必填字段时，读取 `references/{rel}`。不要把短表单拆开后的全文再抄回这里。",
-                "",
-            ])
-        else:
-            body.extend(section)
+        body.extend(_capability_form_section(plan))
     text = _with_toc_if_long("\n".join(header + body).rstrip() + "\n", headings)
-    return text, extras
+    return text, {}
 
 
 def _input_forms_md(plans: list[dict]) -> str:
@@ -998,7 +977,6 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "- 字段需要动态候选，或候选为空/多条时，读取 `references/OPTIONS.md`。",
         "- 需要判断某个能力的输入输出边界时，读取 `references/CAPABILITIES.md`。",
         "- 不要在开始前读取 references 下的全部文件。",
-        "- 若 `INPUT_FORMS.md` 把某个能力拆到 `references/forms/`，只读取当前能力那一份。",
         "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",
     ]
     if any(item.get("requires_confirmation") or item.get("requires_verify") for item in plans):
@@ -2384,6 +2362,7 @@ if __name__ == "__main__":
 
 
 def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -2432,10 +2411,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     _write_text(folder / "SKILL.md", skill_md)
     _write_text(references / "CAPABILITIES.md", _capabilities_md(skill, plans))
     _write_text(references / "OPTIONS.md", _options_md(plans))
-    forms_text, form_files = _input_forms_bundle(plans)
-    _write_text(references / "INPUT_FORMS.md", forms_text)
-    for rel, content in form_files.items():
-        _write_text(references / rel, content)
+    _write_text(references / "INPUT_FORMS.md", _input_forms_md(plans))
     routes_dir = references / "routes"
     for route in _combination_routes(skill):
         route_id = _safe_text(route.get("route_id") or "").strip()

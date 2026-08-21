@@ -87,6 +87,14 @@ _GENERIC_VERBS = (
     "编辑", "修改", "更新", "审核", "审批", "反审", "反审核", "删除", "提交",
     "保存", "导出", "打印", "下载", "同步", "作废", "撤回", "撤销",
 )
+_NARRATIVE_PHRASES = (
+    "保存修改",
+    "撤回修改",
+    "重新更新",
+    "重新修改",
+    "统计存档",
+    "统计归档",
+)
 
 
 def _cap_title(cap: FlowCapability) -> str:
@@ -99,7 +107,9 @@ def _aliases(cap: FlowCapability) -> list[str]:
     aliases = [item for item in (title, name) if item]
     family = capability_family(cap)
     kind = str(cap.kind or "").strip().lower()
-    if family == "query" or kind == "query":
+    if kind == "export" or "导出" in title or "下载" in title:
+        aliases.extend(["导出", "下载"])
+    elif family == "query" or kind == "query":
         if "详情" in title or "查看" in title:
             aliases.extend(["查看", "详情", "看详情"])
         else:
@@ -107,16 +117,18 @@ def _aliases(cap: FlowCapability) -> list[str]:
     if family == "write" or is_write_capability(cap):
         if any(token in title for token in ("新增", "新建", "创建")):
             aliases.extend(["新增", "新建", "创建"])
-        elif any(token in title for token in ("编辑", "修改")):
-            aliases.extend(["编辑", "修改"])
-        elif "反审" in title:
-            aliases.extend(["反审核", "反审"])
+        elif any(token in title for token in ("编辑", "修改", "更新")):
+            aliases.extend(["编辑", "修改", "更新"])
+        elif "取消审核" in title or "反审" in title:
+            aliases.extend(["取消审核", "反审核", "反审"])
         elif any(token in title for token in ("审核", "审批")):
             aliases.extend(["审核", "审批"])
         elif "删除" in title:
             aliases.extend(["删除"])
         elif "提交" in title:
             aliases.extend(["提交"])
+        elif "保存" in title:
+            aliases.extend(["保存"])
     return list(dict.fromkeys(aliases))
 
 
@@ -243,7 +255,7 @@ def _is_sequence_connector(between: str) -> bool:
         return True
     if re.search(r"(?:结束|完成|完毕|做完|完了).{0,4}(?:就|再|即)", compact):
         return True
-    if re.search(r"(?<!不)再", compact):
+    if re.search(r"(?<!不)(?<!重)再(?!新)", compact):
         return True
     stripped = compact.strip()
     return stripped in {"马上", "立即"} or stripped.startswith(("马上", "立即"))
@@ -301,15 +313,35 @@ def looks_like_ordered_multi_step(text: str, caps: list[FlowCapability]) -> bool
     return description_has_explicit_sequence(raw) or bool(_orders_from_mentions(raw, caps))
 
 
+def _mask_known_actions(text: str, caps: list[FlowCapability]) -> str:
+    """Hide already-mapped operations and narrative collocations before scanning leftovers."""
+    raw = str(text or "")
+    spans: list[tuple[int, int]] = [(start, end) for start, end, _cap, _alias in _alias_hits(raw, caps)]
+    for phrase in sorted(_NARRATIVE_PHRASES, key=len, reverse=True):
+        start = 0
+        while True:
+            index = raw.find(phrase, start)
+            if index < 0:
+                break
+            spans.append((index, index + len(phrase)))
+            start = index + len(phrase)
+    chars = list(raw)
+    for start, end in spans:
+        for index in range(start, min(end, len(chars))):
+            chars[index] = "\0"
+    return "".join(chars)
+
+
 def _unknown_actions(text: str, caps: list[FlowCapability]) -> list[str]:
     known = {alias for cap in caps for alias in _aliases(cap)}
+    masked = _mask_known_actions(text, caps)
     unknown: list[str] = []
     for verb in sorted(_GENERIC_VERBS, key=len, reverse=True):
-        if verb not in text:
+        if verb not in masked:
             continue
         if verb in known or any(verb in alias for alias in known):
             continue
-        if any(verb != other and verb in other and other in text for other in _GENERIC_VERBS):
+        if any(verb != other and verb in other and other in masked for other in _GENERIC_VERBS):
             continue
         unknown.append(verb)
     return list(dict.fromkeys(unknown))

@@ -81,8 +81,6 @@ Machine audit facts that users do not need to read stay in `CONTRACT.json`.
     INPUT_FORMS.md
     routes/
       <route-id>.md          # one file per combination route
-    forms/
-      <capability>.md        # only when that form is actually long
 ```
 
 Do not pack `references/generator-guides/`. Those files are generator-internal
@@ -142,9 +140,9 @@ silently pick the first item.
 `references/INPUT_FORMS.md` is an on-demand `ask_user_question` contract.
 Keep the generator-guide behaviors: group current-step fields, stable question
 ids, correct controls, no re-ask for fixed/system/bound values, confirm writes,
-runtime defaults instead of historical samples. If the file exceeds a
-reasonable read, keep the index here and split only the long capability into
-`references/forms/<capability>.md` with a direct conditional pointer.
+runtime defaults instead of historical samples. Keep every capability form in
+this file. If it exceeds a reasonable read, add a TOC; do not create
+`references/forms/`.
 
 The packed contract is copied as-is: field identity, option maps, request
 templates, sample evidence, defaults, and success rules must not be rewritten

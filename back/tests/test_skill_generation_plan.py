@@ -199,11 +199,12 @@ async def test_plan_rejects_unverified_capability() -> None:
     spec = _three_cap_spec()
     request = SkillGenerationRequest(
         title="请假",
-        business_description="查询待办并提交",
+        business_description="查询待办",
         planning_mode=PlanningMode.FIXED,
     )
-    bad = propose_deterministic_plan(spec, request, VERIFIED, "fp")
+    bad = propose_deterministic_plan(spec, request, {"cap_query"}, "fp")
     bad.selected_capability_ids = ["cap_query", "cap_submit"]
+    bad.routes[0].capability_sequence = ["cap_query", "cap_submit"]
 
     async def proposer(*_args, **_kwargs):
         return bad
@@ -1071,3 +1072,166 @@ def test_immediate_single_write_stays_atomic() -> None:
         route.capability_sequence[:2] == ["cap_query", "cap_submit"] and "马上提交" in route.when_to_use
         for route in plan.routes
     )
+
+
+LIVE_SALE_ORDER_DESCRIPTION = (
+    "通过“查询销售订单”定位目标单据，“查看销售订单详情”了解完整信息；"
+    "使用“新增销售订单”录入新订单，后续调整内容则通过“更新销售订单”保存修改；"
+    "订单确认后“审核销售订单”生效，若需撤回修改则“取消审核销售订单”后重新更新；"
+    "无效订单通过“删除销售订单”清理；所有数据可“导出销售订单”用于统计存档。"
+    "各环节权限受控，形成完整闭环。"
+)
+
+
+def _live_sale_order_spec() -> FlowSpec:
+    return FlowSpec(
+        tenant="tenant",
+        subsystem="erp",
+        title="销售订单",
+        steps=[FlowStep(step_id="s1", method="GET", path="/erp/sale-order")],
+        capabilities=[
+            _cap(capability_id="cap_ad4a22046fc893c0", name="query_sale_order", title="查询销售订单", kind="query"),
+            _cap(
+                capability_id="cap_780fe31d3ad6fa41",
+                name="create_sale_order",
+                title="新增销售订单",
+                kind="create",
+                required=["customerId", "orderTime", "items"],
+                confirm=True,
+            ),
+            _cap(
+                capability_id="cap_a2d9254cf0a7dc55",
+                name="get_sale_order_detail",
+                title="查看销售订单详情",
+                kind="query",
+                required=["id"],
+            ),
+            _cap(
+                capability_id="cap_41167d615f84b9bd",
+                name="update_sale_order",
+                title="更新销售订单",
+                kind="update",
+                required=["id", "customerId", "orderTime", "items"],
+                confirm=True,
+            ),
+            _cap(
+                capability_id="cap_feef49cf3ba6e7a5",
+                name="approve_sale_order",
+                title="审核销售订单",
+                kind="approve",
+                required=["id"],
+                confirm=True,
+            ),
+            _cap(
+                capability_id="cap_c98ee6493a8f3d6f",
+                name="reject_sale_order",
+                title="取消审核销售订单",
+                kind="reject",
+                required=["id"],
+                confirm=True,
+            ),
+            _cap(
+                capability_id="cap_a41db2e693c1596b",
+                name="delete_sale_order",
+                title="删除销售订单",
+                kind="delete",
+                required=["ids"],
+                confirm=True,
+            ),
+            _cap(capability_id="cap_ef9fefbc8679f244", name="export_sale_order", title="导出销售订单", kind="export"),
+        ],
+        capability_relations=[],
+    )
+
+
+LIVE_SALE_ORDER_IDS = {
+    "cap_ad4a22046fc893c0",
+    "cap_780fe31d3ad6fa41",
+    "cap_a2d9254cf0a7dc55",
+    "cap_41167d615f84b9bd",
+    "cap_feef49cf3ba6e7a5",
+    "cap_c98ee6493a8f3d6f",
+    "cap_a41db2e693c1596b",
+    "cap_ef9fefbc8679f244",
+}
+
+
+def test_page_overview_does_not_treat_narrative_verbs_as_missing_actions() -> None:
+    spec = _live_sale_order_spec()
+    request = SkillGenerationRequest(
+        title="销售订单操作",
+        business_description=LIVE_SALE_ORDER_DESCRIPTION,
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, LIVE_SALE_ORDER_IDS, "fp-live")
+    checked = validate_skill_plan(
+        plan, spec, verified_capability_ids=LIVE_SALE_ORDER_IDS, expected_fingerprint="fp-live",
+    )
+    assert checked.ok, checked.errors + checked.clarifications
+    assert not plan.clarification_questions
+    packed = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
+    assert packed == LIVE_SALE_ORDER_IDS
+
+
+@pytest.mark.asyncio
+async def test_page_overview_generate_skill_plan() -> None:
+    spec = _live_sale_order_spec()
+    request = SkillGenerationRequest(
+        title="销售订单操作",
+        business_description=LIVE_SALE_ORDER_DESCRIPTION,
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    result = await generate_skill_plan(
+        spec,
+        request,
+        verified_capability_ids=LIVE_SALE_ORDER_IDS,
+        source_flow_fingerprint="fp-live",
+        proposer=lambda *_args, **_kwargs: _async_plan(
+            propose_deterministic_plan(spec, request, LIVE_SALE_ORDER_IDS, "fp-live")
+        ),
+    )
+    assert result.status == "planned"
+    assert result.plan is not None
+    assert not result.clarification_questions
+
+
+@pytest.mark.asyncio
+async def test_unknown_action_skips_proposer() -> None:
+    spec = _three_cap_spec()
+    called = False
+
+    async def boom(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("需要澄清时不应再调用模型提案")
+
+    result = await generate_skill_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="请把待办记录导出成报表。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        verified_capability_ids=VERIFIED,
+        source_flow_fingerprint="fp-unknown-skip",
+        proposer=boom,
+    )
+    assert called is False
+    assert result.status == "needs_clarification"
+    assert result.clarification_questions
+
+
+def test_again_update_is_not_a_sequence_connector() -> None:
+    spec = _live_sale_order_spec()
+    request = SkillGenerationRequest(
+        title="销售订单操作",
+        business_description="取消审核销售订单后重新更新",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, LIVE_SALE_ORDER_IDS, "fp-again")
+    checked = validate_skill_plan(
+        plan, spec, verified_capability_ids=LIVE_SALE_ORDER_IDS, expected_fingerprint="fp-again",
+    )
+    assert checked.ok, checked.errors + checked.clarifications
+    assert not any(branch.branch_id.startswith("desc_order") for branch in plan.intent_branches)
+    assert not any(branch.unresolved for branch in plan.intent_branches)

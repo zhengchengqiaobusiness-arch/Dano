@@ -1443,11 +1443,12 @@ def test_long_input_forms_get_toc_or_split() -> None:
         "input_schema": {"type": "object", "properties": properties, "required": list(properties)},
     }]
     text, extras = _input_forms_bundle(plans)
-    assert extras
-    rel = next(iter(extras))
-    assert rel.startswith("forms/")
-    assert f"references/{rel}" in text
-    assert "## 目录" in text or "forms/" in text
+    assert extras == {}
+    assert "field_0" in text
+    assert "新建销售订单" in text
+    assert "forms/" not in text
+    if text.count("\n") >= 100:
+        assert "## 目录" in text
 
 
 @pytest.mark.asyncio

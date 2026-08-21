@@ -38,6 +38,7 @@ from dano.onboarding.skill_generation.models import (
     UnusedCapability,
 )
 from dano.onboarding.skill_generation.validate import (
+    PlanValidation,
     handbook_text_is_banned,
     is_stock_playbook,
     validate_skill_plan,
@@ -1220,6 +1221,23 @@ async def generate_skill_plan(
             for route in fallback.routes
         ],
     )
+    fallback_checked = validate_skill_plan(
+        fallback,
+        spec,
+        verified_capability_ids=verified_capability_ids,
+        expected_fingerprint=source_flow_fingerprint,
+    )
+    if not fallback_checked.ok:
+        _log_plan(
+            "skill.plan.validation_failed",
+            summary="确定性规划未通过，不再调用模型润色或修复",
+            status="warning",
+            level="warning",
+            errors=list(fallback_checked.errors),
+            clarifications=list(fallback_checked.clarifications),
+        )
+        return _plan_outcome(fallback, fallback_checked)
+
     if proposer is not None:
         try:
             proposed = _parse_proposed_plan(
@@ -1293,65 +1311,27 @@ async def generate_skill_plan(
         )
         return SkillGenerationResult(status="planned", plan=proposed)
 
-    _log_plan(
-        "skill.plan.validation_failed",
-        summary="规划校验未通过，尝试修复或回退",
-        status="warning",
-        level="warning",
-        used_llm=used_llm,
-        errors=list(checked.errors),
-        clarifications=list(checked.clarifications),
-    )
     if used_llm:
-        try:
-            proposed = await _llm_propose(
-                spec,
-                request,
-                verified_capability_ids,
-                source_flow_fingerprint,
-                frozen=fallback,
-                repair_errors=checked.errors + checked.clarifications,
-            )
-        except Exception as exc:  # noqa: BLE001 - one repair only, then report
-            errors.append(str(exc) or "规划修复失败")
-        else:
-            proposed = _merge_proposed_plan(fallback, _parse_proposed_plan(proposed, fallback))
-            checked = validate_skill_plan(
-                proposed,
-                spec,
-                verified_capability_ids=verified_capability_ids,
-                expected_fingerprint=source_flow_fingerprint,
-            )
-            if checked.ok:
-                _log_plan(
-                    "skill.plan.validated",
-                    summary="模型修复后规划校验通过",
-                    status="succeeded",
-                    used_llm=True,
-                    repaired=True,
-                    selected_capability_ids=list(proposed.selected_capability_ids),
-                    route_ids=[route.route_id for route in proposed.routes],
-                )
-                return SkillGenerationResult(status="planned", plan=proposed)
-
-    if used_llm:
-        fallback_checked = validate_skill_plan(
-            fallback,
-            spec,
-            verified_capability_ids=verified_capability_ids,
-            expected_fingerprint=source_flow_fingerprint,
+        _log_plan(
+            "skill.plan.llm_fallback",
+            summary="模型规划无效，已回退确定性规划",
+            status="warning",
+            level="warning",
+            errors=list(checked.errors),
+            clarifications=list(checked.clarifications),
+            selected_capability_ids=list(fallback.selected_capability_ids),
+            route_ids=[route.route_id for route in fallback.routes],
         )
-        if fallback_checked.ok:
-            _log_plan(
-                "skill.plan.llm_fallback",
-                summary="模型规划无效，已回退确定性规划",
-                status="warning",
-                level="warning",
-                selected_capability_ids=list(fallback.selected_capability_ids),
-                route_ids=[route.route_id for route in fallback.routes],
-            )
-            return SkillGenerationResult(status="planned", plan=fallback)
+        return SkillGenerationResult(status="planned", plan=fallback)
+    return _plan_outcome(proposed, checked, errors)
 
+
+def _plan_outcome(
+    plan: SkillPlan | None,
+    checked: PlanValidation,
+    extra_errors: list[str] | None = None,
+) -> SkillGenerationResult:
+    errors = list(checked.errors) + [item for item in (extra_errors or []) if item]
     if checked.clarifications and not checked.errors:
         _log_plan(
             "skill.plan.needs_clarification",
@@ -1363,7 +1343,7 @@ async def generate_skill_plan(
         )
         return SkillGenerationResult(
             status="needs_clarification",
-            plan=proposed,
+            plan=plan,
             clarification_questions=checked.clarifications,
             errors=errors,
         )
@@ -1374,22 +1354,19 @@ async def generate_skill_plan(
             status="failed",
             level="error",
             clarifications=list(checked.clarifications),
-            errors=list(checked.errors) + list(errors),
+            errors=errors,
         )
         return SkillGenerationResult(
             status="needs_clarification",
             plan=None,
             clarification_questions=checked.clarifications,
-            errors=checked.errors + errors,
+            errors=errors,
         )
     _log_plan(
         "skill.plan.failed",
         summary="规划校验失败",
         status="failed",
         level="error",
-        errors=list(checked.errors) + list(errors),
+        errors=errors,
     )
-    return SkillGenerationResult(
-        status="generation_failed",
-        errors=checked.errors + errors,
-    )
+    return SkillGenerationResult(status="generation_failed", errors=errors)
