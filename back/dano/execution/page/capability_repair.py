@@ -889,6 +889,7 @@ def _auto_confirm_ready_capabilities(
     """置信度超过 70% 的能力默认采纳，低置信能力仍可人工采纳。"""
     _normalize_capability_references(spec)
     verification_complete = bool(((spec.meta or {}).get("verification_run") or {}).get("complete"))
+    hash_targets: list[FlowCapability] = []
     for cap in spec.capabilities or []:
         if cap.confirmed:
             # Planner confirmation is automatic. Verification may append a
@@ -900,7 +901,7 @@ def _auto_confirm_ready_capabilities(
                 and not cap.locked
                 and cap.updated_by in {"planner", "repair", "agent", "system"}
             ):
-                cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
+                hash_targets.append(cap)
             continue
         if not (verification_complete or refresh_machine_owned) and float(cap.confidence or 0) <= 0.7:
             continue
@@ -908,7 +909,17 @@ def _auto_confirm_ready_capabilities(
         cap.requires_human_confirm = False
         cap.status = "confirmed"
         cap.updated_by = "planner"
-        cap.confirmation_hash = _capability_confirmation_hash(spec, cap)
+        hash_targets.append(cap)
+    if hash_targets:
+        from dano.execution.page.flow_release import prepare_flow_spec_for_publish
+
+        canonical = prepare_flow_spec_for_publish(spec)
+        for cap in hash_targets:
+            cap.confirmation_hash = _capability_confirmation_hash(
+                canonical,
+                cap,
+                prepared=True,
+            )
     return spec
 
 _PENDING_FLOW_SPEC_HELPERS = {'_apply_mechanical_field_contracts': 'dano.execution.page.flow_materialization.builder', '_attach_option_source_memberships': 'dano.execution.page.capability_refs', '_canonicalize_public_capability_identities': 'dano.execution.page.capability_orchestration', '_capability_confirmation_hash': 'dano.execution.page.capability_views', '_capability_execution_contract': 'dano.execution.page.capability_views', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_sequence_window': 'dano.execution.page.capability_refs', '_capability_step_was_removed': 'dano.execution.page.capability_contracts', '_client_redact_sensitive': 'dano.execution.page.flow_client_projection', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_normalize_generated_capability_semantics': 'dano.execution.page.capability_contracts', '_prune_empty_capabilities': 'dano.execution.page.capability_orchestration', '_query_output_mappings': 'dano.execution.page.capability_io', '_removed_capability_names': 'dano.execution.page.capability_refs', '_sanitize_capability_nodes': 'dano.execution.page.capability_nodes', '_semantic_candidate_gate': 'dano.execution.page.capability_semantic', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'append_flow_version': 'dano.execution.page.flow_spec_core.versioning', 'apply_flow_edits': 'dano.execution.page.flow_spec_core.controlled_edits', 'refresh_review_items': 'dano.execution.page.flow_materialization.review_items', 'validate_flow_spec': 'dano.execution.page.flow_spec_validate'}

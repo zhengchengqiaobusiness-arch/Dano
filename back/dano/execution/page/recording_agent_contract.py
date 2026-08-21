@@ -624,11 +624,18 @@ async def apply_recording_agent_submission(
     )
 
     range_candidate, range_changes = _apply_grounded_indexed_range_names(current)
-    range_accepted, range_gate = _semantic_candidate_gate(current, range_candidate)
-    if range_changes and range_accepted:
-        current = ensure_recorded_goal(range_candidate)
+    if range_changes:
+        range_accepted, range_gate = _semantic_candidate_gate(current, range_candidate)
+        if range_accepted:
+            current = ensure_recorded_goal(range_candidate)
+        else:
+            range_changes = []
     else:
-        range_changes = []
+        range_gate = {
+            "accepted": True,
+            "reasons": [],
+            "skipped": "no_indexed_range_changes",
+        }
 
     _normalize_capability_references(current)
     current = refresh_review_items(_sync_capability_io_schemas(current))
@@ -651,6 +658,20 @@ async def apply_recording_agent_submission(
         # deciding whether semantic Repair is needed. Otherwise every valid
         # first plan appears publish-invalid solely because its newly created
         # capabilities are still drafts, causing a redundant full model call.
+        if mode == "plan":
+            orchestration_audit = dict(
+                (current.meta or {}).get("capability_orchestration_audit") or {}
+            )
+            if "after_errors" in orchestration_audit:
+                error_count = int(orchestration_audit.get("after_errors") or 0)
+                history.append({
+                    "round": round_idx + 1,
+                    "stage": "planner",
+                    "passed": error_count == 0,
+                    "errors": error_count,
+                    "warnings": int(orchestration_audit.get("after_warnings") or 0),
+                })
+                break
         current = _auto_confirm_ready_capabilities(
             _sync_capability_io_schemas(sync_flow_spec_models(current))
         )

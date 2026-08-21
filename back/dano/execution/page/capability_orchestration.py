@@ -707,7 +707,9 @@ async def orchestrate_flow_capabilities(
     original = spec.model_copy(deep=True)
     _prune_auth_materializations(original)
     _mark_repeated_write_observations(original)
-    initial_report = validate_flow_spec(original)
+    # The baseline report is audit-only.  Projection validation preserves its
+    # structural findings without rebuilding release-only capability contracts.
+    initial_report = validate_flow_spec(original, _projection=True)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
     _repair_structural_option_bindings(current)
@@ -733,7 +735,7 @@ async def orchestrate_flow_capabilities(
     # Optimization is a boundary re-analysis over already materialized steps.
     # It may repair capability membership, but request IDs outside FlowSpec
     # remain unavailable to both deterministic and model planners.
-    scope_baseline = current.model_copy(deep=True)
+    capability_count_before = len(current.capabilities or [])
     # Do not manufacture a deterministic capability baseline here.  The
     # compiler below preserves explicit operator-owned definitions and replaces
     # every machine-owned definition from the strict plan in one pass.
@@ -748,15 +750,6 @@ async def orchestrate_flow_capabilities(
         if isinstance(previous_model.get("semantic_plan"), dict) else {}
     )
     incremental_review: dict[str, Any] = {}
-    proposal_baseline = current.model_copy(deep=True)
-    if initial_generation:
-        proposal_baseline = _repair_generated_capability_contracts(
-            proposal_baseline,
-        )
-    proposal_baseline = _ensure_external_transform_relations(
-        _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline))
-    )
-
     proposed_semantic_plan = (
         submission.get("semantic_plan") if isinstance(submission.get("semantic_plan"), dict)
         else (submission.get("plan") if isinstance(submission.get("plan"), dict) else {})
@@ -1179,7 +1172,7 @@ async def orchestrate_flow_capabilities(
             "after_errors": len(final_report.get("errors") or []),
             "after_warnings": len(final_report.get("warnings") or []),
             "boundary_reanalysis": True,
-            "capability_count_before": len(scope_baseline.capabilities or []),
+            "capability_count_before": capability_count_before,
             "capability_count_after": len(caps),
         },
     }

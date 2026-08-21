@@ -1153,6 +1153,8 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
             ):
                 old_key = param.key
                 _rename_param_public_key(current, step, param, name, actor="planner")
+                if param.key == old_key:
+                    continue
                 param.evidence.append({
                     "source": "indexed_range_structure",
                     "group": base,

@@ -448,8 +448,14 @@ def _semantic_candidate_gate(
         )
     ):
         reasons.append("wire_contract_changed")
-    before_dry = dry_run_flow_spec(before)
-    after_dry = dry_run_flow_spec(candidate)
+    # Full validation already compiles and dry-runs each prepared candidate.
+    # Reuse that exact result instead of compiling both models a second time.
+    before_dry = before_report.get("dry_run")
+    if not isinstance(before_dry, dict):
+        before_dry = dry_run_flow_spec(before)
+    after_dry = after_report.get("dry_run")
+    if not isinstance(after_dry, dict):
+        after_dry = dry_run_flow_spec(candidate)
     grounded_required_fields = {
         param.key
         for step in candidate.steps

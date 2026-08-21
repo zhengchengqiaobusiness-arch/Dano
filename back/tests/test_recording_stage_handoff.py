@@ -452,6 +452,270 @@ def test_dry_run_reuses_a_compiled_request(monkeypatch) -> None:
     assert result["ok"] is True
 
 
+def test_semantic_candidate_gate_reuses_validation_dry_run(monkeypatch) -> None:
+    from dano.execution.page.capability_semantic import _semantic_candidate_gate
+    from dano.execution.page.flow_spec import FlowSpec
+
+    reports = iter([
+        {
+            "errors": [],
+            "warnings": [],
+            "capability_validation": {},
+            "dry_run": {"ok": True, "missing_params": []},
+        },
+        {
+            "errors": [],
+            "warnings": [],
+            "capability_validation": {},
+            "dry_run": {"ok": True, "missing_params": []},
+        },
+    ])
+    monkeypatch.setattr(
+        "dano.execution.page.capability_semantic.validate_flow_spec",
+        lambda _spec: next(reports),
+    )
+
+    def _unexpected_dry_run(_spec):
+        raise AssertionError("candidate gate repeated validation dry-run")
+
+    monkeypatch.setattr(
+        "dano.execution.page.capability_semantic.dry_run_flow_spec",
+        _unexpected_dry_run,
+    )
+
+    accepted, audit = _semantic_candidate_gate(FlowSpec(), FlowSpec())
+
+    assert accepted is True
+    assert audit["before_dry_ok"] is True
+    assert audit["after_dry_ok"] is True
+
+
+async def test_plan_without_indexed_range_changes_skips_candidate_gate(monkeypatch) -> None:
+    import dano.execution.page.recording_agent_contract as contract
+    from dano.execution.page.flow_spec import FlowSpec
+
+    spec = FlowSpec(meta={"current_version": 1})
+    monkeypatch.setattr(
+        contract,
+        "_apply_grounded_indexed_range_names",
+        lambda current: (current, []),
+    )
+
+    def _unexpected_gate(*_args, **_kwargs):
+        raise AssertionError("unchanged indexed ranges ran the quality gate")
+
+    monkeypatch.setattr(contract, "_semantic_candidate_gate", _unexpected_gate)
+
+    async def _orchestrate(current, **_kwargs):
+        current.meta = {
+            **(current.meta or {}),
+            "capability_orchestration_audit": {
+                "after_errors": 0,
+                "after_warnings": 0,
+            },
+        }
+        return current
+
+    monkeypatch.setattr(contract, "orchestrate_flow_capabilities", _orchestrate)
+    monkeypatch.setattr(contract, "validate_flow_spec", lambda _spec: {
+        "passed": True,
+        "errors": [],
+        "warnings": [],
+    })
+
+    await contract.apply_recording_agent_submission(
+        spec,
+        submission={"ops": []},
+        mode="plan",
+    )
+
+
+async def test_plan_reuses_orchestration_validation_summary(monkeypatch) -> None:
+    import dano.execution.page.recording_agent_contract as contract
+    from dano.execution.page.flow_spec import FlowSpec
+
+    spec = FlowSpec(meta={"current_version": 1})
+    monkeypatch.setattr(
+        contract,
+        "_apply_grounded_indexed_range_names",
+        lambda current: (current, []),
+    )
+    monkeypatch.setattr(
+        contract,
+        "_semantic_candidate_gate",
+        lambda *_args, **_kwargs: (True, {"accepted": True, "reasons": []}),
+    )
+
+    async def _orchestrate(current, **_kwargs):
+        current.meta = {
+            **(current.meta or {}),
+            "capability_orchestration_audit": {
+                "after_errors": 0,
+                "after_warnings": 2,
+            },
+        }
+        return current
+
+    monkeypatch.setattr(contract, "orchestrate_flow_capabilities", _orchestrate)
+
+    def _unexpected_validation(_spec):
+        raise AssertionError("plan submission repeated orchestration validation")
+
+    monkeypatch.setattr(contract, "validate_flow_spec", _unexpected_validation)
+
+    updated = await contract.apply_recording_agent_submission(
+        spec,
+        submission={"ops": []},
+        mode="plan",
+    )
+
+    rounds = ((updated.meta or {}).get("recording_agent_session") or {}).get("rounds") or []
+    assert rounds == [{
+        "round": 1,
+        "stage": "planner",
+        "passed": True,
+        "errors": 0,
+        "warnings": 2,
+    }]
+
+
+def test_capability_confirmation_hashes_prepare_flow_once(monkeypatch) -> None:
+    from dano.execution.page.capability_repair import _auto_confirm_ready_capabilities
+    from dano.execution.page.flow_spec import FlowCapability, FlowSpec
+
+    spec = FlowSpec(capabilities=[
+        FlowCapability(name="query_docs", confidence=0.9),
+        FlowCapability(name="create_doc", confidence=0.9),
+        FlowCapability(name="delete_doc", confidence=0.9),
+    ])
+    prepare_calls = 0
+
+    def _prepare(current):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return current
+
+    monkeypatch.setattr(
+        "dano.execution.page.flow_release.prepare_flow_spec_for_publish",
+        _prepare,
+    )
+    hash_calls: list[tuple[str, bool]] = []
+
+    def _confirmation_hash(_spec, capability, *, prepared=False):
+        hash_calls.append((capability.name, prepared))
+        return f"hash:{capability.name}"
+
+    monkeypatch.setattr(
+        "dano.execution.page.capability_repair._capability_confirmation_hash",
+        _confirmation_hash,
+    )
+
+    updated = _auto_confirm_ready_capabilities(spec)
+
+    assert prepare_calls == 1
+    assert hash_calls == [
+        ("query_docs", True),
+        ("create_doc", True),
+        ("delete_doc", True),
+    ]
+    assert [cap.confirmation_hash for cap in updated.capabilities] == [
+        "hash:query_docs",
+        "hash:create_doc",
+        "hash:delete_doc",
+    ]
+
+
+async def test_plan_does_not_repeat_post_orchestration_sync(monkeypatch) -> None:
+    import dano.execution.page.recording_agent_contract as contract
+    from dano.execution.page.flow_spec import FlowSpec
+
+    spec = FlowSpec(meta={"current_version": 1})
+    monkeypatch.setattr(
+        contract,
+        "_apply_grounded_indexed_range_names",
+        lambda current: (current, []),
+    )
+
+    async def _orchestrate(current, **_kwargs):
+        current.meta = {
+            **(current.meta or {}),
+            "capability_orchestration_audit": {
+                "after_errors": 0,
+                "after_warnings": 0,
+            },
+        }
+        return current
+
+    monkeypatch.setattr(contract, "orchestrate_flow_capabilities", _orchestrate)
+    sync_calls = 0
+    confirm_calls = 0
+
+    def _sync(current):
+        nonlocal sync_calls
+        sync_calls += 1
+        return current
+
+    def _confirm(current):
+        nonlocal confirm_calls
+        confirm_calls += 1
+        return current
+
+    monkeypatch.setattr(contract, "sync_flow_spec_models", _sync)
+    monkeypatch.setattr(contract, "_auto_confirm_ready_capabilities", _confirm)
+
+    await contract.apply_recording_agent_submission(
+        spec,
+        submission={"ops": []},
+        mode="plan",
+    )
+
+    assert sync_calls == 1
+    assert confirm_calls == 1
+
+
+def test_grounded_indexed_range_naming_is_idempotent() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.common import (
+        _apply_grounded_indexed_range_names,
+    )
+    from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
+
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="query_docs",
+        method="GET",
+        path="/docs/page",
+        params=[
+            ParamField(
+                path="query.createTime[0]",
+                key="createTime[0]",
+                type="date",
+                category="user_param",
+                source_kind="caller_input",
+                exposed_to_user=True,
+            ),
+            ParamField(
+                path="query.createTime[1]",
+                key="createTime[1]",
+                type="date",
+                category="user_param",
+                source_kind="caller_input",
+                exposed_to_user=True,
+            ),
+        ],
+    )])
+
+    named, first_changes = _apply_grounded_indexed_range_names(spec)
+    evidence_counts = [len(param.evidence) for param in named.steps[0].params]
+    repeated, second_changes = _apply_grounded_indexed_range_names(named)
+
+    assert len(first_changes) == 2
+    assert second_changes == []
+    assert [param.key for param in repeated.steps[0].params] == [
+        "查询开始时间",
+        "查询结束时间",
+    ]
+    assert [len(param.evidence) for param in repeated.steps[0].params] == evidence_counts
+
+
 def test_semantic_plan_exact_request_ids_materialize_before_compilation() -> None:
     from dano.execution.page.flow_materialization.builder import (
         _materialize_semantic_plan_request_refs,
