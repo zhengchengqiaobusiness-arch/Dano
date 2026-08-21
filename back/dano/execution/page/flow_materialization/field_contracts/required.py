@@ -223,3 +223,18 @@ def _apply_successful_omit_optional(spec: FlowSpec) -> None:
                 continue
             param.source = {**(param.source or {}), "required_state": "optional"}
             param.required = False
+            if not any(
+                isinstance(item, dict)
+                and item.get("kind") == "successful_omit_optional"
+                and item.get("location") == location
+                and item.get("field_path") == field_path
+                and tuple(item.get("request_family") or ()) == family
+                for item in (param.evidence or [])
+            ):
+                param.evidence.append({
+                    "kind": "successful_omit_optional",
+                    "source": "captured_requests",
+                    "location": location,
+                    "field_path": field_path,
+                    "request_family": list(family),
+                })

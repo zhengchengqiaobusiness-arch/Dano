@@ -15,6 +15,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_has_manual_contract,
 )
 from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+    _editable_required_state,
     _looks_display_echo_field,
 )
 from dano.execution.page.recording_facts import (
@@ -33,16 +34,19 @@ from dano.execution.page.flow_materialization.field_contracts.record_identity im
 )
 
 
-def _mark_auto_fill_caller_override(param: ParamField, reason: str) -> None:
+def _mark_auto_fill_caller_override(
+    param: ParamField, reason: str, *, refresh_required: bool,
+) -> None:
+    required_state = _editable_required_state(param) if refresh_required else "optional"
     param.category = "user_param"
     param.exposed_to_user = True
     param.editable = True
-    param.required = False
+    param.required = required_state == "required"
     param.need_human_confirm = False
     param.source = {
         **(param.source or {}),
         "allow_caller_override": True,
-        "required_state": "optional",
+        "required_state": required_state,
     }
     if reason and "可修改" not in (param.reason or ""):
         param.reason = f"{param.reason}；{reason}" if param.reason else reason
@@ -83,7 +87,10 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                     or not strict_edit_evidence
                 )
             ):
-                _mark_auto_fill_caller_override(param, "所选记录自动带入，页面允许修改")
+                _mark_auto_fill_caller_override(
+                    param, "所选记录自动带入，页面允许修改",
+                    refresh_required=strict_edit_evidence,
+                )
                 continue
             if _looks_display_echo_field(step, param) and not _param_has_editable_control_evidence(param):
                 continue
@@ -91,7 +98,10 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                 param.source_kind == "computed"
                 and _param_has_editable_control_evidence(param)
             ):
-                _mark_auto_fill_caller_override(param, "页面自动计算，但仍允许调用方修改")
+                _mark_auto_fill_caller_override(
+                    param, "页面自动计算，但仍允许调用方修改",
+                    refresh_required=strict_edit_evidence,
+                )
 
 
 def _query_range_index(path: str) -> tuple[str, int] | None:

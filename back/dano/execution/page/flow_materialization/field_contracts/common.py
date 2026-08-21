@@ -761,8 +761,16 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 if not _param_field_manually_edited(param, "reason"):
                     param.reason = _strip_option_descriptions(param.reason)
             else:
-                if not _param_axis_manually_edited(
-                    param, "category", "exposed_to_user", "editable",
+                if (
+                    not _param_axis_manually_edited(
+                        param, "category", "exposed_to_user", "editable",
+                    )
+                    and param.category not in {"runtime_var", "system_const"}
+                    and param.source_kind != "selected_option_field"
+                    and not (
+                        param.source_kind == "previous_response"
+                        and (param.source or {}).get("allow_caller_override") is False
+                    )
                 ):
                     param.category = "user_param"
                     param.exposed_to_user = True

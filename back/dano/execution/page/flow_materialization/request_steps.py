@@ -27,6 +27,7 @@ from dano.execution.page.request_capture import (
     extract_auth_headers,
     flatten_body,
     infer_success_rule,
+    _option_source_tokens,
     page_enum_selects,
     suggest_assignee_names,
     suggest_identity,
@@ -56,6 +57,9 @@ from dano.execution.page.recording_facts import (
 from dano.execution.page.flow_materialization.titles import (
     _default_step_name,
     _select_name_for_step,
+)
+from dano.execution.page.flow_materialization.field_contracts.common import (
+    _param_group_prefix,
 )
 
 
@@ -91,6 +95,9 @@ def _detect_composite_entity_selects(
             matches: list[tuple[dict, str]] = []
             for field in fields:
                 target_path = str(field.get("path") or "")
+                target_leaf = re.sub(
+                    r"[^a-z0-9]+", "", target_path.split(".")[-1].casefold(),
+                )
                 control_kind = str(field.get("control_kind") or "").lower()
                 if not target_path or target_path in claimed:
                     continue
@@ -111,6 +118,14 @@ def _detect_composite_entity_selects(
                     and (
                         _projection_path_score(source_path, target_path) >= 75
                         or (
+                            re.sub(
+                                r"[^a-z0-9]+", "",
+                                source_path.split(".")[-1].casefold(),
+                            ) == "id"
+                            and target_leaf.endswith("id")
+                            and _projection_path_score(source_path, target_path) >= 40
+                        )
+                        or (
                             str(raw).strip().casefold() not in _BORING_COMPOSITE_VALUES
                             and _projection_path_score(source_path, target_path) >= 50
                         )
@@ -125,20 +140,63 @@ def _detect_composite_entity_selects(
         if len(row_hits) != 1:
             continue
         selected, matches = row_hits[0]
-        chooser = next(
-            (
-                (field, source_path)
-                for field, source_path in matches
-                if _is_idlike(str(field.get("path") or field.get("key") or "").split(".")[-1])
+        chooser_candidates = [
+            (field, source_path)
+            for field, source_path in matches
+            if _is_idlike(str(field.get("path") or field.get("key") or "").split(".")[-1])
+        ]
+        chooser = max(
+            chooser_candidates,
+            key=lambda pair: (
+                re.sub(
+                    r"[^a-z0-9]+", "", pair[1].split(".")[-1].casefold(),
+                ) == "id",
+                re.sub(
+                    r"[^a-z0-9]+", "",
+                    str(pair[0].get("path") or pair[0].get("key") or "")
+                    .split(".")[-1].casefold(),
+                ).endswith("id"),
+                _projection_path_score(
+                    pair[1], str(pair[0].get("path") or pair[0].get("key") or ""),
+                ),
             ),
-            None,
+            default=None,
         )
         if chooser is None:
             continue
         chooser_field, value_key = chooser
         chooser_path = str(chooser_field.get("path") or "")
+        chooser_group = _param_group_prefix(chooser_path)
+        matches = [
+            (field, source_path)
+            for field, source_path in matches
+            if _param_group_prefix(str(field.get("path") or "")) == chooser_group
+        ]
+        # Two facts from another form section or repeating row must not make a
+        # chooser in this group look proven. Keep selection and all projected
+        # siblings inside one structural request group.
+        if len(matches) < 2:
+            continue
         label_key = _pick_label_key(selected, value_key.split(".")[-1] if "." in value_key else value_key)
         if not label_key:
+            continue
+        def entity_stem(path: str) -> str:
+            leaf = re.sub(r"[^a-z0-9]+", "", path.split(".")[-1].casefold())
+            for suffix in ("displayname", "name", "title", "label", "text", "id", "ids", "ref", "code"):
+                if leaf.endswith(suffix) and len(leaf) > len(suffix):
+                    return leaf[: -len(suffix)]
+            return leaf
+
+        chooser_stem = entity_stem(chooser_path)
+        source_semantic_match = bool(
+            _option_source_tokens(chooser_path) & _option_source_tokens(source_url)
+        )
+        display_echo_match = any(
+            source_path.split(".")[-1] == label_key
+            and entity_stem(str(field.get("path") or "")) == chooser_stem
+            for field, source_path in matches
+        )
+        if not source_semantic_match and not display_echo_match:
             continue
         records = []
         option_map: dict[str, Any] = {}

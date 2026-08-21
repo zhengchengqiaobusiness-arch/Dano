@@ -11,7 +11,9 @@ from dano.execution.page.flow_materialization.field_contracts.caller_ownership i
     _param_has_editable_control_evidence,
 )
 from dano.execution.page.flow_spec import to_flow_spec
-from dano.execution.page.flow_spec_core.models import FlowLink, FlowSpec, FlowStep, ParamField
+from dano.execution.page.flow_spec_core.models import (
+    FlowLink, FlowSpec, FlowStep, ParamField, SelectBinding,
+)
 
 
 PAGE = {
@@ -178,6 +180,60 @@ def test_capability_input_schema_preserves_required_optional_unknown_states() ->
     assert schema["properties"]["mustSupply"]["x-dano-required-state"] == "required"
     assert schema["properties"]["maySupply"]["x-dano-required-state"] == "optional"
     assert schema["properties"]["notObserved"]["x-dano-required-state"] == "unknown"
+
+
+def test_enum_sync_preserves_system_owned_hydrated_field() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.common import (
+        _audit_step_param_contracts,
+    )
+    from dano.execution.page.flow_materialization.field_contracts.option_sync import (
+        _sync_step_option_contracts,
+    )
+
+    status = ParamField(
+        path="status", key="status", type="enum", wire_type="number",
+        value=10, enum_options=["Draft", "Approved"],
+        enum_value_map={"Draft": 10, "Approved": 20},
+        category="runtime_var", source_kind="previous_response",
+        source={
+            "kind": "previous_response", "link_id": "link_detail",
+            "response_path": "data.status", "allow_caller_override": False,
+            "option_source": {"kind": "api_option", "source_url": "/status/options"},
+            "required_state": "optional",
+        },
+        exposed_to_user=False, editable=False,
+    )
+    step = FlowStep(
+        step_id="step_update", method="PUT", path="/entities/update",
+        params=[status], selects=[SelectBinding(
+            path="status", id_path="status", source_url="/status/options",
+            value_key="value", label_key="label",
+            options=[{"label": "Draft", "value": 10},
+                     {"label": "Approved", "value": 20}],
+            option_map={"Draft": 10, "Approved": 20}, enum_confirmed=True,
+        )],
+    )
+    spec = FlowSpec(steps=[step])
+    step = spec.steps[0]
+    status = step.params[0]
+    status.category = "runtime_var"
+    status.source_kind = "previous_response"
+    status.source = {
+        "kind": "previous_response", "link_id": "link_detail",
+        "response_path": "data.status", "allow_caller_override": False,
+        "option_source": {"kind": "api_option", "source_url": "/status/options"},
+        "required_state": "optional",
+    }
+    status.exposed_to_user = False
+    status.editable = False
+
+    _sync_step_option_contracts(spec, step)
+    _audit_step_param_contracts(step)
+
+    assert status.source_kind == "previous_response"
+    assert status.category == "runtime_var"
+    assert not _param_exposed_to_caller(status)
+    assert (status.source or {}).get("allow_caller_override") is False
 
 
 def test_readonly_inner_input_of_select_remains_caller_editable_enum() -> None:
@@ -1323,6 +1379,468 @@ def test_create_form_projects_option_row_and_computes_line_total() -> None:
     chooser = _param(create, "items[0].productId")
     assert chooser.source_kind != "unknown"
     assert _param_exposed_to_caller(chooser) or chooser.source_kind in {"form_option", "user_input", "api_option"}
+
+
+def test_option_projection_uses_unique_same_value_only_after_structural_match_fails() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.option_projection import (
+        _best_option_projection_path,
+    )
+
+    row = {"opaqueId": 7, "displayText": "Alpha", "defaultRate": 37, "otherRate": 12}
+    assert _best_option_projection_path(row, "lines[0].unitCost", 37) == "defaultRate"
+    assert _best_option_projection_path(
+        {**row, "avatar": ""}, "fileUrl", "",
+    ) == ""
+    assert _best_option_projection_path(
+        {**row, "otherRate": 37}, "lines[0].unitCost", 37,
+    ) == ""
+
+
+def test_reprocess_restores_untouched_option_derived_scalar_after_stale_user_input() -> None:
+    from dano.execution.page.flow_materialization.builder import sync_flow_spec_models
+
+    source_url = "http://example.test/api/reference/simple-list"
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_options", method="GET", url=source_url, sequence=1,
+                role="read_option", response={"data": [
+                    {"opaqueId": 7, "displayText": "Alpha", "unitName": "Piece",
+                     "itemCode": "A", "defaultRate": 37},
+                    {"opaqueId": 8, "displayText": "Beta", "unitName": "Piece",
+                     "itemCode": "A", "defaultRate": 42},
+                    {"opaqueId": 9, "displayText": "Gamma", "unitName": "Piece",
+                     "itemCode": "A", "defaultRate": 43},
+                ]},
+            ),
+            _req(
+                "req_create", method="POST", url="http://example.test/api/entity/create",
+                sequence=2, role="business_write", action="act_create",
+                body={
+                    "choiceRef": 7, "unitName": "Piece", "itemCode": "A",
+                    "unitCost": 37, "quantity": 2,
+                },
+            ),
+        ],
+        reads=[{
+            "request_id": "req_options", "method": "GET", "url": source_url,
+            "json": [
+                {"opaqueId": 7, "displayText": "Alpha", "unitName": "Piece",
+                 "itemCode": "A", "defaultRate": 37},
+                {"opaqueId": 8, "displayText": "Beta", "unitName": "Piece",
+                 "itemCode": "A", "defaultRate": 42},
+                {"opaqueId": 9, "displayText": "Gamma", "unitName": "Piece",
+                 "itemCode": "A", "defaultRate": 43},
+            ],
+            "role": "explicit_read_option", "page_id": "page_1", "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=[
+            _control(
+                label="Choice", aliases=["choiceRef"], kind="select", value="Alpha",
+                request_id="req_create", path="body.choiceRef", in_dialog=True,
+                source_url=source_url,
+            ),
+            {
+                **_control(
+                    label="Unit cost", aliases=["unitCost"], kind="number", value="37",
+                    request_id="req_create", path="body.unitCost", in_dialog=True,
+                ),
+                "required_observed": None,
+                "required_state": "unknown",
+                "required": False,
+                "op": "snapshot",
+            },
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+    target = _param(_step_by_suffix(spec, "/entity/create"), "unitCost")
+    target.source_kind = "user_input"
+    target.source = {"kind": "user_input", "path": target.path, "required_state": "optional"}
+    target.category = "user_param"
+    target.exposed_to_user = True
+    target.editable = True
+
+    sync_flow_spec_models(spec)
+
+    assert target.source_kind == "selected_option_field"
+    assert (target.source or {}).get("response_path") == "defaultRate"
+    assert (target.source or {}).get("allow_caller_override") is True
+    assert (target.source or {}).get("required_state") == "unknown"
+
+
+def test_option_source_does_not_use_generic_response_row_keys_as_control_ownership() -> None:
+    product_url = "http://example.test/api/products/simple-list"
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_products", method="GET", url=product_url, sequence=1,
+                role="read_option", response={"data": [
+                    {"id": 7, "name": "Alpha", "status": 0},
+                    {"id": 8, "name": "Beta", "status": 1},
+                ]},
+            ),
+            _req(
+                "req_create", method="POST", url="http://example.test/api/entity/create",
+                sequence=2, role="business_write", action="act_create",
+                body={"status": 0, "memo": "x"},
+            ),
+        ],
+        reads=[{
+            "request_id": "req_products", "method": "GET", "url": product_url,
+            "json": [{"id": 7, "name": "Alpha", "status": 0},
+                     {"id": 8, "name": "Beta", "status": 1}],
+            "role": "explicit_read_option", "page_id": "page_1", "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=[
+            _control(
+                label="Status", aliases=["status"], kind="select", value="Draft",
+                request_id="req_create", path="body.status", in_dialog=True,
+            ),
+        ],
+        page_enum_options={
+            "Status": {
+                "field_key": "Status", "field_aliases": ["status"],
+                "control_kind": "select", "options": [
+                    {"label": "Draft", "value": 0}, {"label": "Published", "value": 1},
+                ],
+                "enum_source": "dom", "mapping_complete": True,
+                "page_id": "page_1", "frame_id": "frame_1", "page_context": PAGE,
+            },
+        },
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+
+    status = _param(_step_by_suffix(spec, "/entity/create"), "status")
+    assert status.source_kind == "page_enum"
+    assert (status.source or {}).get("source_url") != product_url
+
+
+def test_selected_row_projection_stays_in_the_group_owned_by_its_chooser() -> None:
+    product_url = "http://example.test/api/products/simple-list"
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_products", method="GET", url=product_url, sequence=1,
+                role="read_option", response={"data": [
+                    {"id": 7, "name": "Alpha", "salePrice": 20, "policyCode": 5},
+                    {"id": 8, "name": "Beta", "salePrice": 30, "policyCode": 6},
+                ]},
+            ),
+            _req(
+                "req_create", method="POST", url="http://example.test/api/orders/create",
+                sequence=2, role="business_write", action="act_create",
+                body={
+                    "status": 20, "policyCode": 5,
+                    "line": {"productId": 7, "productName": "Alpha"},
+                },
+            ),
+        ],
+        reads=[{
+            "request_id": "req_products", "method": "GET", "url": product_url,
+            "json": [
+                {"id": 7, "name": "Alpha", "salePrice": 20, "policyCode": 5},
+                {"id": 8, "name": "Beta", "salePrice": 30, "policyCode": 6},
+            ],
+            "role": "explicit_read_option", "page_id": "page_1", "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=[
+            _control(
+                label="Product", aliases=["productId"], kind="select", value="Alpha",
+                request_id="req_create", path="body.line.productId", in_dialog=True,
+                source_url=product_url,
+            ),
+        ],
+        page_events=[{"event_id": "ev_create", "kind": "click", "action_id": "act_create"}],
+        page_context=PAGE,
+    )
+
+    create = _step_by_suffix(spec, "/orders/create")
+    assert _param(create, "status").source_kind != "selected_option_field"
+    assert _param(create, "policyCode").source_kind != "selected_option_field"
+    assert _param(create, "line.productName").source_kind == "selected_option_field"
+
+
+def test_query_unbound_selects_recover_enum_origin_and_unknown_required_state() -> None:
+    source_url = "http://example.test/api/reference/simple-list"
+    common = {
+        "control_kind": "select", "value": "", "editable": True,
+        "disabled": False, "read_only": True, "required_observed": None,
+        "binding_status": "unbound", "surface": "page", "in_dialog": False,
+        "form_root": "generic filters", "page_id": "page_1", "frame_id": "frame_1",
+        "page_context": PAGE,
+    }
+    fields = [
+        {**common, "label": "Known A", "field_aliases": ["knownA"], "form_index": 1},
+        {**common, "label": "Known B", "field_aliases": ["knownB"], "form_index": 2},
+        {**common, "label": "Owner", "field_aliases": [], "form_index": 3},
+        {**common, "label": "First mode", "field_aliases": [], "form_index": 4},
+        {**common, "label": "Second mode", "field_aliases": [], "form_index": 5},
+    ]
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_options", method="GET", url=source_url, sequence=1,
+                role="read_option", response={"data": [
+                    {"opaqueId": 7, "displayText": "Alpha"},
+                    {"opaqueId": 8, "displayText": "Beta"},
+                ]},
+            ),
+            _req(
+                "req_filter", method="GET",
+                url=("http://example.test/api/entities/page?knownA=a&knownB=b"
+                     "&ownerRef=7&opaqueOne=0&opaqueTwo=0"),
+                sequence=2, role="business_get", action="act_filter",
+                response={"data": {"list": []}},
+            ),
+        ],
+        reads=[{
+            "request_id": "req_options", "method": "GET", "url": source_url,
+            "json": [
+                {"opaqueId": 7, "displayText": "Alpha"},
+                {"opaqueId": 8, "displayText": "Beta"},
+            ],
+            "role": "explicit_read_option", "page_id": "page_1", "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=fields,
+        page_enum_options={
+            "Owner": {**common, "field_key": "Owner", "field_aliases": [],
+                      "options": [{"label": "Alpha"}, {"label": "Beta"}],
+                      "mapping_complete": False},
+            "First mode": {**common, "field_key": "First mode", "field_aliases": [],
+                           "options": [{"label": "Off"}, {"label": "On"}],
+                           "mapping_complete": False},
+            "Second mode": {**common, "field_key": "Second mode", "field_aliases": [],
+                            "options": [{"label": "Low"}, {"label": "High"}],
+                            "mapping_complete": False},
+        },
+        page_events=[{"event_id": "ev_filter", "kind": "click", "action_id": "act_filter"}],
+        page_context=PAGE,
+    )
+    query = _step_by_suffix(spec, "/entities/page")
+    owner = _param(query, "query.ownerRef")
+    first = _param(query, "query.opaqueOne")
+    second = _param(query, "query.opaqueTwo")
+
+    assert owner.label == "Owner"
+    assert owner.type == "enum"
+    assert owner.source_kind == "api_option"
+    assert (owner.source or {}).get("required_state") == "unknown"
+    for field, label in ((first, "First mode"), (second, "Second mode")):
+        assert field.label == label
+        assert field.type == "enum"
+        assert field.source_kind == "page_enum"
+        assert (field.source or {}).get("required_state") == "unknown"
+
+
+def test_edit_option_control_is_caller_override_and_required_by_exact_candidate_set() -> None:
+    option_url = "http://example.test/api/reference/simple-list"
+    options = [
+        {"code": 9, "title": "Red team"},
+        {"code": 12, "title": "Blue team"},
+    ]
+    spec = to_flow_spec(
+        captured_requests=[
+            _req(
+                "req_options", method="GET", url=option_url, sequence=1,
+                role="read_option", response={"code": 0, "data": options},
+            ),
+            _req(
+                "req_detail", method="GET", url="http://example.test/api/entity/get?id=41",
+                sequence=2, role="business_get", action="act_edit",
+                response={"code": 0, "data": {"id": 41, "opaqueRef": 9, "memo": "x"}},
+            ),
+            _req(
+                "req_update", method="PUT", url="http://example.test/api/entity/update",
+                sequence=3, role="business_write", action="act_edit",
+                body={"id": 41, "opaqueRef": 9, "memo": "x"},
+            ),
+        ],
+        reads=[{
+            "request_id": "req_options",
+            "method": "GET",
+            "url": option_url,
+            "json": options,
+            "role": "explicit_read_option",
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+        }],
+        field_evidence=[
+            _control(
+                label="Memo", aliases=["memo"], kind="text", value="x",
+                request_id="req_update", path="body.memo", in_dialog=True,
+            ),
+            {
+                "label": "Responsible party",
+                "field": "Responsible party",
+                "field_aliases": [],
+                "control_kind": "select",
+                "value": "",
+                "required": True,
+                "required_state": "required",
+                "required_observed": True,
+                "binding_status": "unbound",
+                "editable": True,
+                "disabled": False,
+                "read_only": True,
+                "in_dialog": True,
+                "surface": "dialog",
+                "form_root": "generic editor",
+                "form_index": 1,
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+            },
+        ],
+        page_enum_options={
+            "Responsible party": {
+                "field_key": "Responsible party",
+                "field_aliases": [],
+                "control_kind": "select",
+                "options": [{"label": "Red team"}, {"label": "Blue team"}],
+                "enum_source": "dom",
+                "mapping_complete": False,
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "page_context": PAGE,
+            },
+        },
+        page_events=[{"event_id": "ev_edit", "kind": "click", "action_id": "act_edit"}],
+        page_context=PAGE,
+    )
+
+    ref = _param(_step_by_suffix(spec, "/entity/update"), "opaqueRef")
+    assert ref.source_kind == "previous_response"
+    assert (ref.source or {}).get("option_source", {}).get("source_url") == option_url
+    assert (ref.source or {}).get("allow_caller_override") is True
+    assert _param_exposed_to_caller(ref)
+    assert ref.required is True
+    assert (ref.source or {}).get("required_state") == "required"
+
+
+def test_edit_single_remaining_chooser_uses_anchored_form_elimination() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+        _apply_edit_form_field_contracts,
+        _reconcile_unbound_editable_controls,
+    )
+    from dano.execution.page.flow_spec_core.models import RequestFacts
+
+    controls = [
+        {
+            "label": "Memo", "control_kind": "text", "binding_status": "bound",
+            "request_id": "req_update", "wire_path": "body.memo",
+            "field_identity_id": "memo-control", "form_root": "editor",
+            "in_dialog": True, "editable": True, "disabled": False,
+            "page_id": "page_1", "frame_id": "frame_1",
+        },
+        {
+            "label": "Due", "control_kind": "date", "binding_status": "bound",
+            "request_id": "req_update", "wire_path": "body.due",
+            "field_identity_id": "due-control", "form_root": "editor",
+            "in_dialog": True, "editable": True, "disabled": False,
+            "page_id": "page_1", "frame_id": "frame_1",
+        },
+        {
+            "label": "Settlement account", "control_kind": "select",
+            "binding_status": "unbound", "field_identity_id": "account-control",
+            "form_root": "editor", "in_dialog": True, "editable": True,
+            "disabled": False, "read_only": False, "required_observed": True,
+            "page_id": "page_1", "frame_id": "frame_1",
+        },
+    ]
+    account = ParamField(
+        path="accountRef", key="accountRef", label="accountRef", value=2,
+        type="enum", category="runtime_var", source_kind="previous_response",
+        source={"kind": "previous_response", "response_path": "data.accountRef"},
+        enum_options=[{"label": "Primary", "value": 2}, {"label": "Reserve", "value": 5}],
+        exposed_to_user=False, editable=False,
+    )
+    step = FlowStep(
+        step_id="update", name="PUT_update", method="PUT", path="/entities/update",
+        params=[
+            ParamField(path="id", key="id", value=41),
+            ParamField(
+                path="memo", key="memo", value="x",
+                source_kind="previous_response", source={"kind": "previous_response"},
+            ),
+            ParamField(
+                path="due", key="due", value="2026-01-01",
+                source_kind="previous_response", source={"kind": "previous_response"},
+            ),
+            account,
+        ],
+        source_meta={"request_id": "req_update", "page_id": "page_1", "frame_id": "frame_1"},
+    )
+    spec = FlowSpec(
+        steps=[step], request_facts=RequestFacts(field_evidence=controls),
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    # The public FlowSpec facade may run the mechanical pass during model
+    # construction; an explicit replay must therefore be idempotent.
+    _reconcile_unbound_editable_controls(spec)
+    _apply_edit_form_field_contracts(spec)
+    assert account.label == "Settlement account"
+    assert account.exposed_to_user is True
+    assert account.editable is True
+    assert account.required is True
+    assert (account.source or {}).get("required_state") == "required"
+
+
+def test_selected_row_projection_rejects_control_from_another_form_group() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+        _restore_selected_option_projections,
+    )
+
+    selector = ParamField(
+        path="items[0].productId", key="productId", label="Product", value=4,
+        type="enum", source_kind="previous_response",
+        source={"kind": "previous_response"},
+        evidence=[{
+            "kind": "page_control", "field_identity_id": "product-control",
+            "form_root": "line-editor", "row_index": 0,
+        }],
+    )
+    projected = ParamField(
+        path="items[0].unitId", key="unitId", label="Customer", value=3,
+        type="enum", category="user_param", source_kind="selected_option_field",
+        source={"kind": "selected_option_field"}, exposed_to_user=True,
+        editable=True, required=True,
+        evidence=[
+            {
+                "kind": "page_control", "field_identity_id": "customer-control",
+                "evidence_id": "customer-evidence", "form_root": "header-editor",
+                "row_index": None, "required_observed": True,
+            },
+            {"kind": "page_required", "evidence_id": "customer-evidence"},
+        ],
+    )
+    step = FlowStep(
+        step_id="update", name="PUT_update", method="PUT", path="/entities/update",
+        params=[selector, projected],
+        selects=[SelectBinding(
+            param="productId", path="items[0].productId",
+            source_url="http://example.test/api/products",
+            source_request_id="req_products", value_key="id", label_key="name",
+            field_projections={"items[0].unitId": "unitId"},
+        )],
+    )
+    spec = FlowSpec(steps=[step], meta={"stage_1_6_contract_version": 2})
+
+    _restore_selected_option_projections(spec)
+    assert projected.source_kind == "selected_option_field"
+    assert projected.category == "runtime_var"
+    assert projected.exposed_to_user is False
+    assert projected.editable is False
+    assert projected.required is False
+    assert projected.label == "unitId"
+    assert not _param_has_editable_control_evidence(projected)
 
 
 def test_create_capability_keeps_repeating_rows_as_array_objects() -> None:

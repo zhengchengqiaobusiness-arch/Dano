@@ -58,6 +58,7 @@ from dano.execution.page.flow_materialization.field_contracts.create_form import
 )
 from dano.execution.page.flow_materialization.field_contracts.edit_form import (
     _apply_edit_form_field_contracts,
+    _reconcile_unbound_editable_controls,
     _repair_readonly_control_defaults,
 )
 from dano.execution.page.flow_materialization.field_contracts.page_rules import (
@@ -482,15 +483,28 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
         _repair_structural_option_bindings(spec)
         _apply_mechanical_field_contracts(spec)
         _materialize_dynamic_array_inputs(spec)
+    elif int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2:
+        # Reprocessing a stable semantic plan must still pick up newer Stage
+        # 2/5 evidence rules. Mechanical passes preserve manual contracts and
+        # do not add or remove capabilities.
+        _repair_structural_option_bindings(spec)
+        _apply_mechanical_field_contracts(spec)
+        _materialize_dynamic_array_inputs(spec)
     _apply_query_form_field_contracts(spec)
     _repair_readonly_control_defaults(spec)
     page_enum_changed = _ground_saved_page_enums(spec)
     # Saved drafts may already have a stable semantic capability plan while
-    # their field contracts still predate newer recorder evidence rules. If
-    # immutable page facts repaired an enum projection, finish its structural
-    # API-source binding without rewriting already-stable field contracts.
+    # their field contracts still predate newer recorder evidence rules. Enum
+    # grounding can create a new projected field after the first mechanical
+    # pass, so run the complete field-contract pass again. Otherwise the new
+    # projection keeps its default ownership/requiredness instead of inheriting
+    # the editable-control evidence that caused the projection.
     if page_enum_changed:
-        _repair_structural_option_bindings(spec)
+        if int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2:
+            _apply_mechanical_field_contracts(spec)
+            _materialize_dynamic_array_inputs(spec)
+        else:
+            _repair_structural_option_bindings(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
     for step in spec.steps:
@@ -660,10 +674,12 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
     # the complete saved evidence set.
     from dano.execution.page.recording_field_evidence import (
         _associate_unsubmitted_file_controls,
+        _associate_unique_remaining_form_order,
     )
 
     if requests:
         _associate_unsubmitted_file_controls(rebound, requests)
+        _associate_unique_remaining_form_order(rebound, requests)
     spec.request_facts.field_evidence = rebound
     for step in spec.steps:
         request_id = str((step.source_meta or {}).get("request_id") or "")
@@ -679,16 +695,35 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
             control = select_field_contract_evidence(matches, wire_path)
             if control is None:
                 continue
-            if any(
+            existing_control = next((
                 isinstance(item, dict)
                 and item.get("kind") == "page_control"
                 and _strip_body_prefix(str(item.get("request_path") or param.path))
                 == _strip_body_prefix(str(param.path))
+                and str(item.get("control_kind") or "").lower()
+                == str(control.get("control_kind") or "").lower()
+                and item
                 for item in (param.evidence or [])
-            ):
+            ), None)
+            if isinstance(existing_control, dict):
                 # This evidence was already projected when the spec was first
-                # materialized. Reanalysis must be idempotent; only fill the
-                # historical gap where bound facts never reached the Param.
+                # materialized. Refresh fields that older projections omitted;
+                # do not append another copy on every reanalysis.
+                updates = {
+                    "editable": bool(control.get("editable")),
+                    "disabled": bool(control.get("disabled")),
+                    "read_only": bool(control.get("read_only")),
+                }
+                modern_contract = int(
+                    (spec.meta or {}).get("stage_1_6_contract_version") or 0
+                ) >= 2
+                if modern_contract and "required_observed" in control:
+                    updates["required"] = control.get("required_observed") is True
+                    updates["required_observed"] = control.get("required_observed")
+                for key in ("evidence_id", "occurrence_id", "field_identity_id"):
+                    if modern_contract and control.get(key):
+                        updates[key] = str(control[key])
+                existing_control.update(updates)
                 continue
             label = str(control.get("label") or control.get("field") or "").strip()
             if (
@@ -746,6 +781,7 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                 "field_aliases": list(control.get("field_aliases") or []),
                 "axes": list(control.get("axes") or []),
                 "required": bool(control.get("required") or control.get("required_observed")),
+                "required_observed": control.get("required_observed"),
                 "editable": bool(control.get("editable")),
                 "disabled": bool(control.get("disabled")),
                 "read_only": bool(control.get("read_only")),
@@ -1754,6 +1790,11 @@ def to_flow_spec(
 
 def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
     """Apply the same origin/ownership rules to every capability family."""
+    _reconcile_unbound_editable_controls(spec)
+    # Reconciliation may be the first point where an aliasless choice control
+    # acquires a field-local label/candidate-set identity. Re-run the existing
+    # option matcher on that stronger evidence before projecting row fields.
+    _repair_structural_option_bindings(spec, modern_only=True)
     _infer_selected_option_row_fields(spec)
     _infer_computed_runtime_fields(spec)
     _apply_create_form_field_contracts(spec)

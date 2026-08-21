@@ -257,7 +257,9 @@ def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
                     binding.source_request_id = ""
 
 
-def _repair_structural_option_bindings(spec: FlowSpec) -> int:
+def _repair_structural_option_bindings(
+    spec: FlowSpec, *, modern_only: bool = False,
+) -> int:
     """Recover grounded enum/reference bindings, including captured-only reads.
 
     Candidate selection is evidence based: an exact recorded wire value, a real
@@ -267,6 +269,11 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     Repeated captures of the same endpoint/contract are one source, not an
     ambiguity.
     """
+    if (
+        modern_only
+        and int((spec.meta or {}).get("stage_1_6_contract_version") or 0) < 2
+    ):
+        return 0
     _clear_ambiguous_automatic_option_request_ids(spec)
     candidates: list[dict[str, Any]] = []
     materialized_request_ids: set[str] = set()
@@ -519,6 +526,15 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 for alias in (evidence.get("field_aliases") or [])
                 if normalized(str(alias).split(":", 1)[-1])
             )
+        bound_control_ids = {
+            str(evidence.get(key) or "")
+            for evidence in (param.evidence or [])
+            if isinstance(evidence, dict)
+            and evidence.get("kind") == "page_control"
+            and str(evidence.get("binding_status") or "bound") == "bound"
+            for key in ("evidence_id", "field_identity_id", "occurrence_id")
+            if str(evidence.get(key) or "")
+        }
         screenshot_matches: list[dict[str, Any]] = []
         screenshot_evidence = _screenshot_control_evidence({"evidence": param.evidence})
         for evidence in [screenshot_evidence] if screenshot_evidence is not None else []:
@@ -538,6 +554,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             return screenshot_matches
         semantic_matches: list[dict[str, Any]] = []
         fallback_matches: list[dict[str, Any]] = []
+        candidate_set_matches: list[dict[str, Any]] = []
         target_meta = target.source_meta or {}
         for raw_key, raw_value in page_options.items():
             if not isinstance(raw_value, dict):
@@ -563,7 +580,21 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 semantic_matches.append(contract)
             elif value_owner_counts.get(value) == 1 and contract["selected"]:
                 fallback_matches.append(contract)
-        return semantic_matches or fallback_matches
+            elif (
+                not bool(raw.get("snapshot_truncated") or raw.get("truncated"))
+                and bool(bound_control_ids & {
+                    str(raw.get(key) or "")
+                    for key in ("evidence_id", "field_identity_id", "occurrence_id")
+                    if str(raw.get(key) or "")
+                })
+            ):
+                # No field name/selection survived, but the complete visible
+                # candidate set can still identify its source after immutable
+                # control identity proves that this enum belongs to this exact
+                # request field. The label-set equality check in row_contracts
+                # remains mandatory before this becomes a binding.
+                candidate_set_matches.append({**contract, "candidate_set_bridge": True})
+        return semantic_matches or fallback_matches or candidate_set_matches
 
     def row_contracts(
         items: list[dict[str, Any]],
@@ -747,6 +778,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             source,
         ):
             return False
+        if page_contract is not None and page_contract.get("candidate_set_bridge") is True:
+            # row_contracts runs next and accepts this bridge only when the
+            # complete DOM label set equals the candidate response label set.
+            return True
         if semantic_match or bool((page_contract or {}).get("semantic_match")):
             # Field-local page evidence identifies the control. The caller's
             # row-contract check still has to prove that this candidate API
@@ -895,10 +930,12 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                     continue
                 items = source["items"]
                 source_url = str(source.get("source_url") or "")
-                source_text = " ".join([
-                    source_url,
-                    *[str(key) for item in items[:3] for key in item.keys()],
-                ])
+                # Response rows commonly contain generic audit/status/name/id
+                # columns. Those columns describe the returned entity, not
+                # which form control owns the endpoint. Endpoint semantics or
+                # an exact field-local candidate set may bridge ownership;
+                # arbitrary row keys may not.
+                source_text = source_url
                 source_tokens = _option_binding_tokens(source_text)
                 source_families = _option_binding_semantic_families(source_text)
                 semantic_match = bool(
@@ -1097,6 +1134,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                             continue
                         response_path = _best_option_projection_path(
                             selected_row, sibling.path, sibling.value,
+                            allow_unique_value_fallback=(
+                                int((spec.meta or {}).get("stage_1_6_contract_version") or 0) >= 2
+                            ),
                         )
                         if not response_path:
                             continue

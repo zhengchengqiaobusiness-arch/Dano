@@ -27,6 +27,9 @@ from dano.execution.page.flow_materialization.field_contracts.caller_ownership i
     _param_has_editable_control_evidence,
     _param_was_caller_typed,
 )
+from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+    _editable_required_state,
+)
 from dano.execution.page.flow_materialization.field_contracts.required import (
     _param_has_local_required_marker,
 )
@@ -98,14 +101,20 @@ def _create_unknown_has_caller_evidence(param: ParamField) -> bool:
     return False
 
 
-def _mark_create_form_caller_input(param: ParamField, *, reason: str) -> None:
+def _mark_create_form_caller_input(
+    param: ParamField, *, reason: str, refresh_required: bool,
+) -> None:
     param.category = "user_param"
     param.exposed_to_user = True
     param.editable = True
     param.need_human_confirm = False
     if reason:
         param.reason = reason
-    if _param_has_local_required_marker(param):
+    if refresh_required:
+        required_state = _editable_required_state(param)
+        param.required = required_state == "required"
+        param.source = {**(param.source or {}), "required_state": required_state}
+    elif _param_has_local_required_marker(param):
         param.required = True
         param.source = {**(param.source or {}), "required_state": "required"}
     elif str((param.source or {}).get("required_state") or "") not in {"required", "optional"}:
@@ -123,6 +132,9 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
         "user_input", "form_option", "page_default", "api_option",
         "page_enum", "static_enum", "manual_enum", "caller_input",
     }
+    refresh_required = int(
+        (spec.meta or {}).get("stage_1_6_contract_version") or 0
+    ) >= 2
     for step in spec.steps or []:
         if not _step_is_create_or_submit_form(step):
             continue
@@ -134,7 +146,9 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
             if str(param.path or "").startswith("query.") and not _param_has_command_local_control(step, param):
                 continue
             if param.source_kind in caller_kinds:
-                _mark_create_form_caller_input(param, reason="")
+                _mark_create_form_caller_input(
+                    param, reason="", refresh_required=refresh_required,
+                )
                 continue
             if param.source_kind not in {"", "unknown"}:
                 continue
@@ -147,6 +161,7 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
                 _mark_create_form_caller_input(
                     param,
                     reason="新建/提交表单上由调用方选择的字段",
+                    refresh_required=refresh_required,
                 )
             else:
                 param.source_kind = "user_input"
@@ -154,6 +169,7 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
                 _mark_create_form_caller_input(
                     param,
                     reason="新建/提交表单上的手工输入，由调用方提供",
+                    refresh_required=refresh_required,
                 )
 
 

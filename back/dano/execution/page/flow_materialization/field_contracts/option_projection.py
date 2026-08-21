@@ -31,6 +31,7 @@ from dano.execution.page.recording_facts import (
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _field_has_unlocked_editable_control,
     _param_has_editable_control_evidence,
+    _param_was_caller_typed,
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_audit_system_leaf,
@@ -357,10 +358,13 @@ _BORING_COMPOSITE_VALUES = frozenset({
 
 
 def _composite_values_match(left: Any, right: Any) -> bool:
-    if _recorded_scalar_values_match(left, right):
-        return True
+    # Missing/empty values are absence, not correlation evidence. Treating two
+    # empty strings as a match can project an unrelated optional response leaf
+    # (for example an avatar URL) into an empty business request field.
     if left in (None, "") or right in (None, ""):
         return False
+    if _recorded_scalar_values_match(left, right):
+        return True
     if isinstance(left, bool) or isinstance(right, bool):
         return False
     try:
@@ -475,6 +479,7 @@ def _best_option_projection_path(
     value: Any,
     *,
     min_score: int = 75,
+    allow_unique_value_fallback: bool = True,
 ) -> str:
     candidates = [
         (_projection_path_score(source_path, target_path), source_path)
@@ -486,7 +491,18 @@ def _best_option_projection_path(
         source_path for score, source_path in candidates
         if score == best_score and score >= min_score
     ]
-    return best_paths[0] if len(best_paths) == 1 else ""
+    if len(best_paths) == 1:
+        return best_paths[0]
+    if best_paths:
+        return ""
+    if not allow_unique_value_fallback:
+        return ""
+    # Last-resort evidence tier: the captured target value occurs on exactly
+    # one scalar leaf of the already selected row. This recovers projections
+    # when frontend and backend use unrelated names without guessing from
+    # position or a vendor vocabulary. Repeated values remain unresolved.
+    same_value_paths = list(dict.fromkeys(source_path for _score, source_path in candidates))
+    return same_value_paths[0] if len(same_value_paths) == 1 else ""
 
 
 def _attach_select_field_projections(
@@ -528,12 +544,14 @@ def _attach_select_field_projections(
             continue
         selected_item = matches[0]
         excluded = {select_path, str(select.get("id_path") or "")}
+        select_group = _param_group_prefix(select_path)
         projections: dict[str, str] = {}
         for field in fields:
             target_path = str(field.get("path") or "")
             if (
                 not target_path
                 or target_path in excluded
+                or _param_group_prefix(target_path) != select_group
                 or field.get("recorded_user_input")
                 or _field_has_unlocked_editable_control(field)
                 or _param_is_quantity_or_formula_leaf(str(field.get("key") or ""), target_path)
@@ -588,20 +606,58 @@ _ENUM_SOURCE_KINDS = frozenset({
 })
 
 
-def _option_row_match_count(row: dict[str, Any], members: list[ParamField]) -> int:
+def _option_row_match_count(
+    row: dict[str, Any], members: list[ParamField], *, allow_unique_value_fallback: bool,
+) -> int:
     matched = 0
     for param in members:
         if param.value in (None, ""):
             continue
         if _param_is_quantity_or_formula_leaf(param.key, param.path):
             continue
-        if _best_option_projection_path(row, param.path, param.value):
+        if _best_option_projection_path(
+            row, param.path, param.value,
+            allow_unique_value_fallback=allow_unique_value_fallback,
+        ):
             matched += 1
     return matched
 
 
+def _group_option_source_request_ids(members: list[ParamField]) -> tuple[bool, set[str]]:
+    """Return genuine chooser ownership for one request-field group.
+
+    Selected-row projections cannot establish their own catalog ownership;
+    otherwise two coincidentally equal root fields can make an unrelated
+    catalog self-confirming. Only a chooser contract (or a hydrated chooser
+    carrying its option source) anchors projections for the group.
+    """
+    anchored = False
+    request_ids: set[str] = set()
+    for param in members:
+        source = param.source or {}
+        option_source = source.get("option_source")
+        if param.source_kind in {"api_option", "form_option"}:
+            anchored = True
+            if source.get("source_request_id"):
+                request_ids.add(str(source["source_request_id"]))
+        elif param.source_kind == "previous_response" and isinstance(option_source, dict):
+            anchored = True
+            if option_source.get("source_request_id"):
+                request_ids.add(str(option_source["source_request_id"]))
+        for item in param.evidence or []:
+            if not isinstance(item, dict) or item.get("source") != "option_source":
+                continue
+            anchored = True
+            if item.get("source_request_id"):
+                request_ids.add(str(item["source_request_id"]))
+    return anchored, request_ids
+
+
 def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
     """Project write-body siblings from the unique captured option row they share."""
+    modern_contract = int(
+        (spec.meta or {}).get("stage_1_6_contract_version") or 0
+    ) >= 2
     catalogs: list[tuple[str, list[dict[str, Any]]]] = []
     for fact in spec.request_facts.requests or []:
         analysis = spec.request_facts.analysis.get(str(fact.request_id or "")) if fact.request_id else None
@@ -640,14 +696,27 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
         for param in step.params or []:
             groups.setdefault(_param_group_prefix(param.path), []).append(param)
         for members in groups.values():
+            has_catalog_anchor, owned_request_ids = _group_option_source_request_ids(members)
+            if modern_contract and not has_catalog_anchor:
+                continue
             scored: list[tuple[int, str, dict[str, Any]]] = []
             for request_id, rows in step_catalogs:
+                if modern_contract and owned_request_ids and request_id not in owned_request_ids:
+                    continue
                 hits = [
-                    (row, _option_row_match_count(row, members))
+                    (row, _option_row_match_count(
+                        row, members,
+                        allow_unique_value_fallback=modern_contract,
+                    ))
                     for row in rows
                 ]
-                good = [(row, count) for row, count in hits if count >= 2]
-                if len(good) != 1:
+                if modern_contract:
+                    best_count = max((count for _row, count in hits), default=0)
+                    good = [(row, count) for row, count in hits if count == best_count]
+                else:
+                    good = [(row, count) for row, count in hits if count >= 2]
+                    best_count = good[0][1] if len(good) == 1 else 0
+                if best_count < 2 or len(good) != 1:
                     continue
                 row, count = good[0]
                 scored.append((count, request_id, row))
@@ -665,6 +734,12 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             projected_paths: set[str] = set()
             for sibling in members:
                 if sibling.locked or _param_has_manual_contract(sibling):
+                    continue
+                # The chooser is the input that selects the row; it cannot also
+                # be a projection from that same row. This matters for schemas
+                # whose selector is named `*Ref`, `code`, or another non-`*Id`
+                # field.
+                if modern_contract and sibling.source_kind in {"api_option", "form_option", "page_enum"}:
                     continue
                 if sibling.source_kind in {
                     "computed", "current_user", "system_time", "system_generated",
@@ -685,6 +760,7 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                         continue
                     response_path = _best_option_projection_path(
                         row, sibling.path, sibling.value, min_score=40,
+                        allow_unique_value_fallback=modern_contract,
                     )
                     if (
                         response_path
@@ -709,10 +785,16 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                 if (
                     _param_has_editable_control_evidence(sibling)
                     and not _param_control_is_readonly(sibling)
-                    and sibling.source_kind not in {"unknown", "page_default"}
+                    and (
+                        sibling.source_kind == "previous_response"
+                        or _param_was_caller_typed(sibling)
+                    )
                 ):
                     continue
-                response_path = _best_option_projection_path(row, sibling.path, sibling.value)
+                response_path = _best_option_projection_path(
+                    row, sibling.path, sibling.value,
+                    allow_unique_value_fallback=modern_contract,
+                )
                 if not response_path:
                     continue
                 selector = next(

@@ -1,9 +1,11 @@
 {
-  "note": "Frozen call order from HEAD 7e6f1509. Do not reorder during the split.",
+  "note": "Frozen Stage 1-6 mechanical field-contract call order.",
   "to_flow_spec_after_option_repair": [
     "_apply_mechanical_field_contracts"
   ],
   "apply_mechanical_field_contracts": [
+    "_reconcile_unbound_editable_controls",
+    "_repair_structural_option_bindings",
     "_infer_selected_option_row_fields",
     "_infer_computed_runtime_fields",
     "_apply_create_form_field_contracts",

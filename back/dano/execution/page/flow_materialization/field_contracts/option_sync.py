@@ -688,7 +688,16 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             param.wire_type = param.type
         if not type_owned:
             param.type = "list-enum" if binding.multi else "enum"
-        if not category_owned:
+        if param.source_kind == "selected_option_field" and not category_owned:
+            param.category = "runtime_var"
+            param.exposed_to_user = False
+            param.editable = False
+            param.required = False
+        elif (
+            not category_owned
+            and param.category not in {"runtime_var", "system_const"}
+            and param.source_kind != "selected_option_field"
+        ):
             param.category = "user_param"
             param.exposed_to_user = True
             param.editable = True
@@ -735,11 +744,14 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                 ),
             }
             if keep_hydration:
+                allow_caller_override = bool(
+                    (param.source or {}).get("allow_caller_override")
+                )
                 param.source_kind = "previous_response"
                 param.source = {
                     **dict(param.source or {}),
                     "kind": "previous_response",
-                    "allow_caller_override": True,
+                    "allow_caller_override": allow_caller_override,
                     "option_source": option_contract,
                 }
             else:

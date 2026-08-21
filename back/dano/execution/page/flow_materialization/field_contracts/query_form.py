@@ -23,6 +23,9 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_control_kinds,
     _param_has_manual_contract,
 )
+from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+    _editable_required_state,
+)
 from dano.execution.page.flow_materialization.field_contracts.required import (
     _param_has_local_required_marker,
 )
@@ -67,12 +70,18 @@ def _step_is_business_list_query(step: FlowStep) -> bool:
     )
 
 
-def _mark_query_filter_caller(param: ParamField, *, reason: str) -> None:
+def _mark_query_filter_caller(
+    param: ParamField, *, reason: str, refresh_required: bool,
+) -> None:
     param.category = "user_param"
     param.exposed_to_user = True
     param.editable = True
     param.need_human_confirm = False
-    if _param_has_local_required_marker(param):
+    if refresh_required:
+        required_state = _editable_required_state(param)
+        param.required = required_state == "required"
+        param.source = {**(param.source or {}), "required_state": required_state}
+    elif _param_has_local_required_marker(param):
         param.required = True
         param.source = {**(param.source or {}), "required_state": "required"}
     elif str((param.source or {}).get("required_state") or "") not in {"required", "optional"}:
@@ -92,6 +101,9 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
         "user_input", "form_option", "page_default", "api_option",
         "page_enum", "static_enum", "manual_enum", "caller_input",
     }
+    refresh_required = int(
+        (spec.meta or {}).get("stage_1_6_contract_version") or 0
+    ) >= 2
     for step in spec.steps or []:
         if not _step_is_business_list_query(step):
             continue
@@ -112,8 +124,14 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
             }:
                 continue
             if param.source_kind in caller_kinds:
-                if not param.exposed_to_user or param.category != "user_param":
-                    _mark_query_filter_caller(param, reason="")
+                if (
+                    refresh_required
+                    or not param.exposed_to_user
+                    or param.category != "user_param"
+                ):
+                    _mark_query_filter_caller(
+                        param, reason="", refresh_required=refresh_required,
+                    )
                 continue
             if param.source_kind not in {"", "unknown"}:
                 continue
@@ -126,6 +144,7 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 _mark_query_filter_caller(
                     param,
                     reason="查询页上由调用方选择的筛选条件",
+                    refresh_required=refresh_required,
                 )
             else:
                 param.source_kind = "user_input"
@@ -137,4 +156,5 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 _mark_query_filter_caller(
                     param,
                     reason="查询页上的业务筛选由调用方提供",
+                    refresh_required=refresh_required,
                 )
