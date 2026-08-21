@@ -847,7 +847,14 @@ def test_capability_plans_restore_flowspec_schema_without_inventing() -> None:
             "title": "修改销售订单",
             "kind": "submit",
             "compiled_step_ids": ["s3"],
-            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "accountId": {"type": "integer", "title": "结算账户"},
+                    "invented": {"type": "string"},
+                },
+                "required": ["invented"],
+            },
         }],
     }
     skill = SimpleNamespace(skill_id="oa.sale", call_metadata={}, api_request=compiled)
@@ -856,6 +863,7 @@ def test_capability_plans_restore_flowspec_schema_without_inventing() -> None:
     assert "id" in (schema.get("properties") or {})
     assert "id" in (schema.get("required") or [])
     assert "invented" not in (schema.get("properties") or {})
+    assert "accountId" not in (schema.get("properties") or {})
     assert "x-dano-derived-from-query" not in json.dumps(schema, ensure_ascii=False)
 
 
@@ -1781,6 +1789,7 @@ def test_exported_plan_mirrors_capability_contract() -> None:
                     "compiled_step_ids": ["s_update"],
                     "requires_human_confirm": True,
                     "request_refs": [
+                        {"usage": "option_source", "step_id": "s_account", "method": "GET", "path": "/accounts/simple-list"},
                         {"usage": "preflight", "step_id": "s_preflight"},
                         {"usage": "execute", "step_id": "s_update"},
                     ],
@@ -1830,6 +1839,10 @@ def test_exported_plan_mirrors_capability_contract() -> None:
     assert "no" not in update["steps"][1]["body_template"]
     assert any(
         item.get("source_url") == "http://example.test/users/simple-list"
+        for item in update["steps"][1]["selects"]
+    )
+    assert any(
+        str(item.get("source_url") or "").endswith("/accounts/simple-list")
         for item in update["steps"][1]["selects"]
     )
     options = _options_md(plans)

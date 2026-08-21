@@ -216,14 +216,16 @@ def _current_spec(body: dict[str, Any]) -> FlowSpec:
 
 
 def _stable_skill_id(body: dict[str, Any], title: str) -> str:
-    from dano.catalog.identity import public_skill_action
+    from dano.catalog.identity import is_generated_action_id, public_skill_action
 
+    subsystem = str(body.get("subsystem") or "oa").strip() or "oa"
+    recording_action = str(body.get("action") or "").strip()
+    if recording_action and is_generated_action_id(recording_action):
+        return f"{subsystem}.{recording_action}"
     existing = str(body.get("skill_id") or "").strip()
     if existing:
         return existing
-    subsystem = str(body.get("subsystem") or "oa")
-    action = public_skill_action(title, str(body.get("action") or ""))
-    return f"{subsystem}.{action}"
+    return f"{subsystem}.{public_skill_action(title, recording_action)}"
 
 
 def _used_capability_rows(spec: FlowSpec, plan: SkillPlan) -> list[dict[str, Any]]:
@@ -438,7 +440,7 @@ async def export_recording_skill(
             title=title,
         )
         raise SkillExportError(400, "业务描述不能为空")
-    if not request.preview_only and not str(request.out_dir or "").strip():
+    if not str(request.out_dir or "").strip():
         _log_export(
             "skill.export.failed",
             summary="导出目录为空，拒绝导出",
@@ -485,8 +487,7 @@ async def export_recording_skill(
         request=request,
     )
     if (
-        not request.preview_only
-        and str(body.get("skill_request_fingerprint") or "") == request_fp
+        str(body.get("skill_request_fingerprint") or "") == request_fp
         and _already_exported(body)
     ):
         plan = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else {}
@@ -529,13 +530,12 @@ async def export_recording_skill(
             idempotent=True,
         )
 
-    if not request.preview_only:
-        await _call_persist(persist, {
-            **body,
-            "skill_export_status": "generating",
-            "skill_plan_valid": False,
-            **_skill_draft_fields(request, title),
-        })
+    await _call_persist(persist, {
+        **body,
+        "skill_export_status": "generating",
+        "skill_plan_valid": False,
+        **_skill_draft_fields(request, title),
+    })
     _log_export(
         "skill.export.planning",
         summary="开始规划 Skill 路线",
@@ -583,28 +583,6 @@ async def export_recording_skill(
         )
 
     plan = planned.plan
-    if request.preview_only:
-        await _call_persist(persist, {
-            **body,
-            "skill_export_status": "previewed",
-            "skill_plan": plan.model_dump(mode="json"),
-            "skill_plan_valid": True,
-            "published": bool(body.get("published")),
-            **_skill_draft_fields(request, title),
-        })
-        return SkillExportOutcome(
-            status="previewed",
-            skill_name=str(request.title or body.get("title") or ""),
-            planning_mode=str(plan.planning_mode),
-            used_capabilities=[
-                {"capability_id": cap_id}
-                for cap_id in plan.selected_capability_ids
-            ],
-            unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
-            routes=_route_rows(plan, spec),
-            unresolved_branches=_unresolved_rows(plan),
-            plan=plan.model_dump(mode="json"),
-        )
     title = str(request.title or body.get("title") or spec.title or "").strip()
     skill_id = _stable_skill_id(body, title)
     _log_export(

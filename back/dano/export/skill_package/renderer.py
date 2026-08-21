@@ -317,7 +317,16 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
     fact_props = fact.get("properties") if isinstance(fact.get("properties"), dict) else {}
     if not fact_props and not packed_props:
         return {"type": "object", "properties": {}, "required": []}
-    properties = {**fact_props, **packed_props}
+    if fact_props:
+        properties = {}
+        for name, field in fact_props.items():
+            packed_field = packed_props.get(name)
+            if isinstance(field, dict) and isinstance(packed_field, dict):
+                properties[str(name)] = {**packed_field, **field}
+            else:
+                properties[str(name)] = field
+    else:
+        properties = dict(packed_props)
     required: list[str] = []
     for field in [*(fact.get("required") or []), *(packed.get("required") or [])]:
         name = str(field)
@@ -696,8 +705,16 @@ def _select_key(item: dict) -> tuple[str, str]:
     )
 
 
-def _merge_schema_selects(existing: list[dict], schema: dict | None) -> list[dict]:
+def _source_path(url: Any) -> str:
+    raw = str(url or "").split("?", 1)[0]
+    if raw.startswith("http"):
+        return urlparse(raw).path or raw
+    return raw
+
+
+def _merge_schema_selects(existing: list[dict], schema: dict | None, cap: dict | None = None) -> list[dict]:
     merged: list[dict] = []
+    seen_urls: set[str] = set()
     seen: set[tuple[str, str]] = set()
     for item in existing or []:
         if not isinstance(item, dict):
@@ -706,6 +723,8 @@ def _merge_schema_selects(existing: list[dict], schema: dict | None) -> list[dic
         if key in seen:
             continue
         seen.add(key)
+        if item.get("source_url"):
+            seen_urls.add(_source_path(item.get("source_url")))
         merged.append(item)
     for path, name, field in _iter_schema_fields(schema):
         binding = _option_binding(path, name, field)
@@ -716,7 +735,28 @@ def _merge_schema_selects(existing: list[dict], schema: dict | None) -> list[dic
         if key in seen or alt in seen:
             continue
         seen.add(key)
+        if binding.get("source_url"):
+            seen_urls.add(_source_path(binding.get("source_url")))
         merged.append(binding)
+    for ref in (cap or {}).get("request_refs") or []:
+        usage, _step_id = _ref_usage_and_step(ref)
+        if usage != "option_source":
+            continue
+        raw = ref if isinstance(ref, dict) else {}
+        path = str(raw.get("path") or getattr(ref, "path", "") or "")
+        method = str(raw.get("method") or getattr(ref, "method", "") or "GET").upper()
+        if not path:
+            continue
+        url = path
+        if _source_path(url) in seen_urls:
+            continue
+        seen_urls.add(_source_path(url))
+        merged.append({
+            "param": "",
+            "path": path,
+            "source_url": url,
+            "source_method": method or "GET",
+        })
     return merged
 
 
@@ -846,7 +886,6 @@ def _project_capability_step(
     links: list[dict],
     step_index: int,
 ) -> dict:
-    del cap
     projected = dict(step)
     fields = _iter_schema_fields(schema)
     linked = {
@@ -890,10 +929,15 @@ def _project_capability_step(
         for key in ("path", "url", "url_template"):
             if projected.get(key):
                 projected[key] = _strip_recorded_query(projected.get(key))
-    selects = _merge_schema_selects(list(projected.get("selects") or []), schema)
+    selects = _merge_schema_selects(list(projected.get("selects") or []), schema, cap)
+    execute_step = (
+        str(projected.get("method") or "GET").upper() not in {"GET", "HEAD"}
+        or projected.get("body_template") is not None
+    )
     projected["selects"] = [
         item for item in selects
         if _step_uses_option(projected, str(item.get("param") or ""), str(item.get("path") or item.get("id_path") or ""))
+        or (execute_step and not item.get("param") and item.get("source_url"))
     ]
     return projected
 
@@ -2172,6 +2216,9 @@ def _nested_array_field(path: str) -> tuple[str, str] | None:
 def _apply_selects(step, values, cache):
     current = dict(values)
     projections = {}
+    for binding in step.get("selects") or []:
+        if binding.get("source_url"):
+            _live_option_rows(binding, current, cache)
     for binding in step.get("selects") or []:
         param = str(binding.get("param") or "")
         nested = _nested_array_field(str(binding.get("path") or binding.get("id_path") or ""))

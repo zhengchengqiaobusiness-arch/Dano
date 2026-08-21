@@ -138,7 +138,6 @@ export interface SkillGenerationRequest {
   forbidden_actions?: string;
   out_dir?: string;
   require_stage_seven?: boolean;
-  preview_only?: boolean;
 }
 
 export interface SkillExportOutcome {
@@ -167,11 +166,4 @@ export async function exportRecordingSkill(
     request,
   );
   return data as SkillExportOutcome;
-}
-
-export async function previewRecordingSkill(
-  resultId: string,
-  request: SkillGenerationRequest,
-): Promise<SkillExportOutcome> {
-  return exportRecordingSkill(resultId, { ...request, preview_only: true });
 }
