@@ -1445,28 +1445,52 @@ async def onboarding_job(job_id: str) -> dict:
     return job
 
 
+_EXPORT_STAGE_SUFFIX = re.compile(r"^[A-Za-z0-9_]{6,}$")
+
+
 def _default_export_dir() -> str:
     return str(Path(__file__).resolve().parents[3] / "export")
+
+
+def _normalize_export_dir(raw: str) -> str:
+    cleaned = str(raw or "").strip()
+    if not cleaned:
+        return ""
+    path = Path(cleaned)
+    if path.name.lower() == "agent-skills":
+        return str(path.parent)
+    return cleaned
 
 
 def _current_export_dir() -> str:
     from dano.execution.page.sessions import get_export_dir
 
-    raw = get_export_dir(_default_export_dir())
-    p = Path(raw)
-    if p.name.lower() == "agent-skills":
-        return str(p.parent)
-    return raw
+    return _normalize_export_dir(get_export_dir(_default_export_dir())) or _default_export_dir()
 
 
 def _known_export_dirs() -> list[str]:
     from dano.execution.page.sessions import get_export_dirs
-    return get_export_dirs(_default_export_dir())
+
+    out: list[str] = []
+    for item in get_export_dirs(_default_export_dir()):
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        for candidate in (raw, _normalize_export_dir(raw)):
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return out
 
 
 def _export_slugs_for_manifest(m: dict) -> set[str]:
     from dano.export.agent_skills import _slug
-    slugs = {_slug(str(m.get("name") or ""))}
+    from dano.export.skill_package.renderer import package_slug
+
+    name = str(m.get("name") or "").strip()
+    slugs: set[str] = set()
+    if name:
+        slugs.add(_slug(name))
+        slugs.add(package_slug(name))
     business = str(m.get("business") or "").strip()
     subsystem = str(m.get("subsystem") or "").strip()
     if business and subsystem:
@@ -1475,21 +1499,63 @@ def _export_slugs_for_manifest(m: dict) -> set[str]:
     return {s for s in slugs if s}
 
 
+def _is_owned_export_leftover(name: str, slugs: set[str]) -> bool:
+    for slug in slugs:
+        if name.startswith(f".{slug}.old-"):
+            return True
+        prefix = f".{slug}-"
+        if name.startswith(prefix) and _EXPORT_STAGE_SUFFIX.fullmatch(name[len(prefix):]):
+            return True
+    return False
+
+
+def _export_cleanup_targets(base: Path, slugs: set[str]) -> list[Path]:
+    targets = [base / slug for slug in slugs]
+    if not base.is_dir():
+        return targets
+    for child in base.iterdir():
+        if child.is_dir() and _is_owned_export_leftover(child.name, slugs):
+            targets.append(child)
+    return targets
+
+
+def _remove_export_tree(target: Path) -> None:
+    def _onexc(func, path, exc):  # noqa: ANN001
+        if isinstance(exc, PermissionError):
+            try:
+                os.chmod(path, 0o700)
+            except OSError:
+                raise exc
+            func(path)
+            return
+        raise exc
+
+    shutil.rmtree(target, onexc=_onexc)
+
+
 def _cleanup_export_folders(out_dir: str, slugs: set[str]) -> list[str]:
-    """清理已导出的 skill 文件夹。只删 out_dir 下的精确 slug 目录。"""
+    """清理已导出的 skill 文件夹，含自包含包、代理包和导出残留目录。"""
     base = Path(out_dir).expanduser().resolve()
     removed: list[str] = []
-    for slug in sorted(slugs):
-        target = (base / slug).resolve()
+    seen: set[str] = set()
+    for target in _export_cleanup_targets(base, slugs):
         try:
-            target.relative_to(base)
-        except ValueError:
+            resolved = target.resolve()
+            resolved.relative_to(base)
+        except (OSError, ValueError):
             log.warning("export.cleanup_refused", base=str(base), target=str(target))
             continue
-        if target.is_dir():
-            shutil.rmtree(target)
-            removed.append(str(target))
-            log.info("export.folder_removed", folder=str(target))
+        key = str(resolved)
+        if key in seen or not resolved.is_dir():
+            continue
+        seen.add(key)
+        try:
+            _remove_export_tree(resolved)
+        except OSError as exc:
+            log.warning("export.cleanup_failed", folder=key, error=str(exc))
+            continue
+        removed.append(key)
+        log.info("export.folder_removed", folder=key)
     return removed
 
 
@@ -1919,17 +1985,13 @@ async def export_agent_skills_ep(req: ExportSkillsReq,
     tenant = await _auth_tenant(x_tenant_key)
     from dano.execution.page.sessions import save_export_dir
     from dano.export.agent_skills import write_exports
-    from dano.export.skill_package.renderer import package_slug
     out = str(req.out_dir or "").strip() or _current_export_dir()
     frozen = await _frozen_skill_ids()
     frozen_manifests = [m for m in await _manifests_for_tenant(tenant) if m["name"] in frozen]
     try:
         removed = []
         for m in frozen_manifests:
-            removed.extend(_cleanup_export_folders(
-                out,
-                [*_export_slugs_for_manifest(m), package_slug(m["name"])],
-            ))
+            removed.extend(_cleanup_export_folders(out, _export_slugs_for_manifest(m)))
         written = await write_exports(
             tenant,
             out,

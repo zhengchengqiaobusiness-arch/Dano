@@ -786,9 +786,7 @@ export default function PageRecorder({
       if (reachedStage >= 2) setKeepResult(true);
     }
     if (reachedStage > reachedStageRef.current) {
-      if (resumeOnly || reachedStage < 2) {
-        setViewStage(reachedStage);
-      }
+      setViewStage(reachedStage);
       if (reachedStage >= 1 && !resumeOnly) setAssistantOpen(true);
     }
     reachedStageRef.current = reachedStage;
