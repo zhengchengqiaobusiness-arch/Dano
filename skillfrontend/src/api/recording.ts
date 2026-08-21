@@ -1,4 +1,8 @@
 import { api } from "./client";
+import {
+  normalizeSkillExportDraft,
+  serializeSkillExportDraft,
+} from "./skillExportDraft.mjs";
 
 export const EXPORT_DIR_LS = "dano.exportDir";
 export const SKILL_EXPORT_DRAFT_LS = "dano.skillExportDrafts";
@@ -6,21 +10,22 @@ export const SKILL_EXPORT_DRAFT_LS = "dano.skillExportDrafts";
 export interface SkillExportDraft {
   title?: string;
   description?: string;
+  planningMode?: "dynamic" | "fixed";
+  exampleRequests?: string;
+  successCriteria?: string;
+  forbiddenActions?: string;
 }
 
 export function rememberedSkillExportDraft(resultId: string): SkillExportDraft {
   const key = String(resultId || "").trim();
-  if (!key) return {};
+  if (!key) return normalizeSkillExportDraft({});
   try {
     const parsed = JSON.parse(localStorage.getItem(SKILL_EXPORT_DRAFT_LS) || "{}");
     const row = parsed && typeof parsed === "object" ? parsed[key] : null;
     if (!row || typeof row !== "object") return {};
-    return {
-      title: typeof row.title === "string" ? row.title : "",
-      description: typeof row.description === "string" ? row.description : "",
-    };
+    return normalizeSkillExportDraft(row);
   } catch {
-    return {};
+    return normalizeSkillExportDraft({});
   }
 }
 
@@ -30,10 +35,7 @@ export function rememberSkillExportDraft(resultId: string, draft: SkillExportDra
   try {
     const parsed = JSON.parse(localStorage.getItem(SKILL_EXPORT_DRAFT_LS) || "{}");
     const all = parsed && typeof parsed === "object" ? parsed : {};
-    all[key] = {
-      title: String(draft.title || ""),
-      description: String(draft.description || ""),
-    };
+    all[key] = serializeSkillExportDraft(draft);
     localStorage.setItem(SKILL_EXPORT_DRAFT_LS, JSON.stringify(all));
   } catch {
     // ignore quota / private mode
@@ -92,6 +94,10 @@ export interface RecordingResultSummary {
   skill_needs_reexport?: boolean;
   skill_export_title?: string;
   skill_export_description?: string;
+  skill_export_planning_mode?: "dynamic" | "fixed" | string;
+  skill_export_example_requests?: string[] | string;
+  skill_export_success_criteria?: string;
+  skill_export_forbidden_actions?: string;
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {
@@ -141,6 +147,7 @@ export interface SkillExportOutcome {
   used_capabilities?: Array<Record<string, unknown>>;
   unused_capabilities?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
+  unresolved_branches?: string[];
   export_path?: string;
   plan?: Record<string, unknown> | null;
   clarification_questions?: string[];

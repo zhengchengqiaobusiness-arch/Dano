@@ -153,6 +153,8 @@ def recording_skill_lifecycle(body: dict[str, Any] | None) -> str:
         return "needs_reexport"
     if export_status in {"exported", "succeeded"} and payload.get("published"):
         return "exported"
+    if export_status == "needs_clarification":
+        return "needs_clarification"
     if export_status in {"failed", "generation_failed", "export_failed"}:
         if payload.get("published") or (payload.get("skill_id") and payload.get("skill_needs_reexport")):
             return "export_failed"
@@ -204,6 +206,14 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
         "skill_needs_reexport": bool(body.get("skill_needs_reexport")),
         "skill_export_title": str(body.get("skill_export_title") or ""),
         "skill_export_description": str(body.get("skill_export_description") or ""),
+        "skill_export_planning_mode": str(body.get("skill_export_planning_mode") or ""),
+        "skill_export_example_requests": list(body.get("skill_export_example_requests") or [])
+        if isinstance(body.get("skill_export_example_requests"), list)
+        else [str(body.get("skill_export_example_requests") or "").strip()]
+        if str(body.get("skill_export_example_requests") or "").strip()
+        else [],
+        "skill_export_success_criteria": str(body.get("skill_export_success_criteria") or ""),
+        "skill_export_forbidden_actions": str(body.get("skill_export_forbidden_actions") or ""),
     }
 
 

@@ -26,7 +26,7 @@ from dano.export.skill_package.validator import _check_skill, validate_skill_pac
 from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
 from dano.onboarding.recording_stage_seven import working_fingerprint
 from dano.onboarding.recording_results import recording_skill_lifecycle
-from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
+from dano.onboarding.skill_generation.export import SkillExportError, _route_rows, export_recording_skill
 from dano.execution.page.flow_spec_core.models import ParamField
 from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import PlanningMode, SkillGenerationRequest
@@ -1294,3 +1294,60 @@ def test_long_input_forms_get_toc_or_split() -> None:
     assert rel.startswith("forms/")
     assert f"references/{rel}" in text
     assert "## 目录" in text or "forms/" in text
+
+
+@pytest.mark.asyncio
+async def test_unknown_action_needs_clarification_and_does_not_export(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    stored: list[dict] = []
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec),
+        tenant="tenant",
+        request=_request(
+            out_dir=str(tmp_path),
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="请把待办记录导出成报表。",
+            example_requests=["帮我导出报表"],
+            success_criteria="已经导出",
+            forbidden_actions="不要提交",
+        ),
+        persist=stored.append,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "needs_clarification"
+    assert outcome.clarification_questions
+    assert outcome.unresolved_branches
+    assert not outcome.export_path
+    assert stored[-1]["skill_export_status"] == "needs_clarification"
+    assert stored[-1]["skill_export_planning_mode"] == "dynamic"
+    assert stored[-1]["skill_export_example_requests"] == ["帮我导出报表"]
+    assert stored[-1]["skill_export_success_criteria"] == "已经导出"
+    assert stored[-1]["skill_export_forbidden_actions"] == "不要提交"
+    assert recording_skill_lifecycle(stored[-1]) == "needs_clarification"
+    assert not list(tmp_path.glob("*-package"))
+
+
+def test_route_rows_use_business_language() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="可以先查询再提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-rows",
+    )
+    rows = _route_rows(plan, spec)
+    combo = next(item for item in rows if len(item["steps"]) > 1)
+    assert "查询待办记录" in combo["steps"]
+    assert "提交请假" in combo["steps"]
+    assert "cap_query" not in json.dumps(combo, ensure_ascii=False)
+    assert "binding" not in json.dumps(combo, ensure_ascii=False)
+    assert combo["composition"] in {"查询后自动带入", "先办理再请你选定", "各步分开收集"}
+    if combo["auto_carry"]:
+        assert any("自动" in item for item in combo["auto_carry"])

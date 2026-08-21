@@ -60,6 +60,7 @@ import {
   rememberedExportDir,
   rememberedSkillExportDraft,
 } from "../api/recording";
+import { routeSummaryFromOutcome } from "../api/skillExportDraft.mjs";
 import { getExportDirectory } from "../api/skills";
 import type {
   RecordingResultDetail,
@@ -1570,10 +1571,58 @@ export default function PageRecorder({
     }
   }
 
-  function persistSkillDraft(nextTitle = skillTitle, nextDescription = skillDescription) {
+  function renderSkillRouteSummary(outcome: SkillExportOutcome | null) {
+    if (!outcome) return null;
+    const routes = (outcome.routes || []).map(routeSummaryFromOutcome);
+    if (!routes.length && !(outcome.unresolved_branches || []).length) return null;
+    return (
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        {routes.map((route) => (
+          <div key={route.name}>
+            <Text strong>{route.name}</Text>
+            {route.whenToUse ? <div>适用：{route.whenToUse}</div> : null}
+            {route.steps.length ? <div>步骤：{route.steps.join(" → ")}</div> : null}
+            <div>自动带入：{route.autoCarry.length ? route.autoCarry.join("；") : "没有自动带入，需要的信息会当场问你"}</div>
+            <div>会停下来问你：{route.askWhen.length ? route.askWhen.join("；") : "输入齐了就不问"}</div>
+            {route.needsConfirm ? <div>写入前会先请你确认。</div> : null}
+          </div>
+        ))}
+        {(outcome.unresolved_branches || []).length ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="还有不明确的办理方式"
+            description={(
+              <List
+                size="small"
+                dataSource={outcome.unresolved_branches || []}
+                renderItem={(item) => <List.Item>{item}</List.Item>}
+              />
+            )}
+          />
+        ) : null}
+      </Space>
+    );
+  }
+
+  function persistSkillDraft(next: {
+    title?: string;
+    description?: string;
+    planningMode?: "dynamic" | "fixed";
+    exampleRequests?: string;
+    successCriteria?: string;
+    forbiddenActions?: string;
+  } = {}) {
     const resultId = currentResultId();
     if (!resultId) return;
-    rememberSkillExportDraft(resultId, { title: nextTitle, description: nextDescription });
+    rememberSkillExportDraft(resultId, {
+      title: next.title ?? skillTitle,
+      description: next.description ?? skillDescription,
+      planningMode: next.planningMode ?? skillPlanningMode,
+      exampleRequests: next.exampleRequests ?? skillExampleRequests,
+      successCriteria: next.successCriteria ?? skillSuccessCriteria,
+      forbiddenActions: next.forbiddenActions ?? skillForbiddenActions,
+    });
   }
 
   function openSkillExport() {
@@ -1585,10 +1634,15 @@ export default function PageRecorder({
     setSkillTitle(saved.title?.trim() || resultMeta?.skill_export_title?.trim() || defaultTitle);
     const rememberedDescription = saved.description?.trim() || resultMeta?.skill_export_description?.trim() || "";
     setSkillDescription(isStockSkillDescription(rememberedDescription) ? defaultDescription : rememberedDescription);
-    setSkillPlanningMode("dynamic");
-    setSkillExampleRequests("");
-    setSkillSuccessCriteria("");
-    setSkillForbiddenActions("");
+    const savedMode = saved.planningMode || resultMeta?.skill_export_planning_mode;
+    setSkillPlanningMode(savedMode === "fixed" ? "fixed" : "dynamic");
+    const savedExamples = saved.exampleRequests?.trim()
+      || (Array.isArray(resultMeta?.skill_export_example_requests)
+        ? resultMeta.skill_export_example_requests.join("\n")
+        : String(resultMeta?.skill_export_example_requests || ""));
+    setSkillExampleRequests(savedExamples);
+    setSkillSuccessCriteria(saved.successCriteria?.trim() || resultMeta?.skill_export_success_criteria?.trim() || "");
+    setSkillForbiddenActions(saved.forbiddenActions?.trim() || resultMeta?.skill_export_forbidden_actions?.trim() || "");
     setSkillOutDir(rememberedExportDir());
     void getExportDirectory()
       .then((dir) => setSkillOutDir(dir || rememberedExportDir()))
@@ -1607,7 +1661,7 @@ export default function PageRecorder({
       return;
     }
     const description = skillDescription.trim();
-    persistSkillDraft(skillTitle, skillDescription);
+    persistSkillDraft();
     if (!skillTitle.trim()) {
       message.error("请填写 Skill 显示名称");
       return;
@@ -1641,8 +1695,9 @@ export default function PageRecorder({
         out_dir: outDir,
         require_stage_seven: false,
       });
-      if (outcome.status === "needs_clarification") {
-        setSkillClarifications(outcome.clarification_questions || []);
+      if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
+        setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
+        setSkillClarifications(outcome.clarification_questions || outcome.unresolved_branches || []);
         setSkillExportProgress("");
         message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
         await refreshResultMeta(resultId);
@@ -3246,7 +3301,7 @@ export default function PageRecorder({
           )}
         </div>
         {renderCapabilities()}
-        {resultMeta?.skill_lifecycle === "exported" || skillExportOutcome?.status === "exported" ? (
+        {(resultMeta?.skill_lifecycle === "exported" || skillExportOutcome?.status === "exported") && skillExportOutcome?.status !== "needs_clarification" ? (
           <Alert
             style={{ marginTop: 16 }}
             type="success"
@@ -3422,10 +3477,12 @@ export default function PageRecorder({
             <Text>Skill 名称：{skillExportOutcome.skill_name || skillTitle || "—"}</Text>
             <Text>导出路径：{skillExportOutcome.export_path || "—"}</Text>
             <Text>Skill 版本：{skillExportOutcome.version || 1}</Text>
+            {renderSkillRouteSummary(skillExportOutcome)}
           </Space>
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在规划和导出 Skill…"} /> : null}
+            {skillExportOutcome?.status === "needs_clarification" ? renderSkillRouteSummary(skillExportOutcome) : null}
             {skillClarifications.length ? (
               <Alert
                 type="warning"
@@ -3454,7 +3511,7 @@ export default function PageRecorder({
                 onChange={(event) => {
                   const next = event.target.value;
                   setSkillTitle(next);
-                  persistSkillDraft(next, skillDescription);
+                  persistSkillDraft({ title: next });
                 }}
                 placeholder="例如：请假办理"
                 disabled={skillExporting}
@@ -3468,7 +3525,7 @@ export default function PageRecorder({
                 onChange={(event) => {
                   const next = event.target.value;
                   setSkillDescription(next);
-                  persistSkillDraft(skillTitle, next);
+                  persistSkillDraft({ description: next });
                 }}
                 autoSize={{ minRows: 6, maxRows: 12 }}
                 disabled={skillExporting}
@@ -3480,7 +3537,11 @@ export default function PageRecorder({
               <Radio.Group
                 style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}
                 value={skillPlanningMode}
-                onChange={(event) => setSkillPlanningMode(event.target.value)}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setSkillPlanningMode(next);
+                  persistSkillDraft({ planningMode: next });
+                }}
                 disabled={skillExporting}
               >
                 <Radio value="dynamic">按用户需求动态选择（推荐）：按请求选一条已规划路线</Radio>
@@ -3498,7 +3559,11 @@ export default function PageRecorder({
                       <Input.TextArea
                         style={{ marginTop: 6 }}
                         value={skillExampleRequests}
-                        onChange={(event) => setSkillExampleRequests(event.target.value)}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setSkillExampleRequests(next);
+                          persistSkillDraft({ exampleRequests: next });
+                        }}
                         autoSize={{ minRows: 3, maxRows: 6 }}
                         placeholder="一行一个，例如：帮我查鲜生的单"
                         disabled={skillExporting}
@@ -3509,7 +3574,11 @@ export default function PageRecorder({
                       <Input.TextArea
                         style={{ marginTop: 6 }}
                         value={skillSuccessCriteria}
-                        onChange={(event) => setSkillSuccessCriteria(event.target.value)}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setSkillSuccessCriteria(next);
+                          persistSkillDraft({ successCriteria: next });
+                        }}
                         autoSize={{ minRows: 2, maxRows: 4 }}
                         disabled={skillExporting}
                       />
@@ -3519,7 +3588,11 @@ export default function PageRecorder({
                       <Input.TextArea
                         style={{ marginTop: 6 }}
                         value={skillForbiddenActions}
-                        onChange={(event) => setSkillForbiddenActions(event.target.value)}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setSkillForbiddenActions(next);
+                          persistSkillDraft({ forbiddenActions: next });
+                        }}
                         autoSize={{ minRows: 2, maxRows: 4 }}
                         disabled={skillExporting}
                       />

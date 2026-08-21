@@ -45,6 +45,7 @@ class SkillExportOutcome(BaseModel):
     used_capabilities: list[dict[str, Any]] = Field(default_factory=list)
     unused_capabilities: list[dict[str, Any]] = Field(default_factory=list)
     routes: list[dict[str, Any]] = Field(default_factory=list)
+    unresolved_branches: list[str] = Field(default_factory=list)
     export_path: str = ""
     plan: dict[str, Any] | None = None
     clarification_questions: list[str] = Field(default_factory=list)
@@ -79,19 +80,95 @@ def _capability_rows(spec: FlowSpec) -> list[dict[str, Any]]:
     ]
 
 
-def _route_rows(plan: SkillPlan | None) -> list[dict[str, Any]]:
+_COMPOSITION_LABELS = {
+    "atomic": "单独办理",
+    "bound": "查询后自动带入",
+    "handoff": "先办理再请你选定",
+    "independent": "各步分开收集",
+}
+
+
+def _capability_titles(spec: FlowSpec | None) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    if spec is None:
+        return titles
+    for cap in spec.capabilities:
+        label = str(cap.title or cap.name or "").strip()
+        if not label:
+            continue
+        if cap.capability_id:
+            titles[str(cap.capability_id)] = label
+        if cap.name:
+            titles[str(cap.name)] = label
+    return titles
+
+
+def _route_rows(plan: SkillPlan | None, spec: FlowSpec | None = None) -> list[dict[str, Any]]:
     if plan is None:
         return []
-    return [
-        {
-            "route_id": route.route_id,
+    titles = _capability_titles(spec)
+    rows: list[dict[str, Any]] = []
+    for route in plan.routes:
+        steps = [
+            titles.get(str(cap_id), "") or str(cap_id)
+            for cap_id in route.capability_sequence
+            if str(cap_id)
+        ]
+        auto_carry = []
+        for binding in route.bindings:
+            source = titles.get(binding.from_capability) or "上一步"
+            target = titles.get(binding.to_capability) or "下一步"
+            field = str(binding.to_input or "").strip()
+            if field:
+                auto_carry.append(f"{source}的结果会自动填入{target}需要的「{field}」")
+            else:
+                auto_carry.append(f"{source}的结果会自动带入{target}")
+        ask_when = [
+            str(item.prompt).strip()
+            for item in route.checkpoints
+            if str(item.prompt or "").strip()
+        ]
+        rows.append({
             "name": route.name,
-            "sequence": list(route.capability_sequence),
-            "bindings": len(route.bindings),
-            "user_inputs": list(route.required_user_inputs),
-        }
-        for route in plan.routes
-    ]
+            "when_to_use": route.when_to_use,
+            "steps": steps,
+            "auto_carry": auto_carry,
+            "ask_when": ask_when,
+            "composition": _COMPOSITION_LABELS.get(str(route.composition_mode), "单独办理"),
+            "needs_confirm": bool(route.requires_confirmation),
+        })
+    return rows
+
+
+def _unresolved_rows(plan: SkillPlan | None) -> list[str]:
+    if plan is None:
+        return []
+    rows = [str(item).strip() for item in plan.clarification_questions if str(item).strip()]
+    for branch in plan.intent_branches:
+        if not (branch.unresolved or branch.conflicting):
+            continue
+        reason = "、".join(str(item).strip() for item in branch.unresolved if str(item).strip())
+        trigger = str(branch.trigger or "").strip()
+        if trigger and reason:
+            rows.append(f"{trigger}：{reason}")
+        elif trigger:
+            rows.append(trigger)
+        elif reason:
+            rows.append(reason)
+    return list(dict.fromkeys(rows))
+
+
+def _skill_draft_fields(request: SkillGenerationRequest, title: str) -> dict[str, Any]:
+    return {
+        "skill_export_title": title,
+        "skill_export_description": str(request.business_description or "").strip(),
+        "skill_export_planning_mode": str(request.planning_mode),
+        "skill_export_example_requests": [
+            str(item).strip() for item in request.example_requests if str(item).strip()
+        ],
+        "skill_export_success_criteria": str(request.success_criteria or "").strip(),
+        "skill_export_forbidden_actions": str(request.forbidden_actions or "").strip(),
+    }
 
 
 def _log_export(
@@ -420,6 +497,11 @@ async def export_recording_skill(
             idempotent=True,
             used_capabilities=used,
         )
+        stored_plan = None
+        try:
+            stored_plan = SkillPlan.model_validate(plan) if plan else None
+        except Exception:  # noqa: BLE001 - keep the stored payload if it is not a current plan
+            stored_plan = None
         return SkillExportOutcome(
             status="exported",
             skill_id=skill_id,
@@ -428,7 +510,8 @@ async def export_recording_skill(
             planning_mode=str((plan or {}).get("planning_mode") or request.planning_mode),
             used_capabilities=used,
             unused_capabilities=list((plan or {}).get("unused_capabilities") or []),
-            routes=list((plan or {}).get("routes") or []),
+            routes=_route_rows(stored_plan, spec) if stored_plan else [],
+            unresolved_branches=_unresolved_rows(stored_plan),
             export_path=export_path,
             plan=plan,
             idempotent=True,
@@ -438,8 +521,7 @@ async def export_recording_skill(
         **body,
         "skill_export_status": "generating",
         "skill_plan_valid": False,
-        "skill_export_title": title,
-        "skill_export_description": str(request.business_description or "").strip(),
+        **_skill_draft_fields(request, title),
     })
     _log_export(
         "skill.export.planning",
@@ -468,7 +550,7 @@ async def export_recording_skill(
             plan_status=planned.status,
             errors=list(planned.errors or []),
             clarification_questions=list(planned.clarification_questions or []),
-            routes=_route_rows(planned.plan),
+            routes=_route_rows(planned.plan, spec),
         )
         await _call_persist(persist, {
             **body,
@@ -476,13 +558,14 @@ async def export_recording_skill(
             "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
             "skill_plan_valid": False,
             "published": bool(body.get("published")),
-            "skill_export_title": title,
-            "skill_export_description": str(request.business_description or "").strip(),
+            **_skill_draft_fields(request, title),
         })
         return SkillExportOutcome(
             status=planned.status,
             clarification_questions=planned.clarification_questions,
+            unresolved_branches=_unresolved_rows(planned.plan) or list(planned.clarification_questions or []),
             errors=planned.errors,
+            routes=_route_rows(planned.plan, spec),
             plan=planned.plan.model_dump(mode="json") if planned.plan else None,
         )
 
@@ -498,7 +581,7 @@ async def export_recording_skill(
         skill_id=skill_id,
         selected_capability_ids=list(plan.selected_capability_ids),
         unused_capabilities=[item.capability_id for item in plan.unused_capabilities],
-        routes=_route_rows(plan),
+        routes=_route_rows(plan, spec),
         planning_mode=str(plan.planning_mode),
     )
     view = build_export_view(spec, plan.selected_capability_ids)
@@ -604,8 +687,7 @@ async def export_recording_skill(
             "skill_export_path": export_path,
             "skill_request_fingerprint": request_fp,
             "skill_needs_reexport": False,
-            "skill_export_title": title,
-            "skill_export_description": str(request.business_description or "").strip(),
+            **_skill_draft_fields(request, title),
         }
         await _call_persist(persist, next_body)
         _log_export(
@@ -620,7 +702,7 @@ async def export_recording_skill(
             export_path=export_path,
             used_capabilities=used_rows,
             unused_capabilities=[item.capability_id for item in plan.unused_capabilities],
-            routes=_route_rows(plan),
+            routes=_route_rows(plan, spec),
         )
         return SkillExportOutcome(
             status="exported",
@@ -630,7 +712,8 @@ async def export_recording_skill(
             planning_mode=str(plan.planning_mode),
             used_capabilities=used_rows,
             unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
-            routes=[route.model_dump(mode="json") for route in plan.routes],
+            routes=_route_rows(plan, spec),
+            unresolved_branches=_unresolved_rows(plan),
             export_path=export_path,
             plan=plan_payload,
         )
