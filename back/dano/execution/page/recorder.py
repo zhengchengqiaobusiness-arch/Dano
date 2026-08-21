@@ -740,15 +740,34 @@ _RECORDER_JS = r"""() => {
         var el = controls[i];
         var ty = String(el.type || '').toLowerCase();
         var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+        var choiceHost = (ty === 'radio' || ty === 'checkbox') && el.closest
+          ? el.closest('label,[role="radiogroup"],[role="checkbox"],[role="switch"],.el-radio,.el-checkbox,.ant-radio-wrapper,.ant-checkbox-wrapper')
+          : null;
+        var hiddenChoiceWithVisibleHost = !!(
+          choiceHost && choiceHost.getClientRects && choiceHost.getClientRects().length
+        );
         // Component libraries normally hide the native file input behind a
         // visible upload button.  It is still the semantic file control and
         // must remain in submit-time evidence even before a file is selected.
-        if (style && (style.display === 'none' || style.visibility === 'hidden') && ty !== 'file') continue;
+        // Radio/checkbox libraries do the same while rendering a visible
+        // label/group.  Preserve only choices with a visible semantic host so
+        // unrelated hidden form values do not become caller fields.
+        if (
+          style && (style.display === 'none' || style.visibility === 'hidden')
+          && ty !== 'file' && !hiddenChoiceWithVisibleHost
+        ) continue;
         var loc = locateField(el);
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
         var evidence = fieldEvidence(el);
         if (ty === 'radio') {
+          var radioGroup = el.closest && el.closest(
+            '[role="radiogroup"],.el-radio-group,.ant-radio-group,.v-radio-group,.q-option-group'
+          );
+          var radioGroupLabel = radioGroup && clean(
+            radioGroup.getAttribute('aria-label') || labelText(radioGroup)
+          );
+          if (radioGroupLabel) label = radioGroupLabel;
           var group = el.name || field || loc;
           if (seenRadio[group]) continue;
           seenRadio[group] = true;

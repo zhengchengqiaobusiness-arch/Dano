@@ -371,6 +371,73 @@ async def test_form_snapshot_keeps_hidden_native_file_control_without_selection(
 
 
 @pytest.mark.asyncio
+async def test_form_snapshot_keeps_hidden_native_radio_inside_visible_group() -> None:
+    """UI libraries hide native radios while leaving the group editable."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.expose_binding("__danoRecord", lambda _source, _raw: None)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="product editor">
+              <div class="el-form-item is-required">
+                <label>State</label>
+                <div role="radiogroup" aria-label="State">
+                  <label><input name="status" type="radio" value="1"
+                    style="display:none" checked>Enabled</label>
+                  <label><input name="status" type="radio" value="0"
+                    style="display:none">Disabled</label>
+                </div>
+              </div>
+            </form>
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await browser.close()
+
+    state = next(item for item in fields if item.get("control_kind") == "radio")
+    assert state["field"] == "status"
+    assert state["label"] == "State"
+    assert state["value"] == "1"
+    assert state["required_state"] == "required"
+    assert state["options"] == [
+        {"label": "Enabled", "value": "1"},
+        {"label": "Disabled", "value": "0"},
+    ]
+
+    session = RecordSession()
+    _feed(session, {
+        "op": "form_snapshot",
+        "action_id": "action_save",
+        "fields": fields,
+        "page_context": PAGE,
+    })
+    bound = bind_field_evidence(
+        [{
+            "request_id": "req_save",
+            "method": "PUT",
+            "url": "http://example.test/products/update",
+            "post_data": json.dumps({"status": 1}),
+            "page_id": "page_1",
+            "frame_id": "frame_1",
+            "page_context": PAGE,
+            "trigger_action_id": "action_save",
+            "trigger_transaction_id": "page_1|frame_1|action_save",
+            "role": "business_write",
+        }],
+        [],
+        session.recorded_field_evidence(),
+    )
+    status = next(item for item in bound if item.get("wire_path") == "body.status")
+    assert status["binding_status"] == "bound"
+    assert status["required_state"] == "required"
+
+
+@pytest.mark.asyncio
 async def test_action_menu_item_is_recorded_as_its_own_business_action() -> None:
     """A command menu is not a form picker and must not swallow its item click."""
     from playwright.async_api import async_playwright
