@@ -197,12 +197,15 @@ name, type, source, and required op.
 
 Never use global DOM order, JSON order from another form, the first candidate, or positional
 matching to override a structural/value conflict. Equal-strength candidates stay unresolved.
-- A non-pagination filter on a business list/search execute GET is an optional caller
-  input even when the response is an array of objects, and even when a control failed to
-  bind. The query string of that execute request *is* the search form. A list-shaped
-  business result is not evidence that the request is an option endpoint. Option-source
-  leftover query params and transport keys (`nonce`, `token`, `timestamp`) stay internal
-  or `unknown`. A detail GET that only names the opened record is not a search form.
+- A non-pagination query leaf on a business list/search execute GET is caller-owned only
+  when an editable filter control maps to that exact request, or repeated same-family
+  recordings prove the same field mapping. An unbound control or query leaf alone does
+  not authorize `set_param_source=caller_input`. Its requiredness is `unknown` unless an
+  explicit required/optional marker or same-method successful omission proves otherwise.
+  A list-shaped business result is not evidence that the request is an option endpoint.
+  Option-source leftover query params and transport keys (`nonce`, `token`, `timestamp`)
+  stay internal or `unknown`. A detail GET that only names the opened record is not a
+  search form.
 - Disabled or read-only display values are not caller inputs. Bind them to the observed
   runtime/API source, or leave them unknown.
 - Origin and caller editability are separate. An editable control that the page prefilled,
@@ -217,8 +220,13 @@ matching to override a structural/value conflict. Equal-strength candidates stay
   works. Do not invent `constant`, `session`, or `page_default` from a field name.
 - An option API is the source of a select only when that control used it: the selected
   value or label appears in that response, and the request is the one that populated the
-  control. A page-load `simple-list` for tenants, users, or products is not automatically
-  every nearby dropdown.
+  control. A generic `id`, `name`, `status`, or other response-row key is not ownership
+  evidence. An API loaded near several controls is not automatically their shared source.
+  When field names differ, compare the complete visible candidate-label set with each
+  captured option response and require one exact unique source; duplicate requests to the
+  same normalized endpoint are equivalent, not competing sources. If the label set is
+  known but the label-to-wire mapping is incomplete, preserve a non-executable page enum
+  instead of changing the field to `unknown` or inventing a map.
 - A list-row command (approve, reject, delete, enable, submit-from-row) is a click, not a
   form. The record id is a caller-selected record. Other payload leaves without a
   field-local control are the button's fixed discriminator (`constant`), never a live
@@ -234,11 +242,18 @@ matching to override a structural/value conflict. Equal-strength candidates stay
   `结束` / `end` / `until` bind to `[1]`. A single filled start date must not stay
   unknown merely because both ends share the calendar day. A dialog date must bind to
   the business timestamp, not an audit `createTime` / `updateTime` on the same day.
-- An empty dialog select still has a page label. If its option API family or the only
-  remaining write `*Id` using a wire key is unique, `rename_field` to that page label.
-  Pair `/customer/simple-list` with `customerId`, `/account/simple-list` with
-  `accountId`, `/user/simple-list` with the remaining user/owner id — never invent a
-  mapping when two unmatched ids remain equally plausible.
+- An empty dialog select still has a page label. Match it first by structural aliases and
+  exact candidate-set ownership. If those fail, align only the remaining controls and
+  request fields inside the same form/action after stronger matches have been removed.
+  Never encode endpoint- or business-specific name pairs, and never invent a mapping when
+  two unmatched fields remain equally plausible.
+- For a selected record and its sibling request fields, resolve origin in this order:
+  explicit response/request path, unique selected response row, structural path/alias
+  match inside that row, then a scalar value that occurs on exactly one leaf of that row.
+  Empty values are not equality evidence. Relative position is permitted only as the final
+  control-to-wire binding fallback within one form snapshot; it is never a response-field
+  projection rule. A writable selected-row echo keeps its automatic origin and caller
+  override; a readonly echo stays system-owned.
 - Numeric coincidence is not a formula. Do not mark `computed` from IDs, status codes, or
   unrelated selects just because three numbers happen to add or multiply. Python only keeps
   sample-proven arithmetic between quantity/money operands.
@@ -264,6 +279,13 @@ explicit optional marker or same-family successful omission may prove optional. 
 remains `unknown`; never submit optional merely because the recorded request succeeded or the
 operator left the control unchanged. Finish only after every required marker is represented or
 explicitly unresolved.
+
+Do not submit source or requiredness operations merely to fill an unresolved field before the
+evidence-order binding above has completed. In particular, do not replace Python's grounded
+`api_option`, `page_enum`, `form_option`, `page_default`, `selected_option_field`,
+`previous_response`, or computed origin with `caller_input`. Report a still-unresolved axis and
+allow deterministic reconciliation to finish; an early Agent operation becomes a durable manual
+override and can otherwise lock a wrong origin or optional state into later reprocessing.
 
 ## Assign executable sources
 
