@@ -1,0 +1,558 @@
+{
+  "flow_id": "d3fd0bb7c265",
+  "tenant": "tenant",
+  "subsystem": "oa",
+  "title": "销售订单",
+  "business_description": "",
+  "recording_mode": "unknown",
+  "diagnostics": [],
+  "steps": [
+    {
+      "step_id": "s1",
+      "name": "",
+      "method": "GET",
+      "url": "",
+      "path": "/erp/search_sale_orders",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s2",
+      "name": "",
+      "method": "GET",
+      "url": "",
+      "path": "/erp/get_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s3",
+      "name": "",
+      "method": "POST",
+      "url": "",
+      "path": "/erp/update_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s4",
+      "name": "",
+      "method": "POST",
+      "url": "",
+      "path": "/erp/approve_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s5",
+      "name": "",
+      "method": "POST",
+      "url": "",
+      "path": "/erp/unapprove_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s6",
+      "name": "",
+      "method": "POST",
+      "url": "",
+      "path": "/erp/create_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    },
+    {
+      "step_id": "s7",
+      "name": "",
+      "method": "POST",
+      "url": "",
+      "path": "/erp/delete_sale_order",
+      "headers": {},
+      "content_type": "application/json",
+      "body_source": "",
+      "body_template": null,
+      "params": [],
+      "selects": [],
+      "identity": [],
+      "system_values": [],
+      "success_rule": null,
+      "response_json": null,
+      "risk_level": "L3",
+      "semantic_role": "",
+      "source_meta": {},
+      "fact_check": null,
+      "sample_inputs": {}
+    }
+  ],
+  "links": [],
+  "capabilities": [
+    {
+      "name": "search_sale_orders",
+      "title": "搜索/筛选销售订单",
+      "intent": "",
+      "kind": "query",
+      "capability_id": "cap_search",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [
+        {
+          "field_id": "output:search_sale_orders:records",
+          "scope": "output",
+          "display_name": "records",
+          "path": "records",
+          "key": "records",
+          "type": "array",
+          "wire_type": "",
+          "wire_format": "",
+          "required": false,
+          "request_id": "",
+          "request_index": null,
+          "step_id": "",
+          "source_kind": "unknown",
+          "source": {},
+          "category": "user_param",
+          "enum_options": null,
+          "enum_value_map": null,
+          "exposed_to_caller": true,
+          "confidence": 0.0,
+          "confirmed": false,
+          "locked": false,
+          "evidence": []
+        }
+      ],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": false,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "get_sale_order",
+      "title": "查看销售订单详情",
+      "intent": "",
+      "kind": "query",
+      "capability_id": "cap_detail",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [
+        {
+          "field_id": "output:get_sale_order:records",
+          "scope": "output",
+          "display_name": "records",
+          "path": "records",
+          "key": "records",
+          "type": "array",
+          "wire_type": "",
+          "wire_format": "",
+          "required": false,
+          "request_id": "",
+          "request_index": null,
+          "step_id": "",
+          "source_kind": "unknown",
+          "source": {},
+          "category": "user_param",
+          "enum_options": null,
+          "enum_value_map": null,
+          "exposed_to_caller": true,
+          "confidence": 0.0,
+          "confirmed": false,
+          "locked": false,
+          "evidence": []
+        }
+      ],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": false,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "update_sale_order",
+      "title": "修改销售订单",
+      "intent": "",
+      "kind": "submit",
+      "capability_id": "cap_update",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": true,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "approve_sale_order",
+      "title": "审批销售订单",
+      "intent": "",
+      "kind": "submit",
+      "capability_id": "cap_approve",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": true,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "unapprove_sale_order",
+      "title": "反审销售订单",
+      "intent": "",
+      "kind": "submit",
+      "capability_id": "cap_unapprove",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": true,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "create_sale_order",
+      "title": "新建销售订单",
+      "intent": "",
+      "kind": "submit",
+      "capability_id": "cap_create",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": true,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    },
+    {
+      "name": "delete_sale_order",
+      "title": "删除销售订单",
+      "intent": "",
+      "kind": "delete",
+      "capability_id": "cap_delete",
+      "request_refs": [],
+      "step_ids": [],
+      "inputs": [],
+      "request_fields": [],
+      "internal_fields": [],
+      "computed_fields": [],
+      "outputs": [],
+      "dependencies": [],
+      "nodes": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_mapping": [],
+      "preconditions": [],
+      "confirmed": false,
+      "confidence": 0.0,
+      "requires_human_confirm": true,
+      "evidence": [],
+      "caller_responsibilities": [],
+      "skill_responsibilities": [],
+      "status": "draft",
+      "locked": false,
+      "updated_by": "planner",
+      "confirmation_hash": ""
+    }
+  ],
+  "request_facts": {
+    "protocol": "dano.request_facts.v1",
+    "requests": [],
+    "diagnostics": [],
+    "page_events": [],
+    "option_sources": [],
+    "analysis": {},
+    "usage": {}
+  },
+  "capability_relations": [],
+  "review_items": [],
+  "goal": {},
+  "risk_level": "L3",
+  "meta": {
+    "capability_scoped_view": {
+      "status": "derived",
+      "source": "steps+links+request_facts",
+      "capability_count": 7
+    }
+  },
+  "schema_version": 1
+}

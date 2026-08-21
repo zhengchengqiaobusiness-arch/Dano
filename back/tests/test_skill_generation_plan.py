@@ -676,3 +676,60 @@ async def test_empty_business_description_fails() -> None:
     )
     assert result.status == "generation_failed"
     assert any("业务描述" in item for item in result.errors)
+
+
+def test_sale_order_baseline_is_description_without_combo() -> None:
+    """Freeze the current sales-order gap: notes exist, executable combos do not."""
+    from stage8_sale_order_fixture import (
+        combination_routes,
+        sale_order_request,
+        sale_order_spec,
+        sale_order_verified_ids,
+    )
+
+    spec = sale_order_spec()
+    request = sale_order_request()
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
+    assert len(spec.capabilities) == 7
+    assert spec.capability_relations == []
+    assert all(len(route.capability_sequence) == 1 for route in plan.routes)
+    assert combination_routes(plan) == []
+    assert plan.clarification_questions == []
+    assert any("没有已确认绑定" in item or "先查再问" in item for item in plan.composition_notes)
+    assert all(not route.bindings for route in plan.routes)
+
+
+def test_explicit_multistep_description_requires_combo_or_clarification() -> None:
+    """业务描述有明确多步分支时，合同必须有组合路线或澄清项。"""
+    from stage8_sale_order_fixture import (
+        combination_routes,
+        sale_order_request,
+        sale_order_spec,
+        sale_order_verified_ids,
+    )
+
+    spec = sale_order_spec()
+    request = sale_order_request()
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
+    assert combination_routes(plan) or plan.clarification_questions, (
+        "明确写出的查询后再编辑/审核/反审核/删除不能静默降级成原子列表"
+    )
+
+
+def test_unbound_dependent_route_requires_human_checkpoint() -> None:
+    """没有确认绑定的依赖路线必须有人工交接点。"""
+    from stage8_sale_order_fixture import (
+        combination_routes,
+        route_has_human_checkpoint,
+        sale_order_request,
+        sale_order_spec,
+        sale_order_verified_ids,
+    )
+
+    spec = sale_order_spec()
+    request = sale_order_request()
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
+    dependents = [route for route in combination_routes(plan) if not route.bindings]
+    assert dependents, "没有确认绑定的依赖序列必须编译成组合路线，不能只剩原子列表"
+    assert all(route_has_human_checkpoint(route) for route in dependents)
+    assert all(not route.bindings for route in dependents)

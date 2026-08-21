@@ -1,0 +1,283 @@
+{
+  "source_flow_fingerprint": "fp-sale-order",
+  "planning_mode": "dynamic",
+  "summary": "销售订单办理：用户通常会说查订单、看详情、新增、编辑、审核、反审核或删除。办理顺序是先查询或查看，再对选中的订单做编辑、审核、反审核或删除；新增是单独创建。只查询或只查看时不要写入。缺目标时必须让用户选定一条。写完要能确认结果。",
+  "trigger_phrases": [
+    "帮我查鲜生的单",
+    "只看看这张订单详情",
+    "先查出订单再编辑",
+    "查出后再审核那张",
+    "新增一张销售订单",
+    "只要搜索/筛选销售订单，不要改也不要写",
+    "只要查看销售订单详情，不要改也不要写",
+    "要执行「修改销售订单」且已指定对象或已备齐字段时",
+    "要执行「审批销售订单」且已指定对象或已备齐字段时",
+    "要执行「反审销售订单」且已指定对象或已备齐字段时",
+    "要执行「新建销售订单」且已指定对象或已备齐字段时",
+    "要执行「删除销售订单」且已指定对象或已备齐字段时"
+  ],
+  "selected_capability_ids": [
+    "cap_search",
+    "cap_detail",
+    "cap_update",
+    "cap_approve",
+    "cap_unapprove",
+    "cap_create",
+    "cap_delete"
+  ],
+  "unused_capabilities": [],
+  "routes": [
+    {
+      "route_id": "query_only",
+      "name": "搜索/筛选销售订单",
+      "when_to_use": "只要搜索/筛选销售订单，不要改也不要写",
+      "capability_sequence": [
+        "cap_search"
+      ],
+      "step_ids": [
+        "query"
+      ],
+      "required_user_inputs": [],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": false,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "query_only",
+          "collected_fields": [],
+          "capability_sequence": [
+            "cap_search"
+          ],
+          "bindings": [],
+          "confirmation_points": [],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_get_sale_order",
+      "name": "查看销售订单详情",
+      "when_to_use": "只要查看销售订单详情，不要改也不要写",
+      "capability_sequence": [
+        "cap_detail"
+      ],
+      "step_ids": [
+        "query"
+      ],
+      "required_user_inputs": [],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": false,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_get_sale_order",
+          "collected_fields": [],
+          "capability_sequence": [
+            "cap_detail"
+          ],
+          "bindings": [],
+          "confirmation_points": [],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_update_sale_order",
+      "name": "修改销售订单",
+      "when_to_use": "要执行「修改销售订单」且已指定对象或已备齐字段时",
+      "capability_sequence": [
+        "cap_update"
+      ],
+      "step_ids": [
+        "submit"
+      ],
+      "required_user_inputs": [
+        "id"
+      ],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": true,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_update_sale_order",
+          "collected_fields": [
+            "id"
+          ],
+          "capability_sequence": [
+            "cap_update"
+          ],
+          "bindings": [],
+          "confirmation_points": [
+            "修改销售订单"
+          ],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_approve_sale_order",
+      "name": "审批销售订单",
+      "when_to_use": "要执行「审批销售订单」且已指定对象或已备齐字段时",
+      "capability_sequence": [
+        "cap_approve"
+      ],
+      "step_ids": [
+        "submit"
+      ],
+      "required_user_inputs": [
+        "id"
+      ],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": true,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_approve_sale_order",
+          "collected_fields": [
+            "id"
+          ],
+          "capability_sequence": [
+            "cap_approve"
+          ],
+          "bindings": [],
+          "confirmation_points": [
+            "审批销售订单"
+          ],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_unapprove_sale_order",
+      "name": "反审销售订单",
+      "when_to_use": "要执行「反审销售订单」且已指定对象或已备齐字段时",
+      "capability_sequence": [
+        "cap_unapprove"
+      ],
+      "step_ids": [
+        "submit"
+      ],
+      "required_user_inputs": [
+        "id"
+      ],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": true,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_unapprove_sale_order",
+          "collected_fields": [
+            "id"
+          ],
+          "capability_sequence": [
+            "cap_unapprove"
+          ],
+          "bindings": [],
+          "confirmation_points": [
+            "反审销售订单"
+          ],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_create_sale_order",
+      "name": "新建销售订单",
+      "when_to_use": "要执行「新建销售订单」且已指定对象或已备齐字段时",
+      "capability_sequence": [
+        "cap_create"
+      ],
+      "step_ids": [
+        "submit"
+      ],
+      "required_user_inputs": [
+        "id"
+      ],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": true,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_create_sale_order",
+          "collected_fields": [
+            "id"
+          ],
+          "capability_sequence": [
+            "cap_create"
+          ],
+          "bindings": [],
+          "confirmation_points": [
+            "新建销售订单"
+          ],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    },
+    {
+      "route_id": "op_delete_sale_order",
+      "name": "删除销售订单",
+      "when_to_use": "要执行「删除销售订单」且已指定对象或已备齐字段时",
+      "capability_sequence": [
+        "cap_delete"
+      ],
+      "step_ids": [
+        "submit"
+      ],
+      "required_user_inputs": [
+        "id"
+      ],
+      "bindings": [],
+      "preconditions": [],
+      "requires_confirmation": true,
+      "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对",
+      "failure_behavior": "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。",
+      "examples": [
+        {
+          "user_request": "帮我查鲜生的单",
+          "route_id": "op_delete_sale_order",
+          "collected_fields": [
+            "id"
+          ],
+          "capability_sequence": [
+            "cap_delete"
+          ],
+          "bindings": [],
+          "confirmation_points": [
+            "删除销售订单"
+          ],
+          "done_when": "已按用户指定的那条路线办理完成，写入已确认且结果可核对"
+        }
+      ]
+    }
+  ],
+  "safety_rules": [
+    "只使用当前页面已打包操作，不得发明字段、接口或输出。",
+    "写操作必须先取得用户确认。",
+    "不得输出 token、cookie、storage_state 或密码。"
+  ],
+  "clarification_questions": [],
+  "composition_summary": "销售订单办理：用户通常会说查订单、看详情、新增、编辑、审核、反审核或删除。办理顺序是先查询或查看，再对选中的订单做编辑、审核、反审核或删除；新增是单独创建。只查询或只查看时不要写入。缺目标时必须让用户选定一条。写完要能确认结果。",
+  "composition_notes": [
+    "组合约定：销售订单办理：用户通常会说查订单、看详情、新增、编辑、审核、反审核或删除。办理顺序是先查询或查看，再对选中的订单做编辑、审核、反审核或删除；新增是单独创建。只查询或只查看时不要写入。缺目标时必须让用户选定一条。写完要能确认结果。",
+    "只要只读操作时，只执行对应只读操作，不得执行写入。",
+    "没有已确认绑定，不能自动传值。先后办理就先查再问：先执行只读操作，停下来请用户指定记录，再写。"
+  ]
+}
