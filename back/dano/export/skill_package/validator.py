@@ -10,6 +10,8 @@ import sys
 
 import yaml
 
+from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
+
 
 _REQUIRED_SKILL_SECTIONS = (
     "适用场景", "不适用场景", "能力关系", "操作路由", "输入",
@@ -79,6 +81,20 @@ def _check_skill(path: Path, text: str, issues: list[dict]) -> None:
     done_when = re.findall(r"(?im)\bDone\s+when\s*:", steps)
     if steps and (not done_when or len(done_when) < max(1, len(step_markers))):
         issues.append(_issue("done_when", "every documented step must include `Done when:`", path))
+    _check_handbook_bans(path, text, issues)
+
+
+def _doc_intro(text: str) -> str:
+    body = re.sub(r"\A---\s*\n.*?\n---(?:\s*\n|\Z)", "", text, count=1, flags=re.S)
+    match = re.search(r"(?ms)^#\s+[^\n]+\n(.*?)(?=^##\s+|\Z)", body)
+    return match.group(1) if match else body[:800]
+
+
+def _check_handbook_bans(path: Path, text: str, issues: list[dict]) -> None:
+    for marker in HANDBOOK_BAN_MARKERS:
+        if marker and marker in text:
+            issues.append(_issue("handbook_language", f"handbook must not contain: {marker}", path))
+            return
 
 
 def _check_reference(
@@ -453,6 +469,13 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         reference = _read(reference_path, issues, missing_as_warnings=missing_as_warnings)
     if skill:
         _check_skill(skill_path, skill, issues)
+    if operations:
+        _check_handbook_bans(operations_path, _doc_intro(operations), issues)
+    forms_path = root / "references" / "INPUT_FORMS.md"
+    if forms_path.is_file():
+        forms = _read(forms_path, issues, missing_as_warnings=True)
+        if forms:
+            _check_handbook_bans(forms_path, _doc_intro(forms), issues)
     chain_source = operations_path if operations else reference_path
     chain_text = operations or reference
     if chain_text:

@@ -26,19 +26,26 @@ and must not enter a consumer Skill.
 
 `SKILL.md` must have YAML frontmatter with non-empty `name` and `description`.
 The description must say what the Skill does, when to use it, and when not to
-use it. One recorded OA page maps to one Skill. Stage 6/7 yields atomic
-capabilities; Stage 8 turns the operator's natural-language composition into
-routes. After planning finishes, `SKILL.md` must show those routes, not just a
-flat capability list.
+use it. One OA page maps to one Skill. After planning finishes, `SKILL.md` is
+an executable handbook: user intent maps to one operation or one combination
+route. It is not a capability catalog, a recording log, or a longer prompt.
 
 The body must contain `适用场景`, `不适用场景`, `能力关系`, `操作路由`, `输入`,
 `操作步骤`, `工具`, `输出`, `完成标准`, `失败处理`, and `安全边界`. Every item
 in `操作步骤` must state a `Done when` condition.
 
-`能力关系` records recommended order, planned combination routes, confirmed
-bindings that may auto-fill, and hand-offs that still need the user. Combination
-routes appear only from the Stage 8 plan. Unconfirmed field-name guesses must
-not become bindings.
+`能力关系` quotes the operator's business description, then the hand-off rules:
+read-only requests must not upgrade into writes; confirmed bindings may
+auto-fill named fields; without bindings, look up first, stop, and ask the
+user. Do not write recording order, stage numbers, or internal ids.
+
+Consumer handbook text (SKILL.md, OPERATIONS intro, INPUT_FORMS intro,
+when_to_use, composition, summary) must not contain: `本页面的实际操作流程`,
+`能力录制`, `录制结果`, `阶段1`, `本页原子能力`, `按用户意图选择一项`,
+`阶段 6` / `阶段6` / `阶段 7` / `阶段7` / `阶段 8` / `阶段8`,
+`录制识别顺序`, `FlowSpec`, `fingerprint`, `capability_id`, `x-dano`,
+`规划依据`, `原子能力`, `一页面对应一个 Skill`, `原样来自`, `生成器`.
+「已确认绑定」may appear as an execution rule.
 
 `references/OPERATIONS.md` must contain an `API chain` section. Every described
 chain must name its executor-generated `verification_id`; a chain that exhausted
@@ -46,10 +53,12 @@ automatic verification must be marked `unverified` instead.
 
 `references/INPUT_FORMS.md` is an on-demand `ask_user_question` contract.
 
-Stage 8 packs the Stage 6/7 capability contract as-is: field identity, option
-maps, request templates, sample evidence, defaults, and success rules must not
-be rewritten or dropped. `SKILL.md` may add routing and handbook language, but
-it cannot invent, rename, or delete those facts.
+The packed contract is copied as-is: field identity, option maps, request
+templates, sample evidence, defaults, and success rules must not be rewritten
+or dropped. `SKILL.md` may add routing and handbook language, but it cannot
+invent, rename, or delete those facts. Scripts may still contain PLAN JSON;
+the handbook must not tell the Agent to read PLAN, `x-dano`, or
+`capability_id`.
 
 ## Script contract
 
@@ -77,14 +86,14 @@ When a recording result is exported through manual Skill planning, `references/C
 
 Public scripts and `SKILL.md` may only name selected capabilities. Unused capabilities stay in the original FlowSpec but must not appear as packed scripts. Packages without these fields remain valid single-capability exports.
 
-A planned `SKILL.md` lists every packed operation in `操作路由`. Combination
-routes come from the Stage 8 plan: confirmed bindings may auto-fill; planned
-sequences without bindings still appear, but the next input is collected from
-the user. Standalone leftover capabilities stay as operations; they must not
-become `solo_*` routes.
+A planned `SKILL.md` lists every packed operation in `操作路由`. The intent
+column uses `when_to_use`, not a title recitation. Combination routes come
+from the plan: confirmed bindings may auto-fill; sequences without bindings
+still appear, but the next input is collected from the user. Leftover
+operations stay as `op_*` routes; they must not become `solo_*` routes.
 
 The model may only rewrite `when_to_use` and examples for those frozen routes.
 It must not replace `selected_capability_ids`, route sequences, or bindings.
-`SKILL.md` 能力关系 must quote the operator's business description as the
-composition contract, and `操作步骤` must include one playbook per planned
-route.
+`操作步骤` is a five-step SOP (choose one route, look-up-then-ask, collect
+fields, run the script, verify/report). Each numbered step has `Done when:`.
+A real combination route may add one extra step for order and bindings.
