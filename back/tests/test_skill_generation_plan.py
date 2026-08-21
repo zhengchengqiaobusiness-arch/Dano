@@ -1023,3 +1023,51 @@ def test_unmapped_parallel_action_needs_clarification() -> None:
     )
     assert checked.clarifications
     assert not checked.ok or checked.clarifications
+
+
+EXPLICIT_ORDER_PHRASES = (
+    "查询结束就提交请假",
+    "查询继而提交请假",
+    "查询优先，提交其次",
+    "查询在前，提交在后",
+    "完成查询方可提交",
+)
+
+
+def test_explicit_order_phrases_compile_to_query_then_submit() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    for phrase in EXPLICIT_ORDER_PHRASES:
+        plan = propose_deterministic_plan(
+            spec,
+            SkillGenerationRequest(title="请假", business_description=phrase, planning_mode=PlanningMode.DYNAMIC),
+            VERIFIED,
+            f"fp-order-{phrase}",
+        )
+        checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint=f"fp-order-{phrase}")
+        combos = [tuple(route.capability_sequence[:2]) for route in plan.routes if len(route.capability_sequence) > 1]
+        assert ("cap_query", "cap_submit") in combos, phrase
+        assert not any(
+            branch.branch_id == "desc_unresolved_sequence" and not branch.capability_sequence
+            for branch in plan.intent_branches
+        ), phrase
+        assert checked.ok, f"{phrase}: {checked.errors + checked.clarifications}"
+
+
+def test_immediate_single_write_stays_atomic() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="马上提交请假", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-immediate",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-immediate")
+    assert checked.ok, checked.errors + checked.clarifications
+    assert not plan.clarification_questions
+    assert not any(branch.unresolved for branch in plan.intent_branches)
+    submit = next(route for route in plan.routes if route.capability_sequence == ["cap_submit"])
+    assert submit.composition_mode == submit.composition_mode.__class__("atomic") or str(submit.composition_mode) == "atomic"
+    assert not any(
+        route.capability_sequence[:2] == ["cap_query", "cap_submit"] and "马上提交" in route.when_to_use
+        for route in plan.routes
+    )

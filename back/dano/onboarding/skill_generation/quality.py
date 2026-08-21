@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from dano.onboarding.skill_generation.catalog import is_write_capability
-from dano.onboarding.skill_generation.intent import description_has_explicit_sequence
+from dano.onboarding.skill_generation.intent import (
+    description_has_explicit_sequence,
+    looks_like_ordered_multi_step,
+)
 from dano.onboarding.skill_generation.models import SkillPlan, SkillRoute
 
 
@@ -43,9 +46,18 @@ def silent_branch_drops(plan: SkillPlan) -> list[str]:
     return missing
 
 
-def silent_sequence_drop(plan: SkillPlan) -> bool:
+def silent_sequence_drop(plan: SkillPlan, spec=None) -> bool:  # noqa: ANN001
     """True when explicit order language was neither compiled nor clarified."""
-    if not description_has_explicit_sequence(plan.summary):
+    texts = [plan.summary, *plan.trigger_phrases]
+    if spec is not None:
+        ordered = any(
+            looks_like_ordered_multi_step(str(text), list(spec.capabilities or []))
+            for text in texts
+            if text
+        )
+    else:
+        ordered = any(description_has_explicit_sequence(str(text)) for text in texts if text)
+    if not ordered:
         return False
     has_combo = any(len(route.capability_sequence) > 1 for route in plan.routes)
     has_clarify = bool(plan.clarification_questions) or any(

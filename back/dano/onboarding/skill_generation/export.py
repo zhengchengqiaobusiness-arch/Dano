@@ -313,11 +313,14 @@ def build_export_skill_spec(
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
 
+    from dano.export.skill_package.renderer import restore_compiled_capability_schemas
+
     release_spec, candidate = prepare_flow_release_candidate(view)
     release_spec = promote_unconfirmed_write_fields(release_spec)
     api_request, errors = flow_spec_to_api_request(release_spec, _prepared=True)
     if errors or not api_request:
         raise SkillExportError(409, "导出视图无法编译为 Skill 包：" + "；".join(errors or ["未知错误"]))
+    api_request = restore_compiled_capability_schemas(api_request, view)
     plan_payload = plan.model_dump(mode="json")
     api_request["_release_snapshot"] = {
         **candidate,

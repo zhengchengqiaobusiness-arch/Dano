@@ -28,6 +28,7 @@ from dano.onboarding.recording_stage_seven import working_fingerprint
 from dano.onboarding.recording_results import recording_skill_lifecycle
 from dano.onboarding.skill_generation.export import (
     SkillExportError,
+    _current_spec,
     _default_render,
     _route_rows,
     export_recording_skill,
@@ -504,6 +505,30 @@ async def test_stage_six_query_hint_exports_without_stage_seven(tmp_path: Path) 
     assert outcome.used_capabilities
 
 
+def test_current_spec_reads_saved_flow_without_recording_results() -> None:
+    spec = _three_cap_spec()
+    working = spec.model_copy(deep=True)
+    working.capabilities = list(working.capabilities) + [
+        spec.capabilities[0].model_copy(update={"capability_id": "cap_stage7_only", "name": "stage7_only"}),
+    ]
+    body = {
+        "flow_spec": spec.model_dump(mode="json"),
+        "stage_seven": {"working_flow_spec": working.model_dump(mode="json")},
+    }
+    loaded = _current_spec(body)
+    assert {cap.capability_id for cap in loaded.capabilities} == {
+        "cap_query",
+        "cap_option",
+        "cap_submit",
+    }
+    fallback = _current_spec({"stage_seven": {"working_flow_spec": spec.model_dump(mode="json")}})
+    assert {cap.capability_id for cap in fallback.capabilities} == {
+        "cap_query",
+        "cap_option",
+        "cap_submit",
+    }
+
+
 @pytest.mark.asyncio
 async def test_export_ignores_stage_seven_working_spec(tmp_path: Path) -> None:
     spec = _three_cap_spec()
@@ -788,6 +813,30 @@ def test_renderer_does_not_invent_capability_fields() -> None:
     assert "invented" not in properties
     assert "id" not in properties
     assert "invented" not in (schema.get("required") or [])
+    assert "x-dano-derived-from-query" not in json.dumps(schema, ensure_ascii=False)
+
+
+def test_capability_plans_restore_flowspec_schema_without_inventing() -> None:
+    spec = sale_order_spec()
+    compiled = {
+        "steps": [
+            {"step_id": "s3", "method": "POST", "path": "/erp/update_sale_order"},
+        ],
+        "capabilities": [{
+            "capability_id": "cap_update",
+            "name": "update_sale_order",
+            "title": "修改销售订单",
+            "kind": "submit",
+            "compiled_step_ids": ["s3"],
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        }],
+    }
+    skill = SimpleNamespace(skill_id="oa.sale", call_metadata={}, api_request=compiled)
+    plans = _capability_plans(skill, spec, compiled)
+    schema = plans[0]["input_schema"]
+    assert "id" in (schema.get("properties") or {})
+    assert "id" in (schema.get("required") or [])
+    assert "invented" not in (schema.get("properties") or {})
     assert "x-dano-derived-from-query" not in json.dumps(schema, ensure_ascii=False)
 
 
@@ -1112,9 +1161,10 @@ def test_user_playbook_appears_in_skill_relation_and_description() -> None:
          "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     ]
     text = _fallback_skill_md(skill, "dano-oa-sale-package", plans, spec)
-    relation = text.split("## 适用场景", 1)[1].split("## 选择工作流", 1)[0]
-    assert playbook in relation or playbook in text.split("## 组合与交接规则", 1)[1]
+    applicable = text.split("## 适用场景", 1)[1].split("## 选择工作流", 1)[0]
     description = text.split("description:", 1)[1].split("\n", 1)[0]
+    assert playbook in description or "不要改" in description or "找到" in description
+    assert playbook not in applicable
     assert "不要改" in description or "查找" in description or "找到" in description
     assert "审批" in description
     assert "用户要搜索/筛选销售订单、用户要查看" not in text
@@ -1550,8 +1600,18 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
         if [str(cap) for cap in (item.get("capability_sequence") or [])][:2] == ["cap_search", "cap_update"]
     )
     assert "id" in (update_route.get("required_user_inputs") or [])
-    if "id" in (schema.get("properties") or {}):
-        assert "id" in forms
+    assert "id" in (schema.get("properties") or {})
+    assert "id" in (schema.get("required") or [])
+    assert "id" in forms
+    update_script = (root / "scripts" / "update_sale_order.py").read_text(encoding="utf-8")
+    assert '"id"' in update_script
+    skill_applicable = skill_md.split("## 适用场景", 1)[1].split("##", 1)[0]
+    description = skill_md.split("description:", 1)[1].split("\n", 1)[0]
+    compact_desc = "".join(description.strip().strip('"').split())
+    compact_app = "".join(skill_applicable.split())
+    assert compact_desc not in compact_app
+    assert not list(root.rglob("__pycache__"))
+    assert not list(root.rglob("*.pyc"))
     result = validate_skill_package(root)
     assert result["ok"], result["issues"]
     atomic_only = [line for line in skill_md.splitlines() if "不必读取组合路线" in line]

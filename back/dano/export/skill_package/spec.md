@@ -150,11 +150,21 @@ The packed contract is copied as-is: field identity, option maps, request
 templates, sample evidence, defaults, and success rules must not be rewritten
 or dropped. Stage 8 consumes upstream capability schemas; it must not invent
 fields, required lists, or derived-from-query marks from route steps.
-`SKILL.md` may add routing and handbook language, but it cannot invent,
-rename, or delete those facts. Scripts may still contain PLAN JSON;
+If compilation emptied a capability `input_schema`, restore the FlowSpec
+capability schema that the planner already used. Do not add fields that
+exist only on route steps.
+Route `required_user_inputs` and `input_sources[user]` must be a subset of
+that same capability schema. `INPUT_FORMS.md`, `CONTRACT.json`, scripts'
+PLAN, and route files must project the same caller fields. If the schema has
+no caller fields, say so and collect “按已有契约收集”; do not write
+`` `id` 由用户提供 ``.
+`SKILL.md` description is the routing trigger. The 适用场景 body must not
+repeat that identity paragraph. Scripts may still contain PLAN JSON;
 the handbook must not tell the Agent to read PLAN, `x-dano`, or
-`capability_id`. Route files may name business fields such as `id`, but they
-must not expose internal step keys or `field←source` markers.
+`capability_id`. Route files may name business fields such as `id` only when
+the capability schema has them, and they must not expose internal step keys
+or `field←source` markers. A consumer package must not contain `__pycache__`
+or `.pyc` files.
 
 ## Script contract
 

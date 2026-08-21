@@ -16,6 +16,7 @@ from dano.onboarding.skill_generation.catalog import (
     confirmed_fixed_or_system_inputs,
     is_write_capability,
     public_capability_catalog,
+    schema_properties,
     schema_required,
     usable_relations,
 )
@@ -228,10 +229,11 @@ def _relation_pair(spec: FlowSpec, left: FlowCapability, right: FlowCapability) 
 
 def _required_user_inputs(cap: FlowCapability, bound_inputs: set[str]) -> list[str]:
     satisfied = set(confirmed_fixed_or_system_inputs(cap))
+    properties = set(schema_properties(cap.input_schema))
     return [
         field
         for field in schema_required(cap.input_schema)
-        if field not in satisfied and field not in bound_inputs
+        if field in properties and field not in satisfied and field not in bound_inputs
     ]
 
 

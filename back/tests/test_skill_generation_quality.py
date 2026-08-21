@@ -57,7 +57,7 @@ def test_sale_order_skill_hit_and_leave_skill_miss() -> None:
     utterance = "帮我查鲜生的单"
     assert skill_hit(sale, utterance)
     assert not skill_hit(leave, utterance)
-    assert not silent_sequence_drop(sale)
+    assert not silent_sequence_drop(sale, sale_order_spec())
 
 
 def test_sale_order_route_match_and_read_only_does_not_write() -> None:
@@ -87,10 +87,55 @@ def test_consecutive_utterance_hits_combo_and_not_leave_skill() -> None:
     )
     utterance = "查询完成紧接着提交请假"
     assert skill_hit(plan, utterance)
-    assert not silent_sequence_drop(plan)
+    assert not silent_sequence_drop(plan, spec)
     matched = match_routes(plan, utterance)
     assert matched
     assert matched[0].capability_sequence[:2] == ["cap_query", "cap_submit"]
+
+
+def test_quality_gate_catches_real_order_phrases_and_not_immediate_write() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    phrases = (
+        "查询结束就提交请假",
+        "查询继而提交请假",
+        "查询优先，提交其次",
+        "查询在前，提交在后",
+        "完成查询方可提交",
+    )
+    for phrase in phrases:
+        plan = propose_deterministic_plan(
+            spec,
+            SkillGenerationRequest(
+                title="请假办理",
+                business_description=phrase,
+                example_requests=[phrase],
+                planning_mode=PlanningMode.DYNAMIC,
+            ),
+            VERIFIED,
+            f"fp-quality-{phrase}",
+        )
+        assert skill_hit(plan, phrase), phrase
+        assert not silent_sequence_drop(plan, spec), phrase
+        matched = match_routes(plan, phrase)
+        assert matched, phrase
+        assert matched[0].capability_sequence[:2] == ["cap_query", "cap_submit"], phrase
+    immediate = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="马上提交请假",
+            example_requests=["马上提交请假"],
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-quality-immediate",
+    )
+    assert skill_hit(immediate, "马上提交请假")
+    assert not silent_sequence_drop(immediate, spec)
+    matched = match_routes(immediate, "马上提交请假")
+    assert matched
+    assert matched[0].capability_sequence == ["cap_submit"]
+    assert not immediate.clarification_questions
 
 
 def test_explicit_branches_have_zero_silent_drops() -> None:

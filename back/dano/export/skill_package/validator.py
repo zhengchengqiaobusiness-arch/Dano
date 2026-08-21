@@ -108,10 +108,26 @@ def _check_skill(path: Path, text: str, issues: list[dict]) -> None:
     if re.search(r"(必须|请)?先?(阅读|读取).{0,16}全部.{0,12}(generator-guides|references\s*下所有)", text, re.I):
         issues.append(_issue("progressive_disclosure", "SKILL.md must not unconditionally load all references", path))
     _check_handbook_bans(path, text, issues)
+    _check_identity_not_repeated(path, text, metadata, issues)
     for marker in _PROCESS_LEAK_MARKERS:
         if marker and marker in text:
             issues.append(_issue("process_leak", f"consumer handbook must not contain: {marker}", path))
             break
+
+
+def _check_identity_not_repeated(path: Path, text: str, metadata: dict, issues: list[dict]) -> None:
+    description = str(metadata.get("description") or "").strip()
+    applicable = _section(text, "适用场景")
+    if len(description) < 24 or not applicable:
+        return
+    compact_desc = "".join(description.split())
+    compact_app = "".join(applicable.split())
+    if compact_desc and compact_desc in compact_app:
+        issues.append(_issue(
+            "identity_repeat",
+            "SKILL.md 适用场景 must not repeat the frontmatter description",
+            path,
+        ))
 
 
 def _doc_intro(text: str) -> str:
@@ -437,6 +453,112 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
                     f"packed script is not in selected capabilities: {script.name}",
                     script,
                 ))
+    _check_input_fact_alignment(root, contract, issues)
+
+
+def _capability_schema_fields(item: dict) -> set[str]:
+    schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    return {str(name) for name, raw in properties.items() if isinstance(raw, dict)}
+
+
+def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) -> None:
+    caps: dict[str, dict] = {}
+    for item in contract.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in (item.get("capability_id"), item.get("name")):
+            if key:
+                caps[str(key)] = item
+    forms_path = root / "references" / "INPUT_FORMS.md"
+    forms = forms_path.read_text(encoding="utf-8") if forms_path.is_file() else ""
+    for item in contract.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        fields = _capability_schema_fields(item)
+        title = str(item.get("title") or item.get("name") or "")
+        name = str(item.get("name") or "")
+        section = ""
+        if title and f"## {title}" in forms:
+            section = forms.split(f"## {title}", 1)[1].split("\n## ", 1)[0]
+        elif name and f"`{name}`" in forms:
+            section = forms
+        if fields:
+            missing = [field for field in sorted(fields) if f"`{field}`" not in (section or forms)]
+            if missing:
+                issues.append(_issue(
+                    "input_form_missing_field",
+                    f"INPUT_FORMS.md missing caller fields from {name or title}: {', '.join(missing)}",
+                    forms_path,
+                ))
+        elif section and "没有调用方字段" not in section and title:
+            issues.append(_issue(
+                "input_form_invented_field",
+                f"INPUT_FORMS.md must not invent caller fields for {name or title}",
+                forms_path,
+            ))
+        script = Path(str(item.get("script") or ""))
+        script_path = root / script if str(script) else None
+        if script_path and script_path.is_file() and fields:
+            source = script_path.read_text(encoding="utf-8")
+            if "PLAN = json.loads" in source or "PLAN=json.loads" in source:
+                missing = [
+                    field
+                    for field in sorted(fields)
+                    if f'"{field}"' not in source and f"'{field}'" not in source
+                ]
+                if missing:
+                    issues.append(_issue(
+                        "script_schema_missing_field",
+                        f"{script_path.name} PLAN is missing capability fields: {', '.join(missing)}",
+                        script_path,
+                    ))
+    for route in contract.get("routes") or []:
+        if not isinstance(route, dict):
+            continue
+        route_id = str(route.get("route_id") or "?")
+        for step in route.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            cap = caps.get(str(step.get("capability_id") or ""))
+            if cap is None:
+                continue
+            allowed = _capability_schema_fields(cap)
+            for source in step.get("input_sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                if str(source.get("source") or "") != "user":
+                    continue
+                field = str(source.get("field") or "").strip()
+                if field and field not in allowed:
+                    issues.append(_issue(
+                        "route_user_field_not_in_schema",
+                        f"route {route_id} asks for {field}, but capability schema does not have it",
+                        root / "references" / "CONTRACT.json",
+                    ))
+        for field in route.get("required_user_inputs") or []:
+            name = str(field).strip()
+            if not name:
+                continue
+            present = False
+            for cap_id in route.get("capability_sequence") or []:
+                cap = caps.get(str(cap_id))
+                if cap is not None and name in _capability_schema_fields(cap):
+                    present = True
+                    break
+            if not present:
+                issues.append(_issue(
+                    "route_user_field_not_in_schema",
+                    f"route {route_id} required_user_inputs {name} is not in any step capability schema",
+                    root / "references" / "CONTRACT.json",
+                ))
+
+
+def _check_runtime_artifacts(root: Path, issues: list[dict]) -> None:
+    for path in root.rglob("__pycache__"):
+        issues.append(_issue("runtime_artifact", "Skill package must not contain __pycache__", path))
+    for path in root.rglob("*.pyc"):
+        issues.append(_issue("runtime_artifact", f"Skill package must not contain {path.name}", path))
 
 
 def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
@@ -618,6 +740,7 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         ))
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
     _check_credentials(root, issues)
+    _check_runtime_artifacts(root, issues)
     if skill:
         _check_planning(root, skill, issues)
     return {"ok": not any(issue["severity"] == "error" for issue in issues), "issues": issues}

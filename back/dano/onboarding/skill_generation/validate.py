@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
-from dano.onboarding.skill_generation.intent import description_has_explicit_sequence
+from dano.onboarding.skill_generation.intent import looks_like_ordered_multi_step
 from dano.onboarding.skill_generation.catalog import (
     capability_by_id,
     capability_ref,
@@ -154,7 +154,7 @@ def validate_skill_plan(
                 result.error(f"未使用能力必须记录原因: {cap_id}")
     _validate_handbook_language(result, plan)
     _validate_intent_coverage(result, plan)
-    _validate_no_silent_sequence(result, plan)
+    _validate_no_silent_sequence(result, plan, spec)
     _validate_route_execution_contracts(result, plan, caps)
     _validate_forbidden_routes(result, plan)
     _validate_done_when_matches_route(result, plan, caps)
@@ -235,9 +235,10 @@ def _validate_intent_coverage(result: PlanValidation, plan: SkillPlan) -> None:
             result.clarify(f"「{branch.trigger}」对应了多条不同合同的路线，请确认唯一顺序")
 
 
-def _validate_no_silent_sequence(result: PlanValidation, plan: SkillPlan) -> None:
-    text = str(plan.summary or "")
-    if not description_has_explicit_sequence(text):
+def _validate_no_silent_sequence(result: PlanValidation, plan: SkillPlan, spec: FlowSpec) -> None:
+    caps = list(spec.capabilities or [])
+    texts = [plan.summary, *plan.trigger_phrases, *(branch.trigger for branch in plan.intent_branches)]
+    if not any(looks_like_ordered_multi_step(str(text), caps) for text in texts if text):
         return
     has_combo = any(len(route.capability_sequence) > 1 for route in plan.routes)
     has_clarify = bool(plan.clarification_questions) or any(
@@ -281,6 +282,15 @@ def _validate_route_execution_contracts(
                 for source in step.input_sources:
                     if source.source == InputSourceKind.CONFIRMED_BINDING and not step.bindings:
                         result.error(f"路线 {route.route_id} 步骤 {step.step_key} 把未确认关系当成了自动绑定")
+                    if (
+                        source.source == InputSourceKind.USER
+                        and source.field
+                        and not schema_has_field(cap.input_schema, source.field)
+                    ):
+                        result.error(
+                            f"路线 {route.route_id} 用户输入 {source.field} 不在能力契约中，"
+                            "不得发明调用方字段"
+                        )
         if (
             len(route.capability_sequence) > 1
             and not route.bindings

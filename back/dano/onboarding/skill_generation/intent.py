@@ -19,6 +19,12 @@ _LIST_SPLIT = re.compile(r"或者|或是|以及|和|[、,/]|或")
 _ORDER_PATTERNS = (
     re.compile(r"先(?P<left>.+?)再(?:对选中的[^做]*做)?(?P<right>.+)"),
     re.compile(r"先(?P<left>.+?)后(?:再)?(?P<right>.+)"),
+    re.compile(r"完成(?P<left>.+?)方可(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)优先[，,、\s]*(?P<right>.+?)其次"),
+    re.compile(r"(?P<left>.+?)在前[，,、\s]*(?P<right>.+?)在后"),
+    re.compile(r"(?P<left>.+?)方可(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)继而(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)结束(?:后|了)?(?:就|再|即)(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)紧接着(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)随后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)随即(?P<right>.+)"),
@@ -48,10 +54,30 @@ _SEQUENCE_HINTS = (
     "下一步",
     "跟着",
     "后再",
-    "马上",
     "连着",
     "连续办理",
     "衔接",
+    "继而",
+    "结束就",
+    "结束后",
+    "结束即",
+    "方可",
+    "在前",
+    "在后",
+    "优先",
+    "其次",
+)
+_BETWEEN_SEQUENCE = _SEQUENCE_HINTS + (
+    "结束就",
+    "结束后",
+    "完成就",
+    "完毕就",
+    "优先",
+    "其次",
+    "在前",
+    "在后",
+    "方可",
+    "继而",
 )
 _UNRESOLVED_SEQUENCE = "描述像是要按顺序办理多项操作，但无法唯一确定组合路线。请用「先…再…」写明每一步，不要省略顺序"
 _TARGET_GIVEN = ("已指定", "已备齐", "已经提供", "目标已给出", "已给出完整")
@@ -189,13 +215,90 @@ def _target_given(text: str) -> bool:
 
 
 def description_has_explicit_sequence(text: str) -> bool:
-    """True when the user named a multi-step order, not just a list of actions."""
+    """True when the user named a multi-step order, not just a list of actions.
+
+    Degree adverbs such as「马上」or「立即」alone are not order language.
+    """
     raw = str(text or "")
     if any(token in raw for token in _SEQUENCE_HINTS):
         return True
     if "接着" in raw:
         return True
+    if "优先" in raw and "其次" in raw:
+        return True
+    if "在前" in raw and "在后" in raw:
+        return True
+    if "方可" in raw:
+        return True
+    if re.search(r"(?:结束|完成|完毕|做完|完了).{0,4}(?:就|再|即)", raw):
+        return True
     return "先" in raw and ("再" in raw or "后" in raw)
+
+
+def _is_sequence_connector(between: str) -> bool:
+    compact = str(between or "")
+    if not compact.strip():
+        return False
+    if any(token in compact for token in _BETWEEN_SEQUENCE):
+        return True
+    if re.search(r"(?:结束|完成|完毕|做完|完了).{0,4}(?:就|再|即)", compact):
+        return True
+    if re.search(r"(?<!不)再", compact):
+        return True
+    stripped = compact.strip()
+    return stripped in {"马上", "立即"} or stripped.startswith(("马上", "立即"))
+
+
+def _has_sequence_between_hits(
+    text: str,
+    hits: list[tuple[int, int, FlowCapability, str]],
+) -> bool:
+    raw = str(text or "")
+    if len(hits) < 2:
+        return False
+    for index in range(len(hits) - 1):
+        _start, end, _cap, _alias = hits[index]
+        nxt_start, nxt_end, _nxt_cap, _nxt_alias = hits[index + 1]
+        between = raw[end:nxt_start]
+        after = raw[nxt_start:nxt_end + 8]
+        before = raw[max(0, end - 8):end]
+        if _is_sequence_connector(between):
+            return True
+        if ("优先" in between or "优先" in before) and "其次" in after:
+            return True
+        if ("在前" in between or "在前" in before) and "在后" in after:
+            return True
+    return False
+
+
+def _orders_from_mentions(
+    text: str,
+    caps: list[FlowCapability],
+) -> list[list[FlowCapability]]:
+    """Compile appearance order when two named capabilities have sequence language between them."""
+    hits = _alias_hits(text, caps)
+    if not _has_sequence_between_hits(text, hits):
+        return []
+    ordered: list[FlowCapability] = []
+    seen: set[str] = set()
+    for _start, _end, cap, _alias in hits:
+        key = capability_ref(cap)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(cap)
+    if len(ordered) < 2:
+        return []
+    return [ordered[:2]]
+
+
+def looks_like_ordered_multi_step(text: str, caps: list[FlowCapability]) -> bool:
+    """True when the utterance names two capabilities and an order, not one action."""
+    raw = str(text or "")
+    mentioned = _match_caps(raw, caps)
+    if len(mentioned) < 2:
+        return False
+    return description_has_explicit_sequence(raw) or bool(_orders_from_mentions(raw, caps))
 
 
 def _unknown_actions(text: str, caps: list[FlowCapability]) -> list[str]:
@@ -274,6 +377,7 @@ def _sentence_orders(
         raw = sentence.strip()
         if not raw:
             continue
+        matched = False
         for pattern in _ORDER_PATTERNS:
             match = pattern.search(raw)
             if not match:
@@ -281,7 +385,12 @@ def _sentence_orders(
             sequences, problems = _expand_order(match.group("left"), match.group("right"), caps)
             unresolved.extend(problems)
             found.extend(sequences)
+            matched = True
             break
+        if matched:
+            continue
+        mention_orders = _orders_from_mentions(raw, caps)
+        found.extend(mention_orders)
     return found, unresolved
 
 
@@ -364,7 +473,7 @@ def extract_intent_branches(
         elif (
             len(mentioned) >= 2
             and _looks_independent(mentioned)
-            and not description_has_explicit_sequence(description)
+            and not looks_like_ordered_multi_step(description, selected)
         ):
             add(_branch(
                 branch_id="desc_independent",
@@ -373,8 +482,9 @@ def extract_intent_branches(
                 source="description",
                 independent=True,
             ))
-        if description_has_explicit_sequence(description) and not any(
-            branch.unresolved or branch.conflicting for branch in branches
+        if (
+            looks_like_ordered_multi_step(description, selected)
+            and not any(branch.unresolved or branch.conflicting for branch in branches)
         ):
             add(_branch(
                 branch_id="desc_unresolved_sequence",
@@ -439,7 +549,7 @@ def extract_intent_branches(
                 ))
             continue
         hits = _match_caps(example, selected)
-        if description_has_explicit_sequence(example) and len(hits) != 1:
+        if looks_like_ordered_multi_step(example, selected) and len(hits) != 1:
             add(_branch(
                 branch_id=f"example_unresolved_sequence_{index + 1}",
                 trigger=example,

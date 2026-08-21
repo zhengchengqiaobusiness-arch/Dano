@@ -309,6 +309,64 @@ def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
     return links
 
 
+def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any]:
+    """Copy capability schema facts. Restore dropped fields; never invent route fields."""
+    packed = dict(compiled) if isinstance(compiled, dict) else {}
+    fact = dict(upstream) if isinstance(upstream, dict) else {}
+    packed_props = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+    fact_props = fact.get("properties") if isinstance(fact.get("properties"), dict) else {}
+    if not fact_props and not packed_props:
+        return {"type": "object", "properties": {}, "required": []}
+    properties = {**fact_props, **packed_props}
+    required: list[str] = []
+    for field in [*(fact.get("required") or []), *(packed.get("required") or [])]:
+        name = str(field)
+        if name in properties and name not in required:
+            required.append(name)
+    schema: dict[str, Any] = {"type": "object", "properties": dict(properties), "required": required}
+    for source in (fact, packed):
+        for key, value in source.items():
+            if key in {"type", "properties", "required"}:
+                continue
+            schema[key] = value
+    return schema
+
+
+def _upstream_capability_schema(spec, skill, cap: dict) -> dict[str, Any]:  # noqa: ANN001
+    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
+    if spec is not None:
+        for item in spec.capabilities or []:
+            if str(item.capability_id or "") in keys or str(item.name or "") in keys:
+                schema = getattr(item, "input_schema", None)
+                if isinstance(schema, dict) and (schema.get("properties") or schema.get("required")):
+                    return dict(schema)
+    for item in getattr(skill, "capabilities", None) or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("capability_id") or "") in keys or str(item.get("name") or "") in keys:
+            schema = item.get("input_schema") or item.get("parameters")
+            if isinstance(schema, dict) and (schema.get("properties") or schema.get("required")):
+                return dict(schema)
+    return {}
+
+
+def restore_compiled_capability_schemas(api_request: dict, spec) -> dict:  # noqa: ANN001
+    """Put FlowSpec capability schemas back onto compiled capabilities. Do not invent fields."""
+    raw = dict(api_request or {})
+    capabilities = [dict(item) for item in (raw.get("capabilities") or []) if isinstance(item, dict)]
+    if spec is None:
+        raw["capabilities"] = capabilities
+        return raw
+    restored: list[dict] = []
+    for cap in capabilities:
+        fact = _upstream_capability_schema(spec, None, cap)
+        compiled = cap.get("input_schema") or cap.get("parameters") or {}
+        cap["input_schema"] = consume_upstream_input_schema(compiled, fact)
+        restored.append(cap)
+    raw["capabilities"] = restored
+    return raw
+
+
 def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
     all_steps = _steps(api_request)
     by_id = {str(step.get("step_id") or f"step-{index}"): step for index, step in enumerate(all_steps)}
@@ -352,7 +410,10 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             "title": str(cap.get("title") or name),
             "kind": str(cap.get("kind") or "operation"),
             "script": script,
-            "input_schema": dict(cap.get("input_schema") or cap.get("parameters") or {"type": "object", "properties": {}}),
+            "input_schema": consume_upstream_input_schema(
+                cap.get("input_schema") or cap.get("parameters") or {},
+                _upstream_capability_schema(spec, skill, cap),
+            ),
             "output_schema": dict(cap.get("output_schema") or {"type": "object"}),
             "preconditions": list(cap.get("preconditions") or []),
             "caller_responsibilities": list(cap.get("caller_responsibilities") or []),
@@ -459,6 +520,31 @@ def _skill_description(skill, plans: list[dict], spec) -> tuple[str, str]:  # no
     if not text.endswith("。"):
         text += "。"
     return heading, _clip_description(text)
+
+
+def _schema_field_names(plan: dict) -> set[str] | None:
+    schema = plan.get("input_schema")
+    if not isinstance(schema, dict):
+        return None
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    return {
+        str(name)
+        for name, raw in properties.items()
+        if isinstance(raw, dict) and _is_caller_field(raw)
+    }
+
+
+def _route_schema_fields(route: dict, plans: list[dict]) -> set[str] | None:
+    by_ref = _plan_by_ref(plans)
+    known = False
+    fields: set[str] = set()
+    for cap_id in route.get("capability_sequence") or []:
+        names = _schema_field_names(by_ref.get(str(cap_id)) or {})
+        if names is None:
+            continue
+        known = True
+        fields.update(names)
+    return fields if known else None
 
 
 def _field_label(name: str, field: dict) -> str:
@@ -757,13 +843,20 @@ def _cross_step_label(route: dict) -> str:
     return "不涉及"
 
 
-def _ask_when_label(route: dict) -> str:
+def _ask_when_label(route: dict, plans: list[dict] | None = None) -> str:
     checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
     if checks:
         return "；".join(str(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
-    if route.get("required_user_inputs"):
-        fields = "、".join(f"`{name}`" for name in route.get("required_user_inputs") or [])
-        return f"只补当前步骤缺少的输入：{fields}"
+    allowed = _route_schema_fields(route, plans or [])
+    fields = [
+        str(name)
+        for name in (route.get("required_user_inputs") or [])
+        if str(name) and (allowed is None or str(name) in allowed)
+    ]
+    if fields:
+        return "只补当前步骤缺少的输入：" + "、".join(f"`{name}`" for name in fields)
+    if route.get("required_user_inputs") and allowed is not None:
+        return "按已有契约收集当前步骤缺少的输入"
     return "输入已齐则不问"
 
 
@@ -808,7 +901,7 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         lines.append(
             f"| {_safe_text(route.get('when_to_use') or route.get('name'))} | "
             f"{_safe_text(route.get('name') or route.get('route_id'))} | "
-            f"{' → '.join(titles)} | {_cross_step_label(route)} | {_ask_when_label(route)} | "
+            f"{' → '.join(titles)} | {_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
             f"{_confirm_label(route, plans)} | {_safe_text(route.get('done_when') or '按该行完成条件核对')} | "
             f"{_route_detail_link(route)} |"
         )
@@ -921,10 +1014,9 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
 def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
     unused = [item for item in (plan.get("unused_capabilities") or []) if isinstance(item, dict)]
-    summary = _safe_text(plan.get("composition_summary") or plan.get("summary"))
+    identity = _safe_text(plan.get("composition_summary") or plan.get("summary"))
     lines = ["## 适用场景", ""]
-    if summary and not _is_recording_copy(summary):
-        lines.append(f"- {summary}")
+    lines.append("- 用户原话能对应「选择工作流」中恰好一行时使用。")
     route_whens = {
         _safe_text(route.get("when_to_use"))
         for route in _all_routes(skill)
@@ -936,16 +1028,24 @@ def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         if (
             not example
             or _is_recording_copy(example)
-            or example in route_whens
+            or example == identity
             or example in "\n".join(lines)
         ):
             continue
-        lines.append(f"- {example}")
+        if example in route_whens and added >= 2:
+            continue
+        lines.append(f"- 例如：{example}")
         added += 1
         if added >= 3:
             break
-    if len(lines) == 2:
-        lines.append("- 用户请求与本页已打包操作一致时使用。")
+    if added == 0:
+        for when in route_whens:
+            if not when or when == identity or when in "\n".join(lines):
+                continue
+            lines.append(f"- 例如：{when}")
+            added += 1
+            if added >= 2:
+                break
     lines.extend(["", "## 不适用场景", ""])
     lines.append("- 不要用于其它业务对象或未列出的动作。")
     lines.append("- 只要查询或查看时，不得执行写入。")
@@ -1249,8 +1349,10 @@ _INPUT_SOURCE_LABELS = {
 }
 
 
-def _input_source_label(item: dict) -> str:
+def _input_source_label(item: dict, allowed: set[str] | None = None) -> str:
     field = str(item.get("field") or "").strip()
+    if field and allowed is not None and field not in allowed:
+        return "按已有契约收集"
     how = _INPUT_SOURCE_LABELS.get(str(item.get("source") or "").strip(), "按已有契约收集")
     return f"`{field}` {how}" if field else how
 
@@ -1290,11 +1392,12 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
             cap_id = str(step.get("capability_id") or "")
             title = _title_for_plan_ref(plans, cap_id) or cap_id
             script = _script_for(plans, cap_id)
+            allowed = _schema_field_names(_plan_by_ref(plans).get(cap_id) or {})
             sources = "；".join(
-                _input_source_label(item)
+                _input_source_label(item, allowed)
                 for item in (step.get("input_sources") or [])
                 if isinstance(item, dict) and item.get("field")
-            ) or "当前步骤缺少的调用方输入"
+            ) or ("按已有契约收集" if allowed is not None else "当前步骤缺少的调用方输入")
             nxt = "继续下一步" if index + 1 < len(steps) else "按完成条件结束"
             if step.get("checkpoint"):
                 nxt = "在交接点停问，用户选定后再继续"
@@ -1307,7 +1410,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
             title = _title_for_plan_ref(plans, cap_id) or cap_id
             script = _script_for(plans, cap_id)
             lines.append(
-                f"| {index + 1} | {title} `{script}` | 当前步骤缺少的调用方输入 | 结果可核对 | "
+                f"| {index + 1} | {title} `{script}` | 按已有契约收集 | 结果可核对 | "
                 f"{'继续下一步' if index + 1 < len(sequence) else '按完成条件结束'} |"
             )
     lines.extend(["", "## 输入来源与交接点", ""])
@@ -1348,7 +1451,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
         f"- 选择路线：{name}",
         f"- 步骤：{' → '.join(_title_for_plan_ref(plans, cap_id) or cap_id for cap_id in sequence)}",
         f"- 输入来源：{_cross_step_label(route)}",
-        f"- 问人：{_ask_when_label(route)}",
+        f"- 问人：{_ask_when_label(route, plans)}",
         f"- 确认：{_confirm_label(route, plans)}",
         f"- 完成：{_safe_text(example.get('done_when') or route.get('done_when') or '按完成条件核对')}",
         f"- 取消/空结果/失败：{_safe_text(example.get('on_cancel') or '停止并报告未执行')}；"
@@ -2284,6 +2387,17 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def _clean_runtime_artifacts(folder: Path) -> None:
+    for path in folder.rglob("__pycache__"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    for path in folder.rglob("*.pyc"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], bool]:  # noqa: ANN001
     spec = _flow_spec(skill)
     api_request = _compiled_request(skill, spec)
@@ -2385,6 +2499,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 scripts / f"verify_{module}.py",
                 _VERIFY_TEMPLATE.replace("__CAP_MODULE__", module),
             )
+    _clean_runtime_artifacts(folder)
     return plans, not docs_valid
 
 
@@ -2396,6 +2511,7 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
     stage = Path(tempfile.mkdtemp(prefix=f".{slug}-", dir=root))
     try:
         _plans, fallback_used = _render_folder(skill, stage, tenant=tenant)
+        _clean_runtime_artifacts(stage)
         validation = validate_skill_package(stage)
         if not validation["ok"] and not fallback_used:
             spec = _flow_spec(skill)
@@ -2406,6 +2522,7 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
             _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, spec))
             fallback_used = True
             validation = validate_skill_package(stage)
+        _clean_runtime_artifacts(stage)
         if not validation["ok"]:
             raise ValueError(f"skill package validation failed: {validation['issues']}")
         target = root / slug
