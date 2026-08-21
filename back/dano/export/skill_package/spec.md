@@ -16,6 +16,12 @@ on handbook shape, routing, or disclosure.
 1. Alibaba Cloud AIOps Skills
    - Repository: https://github.com/aliyun/alibabacloud-aiops-skills/tree/master/skills
    - Pinned commit: `a2497242c16a61b9396f809a22b468f0f1cd8cf9`
+   - Representative samples read at that commit:
+     - `skills/aiml/agentloop/alibabacloud-agentloop-evaluation/SKILL.md`
+     - `skills/aiml/agentloop/alibabacloud-agentloop-dataset/SKILL.md`
+     - `skills/analyticscomputing/datahub/alibabacloud-datahub-manage/SKILL.md`
+     - `skills/aiml/learn/alibabacloud-pai-workspace-manage/SKILL.md`
+     - `skills/aiml/sfm/alibabacloud-bailian-voice-creator/SKILL.md`
    - Adopt: description as the routing entry; choose one workflow before
      running it; ordered executable steps; preview → confirm → execute for
      writes; success and failure checks; conditional references.
@@ -142,10 +148,13 @@ reasonable read, keep the index here and split only the long capability into
 
 The packed contract is copied as-is: field identity, option maps, request
 templates, sample evidence, defaults, and success rules must not be rewritten
-or dropped. `SKILL.md` may add routing and handbook language, but it cannot
-invent, rename, or delete those facts. Scripts may still contain PLAN JSON;
+or dropped. Stage 8 consumes upstream capability schemas; it must not invent
+fields, required lists, or derived-from-query marks from route steps.
+`SKILL.md` may add routing and handbook language, but it cannot invent,
+rename, or delete those facts. Scripts may still contain PLAN JSON;
 the handbook must not tell the Agent to read PLAN, `x-dano`, or
-`capability_id`.
+`capability_id`. Route files may name business fields such as `id`, but they
+must not expose internal step keys or `field←source` markers.
 
 ## Script contract
 
@@ -170,7 +179,9 @@ When a recording result is exported through manual Skill planning, `references/C
   `composition_mode`, `done_when`, and `failure_behavior`
 - `unused_capabilities`
 - `source_flow_fingerprint`
-- `intent_branches` when the compiler produced them
+- `intent_branches` when the compiler produced them; keep the compiled
+  natural-language branches so auditors can map user wording to routes
+  and detect dropped combinations
 
 Public scripts and `SKILL.md` may only name selected capabilities. Unused capabilities stay in the original FlowSpec but must not appear as packed scripts. Packages without these fields remain valid single-capability exports.
 
@@ -190,9 +201,16 @@ These are Skill-handbook metrics, not interface-correctness metrics:
 - Loading a combination route file for a single atomic request = 0.
 
 Runnable checks live in `back/tests/test_skill_generation_quality.py`.
-They measure Skill hit/miss, complete route match, silent branch drops,
-unnecessary asks, should-stop-but-continued, and on-demand context load.
-They do not score whether a business API field was discovered correctly.
+They measure Skill hit/miss from the user's original utterance, complete
+route match, silent branch drops, silent sequence drops, unnecessary asks,
+should-stop-but-continued, tool-invocation readiness, human-correction
+surface, and on-demand context load. They do not score whether a business
+API field was discovered correctly.
+
+Live tool-call success rate and live human-correction rate need runtime
+telemetry. Generation-time checks only prove the handbook exposes the
+measurement points: every step has a capability and a done condition,
+writes confirm, and unbound write combinations stop at a checkpoint.
 
 `route_id` must be generated from the full capability sequence and stay
 globally unique. Package validation rejects duplicate IDs before file-set

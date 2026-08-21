@@ -849,6 +849,8 @@ def _assert_package_matches_plan(export_path: str, plan: SkillPlan) -> None:
     payload = plan_to_contract_payload(plan)
     if payload["planning_mode"] != contract.get("planning_mode"):
         raise RuntimeError("SKILL 规划模式与 CONTRACT 不一致")
+    if plan.intent_branches and not contract.get("intent_branches"):
+        raise RuntimeError("CONTRACT.json 缺少 intent_branches，无法审计自然语言分支")
 
 
 def _default_render(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001

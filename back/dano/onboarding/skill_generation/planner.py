@@ -875,7 +875,7 @@ def propose_deterministic_plan(
             bindings=bindings,
             request=request,
             extra_preconditions=(
-                ["回查使用独立步骤身份 query_before / submit_selected / query_after"]
+                ["回查使用独立步骤，不要复用上一步的步骤身份"]
                 if _mentions(text, _LOOKUP_HINTS) and queries
                 else None
             ),

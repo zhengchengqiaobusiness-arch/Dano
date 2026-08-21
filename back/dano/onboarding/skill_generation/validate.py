@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
+from dano.onboarding.skill_generation.intent import description_has_explicit_sequence
 from dano.onboarding.skill_generation.catalog import (
     capability_by_id,
     capability_ref,
@@ -153,6 +154,7 @@ def validate_skill_plan(
                 result.error(f"未使用能力必须记录原因: {cap_id}")
     _validate_handbook_language(result, plan)
     _validate_intent_coverage(result, plan)
+    _validate_no_silent_sequence(result, plan)
     _validate_route_execution_contracts(result, plan, caps)
     _validate_forbidden_routes(result, plan)
     _validate_done_when_matches_route(result, plan, caps)
@@ -231,6 +233,21 @@ def _validate_intent_coverage(result: PlanValidation, plan: SkillPlan) -> None:
             result.error(f"明确分支没有对应路线，不能静默原子化: {branch.trigger}")
         elif len({tuple(route.capability_sequence) for route in matches}) > 1 and not branch.independent:
             result.clarify(f"「{branch.trigger}」对应了多条不同合同的路线，请确认唯一顺序")
+
+
+def _validate_no_silent_sequence(result: PlanValidation, plan: SkillPlan) -> None:
+    text = str(plan.summary or "")
+    if not description_has_explicit_sequence(text):
+        return
+    has_combo = any(len(route.capability_sequence) > 1 for route in plan.routes)
+    has_clarify = bool(plan.clarification_questions) or any(
+        branch.unresolved or branch.conflicting for branch in plan.intent_branches
+    )
+    if not has_combo and not has_clarify:
+        result.clarify(
+            "业务描述像是要按顺序办理多项操作，但没有形成组合路线，也不能静默拆成互不相关的原子操作。"
+            "请用「先…再…」写明每一步。"
+        )
 
 
 def _validate_route_execution_contracts(
@@ -537,4 +554,7 @@ def plan_to_contract_payload(plan: SkillPlan) -> dict[str, Any]:
         ],
         "unused_capabilities": [item.model_dump(mode="json") for item in plan.unused_capabilities],
         "source_flow_fingerprint": plan.source_flow_fingerprint,
+        "intent_branches": [branch.model_dump(mode="json") for branch in plan.intent_branches],
+        "composition_summary": plan.composition_summary,
+        "composition_notes": list(plan.composition_notes),
     }

@@ -158,6 +158,7 @@ def _contract_planning_fields(skill) -> dict[str, Any]:  # noqa: ANN001
         "source_flow_fingerprint": plan.get("source_flow_fingerprint") or "",
         "composition_summary": plan.get("composition_summary") or "",
         "composition_notes": list(plan.get("composition_notes") or []),
+        "intent_branches": list(plan.get("intent_branches") or []),
     }
 
 
@@ -172,75 +173,12 @@ def _filter_plans_for_export(plans: list[dict], skill) -> list[dict]:  # noqa: A
     payload = _skill_plan_payload(skill)
     selected = [str(item) for item in (payload.get("selected_capability_ids") or []) if str(item)]
     if not selected:
-        return _project_plan_inputs(plans, payload)
+        return plans
     selected_set = set(selected)
     kept = [plan for plan in plans if _plan_keys(plan) & selected_set]
     if not kept:
         raise ValueError(f"{skill.skill_id} skill plan selected capabilities are not in the compiled contract")
-    return _project_plan_inputs(kept, payload)
-
-
-def _project_plan_inputs(plans: list[dict], payload: dict) -> list[dict]:
-    """Project route step inputs into capability schemas so CONTRACT and forms share one fact."""
-    user_fields: dict[str, dict[str, dict]] = {}
-    required_fields: dict[str, list[str]] = {}
-    bound_fields: dict[str, set[str]] = {}
-    for route in payload.get("routes") or []:
-        if not isinstance(route, dict):
-            continue
-        for step in route.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            cap_id = str(step.get("capability_id") or "").strip()
-            if not cap_id:
-                continue
-            for source in step.get("input_sources") or []:
-                if not isinstance(source, dict):
-                    continue
-                field = str(source.get("field") or "").strip()
-                kind = str(source.get("source") or "").strip()
-                if not field:
-                    continue
-                if kind == "user":
-                    user_fields.setdefault(cap_id, {})[field] = {
-                        "type": "string",
-                        "description": str(source.get("notes") or ""),
-                    }
-                    bucket = required_fields.setdefault(cap_id, [])
-                    if field not in bucket:
-                        bucket.append(field)
-                elif kind == "confirmed_binding":
-                    bound_fields.setdefault(cap_id, set()).add(field)
-    projected: list[dict] = []
-    for plan in plans:
-        schema = dict(plan.get("input_schema") or {"type": "object", "properties": {}})
-        properties = dict(schema.get("properties") or {})
-        required = [str(item) for item in (schema.get("required") or []) if str(item)]
-        keys = {str(plan.get("capability_id") or ""), str(plan.get("name") or "")} - {""}
-        for key in keys:
-            for field, spec in (user_fields.get(key) or {}).items():
-                current = properties.get(field)
-                if not isinstance(current, dict):
-                    properties[field] = dict(spec)
-                for item in required_fields.get(key) or []:
-                    if item not in required:
-                        required.append(item)
-            for field in bound_fields.get(key) or set():
-                current = properties.get(field)
-                if not isinstance(current, dict):
-                    properties[field] = {"type": "string", "x-dano-derived-from-query": True}
-                elif current.get("x-dano-derived-from-query") is not True and field not in required:
-                    properties[field] = {**current, "x-dano-derived-from-query": True}
-        projected.append({
-            **plan,
-            "input_schema": {
-                **schema,
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        })
-    return projected
+    return kept
 
 
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
@@ -902,8 +840,16 @@ def _composition_rules(skill) -> list[str]:  # noqa: ANN001
         "3. **人工交接串联**：没有确认绑定时，先做前一步，再展示候选或请用户补充下一步必要输入；只有用户选择通过校验后才恢复路线。",
         "",
     ]
-    if notes:
-        lines.extend(f"- {item}" for item in notes)
+    summary = _safe_text(plan.get("composition_summary") or plan.get("summary"))
+    extras = 0
+    for item in notes:
+        if item.startswith("组合路线「") or item.startswith("用户描述中的先后"):
+            continue
+        if item.startswith("组合约定：") and summary and item[5:].strip() == summary:
+            continue
+        lines.append(f"- {item}")
+        extras += 1
+    if extras:
         lines.append("")
     return lines
 
@@ -960,13 +906,8 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "- 需要判断某个能力的输入输出边界时，读取 `references/CAPABILITIES.md`。",
         "- 不要在开始前读取 references 下的全部文件。",
         "- 若 `INPUT_FORMS.md` 把某个能力拆到 `references/forms/`，只读取当前能力那一份。",
+        "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",
     ]
-    for route in _combination_routes(skill):
-        route_id = _safe_text(route.get("route_id") or "route")
-        name = _safe_text(route.get("name") or route_id)
-        lines.append(
-            f"- 选择「{name}」路线时，读取 `references/routes/{route_id}.md`；不要为单次原子操作加载它。"
-        )
     if any(item.get("requires_confirmation") or item.get("requires_verify") for item in plans):
         lines.extend([
             "",
@@ -984,10 +925,25 @@ def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines = ["## 适用场景", ""]
     if summary and not _is_recording_copy(summary):
         lines.append(f"- {summary}")
-    for route in _all_routes(skill):
-        when = _safe_text(route.get("when_to_use"))
-        if when and not _is_recording_copy(when) and when not in "\n".join(lines):
-            lines.append(f"- {when}")
+    route_whens = {
+        _safe_text(route.get("when_to_use"))
+        for route in _all_routes(skill)
+        if _safe_text(route.get("when_to_use"))
+    }
+    added = 0
+    for item in plan.get("trigger_phrases") or []:
+        example = _safe_text(item)
+        if (
+            not example
+            or _is_recording_copy(example)
+            or example in route_whens
+            or example in "\n".join(lines)
+        ):
+            continue
+        lines.append(f"- {example}")
+        added += 1
+        if added >= 3:
+            break
     if len(lines) == 2:
         lines.append("- 用户请求与本页已打包操作一致时使用。")
     lines.extend(["", "## 不适用场景", ""])
@@ -1285,6 +1241,20 @@ def _options_md(plans: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+_INPUT_SOURCE_LABELS = {
+    "user": "由用户提供",
+    "fixed_value": "使用固定值",
+    "system_context": "来自系统上下文",
+    "confirmed_binding": "由上一步已确认结果带入",
+}
+
+
+def _input_source_label(item: dict) -> str:
+    field = str(item.get("field") or "").strip()
+    how = _INPUT_SOURCE_LABELS.get(str(item.get("source") or "").strip(), "按已有契约收集")
+    return f"`{field}` {how}" if field else how
+
+
 def _route_file_md(route: dict, plans: list[dict]) -> str:
     name = _safe_text(route.get("name") or route.get("route_id"))
     sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
@@ -1321,7 +1291,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
             title = _title_for_plan_ref(plans, cap_id) or cap_id
             script = _script_for(plans, cap_id)
             sources = "；".join(
-                f"{item.get('field')}←{item.get('source')}"
+                _input_source_label(item)
                 for item in (step.get("input_sources") or [])
                 if isinstance(item, dict) and item.get("field")
             ) or "当前步骤缺少的调用方输入"
@@ -1329,7 +1299,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
             if step.get("checkpoint"):
                 nxt = "在交接点停问，用户选定后再继续"
             lines.append(
-                f"| {step.get('step_key') or index + 1} | {title} `{script}` | {sources} | "
+                f"| 第{index + 1}步 | {title} `{script}` | {sources} | "
                 f"{_safe_text(step.get('done_when') or '结果可核对')} | {nxt} |"
             )
     else:

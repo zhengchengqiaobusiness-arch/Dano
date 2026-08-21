@@ -19,12 +19,41 @@ _LIST_SPLIT = re.compile(r"或者|或是|以及|和|[、,/]|或")
 _ORDER_PATTERNS = (
     re.compile(r"先(?P<left>.+?)再(?:对选中的[^做]*做)?(?P<right>.+)"),
     re.compile(r"先(?P<left>.+?)后(?:再)?(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)紧接着(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)随后(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)随即(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)接下来(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)然后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)之后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)后再(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)接着(?P<right>.+)"),
+    re.compile(
+        r"(?P<left>.+?)(?:完成|完毕|做完|完了)(?:后|了)?(?:就|再|立即|马上|紧接着|帮我)?(?P<right>.+)"
+    ),
     re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,6}后(?:再)?(?P<right>.+)"),
     re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,8}再(?P<right>.+)"),
 )
+_SEQUENCE_HINTS = (
+    "然后",
+    "之后",
+    "紧接着",
+    "随后",
+    "随即",
+    "接下来",
+    "完成后",
+    "完毕后",
+    "完了就",
+    "完了再",
+    "做完",
+    "下一步",
+    "跟着",
+    "后再",
+    "马上",
+    "连着",
+    "连续办理",
+    "衔接",
+)
+_UNRESOLVED_SEQUENCE = "描述像是要按顺序办理多项操作，但无法唯一确定组合路线。请用「先…再…」写明每一步，不要省略顺序"
 _TARGET_GIVEN = ("已指定", "已备齐", "已经提供", "目标已给出", "已给出完整")
 _READ_ONLY = ("只要查询", "只要查看", "只查", "只看", "不要写", "不要改", "不要审")
 _GENERIC_VERBS = (
@@ -157,6 +186,16 @@ def _mutation(caps: list[FlowCapability]) -> str:
 
 def _target_given(text: str) -> bool:
     return any(token in text for token in _TARGET_GIVEN)
+
+
+def description_has_explicit_sequence(text: str) -> bool:
+    """True when the user named a multi-step order, not just a list of actions."""
+    raw = str(text or "")
+    if any(token in raw for token in _SEQUENCE_HINTS):
+        return True
+    if "接着" in raw:
+        return True
+    return "先" in raw and ("再" in raw or "后" in raw)
 
 
 def _unknown_actions(text: str, caps: list[FlowCapability]) -> list[str]:
@@ -322,8 +361,10 @@ def extract_intent_branches(
                 source="description",
                 target_given=_target_given(description),
             ))
-        elif len(mentioned) >= 2 and _looks_independent(mentioned) and not any(
-            token in description for token in ("先", "再", "然后", "之后")
+        elif (
+            len(mentioned) >= 2
+            and _looks_independent(mentioned)
+            and not description_has_explicit_sequence(description)
         ):
             add(_branch(
                 branch_id="desc_independent",
@@ -331,6 +372,16 @@ def extract_intent_branches(
                 caps=mentioned,
                 source="description",
                 independent=True,
+            ))
+        if description_has_explicit_sequence(description) and not any(
+            branch.unresolved or branch.conflicting for branch in branches
+        ):
+            add(_branch(
+                branch_id="desc_unresolved_sequence",
+                trigger=description,
+                caps=[],
+                source="description",
+                unresolved=[_UNRESOLVED_SEQUENCE],
             ))
 
     unknown = _unknown_actions(description, selected)
@@ -388,6 +439,15 @@ def extract_intent_branches(
                 ))
             continue
         hits = _match_caps(example, selected)
+        if description_has_explicit_sequence(example) and len(hits) != 1:
+            add(_branch(
+                branch_id=f"example_unresolved_sequence_{index + 1}",
+                trigger=example,
+                caps=[],
+                source="example",
+                unresolved=[_UNRESOLVED_SEQUENCE],
+            ))
+            continue
         if len(hits) == 1:
             add(_branch(
                 branch_id=f"example_single_{index + 1}",

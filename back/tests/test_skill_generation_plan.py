@@ -725,6 +725,44 @@ def test_sale_order_baseline_is_description_without_combo() -> None:
             assert "写操作已确认" not in route.done_when
 
 
+def test_consecutive_connector_compiles_query_then_submit() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="查询完成紧接着提交请假",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-consecutive",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-consecutive")
+    assert not plan.clarification_questions
+    assert any(route.capability_sequence[:2] == ["cap_query", "cap_submit"] for route in plan.routes)
+    assert checked.ok, checked.errors + checked.clarifications
+
+
+def test_unparsed_sequence_must_clarify_instead_of_atomizing() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="查询和提交要连着办",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-clarify-seq",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-clarify-seq")
+    assert plan.clarification_questions or checked.clarifications
+    assert not (
+        any(len(route.capability_sequence) > 1 for route in plan.routes)
+        and not (plan.clarification_questions or checked.clarifications)
+    )
+
+
 def test_explicit_multistep_description_requires_combo_or_clarification() -> None:
     """业务描述有明确多步分支时，合同必须有组合路线或澄清项。"""
     from stage8_sale_order_fixture import (

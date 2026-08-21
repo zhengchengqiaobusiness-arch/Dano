@@ -15,10 +15,13 @@ from dano.onboarding.skill_generation.planner import propose_deterministic_plan
 from dano.onboarding.skill_generation.quality import (
     combo_pairs,
     context_load_cost,
+    human_correction_ready,
     match_routes,
     should_stop_but_continued,
     silent_branch_drops,
+    silent_sequence_drop,
     skill_hit,
+    tool_invocation_ready,
     unnecessary_asks,
     write_capability_ids,
 )
@@ -52,8 +55,9 @@ def test_sale_order_skill_hit_and_leave_skill_miss() -> None:
         "fp-quality-leave",
     )
     utterance = "帮我查鲜生的单"
-    assert skill_hit(sale, utterance, ("销售订单", "鲜生"))
-    assert not skill_hit(leave, utterance, ("销售订单", "鲜生"))
+    assert skill_hit(sale, utterance)
+    assert not skill_hit(leave, utterance)
+    assert not silent_sequence_drop(sale)
 
 
 def test_sale_order_route_match_and_read_only_does_not_write() -> None:
@@ -66,6 +70,27 @@ def test_sale_order_route_match_and_read_only_does_not_write() -> None:
     edit = match_routes(plan, "先查出订单再编辑")
     assert edit
     assert edit[0].capability_sequence[:2] == ["cap_search", "cap_update"]
+
+
+def test_consecutive_utterance_hits_combo_and_not_leave_skill() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="查询完成紧接着提交请假",
+            example_requests=["查询完成紧接着提交请假"],
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-quality-consecutive",
+    )
+    utterance = "查询完成紧接着提交请假"
+    assert skill_hit(plan, utterance)
+    assert not silent_sequence_drop(plan)
+    matched = match_routes(plan, utterance)
+    assert matched
+    assert matched[0].capability_sequence[:2] == ["cap_query", "cap_submit"]
 
 
 def test_explicit_branches_have_zero_silent_drops() -> None:
@@ -97,6 +122,8 @@ def test_unbound_combo_must_stop_and_bound_combo_must_not_reask() -> None:
     assert continued == []
     combo = next(route for route in unbound.routes if route.capability_sequence[:2] == ["cap_query", "cap_submit"])
     assert combo.checkpoints
+    assert tool_invocation_ready(combo) == []
+    assert human_correction_ready(combo) == []
 
     bound_spec = _three_cap_spec()
     bound = propose_deterministic_plan(

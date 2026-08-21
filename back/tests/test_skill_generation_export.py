@@ -16,7 +16,6 @@ from dano.export.skill_package.renderer import (
     _fallback_skill_md,
     _filter_plans_for_export,
     _input_forms_bundle,
-    _project_plan_inputs,
     _input_forms_md,
     _options_md,
     _route_file_md,
@@ -105,26 +104,23 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
     ]
     if not caps and raw_caps:
         caps = list(raw_caps)
-    plans = _project_plan_inputs(
-        [
-            {
-                "name": cap.get("name") or cap.get("capability_id"),
-                "capability_id": cap.get("capability_id") or "",
-                "title": cap.get("title") or cap.get("name"),
-                "kind": cap.get("kind") or "operation",
-                "script": str(cap.get("name") or cap.get("capability_id")),
-                "requires_confirmation": bool(cap.get("requires_human_confirm")),
-                "requires_verify": bool(cap.get("requires_human_confirm")),
-                "input_schema": cap.get("input_schema") or {"type": "object", "properties": {}},
-                "output_schema": cap.get("output_schema") or {"type": "object"},
-                "preconditions": [],
-                "caller_responsibilities": [],
-                "skill_responsibilities": [],
-            }
-            for cap in caps
-        ],
-        plan,
-    )
+    plans = [
+        {
+            "name": cap.get("name") or cap.get("capability_id"),
+            "capability_id": cap.get("capability_id") or "",
+            "title": cap.get("title") or cap.get("name"),
+            "kind": cap.get("kind") or "operation",
+            "script": str(cap.get("name") or cap.get("capability_id")),
+            "requires_confirmation": bool(cap.get("requires_human_confirm")),
+            "requires_verify": bool(cap.get("requires_human_confirm")),
+            "input_schema": cap.get("input_schema") or {"type": "object", "properties": {}},
+            "output_schema": cap.get("output_schema") or {"type": "object"},
+            "preconditions": [],
+            "caller_responsibilities": [],
+            "skill_responsibilities": [],
+        }
+        for cap in caps
+    ]
     skill_md = _fallback_skill_md(skill, package_slug(skill.skill_id), plans, None)
     (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
     (references / "CAPABILITIES.md").write_text(_capabilities_md(skill, plans), encoding="utf-8")
@@ -166,6 +162,9 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
         ],
         "unused_capabilities": plan.get("unused_capabilities") or [],
         "source_flow_fingerprint": plan.get("source_flow_fingerprint") or "",
+        "intent_branches": plan.get("intent_branches") or [],
+        "composition_summary": plan.get("composition_summary") or "",
+        "composition_notes": plan.get("composition_notes") or [],
     }
     (references / "CONTRACT.json").write_text(
         json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -758,6 +757,78 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
     assert "录制识别顺序" not in text
 
 
+def test_renderer_does_not_invent_capability_fields() -> None:
+    plan = {
+        "planning_mode": "dynamic",
+        "selected_capability_ids": ["cap_submit"],
+        "routes": [{
+            "route_id": "write",
+            "capability_sequence": ["cap_submit"],
+            "steps": [{
+                "capability_id": "cap_submit",
+                "step_key": "submit_selected",
+                "input_sources": [
+                    {"field": "invented", "source": "user"},
+                    {"field": "id", "source": "confirmed_binding"},
+                ],
+            }],
+        }],
+    }
+    skill = SimpleNamespace(skill_id="oa.leave", call_metadata={"skill_plan": plan}, api_request={})
+    kept = _filter_plans_for_export(
+        [{
+            "name": "submit_leave",
+            "capability_id": "cap_submit",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        }],
+        skill,
+    )
+    schema = kept[0]["input_schema"]
+    properties = schema.get("properties") or {}
+    assert "invented" not in properties
+    assert "id" not in properties
+    assert "invented" not in (schema.get("required") or [])
+    assert "x-dano-derived-from-query" not in json.dumps(schema, ensure_ascii=False)
+
+
+def test_route_file_uses_business_language() -> None:
+    route = {
+        "route_id": "cap_query_then_cap_submit",
+        "name": "查询待办 → 提交请假",
+        "when_to_use": "查询完成紧接着提交请假",
+        "capability_sequence": ["cap_query", "cap_submit"],
+        "steps": [
+            {
+                "capability_id": "cap_query",
+                "step_key": "query",
+                "done_when": "已返回可核对的查询结果",
+                "input_sources": [],
+            },
+            {
+                "capability_id": "cap_submit",
+                "step_key": "submit_selected",
+                "done_when": "写入已确认",
+                "checkpoint": True,
+                "input_sources": [{"field": "id", "source": "user"}],
+            },
+        ],
+        "checkpoints": [{"prompt": "请选定要提交的记录"}],
+        "examples": [{"user_request": "查询完成紧接着提交请假"}],
+        "done_when": "提交已确认",
+        "failure_behavior": "失败时停止，不得重试",
+    }
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave"},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave"},
+    ]
+    text = _route_file_md(route, plans)
+    assert "submit_selected" not in text
+    assert "←user" not in text
+    assert "`id` 由用户提供" in text
+    assert "第1步" in text
+    assert "查询待办" in text
+
+
 def test_renderer_planning_fields_and_selected_filter() -> None:
     plan = {
         "planning_mode": "fixed",
@@ -770,6 +841,7 @@ def test_renderer_planning_fields_and_selected_filter() -> None:
     fields = _contract_planning_fields(skill)
     assert fields["planning_mode"] == "fixed"
     assert fields["selected_capability_ids"] == ["cap_query", "cap_submit"]
+    assert fields["intent_branches"] == []
     assert fields["unused_capabilities"][0]["capability_id"] == "cap_option"
     kept = _filter_plans_for_export(
         [
@@ -1463,11 +1535,23 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
     assert packed >= {name for _cid, name, _title, _kind in SALE_ORDER_TITLES}
     contract_ids = [str(item.get("route_id") or "") for item in contract.get("routes") or []]
     assert len(contract_ids) == len(set(contract_ids))
+    assert contract.get("intent_branches")
+    for route_file in route_files:
+        route_text = route_file.read_text(encoding="utf-8")
+        assert "←user" not in route_text
+        assert "submit_selected" not in route_text
     forms = (root / "references" / "INPUT_FORMS.md").read_text(encoding="utf-8")
     update = next(item for item in contract["capabilities"] if item.get("capability_id") == "cap_update")
-    assert "id" in (update.get("input_schema") or {}).get("properties") or {}
-    assert "id" in (update.get("input_schema") or {}).get("required") or []
-    assert "id" in forms
+    schema = update.get("input_schema") or {}
+    assert "x-dano-derived-from-query" not in json.dumps(schema, ensure_ascii=False)
+    update_route = next(
+        item
+        for item in contract.get("routes") or []
+        if [str(cap) for cap in (item.get("capability_sequence") or [])][:2] == ["cap_search", "cap_update"]
+    )
+    assert "id" in (update_route.get("required_user_inputs") or [])
+    if "id" in (schema.get("properties") or {}):
+        assert "id" in forms
     result = validate_skill_package(root)
     assert result["ok"], result["issues"]
     atomic_only = [line for line in skill_md.splitlines() if "不必读取组合路线" in line]
