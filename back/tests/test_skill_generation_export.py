@@ -425,7 +425,9 @@ async def test_incomplete_relation_export_uses_user_inputs(tmp_path: Path) -> No
     assert stored[-1]["published"] is True
     routes = (outcome.plan or {}).get("routes") or []
     assert {route.get("route_id") for route in routes} >= {"query_only", "write_direct"}
-    assert "query_then_write" not in {route.get("route_id") for route in routes}
+    combo = next(route for route in routes if len(route.get("capability_sequence") or []) > 1)
+    assert not combo.get("bindings")
+    assert combo.get("checkpoints") or any(step.get("checkpoint") for step in (combo.get("steps") or []))
     write = next(route for route in routes if route.get("route_id") == "write_direct")
     assert not write.get("bindings")
     assert "id" in (write.get("required_user_inputs") or [])
@@ -449,7 +451,7 @@ async def test_stage_six_query_hint_exports_without_stage_seven(tmp_path: Path) 
             out_dir=str(tmp_path),
             planning_mode=PlanningMode.DYNAMIC,
             title="点狮ERP销售订单操作能力录制",
-            business_description="先查询 在新建 在编辑 在查看 在审核 在反审核 在删除",
+            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
         ),
         persist=lambda _body: None,
         publish=_ok_publish,
@@ -608,7 +610,7 @@ async def test_unconfirmed_write_fields_do_not_block_export(tmp_path: Path) -> N
         request=_request(
             out_dir=str(tmp_path),
             title="点狮ERP销售订单操作能力录制",
-            business_description="销售订单操作流程：新增订单后，可搜索筛选、查看详情或编辑修改。",
+            business_description="用户可以查询待办记录，也可以查询后选择一条记录进行提交。",
         ),
         persist=stored.append,
         publish=_ok_publish,
@@ -617,7 +619,7 @@ async def test_unconfirmed_write_fields_do_not_block_export(tmp_path: Path) -> N
     )
     assert outcome.status == "exported"
     assert stored[-1]["skill_export_title"] == "点狮ERP销售订单操作能力录制"
-    assert "销售订单操作流程" in stored[-1]["skill_export_description"]
+    assert "查询待办记录" in stored[-1]["skill_export_description"]
 
 
 def test_existing_single_capability_package_still_works(tmp_path: Path) -> None:

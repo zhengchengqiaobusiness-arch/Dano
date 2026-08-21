@@ -393,8 +393,11 @@ def test_composition_notes_describe_confirmed_and_handoff_routes() -> None:
         VERIFIED,
         "fp-handoff",
     )
-    assert "query_then_write" not in {route.route_id for route in handoff.routes}
-    assert any("没有已确认绑定" in item for item in handoff.composition_notes)
+    combo = next((route for route in handoff.routes if len(route.capability_sequence) > 1), None)
+    assert combo is not None
+    assert combo.bindings == []
+    assert combo.checkpoints or any(step.checkpoint for step in combo.steps)
+    assert any("没有已确认绑定" in item or "人工" in item or "先查再问" in item for item in handoff.composition_notes)
     assert any("只读" in item and "不得执行写入" in item for item in handoff.composition_notes)
 
 
@@ -470,7 +473,9 @@ async def test_incomplete_relation_plans_independent_routes() -> None:
     assert result.plan is not None
     route_ids = {route.route_id for route in result.plan.routes}
     assert route_ids >= {"query_only", "write_direct"}
-    assert "query_then_write" not in route_ids
+    combo = next(route for route in result.plan.routes if len(route.capability_sequence) > 1)
+    assert combo.bindings == []
+    assert combo.checkpoints or any(step.checkpoint for step in combo.steps)
     write = next(route for route in result.plan.routes if route.route_id == "write_direct")
     assert write.bindings == []
     assert "id" in write.required_user_inputs
@@ -563,6 +568,7 @@ def test_fixed_plan_without_relation_uses_user_inputs() -> None:
     assert checked.ok, checked.errors
     assert plan.routes[0].capability_sequence == ["cap_query", "cap_submit"]
     assert plan.routes[0].bindings == []
+    assert plan.routes[0].checkpoints or any(step.checkpoint for step in plan.routes[0].steps)
     assert "id" in plan.routes[0].required_user_inputs
 
 
@@ -679,9 +685,10 @@ async def test_empty_business_description_fails() -> None:
 
 
 def test_sale_order_baseline_is_description_without_combo() -> None:
-    """Freeze the current sales-order gap: notes exist, executable combos do not."""
+    """Sales-order description now compiles to handoff combos, not notes-only."""
     from stage8_sale_order_fixture import (
         combination_routes,
+        route_has_human_checkpoint,
         sale_order_request,
         sale_order_spec,
         sale_order_verified_ids,
@@ -692,11 +699,14 @@ def test_sale_order_baseline_is_description_without_combo() -> None:
     plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
     assert len(spec.capabilities) == 7
     assert spec.capability_relations == []
-    assert all(len(route.capability_sequence) == 1 for route in plan.routes)
-    assert combination_routes(plan) == []
+    combos = combination_routes(plan)
+    assert combos
     assert plan.clarification_questions == []
-    assert any("没有已确认绑定" in item or "先查再问" in item for item in plan.composition_notes)
-    assert all(not route.bindings for route in plan.routes)
+    assert all(not route.bindings for route in combos)
+    assert all(route_has_human_checkpoint(route) for route in combos if not route.bindings)
+    assert {cap.capability_id for cap in spec.capabilities} <= {
+        cap_id for route in plan.routes for cap_id in route.capability_sequence
+    }
 
 
 def test_explicit_multistep_description_requires_combo_or_clarification() -> None:
@@ -733,3 +743,208 @@ def test_unbound_dependent_route_requires_human_checkpoint() -> None:
     assert dependents, "没有确认绑定的依赖序列必须编译成组合路线，不能只剩原子列表"
     assert all(route_has_human_checkpoint(route) for route in dependents)
     assert all(not route.bindings for route in dependents)
+
+
+def test_single_query_intent_stays_atomic() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="只查询待办记录，不要提交。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-single-query",
+    )
+    combos = [route for route in plan.routes if len(route.capability_sequence) > 1]
+    assert all("cap_submit" not in route.capability_sequence or len(route.capability_sequence) == 1 for route in plan.routes if route.route_id == "query_only")
+    query = next(route for route in plan.routes if route.capability_sequence == ["cap_query"])
+    assert query.composition_mode == query.composition_mode.__class__("atomic") or str(query.composition_mode) == "atomic"
+    assert not any(route.capability_sequence == ["cap_query", "cap_submit"] and "只查询" in route.when_to_use for route in combos)
+
+
+def test_single_write_with_target_given_confirms() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="用户已经提供完整提交字段，直接提交请假。",
+            planning_mode=PlanningMode.DYNAMIC,
+            example_requests=["帮我提交请假，目标已给出"],
+        ),
+        {"cap_submit"},
+        "fp-write-given",
+    )
+    write = next(route for route in plan.routes if "cap_submit" in route.capability_sequence)
+    assert write.requires_confirmation
+    assert write.done_when
+    assert all(step.confirm_before_execute for step in write.steps if step.capability_id == "cap_submit")
+
+
+def test_query_then_edit_without_relation_uses_handoff() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="先查询待办记录再提交请假。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-handoff",
+    )
+    combo = next(route for route in plan.routes if route.capability_sequence[:2] == ["cap_query", "cap_submit"])
+    assert combo.bindings == []
+    assert combo.checkpoints
+    assert combo.composition_mode == combo.composition_mode.__class__("handoff") or str(combo.composition_mode) == "handoff"
+
+
+def test_query_then_edit_with_relation_uses_exact_binding() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="先查询待办记录再提交请假。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-bound",
+    )
+    combo = next(route for route in plan.routes if route.capability_sequence[:2] == ["cap_query", "cap_submit"] and route.bindings)
+    assert combo.bindings[0].from_output == "records[].id"
+    assert combo.bindings[0].to_input == "id"
+    assert str(combo.composition_mode) == "bound"
+
+
+def test_independent_multi_step_keeps_user_order() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="先查询请假选项，再查询待办记录。两步输入各自独立。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-indep",
+    )
+    combo = next((route for route in plan.routes if len(route.capability_sequence) > 1), None)
+    assert combo is not None
+    assert combo.capability_sequence == ["cap_option", "cap_query"]
+    assert combo.bindings == []
+    assert all(source.source != "confirmed_binding" for step in combo.steps for source in step.input_sources)
+
+
+def test_unknown_action_returns_clarification() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="请把待办记录导出成报表。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-unknown",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-unknown")
+    assert plan.clarification_questions or checked.clarifications
+    assert not any("导出" in route.name and len(route.capability_sequence) > 1 for route in plan.routes)
+
+
+def test_conflicting_order_returns_clarification() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="先查询待办再提交。另外必须先提交再查询待办。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-conflict",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-conflict")
+    assert plan.clarification_questions or checked.clarifications
+
+
+def test_readonly_branch_does_not_require_write_confirm() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="只查询待办记录，不要写入。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-ro",
+    )
+    query = next(route for route in plan.routes if route.capability_sequence == ["cap_query"])
+    assert query.requires_confirmation is False
+    assert all(not step.confirm_before_execute for step in query.steps)
+
+
+def test_forbidden_action_is_not_an_executable_route() -> None:
+    spec = _three_cap_spec()
+    spec.capabilities.append(
+        _cap(capability_id="cap_delete", name="delete_leave", title="删除请假", kind="delete", required=["id"], confirm=True)
+    )
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="可以查询待办并提交请假。",
+            forbidden_actions="删除请假",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        {"cap_query", "cap_option", "cap_submit", "cap_delete"},
+        "fp-forbid",
+    )
+    used = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
+    assert "cap_delete" not in used
+    assert any(item.capability_id == "cap_delete" for item in plan.unused_capabilities)
+
+
+def test_same_contract_merges_trigger_examples() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假",
+            business_description="先查询待办再提交请假。",
+            example_requests=["先查再提交", "查完帮我提交一条"],
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-merge-ex",
+    )
+    combos = [route for route in plan.routes if route.capability_sequence[:2] == ["cap_query", "cap_submit"]]
+    assert len(combos) == 1
+    assert len(combos[0].examples) >= 1
+
+
+def test_one_described_combo_does_not_explode() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="请假", business_description="先查询待办再提交请假。", planning_mode=PlanningMode.DYNAMIC),
+        VERIFIED,
+        "fp-no-perm",
+    )
+    combos = [tuple(route.capability_sequence) for route in plan.routes if len(route.capability_sequence) > 1]
+    assert ("cap_query", "cap_submit") in {item[:2] for item in combos}
+    assert ("cap_option", "cap_query", "cap_submit") not in combos
+    assert ("cap_submit", "cap_query", "cap_option") not in combos
+
+
+def test_sale_order_contract_quality_gates() -> None:
+    from stage8_sale_order_fixture import (
+        combination_routes,
+        route_has_human_checkpoint,
+        sale_order_request,
+        sale_order_spec,
+        sale_order_verified_ids,
+    )
+
+    spec = sale_order_spec()
+    request = sale_order_request()
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=sale_order_verified_ids(spec), expected_fingerprint="fp-sale-order")
+    assert checked.ok, checked.errors + checked.clarifications
+    silent_loss = [
+        branch
+        for branch in plan.intent_branches
+        if branch.capability_sequence
+        and not branch.unresolved
+        and not any(list(route.capability_sequence)[:len(branch.capability_sequence)] == list(branch.capability_sequence) for route in plan.routes)
+    ]
+    assert silent_loss == []
+    illegal_binds = [binding for route in plan.routes for binding in route.bindings]
+    assert illegal_binds == []
+    assert all(route_has_human_checkpoint(route) for route in combination_routes(plan) if not route.bindings)
+    assert all(route.requires_confirmation for route in plan.routes if any(cap_id.startswith("cap_") and cap_id not in {"cap_search", "cap_detail"} for cap_id in route.capability_sequence if cap_id in {"cap_update", "cap_approve", "cap_unapprove", "cap_create", "cap_delete"}))
+    assert all(route.done_when and all(step.done_when for step in route.steps) for route in plan.routes)

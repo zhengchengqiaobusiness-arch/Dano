@@ -6,7 +6,10 @@ treated as an executable fact.
 """
 
 from dano.onboarding.skill_generation.models import (
+    CompositionMode,
+    HumanCheckpoint,
     PlanningMode,
+    RouteStep,
     SkillGenerationRequest,
     SkillGenerationResult,
     SkillPlan,
@@ -22,7 +25,10 @@ from dano.onboarding.skill_generation.export import (
 )
 
 __all__ = [
+    "CompositionMode",
+    "HumanCheckpoint",
     "PlanningMode",
+    "RouteStep",
     "SkillExportError",
     "SkillExportOutcome",
     "SkillGenerationRequest",

@@ -19,14 +19,21 @@ from dano.onboarding.skill_generation.catalog import (
     schema_required,
     usable_relations,
 )
+from dano.onboarding.skill_generation.intent import branch_needs_clarification, extract_intent_branches
 from dano.onboarding.skill_generation.models import (
+    CompositionMode,
+    HumanCheckpoint,
+    InputSourceKind,
+    IntentBranch,
     PlanningMode,
     RouteBinding,
     RouteExample,
+    RouteStep,
     SkillGenerationRequest,
     SkillGenerationResult,
     SkillPlan,
     SkillRoute,
+    StepInputSource,
     UnusedCapability,
 )
 from dano.onboarding.skill_generation.validate import (
@@ -62,7 +69,7 @@ PlanProposer = Callable[[FlowSpec, SkillGenerationRequest, set[str], str], Await
 _QUERY_HINTS = ("查询", "查看", "列表", "待办", "记录", "检索", "筛选")
 _OPTION_HINTS = ("选项", "字典", "下拉", "候选")
 _SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
-_LOOKUP_HINTS = ("回查", "确认提交", "确认成功", "再查询", "查询状态")
+_LOOKUP_HINTS = ("回查", "确认提交成功", "确认提交", "查询状态确认", "查询状态")
 _SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
 _OBJECT_PREFIXES = (
     "搜索/筛选", "搜索", "筛选", "查询", "查看", "新增", "新建", "修改", "编辑",
@@ -237,7 +244,8 @@ def _step_ids_for(sequence: list[FlowCapability]) -> list[str]:
             else:
                 ids.append("query")
         elif family == "write":
-            ids.append("submit_selected" if "query" in families else "submit")
+            base = "submit_selected" if "query" in families else "submit"
+            ids.append(base if total == 1 else f"{base}_{count}")
         elif family == "option":
             ids.append("option" if total == 1 else f"option_{count}")
         else:
@@ -428,6 +436,55 @@ def _append_lookup(
     return [*sequence, lookup]
 
 
+def _pair_bindings(
+    spec: FlowSpec,
+    left: FlowCapability | None,
+    right: FlowCapability,
+    all_bindings: list[RouteBinding],
+) -> list[RouteBinding]:
+    if left is None:
+        return []
+    left_ids = {capability_ref(left), left.name, left.capability_id}
+    right_ids = {capability_ref(right), right.name, right.capability_id}
+    matched = [
+        binding
+        for binding in all_bindings
+        if binding.from_capability in left_ids and binding.to_capability in right_ids
+    ]
+    if matched:
+        return matched
+    return _relation_pair(spec, left, right)
+
+
+def _needs_target(cap: FlowCapability) -> bool:
+    required = set(schema_required(cap.input_schema))
+    satisfied = set(confirmed_fixed_or_system_inputs(cap))
+    return bool(required - satisfied)
+
+
+def _step_done_when(cap: FlowCapability) -> str:
+    title = _cap_title(cap)
+    if is_write_capability(cap):
+        return f"「{title}」已展示影响、获得确认并执行成功，结果已核对"
+    return f"「{title}」已返回可核对的业务结果"
+
+
+def _step_failure(cap: FlowCapability) -> str:
+    title = _cap_title(cap)
+    if is_write_capability(cap):
+        return f"「{title}」失败、结果未知或用户取消时立即停止，不得静默重试"
+    return f"「{title}」失败或结果为空时停止，并说明未继续后续步骤"
+
+
+def _placeholder_request(sequence: list[FlowCapability], fallback: str) -> str:
+    titles = "、".join(_cap_title(cap) for cap in sequence if _cap_title(cap))
+    if any(is_write_capability(cap) for cap in sequence) and len(sequence) > 1:
+        return f"请先查出目标，再办理{titles}。目标用 <业务编号> 占位，不要填历史样本。"
+    if titles:
+        return fallback if fallback and "<" in fallback else f"请办理{titles}，必要输入用 <字段> 占位"
+    return fallback
+
+
 def _route(
     *,
     route_id: str,
@@ -437,6 +494,8 @@ def _route(
     bindings: list[RouteBinding],
     request: SkillGenerationRequest,
     extra_preconditions: list[str] | None = None,
+    independent: bool = False,
+    spec: FlowSpec | None = None,
 ) -> SkillRoute:
     cap_ids = [capability_ref(cap) for cap in sequence]
     step_ids = _step_ids_for(sequence)
@@ -445,22 +504,96 @@ def _route(
     for binding in annotated:
         bound_by_cap.setdefault(binding.to_capability, set()).add(binding.to_input)
     required: list[str] = []
-    for cap in sequence:
-        required.extend(_required_user_inputs(cap, bound_by_cap.get(capability_ref(cap), set())))
+    steps: list[RouteStep] = []
+    checkpoints: list[HumanCheckpoint] = []
+    mode = CompositionMode.ATOMIC
+    if len(sequence) > 1:
+        if annotated:
+            mode = CompositionMode.BOUND
+        elif independent:
+            mode = CompositionMode.INDEPENDENT
+        else:
+            mode = CompositionMode.HANDOFF
+    for index, cap in enumerate(sequence):
+        cap_id = capability_ref(cap)
+        prev = sequence[index - 1] if index else None
+        step_key = step_ids[index]
+        pair = _pair_bindings(spec, prev, cap, annotated) if spec is not None else [
+            binding for binding in annotated if binding.to_capability in {cap_id, cap.name}
+        ]
+        pair = _annotate_bindings(sequence, step_ids, pair)
+        bound_fields = {binding.to_input for binding in pair if binding.to_input}
+        bound_by_cap.setdefault(cap_id, set()).update(bound_fields)
+        user_fields = _required_user_inputs(cap, bound_fields)
+        required.extend(user_fields)
+        sources: list[StepInputSource] = []
+        satisfied = confirmed_fixed_or_system_inputs(cap)
+        for field, kind in satisfied.items():
+            sources.append(StepInputSource(
+                field=field,
+                source=InputSourceKind.SYSTEM_CONTEXT if kind == "system_value" else InputSourceKind.FIXED_VALUE,
+            ))
+        for binding in pair:
+            if binding.to_input:
+                sources.append(StepInputSource(
+                    field=binding.to_input,
+                    source=InputSourceKind.CONFIRMED_BINDING,
+                    from_step_key=binding.from_step or (step_ids[index - 1] if index else ""),
+                    notes=f"{binding.from_output} → {binding.to_input}",
+                ))
+        for field in user_fields:
+            sources.append(StepInputSource(field=field, source=InputSourceKind.USER))
+        checkpoint = None
+        if (
+            prev is not None
+            and not pair
+            and not independent
+            and _needs_target(cap)
+            and not is_write_capability(prev)
+        ):
+            checkpoint = HumanCheckpoint(
+                after_step=step_ids[index - 1],
+                before_step=step_key,
+                required_fields=user_fields,
+                prompt=f"请从「{_cap_title(prev)}」的结果中选定下一步「{_cap_title(cap)}」的目标，不要默认第一条",
+                choice_source="previous_result",
+                selection_mode="single",
+                resume_when="用户已选定有效目标并通过输入校验",
+                on_cancel="停止并报告未执行",
+            )
+            checkpoints.append(checkpoint)
+            if steps:
+                steps[-1] = steps[-1].model_copy(update={"checkpoint": checkpoint})
+            mode = CompositionMode.HANDOFF
+        confirm = is_write_capability(cap)
+        steps.append(RouteStep(
+            step_key=step_key,
+            capability_id=cap_id,
+            input_sources=sources,
+            bindings=pair,
+            checkpoint=None,
+            confirm_before_execute=confirm,
+            done_when=_step_done_when(cap),
+            on_failure=_step_failure(cap),
+        ))
     required = list(dict.fromkeys(required))
     writes = [cap for cap in sequence if is_write_capability(cap)]
     confirmation = [_cap_title(cap) for cap in writes]
     done = str(request.success_criteria or "").strip() or (
-        "写操作已确认并执行成功" if writes else "已返回查询结果"
+        "写操作已确认并执行成功，结果已核对" if writes else "已返回可核对的查询结果"
     )
     cleaned_when = _clean_when(
         when_to_use,
         " → ".join(_cap_title(cap) for cap in sequence) or "按本页已打包操作办理",
     )
-    example_request = _example_request(request, cleaned_when, sequence)
-    failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。"
+    example_request = _placeholder_request(sequence, _example_request(request, cleaned_when, sequence))
+    failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。用户取消或候选无效时停止并报告未执行。"
     if request.forbidden_actions:
         failure = f"{failure} 禁止：{request.forbidden_actions}"
+    ask_at = [
+        f"{item.after_step} → {item.before_step}"
+        for item in checkpoints
+    ]
     return SkillRoute(
         route_id=route_id,
         name=name,
@@ -473,6 +606,9 @@ def _route(
         requires_confirmation=bool(writes),
         done_when=done,
         failure_behavior=failure,
+        composition_mode=mode,
+        steps=steps,
+        checkpoints=checkpoints,
         examples=[
             RouteExample(
                 user_request=example_request,
@@ -482,9 +618,209 @@ def _route(
                 bindings=list(annotated),
                 confirmation_points=confirmation,
                 done_when=done,
+                input_origins=[
+                    f"{source.field}:{source.source}"
+                    for step in steps
+                    for source in step.input_sources
+                ],
+                auto_bound_fields=[
+                    f"{binding.from_output}→{binding.to_input}"
+                    for binding in annotated
+                    if binding.from_output and binding.to_input
+                ],
+                ask_at=ask_at,
+                confirm_at=confirmation,
+                on_cancel="用户取消或拒绝确认后停止，不执行后续写入",
+                on_empty_or_ambiguous="候选为空或多条且要求单条时停问，不得默认第一条",
+                on_unknown_write_result="写入结果未知时停止并请人处理，不得重试",
             )
         ],
     )
+
+
+def _caps_by_id(selected: list[FlowCapability]) -> dict[str, FlowCapability]:
+    index: dict[str, FlowCapability] = {}
+    for cap in selected:
+        for key in (capability_ref(cap), cap.capability_id, cap.name):
+            if key:
+                index[str(key)] = cap
+    return index
+
+
+def _route_merge_key(route: SkillRoute) -> tuple:
+    sources = tuple(
+        (step.step_key, source.field, str(source.source))
+        for step in route.steps
+        for source in step.input_sources
+    )
+    bindings = tuple(
+        (binding.from_capability, binding.from_output, binding.to_capability, binding.to_input)
+        for binding in route.bindings
+    )
+    checks = tuple((item.after_step, item.before_step, tuple(item.required_fields)) for item in route.checkpoints)
+    return (
+        tuple(route.capability_sequence),
+        sources,
+        bindings,
+        checks,
+        str(route.composition_mode),
+        bool(route.requires_confirmation),
+        route.done_when,
+    )
+
+
+def _merge_equivalent_routes(routes: list[SkillRoute]) -> list[SkillRoute]:
+    merged: list[SkillRoute] = []
+    index: dict[tuple, int] = {}
+    for route in routes:
+        key = _route_merge_key(route)
+        existing = index.get(key)
+        if existing is None:
+            index[key] = len(merged)
+            merged.append(route)
+            continue
+        current = merged[existing]
+        examples = list(current.examples)
+        for example in route.examples:
+            if example.user_request and all(example.user_request != item.user_request for item in examples):
+                examples.append(example)
+        merged[existing] = current.model_copy(update={"examples": examples})
+    return merged
+
+
+def _compile_branch_route(
+    branch: IntentBranch,
+    spec: FlowSpec,
+    selected: list[FlowCapability],
+    request: SkillGenerationRequest,
+    queries: list[FlowCapability],
+) -> SkillRoute | str:
+    caps_index = _caps_by_id(selected)
+    sequence = [caps_index[cap_id] for cap_id in branch.capability_sequence if cap_id in caps_index]
+    if len(sequence) != len(branch.capability_sequence):
+        return f"无法把「{branch.trigger}」映射到已验证能力，请说明要使用哪一个已有操作"
+    if not sequence:
+        return branch.unresolved[0] if branch.unresolved else f"无法解释「{branch.trigger}」"
+    text = _text(request)
+    if len(sequence) == 1 and is_write_capability(sequence[0]) and _mentions(text, _LOOKUP_HINTS):
+        sequence = _append_lookup(sequence, queries, text)
+    bindings: list[RouteBinding] = []
+    for left, right in zip(sequence, sequence[1:], strict=False):
+        bindings.extend(_relation_pair(spec, left, right))
+    if len(sequence) == 1:
+        route_id = "query_only" if _family(sequence[0]) == "query" else _operation_route_id(sequence[0])
+        if is_write_capability(sequence[0]) and len([cap for cap in selected if is_write_capability(cap)]) == 1:
+            route_id = "write_direct"
+        when = _operation_when(sequence[0])
+        if branch.target_given and is_write_capability(sequence[0]):
+            when = f"要执行「{_cap_title(sequence[0])}」且目标或必要字段已经给出"
+    else:
+        tail = sequence[-1]
+        head = sequence[0]
+        if _family(head) == "query" and is_write_capability(tail) and len(sequence) <= 3:
+            route_id = "query_then_write" if sum(1 for cap in selected if is_write_capability(cap)) == 1 else f"query_then_{capability_ref(tail)}"
+        else:
+            route_id = "handoff_" + "_".join(capability_ref(cap) for cap in sequence)
+        when = branch.trigger if len(branch.trigger) <= 80 else f"按「{_cap_title(head)} → {_cap_title(tail)}」办理"
+        sequence = _append_lookup(sequence, queries, text)
+        bindings = []
+        for left, right in zip(sequence, sequence[1:], strict=False):
+            bindings.extend(_relation_pair(spec, left, right))
+    return _route(
+        route_id=route_id,
+        name=" → ".join(_cap_title(cap) for cap in sequence),
+        when_to_use=when,
+        sequence=sequence,
+        bindings=bindings,
+        request=request,
+        independent=branch.independent,
+        spec=spec,
+    )
+
+
+def _confirmed_relation_routes(
+    spec: FlowSpec,
+    selected: list[FlowCapability],
+    request: SkillGenerationRequest,
+    mentioned: set[str],
+    queries: list[FlowCapability],
+    options: list[FlowCapability],
+) -> list[SkillRoute]:
+    routes: list[SkillRoute] = []
+    writes = [cap for cap in selected if is_write_capability(cap)]
+    for write in writes:
+        if capability_ref(write) not in mentioned and write.name not in mentioned:
+            continue
+        if queries:
+            bindings = _relation_pair(spec, queries[0], write)
+            if bindings:
+                routes.append(_route(
+                    route_id="query_then_write" if len(writes) == 1 else f"query_then_{capability_ref(write)}",
+                    name=f"查询后{_cap_title(write)}",
+                    when_to_use=f"需要先查询记录，再对选中记录执行「{_cap_title(write)}」",
+                    sequence=_append_lookup([queries[0], write], queries, _text(request)),
+                    bindings=bindings,
+                    request=request,
+                    spec=spec,
+                ))
+        if options:
+            bindings = _relation_pair(spec, options[0], write)
+            if bindings:
+                routes.append(_route(
+                    route_id="option_then_write" if len(writes) == 1 else f"option_then_{capability_ref(write)}",
+                    name=f"选项后{_cap_title(write)}",
+                    when_to_use=f"「{_cap_title(write)}」字段需要从选项中选择",
+                    sequence=_append_lookup([options[0], write], queries, _text(request)),
+                    bindings=bindings,
+                    request=request,
+                    spec=spec,
+                ))
+    return routes
+
+
+def _atomic_fallback_routes(
+    selected: list[FlowCapability],
+    request: SkillGenerationRequest,
+    queries: list[FlowCapability],
+    spec: FlowSpec,
+    existing: list[SkillRoute],
+) -> list[SkillRoute]:
+    existing_singles = {
+        route.capability_sequence[0]
+        for route in existing
+        if len(route.capability_sequence) == 1
+    }
+    routes: list[SkillRoute] = []
+    writes = [cap for cap in selected if is_write_capability(cap)]
+    for cap in selected:
+        cap_id = capability_ref(cap)
+        if cap_id in existing_singles:
+            continue
+        sequence = [cap]
+        extra = None
+        route_id = _operation_route_id(cap)
+        if _family(cap) == "query" and "query_only" not in {route.route_id for route in existing}:
+            route_id = "query_only"
+        elif is_write_capability(cap) and len(writes) == 1:
+            sequence = _append_lookup([cap], queries, _text(request))
+            route_id = "write_direct"
+            extra = (
+                ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
+                if len(sequence) > 1
+                else None
+            )
+        routes.append(_route(
+            route_id=route_id,
+            name=_cap_title(cap),
+            when_to_use=_operation_when(cap),
+            sequence=sequence,
+            bindings=[],
+            request=request,
+            extra_preconditions=extra,
+            spec=spec,
+        ))
+        existing_singles.add(cap_id)
+    return routes
 
 
 def propose_deterministic_plan(
@@ -501,20 +837,36 @@ def propose_deterministic_plan(
     queries = by_family.get("query") or []
     options = by_family.get("option") or []
     writes = by_family.get("write") or []
+    branches = extract_intent_branches(request, selected)
+    forbidden_ids = {item.capability_id for item in unused if "禁止" in item.reason or "限制" in item.reason}
+    clarifications: list[str] = []
     routes: list[SkillRoute] = []
 
     if request.planning_mode == PlanningMode.FIXED:
-        sequence: list[FlowCapability] = []
+        compiled: list[FlowCapability] = []
+        for branch in branches:
+            if branch_needs_clarification(branch):
+                clarifications.extend(branch.unresolved or [f"请澄清「{branch.trigger}」要走哪一条顺序"])
+                continue
+            if len(branch.capability_sequence) >= 2:
+                caps_index = _caps_by_id(selected)
+                compiled = [caps_index[item] for item in branch.capability_sequence if item in caps_index]
+                break
+        sequence: list[FlowCapability] = list(compiled)
         bindings: list[RouteBinding] = []
-        if queries and (_mentions(text, _QUERY_HINTS) or writes):
-            sequence.append(queries[0])
-        if writes:
-            write = writes[0]
-            if sequence:
-                pair = _relation_pair(spec, sequence[-1], write)
-                if pair:
-                    bindings.extend(pair)
-            sequence.append(write)
+        if not sequence:
+            if queries and (_mentions(text, _QUERY_HINTS) or writes):
+                sequence.append(queries[0])
+            if writes:
+                write = writes[0]
+                if sequence:
+                    pair = _relation_pair(spec, sequence[-1], write)
+                    if pair:
+                        bindings.extend(pair)
+                sequence.append(write)
+        else:
+            for left, right in zip(sequence, sequence[1:], strict=False):
+                bindings.extend(_relation_pair(spec, left, right))
         sequence = _append_lookup(sequence, queries, text)
         if not sequence:
             sequence = list(selected[:1] or spec.capabilities[:1])
@@ -533,59 +885,37 @@ def propose_deterministic_plan(
                 if _mentions(text, _LOOKUP_HINTS) and queries
                 else None
             ),
+            spec=spec,
         ))
     else:
-        if queries:
-            query = queries[0]
-            routes.append(_route(
-                route_id="query_only",
-                name=_cap_title(query),
-                when_to_use=_operation_when(query),
-                sequence=[query],
-                bindings=[],
-                request=request,
+        mentioned = {
+            cap_id
+            for branch in branches
+            for cap_id in branch.capability_sequence
+        }
+        write_mentioned = any(
+            _cap_title(cap) in text or cap.name in text or any(token in text for token in ("提交", "编辑", "审核", "删除", "新增", "新建"))
+            for cap in writes
+        )
+        for branch in branches:
+            if any(cap_id in forbidden_ids for cap_id in branch.capability_sequence):
+                continue
+            if branch_needs_clarification(branch):
+                clarifications.extend(branch.unresolved or [f"请澄清「{branch.trigger}」"])
+                continue
+            compiled_route = _compile_branch_route(branch, spec, selected, request, queries)
+            if isinstance(compiled_route, str):
+                clarifications.append(compiled_route)
+                continue
+            routes.append(compiled_route)
+        relation_ids = {capability_ref(cap) for cap in selected} if write_mentioned else mentioned
+        if relation_ids:
+            routes.extend(_confirmed_relation_routes(spec, selected, request, relation_ids, queries, options))
+        elif not branches:
+            routes.extend(_confirmed_relation_routes(
+                spec, selected, request, {capability_ref(cap) for cap in selected}, queries, options,
             ))
-        if writes:
-            if len(writes) == 1:
-                write = writes[0]
-                write_direct = _append_lookup([write], queries, text)
-                routes.append(_route(
-                    route_id="write_direct",
-                    name=_cap_title(write),
-                    when_to_use=f"要{_cap_title(write)}且已备齐字段，不需要先查询",
-                    sequence=write_direct,
-                    bindings=[],
-                    request=request,
-                    extra_preconditions=(
-                        ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
-                        if len(write_direct) > 1
-                        else None
-                    ),
-                ))
-            for write in writes:
-                if queries:
-                    bindings = _relation_pair(spec, queries[0], write)
-                    if bindings:
-                        routes.append(_route(
-                            route_id="query_then_write" if len(writes) == 1 else f"query_then_{capability_ref(write)}",
-                            name=f"查询后{write.title or write.name}",
-                            when_to_use=f"需要先查询记录，再对选中记录执行「{write.title or write.name}」",
-                            sequence=_append_lookup([queries[0], write], queries, text),
-                            bindings=bindings,
-                            request=request,
-                        ))
-                if options:
-                    bindings = _relation_pair(spec, options[0], write)
-                    if bindings:
-                        routes.append(_route(
-                            route_id="option_then_write" if len(writes) == 1 else f"option_then_{capability_ref(write)}",
-                            name=f"选项后{write.title or write.name}",
-                            when_to_use=f"「{write.title or write.name}」字段需要从选项中选择",
-                            sequence=_append_lookup([options[0], write], queries, text),
-                            bindings=bindings,
-                            request=request,
-                        ))
-        if not routes:
+        if not routes and selected:
             routes.append(_route(
                 route_id="single",
                 name=_cap_title(selected[0]),
@@ -596,25 +926,10 @@ def propose_deterministic_plan(
                 sequence=selected[:1],
                 bindings=[],
                 request=request,
+                spec=spec,
             ))
-        existing_singles = {
-            route.capability_sequence[0]
-            for route in routes
-            if len(route.capability_sequence) == 1
-        }
-        for cap in selected:
-            cap_id = capability_ref(cap)
-            if cap_id in existing_singles:
-                continue
-            routes.append(_route(
-                route_id=_operation_route_id(cap),
-                name=cap.title or cap.name or cap_id,
-                when_to_use=_operation_when(cap),
-                sequence=[cap],
-                bindings=[],
-                request=request,
-            ))
-            existing_singles.add(cap_id)
+        routes.extend(_atomic_fallback_routes(selected, request, queries, spec, routes))
+        routes = _merge_equivalent_routes(routes)
 
     if request.planning_mode == PlanningMode.FIXED:
         used_ids = {cap_id for route in routes for cap_id in route.capability_sequence}
@@ -646,6 +961,7 @@ def propose_deterministic_plan(
     safety = [
         "只使用当前页面已打包操作，不得发明字段、接口或输出。",
         "写操作必须先取得用户确认。",
+        "只有已确认绑定可以自动带入跨步骤字段；没有绑定就在交接点停问。",
         "不得输出 token、cookie、storage_state 或密码。",
     ]
     if request.forbidden_actions:
@@ -672,8 +988,10 @@ def propose_deterministic_plan(
         unused_capabilities=unused,
         routes=routes,
         safety_rules=safety,
+        clarification_questions=list(dict.fromkeys(item for item in clarifications if item)),
         composition_summary=composition_summary,
         composition_notes=composition_notes,
+        intent_branches=branches,
     )
 
 
@@ -717,12 +1035,34 @@ def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
         extra = overlay.get(tuple(route.capability_sequence))
         payload = route.model_dump()
         if extra is not None:
+            name = _clean_phrase(extra.name)
+            if name:
+                payload["name"] = name
             when = _clean_phrase(extra.when_to_use)
             if when:
                 payload["when_to_use"] = when
             done = _clean_phrase(extra.done_when)
             if done:
                 payload["done_when"] = done
+            failure = _clean_phrase(extra.failure_behavior)
+            if failure:
+                payload["failure_behavior"] = failure
+            if extra.steps and route.steps:
+                polished = []
+                for frozen, incoming in zip(route.steps, extra.steps, strict=False):
+                    step_payload = frozen.model_dump()
+                    step_done = _clean_phrase(incoming.done_when)
+                    if step_done:
+                        step_payload["done_when"] = step_done
+                    step_fail = _clean_phrase(incoming.on_failure)
+                    if step_fail:
+                        step_payload["on_failure"] = step_fail
+                    if frozen.checkpoint is not None and incoming.checkpoint is not None:
+                        prompt = _clean_phrase(incoming.checkpoint.prompt)
+                        if prompt:
+                            step_payload["checkpoint"] = frozen.checkpoint.model_copy(update={"prompt": prompt}).model_dump()
+                    polished.append(step_payload)
+                payload["steps"] = polished
             examples = []
             for example in extra.examples:
                 request_text = _clean_phrase(example.user_request)
@@ -730,6 +1070,7 @@ def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
                     continue
                 if example.capability_sequence and example.capability_sequence != list(route.capability_sequence):
                     continue
+                base = route.examples[0] if route.examples else None
                 examples.append(
                     RouteExample(
                         user_request=request_text,
@@ -739,13 +1080,25 @@ def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
                         bindings=list(route.bindings),
                         confirmation_points=list(
                             example.confirmation_points
-                            or (route.examples[0].confirmation_points if route.examples else [])
+                            or (base.confirmation_points if base else [])
                         ),
                         done_when=done or route.done_when,
+                        input_origins=list(base.input_origins if base else []),
+                        auto_bound_fields=list(base.auto_bound_fields if base else []),
+                        ask_at=list(base.ask_at if base else []),
+                        confirm_at=list(base.confirm_at if base else []),
+                        on_cancel=base.on_cancel if base else route.failure_behavior,
+                        on_empty_or_ambiguous=base.on_empty_or_ambiguous if base else "",
+                        on_unknown_write_result=base.on_unknown_write_result if base else "",
                     )
                 )
             if examples:
                 payload["examples"] = [examples[0].model_dump()]
+        payload["bindings"] = [item.model_dump() for item in route.bindings]
+        payload["capability_sequence"] = list(route.capability_sequence)
+        payload["step_ids"] = list(route.step_ids)
+        payload["composition_mode"] = route.composition_mode
+        payload["checkpoints"] = [item.model_dump() for item in route.checkpoints]
         merged_routes.append(SkillRoute.model_validate(payload))
     return fallback.model_copy(update={
         "routes": merged_routes,
@@ -755,6 +1108,8 @@ def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
         "trigger_phrases": list(fallback.trigger_phrases),
         "composition_summary": fallback.composition_summary,
         "composition_notes": list(fallback.composition_notes),
+        "intent_branches": list(fallback.intent_branches),
+        "clarification_questions": list(fallback.clarification_questions),
     })
 
 
@@ -791,12 +1146,12 @@ async def _llm_propose(
             "禁止阶段号、禁止录制过程、禁止把操作名复读成清单。"
         ),
         "rules": [
-            "selected_capability_ids、unused_capabilities、每条 route 的 route_id、capability_sequence、bindings、step_ids 必须与 frozen_plan 完全一致",
-            "只能改 summary、trigger_phrases、composition_notes、composition_summary、when_to_use、done_when、examples.user_request",
-            "自然语言必须落实业务描述里的组合约定，禁止录制套话，禁止发明绑定",
-            "when_to_use 和例句用用户说法，不要写「用户要{标题}」",
+            "selected_capability_ids、unused_capabilities、intent_branches、每条 route 的 route_id、capability_sequence、bindings、step_ids、steps、checkpoints、composition_mode 必须与 frozen_plan 完全一致",
+            "只能改 name、when_to_use、done_when、failure_behavior、checkpoint.prompt、examples.user_request 的措辞",
+            "不得新增未验证能力、不得新增或改变绑定、不得改变能力顺序、不得删除确认门禁",
+            "不得把人工交接改成自动传值，不得把未知结果改成成功",
+            "when_to_use 和例句用用户说法，示例 ID/姓名/日期必须用 <占位符>",
             "禁止出现：阶段、原子能力、录制、FlowSpec、fingerprint、capability_id、规划依据",
-            "不得减少操作，不得另造路线",
         ],
         "request": request.model_dump(mode="json"),
         "frozen_plan": frozen.model_dump(mode="json"),

@@ -20,6 +20,8 @@ from dano.onboarding.skill_generation.catalog import (
     usable_relations,
 )
 from dano.onboarding.skill_generation.models import (
+    CompositionMode,
+    InputSourceKind,
     PlanningMode,
     RouteBinding,
     SkillPlan,
@@ -149,7 +151,122 @@ def validate_skill_plan(
             if cap_id not in unused_ids and cap.name not in unused_ids:
                 result.error(f"未使用能力必须记录原因: {cap_id}")
     _validate_handbook_language(result, plan)
+    _validate_intent_coverage(result, plan)
+    _validate_route_execution_contracts(result, plan, caps)
+    _validate_forbidden_routes(result, plan)
     return result
+
+
+def _sequence_covers(route_sequence: list[str], branch_sequence: list[str]) -> bool:
+    if list(route_sequence) == list(branch_sequence):
+        return True
+    return (
+        len(route_sequence) == len(branch_sequence) + 1
+        and list(route_sequence[:-1]) == list(branch_sequence)
+        and route_sequence[-1] == route_sequence[0]
+    )
+
+
+def _validate_intent_coverage(result: PlanValidation, plan: SkillPlan) -> None:
+    for question in plan.clarification_questions:
+        result.clarify(question)
+    blocked = {
+        item.capability_id
+        for item in plan.unused_capabilities
+        if "禁止" in (item.reason or "") or "限制" in (item.reason or "")
+    }
+    for branch in plan.intent_branches:
+        if any(cap_id in blocked for cap_id in branch.capability_sequence):
+            continue
+        if branch.unresolved or branch.conflicting or not branch.capability_sequence:
+            for item in branch.unresolved or ["请澄清互相冲突或无法映射的办理顺序"]:
+                result.clarify(item)
+            continue
+        if plan.planning_mode == PlanningMode.FIXED and len(branch.capability_sequence) < 2:
+            continue
+        matches = [
+            route
+            for route in plan.routes
+            if _sequence_covers(list(route.capability_sequence), list(branch.capability_sequence))
+            or (
+                plan.planning_mode == PlanningMode.FIXED
+                and set(branch.capability_sequence) <= set(route.capability_sequence)
+            )
+        ]
+        if not matches:
+            result.error(f"明确分支没有对应路线，不能静默原子化: {branch.trigger}")
+        elif len({tuple(route.capability_sequence) for route in matches}) > 1 and not branch.independent:
+            result.clarify(f"「{branch.trigger}」对应了多条不同合同的路线，请确认唯一顺序")
+
+
+def _validate_route_execution_contracts(
+    result: PlanValidation,
+    plan: SkillPlan,
+    caps: dict[str, FlowCapability],
+) -> None:
+    for route in plan.routes:
+        if len(route.capability_sequence) > 1 and not route.examples:
+            result.error(f"多步路线 {route.route_id} 必须有完整示例")
+        if route.steps:
+            if [step.capability_id for step in route.steps] != list(route.capability_sequence):
+                result.error(f"路线 {route.route_id} 的步骤顺序与能力顺序不一致")
+            for step in route.steps:
+                if not str(step.done_when or "").strip():
+                    result.error(f"路线 {route.route_id} 步骤 {step.step_key} 缺少完成条件")
+                cap = caps.get(step.capability_id)
+                if cap is None:
+                    continue
+                if is_write_capability(cap) and not step.confirm_before_execute:
+                    result.error(f"路线 {route.route_id} 的写步骤 {step.step_key} 必须先确认")
+                if not is_write_capability(cap) and step.confirm_before_execute:
+                    result.error(f"路线 {route.route_id} 的只读步骤 {step.step_key} 不能标成写入确认")
+                provided = {source.field for source in step.input_sources}
+                bound = {binding.to_input for binding in step.bindings if binding.to_input}
+                satisfied = set(confirmed_fixed_or_system_inputs(cap))
+                for field in schema_required(cap.input_schema):
+                    if field in satisfied or field in bound or field in provided or field in route.required_user_inputs:
+                        continue
+                    result.error(f"路线 {route.route_id} 步骤 {step.step_key} 的输入 {field} 没有来源")
+                for source in step.input_sources:
+                    if source.source == InputSourceKind.CONFIRMED_BINDING and not step.bindings:
+                        result.error(f"路线 {route.route_id} 步骤 {step.step_key} 把未确认关系当成了自动绑定")
+        if (
+            len(route.capability_sequence) > 1
+            and not route.bindings
+            and route.composition_mode in {CompositionMode.HANDOFF, CompositionMode.ATOMIC}
+        ):
+            if not route.checkpoints and not any(step.checkpoint for step in route.steps):
+                dependent = False
+                for cap_id in route.capability_sequence[1:]:
+                    cap = caps.get(cap_id)
+                    if cap is not None and is_write_capability(cap) and _needs_user_or_prior(cap):
+                        dependent = True
+                if dependent:
+                    result.error(f"路线 {route.route_id} 没有确认绑定，必须设置人工交接点")
+        failure = str(route.failure_behavior or "")
+        if any(caps.get(cap_id) and is_write_capability(caps[cap_id]) for cap_id in route.capability_sequence):
+            if "不得重试" not in failure and "不能重试" not in failure:
+                result.error(f"路线 {route.route_id} 写结果未知时必须禁止自动重试")
+
+
+def _needs_user_or_prior(cap: FlowCapability) -> bool:
+    required = set(schema_required(cap.input_schema))
+    satisfied = set(confirmed_fixed_or_system_inputs(cap))
+    return bool(required - satisfied)
+
+
+def _validate_forbidden_routes(result: PlanValidation, plan: SkillPlan) -> None:
+    blocked = {
+        item.capability_id
+        for item in plan.unused_capabilities
+        if "禁止" in (item.reason or "") or "限制" in (item.reason or "")
+    }
+    if not blocked:
+        return
+    for route in plan.routes:
+        hit = [cap_id for cap_id in route.capability_sequence if cap_id in blocked]
+        if hit:
+            result.error(f"被禁止的操作不能进入可执行路线: {', '.join(hit)}")
 
 
 def _validate_handbook_language(result: PlanValidation, plan: SkillPlan) -> None:

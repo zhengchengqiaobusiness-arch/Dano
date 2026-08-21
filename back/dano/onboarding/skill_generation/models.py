@@ -7,12 +7,26 @@ import json
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlanningMode(StrEnum):
     DYNAMIC = "dynamic"
     FIXED = "fixed"
+
+
+class InputSourceKind(StrEnum):
+    USER = "user"
+    FIXED_VALUE = "fixed_value"
+    SYSTEM_CONTEXT = "system_context"
+    CONFIRMED_BINDING = "confirmed_binding"
+
+
+class CompositionMode(StrEnum):
+    ATOMIC = "atomic"
+    BOUND = "bound"
+    HANDOFF = "handoff"
+    INDEPENDENT = "independent"
 
 
 class SkillGenerationRequest(BaseModel):
@@ -47,6 +61,49 @@ class RouteBinding(BaseModel):
     fixed_value: Any = None
 
 
+class StepInputSource(BaseModel):
+    field: str
+    source: InputSourceKind
+    from_step_key: str = ""
+    notes: str = ""
+
+
+class HumanCheckpoint(BaseModel):
+    after_step: str = ""
+    before_step: str = ""
+    required_fields: list[str] = Field(default_factory=list)
+    prompt: str = ""
+    choice_source: Literal["previous_result", "dynamic_options", "free_text", "combined"] = "previous_result"
+    selection_mode: Literal["single", "multiple", "text", "date"] = "single"
+    resume_when: str = "用户已选定有效目标并通过输入校验"
+    on_cancel: str = "停止并报告未执行"
+
+
+class RouteStep(BaseModel):
+    step_key: str
+    capability_id: str
+    input_sources: list[StepInputSource] = Field(default_factory=list)
+    bindings: list[RouteBinding] = Field(default_factory=list)
+    checkpoint: HumanCheckpoint | None = None
+    confirm_before_execute: bool = False
+    done_when: str = ""
+    on_failure: str = ""
+
+
+class IntentBranch(BaseModel):
+    branch_id: str
+    trigger: str
+    capability_sequence: list[str] = Field(default_factory=list)
+    mutation: Literal["read", "write", "mixed"] = "read"
+    preconditions: list[str] = Field(default_factory=list)
+    done_when: str = ""
+    unresolved: list[str] = Field(default_factory=list)
+    source: Literal["description", "example", "confirmed_relation"] = "description"
+    independent: bool = False
+    target_given: bool = False
+    conflicting: bool = False
+
+
 class RouteExample(BaseModel):
     user_request: str
     route_id: str = ""
@@ -55,6 +112,13 @@ class RouteExample(BaseModel):
     bindings: list[RouteBinding] = Field(default_factory=list)
     confirmation_points: list[str] = Field(default_factory=list)
     done_when: str = ""
+    input_origins: list[str] = Field(default_factory=list)
+    auto_bound_fields: list[str] = Field(default_factory=list)
+    ask_at: list[str] = Field(default_factory=list)
+    confirm_at: list[str] = Field(default_factory=list)
+    on_cancel: str = ""
+    on_empty_or_ambiguous: str = ""
+    on_unknown_write_result: str = ""
 
 
 class SkillRoute(BaseModel):
@@ -70,6 +134,24 @@ class SkillRoute(BaseModel):
     done_when: str = ""
     failure_behavior: str = ""
     examples: list[RouteExample] = Field(default_factory=list)
+    steps: list[RouteStep] = Field(default_factory=list)
+    checkpoints: list[HumanCheckpoint] = Field(default_factory=list)
+    composition_mode: CompositionMode = CompositionMode.ATOMIC
+
+    @model_validator(mode="after")
+    def derive_sequence_from_steps(self) -> SkillRoute:
+        if self.steps:
+            self.capability_sequence = [step.capability_id for step in self.steps]
+            self.step_ids = [step.step_key for step in self.steps]
+            derived_bindings = [binding for step in self.steps for binding in step.bindings]
+            if derived_bindings:
+                self.bindings = derived_bindings
+            derived_checks = [step.checkpoint for step in self.steps if step.checkpoint is not None]
+            if derived_checks and not self.checkpoints:
+                self.checkpoints = derived_checks
+            if any(step.confirm_before_execute for step in self.steps):
+                self.requires_confirmation = True
+        return self
 
 
 class SkillPlan(BaseModel):
@@ -84,6 +166,7 @@ class SkillPlan(BaseModel):
     clarification_questions: list[str] = Field(default_factory=list)
     composition_summary: str = ""
     composition_notes: list[str] = Field(default_factory=list)
+    intent_branches: list[IntentBranch] = Field(default_factory=list)
 
 
 class SkillGenerationResult(BaseModel):
