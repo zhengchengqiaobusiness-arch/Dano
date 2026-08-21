@@ -1902,6 +1902,13 @@ class ExportSkillsReq(BaseModel):
     mode: Literal["proxy", "package", "both"] = "package"
 
 
+@app.get("/export/directory")
+async def export_directory(x_tenant_key: str | None = Header(default=None)) -> dict:
+    """返回当前导出目录：页面配过的配置文件 > DANO_EXPORT_DIR > 仓库 export/。"""
+    await _auth_tenant(x_tenant_key)
+    return {"out_dir": _current_export_dir()}
+
+
 @app.post("/export/agent-skills")
 async def export_agent_skills_ep(req: ExportSkillsReq,
                                  x_tenant_key: str | None = Header(default=None)) -> dict:

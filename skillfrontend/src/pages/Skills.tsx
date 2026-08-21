@@ -1,17 +1,10 @@
 import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select } from "antd";
 import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
-import { listSkills, exportAgentSkills, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
+import { listSkills, exportAgentSkills, getExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
-
-const EXPORT_DIR_LS = "dano.exportDir";
-const DEFAULT_EXPORT_DIR = "E:\\python\\try\\Dano\\export";
-
-function rememberedExportDir() {
-  const raw = localStorage.getItem(EXPORT_DIR_LS) || DEFAULT_EXPORT_DIR;
-  return raw.replace(/[\\/]+agent-skills[\\/]*$/i, "") || DEFAULT_EXPORT_DIR;
-}
+import { rememberExportDir, rememberedExportDir } from "../api/recording";
 
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
 const INTEG_LABEL: Record<string, string> = { workflow: "复合流程", api: "接口", page: "页面" };
@@ -52,18 +45,29 @@ export default function Skills() {
   const [data, setData] = useState<SkillManifest[]>([]);
   const [loading, setLoading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportDir, setExportDir] = useState(rememberedExportDir);
+  const [exportDir, setExportDir] = useState("");
   const [exportMode, setExportMode] = useState<SkillExportMode>("package");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);
   const tenant = localStorage.getItem(TENANT_NAME) || "";
 
+  async function loadExportDir() {
+    try {
+      setExportDir(await getExportDirectory() || rememberedExportDir());
+    } catch {
+      setExportDir(rememberedExportDir());
+    }
+  }
+
   async function doExport() {
-    if (!exportDir.trim()) { message.error("请填目标目录"); return; }
+    const outDir = exportDir.trim();
     setExporting(true);
     try {
-      const r = await exportAgentSkills(exportDir.trim(), exportMode);
-      localStorage.setItem(EXPORT_DIR_LS, exportDir.trim());
+      const r = await exportAgentSkills(outDir, exportMode);
+      if (r.out_dir) {
+        rememberExportDir(r.out_dir);
+        setExportDir(r.out_dir);
+      }
       message.success(`已导出 ${r.count} 个 skill 到 ${r.out_dir}`);
       setExportOpen(false);
     } catch (e: any) {
@@ -114,6 +118,9 @@ export default function Skills() {
     }
   }
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (exportOpen) void loadExportDir();
+  }, [exportOpen]);
 
   return (
     <div>
@@ -197,7 +204,7 @@ export default function Skills() {
         <Input
           value={exportDir}
           onChange={(e) => setExportDir(e.target.value)}
-          placeholder={DEFAULT_EXPORT_DIR}
+          placeholder="默认读取后端导出目录配置"
           onPressEnter={doExport}
         />
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 6 }}>导出模式:</Typography.Paragraph>

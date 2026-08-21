@@ -113,6 +113,11 @@ export async function resumeSkill(skillId: string): Promise<{ skill_id: string; 
 // 导出本租户已上架 Skill 为文件式 skill，后端就地写入 out_dir
 export type SkillExportMode = "proxy" | "package" | "both";
 
+export async function getExportDirectory(): Promise<string> {
+  const { data } = await api.get("/export/directory");
+  return String(data?.out_dir || "").trim();
+}
+
 export async function exportAgentSkills(out_dir: string, mode: SkillExportMode = "package"): Promise<{ out_dir: string; mode: SkillExportMode; count: number; written: string[]; removed_frozen_folders?: string[] }> {
   const { data } = await api.post("/export/agent-skills", { out_dir, mode });
   return data;

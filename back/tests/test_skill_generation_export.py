@@ -716,6 +716,9 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
     assert issues == []
     assert any(len(route.capability_sequence) > 1 for route in plan.routes)
     assert "已确认绑定" in text or "组合路线" in text
+    assert "规划依据（用户业务描述）" in text
+    assert "组合约定：" in text
+    assert "已确认绑定自动带入下一步" in text or "无已确认绑定，下一步向用户收集" in text
 
 
 def test_renderer_planning_fields_and_selected_filter() -> None:

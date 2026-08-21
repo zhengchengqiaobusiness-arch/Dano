@@ -59,6 +59,7 @@ import {
   rememberedExportDir,
   rememberedSkillExportDraft,
 } from "../api/recording";
+import { getExportDirectory } from "../api/skills";
 import type {
   RecordingResultDetail,
   RecordingResultSummary,
@@ -783,8 +784,10 @@ export default function PageRecorder({
       if (reachedStage >= 2) setKeepResult(true);
     }
     if (reachedStage > reachedStageRef.current) {
-      setViewStage(reachedStage);
-      if (reachedStage >= 2 && !resumeOnly) setAssistantOpen(true);
+      if (resumeOnly || reachedStage < 2) {
+        setViewStage(reachedStage);
+      }
+      if (reachedStage >= 1 && !resumeOnly) setAssistantOpen(true);
     }
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
@@ -910,12 +913,6 @@ export default function PageRecorder({
     setConnected(false);
     setConnecting(false);
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
-  }
-
-  function enterCapabilityResults() {
-    setKeepResult(true);
-    setViewStage(2);
-    setAssistantOpen(true);
   }
 
   function canAutoReconnectRecording() {
@@ -1094,7 +1091,8 @@ export default function PageRecorder({
       ["published", "editable", "failed", "cancelled"].includes(next.status)
       && !resumeOnlyRef.current
     ) {
-      enterCapabilityResults();
+      setKeepResult(true);
+      setAssistantOpen(true);
     } else if (next.status === "waiting_operator") {
       setAssistantOpen(true);
     }
@@ -1227,7 +1225,10 @@ export default function PageRecorder({
             };
             snapshotRef.current = failed;
             setSnapshot(failed);
-            if (!resumeOnlyRef.current) enterCapabilityResults();
+            if (!resumeOnlyRef.current) {
+              setKeepResult(true);
+              setAssistantOpen(true);
+            }
           }
           message.error(detail);
         }
@@ -1588,6 +1589,9 @@ export default function PageRecorder({
       || defaultDescription,
     );
     setSkillOutDir(rememberedExportDir());
+    void getExportDirectory()
+      .then((dir) => setSkillOutDir(dir || rememberedExportDir()))
+      .catch(() => setSkillOutDir(rememberedExportDir()));
     setSkillExportOutcome(null);
     setSkillClarifications([]);
     setSkillExportErrors([]);
@@ -1684,6 +1688,7 @@ export default function PageRecorder({
     if (finishRequestedRef.current || status !== "recording") return;
     finishRequestedRef.current = true;
     setFinishRequested(true);
+    setAssistantOpen(true);
     if (!send({ type: "finish",
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
@@ -3431,21 +3436,6 @@ export default function PageRecorder({
                 />
               ) : <Text type="secondary">无</Text>}
             </div>
-            <div>
-              <Text>有效调用路线：</Text>
-              <List
-                size="small"
-                dataSource={skillExportOutcome.routes || []}
-                renderItem={(route) => (
-                  <List.Item>
-                    <Space direction="vertical" size={0}>
-                      <Text>{String(route.name || route.route_id || "")}</Text>
-                      <Text type="secondary">{Array.isArray(route.capability_sequence) ? route.capability_sequence.join(" → ") : ""}</Text>
-                    </Space>
-                  </List.Item>
-                )}
-              />
-            </div>
             <Text>导出路径：{skillExportOutcome.export_path || "—"}</Text>
             <Text>Skill 版本：{skillExportOutcome.version || 1}</Text>
           </Space>
@@ -3499,6 +3489,16 @@ export default function PageRecorder({
                 autoSize={{ minRows: 6, maxRows: 12 }}
                 disabled={skillExporting}
                 placeholder="用自然语言说明这个页面有哪些原子能力、用户通常怎么组合它们、什么结果算完成。例如：用户可以只查询待办；也可以查询后选一条再提交。只要求查询时不要提交。没有已确认绑定时，先查再请用户指定记录。"
+              />
+            </div>
+            <div>
+              <Text strong>目标目录</Text>
+              <Input
+                style={{ marginTop: 6 }}
+                value={skillOutDir}
+                onChange={(event) => setSkillOutDir(event.target.value)}
+                placeholder="默认读取后端导出目录配置"
+                disabled={skillExporting}
               />
             </div>
           </Space>

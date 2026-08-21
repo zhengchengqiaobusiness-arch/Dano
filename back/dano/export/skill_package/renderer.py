@@ -655,6 +655,42 @@ def _required_fields(plan: dict) -> list[str]:
     return [str(name) for name in (schema.get("required") or []) if str(name)]
 
 
+def _route_playbook_steps(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    routes = [
+        item for item in (plan.get("routes") or [])
+        if isinstance(item, dict) and item.get("capability_sequence")
+    ]
+    by_ref = _plan_by_ref(plans)
+    lines = ["## 操作步骤", ""]
+    index = 1
+    lines.extend([
+        f"{index}. 对照用户业务描述和「操作路由」，只选一条已规划路线；只要只读时不得执行写入。",
+        "   Done when: 已选出恰好一条已规划路线。",
+    ])
+    index += 1
+    for route in routes:
+        titles: list[str] = []
+        for cap_id in route.get("capability_sequence") or []:
+            item = by_ref.get(str(cap_id))
+            titles.append(_safe_text((item or {}).get("title") or cap_id))
+        when = _safe_text(route.get("when_to_use") or route.get("name") or route.get("route_id"))
+        done = _safe_text(route.get("done_when") or "该路线已执行完成")
+        bindings = [item for item in (route.get("bindings") or []) if isinstance(item, dict)]
+        handoff = "已确认绑定自动带入下一步" if bindings else "无已确认绑定，下一步向用户收集，不得按字段同名猜测"
+        sequence = " → ".join(titles) or _safe_text(route.get("name") or route.get("route_id"))
+        lines.extend([
+            f"{index}. 当{when}：按 {sequence} 执行。{handoff}。",
+            f"   Done when: {done}",
+        ])
+        index += 1
+    lines.extend([
+        f"{index}. 读取该路线 `references/OPERATIONS.md` 小节和 `references/CONTRACT.json` 中的 `input_schema`，收集仍缺字段；写前确认后执行对应脚本，需要验证时再跑 verify 脚本。",
+        "   Done when: 脚本 stdout 最后一行 JSON 为 `status=succeeded` 且 `ok=true`，需要验证时验证通过。",
+    ])
+    return lines
+
+
 def _combination_routes(skill) -> list[dict]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
     routes = [item for item in (plan.get("routes") or []) if isinstance(item, dict)]
@@ -708,7 +744,7 @@ def _composition_section(skill, plans: list[dict], spec) -> list[str]:  # noqa: 
     lines = ["## 能力关系", ""]
     summary = _safe_text(plan.get("composition_summary") or plan.get("summary"))
     if summary and not _is_recording_copy(summary):
-        lines.extend([summary, ""])
+        lines.extend(["规划依据（用户业务描述）：", "", summary, ""])
     if order:
         lines.append("录制识别顺序（不是自动编排）：" + " → ".join(order) + "。")
         lines.append("")
@@ -851,20 +887,8 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
         "- 提问时按 `references/INPUT_FORMS.md` 原生调用 `ask_user_question`。",
     ])
     lines.extend(f"- {hint}" for hint in collect_hints)
+    lines.extend(["", *_route_playbook_steps(skill, plans)])
     lines.extend([
-        "",
-        "## 操作步骤",
-        "",
-        "1. 用用户原话对照「操作路由」和「能力关系」：走一条原子操作，还是一条已规划组合路线。",
-        "   Done when: 已选出恰好一条路线，且没有把「只查询」升级成写入。",
-        "2. 只读取该路线将用到的 `references/OPERATIONS.md` 小节，以及 `references/CONTRACT.json` 中对应 `input_schema`。",
-        "   Done when: 已确定每步的必填字段、类型和枚举。",
-        "3. 按路线顺序收集当前步仍缺的调用方字段；已有用户值或已确认绑定不要再问。缺字段就追问，不得编造。",
-        "   Done when: 当前步必填输入完整，或用户取消并立即停止。",
-        "4. 按契约校验类型、枚举和格式。写操作必须先取得用户确认，再执行对应 `python scripts/<script>.py --input-json '<JSON>'`；需确认时加 `--confirm`。",
-        "   Done when: 脚本 stdout 最后一行 JSON 为 `status=succeeded` 且 `ok=true`。",
-        "5. 若路线还有下一步：已确认绑定则自动带入，否则停下来让用户指定。需要验证时再跑对应 `verify_script`；列表结果先运行 `python scripts/format_list.py`。",
-        "   Done when: 整条路线完成，验证通过或该步不需要验证，且已按输出格式汇报。",
         "",
         "## 工具",
         "",

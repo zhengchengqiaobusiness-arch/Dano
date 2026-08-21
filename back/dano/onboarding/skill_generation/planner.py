@@ -262,13 +262,16 @@ def _build_composition(
     routes: list[SkillRoute],
 ) -> tuple[str, list[str]]:
     titles = [_cap_title(cap) for cap in selected]
+    description = str(request.business_description or "").strip()
     summary = _clean_when(
-        request.business_description,
+        description,
         f"本页原子能力：{'、'.join(titles)}。按用户意图选择一项，或按已规划路线组合。",
     )
     notes: list[str] = [
         "一页面对应一个 Skill；阶段 6/7 产出的是原子能力，本 Skill 用自然语言规划它们如何组合。",
     ]
+    if description and not _is_recording_copy(description):
+        notes.append(f"组合约定：{description}")
     reads = [cap for cap in selected if not is_write_capability(cap)]
     writes = [cap for cap in selected if is_write_capability(cap)]
     if reads and writes:
@@ -584,12 +587,75 @@ def _parse_proposed_plan(raw: SkillPlan | dict[str, Any], fallback: SkillPlan) -
     return plan
 
 
+def _clean_phrase(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or _is_recording_copy(text):
+        return ""
+    return text
+
+
+def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
+    """Keep recorded structure; take model wording only."""
+    if not _plan_is_usable(proposed):
+        return fallback
+    overlay = {
+        tuple(route.capability_sequence): route
+        for route in proposed.routes
+        if route.capability_sequence
+    }
+    merged_routes: list[SkillRoute] = []
+    for route in fallback.routes:
+        extra = overlay.get(tuple(route.capability_sequence))
+        payload = route.model_dump()
+        if extra is not None:
+            when = _clean_phrase(extra.when_to_use)
+            if when:
+                payload["when_to_use"] = when
+            done = _clean_phrase(extra.done_when)
+            if done:
+                payload["done_when"] = done
+            examples = []
+            for example in extra.examples:
+                request_text = _clean_phrase(example.user_request)
+                if not request_text:
+                    continue
+                if example.capability_sequence and example.capability_sequence != list(route.capability_sequence):
+                    continue
+                examples.append(
+                    RouteExample(
+                        user_request=request_text,
+                        route_id=route.route_id,
+                        collected_fields=list(route.required_user_inputs),
+                        capability_sequence=list(route.capability_sequence),
+                        bindings=list(route.bindings),
+                        confirmation_points=list(
+                            example.confirmation_points
+                            or (route.examples[0].confirmation_points if route.examples else [])
+                        ),
+                        done_when=done or route.done_when,
+                    )
+                )
+            if examples:
+                payload["examples"] = [examples[0].model_dump()]
+        merged_routes.append(SkillRoute.model_validate(payload))
+    return fallback.model_copy(update={
+        "routes": merged_routes,
+        "selected_capability_ids": list(fallback.selected_capability_ids),
+        "unused_capabilities": list(fallback.unused_capabilities),
+        "summary": fallback.summary,
+        "trigger_phrases": list(fallback.trigger_phrases),
+        "composition_summary": fallback.composition_summary,
+        "composition_notes": list(fallback.composition_notes),
+    })
+
+
 async def _llm_propose(
     spec: FlowSpec,
     request: SkillGenerationRequest,
     verified_ids: set[str],
     source_flow_fingerprint: str,
     *,
+    frozen: SkillPlan,
     repair_errors: list[str] | None = None,
 ) -> SkillPlan:
     from dano.infra.llm import openai_text_spawn
@@ -610,27 +676,20 @@ async def _llm_propose(
         for relation in usable_relations(spec)
     ]
     prompt = {
-        "task": "为已验证的页面能力规划文件式 Skill，只输出 JSON 对象。",
+        "task": "不要重新规划能力或路线。只润色已冻结规划的自然语言，输出完整 JSON。",
+        "purpose": (
+            "一页面对应一个 Skill。阶段6/7只提供原子能力；"
+            "阶段8用业务描述说明这些原子能力如何组合；"
+            "输出必须落实这条组合约定，而不是另写一份能力清单。"
+        ),
         "rules": [
-            "只能使用 verified_capabilities 中的 capability_id",
-            "选择完成业务描述所需的最少能力，不要排列组合",
-            "不得发明能力、字段或关系",
-            "未确认 suggested_call_chain 不得进入 bindings",
-            "写能力必须 requires_confirmation=true",
-            "每条 route 必须有 when_to_use、done_when 和至少一个 example",
-            "fixed 模式只能一条 route，dynamic 可以多条有效路线",
-            "unused_capabilities 必须写明原因",
-            "组合路线必须有已确认 bindings，不得按字段同名猜测",
-            "不要单独生成写后查询路线；回查应追加到写路线末尾并使用 query_before/submit_selected/query_after",
-            "同一能力多次调用必须有独立 step_ids，绑定必须带 from_step/to_step",
-            "不要生成 solo_ 路线；未进入组合路线的能力仍留在 selected_capability_ids，作为独立操作",
-            "多写能力时不要只为第一个写能力生成 write_direct",
-            "一页面对应一个 Skill：用业务描述说明原子能力如何组合，并写进 composition_notes",
-            "组合路线必须出现在 routes 里，when_to_use 用自然语言说明何时走这条组合",
-            "没有已确认绑定仍可写推荐顺序，但 bindings 必须为空，不得按字段同名猜测",
-            "route.examples.user_request 必须是业务例句，禁止使用录制套话",
+            "selected_capability_ids、unused_capabilities、每条 route 的 route_id、capability_sequence、bindings、step_ids 必须与 frozen_plan 完全一致",
+            "只能改 summary、trigger_phrases、composition_notes、composition_summary、when_to_use、done_when、examples.user_request",
+            "自然语言必须落实业务描述里的组合约定，禁止录制套话，禁止发明绑定",
+            "不得减少能力，不得另造路线",
         ],
         "request": request.model_dump(mode="json"),
+        "frozen_plan": frozen.model_dump(mode="json"),
         "source_flow_fingerprint": source_flow_fingerprint,
         "verified_capabilities": catalog,
         "confirmed_relations": relations,
@@ -727,11 +786,15 @@ async def generate_skill_plan(
             api_key = ""
         if api_key:
             try:
-                proposed = _parse_proposed_plan(
-                    await _llm_propose(
-                        spec, request, verified_capability_ids, source_flow_fingerprint,
-                    ),
+                proposed = _merge_proposed_plan(
                     fallback,
+                    _parse_proposed_plan(
+                        await _llm_propose(
+                            spec, request, verified_capability_ids, source_flow_fingerprint,
+                            frozen=fallback,
+                        ),
+                        fallback,
+                    ),
                 )
                 used_llm = True
             except Exception as exc:  # noqa: BLE001 - deterministic plan is the fallback candidate
@@ -747,7 +810,7 @@ async def generate_skill_plan(
             else:
                 _log_plan(
                     "skill.plan.llm",
-                    summary="模型已返回规划草案",
+                    summary="模型用语已并入确定性规划，路线结构未改",
                     selected_capability_ids=list(proposed.selected_capability_ids),
                     route_ids=[route.route_id for route in proposed.routes],
                 )
@@ -785,12 +848,13 @@ async def generate_skill_plan(
                 request,
                 verified_capability_ids,
                 source_flow_fingerprint,
+                frozen=fallback,
                 repair_errors=checked.errors + checked.clarifications,
             )
         except Exception as exc:  # noqa: BLE001 - one repair only, then report
             errors.append(str(exc) or "规划修复失败")
         else:
-            proposed = _parse_proposed_plan(proposed, fallback)
+            proposed = _merge_proposed_plan(fallback, _parse_proposed_plan(proposed, fallback))
             checked = validate_skill_plan(
                 proposed,
                 spec,

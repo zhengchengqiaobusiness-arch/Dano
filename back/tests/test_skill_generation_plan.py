@@ -12,6 +12,7 @@ from dano.onboarding.skill_generation import (
     propose_deterministic_plan,
     validate_skill_plan,
 )
+from dano.onboarding.skill_generation.planner import _merge_proposed_plan
 from dano.onboarding.skill_generation.models import RouteBinding, RouteExample, SkillPlan, SkillRoute, UnusedCapability
 
 
@@ -375,6 +376,7 @@ def test_composition_notes_describe_confirmed_and_handoff_routes() -> None:
         VERIFIED,
         "fp-compose",
     )
+    assert any(item.startswith("组合约定：") for item in confirmed.composition_notes)
     assert any("组合路线" in item and "已确认绑定" in item for item in confirmed.composition_notes)
     assert any(len(route.capability_sequence) > 1 and route.bindings for route in confirmed.routes)
     for route in confirmed.routes:
@@ -394,6 +396,34 @@ def test_composition_notes_describe_confirmed_and_handoff_routes() -> None:
     assert "query_then_write" not in {route.route_id for route in handoff.routes}
     assert any("没有已确认绑定" in item for item in handoff.composition_notes)
     assert any("只读" in item and "不得执行写入" in item for item in handoff.composition_notes)
+
+
+def test_model_wording_cannot_replace_recorded_plan_structure() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="用户可以只查询待办，也可以查询后选择一条记录进行提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    base = propose_deterministic_plan(spec, request, VERIFIED, "fp-merge")
+    skinny = propose_deterministic_plan(spec, request, {"cap_query"}, "fp-merge")
+    skinny.routes[0].when_to_use = "只看待办，不要提交"
+    skinny.routes[0].examples[0].user_request = "帮我看一下待办"
+    merged = _merge_proposed_plan(base, skinny)
+    assert merged.selected_capability_ids == base.selected_capability_ids
+    assert {tuple(route.capability_sequence) for route in merged.routes} == {
+        tuple(route.capability_sequence) for route in base.routes
+    }
+    query = next(route for route in merged.routes if route.route_id == "query_only")
+    assert query.when_to_use == "只看待办，不要提交"
+    assert query.examples[0].user_request == "帮我看一下待办"
+    skinny.summary = "模型另写的摘要，丢掉用户约定"
+    skinny.composition_summary = "模型另写的组合摘要"
+    skinny.composition_notes = ["模型另写的说明"]
+    merged = _merge_proposed_plan(base, skinny)
+    assert merged.summary == base.summary
+    assert merged.composition_summary == base.composition_summary
+    assert merged.composition_notes == base.composition_notes
 
 
 def test_every_route_has_example_and_done_when() -> None:

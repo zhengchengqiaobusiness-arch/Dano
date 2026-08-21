@@ -82,3 +82,9 @@ routes come from the Stage 8 plan: confirmed bindings may auto-fill; planned
 sequences without bindings still appear, but the next input is collected from
 the user. Standalone leftover capabilities stay as operations; they must not
 become `solo_*` routes.
+
+The model may only rewrite `when_to_use` and examples for those frozen routes.
+It must not replace `selected_capability_ids`, route sequences, or bindings.
+`SKILL.md` 能力关系 must quote the operator's business description as the
+composition contract, and `操作步骤` must include one playbook per planned
+route.

@@ -42,7 +42,8 @@ export function rememberSkillExportDraft(resultId: string, draft: SkillExportDra
 
 export function rememberedExportDir() {
   try {
-    return localStorage.getItem(EXPORT_DIR_LS) || "";
+    const raw = localStorage.getItem(EXPORT_DIR_LS) || "";
+    return raw.replace(/[\\/]+agent-skills[\\/]*$/i, "") || "";
   } catch {
     return "";
   }
