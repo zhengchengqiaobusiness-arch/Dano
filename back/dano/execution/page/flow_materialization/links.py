@@ -1,7 +1,7 @@
 """Stage 5: captured value links and dependency structure."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -23,6 +23,29 @@ from dano.execution.page.recording_facts import (
 from dano.execution.page.flow_materialization.request_steps import (
     _step_sequence,
 )
+
+if TYPE_CHECKING:
+    from dano.execution.page.flow_spec_core.normalization import (
+        _FLOW_PATH_MISSING,
+        _flow_path_lookup,
+    )
+    from dano.execution.page.flow_spec_core.controlled_edits import (
+        _apply_link_sources,
+        _reset_param_source,
+        _resolve_param_reference,
+    )
+    from dano.execution.page.flow_materialization.field_contracts.common import (
+        _looks_system_const_field,
+        _looks_user_entered_business_field,
+    )
+    from dano.execution.page.flow_materialization.field_contracts.option_projection import (
+        _OPTION_SOURCE_KINDS,
+        _composite_values_match,
+        _recorded_scalar_values_match,
+    )
+    from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+        _param_has_editable_control_evidence,
+    )
 
 
 def _link_is_auto_generated(lk: FlowLink) -> bool:
@@ -585,11 +608,25 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
     _sync_link_sources(spec.steps, spec.links)
     return added
 
-_PENDING_FLOW_SPEC_HELPERS = {'_FLOW_PATH_MISSING': 'dano.execution.page.flow_spec_core.normalization', '_OPTION_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_apply_link_sources': 'dano.execution.page.flow_spec_core.controlled_edits', '_composite_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_looks_system_const_field': 'dano.execution.page.flow_materialization.field_contracts.common', '_looks_user_entered_business_field': 'dano.execution.page.flow_materialization.field_contracts.common', '_param_has_editable_control_evidence': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_reset_param_source': 'dano.execution.page.flow_spec_core.controlled_edits', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits'}
+
+_PENDING_FLOW_SPEC_HELPERS = {
+    "_FLOW_PATH_MISSING": "dano.execution.page.flow_spec_core.normalization",
+    "_OPTION_SOURCE_KINDS": "dano.execution.page.flow_materialization.field_contracts.option_projection",
+    "_apply_link_sources": "dano.execution.page.flow_spec_core.controlled_edits",
+    "_composite_values_match": "dano.execution.page.flow_materialization.field_contracts.option_projection",
+    "_flow_path_lookup": "dano.execution.page.flow_spec_core.normalization",
+    "_looks_system_const_field": "dano.execution.page.flow_materialization.field_contracts.common",
+    "_looks_user_entered_business_field": "dano.execution.page.flow_materialization.field_contracts.common",
+    "_param_has_editable_control_evidence": "dano.execution.page.flow_materialization.field_contracts.caller_ownership",
+    "_recorded_scalar_values_match": "dano.execution.page.flow_materialization.field_contracts.option_projection",
+    "_reset_param_source": "dano.execution.page.flow_spec_core.controlled_edits",
+    "_resolve_param_reference": "dano.execution.page.flow_spec_core.controlled_edits",
+}
 
 
 def _bind_flow_spec_helpers() -> None:
     import sys
+
     module_globals = globals()
     for name, owner in _PENDING_FLOW_SPEC_HELPERS.items():
         mod = sys.modules.get(owner)
