@@ -34,6 +34,124 @@ def _feed(session: RecordSession, payload: dict) -> None:
     session._on_record({}, json.dumps(payload, ensure_ascii=False))
 
 
+def test_aliasless_selects_use_unique_remaining_form_order_as_last_fallback() -> None:
+    request = {
+        "request_id": "req_filter",
+        "method": "GET",
+        "url": (
+            "http://example.test/api/entities/page?pageNo=1&pageSize=20"
+            "&knownAlpha=a&knownBeta=b&opaqueOne=0&opaqueTwo=0"
+        ),
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "role": "business_get",
+    }
+    common = {
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "surface": "page",
+        "in_dialog": False,
+        "form_root": "generic filters",
+        "control_kind": "select",
+        "value": "",
+    }
+    evidence = [
+        {**common, "label": "Alpha", "field_aliases": ["knownAlpha"], "form_index": 2},
+        {**common, "label": "Beta", "field_aliases": ["knownBeta"], "form_index": 3},
+        {**common, "label": "First opaque choice", "field_aliases": [], "form_index": 4},
+        {**common, "label": "Second opaque choice", "field_aliases": [], "form_index": 5},
+    ]
+    page_enums = {
+        item["label"]: {
+            **common,
+            "field_key": item["label"],
+            "field_aliases": item["field_aliases"],
+            "options": [{"label": "Off"}, {"label": "On"}],
+            "mapping_complete": False,
+        }
+        for item in evidence
+    }
+
+    bound = bind_field_evidence([request], [], evidence, page_enum_options=page_enums)
+    by_label = {item["label"]: item for item in bound}
+    assert by_label["First opaque choice"]["wire_path"] == "query.opaqueOne"
+    assert by_label["Second opaque choice"]["wire_path"] == "query.opaqueTwo"
+    assert by_label["First opaque choice"]["binding_method"] == "unique_remaining_form_order"
+
+
+def test_form_order_fallback_respects_indexed_query_anchors_and_local_aliases() -> None:
+    from dano.execution.page.recording_field_evidence import (
+        _associate_unique_remaining_form_order,
+    )
+
+    request = {
+        "request_id": "req_filter",
+        "method": "GET",
+        "url": (
+            "http://example.test/api/entities/page?knownAlpha=a&choiceRef=7"
+            "&window=x&window=y&state=1&opaqueOne=0&opaqueTwo=0"
+        ),
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "role": "business_get",
+    }
+    common = {
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "page_context": PAGE,
+        "surface": "page",
+        "in_dialog": False,
+        "form_root": "generic filters",
+        "control_kind": "select",
+        "value": "",
+    }
+    evidence = [
+        {
+            **common, "label": "Known", "field_aliases": ["knownAlpha"],
+            "form_index": 1, "binding_status": "bound", "request_id": "req_filter",
+            "wire_path": "query.knownAlpha",
+        },
+        {
+            **common, "label": "Start", "field_aliases": [], "form_index": 3,
+            "binding_status": "bound", "request_id": "req_filter",
+            "wire_path": "query.window[0]",
+        },
+        {
+            **common, "label": "End", "field_aliases": [], "form_index": 4,
+            "binding_status": "bound", "request_id": "req_filter",
+            "wire_path": "query.window[1]",
+        },
+        {
+            **common, "label": "Reference", "field_aliases": ["choiceRef"],
+            "form_index": 2, "binding_status": "unbound",
+        },
+        {
+            **common, "label": "State", "field_aliases": ["state"],
+            "form_index": 5, "binding_status": "unbound",
+        },
+        {
+            **common, "label": "First opaque", "field_aliases": [],
+            "form_index": 6, "binding_status": "unbound",
+        },
+        {
+            **common, "label": "Second opaque", "field_aliases": [],
+            "form_index": 7, "binding_status": "unbound",
+        },
+    ]
+
+    _associate_unique_remaining_form_order(evidence, [request])
+
+    by_label = {item["label"]: item for item in evidence}
+    assert by_label["Reference"]["wire_path"] == "query.choiceRef"
+    assert by_label["Reference"]["binding_method"] == "anchored_form_local_alias"
+    assert by_label["State"]["wire_path"] == "query.state"
+    assert by_label["First opaque"]["wire_path"] == "query.opaqueOne"
+    assert by_label["Second opaque"]["wire_path"] == "query.opaqueTwo"
+
+
 def test_false_and_zero_are_recorded_values() -> None:
     assert has_recorded_value({"value": False}) is True
     assert has_recorded_value({"value": 0}) is True
@@ -326,6 +444,7 @@ async def test_split_header_table_preserves_all_inline_controls_and_select_is_no
     product = next(item for item in fields if item.get("label") == "Product")
     quantity = next(item for item in fields if item.get("label") == "Quantity")
     assert product["control_kind"] == "select"
+    assert product["read_only"] is False
     assert product["column_label"] == "Product"
     assert product["row_index"] == 0
     assert product["row_identity"] == "row-1"
@@ -435,6 +554,67 @@ async def test_form_snapshot_keeps_hidden_native_radio_inside_visible_group() ->
     status = next(item for item in bound if item.get("wire_path") == "body.status")
     assert status["binding_status"] == "bound"
     assert status["required_state"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_custom_select_keeps_host_text_and_vue_ancestor_option_values() -> None:
+    """Teleported custom selects keep display text and scalar values outside the input node."""
+    from playwright.async_api import async_playwright
+
+    recorded: list[dict] = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+
+        async def receive(_source, raw: str) -> None:
+            recorded.append(json.loads(raw))
+
+        await context.expose_binding("__danoRecord", receive)
+        await context.add_init_script(f"({_RECORDER_JS})()")
+        page = await context.new_page()
+        await page.set_content(
+            """
+            <form aria-label="generic editor">
+              <div class="el-form-item is-required">
+                <label for="opaque-choice">Responsible party</label>
+                <div class="el-select">
+                  <input id="opaque-choice" role="combobox" readonly
+                         aria-controls="opaque-popup" aria-expanded="true" value="">
+                  <span class="selected-text">Red team</span>
+                </div>
+              </div>
+            </form>
+            <div id="opaque-popup" role="listbox">
+              <div id="red-holder"><div role="option">Red team</div></div>
+              <div id="blue-holder"><div role="option">Blue team</div></div>
+            </div>
+            """
+        )
+        await page.evaluate(f"delete window.__danoRecorderInstalled; ({_RECORDER_JS})()")
+        await page.evaluate(
+            """
+            document.querySelector('#red-holder').__vueParentComponent = {
+              props: {value: 17}, vnode: {props: {}}
+            };
+            document.querySelector('#blue-holder').__vueParentComponent = {
+              props: {}, vnode: {props: {value: 23}}
+            };
+            """
+        )
+        fields = await page.evaluate("window.__danoFormFieldEvidence()")
+        await page.click("#opaque-choice")
+        await page.wait_for_timeout(750)
+        await browser.close()
+
+    choice = next(item for item in fields if item.get("label") == "Responsible party")
+    assert choice["value"] == "Red team"
+    assert choice["read_only"] is False
+    snapshots = [item for item in recorded if item.get("op") == "enum_snapshot"]
+    assert snapshots
+    assert snapshots[-1]["options"] == [
+        {"label": "Red team", "value": 17},
+        {"label": "Blue team", "value": 23},
+    ]
 
 
 @pytest.mark.asyncio

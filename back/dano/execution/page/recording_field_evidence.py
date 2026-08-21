@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 from dano.execution.page.request_capture import (
     _JSONSTR,
@@ -982,6 +982,227 @@ def _script_alias_is_unverified_empty_picker(evidence: dict[str, Any]) -> bool:
     )
 
 
+def _form_position_identity(evidence: dict[str, Any]) -> tuple[Any, ...]:
+    identity = str(evidence.get("field_identity_id") or "")
+    if identity:
+        return (identity,)
+    return (
+        str(evidence.get("page_id") or ""),
+        str(evidence.get("frame_id") or ""),
+        _route_identity(evidence),
+        _evidence_surface(evidence),
+        str(evidence.get("form_root") or ""),
+        evidence.get("form_index"),
+        evidence.get("row_index"),
+        evidence.get("column_index"),
+        str(evidence.get("label") or evidence.get("field") or ""),
+        _control_kind(evidence),
+    )
+
+
+def _form_position_scope(evidence: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(evidence.get("page_id") or ""),
+        str(evidence.get("frame_id") or ""),
+        _route_identity(evidence),
+        _evidence_surface(evidence),
+        str(evidence.get("form_root") or ""),
+    )
+
+
+def _position_path_is_bound(wire_path: str, bound_paths: set[str]) -> bool:
+    """Treat an indexed occurrence as coverage of its request-level field."""
+    return bool(
+        wire_path in bound_paths
+        or any(path.startswith(f"{wire_path}[") for path in bound_paths)
+    )
+
+
+def _position_request_fields(request: dict[str, Any]) -> list[str]:
+    """Keep the browser's query serialization order for the final fallback."""
+    parsed = urlparse(str(request.get("url") or request.get("path") or ""))
+    ordered_query = [f"query.{key}" for key, _value in parse_qsl(parsed.query, keep_blank_values=True)]
+    if not ordered_query:
+        query = request.get("query")
+        if isinstance(query, dict):
+            ordered_query = [f"query.{key}" for key in query]
+    body = [path for path in _request_fields(request) if path.startswith("body.")]
+    return list(dict.fromkeys([*ordered_query, *body]))
+
+
+def _associate_unique_remaining_form_order(
+    evidence_items: list[dict[str, Any]],
+    requests: list[dict[str, Any]],
+) -> None:
+    """Use form order only after stronger bindings leave one complete bijection.
+
+    Framework controls may expose no wire alias and no selected scalar. Position
+    is therefore the final evidence tier: two or more already-bound controls
+    must anchor the same form/request, every remaining choice control must have
+    a unique form index, and the remaining request leaves must have the same
+    cardinality. Any partial or competing layout stays unresolved.
+    """
+    for request in requests:
+        request_id = str(
+            request.get("request_id") or request.get("id") or request.get("index") or ""
+        )
+        if not request_id:
+            continue
+        method = str(request.get("method") or "GET").upper()
+        # Positional request order is stable for URL query serialization. JSON
+        # body key order frequently differs from visual dialog/table order, so
+        # write controls must use option-set/value reconciliation instead.
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            continue
+        container = "query"
+        scoped = [
+            item for item in evidence_items
+            if _same_scope(request, item)
+            and _evidence_surface(item) == "page"
+            and _control_kind(item) != "table_column"
+        ]
+        bound = [
+            item for item in scoped
+            if str(item.get("binding_status") or "") == "bound"
+            and str(item.get("request_id") or "") == request_id
+            and str(item.get("wire_path") or "").startswith(f"{container}.")
+        ]
+        anchored_scopes = {
+            _form_position_scope(item)
+            for item in bound
+            if item.get("form_index") is not None
+        }
+        anchored_scopes = {
+            scope for scope in anchored_scopes
+            if len({
+                _form_position_identity(item) for item in bound
+                if _form_position_scope(item) == scope
+            }) >= 2
+            and any(
+                str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+                and _form_position_scope(item) == scope
+                and _control_kind(item) in {"select", "combobox", "radio"}
+                for item in scoped
+            )
+        }
+        # More than one anchored form could submit the same request. Without
+        # action/transaction identity, choosing one of them would cross forms.
+        if len(anchored_scopes) != 1:
+            continue
+        form_scope = next(iter(anchored_scopes))
+        form_items = [item for item in scoped if _form_position_scope(item) == form_scope]
+        bound_paths = {str(item.get("wire_path") or "") for item in bound}
+        remaining_paths = [
+            path for path in _position_request_fields(request)
+            if path.startswith(f"{container}.")
+            and not _position_path_is_bound(path, bound_paths)
+            and not _looks_pagination_wire_path(path)
+        ]
+        if not remaining_paths:
+            continue
+        unresolved = [
+            item for item in form_items
+            if str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+            and _control_kind(item) in {"select", "combobox", "radio"}
+            and item.get("form_index") is not None
+        ]
+        representatives: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for item in unresolved:
+            key = _form_position_identity(item)
+            previous = representatives.get(key)
+            if previous is None or float(item.get("observed_at") or 0) >= float(previous.get("observed_at") or 0):
+                representatives[key] = item
+        # A request-local structural alias is stronger than position. Global
+        # binding may leave it ambiguous when another action has the same leaf;
+        # the already-bound controls above prove which form/request owns it.
+        alias_proposals: dict[tuple[Any, ...], str] = {}
+        for identity, item in representatives.items():
+            aliases = _structural_evidence_aliases(item)
+            if not aliases:
+                continue
+            scored = [
+                (_field_match_score(aliases, path), path) for path in remaining_paths
+            ]
+            best_score = max((score for score, _path in scored), default=0)
+            matches = [path for score, path in scored if score == best_score and score > 0]
+            if len(matches) == 1:
+                alias_proposals[identity] = matches[0]
+        path_owners: dict[str, list[tuple[Any, ...]]] = {}
+        for identity, path in alias_proposals.items():
+            path_owners.setdefault(path, []).append(identity)
+        alias_assignments = {
+            identity: path for identity, path in alias_proposals.items()
+            if len(path_owners[path]) == 1
+        }
+        for item in unresolved:
+            wire_path = alias_assignments.get(_form_position_identity(item))
+            if not wire_path:
+                continue
+            item.update({
+                "binding_status": "bound",
+                "request_id": request_id,
+                "wire_path": wire_path,
+                "binding_method": "anchored_form_local_alias",
+                "binding_reason": (
+                    "two or more fields anchor this form to the request and the "
+                    "remaining structural alias names one request-local leaf"
+                ),
+                "binding_candidates": [{"request_id": request_id, "wire_path": wire_path}],
+            })
+
+        bound_paths.update(alias_assignments.values())
+        remaining_paths = [
+            path for path in _position_request_fields(request)
+            if path.startswith(f"{container}.")
+            and not _position_path_is_bound(path, bound_paths)
+            and not _looks_pagination_wire_path(path)
+        ]
+        unresolved = [
+            item for item in form_items
+            if str(item.get("binding_status") or "") in {"unbound", "unresolved", "ambiguous"}
+            and _control_kind(item) in {"select", "combobox", "radio"}
+            and item.get("form_index") is not None
+        ]
+        representatives = {}
+        for item in unresolved:
+            key = _form_position_identity(item)
+            previous = representatives.get(key)
+            if previous is None or float(item.get("observed_at") or 0) >= float(previous.get("observed_at") or 0):
+                representatives[key] = item
+        ordered = sorted(
+            representatives.values(),
+            key=lambda item: (
+                int(item.get("form_index")),
+                int(item.get("row_index") or -1),
+                int(item.get("column_index") or -1),
+            ),
+        )
+        if len(remaining_paths) < 2 or len(ordered) != len(remaining_paths):
+            continue
+        indexes = [int(item.get("form_index")) for item in ordered]
+        if len(set(indexes)) != len(indexes):
+            continue
+        assignments = {
+            _form_position_identity(item): path
+            for item, path in zip(ordered, remaining_paths, strict=True)
+        }
+        for item in unresolved:
+            wire_path = assignments.get(_form_position_identity(item))
+            if not wire_path:
+                continue
+            item.update({
+                "binding_status": "bound",
+                "request_id": request_id,
+                "wire_path": wire_path,
+                "binding_method": "unique_remaining_form_order",
+                "binding_reason": (
+                    "stronger aliases/value matches anchored the same form; "
+                    "the remaining controls and request leaves form one ordered bijection"
+                ),
+                "binding_candidates": [{"request_id": request_id, "wire_path": wire_path}],
+            })
+
+
 def bind_field_evidence(
     captured_requests: list[dict[str, Any]],
     page_events: list[dict[str, Any]] | None,
@@ -1373,4 +1594,5 @@ def bind_field_evidence(
             )
         results.append(evidence)
     _associate_unsubmitted_file_controls(results, requests)
+    _associate_unique_remaining_form_order(results, requests)
     return results

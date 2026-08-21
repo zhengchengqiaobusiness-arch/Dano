@@ -637,6 +637,38 @@ _RECORDER_JS = r"""() => {
     } catch (_) {}
     return 'unknown';
   }
+  function controlState(el, kind) {
+    var host = null;
+    try {
+      host = el && el.closest && el.closest(
+        '.el-select,.el-cascader,.ant-select,.ant-cascader-picker,' +
+        '.mat-mdc-select,.mat-select,.q-select,.v-select,' +
+        '[role="combobox"],[role="listbox"],[role="radiogroup"],[role="switch"]'
+      );
+    } catch (_) {}
+    function attrTrue(node, name) {
+      try { return !!(node && node.getAttribute && String(node.getAttribute(name) || '').toLowerCase() === 'true'); }
+      catch (_) { return false; }
+    }
+    var cls = String((host && host.className) || '').toLowerCase();
+    var disabled = !!(
+      (el && el.disabled)
+      || attrTrue(el, 'aria-disabled')
+      || attrTrue(host, 'aria-disabled')
+      || /(?:^|[\s_-])(?:is-)?disabled(?:[\s_-]|$)/.test(cls)
+    );
+    var choiceKind = ['select','radio','checkbox','switch'].indexOf(String(kind || '')) >= 0;
+    var readOnly = choiceKind
+      ? !!(
+          attrTrue(el, 'aria-readonly')
+          || attrTrue(host, 'aria-readonly')
+          || attrTrue(el, 'data-readonly')
+          || attrTrue(host, 'data-readonly')
+          || /(?:^|[\s_-])(?:is-)?read-?only(?:[\s_-]|$)/.test(cls)
+        )
+      : !!(el && (el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null)));
+    return {disabled: disabled, read_only: readOnly};
+  }
   function inDialog(el) {
     // List filters and dialog/drawer forms commonly share the same label.
     // The input stays in its form; dropdown poppers are not the surface.
@@ -661,12 +693,17 @@ _RECORDER_JS = r"""() => {
       return value && all.indexOf(value) === index;
     });
     var reqState = requiredStateOf(el);
+    var kind = controlKind(el);
+    var state = controlState(el, kind);
     var evidence = {
       field_aliases: aliases,
-      control_kind: controlKind(el),
+      control_kind: kind,
       input_type: String(el.type || '').toLowerCase(),
-      disabled: !!(el.disabled || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
-      read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null)),
+      disabled: state.disabled,
+      // UI libraries put `readonly` on the inner text input of a normal
+      // dropdown to prevent free typing. The choice control remains editable;
+      // only explicit host-level readonly/disabled state makes it locked.
+      read_only: state.read_only,
       minimum: el.getAttribute && el.getAttribute('min') !== null ? Number(el.getAttribute('min')) : null,
       maximum: el.getAttribute && el.getAttribute('max') !== null ? Number(el.getAttribute('max')) : null,
       in_dialog: !!surface.in_dialog,
@@ -1154,37 +1191,44 @@ _RECORDER_JS = r"""() => {
             // explicitly named `value` props; never serialize arbitrary
             // component state or fall back to the visible label.
             try {
-              var vue2 = node && node.__vue__;
-              var vue2Candidates = vue2 ? [
-                vue2.value,
-                vue2.$props && vue2.$props.value,
-                vue2.$attrs && vue2.$attrs.value,
-                vue2.$vnode && vue2.$vnode.componentOptions && vue2.$vnode.componentOptions.propsData
-                  && vue2.$vnode.componentOptions.propsData.value
-              ] : [];
-              for (var vi = 0; vi < vue2Candidates.length; vi++) {
-                var vue2Value = scalar(vue2Candidates[vi]);
-                if (vue2Value !== null) return vue2Value;
-              }
-              var vue3 = node && node.__vueParentComponent;
-              if (vue3) {
-                var vue3Candidates = [
-                  vue3.props && vue3.props.value,
-                  vue3.vnode && vue3.vnode.props && vue3.vnode.props.value
-                ];
-                for (var vj = 0; vj < vue3Candidates.length; vj++) {
-                  var vue3Value = scalar(vue3Candidates[vj]);
-                  if (vue3Value !== null) return vue3Value;
+              // The semantic option component is commonly mounted on a
+              // wrapper while role=option lives on a child. Walk only the
+              // short DOM/component ancestor chain and read explicitly named
+              // scalar value props; arbitrary framework state is never used.
+              var owner = node;
+              for (var depth = 0; owner && depth < 8; depth++, owner = owner.parentElement) {
+                var vue2 = owner.__vue__;
+                var vue2Candidates = vue2 ? [
+                  vue2.value,
+                  vue2.$props && vue2.$props.value,
+                  vue2.$attrs && vue2.$attrs.value,
+                  vue2.$vnode && vue2.$vnode.componentOptions && vue2.$vnode.componentOptions.propsData
+                    && vue2.$vnode.componentOptions.propsData.value
+                ] : [];
+                for (var vi = 0; vi < vue2Candidates.length; vi++) {
+                  var vue2Value = scalar(vue2Candidates[vi]);
+                  if (vue2Value !== null) return vue2Value;
                 }
-              }
-              var keys = node ? Object.keys(node) : [];
-              for (var ki = 0; ki < keys.length; ki++) {
-                var key = keys[ki];
-                if (key.indexOf('__reactProps$') !== 0 && key.indexOf('__reactFiber$') !== 0) continue;
-                var holder = node[key] || {};
-                var props = key.indexOf('__reactProps$') === 0 ? holder : (holder.memoizedProps || holder.pendingProps || {});
-                var reactValue = scalar(props && (props.value !== undefined ? props.value : props['data-value']));
-                if (reactValue !== null) return reactValue;
+                var vue3 = owner.__vueParentComponent;
+                for (var componentDepth = 0; vue3 && componentDepth < 8; componentDepth++, vue3 = vue3.parent) {
+                  var vue3Candidates = [
+                    vue3.props && vue3.props.value,
+                    vue3.vnode && vue3.vnode.props && vue3.vnode.props.value
+                  ];
+                  for (var vj = 0; vj < vue3Candidates.length; vj++) {
+                    var vue3Value = scalar(vue3Candidates[vj]);
+                    if (vue3Value !== null) return vue3Value;
+                  }
+                }
+                var keys = Object.keys(owner);
+                for (var ki = 0; ki < keys.length; ki++) {
+                  var key = keys[ki];
+                  if (key.indexOf('__reactProps$') !== 0 && key.indexOf('__reactFiber$') !== 0) continue;
+                  var holder = owner[key] || {};
+                  var props = key.indexOf('__reactProps$') === 0 ? holder : (holder.memoizedProps || holder.pendingProps || {});
+                  var reactValue = scalar(props && (props.value !== undefined ? props.value : props['data-value']));
+                  if (reactValue !== null) return reactValue;
+                }
               }
             } catch (_) {}
             return null;
@@ -1480,17 +1524,29 @@ _RECORDER_JS = r"""() => {
   // —— Element Plus(Vue3)等现代框架选中值在文本节点里、input.value 为空,必须读 innerText 才抓得到。
   function pickVal(trig) {
     if (!trig) return '';
-    var inp = trig.querySelector ? trig.querySelector('input') : null;
+    var host = trig;
+    try {
+      if (trig.matches && trig.matches('input,select,[role="combobox"]')) {
+        var parent = trig.parentElement;
+        for (var depth = 0; parent && depth < 6; depth++, parent = parent.parentElement) {
+          if (parent.matches && parent.matches(TRIGGER_CLS) && controlKind(parent) === 'select') {
+            host = parent; break;
+          }
+        }
+      }
+    } catch (_) {}
+    var inp = trig.matches && trig.matches('input') ? trig :
+              (host.querySelector ? host.querySelector('input') : null);
     var v = inp ? clean(inp.value) : '';
     if (!v && inp) {                                       // H4+H10 修复:input.value 为空时,优先读 aria-valuetext / title(Element Plus/Ant Design 把选中值放这里)
         v = clean(inp.getAttribute('aria-valuetext') || inp.getAttribute('title') || '');
     }
     if (!v) {                                              // 兜底:读 innerText,但过滤 placeholder 灰色文本(否则与 prevVal 永远相等,pollPick 超时放弃)
-        var txt = clean(trig.innerText || '');
+        var txt = clean(host.innerText || '');
         // M-A1 修复:用真正常见的 placeholder 选择器 + opacity < 0.6 + Element Plus `el-select__placeholder` 类
         // 框架透明色文本占位符在 Ant Design v5 是独立 span(opacity < 0.5);Element Plus 用 `.el-select__placeholder`(默认隐藏层)
         var sels = '[class*="placeholder" i],[class*="el-select__placeholder"],[placeholder]';
-        var placeholders = trig.querySelectorAll ? trig.querySelectorAll(sels) : [];
+        var placeholders = host.querySelectorAll ? host.querySelectorAll(sels) : [];
         for (var i = 0; i < placeholders.length; i++) {
             try {
                 var ph_el = placeholders[i];
