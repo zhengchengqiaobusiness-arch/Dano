@@ -217,14 +217,34 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
     }
 
 
+def latest_recording_spec(body: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the spec every reader should show: saved original, else live working copy."""
+
+    payload = body if isinstance(body, dict) else {}
+    flow = payload.get("flow_spec") if isinstance(payload.get("flow_spec"), dict) else None
+    checkpoint = payload.get("stage_seven") if isinstance(payload.get("stage_seven"), dict) else None
+    working = checkpoint.get("working_flow_spec") if isinstance(checkpoint, dict) else None
+    working = working if isinstance(working, dict) and working else None
+    if not flow:
+        return working
+    if not working:
+        return flow
+    from dano.onboarding.recording_stage_seven import baseline_fingerprint
+
+    stored_baseline = str((checkpoint or {}).get("baseline_fingerprint") or "")
+    actual_baseline = baseline_fingerprint(flow)
+    if stored_baseline and stored_baseline != actual_baseline:
+        return flow
+    return working
+
+
 def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
     """Return one saved result plus its client FlowSpec for the capability page."""
 
     payload = recording_result_summary(draft)
     body = draft.body if isinstance(draft.body, dict) else {}
     checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else None
-    working = checkpoint.get("working_flow_spec") if isinstance(checkpoint, dict) else None
-    spec = working if isinstance(working, dict) and working else body.get("flow_spec")
+    spec = latest_recording_spec(body)
     if not isinstance(spec, dict):
         payload["draft"] = None
         return payload
@@ -239,6 +259,57 @@ def recording_result_detail(draft: AssetDraft) -> dict[str, Any]:
     } if checkpoint or body.get("machine_verification_status") else None
     payload["skill_plan"] = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else None
     return payload
+
+
+def _editable_recording_spec(body: dict[str, Any]) -> dict[str, Any]:
+    spec = latest_recording_spec(body)
+    if not isinstance(spec, dict) or not spec:
+        raise ValueError("录制结果没有完整 FlowSpec")
+    return spec
+
+
+def apply_recording_result_edits(
+    body: dict[str, Any],
+    edits: list[dict[str, Any]],
+    *,
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    """Write capability edits back to the stored result. No verify/repair/export."""
+
+    from dano.execution.page.flow_spec import FlowSpec, FlowSpecConflictError, apply_client_flow_patch, flow_spec_fingerprint
+
+    current_spec = _editable_recording_spec(body)
+    current_fp = _draft_fingerprint(current_spec)
+    expected = str(expected_fingerprint or "")
+    if not expected:
+        raise ValueError("expected_fingerprint is required")
+    if expected != current_fp:
+        raise FlowSpecConflictError(expected, current_fp)
+    spec = FlowSpec.model_validate(current_spec)
+    updated = apply_client_flow_patch(
+        spec,
+        list(edits or []),
+        expected_fingerprint=flow_spec_fingerprint(spec),
+    )
+    dumped = updated.model_dump(mode="json")
+    next_body = dict(body)
+    next_body["flow_spec"] = dumped
+    next_body["fingerprint"] = _draft_fingerprint(dumped)
+    next_body["capability_count"] = len(list(dumped.get("capabilities") or []))
+    next_body["title"] = recording_display_title(
+        user_title=str(next_body.get("title") or ""),
+        draft=dumped,
+    )
+    checkpoint = next_body.get("stage_seven") if isinstance(next_body.get("stage_seven"), dict) else None
+    if checkpoint is not None:
+        from dano.onboarding.recording_stage_seven import baseline_fingerprint
+
+        synced = dict(checkpoint)
+        synced["working_flow_spec"] = dumped
+        synced["working_fingerprint"] = next_body["fingerprint"]
+        synced["baseline_fingerprint"] = baseline_fingerprint(dumped)
+        next_body["stage_seven"] = synced
+    return next_body
 
 
 def invalidate_skill_after_capability_edit(body: dict[str, Any]) -> dict[str, Any]:
@@ -293,7 +364,7 @@ async def load_stage_six_flow_spec(store: DraftStore, result_id: UUID) -> dict[s
     draft = await store.get_draft(result_id)
     if draft is None or not is_recording_result_key(draft.asset_key):
         raise ValueError("录制结果不存在")
-    flow_spec = draft.body.get("flow_spec")
+    flow_spec = latest_recording_spec(dict(draft.body or {}))
     if not isinstance(flow_spec, dict):
         raise ValueError("录制结果没有完整 FlowSpec")
     return flow_spec

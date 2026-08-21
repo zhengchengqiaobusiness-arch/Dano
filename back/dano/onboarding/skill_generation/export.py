@@ -204,8 +204,13 @@ def _log_export(
 
 
 def _current_spec(body: dict[str, Any]) -> FlowSpec:
-    raw = body.get("flow_spec")
-    if not isinstance(raw, dict):
+    """Read the persisted recording FlowSpec. Do not import recording_results."""
+    raw = body.get("flow_spec") if isinstance(body.get("flow_spec"), dict) else None
+    if not isinstance(raw, dict) or not raw:
+        checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
+        working = checkpoint.get("working_flow_spec") if isinstance(checkpoint, dict) else None
+        raw = working if isinstance(working, dict) and working else None
+    if not isinstance(raw, dict) or not raw:
         raise SkillExportError(409, "录制结果没有可导出的 FlowSpec")
     return FlowSpec.model_validate(raw)
 

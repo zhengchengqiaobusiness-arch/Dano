@@ -1093,7 +1093,7 @@ def load_resumable_working_spec(
     stored_baseline = str(checkpoint.get("baseline_fingerprint") or "")
     actual_baseline = baseline_fingerprint(baseline)
     if stored_baseline and stored_baseline != actual_baseline:
-        return dict(baseline), checkpoint, "阶段 7 检查点与当前阶段 6 基线不一致，已阻塞自动恢复"
+        return dict(baseline), None, ""
     working = checkpoint.get("working_flow_spec")
     if isinstance(working, dict) and working:
         return dict(working), checkpoint, ""

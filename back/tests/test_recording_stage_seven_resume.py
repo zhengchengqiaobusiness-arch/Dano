@@ -144,7 +144,7 @@ def test_resume_uses_working_copy_not_stage_six_baseline() -> None:
     assert body["flow_spec"]["steps"][0].get("fact_check") in (None, {})
 
 
-def test_resume_blocks_when_baseline_fingerprint_changes() -> None:
+def test_resume_uses_saved_spec_when_baseline_fingerprint_changes() -> None:
     baseline = _spec()
     body = stage_six_result_body(
         action="action_c",
@@ -168,11 +168,12 @@ def test_resume_blocks_when_baseline_fingerprint_changes() -> None:
     )
     assert body is not None
     body["flow_spec"]["title"] = "changed-stage-six"
-    # baseline fingerprint includes title
-    _draft, _checkpoint, reason = load_resumable_working_spec(body)
     if baseline_fingerprint(body["flow_spec"]) == body["stage_seven"]["baseline_fingerprint"]:
         pytest.skip("title is not part of baseline fingerprint")
-    assert "不一致" in reason
+    draft, checkpoint, reason = load_resumable_working_spec(body)
+    assert reason == ""
+    assert checkpoint is None
+    assert draft["title"] == "changed-stage-six"
 
 
 def test_recording_result_detail_projects_working_copy() -> None:

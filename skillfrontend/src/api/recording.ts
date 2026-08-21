@@ -121,6 +121,14 @@ export async function deleteRecordingResult(id: string): Promise<void> {
   await api.delete(`/v1/recording-results/${id}`);
 }
 
+export async function patchRecordingResult(
+  id: string,
+  request: { edits: Array<Record<string, unknown>>; expected_fingerprint?: string },
+): Promise<RecordingResultDetail> {
+  const { data } = await api.patch(`/v1/recording-results/${encodeURIComponent(id)}`, request);
+  return data as RecordingResultDetail;
+}
+
 export interface SkillGenerationRequest {
   title: string;
   business_description: string;

@@ -1665,6 +1665,55 @@ async def delete_recording_result(
     return {"deleted": True, "id": result_id}
 
 
+class PatchRecordingResultReq(BaseModel):
+    edits: list[dict] = Field(default_factory=list)
+    expected_fingerprint: str = ""
+
+
+@app.patch("/v1/recording-results/{result_id}")
+async def patch_recording_result(
+    result_id: str,
+    req: PatchRecordingResultReq,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """Save capability-page edits to the stored recording result only."""
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.assets.drafts import DraftStore
+    from dano.execution.page.flow_spec import FlowSpecConflictError
+    from dano.onboarding.recording_results import (
+        apply_recording_result_edits,
+        is_recording_result_key,
+        recording_result_detail,
+    )
+
+    try:
+        parsed = uuid.UUID(result_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    store = DraftStore()
+    saved = await store.get_draft(parsed)
+    if (
+        saved is None
+        or saved.tenant != tenant
+        or not is_recording_result_key(saved.asset_key)
+    ):
+        raise HTTPException(status_code=404, detail="录制结果不存在")
+    try:
+        next_body = apply_recording_result_edits(
+            dict(saved.body or {}),
+            list(req.edits or []),
+            expected_fingerprint=str(req.expected_fingerprint or ""),
+        )
+    except FlowSpecConflictError as exc:
+        raise HTTPException(status_code=409, detail="录制结果已被更新，请刷新后再保存") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated = await store.patch_recording_result_body(parsed, next_body)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="录制结果不存在")
+    return recording_result_detail(updated)
+
+
 class ExportRecordingSkillReq(BaseModel):
     title: str = ""
     business_description: str = ""

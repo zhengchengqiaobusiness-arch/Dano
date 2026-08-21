@@ -55,6 +55,7 @@ import {
   exportRecordingSkill,
   getRecordingResult,
   listRecordingResults,
+  patchRecordingResult,
   previewRecordingSkill,
   rememberExportDir,
   rememberSkillExportDraft,
@@ -720,6 +721,7 @@ export default function PageRecorder({
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
   const [skillPreviewKey, setSkillPreviewKey] = useState("");
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
+  const [savingResult, setSavingResult] = useState(false);
 
   const status = snapshot?.status || "idle";
   const processing = status === "processing" || status === "waiting_operator";
@@ -819,6 +821,31 @@ export default function PageRecorder({
       }
       return current;
     });
+  }
+
+  function historyRowFromDetail(detail: RecordingResultDetail): RecordingResultSummary {
+    return {
+      id: detail.id,
+      action: detail.action,
+      title: detail.title,
+      goal_summary: detail.goal_summary,
+      capability_count: detail.capability_count,
+      request_count: detail.request_count,
+      created_at: detail.created_at,
+      published: detail.published,
+      machine_verification_ran: detail.machine_verification_ran,
+      machine_verification_required: detail.machine_verification_required,
+      machine_verification_status: detail.machine_verification_status,
+      stage_seven_fingerprint: detail.stage_seven_fingerprint,
+      skill_id: detail.skill_id,
+      skill_version: detail.skill_version,
+      skill_export_status: detail.skill_export_status,
+      skill_export_path: detail.skill_export_path,
+      skill_export_title: detail.skill_export_title,
+      skill_export_description: detail.skill_export_description,
+      skill_lifecycle: detail.skill_lifecycle,
+      skill_needs_reexport: detail.skill_needs_reexport,
+    };
   }
 
   function upsertHistory(row: RecordingResultSummary) {
@@ -1410,9 +1437,13 @@ export default function PageRecorder({
     pendingEditsRef.current = [];
     setEditingResult(false);
     socketInitRef.current = null;
+    snapshotRef.current = null;
+    setSnapshot(null);
     try {
       const detail = await getRecordingResult(item.id);
-      applyViewedDraft(item, (detail.draft || null) as FlowSpec | null, detail);
+      const row = historyRowFromDetail(detail);
+      upsertHistory(row);
+      applyViewedDraft(row, (detail.draft || null) as FlowSpec | null, detail);
     } catch {
       message.error("打开录制结果失败");
       setKeepResult(false);
@@ -1458,18 +1489,33 @@ export default function PageRecorder({
     }
     activeResultIdRef.current = resultId;
     setActiveResultId(resultId);
+    if (pendingEditsRef.current.length) {
+      const saved = await saveResultEdits();
+      if (!saved) return;
+    }
+    let latest: RecordingResultDetail | null = null;
+    try {
+      latest = await getRecordingResult(resultId);
+      upsertHistory(historyRowFromDetail(latest));
+      setResultMeta(latest);
+      if (latest.title) setTitle(latest.title);
+    } catch {
+      message.error("加载最新录制结果失败");
+      return;
+    }
     closeRecordingSocket();
     acceptNextSnapshotRef.current = true;
     setStageSevenOpen(true);
-    let draft = snapshotRef.current?.draft || null;
+    const latestDraft = (latest.draft || snapshotRef.current?.draft || null) as FlowSpec | null;
     const starting: WorkflowSnapshot = {
       run_id: "",
-      action: item?.action || actionRef.current,
-      title: item?.title || title,
+      action: latest.action || item?.action || actionRef.current,
+      title: latest.title || item?.title || title,
       revision: 0,
       status: "processing",
       progress: { step: "verifying", label: "正在启动机器验证", round: 0 },
-      draft,
+      draft: latestDraft,
+      draft_fingerprint: latest.draft_fingerprint,
       capture_frozen: true,
       activity: [],
       issues: [],
@@ -1490,19 +1536,6 @@ export default function PageRecorder({
       attempt_id: stageSevenAttemptIdRef.current || undefined,
     };
     openRecordingSocket(actionRef.current);
-    if (draft) return;
-    try {
-      const detail = await getRecordingResult(resultId);
-      const current = snapshotRef.current;
-      if (current?.status === "processing" && !current.draft && detail.draft) {
-        const next = { ...current, draft: detail.draft as FlowSpec };
-        snapshotRef.current = next;
-        setSnapshot(next);
-      }
-      if (detail.title) setTitle(detail.title);
-    } catch {
-      // The websocket snapshot can still populate the draft.
-    }
   }
 
   async function removeResult(item: RecordingResultSummary) {
@@ -1547,28 +1580,7 @@ export default function PageRecorder({
     try {
       const detail = await getRecordingResult(resultId);
       setResultMeta(detail);
-      upsertHistory({
-        id: detail.id,
-        action: detail.action,
-        title: detail.title,
-        goal_summary: detail.goal_summary,
-        capability_count: detail.capability_count,
-        request_count: detail.request_count,
-        created_at: detail.created_at,
-        published: detail.published,
-        machine_verification_ran: detail.machine_verification_ran,
-        machine_verification_required: detail.machine_verification_required,
-        machine_verification_status: detail.machine_verification_status,
-        stage_seven_fingerprint: detail.stage_seven_fingerprint,
-        skill_id: detail.skill_id,
-        skill_version: detail.skill_version,
-        skill_export_status: detail.skill_export_status,
-        skill_export_path: detail.skill_export_path,
-        skill_export_title: detail.skill_export_title,
-        skill_export_description: detail.skill_export_description,
-        skill_lifecycle: detail.skill_lifecycle,
-        skill_needs_reexport: detail.skill_needs_reexport,
-      });
+      upsertHistory(historyRowFromDetail(detail));
     } catch {
       // keep the last known meta
     }
@@ -2061,6 +2073,53 @@ export default function PageRecorder({
     if (send(payload)) return;
     republishRequestedRef.current = true;
     startAnalysis();
+  }
+
+  async function saveResultEdits() {
+    const current = snapshotRef.current;
+    const edits = pendingEditsRef.current;
+    const resultId = currentResultId();
+    if (!current?.draft || savingResult) return false;
+    if (!edits.length) {
+      setEditingResult(false);
+      return true;
+    }
+    if (!resultId) {
+      message.error("没有可保存的录制结果");
+      return false;
+    }
+    setSavingResult(true);
+    try {
+      const detail = await patchRecordingResult(resultId, {
+        edits,
+        expected_fingerprint: String(current.draft_fingerprint || ""),
+      });
+      pendingEditsRef.current = [];
+      setPendingEdits([]);
+      setLocalValues({});
+      setLocalCapabilityStepIds({});
+      republishRequestedRef.current = false;
+      const next: WorkflowSnapshot = {
+        ...current,
+        title: detail.title || current.title,
+        draft: (detail.draft || current.draft) as FlowSpec,
+        draft_fingerprint: detail.draft_fingerprint || current.draft_fingerprint,
+      };
+      snapshotRef.current = next;
+      setSnapshot(next);
+      setResultMeta(detail);
+      upsertHistory(historyRowFromDetail(detail));
+      if (detail.title) setTitle(detail.title);
+      setEditingResult(false);
+      message.success("已保存修改");
+      return true;
+    } catch (error: unknown) {
+      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(typeof detail === "string" && detail ? detail : "保存失败");
+      return false;
+    } finally {
+      setSavingResult(false);
+    }
   }
 
   function requestPublish() {
@@ -3351,13 +3410,13 @@ export default function PageRecorder({
           </Space>
           {editingResult ? (
             <Space>
-              <Button disabled={Boolean(patchInFlightRef.current) || processing} onClick={cancelResultEditing}>取消修改</Button>
+              <Button disabled={savingResult} onClick={cancelResultEditing}>取消修改</Button>
               <Button
                 type="primary"
-                loading={processing || Boolean(patchInFlightRef.current)}
-                disabled={!draft || processing || (status === "published" && !pendingEdits.length)}
-                onClick={republish}
-                >保存并重新验证</Button>
+                loading={savingResult}
+                disabled={!draft || savingResult || !pendingEdits.length}
+                onClick={() => void saveResultEdits()}
+                >保存</Button>
             </Space>
           ) : (
             <Space>
