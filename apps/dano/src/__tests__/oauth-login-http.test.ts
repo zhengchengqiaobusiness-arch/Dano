@@ -2743,7 +2743,7 @@ describe("OAuth authentication over HTTP", () => {
     });
   });
 
-  it("logs out only the current Login Session and disconnects only its Bridge Clients", async () => {
+  it("logs out only the current Dano Login Session and revokes only its Provider Credential", async () => {
     const revoked: string[] = [];
     const provider: OAuthProviderAdapter = {
       ...successfulProvider("shared-logout-user", "unused"),
@@ -2798,6 +2798,7 @@ describe("OAuth authentication over HTTP", () => {
     });
 
     expect(logout.status).toBe(200);
+    expect(await logout.json()).toEqual({ status: "anonymous" });
     expect(logout.headers.get("set-cookie")).toMatch(
       /^dano_login=; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=0$/,
     );

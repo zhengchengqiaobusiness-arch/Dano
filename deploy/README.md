@@ -179,6 +179,40 @@ Provider credential revocation is optional. Use
 `delete-query-basic` for providers that require a DELETE request with Basic
 client authentication. The latter defaults to the configured token endpoint.
 
+### OAuth browser-session synchronization boundary
+
+Do not use a successful Authorization Code exchange or Provider Credential
+revocation as proof that the provider's browser login state changed. The
+provider browser origin, one-time Authorization Code, Dano Login Session, and
+server-side Provider Credential have different owners:
+
+| State or artifact | Owner | What ends it |
+| --- | --- | --- |
+| Provider Browser Session | Provider browser origin | Provider logout or a configured OIDC session/logout contract |
+| Authorization Code | Provider, then one server-side Dano exchange | One successful exchange or provider expiry |
+| Dano Login Session | Dano | Dano logout, expiry, or verified provider logout notification |
+| Provider Credential | One Dano Login Session | Provider expiry, refresh replacement, or configured token revocation |
+| Logout Propagation | Provider and Dano protocol configuration | Delivery and validation defined by the selected session/logout standard |
+
+OAuth 2.0 token revocation and introspection are token contracts, not browser
+session contracts. Full bidirectional login/logout synchronization requires a
+verified provider capability such as OpenID Connect Session Management,
+RP-Initiated Logout, Front-Channel Logout, or Back-Channel Logout. Record the
+provider discovery metadata, required signed identifiers, registered logout
+URIs, and browser acceptance evidence before enabling such a capability.
+
+For an OAuth-only provider, the supported semantics are narrower:
+
+- an explicit Dano login may reuse an existing Provider Browser Session;
+- Dano logout removes only the current Dano Login Session and may revoke only
+  its Provider Credential;
+- provider browser login does not passively create a Dano Login Session;
+- provider browser logout does not notify Dano.
+
+Do not fill these gaps with authorization-page polling, copied browser tokens,
+client secrets in browser code, or a Dano same-origin provider proxy. See
+[`ADR 0007`](../docs/adr/0007-do-not-equate-oauth-token-revocation-with-browser-session-logout.md).
+
 The redirect URI must be the fixed `/api/auth/callback` URL. Provider
 server-to-server endpoints, the API origin, and the production callback must
 use trusted HTTPS. URL credentials, fragments, callback query parameters, a

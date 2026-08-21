@@ -65,6 +65,14 @@ _Avoid_: client context, browser identity, session context
 The provider-adapter output that establishes an authenticated User from one stable opaque `userId` plus optional display name and avatar URL. Dano does not interpret provider-private fields or use display data as identity.
 _Avoid_: provider payload, account category, display-name identity
 
+**Provider Browser Session**:
+The login state owned by the OAuth or OpenID Provider in the provider's browser origin. Dano cannot infer, create, or end it from a Dano Login Session or a Provider Credential unless the provider exposes and configures an explicit session or logout protocol.
+_Avoid_: Dano Login Session, Provider Credential, authorization code, shared Cookie
+
+**Authorization Code**:
+A short-lived, one-time provider artifact returned through the browser redirect and consumed server-side to create a Dano Login Session. It is not a browser session, a Dano Login Session, or a reusable Provider Credential.
+_Avoid_: login Cookie, access token, session identifier
+
 **Dano Login Session**:
 A persistent, revocable server-side session created for one successful OAuth login. Its opaque browser Cookie identifies only that Login Session; it does not contain a provider token or establish a separate User data namespace.
 _Avoid_: User, Browser Client, JWT Cookie, provider SSO session
@@ -72,6 +80,10 @@ _Avoid_: User, Browser Client, JWT Cookie, provider SSO session
 **Provider Credential**:
 The encrypted server-side access and optional refresh credential owned by exactly one Dano Login Session. It is never browser or model data and is not shared merely because two Login Sessions resolve to the same User.
 _Avoid_: User credential, browser token, shared account token
+
+**Logout Propagation**:
+An explicit provider-to-Dano or Dano-to-provider session protocol. Revoking one Provider Credential ends that credential's authority but does not by itself prove that a Provider Browser Session or another Dano Login Session ended.
+_Avoid_: token deletion described as global logout, browser polling, copied token
 
 **Credential Broker**:
 The server-owned module that binds a provider request to the Dano Login Session that initiated its Assistant Turn, reads that session's Provider Credential, and forwards the request only to the configured provider origin. Skill instructions can use its generic provider request tool without receiving the credential.
