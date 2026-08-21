@@ -389,16 +389,13 @@ def _build_composition(
             "每次只做用户当前要求的那一件；要先后办理时先查，再请用户指定记录。"
         )
     notes: list[str] = []
-    if _has_custom_playbook(request):
+    combinations = [route for route in routes if len(route.capability_sequence) > 1]
+    if _has_custom_playbook(request) and combinations:
         notes.append(f"组合约定：{description}")
-        mentioned = [title for title in titles if title and title in description]
-        if len(mentioned) >= 2:
-            notes.append("用户描述中的先后：" + " → ".join(mentioned) + "。")
     reads = [cap for cap in selected if not is_write_capability(cap)]
     writes = [cap for cap in selected if is_write_capability(cap)]
     if reads and writes:
         notes.append("只要只读操作时，只执行对应只读操作，不得执行写入。")
-    combinations = [route for route in routes if len(route.capability_sequence) > 1]
     if combinations:
         for route in combinations:
             sequence = " → ".join(
@@ -575,7 +572,7 @@ def _route(
             if steps:
                 steps[-1] = steps[-1].model_copy(update={"checkpoint": checkpoint})
             mode = CompositionMode.HANDOFF
-        confirm = is_write_capability(cap)
+        confirm = bool(cap.requires_human_confirm)
         steps.append(RouteStep(
             step_key=step_key,
             capability_id=cap_id,
@@ -588,7 +585,7 @@ def _route(
         ))
     required = list(dict.fromkeys(required))
     writes = [cap for cap in sequence if is_write_capability(cap)]
-    confirmation = [_cap_title(cap) for cap in writes]
+    confirmation = [_cap_title(cap) for cap in sequence if cap.requires_human_confirm]
     done = _route_done_when(request, writes)
     cleaned_when = _clean_when(
         when_to_use,
@@ -611,7 +608,7 @@ def _route(
         required_user_inputs=required,
         bindings=annotated,
         preconditions=list(extra_preconditions or []),
-        requires_confirmation=bool(writes),
+        requires_confirmation=any(step.confirm_before_execute for step in steps),
         done_when=done,
         failure_behavior=failure,
         composition_mode=mode,
@@ -912,14 +909,11 @@ def propose_deterministic_plan(
             routes.extend(_confirmed_relation_routes(
                 spec, selected, request, {capability_ref(cap) for cap in selected}, queries, options,
             ))
-        if not routes and selected:
+        if not routes and len(selected) == 1:
             routes.append(_route(
-                route_id="single",
+                route_id=_stable_route_id(selected[:1]),
                 name=_cap_title(selected[0]),
-                when_to_use=_clean_when(
-                    request.business_description if _has_custom_playbook(request) else "",
-                    _operation_when(selected[0]),
-                ),
+                when_to_use=_operation_when(selected[0]),
                 sequence=selected[:1],
                 bindings=[],
                 request=request,

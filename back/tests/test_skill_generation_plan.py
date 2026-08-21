@@ -348,6 +348,51 @@ def test_missing_required_input_becomes_user_input() -> None:
     assert checked.ok, checked.errors
 
 
+def test_confirm_follows_capability_flag_not_write_kind() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            _cap(
+                capability_id="cap_query",
+                name="query_ticket",
+                title="查询工单",
+                kind="query",
+                confirm=True,
+            ),
+            _cap(
+                capability_id="cap_create",
+                name="create_ticket",
+                title="新建工单",
+                kind="create",
+                required=["title"],
+                confirm=False,
+            ),
+        ]
+    )
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="工单",
+            business_description="可以查询工单，也可以新建工单。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        {"cap_query", "cap_create"},
+        "fp-confirm-flag",
+    )
+    query = next(route for route in plan.routes if route.capability_sequence == ["cap_query"])
+    create = next(route for route in plan.routes if route.capability_sequence == ["cap_create"])
+    assert query.requires_confirmation is True
+    assert all(step.confirm_before_execute for step in query.steps)
+    assert create.requires_confirmation is False
+    assert all(not step.confirm_before_execute for step in create.steps)
+    checked = validate_skill_plan(
+        plan,
+        spec,
+        verified_capability_ids={"cap_query", "cap_create"},
+        expected_fingerprint="fp-confirm-flag",
+    )
+    assert checked.ok, checked.errors
+
+
 def test_write_route_requires_confirmation() -> None:
     spec = _three_cap_spec()
     plan = propose_deterministic_plan(
@@ -1171,6 +1216,12 @@ def test_page_overview_does_not_treat_narrative_verbs_as_missing_actions() -> No
     assert not plan.clarification_questions
     packed = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
     assert packed == LIVE_SALE_ORDER_IDS
+    assert all(len(route.capability_sequence) == 1 for route in plan.routes)
+    query = next(route for route in plan.routes if route.capability_sequence == ["cap_ad4a22046fc893c0"])
+    assert query.when_to_use == "只要查询销售订单，不要改也不要写"
+    assert "新增销售订单" not in query.when_to_use
+    assert not any("用户描述中的先后" in item for item in plan.composition_notes)
+    assert not any(item.startswith("组合约定：") for item in plan.composition_notes)
 
 
 @pytest.mark.asyncio

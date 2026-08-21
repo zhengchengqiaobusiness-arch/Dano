@@ -268,10 +268,10 @@ def _validate_route_execution_contracts(
                 cap = caps.get(step.capability_id)
                 if cap is None:
                     continue
-                if is_write_capability(cap) and not step.confirm_before_execute:
-                    result.error(f"路线 {route.route_id} 的写步骤 {step.step_key} 必须先确认")
-                if not is_write_capability(cap) and step.confirm_before_execute:
-                    result.error(f"路线 {route.route_id} 的只读步骤 {step.step_key} 不能标成写入确认")
+                if bool(cap.requires_human_confirm) != bool(step.confirm_before_execute):
+                    result.error(
+                        f"路线 {route.route_id} 步骤 {step.step_key} 的确认点必须与能力契约一致"
+                    )
                 provided = {source.field for source in step.input_sources}
                 bound = {binding.to_input for binding in step.bindings if binding.to_input}
                 satisfied = set(confirmed_fixed_or_system_inputs(cap))
@@ -392,10 +392,15 @@ def _validate_route(
             result.error(f"路线 {route.route_id} 引用了不可导出能力: {cap_id}")
         if is_write_capability(cap):
             write_caps.append(cap)
-    if write_caps and not route.requires_confirmation:
-        result.error(f"路线 {route.route_id} 包含写能力，必须保留确认要求")
+    needs_confirm = any(
+        caps[cap_id].requires_human_confirm
+        for cap_id in route.capability_sequence
+        if cap_id in caps
+    )
+    if needs_confirm != bool(route.requires_confirmation):
+        result.error(f"路线 {route.route_id} 的确认要求必须与能力契约一致")
     for cap in write_caps:
-        if is_risk_write(cap) and not _route_mentions_risk(route, cap):
+        if is_risk_write(cap) and cap.requires_human_confirm and not _route_mentions_risk(route, cap):
             result.error(
                 f"路线 {route.route_id} 的风险操作 {cap.title or cap.name} 必须明确提示确认"
             )

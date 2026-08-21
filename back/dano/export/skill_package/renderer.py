@@ -216,7 +216,7 @@ def _safe_step(step: dict) -> dict:
     keep = {
         "step_id", "step_name", "method", "url", "url_template", "path",
         "content_type", "body_template", "query_template", "params", "success_rule",
-        "sample_inputs", "field_types", "wire_formats", "runtime_fields",
+        "field_types", "wire_formats", "runtime_fields",
         "selects", "system_values", "fact_check",
     }
     projected = {key: step.get(key) for key in keep if step.get(key) is not None}
@@ -379,22 +379,30 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         if script in used_scripts:
             script += "_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
         used_scripts.add(script)
-        step_ids = [
-            str(value) for value in (
-                cap.get("compiled_step_ids") or cap.get("step_ids") or []
-            ) if str(value) in by_id
-        ]
+        schema = consume_upstream_input_schema(
+            cap.get("input_schema") or cap.get("parameters") or {},
+            _upstream_capability_schema(spec, skill, cap),
+        )
+        step_ids = _capability_call_step_ids(cap, by_id)
         if not step_ids:
             raise ValueError(
                 f"capability {name!r} does not reference any compiled request step"
             )
-        cap_steps = [_safe_step(by_id[step_id]) for step_id in step_ids]
+        links = _verified_links(spec, step_ids)
+        cap_steps = [
+            _project_capability_step(
+                _safe_step(by_id[step_id]),
+                schema=schema,
+                cap=cap,
+                links=links,
+                step_index=step_index,
+            )
+            for step_index, step_id in enumerate(step_ids)
+        ]
         is_write = any(
             str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}
             for step in cap_steps
         )
-        raw_risk = getattr(skill, "risk_level", "")
-        risk = str(raw_risk.value if hasattr(raw_risk, "value") else raw_risk or "").upper()
         fact_checks = []
         for step in cap_steps:
             fact_check = step.get("fact_check")
@@ -410,21 +418,15 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             "title": str(cap.get("title") or name),
             "kind": str(cap.get("kind") or "operation"),
             "script": script,
-            "input_schema": consume_upstream_input_schema(
-                cap.get("input_schema") or cap.get("parameters") or {},
-                _upstream_capability_schema(spec, skill, cap),
-            ),
+            "input_schema": schema,
             "output_schema": dict(cap.get("output_schema") or {"type": "object"}),
             "preconditions": list(cap.get("preconditions") or []),
             "caller_responsibilities": list(cap.get("caller_responsibilities") or []),
             "skill_responsibilities": list(cap.get("skill_responsibilities") or []),
             "steps": cap_steps,
-            "links": _verified_links(spec, step_ids),
+            "links": links,
             "fact_checks": fact_checks,
-            "requires_confirmation": bool(
-                is_write
-                and (cap.get("requires_human_confirm") is True or risk in {"L3", "L4", "L5"})
-            ),
+            "requires_confirmation": _capability_confirm_flag(cap, spec),
             "requires_verify": is_write,
         })
     return plans
@@ -561,18 +563,19 @@ def _option_source(field: dict) -> dict | None:
         source.get("endpoint") or source.get("source_url") or source.get("url")
     )
     result_path = source.get("resultPath") or source.get("result_path")
-    id_field = source.get("idField") or source.get("value_key") or source.get("id_path")
+    id_field = source.get("idField") or source.get("value_key") or "id"
     label_field = source.get("labelField") or source.get("label_key") or source.get("label_path")
-    if not all((endpoint, result_path, id_field, label_field)):
+    if not all((endpoint, id_field, label_field)):
         return None
     data_source: dict[str, Any] = {
         "type": "api",
         "endpoint": endpoint,
         "method": str(source.get("method") or source.get("source_method") or "GET").upper(),
-        "resultPath": result_path,
         "idField": id_field,
         "labelField": label_field,
     }
+    if result_path:
+        data_source["resultPath"] = result_path
     params = source.get("params") or source.get("source_params") or source.get("source_body")
     if isinstance(params, dict) and params:
         data_source["params"] = params
@@ -616,6 +619,283 @@ def _is_caller_field(field: dict) -> bool:
         or field.get("x-dano-display") is False
         or field.get("x-dano-visibility") == "internal"
     )
+
+
+_PLACEHOLDER_RE = re.compile(r"^\{\{.+\}\}$")
+_ARRAY_FIELD_PATH_RE = re.compile(r"^([^.\[]+)\[(?:\d+|\*|)?\]\.(.+)$")
+_EXECUTE_REF_USAGES = frozenset({"preflight", "execute"})
+
+
+def _is_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and bool(_PLACEHOLDER_RE.match(value.strip()))
+
+
+def _iter_schema_fields(schema: dict | None, prefix: str = "") -> list[tuple[str, str, dict]]:
+    raw = schema if isinstance(schema, dict) else {}
+    rows: list[tuple[str, str, dict]] = []
+    if raw.get("type") == "array" and isinstance(raw.get("items"), dict):
+        rows.extend(_iter_schema_fields(raw.get("items"), f"{prefix}[]" if prefix else "[]"))
+        return rows
+    properties = raw.get("properties") if isinstance(raw.get("properties"), dict) else {}
+    for name, field in properties.items():
+        if not isinstance(field, dict) or not _is_caller_field(field):
+            continue
+        if prefix.endswith("[]"):
+            path = f"{prefix}.{name}"
+        elif prefix:
+            path = f"{prefix}.{name}"
+        else:
+            path = str(name)
+        rows.append((path, str(name), field))
+        if field.get("type") == "object":
+            rows.extend(_iter_schema_fields(field, path))
+        elif field.get("type") == "array" and isinstance(field.get("items"), dict):
+            rows.extend(_iter_schema_fields(field.get("items"), f"{path}[]"))
+    return rows
+
+
+def _option_binding(path: str, name: str, field: dict) -> dict | None:
+    source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+    if not isinstance(source, dict):
+        return None
+    url = _safe_text(source.get("source_url") or source.get("endpoint") or source.get("url"))
+    if not url:
+        return None
+    value_key = source.get("value_key") or source.get("idField") or "id"
+    label_key = source.get("label_key") or source.get("labelField") or source.get("label_path")
+    if not label_key:
+        return None
+    id_path = str(source.get("id_path") or source.get("schema_identity_path") or path)
+    binding: dict[str, Any] = {
+        "param": name if "." not in path and "[" not in path else name,
+        "path": id_path or path,
+        "source_url": url,
+        "source_method": str(source.get("source_method") or source.get("method") or "GET").upper(),
+        "value_key": value_key,
+        "label_key": label_key,
+        "id_path": id_path or path,
+    }
+    option_map = field.get("x-enum-value-map")
+    if isinstance(option_map, dict) and option_map:
+        binding["option_map"] = option_map
+    if source.get("source_body") is not None:
+        binding["source_body"] = source.get("source_body")
+    if source.get("source_content_type"):
+        binding["source_content_type"] = source.get("source_content_type")
+    if source.get("category_key"):
+        binding["category_key"] = source.get("category_key")
+        if source.get("category_value") is not None:
+            binding["category_value"] = source.get("category_value")
+    return binding
+
+
+def _select_key(item: dict) -> tuple[str, str]:
+    return (
+        str(item.get("path") or item.get("id_path") or item.get("param") or ""),
+        str(item.get("source_url") or ""),
+    )
+
+
+def _merge_schema_selects(existing: list[dict], schema: dict | None) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in existing or []:
+        if not isinstance(item, dict):
+            continue
+        key = _select_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    for path, name, field in _iter_schema_fields(schema):
+        binding = _option_binding(path, name, field)
+        if not binding:
+            continue
+        key = _select_key(binding)
+        alt = (str(name), str(binding.get("source_url") or ""))
+        if key in seen or alt in seen:
+            continue
+        seen.add(key)
+        merged.append(binding)
+    return merged
+
+
+def _step_uses_option(step: dict, name: str, path: str) -> bool:
+    params = {str(item) for item in (step.get("params") or [])}
+    if name in params or path in params:
+        return True
+    container = str(path).split("[", 1)[0].split(".", 1)[0]
+    if container and container in params:
+        return True
+    blob = json.dumps(
+        {"body": step.get("body_template"), "query": step.get("query_template")},
+        ensure_ascii=False,
+        default=str,
+    )
+    return f"{{{{{name}}}}}" in blob or f"{{{{{container}}}}}" in blob or f'"{name}"' in blob
+
+
+def _ref_usage_and_step(ref: Any) -> tuple[str, str]:
+    if isinstance(ref, dict):
+        return str(ref.get("usage") or ""), str(ref.get("step_id") or "")
+    return str(getattr(ref, "usage", "") or ""), str(getattr(ref, "step_id", "") or "")
+
+
+def _capability_call_step_ids(cap: dict, by_id: dict[str, dict]) -> list[str]:
+    ordered: list[str] = []
+    for value in cap.get("compiled_step_ids") or cap.get("step_ids") or []:
+        step_id = str(value)
+        if step_id in by_id and step_id not in ordered:
+            ordered.append(step_id)
+    preflight: list[str] = []
+    execute: list[str] = []
+    for ref in cap.get("request_refs") or []:
+        usage, step_id = _ref_usage_and_step(ref)
+        if usage not in _EXECUTE_REF_USAGES or step_id not in by_id:
+            continue
+        if usage == "preflight":
+            preflight.append(step_id)
+        else:
+            execute.append(step_id)
+    if not ordered:
+        return list(dict.fromkeys([*preflight, *execute]))
+    for step_id in reversed(preflight):
+        if step_id not in ordered:
+            ordered.insert(0, step_id)
+    for step_id in execute:
+        if step_id not in ordered:
+            ordered.append(step_id)
+    return ordered
+
+
+def _capability_confirm_flag(cap: dict, spec) -> bool:  # noqa: ANN001
+    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
+    if spec is not None:
+        for item in getattr(spec, "capabilities", None) or []:
+            if str(getattr(item, "capability_id", "") or "") in keys or str(getattr(item, "name", "") or "") in keys:
+                return bool(getattr(item, "requires_human_confirm", False))
+    if "requires_human_confirm" in cap:
+        return bool(cap.get("requires_human_confirm"))
+    return False
+
+
+def _path_covers(key: str, paths: set[str]) -> bool:
+    for path in paths:
+        raw = str(path or "").removeprefix("body.").removeprefix("query.")
+        if raw == key or raw.startswith(f"{key}.") or raw.startswith(f"{key}["):
+            return True
+    return False
+
+
+def _caller_name_for_key(key: str, fields: list[tuple[str, str, dict]]) -> str:
+    for path, name, field in fields:
+        flow = str(field.get("x-flow-path") or "")
+        if path == key or flow == key:
+            return name
+        if name == key and "[" not in path and "." not in path:
+            return name
+        if flow in {f"query.{key}", f"path.{key}", f"body.{key}"}:
+            return name
+    return ""
+
+
+def _sanitize_request_mapping(
+    template: Any,
+    *,
+    kind: str,
+    params: list[Any],
+    fields: list[tuple[str, str, dict]],
+    linked: set[str],
+    system_paths: set[str],
+    formula_paths: set[str],
+) -> Any:
+    if not isinstance(template, dict):
+        return template
+    params_set = {str(item) for item in params if str(item)}
+    out: dict[str, Any] = {}
+    for key, value in template.items():
+        name = str(key)
+        if _is_placeholder(value):
+            out[name] = value
+            continue
+        caller = _caller_name_for_key(name, fields)
+        if caller:
+            out[name] = "{{" + caller + "}}"
+            continue
+        if name in params_set:
+            out[name] = "{{" + name + "}}"
+            continue
+        if _path_covers(name, linked) or _path_covers(name, system_paths) or _path_covers(name, formula_paths):
+            continue
+        if kind == "query":
+            out[name] = value
+    return out
+
+
+def _strip_recorded_query(url: Any) -> Any:
+    if not isinstance(url, str) or "?" not in url:
+        return url
+    return url.split("?", 1)[0]
+
+
+def _project_capability_step(
+    step: dict,
+    *,
+    schema: dict,
+    cap: dict,
+    links: list[dict],
+    step_index: int,
+) -> dict:
+    del cap
+    projected = dict(step)
+    fields = _iter_schema_fields(schema)
+    linked = {
+        str(item.get("target_path") or "")
+        for item in links
+        if int(item.get("target_step", -1)) == step_index
+    }
+    system_paths = {
+        str(item.get("path") or "")
+        for item in (projected.get("system_values") or [])
+        if isinstance(item, dict)
+    }
+    formula_paths = set()
+    for item in projected.get("runtime_fields") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("path", "result_field", "array_item_key", "schema_identity_path"):
+            if item.get(key):
+                formula_paths.add(str(item.get(key)))
+    params = list(projected.get("params") or [])
+    if projected.get("body_template") is not None:
+        projected["body_template"] = _sanitize_request_mapping(
+            projected.get("body_template"),
+            kind="body",
+            params=params,
+            fields=fields,
+            linked=linked,
+            system_paths=system_paths,
+            formula_paths=formula_paths,
+        )
+    if projected.get("query_template") is not None:
+        projected["query_template"] = _sanitize_request_mapping(
+            projected.get("query_template"),
+            kind="query",
+            params=params,
+            fields=fields,
+            linked=linked,
+            system_paths=system_paths,
+            formula_paths=formula_paths,
+        )
+        for key in ("path", "url", "url_template"):
+            if projected.get(key):
+                projected[key] = _strip_recorded_query(projected.get(key))
+    selects = _merge_schema_selects(list(projected.get("selects") or []), schema)
+    projected["selects"] = [
+        item for item in selects
+        if _step_uses_option(projected, str(item.get("param") or ""), str(item.get("path") or item.get("id_path") or ""))
+    ]
+    return projected
 
 
 def _field_control(name: str, field: dict) -> str:
@@ -751,7 +1031,7 @@ def _capability_form_section(plan: dict) -> list[str]:
         )
     lines.extend([
         "",
-        "回答处理顺序：按 question id 取值 → 语义与类型转换 → schema 校验 → 仅纠正无效字段 → 写操作单独确认 → 执行下一步。",
+        "回答处理顺序：按 question id 取值 → 语义与类型转换 → schema 校验 → 仅纠正无效字段 → 契约要求确认时单独确认 → 执行下一步。",
         "",
     ])
     return lines
@@ -770,7 +1050,7 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "- 下列 `default` 是生成规则占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选生成的非空推荐值；不得把占位符本身传给工具，也不得使用历史样本值。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
         "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
-        "- 写操作整理完参数后，另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
+        "- 能力契约要求执行前确认时，整理完参数后另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
         "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
@@ -843,7 +1123,7 @@ def _confirm_label(route: dict, plans: list[dict]) -> str:
     writes = []
     for cap_id in route.get("capability_sequence") or []:
         item = _plan_by_ref(plans).get(str(cap_id))
-        if item and (item.get("requires_confirmation") or item.get("requires_verify") is True):
+        if item and item.get("requires_confirmation"):
             writes.append(_safe_text(item.get("title") or item.get("name")))
     if writes:
         return "、".join(writes) + " 执行前确认"
@@ -938,8 +1218,8 @@ def _execution_protocol() -> list[str]:
         "   Done when: 当前步骤必填已齐，或用户取消。",
         "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
-        "5. 写操作先展示目标、关键字段和影响，获得确认后再执行对应脚本。",
-        "   Done when: 用户确认后脚本返回成功，或用户拒绝后未执行。",
+        "5. 契约要求确认的操作先展示目标、关键字段和影响，获得确认后再执行对应脚本；未要求确认的操作收集齐输入后直接执行。",
+        "   Done when: 已按契约确认或跳过确认，脚本返回成功，或用户拒绝后未执行。",
         "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
         "   Done when: 已按完成条件判定成功、失败或未知。",
         "7. 只报告已确认完成的步骤、未执行步骤和需要用户处理的事项。",
@@ -1070,13 +1350,15 @@ def _recorded_order(plans: list[dict]) -> list[str]:
 def _operation_collect_hint(plan: dict) -> str:
     title = _safe_text(plan.get("title") or plan.get("name"))
     required = _required_fields(plan)
-    write = bool(plan.get("requires_verify") or plan.get("requires_confirmation"))
-    if not write:
-        return f"{title}：只收集用户本次给出的调用方字段。"
+    if plan.get("requires_confirmation"):
+        if required:
+            fields = "、".join(f"`{name}`" for name in required)
+            return f"{title}：收集契约中的必填字段（{fields}），执行前确认。"
+        return f"{title}：收集该操作调用方字段，执行前确认。"
     if required:
         fields = "、".join(f"`{name}`" for name in required)
-        return f"{title}：收集契约中的必填字段（{fields}），写前确认。"
-    return f"{title}：收集该操作调用方字段，写前确认。"
+        return f"{title}：收集契约中的必填字段（{fields}）。"
+    return f"{title}：只收集用户本次给出的调用方字段。"
 
 
 def _title_for_plan_ref(plans: list[dict], cap_id: str) -> str:
@@ -1271,10 +1553,16 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
         "|---|---|---|---|---|---|---|",
     ]
     for item in plans:
-        write = bool(item.get("requires_confirmation") or item.get("requires_verify"))
+        write = bool(item.get("requires_verify"))
+        confirm = bool(item.get("requires_confirmation"))
         required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无调用方必填"
-        risk = "写入前必须确认；结果未知不得重试" if write else "只读，不得升级成写入"
-        done = "已确认并执行成功" if write else "已返回可核对的业务结果"
+        if confirm:
+            risk = "执行前必须确认；结果未知不得重试" if write else "执行前必须确认"
+        elif write:
+            risk = "结果未知不得重试"
+        else:
+            risk = "只读，不得升级成写入"
+        done = "已确认并执行成功" if confirm else "已返回可核对的业务结果"
         lines.append(
             f"| {_safe_text(item.get('title') or item.get('name'))} | {_intent_for_plan(skill, item)} | "
             f"{'变更' if write else '只读'} | {required} | 业务结果 | {done} | {risk} |"
@@ -1294,10 +1582,7 @@ def _options_md(plans: list[dict]) -> str:
     rows = 0
     for item in plans:
         schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
-        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-        for name, raw in properties.items():
-            if not isinstance(raw, dict) or not _is_caller_field(raw):
-                continue
+        for name, _field_name, raw in _iter_schema_fields(schema):
             source = _option_source(raw)
             options = _field_options(raw)
             if not source and not options:
@@ -1877,11 +2162,35 @@ def _selected_option(binding, raw, rows):
     return get_path(matches[0], value_key), matches[0]
 
 
+def _nested_array_field(path: str) -> tuple[str, str] | None:
+    match = re.match(r"^([^.\[]+)\[(?:\d+|\*|)?\]\.(.+)$", str(path or ""))
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
 def _apply_selects(step, values, cache):
     current = dict(values)
     projections = {}
     for binding in step.get("selects") or []:
         param = str(binding.get("param") or "")
+        nested = _nested_array_field(str(binding.get("path") or binding.get("id_path") or ""))
+        if nested:
+            container, field = nested
+            rows_in = current.get(container)
+            if not isinstance(rows_in, list):
+                continue
+            live_rows = _live_option_rows(binding, current, cache)
+            owned = []
+            for item in rows_in:
+                if not isinstance(item, dict) or field not in item:
+                    owned.append(item)
+                    continue
+                row = dict(item)
+                row[field], _selected = _selected_option(binding, row[field], live_rows)
+                owned.append(row)
+            current[container] = owned
+            continue
         if not param or param not in current:
             continue
         rows = _live_option_rows(binding, current, cache)

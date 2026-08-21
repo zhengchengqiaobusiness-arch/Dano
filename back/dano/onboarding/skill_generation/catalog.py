@@ -219,7 +219,7 @@ def public_capability_catalog(spec: FlowSpec, verified_ids: set[str]) -> list[di
             "kind": cap.kind,
             "intent": cap.intent,
             "write": is_write_capability(cap),
-            "requires_confirmation": bool(cap.requires_human_confirm or is_write_capability(cap)),
+            "requires_confirmation": bool(cap.requires_human_confirm),
             "input_schema": dict(cap.input_schema or {}),
             "output_schema": dict(cap.output_schema or {}),
             "required_inputs": schema_required(cap.input_schema),

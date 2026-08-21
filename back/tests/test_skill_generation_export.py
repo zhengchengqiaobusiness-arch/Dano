@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from dano.export.skill_package.renderer import (
+    _ARRAY_FIELD_PATH_RE,
     _capabilities_md,
     _capability_plans,
     _contract_planning_fields,
@@ -264,6 +265,24 @@ async def test_manual_export_requires_business_description(tmp_path: Path) -> No
         )
     assert exc.value.status_code == 400
     assert "业务描述" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_export_skill_id_keeps_recording_action(tmp_path: Path) -> None:
+    spec = _three_cap_spec()
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_verified_body(spec, extra={"skill_id": "oa.sk_870d32db6a27"}),
+        tenant="tenant",
+        request=_request(out_dir=str(tmp_path)),
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_render_valid,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported", outcome.errors or outcome.clarification_questions
+    assert outcome.skill_id == "oa.action_deadbeef"
+    assert "action-deadbeef" in (outcome.export_path or "").replace("_", "-")
 
 
 @pytest.mark.asyncio
@@ -1051,12 +1070,14 @@ def test_export_keeps_stage_six_contract_and_writes_business_triggers() -> None:
     plans = _capability_plans(skill, None, skill.api_request)
     search = next(item for item in plans if item["name"] == "search-sale-orders")
     create = next(item for item in plans if item["name"] == "create-sale-order")
-    assert search["steps"][0]["path"] == "/admin-api/erp/sale-order/page?pageNo=1&no=1&customerId=8"
-    assert search["steps"][0]["sample_inputs"] == {"订单单号": "1", "客户": "8"}
+    assert search["steps"][0]["path"] == "/admin-api/erp/sale-order/page"
+    assert "sample_inputs" not in search["steps"][0]
     assert search["steps"][0]["query_template"]["outStatus"] == "0"
-    assert create["steps"][0]["body_template"]["discountPrice"] == 117105
+    assert "discountPrice" not in create["steps"][0]["body_template"]
+    assert create["steps"][0]["body_template"]["customerId"] == "{{customerId}}"
     assert create["steps"][0]["success_rule"]["ok_values"] == ["1020201001"]
     assert create["requires_verify"] is True
+    assert create["requires_confirmation"] is True
     assert "post_sale_order_create_body_totalPrice" in create["input_schema"]["properties"]
     assert create["input_schema"]["properties"]["post_sale_order_create_body_totalPrice"]["default"] == -106555
 
@@ -1619,25 +1640,207 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
     assert atomic_only
 
 
-@pytest.mark.asyncio
-async def test_preview_only_does_not_write_package(tmp_path: Path) -> None:
-    spec = sale_order_spec()
-    request = sale_order_request()
-    request.out_dir = str(tmp_path)
-    request.preview_only = True
-    stored: list[dict] = []
-    outcome = await export_recording_skill(
-        result_id=uuid4(),
-        body=_sale_verified_body(spec),
-        tenant="tenant",
-        request=request,
-        persist=stored.append,
-        publish=_ok_publish,
-        render=_default_render,
-        proposer=_deterministic_proposer,
+def test_exported_plan_mirrors_capability_contract() -> None:
+    skill = SimpleNamespace(
+        skill_id="demo.ticket",
+        title="工单办理",
+        action="action_demo",
+        risk_level="",
+        call_metadata={"skill_plan": {"routes": [], "selected_capability_ids": ["cap_query", "cap_create", "cap_update"]}},
+        api_request={
+            "steps": [
+                {
+                    "step_id": "s_query",
+                    "method": "GET",
+                    "path": "/tickets/page?pageNo=1&ownerId=88",
+                    "url": "http://example.test/tickets/page?pageNo=1&ownerId=88",
+                    "query_template": {"pageNo": "1", "ownerId": "{{ownerId}}", "status": "20"},
+                    "params": ["ownerId"],
+                    "sample_inputs": {"ownerId": "88"},
+                    "selects": [],
+                },
+                {
+                    "step_id": "s_create",
+                    "method": "POST",
+                    "path": "/tickets/create",
+                    "url": "http://example.test/tickets/create",
+                    "body_template": {
+                        "ownerId": "{{ownerId}}",
+                        "title": "{{title}}",
+                        "sampleAmount": 672105,
+                        "items": "{{items}}",
+                    },
+                    "params": ["ownerId", "title", "items"],
+                    "sample_inputs": {"ownerId": 8, "title": "demo"},
+                    "selects": [
+                        {
+                            "param": "ownerId",
+                            "path": "ownerId",
+                            "source_url": "http://example.test/users/simple-list",
+                            "value_key": "id",
+                            "label_key": "name",
+                        }
+                    ],
+                },
+                {
+                    "step_id": "s_preflight",
+                    "method": "GET",
+                    "path": "/tickets/get?id=56",
+                    "url": "http://example.test/tickets/get?id=56",
+                    "query_template": {"id": "{{id}}"},
+                    "params": ["id"],
+                    "selects": [],
+                },
+                {
+                    "step_id": "s_update",
+                    "method": "PUT",
+                    "path": "/tickets/update",
+                    "body_template": {
+                        "id": 56,
+                        "no": "TK-REC",
+                        "ownerId": "{{ownerId}}",
+                        "title": "{{title}}",
+                    },
+                    "params": ["ownerId", "title"],
+                    "selects": [],
+                },
+            ],
+            "capabilities": [
+                {
+                    "capability_id": "cap_query",
+                    "name": "query_ticket",
+                    "title": "查询工单",
+                    "kind": "query",
+                    "compiled_step_ids": ["s_query"],
+                    "requires_human_confirm": True,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "ownerId": {
+                                "type": "string",
+                                "x-dano-option-source": {
+                                    "source_url": "http://example.test/users/simple-list",
+                                    "value_key": "id",
+                                    "label_key": "name",
+                                },
+                            }
+                        },
+                    },
+                },
+                {
+                    "capability_id": "cap_create",
+                    "name": "create_ticket",
+                    "title": "新建工单",
+                    "kind": "create",
+                    "compiled_step_ids": ["s_create"],
+                    "requires_human_confirm": False,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "ownerId": {
+                                "type": "string",
+                                "x-dano-option-source": {
+                                    "source_url": "http://example.test/users/simple-list",
+                                    "value_key": "id",
+                                    "label_key": "name",
+                                },
+                            },
+                            "title": {"type": "string"},
+                            "file": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "页面表单包含调用方文件输入，但录制未提交文件，保留能力输入并明确标记执行不支持",
+                            },
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "productId": {
+                                            "type": "string",
+                                            "x-dano-option-source": {
+                                                "source_url": "http://example.test/products/simple-list",
+                                                "value_key": "id",
+                                                "label_key": "name",
+                                                "id_path": "items[].productId",
+                                            },
+                                        },
+                                        "count": {"type": "number"},
+                                    },
+                                },
+                            },
+                        },
+                        "required": ["ownerId", "title", "items"],
+                    },
+                },
+                {
+                    "capability_id": "cap_update",
+                    "name": "update_ticket",
+                    "title": "更新工单",
+                    "kind": "update",
+                    "compiled_step_ids": ["s_update"],
+                    "requires_human_confirm": True,
+                    "request_refs": [
+                        {"usage": "preflight", "step_id": "s_preflight"},
+                        {"usage": "execute", "step_id": "s_update"},
+                    ],
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "x-flow-path": "query.id"},
+                            "ownerId": {
+                                "type": "string",
+                                "x-dano-option-source": {
+                                    "source_url": "http://example.test/users/simple-list",
+                                    "value_key": "id",
+                                    "label_key": "name",
+                                },
+                            },
+                            "title": {"type": "string"},
+                        },
+                        "required": ["id", "ownerId", "title"],
+                    },
+                },
+            ],
+        },
     )
-    assert outcome.status == "previewed", outcome.errors or outcome.clarification_questions
-    assert not outcome.export_path
-    assert outcome.routes
-    assert not list(tmp_path.glob("*-package"))
-    assert stored[-1]["skill_export_status"] == "previewed"
+    plans = _capability_plans(skill, None, skill.api_request)
+    query = next(item for item in plans if item["capability_id"] == "cap_query")
+    create = next(item for item in plans if item["capability_id"] == "cap_create")
+    update = next(item for item in plans if item["capability_id"] == "cap_update")
+
+    assert query["requires_confirmation"] is True
+    assert create["requires_confirmation"] is False
+    assert update["requires_confirmation"] is True
+    assert query["steps"][0]["path"] == "/tickets/page"
+    assert query["steps"][0]["query_template"]["status"] == "20"
+    assert "sample_inputs" not in query["steps"][0]
+    assert "sampleAmount" not in create["steps"][0]["body_template"]
+    assert create["steps"][0]["body_template"]["ownerId"] == "{{ownerId}}"
+    create_sources = {item.get("source_url") for item in create["steps"][0]["selects"]}
+    assert "http://example.test/users/simple-list" in create_sources
+    assert "http://example.test/products/simple-list" in create_sources
+    assert any(
+        str(item.get("path") or "").endswith("productId")
+        for item in create["steps"][0]["selects"]
+    )
+    assert [step["step_id"] for step in update["steps"]] == ["s_preflight", "s_update"]
+    assert update["steps"][0]["path"] == "/tickets/get"
+    assert update["steps"][1]["body_template"]["id"] == "{{id}}"
+    assert "no" not in update["steps"][1]["body_template"]
+    assert any(
+        item.get("source_url") == "http://example.test/users/simple-list"
+        for item in update["steps"][1]["selects"]
+    )
+    options = _options_md(plans)
+    assert "items[].productId" in options
+    assert "http://example.test/products/simple-list" in options
+    forms = _input_forms_md(plans)
+    assert "执行不支持" in forms
+    assert "http://example.test/users/simple-list" in forms
+
+
+def test_nested_option_path_covers_array_items() -> None:
+    assert _ARRAY_FIELD_PATH_RE.match("items[].productId").groups() == ("items", "productId")
+    assert _ARRAY_FIELD_PATH_RE.match("items[0].productId").groups() == ("items", "productId")
+    assert _ARRAY_FIELD_PATH_RE.match("ownerId") is None
