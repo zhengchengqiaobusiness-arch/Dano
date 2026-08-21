@@ -229,6 +229,61 @@ def test_readonly_inner_input_of_select_is_editable_for_hydration_override() -> 
     assert _param_has_editable_control_evidence(param)
 
 
+def test_unsubmitted_file_field_remains_a_caller_input_in_write_contract() -> None:
+    form_root = "generic asset editor"
+    spec = to_flow_spec(
+        captured_requests=[_req(
+            "req_asset_update",
+            method="PATCH",
+            url="http://random.invalid/v2/assets/update",
+            sequence=1,
+            body={"title": "sample", "attachmentUrl": ""},
+            role="business_write",
+            action="action_asset_update",
+        )],
+        field_evidence=[
+            {
+                "label": "Title",
+                "field_aliases": ["title"],
+                "control_kind": "text",
+                "value": "sample",
+                "form_root": form_root,
+                "surface": "dialog",
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "action_id": "action_asset_update",
+                "transaction_id": "action_asset_update",
+            },
+            {
+                "label": "Artifact",
+                "field_aliases": [],
+                "control_kind": "file",
+                "value": "",
+                "form_root": form_root,
+                "surface": "dialog",
+                "page_id": "page_1",
+                "frame_id": "frame_1",
+                "action_id": "action_asset_update",
+                "transaction_id": "action_asset_update",
+            },
+        ],
+        page_events=[{
+            "event_id": "event_asset_update",
+            "kind": "action",
+            "action_id": "action_asset_update",
+            "transaction_id": "action_asset_update",
+            "op": "submit",
+        }],
+        page_context=PAGE,
+    )
+    update = _step_by_suffix(spec, "/assets/update")
+    attachment = _param(update, "attachmentUrl")
+    assert attachment.type == "file"
+    assert attachment.source_kind == "user_input"
+    assert _param_exposed_to_caller(attachment)
+    assert (attachment.source or {}).get("unsupported_execution") is True
+
+
 def _edit_and_command_spec(*, include_dialog_controls: bool = True):
     dict_url = "http://example.test/admin-api/system/dict-data/simple-list?dictType=doc_status"
     status_options = [

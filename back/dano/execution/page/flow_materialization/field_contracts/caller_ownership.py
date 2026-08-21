@@ -21,16 +21,19 @@ def _field_has_unlocked_editable_control(field: dict | None) -> bool:
     """
     if not isinstance(field, dict):
         return False
-    kind = str(field.get("control_kind") or "unknown").lower()
-    if field.get("control_disabled") is True:
+    kind = str(field.get("control_kind") or field.get("input_type") or "unknown").lower()
+    disabled = field.get("control_disabled", field.get("disabled"))
+    read_only = field.get("control_read_only", field.get("read_only"))
+    if disabled is True:
         return False
     if kind in {"select", "combobox"}:
         return True
-    if field.get("control_read_only") is True:
+    if read_only is True:
         return False
     return kind in {
-        "text", "textarea", "number", "date", "datetime", "time",
-        "checkbox", "radio", "spinbutton",
+        "text", "search", "textarea", "contenteditable", "number", "range",
+        "date", "datetime", "datetime-local", "time", "checkbox", "radio",
+        "switch", "spinbutton", "file", "upload", "email", "url",
     }
 
 
@@ -40,9 +43,11 @@ def _param_has_editable_control_evidence(param: ParamField | None) -> bool:
     for item in param.evidence or []:
         if not isinstance(item, dict) or item.get("kind") != "page_control":
             continue
-        if item.get("interacted"):
+        if item.get("interacted") and not bool(
+            item.get("disabled", item.get("control_disabled", False))
+        ):
             return True
-        if item.get("editable") and not item.get("disabled") and not item.get("read_only"):
+        if _field_has_unlocked_editable_control(item):
             return True
     return False
 
