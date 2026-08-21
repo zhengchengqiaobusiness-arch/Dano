@@ -9,6 +9,7 @@ import {
   Input,
   List,
   Modal,
+  Radio,
   Select,
   Space,
   Spin,
@@ -585,27 +586,24 @@ function capabilityFlowName(capability: FlowCapability, index: number) {
   return String(capability.title || capability.intent || capability.name || `操作${index + 1}`).trim();
 }
 
-function defaultSkillDescription(capabilities: FlowCapability[], steps: FlowStep[] = []) {
-  const ordered = capabilities.map((capability, index) => {
-    const refs = capability.request_refs || [];
-    const stepIndexes = refs
-      .map((ref) => steps.findIndex((step) => step.step_id && step.step_id === ref.step_id))
-      .filter((stepIndex) => stepIndex >= 0);
-    const order = stepIndexes.length ? Math.min(...stepIndexes) : index;
-    return { name: capabilityFlowName(capability, index), order, index };
-  }).filter((item) => item.name);
-  ordered.sort((left, right) => left.order - right.order || left.index - right.index);
-  const names = ordered.map((item) => item.name);
-  if (!names.length) return "";
-  if (names.length === 1) {
-    return `本页原子能力：${names[0]}。用户要${names[0]}时使用该操作。`;
-  }
+const DEFAULT_SKILL_PLAYBOOK = "先查找再办理。只要查看时不要写入。没有已确认绑定就先查再问人。";
+const SKILL_DESCRIPTION_PLACEHOLDER = [
+  "用自然语言写这个页面怎么办理：用户通常怎么开口、哪些操作要先后做、什么时候只查不写、缺什么必须问人、什么结果算完成。",
+  "不要只罗列能力名称。例如：先按客户或单号找到订单；只查看时不要改、不要审；要改或审批时先让我指定哪一条，再执行对应写入。",
+].join("\n");
+
+function isStockSkillDescription(text: string) {
+  const value = String(text || "").trim();
+  if (!value) return true;
   return (
-    `本页原子能力：${names.join("、")}。`
-    + "用户可以只执行其中一项；也可以按业务需要先查找再办理。"
-    + "只要求查询时不要执行写入。"
-    + "先查找再办理时，按已确认绑定传递字段；没有已确认绑定则向用户收集下一步输入，不得按字段同名猜测。"
+    value === DEFAULT_SKILL_PLAYBOOK
+    || value.includes("本页原子能力")
+    || value.includes("按用户意图选择一项")
   );
+}
+
+function defaultSkillDescription(capabilities: FlowCapability[], _steps: FlowStep[] = []) {
+  return capabilities.length ? DEFAULT_SKILL_PLAYBOOK : "";
 }
 
 function historyLifecycleView(item: RecordingResultSummary) {
@@ -712,6 +710,10 @@ export default function PageRecorder({
   const [skillExportErrors, setSkillExportErrors] = useState<string[]>([]);
   const [skillTitle, setSkillTitle] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
+  const [skillPlanningMode, setSkillPlanningMode] = useState<"dynamic" | "fixed">("dynamic");
+  const [skillExampleRequests, setSkillExampleRequests] = useState("");
+  const [skillSuccessCriteria, setSkillSuccessCriteria] = useState("");
+  const [skillForbiddenActions, setSkillForbiddenActions] = useState("");
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
 
@@ -1583,11 +1585,12 @@ export default function PageRecorder({
     const defaultTitle = (title || snapshot?.title || "").trim();
     const defaultDescription = defaultSkillDescription(capabilities, draft?.steps || []);
     setSkillTitle(saved.title?.trim() || resultMeta?.skill_export_title?.trim() || defaultTitle);
-    setSkillDescription(
-      saved.description?.trim()
-      || resultMeta?.skill_export_description?.trim()
-      || defaultDescription,
-    );
+    const rememberedDescription = saved.description?.trim() || resultMeta?.skill_export_description?.trim() || "";
+    setSkillDescription(isStockSkillDescription(rememberedDescription) ? defaultDescription : rememberedDescription);
+    setSkillPlanningMode("dynamic");
+    setSkillExampleRequests("");
+    setSkillSuccessCriteria("");
+    setSkillForbiddenActions("");
     setSkillOutDir(rememberedExportDir());
     void getExportDirectory()
       .then((dir) => setSkillOutDir(dir || rememberedExportDir()))
@@ -1633,10 +1636,10 @@ export default function PageRecorder({
       const outcome = await exportRecordingSkill(resultId, {
         title: skillTitle.trim(),
         business_description: description,
-        planning_mode: "dynamic",
-        example_requests: [],
-        success_criteria: "",
-        forbidden_actions: "",
+        planning_mode: skillPlanningMode,
+        example_requests: skillExampleRequests.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+        success_criteria: skillSuccessCriteria.trim(),
+        forbidden_actions: skillForbiddenActions.trim(),
         out_dir: outDir,
         require_stage_seven: false,
       });
@@ -3253,9 +3256,9 @@ export default function PageRecorder({
             message="Skill 已导出"
             description={
               <Space direction="vertical" size={4}>
-                <Text>Skill ID：{skillExportOutcome?.skill_id || resultMeta?.skill_id || "—"}</Text>
-                <Text>导出路径：{skillExportOutcome?.export_path || resultMeta?.skill_export_path || "—"}</Text>
-                <Text>版本：{skillExportOutcome?.version || resultMeta?.skill_version || "—"}</Text>
+            <Text>Skill 名称：{skillExportOutcome?.skill_name || resultMeta?.skill_export_title || skillTitle || "—"}</Text>
+            <Text>导出路径：{skillExportOutcome?.export_path || resultMeta?.skill_export_path || "—"}</Text>
+            <Text>版本：{skillExportOutcome?.version || resultMeta?.skill_version || "—"}</Text>
                 <Space>
                   <Button size="small" icon={<CopyOutlined />} onClick={() => copySkillDir(skillExportOutcome?.export_path || resultMeta?.skill_export_path)}>打开 Skill 目录</Button>
                   <Button size="small" onClick={openSkillExport} disabled={!canProduceSkill}>重新产出 Skill</Button>
@@ -3418,24 +3421,7 @@ export default function PageRecorder({
       >
         {skillExportOutcome?.status === "exported" ? (
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
-            <Text>Skill ID：{skillExportOutcome.skill_id || "—"}</Text>
             <Text>Skill 名称：{skillExportOutcome.skill_name || skillTitle || "—"}</Text>
-            <Text>使用的能力：{(skillExportOutcome.used_capabilities || []).map((item) => String(item.title || item.name || item.capability_id || "")).filter(Boolean).join("、") || "—"}</Text>
-            <div>
-              <Text>未使用的能力：</Text>
-              {(skillExportOutcome.unused_capabilities || []).length ? (
-                <List
-                  size="small"
-                  dataSource={skillExportOutcome.unused_capabilities || []}
-                  renderItem={(item) => (
-                    <List.Item>
-                      <Text>{String(item.title || item.name || item.capability_id || "")}</Text>
-                      <Text type="secondary">{String(item.reason || "")}</Text>
-                    </List.Item>
-                  )}
-                />
-              ) : <Text type="secondary">无</Text>}
-            </div>
             <Text>导出路径：{skillExportOutcome.export_path || "—"}</Text>
             <Text>Skill 版本：{skillExportOutcome.version || 1}</Text>
           </Space>
@@ -3488,9 +3474,62 @@ export default function PageRecorder({
                 }}
                 autoSize={{ minRows: 6, maxRows: 12 }}
                 disabled={skillExporting}
-                placeholder="用自然语言说明这个页面有哪些原子能力、用户通常怎么组合它们、什么结果算完成。例如：用户可以只查询待办；也可以查询后选一条再提交。只要求查询时不要提交。没有已确认绑定时，先查再请用户指定记录。"
+                placeholder={SKILL_DESCRIPTION_PLACEHOLDER}
               />
             </div>
+            <div>
+              <Text strong>规划方式</Text>
+              <Radio.Group
+                style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}
+                value={skillPlanningMode}
+                onChange={(event) => setSkillPlanningMode(event.target.value)}
+                disabled={skillExporting}
+              >
+                <Radio value="dynamic">按用户需求动态选择（推荐）：按请求选一条已规划路线</Radio>
+                <Radio value="fixed">固定业务步骤：按描述生成一条主路线</Radio>
+              </Radio.Group>
+            </div>
+            <Collapse
+              items={[{
+                key: "more",
+                label: "更多设置",
+                children: (
+                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                    <div>
+                      <Text strong>用户请求示例</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillExampleRequests}
+                        onChange={(event) => setSkillExampleRequests(event.target.value)}
+                        autoSize={{ minRows: 3, maxRows: 6 }}
+                        placeholder="一行一个，例如：帮我查鲜生的单"
+                        disabled={skillExporting}
+                      />
+                    </div>
+                    <div>
+                      <Text strong>成功条件</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillSuccessCriteria}
+                        onChange={(event) => setSkillSuccessCriteria(event.target.value)}
+                        autoSize={{ minRows: 2, maxRows: 4 }}
+                        disabled={skillExporting}
+                      />
+                    </div>
+                    <div>
+                      <Text strong>禁止或限制的操作</Text>
+                      <Input.TextArea
+                        style={{ marginTop: 6 }}
+                        value={skillForbiddenActions}
+                        onChange={(event) => setSkillForbiddenActions(event.target.value)}
+                        autoSize={{ minRows: 2, maxRows: 4 }}
+                        disabled={skillExporting}
+                      />
+                    </div>
+                  </Space>
+                ),
+              }]}
+            />
             <div>
               <Text strong>目标目录</Text>
               <Input
