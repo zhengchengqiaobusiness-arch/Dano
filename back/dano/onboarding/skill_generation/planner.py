@@ -29,7 +29,11 @@ from dano.onboarding.skill_generation.models import (
     SkillRoute,
     UnusedCapability,
 )
-from dano.onboarding.skill_generation.validate import validate_skill_plan
+from dano.onboarding.skill_generation.validate import (
+    handbook_text_is_banned,
+    is_stock_playbook,
+    validate_skill_plan,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -60,12 +64,14 @@ _OPTION_HINTS = ("选项", "字典", "下拉", "候选")
 _SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
 _LOOKUP_HINTS = ("回查", "确认提交", "确认成功", "再查询", "查询状态")
 _SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
-_RECORDING_COPY_MARKERS = ("本页面的实际操作流程", "能力录制", "录制结果", "阶段1")
+_OBJECT_PREFIXES = (
+    "搜索/筛选", "搜索", "筛选", "查询", "查看", "新增", "新建", "修改", "编辑",
+    "审批", "审核", "反审", "反审核", "删除", "提交", "办理",
+)
 
 
 def _is_recording_copy(value: Any) -> bool:
-    text = str(value or "")
-    return any(marker in text for marker in _RECORDING_COPY_MARKERS)
+    return handbook_text_is_banned(value) or is_stock_playbook(value)
 
 
 def _operation_route_id(cap: FlowCapability) -> str:
@@ -120,6 +126,24 @@ def _score_capability(cap: FlowCapability, text: str) -> int:
     return score
 
 
+def _forbidden_capability_ids(
+    caps: list[FlowCapability],
+    request: SkillGenerationRequest,
+) -> set[str]:
+    text = str(request.forbidden_actions or "").strip()
+    if not text:
+        return set()
+    hits: set[str] = set()
+    for cap in caps:
+        title = str(cap.title or "").strip()
+        name = str(cap.name or "").strip()
+        if title and title in text:
+            hits.add(capability_ref(cap))
+        elif name and name in text:
+            hits.add(capability_ref(cap))
+    return hits
+
+
 def _select_capabilities(
     spec: FlowSpec,
     request: SkillGenerationRequest,
@@ -129,29 +153,43 @@ def _select_capabilities(
         cap for cap in spec.capabilities
         if capability_ref(cap) in verified_ids or cap.name in verified_ids
     ]
-    text = _text(request)
     if not caps:
         return [], []
-    scored = [(cap, _score_capability(cap, text)) for cap in caps]
+    forbidden = _forbidden_capability_ids(caps, request)
+    unused = [
+        UnusedCapability(
+            capability_id=capability_ref(cap),
+            name=cap.name,
+            title=cap.title or cap.name,
+            reason="禁止或限制的操作",
+        )
+        for cap in caps
+        if capability_ref(cap) in forbidden
+    ]
+    available = [cap for cap in caps if capability_ref(cap) not in forbidden]
+    if request.planning_mode == PlanningMode.DYNAMIC:
+        return available, unused
+    text = _text(request)
+    scored = [(cap, _score_capability(cap, text)) for cap in available]
     mentioned = [cap for cap, score in scored if score > 0]
     if not mentioned:
-        selected = list(caps)
+        selected = list(available)
     else:
         selected = mentioned
         families = {_family(cap) for cap in selected}
         if "write" in families and "query" not in families and _mentions(text, _LOOKUP_HINTS):
-            selected.extend(cap for cap in caps if _family(cap) == "query" and cap not in selected)
+            selected.extend(cap for cap in available if _family(cap) == "query" and cap not in selected)
     selected_ids = {capability_ref(cap) for cap in selected}
-    unused = [
+    unused.extend(
         UnusedCapability(
             capability_id=capability_ref(cap),
             name=cap.name,
             title=cap.title or cap.name,
             reason="业务描述未要求该能力",
         )
-        for cap in caps
+        for cap in available
         if capability_ref(cap) not in selected_ids
-    ]
+    )
     return selected, unused
 
 
@@ -242,18 +280,78 @@ def _example_request(
     when_to_use: str,
     sequence: list[FlowCapability],
 ) -> str:
+    titles = [_cap_title(cap) for cap in sequence]
+    for item in request.example_requests:
+        text = str(item).strip()
+        if text and not _is_recording_copy(text) and any(title and title in text for title in titles):
+            return text
     for item in request.example_requests:
         text = str(item).strip()
         if text and not _is_recording_copy(text):
             return text
     if when_to_use and not _is_recording_copy(when_to_use):
         return when_to_use
-    titles = "、".join(cap.title or cap.name for cap in sequence if cap.title or cap.name)
-    return f"请{titles}" if titles else "按本页已打包操作办理"
+    joined = "、".join(title for title in titles if title)
+    return f"请{joined}" if joined else "按本页已打包操作办理"
 
 
 def _cap_title(cap: FlowCapability) -> str:
-    return str(cap.title or cap.name or capability_ref(cap) or "该操作")
+    return str(cap.title or cap.name or "该操作")
+
+
+def _object_from_title(title: str) -> str:
+    text = str(title or "").strip()
+    for prefix in _OBJECT_PREFIXES:
+        if text.startswith(prefix):
+            rest = text[len(prefix):].strip(" /")
+            return rest or text
+    return text
+
+
+def _page_object_name(request: SkillGenerationRequest, selected: list[FlowCapability]) -> str:
+    title = str(request.title or "").strip()
+    if title and not handbook_text_is_banned(title) and "能力录制" not in title and "等" not in title:
+        return title
+    first = _cap_title(selected[0]) if selected else ""
+    return _object_from_title(first) or first or "本页业务"
+
+
+def _title_for_ref(selected: list[FlowCapability], cap_id: str) -> str:
+    for cap in selected:
+        if capability_ref(cap) == cap_id or cap.name == cap_id:
+            return _cap_title(cap)
+    return ""
+
+
+def _truncate_playbook(text: str, limit: int = 800) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "…"
+
+
+def _operation_when(cap: FlowCapability) -> str:
+    title = _cap_title(cap)
+    family = _family(cap)
+    if family == "query":
+        return f"只要{title}，不要改也不要写"
+    if family == "option":
+        return f"只要获取「{title}」，不要写入"
+    if family == "write":
+        return f"要执行「{title}」且已指定对象或已备齐字段时"
+    return f"只要「{title}」"
+
+
+def _binding_note(binding: RouteBinding, selected: list[FlowCapability]) -> str:
+    source = _title_for_ref(selected, binding.from_capability)
+    target = _title_for_ref(selected, binding.to_capability)
+    if source and target:
+        return f"{source} 的 {binding.from_output} → {target} 的 {binding.to_input}"
+    return f"{binding.from_output} → {binding.to_input}"
+
+
+def _has_custom_playbook(request: SkillGenerationRequest) -> bool:
+    return not is_stock_playbook(request.business_description)
 
 
 def _build_composition(
@@ -263,26 +361,35 @@ def _build_composition(
 ) -> tuple[str, list[str]]:
     titles = [_cap_title(cap) for cap in selected]
     description = str(request.business_description or "").strip()
-    summary = _clean_when(
-        description,
-        f"本页原子能力：{'、'.join(titles)}。按用户意图选择一项，或按已规划路线组合。",
-    )
-    notes: list[str] = [
-        "一页面对应一个 Skill；阶段 6/7 产出的是原子能力，本 Skill 用自然语言规划它们如何组合。",
-    ]
-    if description and not _is_recording_copy(description):
+    page = _page_object_name(request, selected)
+    if _has_custom_playbook(request):
+        summary = _truncate_playbook(description)
+    else:
+        actions = "、".join(titles) if titles else "已打包操作"
+        summary = (
+            f"本页办理{page}：可{actions}。"
+            "每次只做用户当前要求的那一件；要先后办理时先查，再请用户指定记录。"
+        )
+    notes: list[str] = []
+    if _has_custom_playbook(request):
         notes.append(f"组合约定：{description}")
+        mentioned = [title for title in titles if title and title in description]
+        if len(mentioned) >= 2:
+            notes.append("用户描述中的先后：" + " → ".join(mentioned) + "。")
     reads = [cap for cap in selected if not is_write_capability(cap)]
     writes = [cap for cap in selected if is_write_capability(cap)]
     if reads and writes:
-        notes.append("用户只要只读操作时，只执行对应只读能力，不得执行写入。")
+        notes.append("只要只读操作时，只执行对应只读操作，不得执行写入。")
     combinations = [route for route in routes if len(route.capability_sequence) > 1]
     if combinations:
         for route in combinations:
-            sequence = " → ".join(f"`{cap_id}`" for cap_id in route.capability_sequence)
+            sequence = " → ".join(
+                _title_for_ref(selected, cap_id) or route.name
+                for cap_id in route.capability_sequence
+            )
             if route.bindings:
                 bound = "；".join(
-                    f"{binding.from_output} → {binding.to_input}"
+                    _binding_note(binding, selected)
                     for binding in route.bindings
                     if binding.from_output and binding.to_input
                 )
@@ -294,16 +401,16 @@ def _build_composition(
             else:
                 notes.append(
                     f"组合路线「{route.name}」按 {sequence} 执行，但没有已确认绑定；"
-                    "下一步输入向用户收集，不得按字段同名猜测。"
+                    "先查再问，下一步输入向用户收集，不得按字段同名猜测。"
                 )
     elif reads and writes:
         notes.append(
-            "本页同时有只读和写入能力，但没有已确认绑定，不能生成自动传值的组合路线。"
-            "需要先后办理时，先执行只读能力，再请用户指定记录后执行写入。"
+            "没有已确认绑定，不能自动传值。先后办理就先查再问："
+            "先执行只读操作，停下来请用户指定记录，再写。"
         )
     else:
-        notes.append("未规划自动传值的组合路线。一次对话只执行用户当前要求的那条路线。")
-    return summary, notes
+        notes.append("没有自动传值。一次对话只执行用户当前要求的那一件。")
+    return summary, [item for item in notes if item and not _is_recording_copy(item)]
 
 
 def _append_lookup(
@@ -415,8 +522,8 @@ def propose_deterministic_plan(
             route_id="main",
             name=" → ".join(_cap_title(cap) for cap in sequence) or "主要业务步骤",
             when_to_use=_clean_when(
-                request.business_description,
-                "按用户描述的顺序组合本页已选原子能力",
+                request.business_description if _has_custom_playbook(request) else "",
+                "按用户描述的顺序办理本页已选操作",
             ),
             sequence=sequence,
             bindings=bindings,
@@ -433,7 +540,7 @@ def propose_deterministic_plan(
             routes.append(_route(
                 route_id="query_only",
                 name=_cap_title(query),
-                when_to_use=f"用户只要{_cap_title(query)}，不要执行提交或其他写操作",
+                when_to_use=_operation_when(query),
                 sequence=[query],
                 bindings=[],
                 request=request,
@@ -445,7 +552,7 @@ def propose_deterministic_plan(
                 routes.append(_route(
                     route_id="write_direct",
                     name=_cap_title(write),
-                    when_to_use=f"用户要{_cap_title(write)}，且已提供完整字段，不需要先查询",
+                    when_to_use=f"要{_cap_title(write)}且已备齐字段，不需要先查询",
                     sequence=write_direct,
                     bindings=[],
                     request=request,
@@ -482,7 +589,10 @@ def propose_deterministic_plan(
             routes.append(_route(
                 route_id="single",
                 name=_cap_title(selected[0]),
-                when_to_use=_clean_when(request.business_description, f"用户要{_cap_title(selected[0])}"),
+                when_to_use=_clean_when(
+                    request.business_description if _has_custom_playbook(request) else "",
+                    _operation_when(selected[0]),
+                ),
                 sequence=selected[:1],
                 bindings=[],
                 request=request,
@@ -499,7 +609,7 @@ def propose_deterministic_plan(
             routes.append(_route(
                 route_id=_operation_route_id(cap),
                 name=cap.title or cap.name or cap_id,
-                when_to_use=f"用户要{cap.title or cap.name}",
+                when_to_use=_operation_when(cap),
                 sequence=[cap],
                 bindings=[],
                 request=request,
@@ -534,25 +644,24 @@ def propose_deterministic_plan(
         and capability_ref(cap) not in {item.capability_id for item in unused}
     )
     safety = [
-        "只使用当前页面已识别能力，不得发明字段、接口或输出。",
+        "只使用当前页面已打包操作，不得发明字段、接口或输出。",
         "写操作必须先取得用户确认。",
         "不得输出 token、cookie、storage_state 或密码。",
     ]
     if request.forbidden_actions:
         safety.append(f"禁止或限制：{request.forbidden_actions}")
-    triggers = [f"用户要{cap.title or cap.name}时使用" for cap in selected]
-    triggers.extend(
+    triggers = [
         str(item).strip()
         for item in request.example_requests
         if str(item).strip() and not _is_recording_copy(item)
-    )
-    if request.title and not _is_recording_copy(request.title):
-        title_trigger = str(request.title).strip()
-        if title_trigger and title_trigger not in triggers:
-            triggers.insert(0, f"用户要{title_trigger}时使用")
+    ]
+    for route in routes:
+        when = str(route.when_to_use or "").strip()
+        if when and when not in triggers and not _is_recording_copy(when):
+            triggers.append(when)
     composition_summary, composition_notes = _build_composition(request, selected, routes)
     summary = request.business_description.strip()
-    if _is_recording_copy(summary):
+    if is_stock_playbook(summary):
         summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)
     return SkillPlan(
         source_flow_fingerprint=source_flow_fingerprint,
@@ -678,15 +787,16 @@ async def _llm_propose(
     prompt = {
         "task": "不要重新规划能力或路线。只润色已冻结规划的自然语言，输出完整 JSON。",
         "purpose": (
-            "一页面对应一个 Skill。阶段6/7只提供原子能力；"
-            "阶段8用业务描述说明这些原子能力如何组合；"
-            "输出必须落实这条组合约定，而不是另写一份能力清单。"
+            "输出给办理本页业务的 Agent 阅读。"
+            "禁止阶段号、禁止录制过程、禁止把操作名复读成清单。"
         ),
         "rules": [
             "selected_capability_ids、unused_capabilities、每条 route 的 route_id、capability_sequence、bindings、step_ids 必须与 frozen_plan 完全一致",
             "只能改 summary、trigger_phrases、composition_notes、composition_summary、when_to_use、done_when、examples.user_request",
             "自然语言必须落实业务描述里的组合约定，禁止录制套话，禁止发明绑定",
-            "不得减少能力，不得另造路线",
+            "when_to_use 和例句用用户说法，不要写「用户要{标题}」",
+            "禁止出现：阶段、原子能力、录制、FlowSpec、fingerprint、capability_id、规划依据",
+            "不得减少操作，不得另造路线",
         ],
         "request": request.model_dump(mode="json"),
         "frozen_plan": frozen.model_dump(mode="json"),

@@ -26,6 +26,54 @@ from dano.onboarding.skill_generation.models import (
     SkillRoute,
 )
 
+HANDBOOK_BAN_MARKERS = (
+    "本页面的实际操作流程",
+    "能力录制",
+    "录制结果",
+    "阶段1",
+    "本页原子能力",
+    "按用户意图选择一项",
+    "阶段 6",
+    "阶段6",
+    "阶段 7",
+    "阶段7",
+    "阶段 8",
+    "阶段8",
+    "录制识别顺序",
+    "FlowSpec",
+    "fingerprint",
+    "capability_id",
+    "x-dano",
+    "规划依据",
+    "原子能力",
+    "一页面对应一个 Skill",
+    "原样来自",
+    "生成器",
+)
+
+DEFAULT_SKILL_PLAYBOOK = "先查找再办理。只要查看时不要写入。没有已确认绑定就先查再问人。"
+
+
+def handbook_text_is_banned(value: Any) -> bool:
+    text = str(value or "")
+    return any(marker in text for marker in HANDBOOK_BAN_MARKERS)
+
+
+def handbook_ban_hit(value: Any) -> str:
+    text = str(value or "")
+    for marker in HANDBOOK_BAN_MARKERS:
+        if marker in text:
+            return marker
+    return ""
+
+
+def is_stock_playbook(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or handbook_text_is_banned(text):
+        return True
+    compact = "".join(text.split())
+    return compact == "".join(DEFAULT_SKILL_PLAYBOOK.split())
+
 
 class PlanValidation:
     def __init__(self) -> None:
@@ -79,6 +127,20 @@ def validate_skill_plan(
         extra = ", ".join(sorted(used_in_routes - selected_set))
         result.error(f"路线引用了未入选能力: {extra}")
     unused_ids = {item.capability_id for item in plan.unused_capabilities}
+    packed = {
+        capability_ref(cap)
+        for cap in spec.capabilities
+        if capability_ref(cap) in verified or cap.name in verified
+    }
+    if plan.planning_mode == PlanningMode.DYNAMIC:
+        missing = packed - selected_set - unused_ids
+        if missing:
+            extra = ", ".join(sorted(missing))
+            result.error(f"动态模式必须覆盖全部已打包操作: {extra}")
+        for item in plan.unused_capabilities:
+            reason = str(item.reason or "")
+            if "禁止" not in reason and "限制" not in reason:
+                result.error(f"动态模式不得因描述未点名而丢弃操作: {item.capability_id}")
     for cap in spec.capabilities:
         cap_id = capability_ref(cap)
         if cap_id in selected_set or cap.name in selected_set:
@@ -86,7 +148,25 @@ def validate_skill_plan(
         if cap_id in verified or cap.name in verified:
             if cap_id not in unused_ids and cap.name not in unused_ids:
                 result.error(f"未使用能力必须记录原因: {cap_id}")
+    _validate_handbook_language(result, plan)
     return result
+
+
+def _validate_handbook_language(result: PlanValidation, plan: SkillPlan) -> None:
+    texts = [plan.summary, plan.composition_summary, *plan.composition_notes]
+    texts.extend(plan.trigger_phrases)
+    for route in plan.routes:
+        texts.append(route.when_to_use)
+        texts.append(route.done_when)
+        texts.append(route.failure_behavior)
+        texts.extend(route.preconditions)
+        for example in route.examples:
+            texts.append(example.user_request)
+    for text in texts:
+        hit = handbook_ban_hit(text)
+        if hit:
+            result.error(f"手册用语不合格: {hit}")
+            return
 
 
 def _validate_route(
