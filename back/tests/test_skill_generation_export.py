@@ -19,6 +19,7 @@ from dano.export.skill_package.renderer import (
     package_slug,
 )
 from dano.export.skill_package.validator import _check_skill, validate_skill_package
+from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
 from dano.onboarding.recording_stage_seven import working_fingerprint
 from dano.onboarding.recording_results import recording_skill_lifecycle
 from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
@@ -27,7 +28,8 @@ from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import PlanningMode, SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
 
-from test_skill_generation_plan import VERIFIED, _three_cap_spec
+from test_skill_generation_plan import VERIFIED, _cap, _three_cap_spec
+from dano.execution.page.flow_spec import FlowSpec, FlowStep
 
 
 def _verified_body(spec, *, extra: dict | None = None) -> dict:
@@ -716,9 +718,12 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
     assert issues == []
     assert any(len(route.capability_sequence) > 1 for route in plan.routes)
     assert "已确认绑定" in text or "组合路线" in text
-    assert "规划依据（用户业务描述）" in text
+    assert "规划依据（用户业务描述）" not in text
     assert "组合约定：" in text
-    assert "已确认绑定自动带入下一步" in text or "无已确认绑定，下一步向用户收集" in text
+    assert "有绑定则带入" in text or "无绑定则停下来问记录" in text
+    assert "阶段" not in text
+    assert "原子能力" not in text
+    assert "录制识别顺序" not in text
 
 
 def test_renderer_planning_fields_and_selected_filter() -> None:
@@ -905,16 +910,17 @@ def test_export_keeps_stage_six_contract_and_writes_business_triggers() -> None:
     text = _fallback_skill_md(skill, "dano-admin-erp-package", plans, None)
     applicable = text.split("## 适用场景", 1)[1].split("##", 1)[0]
     assert "点狮ERP销售订单操作能力录制" not in applicable
-    assert "用户要搜索/筛选销售订单时使用" in text
-    assert "用户要新增销售订单时使用" in text
+    assert "用户要搜索/筛选销售订单时使用" not in text
+    assert "用户要新增销售订单时使用" not in text
     assert "本页面的实际操作流程" not in text
     assert "name: sale-order-operations" in text
-    assert "使用时机" in text
     assert "不要用于" in text
+    assert "等2项业务能力" not in text
     assert "不得把录制样例" not in text
     assert "## 能力关系" in text
     description = text.split("description:", 1)[1].split("\n", 1)[0]
     assert "。不要用于" in description or "不要用于" in description
+    assert "先查再问" in description or "不要写入" in description
 
     operations = _operations_md(skill, plans, None)
     assert "customerId=8" in operations
@@ -941,3 +947,196 @@ def test_dynamic_plan_skips_recording_title_triggers() -> None:
         assert "本页面的实际操作流程" not in route.when_to_use
         assert route.examples
         assert "本页面的实际操作流程" not in route.examples[0].user_request
+
+
+def test_handoff_without_bindings_is_written_into_skill_md() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="可以只查询，也可以查询后再提交",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-handoff-md")
+    assert not any(route.bindings for route in plan.routes if len(route.capability_sequence) > 1)
+    assert any("先查再问" in item for item in plan.composition_notes)
+    assert any("只读" in item and "不得执行写入" in item for item in plan.composition_notes)
+    skill = SimpleNamespace(
+        skill_id="oa.leave",
+        title="请假办理",
+        action="leave",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json")},
+    )
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave",
+         "requires_confirmation": False, "requires_verify": False,
+         "input_schema": {"type": "object", "properties": {}, "required": []}},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave",
+         "requires_confirmation": True, "requires_verify": True,
+         "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    ]
+    text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, None)
+    assert "先查再问" in text
+    assert "阶段" not in text
+    assert "原子能力" not in text
+    assert "录制识别顺序" not in text
+    for marker in HANDBOOK_BAN_MARKERS:
+        assert marker not in text
+
+
+def test_user_playbook_appears_in_skill_relation_and_description() -> None:
+    playbook = "先按客户找到订单，只要看不要改；要审批时先让我指定哪一条"
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    request = SkillGenerationRequest(
+        title="销售订单办理",
+        business_description=playbook,
+        planning_mode=PlanningMode.DYNAMIC,
+        example_requests=["帮我查鲜生的单"],
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-playbook")
+    skill = SimpleNamespace(
+        skill_id="oa.sale",
+        title="销售订单办理",
+        action="sale",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json")},
+    )
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "搜索/筛选销售订单", "script": "search_sale_orders",
+         "requires_confirmation": False, "requires_verify": False,
+         "input_schema": {"type": "object", "properties": {}, "required": []}},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "审批销售订单", "script": "approve_sale_order",
+         "requires_confirmation": True, "requires_verify": True,
+         "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    ]
+    text = _fallback_skill_md(skill, "dano-oa-sale-package", plans, spec)
+    relation = text.split("## 能力关系", 1)[1].split("##", 1)[0]
+    assert playbook in relation
+    description = text.split("description:", 1)[1].split("\n", 1)[0]
+    assert "不要改" in description or "查找" in description or "找到" in description
+    assert "审批" in description
+    assert "用户要搜索/筛选销售订单、用户要查看" not in text
+    issues: list[dict] = []
+    _check_skill(Path("SKILL.md"), text, issues)
+    assert issues == []
+
+
+def test_fallback_skill_md_rejects_handbook_ban_markers() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="可以只查询，也可以查询后再提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-ban")
+    skill = SimpleNamespace(
+        skill_id="oa.leave",
+        title="请假办理",
+        action="leave",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json")},
+    )
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave",
+         "requires_confirmation": False, "requires_verify": False,
+         "input_schema": {"type": "object", "properties": {}, "required": []}},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave",
+         "requires_confirmation": True, "requires_verify": True,
+         "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    ]
+    text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, spec)
+    for marker in HANDBOOK_BAN_MARKERS:
+        assert marker not in text
+    for title in ("适用场景", "不适用场景", "能力关系", "操作路由", "输入", "操作步骤", "工具", "输出", "完成标准", "失败处理", "安全边界"):
+        assert f"## {title}" in text
+    steps = text.split("## 操作步骤", 1)[1].split("##", 1)[0]
+    numbered = [line for line in steps.splitlines() if line[:2].rstrip(".").isdigit() or line[:1].isdigit()]
+    assert steps.count("Done when:") >= 5
+    assert numbered
+    issues: list[dict] = []
+    _check_skill(Path("SKILL.md"), text, issues)
+    assert issues == []
+
+
+def _sale_order_seven_spec() -> FlowSpec:
+    titles = [
+        ("cap_search", "search_sale_orders", "搜索/筛选销售订单", "query"),
+        ("cap_detail", "get_sale_order", "查看销售订单详情", "query"),
+        ("cap_update", "update_sale_order", "修改销售订单", "submit"),
+        ("cap_approve", "approve_sale_order", "审批销售订单", "submit"),
+        ("cap_unapprove", "unapprove_sale_order", "反审销售订单", "submit"),
+        ("cap_create", "create_sale_order", "新建销售订单", "submit"),
+        ("cap_delete", "delete_sale_order", "删除销售订单", "delete"),
+    ]
+    return FlowSpec(
+        tenant="tenant",
+        subsystem="oa",
+        title="销售订单",
+        steps=[FlowStep(step_id=f"s{index + 1}", method="GET" if kind == "query" else "POST", path=f"/erp/{name}")
+               for index, (_cid, name, _title, kind) in enumerate(titles)],
+        capabilities=[
+            _cap(
+                capability_id=cid,
+                name=name,
+                title=title,
+                kind=kind,
+                required=["id"] if kind != "query" else [],
+                confirm=kind != "query",
+                output_props={"records": {"type": "array"}} if kind == "query" else {},
+                input_props={"id": {"type": "string"}, "status": {"type": "string", "x-enum-value-map": {"通过": "1"}, "option_map": {"通过": "1"}}} if kind != "query" else {},
+            )
+            for cid, name, title, kind in titles
+        ],
+        capability_relations=[],
+    )
+
+
+def test_sale_order_handbook_is_an_executable_agent_playbook() -> None:
+    spec = _sale_order_seven_spec()
+    verified = {cap.capability_id for cap in spec.capabilities}
+    playbook = "先按客户或单号找到订单；只看时不要改不要审；要改或审批时先让我指定哪一条再写"
+    request = SkillGenerationRequest(
+        title="销售订单办理",
+        business_description=playbook,
+        planning_mode=PlanningMode.DYNAMIC,
+        example_requests=["帮我查鲜生的单", "只看看", "把那张过一下"],
+    )
+    plan = propose_deterministic_plan(spec, request, verified, "fp-sale")
+    skill = SimpleNamespace(
+        skill_id="admin.erp_sale",
+        title="销售订单办理",
+        action="sale-order",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json"), "capabilities": [
+            {"capability_id": cap.capability_id, "name": cap.name, "title": cap.title, "kind": cap.kind, "input_schema": cap.input_schema}
+            for cap in spec.capabilities
+        ]},
+    )
+    plans = [
+        {
+            "name": cap.name,
+            "capability_id": cap.capability_id,
+            "title": cap.title,
+            "script": cap.name,
+            "requires_confirmation": cap.kind != "query",
+            "requires_verify": cap.kind != "query",
+            "input_schema": cap.input_schema,
+        }
+        for cap in spec.capabilities
+    ]
+    text = _fallback_skill_md(skill, "dano-sale-package", plans, spec)
+    assert playbook in text.split("## 能力关系", 1)[1]
+    assert "7项业务能力" not in text
+    assert "python scripts/search_sale_orders.py" in text
+    assert "先查再问" in text or "指定" in text
+    assert "ask_user_question" in text
+    assert "INPUT_FORMS.md" in text
+    assert "只要查询时不要写入" in text or "不要改" in text
+    for marker in HANDBOOK_BAN_MARKERS:
+        assert marker not in text
+    issues: list[dict] = []
+    _check_skill(Path("SKILL.md"), text, issues)
+    assert issues == []
+    write = next(item for item in plans if item["name"] == "update_sale_order")
+    assert write["input_schema"]["properties"]["status"]["option_map"] == {"通过": "1"}
+    assert write["input_schema"]["properties"]["status"]["x-enum-value-map"] == {"通过": "1"}

@@ -541,8 +541,9 @@ def test_dynamic_plan_keeps_all_mentioned_capabilities() -> None:
     )
     assert checked.ok, checked.errors
     used = {cap_id for route in plan.routes for cap_id in route.capability_sequence}
-    assert set(plan.selected_capability_ids) >= {"cap_query", "cap_submit", "cap_delete"}
+    assert set(plan.selected_capability_ids) == {"cap_query", "cap_option", "cap_submit", "cap_delete"}
     assert "cap_query" in used
+    assert "cap_option" in used
     assert not any(route.route_id.startswith("solo_") for route in plan.routes)
 
 
@@ -618,6 +619,50 @@ async def test_dynamic_lookup_appends_to_write_routes_not_standalone_c3_c1() -> 
     assert query_then_write.step_ids == ["query_before", "submit_selected", "query_after"]
     checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-lookup")
     assert checked.ok, checked.errors
+
+
+def test_dynamic_plan_keeps_all_packed_operations_with_confirmed_query_write() -> None:
+    spec = _three_cap_spec()
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="可以只查询，也可以查询后再提交。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-all",
+    )
+    checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-all")
+    assert checked.ok, checked.errors
+    assert set(plan.selected_capability_ids) == {"cap_query", "cap_option", "cap_submit"}
+    combo = next(route for route in plan.routes if route.route_id == "query_then_write")
+    assert combo.bindings
+    assert any(route.route_id.startswith("op_") for route in plan.routes)
+    assert not any(route.route_id.startswith("solo_") for route in plan.routes)
+    singles = [route for route in plan.routes if len(route.capability_sequence) == 1]
+    assert {route.capability_sequence[0] for route in singles} >= {"cap_query", "cap_option", "cap_submit"}
+
+
+def test_stock_playbook_is_not_treated_as_custom_composition() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="请假办理",
+            business_description="先查找再办理。只要查看时不要写入。没有已确认绑定就先查再问人。",
+            planning_mode=PlanningMode.DYNAMIC,
+        ),
+        VERIFIED,
+        "fp-stock",
+    )
+    assert "本页原子能力" not in plan.composition_summary
+    assert "按用户意图选择一项" not in plan.composition_summary
+    assert "阶段" not in plan.composition_summary
+    assert "原子能力" not in plan.composition_summary
+    assert plan.composition_summary.startswith("本页办理")
+    assert any("先查再问" in item for item in plan.composition_notes)
+    assert any("只读" in item and "不得执行写入" in item for item in plan.composition_notes)
 
 
 @pytest.mark.asyncio
