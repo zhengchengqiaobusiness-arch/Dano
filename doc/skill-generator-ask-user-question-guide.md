@@ -1790,12 +1790,15 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 ## 8. 自包含要求
 
+生成器在**生成期**可以阅读本文档和仓库内其它编写规范。最终给使用者的 Skill **不得携带** `references/generator-guides/`，也不得要求执行前先读生成规范。应保留本文档约束产生的行为，不把生成过程材料写进成品。
+
 每个导出的 Skill 必须包含：
 
 - `references/CONTRACT.json`：机器能力合同；
-- `references/CAPABILITIES.md`：能力和字段说明；
+- `references/CAPABILITIES.md`：业务能力索引（何时用、读/写、输入输出概况）；
+- `references/OPTIONS.md`：候选如何在运行时获得和处理；
 - `references/INPUT_FORMS.md`：逐能力原生表单、控件、默认规则和动态数据源；
-- `references/generator-guides/`：生成时读取的全部项目 Markdown 规范及 INDEX；
+- `references/routes/<route-id>.md`：仅组合路线的逐步方法和完整示例；
 - `scripts/format_list.py`：稳定列表格式化脚本。
 
-执行时必须先读取 `references/generator-guides/INDEX.md` 列出的全部规范，再按所选 capability 的合同和表单执行。
+执行时按 `SKILL.md` 的条件指针读取当前步骤真正需要的那一个文件，不要在开始前读取 references 下的全部文件。

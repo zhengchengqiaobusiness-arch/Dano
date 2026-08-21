@@ -26,7 +26,20 @@ from dano.export.skill_package.validator import _check_skill, validate_skill_pac
 from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
 from dano.onboarding.recording_stage_seven import working_fingerprint
 from dano.onboarding.recording_results import recording_skill_lifecycle
-from dano.onboarding.skill_generation.export import SkillExportError, _route_rows, export_recording_skill
+from dano.onboarding.skill_generation.export import (
+    SkillExportError,
+    _default_render,
+    _route_rows,
+    export_recording_skill,
+)
+from stage8_sale_order_fixture import (
+    SALE_ORDER_TITLES,
+    combination_routes,
+    route_has_human_checkpoint,
+    sale_order_request,
+    sale_order_spec,
+    sale_order_verified_ids,
+)
 from dano.execution.page.flow_spec_core.models import ParamField
 from dano.onboarding.skill_generation.export_view import build_export_view
 from dano.onboarding.skill_generation.models import PlanningMode, SkillGenerationRequest
@@ -1351,3 +1364,81 @@ def test_route_rows_use_business_language() -> None:
     assert combo["composition"] in {"查询后自动带入", "先办理再请你选定", "各步分开收集"}
     if combo["auto_carry"]:
         assert any("自动" in item for item in combo["auto_carry"])
+
+
+def _sale_verified_body(spec) -> dict:
+    payload = spec.model_dump(mode="json")
+    fingerprint = working_fingerprint(spec)
+    verified = sorted(sale_order_verified_ids(spec))
+    return {
+        "title": spec.title or "销售订单",
+        "subsystem": "admin",
+        "action": "erp-372468ecf111",
+        "flow_spec": payload,
+        "machine_verification_status": "verified",
+        "machine_verification_ran": True,
+        "stage_seven_fingerprint": fingerprint,
+        "published": False,
+        "skill_id": "admin.dianshixinxi.com.90.erp.372468ecf111",
+        "stage_seven": {
+            "status": "verified",
+            "working_fingerprint": fingerprint,
+            "working_flow_spec": payload,
+            "verdict": {"callable_capability_ids": verified},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> None:
+    spec = sale_order_spec()
+    request = sale_order_request()
+    request.out_dir = str(tmp_path)
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), working_fingerprint(spec))
+    combos = combination_routes(plan)
+    assert len(spec.capabilities) == 7
+    assert combos
+    assert all(not route.bindings for route in combos)
+    assert all(route_has_human_checkpoint(route) for route in combos)
+    assert not plan.clarification_questions or all(str(item) for item in plan.clarification_questions)
+
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_sale_verified_body(spec),
+        tenant="tenant",
+        request=request,
+        persist=lambda _body: None,
+        publish=_ok_publish,
+        render=_default_render,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "exported", outcome.errors or outcome.clarification_questions
+    root = Path(outcome.export_path)
+    assert root.is_dir()
+    assert (root / "SKILL.md").is_file()
+    assert (root / "references" / "CAPABILITIES.md").is_file()
+    assert (root / "references" / "OPTIONS.md").is_file()
+    assert (root / "references" / "INPUT_FORMS.md").is_file()
+    assert not (root / "references" / "OPERATIONS.md").exists()
+    assert not (root / "references" / "generator-guides").exists()
+    skill_md = (root / "SKILL.md").read_text(encoding="utf-8")
+    assert "## 选择工作流" in skill_md
+    assert "GET /" not in skill_md
+    assert "generator-guides" not in skill_md
+    for route in combos:
+        route_file = root / "references" / "routes" / f"{route.route_id}.md"
+        assert route_file.is_file()
+        text = route_file.read_text(encoding="utf-8")
+        assert "## 完整示例" in text
+        assert "用户原话" in text
+        assert "人工交接" in text or "请" in text
+        assert not route.bindings
+    packed = {
+        str(item.get("name") or "")
+        for item in json.loads((root / "references" / "CONTRACT.json").read_text(encoding="utf-8")).get("capabilities") or []
+    }
+    assert packed >= {name for _cid, name, _title, _kind in SALE_ORDER_TITLES}
+    result = validate_skill_package(root)
+    assert result["ok"], result["issues"]
+    atomic_only = [line for line in skill_md.splitlines() if "不必读取组合路线" in line]
+    assert atomic_only

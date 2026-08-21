@@ -52,13 +52,20 @@ def _cap(
     input_props: dict | None = None,
     output_props: dict | None = None,
     confirm: bool = False,
+    step_ids: list[str] | None = None,
 ) -> FlowCapability:
     properties = input_props or {item: {"type": "string"} for item in (required or [])}
+    members = list(step_ids or [])
     return FlowCapability(
         capability_id=capability_id,
         name=name,
         title=title,
         kind=kind,
+        step_ids=members,
+        nodes=[
+            {"id": f"call_{index + 1}", "type": "call", "step_id": step_id}
+            for index, step_id in enumerate(members)
+        ],
         requires_human_confirm=confirm or kind in {"submit", "delete", "withdraw"},
         input_schema={
             "type": "object",
@@ -92,6 +99,7 @@ def sale_order_spec(*, relations: list[CapabilityRelation] | None = None) -> Flo
                 name=name,
                 title=title,
                 kind=kind,
+                step_ids=[f"s{index + 1}"],
                 required=["id"] if kind != "query" else [],
                 confirm=kind != "query",
                 output_props=(
@@ -116,7 +124,7 @@ def sale_order_spec(*, relations: list[CapabilityRelation] | None = None) -> Flo
                     else {}
                 ),
             )
-            for cid, name, title, kind in SALE_ORDER_TITLES
+            for index, (cid, name, title, kind) in enumerate(SALE_ORDER_TITLES)
         ],
         capability_relations=list(relations or []),
     )
