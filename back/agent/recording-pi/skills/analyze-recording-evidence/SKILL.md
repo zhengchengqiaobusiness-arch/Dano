@@ -14,6 +14,11 @@ through the current recording tools; never construct or publish a FlowSpec direc
 You own business semantics. Python owns capture, evidence, and compilation. The two must
 collaborate, not compete.
 
+- Stage 2 Python captures controls, actions, requests, structural order, and immutable evidence.
+- Stages 3–4 expose that evidence; this Skill decides business meaning and submits grounded ops.
+- Stages 5–6 Python materialize the submitted meaning and enforce deterministic field/request
+  contracts. Do not compensate for missing capture facts by inventing a semantic conclusion.
+
 - You decide capability boundaries, public `name` / `title` / `intent` / `kind`, request roles,
   who supplies a field (`set_param_source` 7-kind contract), requiredness, enum conclusions,
   and interface relations.
@@ -75,6 +80,22 @@ capabilities after the fact.
    steps, copy the exact observed `request_id` (for example `req_86`) into both `anchor_step_id` and
    `request_refs[].step_id`; never invent a `step_` prefix. The sole `execute` reference must equal
    `anchor_step_id`.
+
+### Reconcile every action before finalizing capabilities
+
+Build an action-to-request ledger from `action_request_ledger`, `page_events`, transactions, and
+captured requests before every full plan. Account for every clicked business action that emitted a
+request: publish it as a grounded capability, attach it as a demonstrated support member, or keep
+it explicitly unresolved with the missing fact.
+
+- A standalone inspect/detail action returning the selected business entity is a read capability.
+  A later same-endpoint read opened by Edit is edit hydration/preflight. Keep both request IDs and
+  action/transaction identities; never collapse them because method and path match.
+- Use the concrete clicked menu item, not only the menu trigger. If the ledger shows a request but
+  only a generic menu trigger, keep the business meaning unresolved instead of naming it from the
+  route alone.
+- Before submitting, compare the ledger with the complete capability array. A request used by an
+  earlier accepted capability must not disappear when a later action is analyzed.
 
 ## Use the recording goal as the public boundary
 
@@ -154,6 +175,28 @@ plausible. `category` is not an editable field axis and must not be submitted.
   Python binds the observed label/value map from page evidence; you do not need to transcribe
   every pair if the captured mapping is already complete.
 - Cite the field fact and the control/dictionary fact for conclusions derived from page controls.
+
+### Resolve an unknown field binding in evidence order
+
+For an unbound or unresolved editable control, infer the target only when one candidate remains
+after applying the following order. Cite the exact immutable field evidence ID in every resulting
+name, type, source, and required op.
+
+1. Use exact structural identity: wire alias, form/table root, row identity, action/transaction,
+   option ownership, or a confirmed response/request link.
+2. Use semantic content: the visible label, control kind, candidate request leaves, option response
+   label/value shape, and surrounding form purpose. Require one coherent candidate; a route or
+   `*Id` suffix alone is insufficient.
+3. Use the same recorded value only inside the same page/frame, form or table row, action/transaction,
+   and request surface. Require a unique value occurrence after excluding pagination, readonly
+   echoes, computed results, and unrelated support requests.
+4. Use relative form or table position only as the final fallback, and only within one captured
+   snapshot and one causally matched request. Remove fields already matched by stronger evidence,
+   align the remaining controls and wire leaves one-to-one, and reject the mapping if order or
+   cardinality is ambiguous.
+
+Never use global DOM order, JSON order from another form, the first candidate, or positional
+matching to override a structural/value conflict. Equal-strength candidates stay unresolved.
 - A non-pagination filter on a business list/search execute GET is an optional caller
   input even when the response is an array of objects, and even when a control failed to
   bind. The query string of that execute request *is* the search form. A list-shaped
@@ -199,6 +242,28 @@ plausible. `category` is not an editable field axis and must not be submitted.
 - Numeric coincidence is not a formula. Do not mark `computed` from IDs, status codes, or
   unrelated selects just because three numbers happen to add or multiply. Python only keeps
   sample-proven arithmetic between quantity/money operands.
+
+### Reconcile edit ownership and requiredness by control
+
+For every create/edit surface, build an editable-control inventory from the semantic field facts,
+including untouched text/number/date controls, readonly inner inputs owned by a select/combobox,
+radio groups, switches, dynamic-row controls, and file pickers. Then reconcile it against the
+execute request fields:
+
+- Every enabled editable control must map to one caller input or one caller-overridable upstream
+  value. “The operator did not change it” is never system-ownership evidence.
+- A hydrated field uses `response_binding` only for its initial value. Cite its editable control so
+  caller override remains true. Disabled, genuinely readonly, hidden, computed, and display-only
+  echoes stay system-owned.
+- Compare the inventory with the final exposed fields. Any missing editable control must be mapped
+  by the evidence order above or listed unresolved; do not silently finish with a smaller count.
+
+Build a required-control inventory independently. For every control with an explicit required
+marker, submit `set_param_required` against the exact mapped wire field and cite that marker. An
+explicit optional marker or same-family successful omission may prove optional. An absent marker
+remains `unknown`; never submit optional merely because the recorded request succeeded or the
+operator left the control unchanged. Finish only after every required marker is represented or
+explicitly unresolved.
 
 ## Assign executable sources
 
