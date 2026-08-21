@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from urllib.parse import parse_qs, urlsplit
 
 from dano.execution.page.recording_facts import _preread_dedupe_key
@@ -23,6 +26,54 @@ PAGE = {
     "path": "/app/docs",
     "document_title": "单据",
 }
+
+
+def test_recording_agent_contract_can_run_from_a_fresh_direct_import() -> None:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(__file__).split("tests", 1)[0], env.get("PYTHONPATH", "")])
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from dano.execution.page.flow_spec_core.models import FlowSpec; "
+                "from dano.execution.page.recording_agent_contract import "
+                "_semantic_fact_snapshot; "
+                "assert _semantic_fact_snapshot(FlowSpec())['protocol'] == "
+                "'dano.recording-semantic-facts.v1'"
+            ),
+        ],
+        cwd=str(__file__).split("tests", 1)[0],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_semantic_field_compaction_accepts_non_numeric_timestamps() -> None:
+    from dano.execution.page.recording_agent_contract import _model_visible_field_evidence
+
+    evidence = [
+        {
+            "field_identity_id": "field_name",
+            "label": "Name",
+            "observed_at": "2026-08-21T10:00:00Z",
+        },
+        {
+            "field_identity_id": "field_code",
+            "label": "Code",
+            "observed_at": "not-a-number",
+        },
+    ]
+
+    assert {item["label"] for item in _model_visible_field_evidence(evidence)} == {
+        "Name",
+        "Code",
+    }
 
 
 def _req(

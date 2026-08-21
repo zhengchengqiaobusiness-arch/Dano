@@ -23,6 +23,18 @@ from dano.execution.page.recording_analysis_state import (
 from dano.execution.page.flow_spec_core.fingerprints import (
     _stable_json_hash,
 )
+from dano.execution.page.capability_refs import _step_page_id_from_facts
+from dano.execution.page.flow_client_projection import _client_redact_sensitive
+from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _param_requires_caller_input,
+)
+
+
+def _numeric_order(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _field_semantic_identity(item: dict[str, Any]) -> tuple[Any, ...]:
@@ -65,7 +77,7 @@ def _field_semantic_rank(item: dict[str, Any]) -> tuple[int, ...]:
         int(isinstance(item.get("required_observed"), bool)),
         int(bool(item.get("options") or item.get("enum_source"))),
         int(item.get("value") not in (None, "")),
-        int(float(item.get("observed_at") or 0)),
+        int(_numeric_order(item.get("observed_at"))),
     )
 
 
@@ -102,7 +114,7 @@ def _model_visible_field_evidence(
     return sorted(
         selected,
         key=lambda item: (
-            float(item.get("observed_at") or 0),
+            _numeric_order(item.get("observed_at")),
             str(item.get("evidence_id") or item.get("occurrence_id") or ""),
         ),
     )
@@ -149,7 +161,13 @@ def _action_request_ledger(
             "response_status": request.get("response_status") or request.get("status"),
             "causality_confidence": request.get("causality_confidence"),
         })
-    return sorted(out, key=lambda item: (int(item.get("sequence") or 0), str(item.get("request_id") or "")))
+    return sorted(
+        out,
+        key=lambda item: (
+            _numeric_order(item.get("sequence")),
+            str(item.get("request_id") or ""),
+        ),
+    )
 
 
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
