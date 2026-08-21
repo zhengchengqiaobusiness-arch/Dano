@@ -599,12 +599,92 @@ def _question_spec(name: str, field: dict, *, required: bool) -> dict:
     return question
 
 
-def _input_forms_md(plans: list[dict]) -> str:
-    """Render executable ask_user_question contracts from caller-facing schemas."""
+def _with_toc_if_long(text: str, headings: list[str]) -> str:
+    lines = text.splitlines()
+    if len(lines) < 100 or not headings:
+        return text
+    toc = ["## 目录", ""]
+    toc.extend(f"- [{title}](#{re.sub(r'\\s+', '-', title).strip('-') or 'section'})" for title in headings)
+    toc.append("")
+    body = text
+    marker = "## Global rules" if "## Global rules" in text else (f"## {headings[0]}" if headings else "")
+    if marker and marker in body:
+        prefix, rest = body.split(marker, 1)
+        return prefix + "\n".join(toc) + marker + rest
+    return "\n".join(toc) + "\n" + text
+
+
+_FORM_SPLIT_LINES = 40
+
+
+def _capability_form_section(plan: dict) -> list[str]:
+    schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = set(schema.get("required") or [])
+    caller_properties = {
+        str(name): raw
+        for name, raw in properties.items()
+        if isinstance(raw, dict) and _is_caller_field(raw)
+    }
+    title = _safe_text(plan.get("title") or plan.get("name"))
     lines = [
+        f"## {title} (`{plan.get('name')}`)",
+        "",
+    ]
+    questions = [
+        _question_spec(str(name), raw if isinstance(raw, dict) else {}, required=name in required)
+        for name, raw in caller_properties.items()
+    ]
+    if not questions:
+        lines.extend(["该能力没有调用方字段，不调用 `ask_user_question`。", ""])
+        return lines
+    request = {"title": title, "questions": questions}
+    lines.extend([
+        "原生分组表单请求：",
+        "",
+        "```json",
+        json.dumps(request, ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "| 字段 | Label | 控件 | JSON 类型 | 必填 | 默认值规则 | 选项来源 |",
+        "|---|---|---|---|---|---|---|",
+    ])
+    for name, raw in caller_properties.items():
+        field = raw if isinstance(raw, dict) else {}
+        control = _field_control(str(name), field)
+        source = _option_source(field)
+        options = _field_options(field)
+        if source or options:
+            source_text = "见 `references/OPTIONS.md` 对应行"
+        else:
+            source_text = "自由输入"
+        label_text = _field_label(str(name), field).replace("|", "\\|")
+        default_text = _runtime_default(str(name), field, control).replace("|", "\\|")
+        lines.append(
+            f"| `{name}` | {label_text} | `{control}` | "
+            f"`{field.get('type') or 'string'}` | {'是' if name in required else '否'} | "
+            f"{default_text} | {source_text} |"
+        )
+    lines.extend([
+        "",
+        "回答处理顺序：按 question id 取值 → 语义与类型转换 → schema 校验 → 仅纠正无效字段 → 写操作单独确认 → 执行下一步。",
+        "",
+    ])
+    return lines
+
+
+def _form_file_slug(plan: dict) -> str:
+    raw = str(plan.get("script") or plan.get("name") or plan.get("title") or "form")
+    slug = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]+", "_", raw)).strip("_")
+    return slug or "form"
+
+
+def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
+    """Return INPUT_FORMS.md plus optional long-form files under forms/."""
+    header = [
         "# Native input forms",
         "",
-        "本文件只投影能力契约中的调用方字段，不改变能力、接口或编排。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
+        "本文件只投影能力契约中的调用方字段。当前步骤缺少字段时才阅读对应能力章节。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
         "",
         "## Global rules",
         "",
@@ -613,62 +693,36 @@ def _input_forms_md(plans: list[dict]) -> str:
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
         "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
         "- 写操作整理完参数后，另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
+        "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
+    extras: dict[str, str] = {}
+    body: list[str] = []
+    headings: list[str] = []
     for plan in plans:
-        schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
-        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-        required = set(schema.get("required") or [])
-        caller_properties = {
-            str(name): raw
-            for name, raw in properties.items()
-            if isinstance(raw, dict) and _is_caller_field(raw)
-        }
-        questions = [
-            _question_spec(str(name), raw if isinstance(raw, dict) else {}, required=name in required)
-            for name, raw in caller_properties.items()
-        ]
-        lines.extend([
-            f"## {_safe_text(plan.get('title') or plan.get('name'))} (`{plan.get('name')}`)",
-            "",
-        ])
-        if not questions:
-            lines.extend(["该能力没有调用方字段，不调用 `ask_user_question`。", ""])
-            continue
-        request = {"title": _safe_text(plan.get("title") or plan.get("name")), "questions": questions}
-        lines.extend([
-            "原生分组表单请求：",
-            "",
-            "```json",
-            json.dumps(request, ensure_ascii=False, indent=2),
-            "```",
-            "",
-            "| 字段 | Label | 控件 | JSON 类型 | 必填 | 默认值规则 | 选项来源 |",
-            "|---|---|---|---|---|---|---|",
-        ])
-        for name, raw in caller_properties.items():
-            field = raw if isinstance(raw, dict) else {}
-            control = _field_control(str(name), field)
-            source = _option_source(field)
-            options = _field_options(field)
-            source_text = (
-                f"动态 `{source['method']} {source['endpoint']}` → "
-                f"`{source['resultPath']}` (`{source['labelField']}`/`{source['idField']}`)"
-                if source else ("静态契约候选" if options else "自由输入")
-            )
-            label_text = _field_label(str(name), field).replace("|", "\\|")
-            default_text = _runtime_default(str(name), field, control).replace("|", "\\|")
-            lines.append(
-                f"| `{name}` | {label_text} | `{control}` | "
-                f"`{field.get('type') or 'string'}` | {'是' if name in required else '否'} | "
-                f"{default_text} | {source_text} |"
-            )
-        lines.extend([
-            "",
-            "回答处理顺序：按 question id 取值 → 语义与类型转换 → schema 校验 → 仅纠正无效字段 → 写操作单独确认 → 执行下一步。",
-            "",
-        ])
-    return "\n".join(lines).rstrip() + "\n"
+        title = _safe_text(plan.get("title") or plan.get("name"))
+        if title:
+            headings.append(title)
+        section = _capability_form_section(plan)
+        if "\n".join(section).count("\n") + 1 >= _FORM_SPLIT_LINES:
+            rel = f"forms/{_form_file_slug(plan)}.md"
+            extras[rel] = f"# {title}\n\n当前操作是「{title}」且缺少必填字段时阅读本文件。\n\n" + "\n".join(section).rstrip() + "\n"
+            body.extend([
+                f"## {title}",
+                "",
+                f"当前操作是「{title}」且缺少必填字段时，读取 `references/{rel}`。不要把短表单拆开后的全文再抄回这里。",
+                "",
+            ])
+        else:
+            body.extend(section)
+    text = _with_toc_if_long("\n".join(header + body).rstrip() + "\n", headings)
+    return text, extras
+
+
+def _input_forms_md(plans: list[dict]) -> str:
+    """Render executable ask_user_question contracts from caller-facing schemas."""
+    text, _extras = _input_forms_bundle(plans)
+    return text
 
 
 
@@ -677,44 +731,213 @@ def _required_fields(plan: dict) -> list[str]:
     return [str(name) for name in (schema.get("required") or []) if str(name)]
 
 
-def _route_playbook_steps(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
-    combinations = _combination_routes(skill)
-    by_ref = _plan_by_ref(plans)
+def _script_for(plans: list[dict], cap_id: str) -> str:
+    item = _plan_by_ref(plans).get(str(cap_id or ""))
+    if item:
+        return f"python scripts/{item['script']}.py"
+    return ""
+
+
+def _cross_step_label(route: dict) -> str:
+    bindings = [item for item in (route.get("bindings") or []) if isinstance(item, dict) and item.get("from_output")]
+    if bindings:
+        return "；".join(
+            f"{item.get('from_output')} → {item.get('to_input')}"
+            for item in bindings
+            if item.get("to_input")
+        )
+    if route.get("checkpoints") or any(
+        isinstance(step, dict) and step.get("checkpoint")
+        for step in (route.get("steps") or [])
+    ):
+        return "人工交接，不自动带入"
+    if len(route.get("capability_sequence") or []) > 1:
+        return "各步输入独立，不猜跨步字段"
+    return "不涉及"
+
+
+def _ask_when_label(route: dict) -> str:
+    checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
+    if checks:
+        return "；".join(str(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
+    if route.get("required_user_inputs"):
+        fields = "、".join(f"`{name}`" for name in route.get("required_user_inputs") or [])
+        return f"只补当前步骤缺少的输入：{fields}"
+    return "输入已齐则不问"
+
+
+def _confirm_label(route: dict, plans: list[dict]) -> str:
+    writes = []
+    for cap_id in route.get("capability_sequence") or []:
+        item = _plan_by_ref(plans).get(str(cap_id))
+        if item and (item.get("requires_confirmation") or item.get("requires_verify") is True):
+            writes.append(_safe_text(item.get("title") or item.get("name")))
+    if writes:
+        return "、".join(writes) + " 执行前确认"
+    return "无"
+
+
+def _route_detail_link(route: dict) -> str:
+    sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+    if len(sequence) <= 1:
+        return "原子操作，不必读取组合路线"
+    route_id = _safe_text(route.get("route_id") or "route")
+    return f"[`references/routes/{route_id}.md`](references/routes/{route_id}.md)"
+
+
+def _all_routes(skill) -> list[dict]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    return [item for item in (plan.get("routes") or []) if isinstance(item, dict) and item.get("capability_sequence")]
+
+
+def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines = [
-        "## 操作步骤",
+        "## 选择工作流",
         "",
-        "1. 用用户原话对照「操作路由」和「能力关系」，只选一条路线；只读不得升级成写。",
-        "   Done when: 选出恰好一条。",
-        "2. 若选的是组合或「先查再办」：先跑只读脚本；有绑定则带入；无绑定则停下来问记录。",
-        "   Done when: 下一步输入已齐或用户取消。",
-        "3. 读当前这条的 `references/OPERATIONS.md` 小节和 `references/CONTRACT.json` 的 `input_schema`，补齐字段。",
-        "   Done when: 必填齐或用户取消。",
-        "4. 执行对应 `python scripts/<x>.py --input-json '...'`；写操作加确认。",
-        "   Done when: stdout 最后一行 JSON `status=succeeded` 且 `ok=true`。",
-        "5. 需要验证再跑 `verify_*.py`；列表先 `format_list.py`。",
-        "   Done when: 整条路线结束并按输出格式汇报。",
+        "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。",
+        "",
+        "| 用户意图 | 路线 | 步骤顺序 | 跨步数据 | 何时问人 | 确认点 | 完成条件 | 详情 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    if combinations:
-        scripts: list[str] = []
-        bindings: list[str] = []
-        for route in combinations:
-            for cap_id in route.get("capability_sequence") or []:
-                item = by_ref.get(str(cap_id))
-                if item:
-                    scripts.append(f"`python scripts/{item['script']}.py`")
-                else:
-                    scripts.append(_safe_text(item and item.get("title") or route.get("name")))
-            for item in route.get("bindings") or []:
-                if not isinstance(item, dict) or not item.get("from_output") or not item.get("to_input"):
-                    continue
-                bindings.append(f"{item.get('from_output')} → {item.get('to_input')}")
-        unique_scripts = list(dict.fromkeys(scripts))
-        unique_bindings = list(dict.fromkeys(bindings))
-        extra = "；".join(unique_bindings) if unique_bindings else "没有自动传值，先查再问"
+    for route in _all_routes(skill):
+        titles = [
+            _title_for_plan_ref(plans, str(cap_id)) or str(cap_id)
+            for cap_id in (route.get("capability_sequence") or [])
+        ]
+        lines.append(
+            f"| {_safe_text(route.get('when_to_use') or route.get('name'))} | "
+            f"{_safe_text(route.get('name') or route.get('route_id'))} | "
+            f"{' → '.join(titles)} | {_cross_step_label(route)} | {_ask_when_label(route)} | "
+            f"{_confirm_label(route, plans)} | {_safe_text(route.get('done_when') or '按该行完成条件核对')} | "
+            f"{_route_detail_link(route)} |"
+        )
+    if len(lines) == 6:
+        for item in plans:
+            lines.append(
+                f"| {_intent_for_plan(skill, item)} | {_safe_text(item.get('title') or item.get('name'))} | "
+                f"{_safe_text(item.get('title') or item.get('name'))} | 不涉及 | "
+                f"{_operation_collect_hint(item)} | "
+                f"{'写前确认' if item.get('requires_confirmation') else '无'} | "
+                f"{'已返回业务结果' if not item.get('requires_confirmation') else '已确认并执行成功'} | "
+                f"原子操作，不必读取组合路线 |"
+            )
+    return lines
+
+
+def _composition_rules(skill) -> list[str]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    notes = [
+        _safe_text(item)
+        for item in (plan.get("composition_notes") or [])
+        if _safe_text(item) and not _is_recording_copy(item)
+    ]
+    lines = [
+        "## 组合与交接规则",
+        "",
+        "1. **原子执行**：单一明确意图时只选一条已打包操作，只补齐该操作缺少的输入。",
+        "2. **确认绑定串联**：只有合同列出的绑定可以自动带入；空值、多条但要求单条、类型或基数不符时立即停止自动串联并问人。",
+        "3. **人工交接串联**：没有确认绑定时，先做前一步，再展示候选或请用户补充下一步必要输入；只有用户选择通过校验后才恢复路线。",
+        "",
+    ]
+    if notes:
+        lines.extend(f"- {item}" for item in notes)
+        lines.append("")
+    return lines
+
+
+def _execution_protocol() -> list[str]:
+    return [
+        "## 执行协议",
+        "",
+        "1. 根据用户原话选择唯一工作流；无法唯一选择时先澄清。",
+        "   Done when: 选出恰好一条路线，或已提出一个可回答的澄清问题。",
+        "2. 按该行详情指针读取路线文件和当前步骤必要的输入表单。原子路线不要加载组合路线全文。",
+        "   Done when: 已打开当前路线真正需要的那一个文件。",
+        "3. 只收集当前路线当前步骤缺少的输入。固定值、系统值和已确认绑定不重复询问。",
+        "   Done when: 当前步骤必填已齐，或用户取消。",
+        "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
+        "   Done when: 下一步输入已确认，或已停止并说明原因。",
+        "5. 写操作先展示目标、关键字段和影响，获得确认后再执行对应脚本。",
+        "   Done when: 用户确认后脚本返回成功，或用户拒绝后未执行。",
+        "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
+        "   Done when: 已按完成条件判定成功、失败或未知。",
+        "7. 只报告已确认完成的步骤、未执行步骤和需要用户处理的事项。",
+        "   Done when: 汇报与实际执行一致。",
+        "",
+    ]
+
+
+def _success_failure_section(skill) -> list[str]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    lines = [
+        "## 成功、失败与停止",
+        "",
+        "- 成功：当前路线的完成条件全部成立。",
+        "- 失败：任一步脚本失败，立即停止并报告原因。",
+        "- 未知写入结果：停止并请人处理，不得用同一载荷重试。",
+        "- 用户取消、拒绝确认或候选选择无效：停止并报告未执行。",
+        "- 候选为空或多条但要求单条：停问，不得默认第一条。",
+        "",
+    ]
+    for item in plan.get("safety_rules") or []:
+        text = _safe_text(item)
+        if text and not _is_recording_copy(text):
+            lines.append(f"- {text}")
+    if lines[-1] != "":
+        lines.append("")
+    return lines
+
+
+def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
+    lines = [
+        "## 按需读取资源",
+        "",
+        "- 当前操作缺少必填字段时，读取 `references/INPUT_FORMS.md` 中对应能力的章节。",
+        "- 字段需要动态候选，或候选为空/多条时，读取 `references/OPTIONS.md`。",
+        "- 需要判断某个能力的输入输出边界时，读取 `references/CAPABILITIES.md`。",
+        "- 不要在开始前读取 references 下的全部文件。",
+        "- 若 `INPUT_FORMS.md` 把某个能力拆到 `references/forms/`，只读取当前能力那一份。",
+    ]
+    for route in _combination_routes(skill):
+        route_id = _safe_text(route.get("route_id") or "route")
+        name = _safe_text(route.get("name") or route_id)
+        lines.append(
+            f"- 选择「{name}」路线时，读取 `references/routes/{route_id}.md`；不要为单次原子操作加载它。"
+        )
+    if any(item.get("requires_confirmation") or item.get("requires_verify") for item in plans):
         lines.extend([
-            f"6. 组合路线按 {' → '.join(unique_scripts) or '已规划脚本顺序'} 执行。自动带入：{extra}。",
-            "   Done when: 该组合路线结束并按输出格式汇报。",
+            "",
+            "## 鉴权",
+            "",
+            "- 运行期凭证只来自环境变量或本机会话缓存，不要把历史登录信息写进对话。",
         ])
+    return lines
+
+
+def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
+    plan = _skill_plan_payload(skill)
+    unused = [item for item in (plan.get("unused_capabilities") or []) if isinstance(item, dict)]
+    summary = _safe_text(plan.get("composition_summary") or plan.get("summary"))
+    lines = ["## 适用场景", ""]
+    if summary and not _is_recording_copy(summary):
+        lines.append(f"- {summary}")
+    for route in _all_routes(skill):
+        when = _safe_text(route.get("when_to_use"))
+        if when and not _is_recording_copy(when) and when not in "\n".join(lines):
+            lines.append(f"- {when}")
+    if len(lines) == 2:
+        lines.append("- 用户请求与本页已打包操作一致时使用。")
+    lines.extend(["", "## 不适用场景", ""])
+    lines.append("- 不要用于其它业务对象或未列出的动作。")
+    lines.append("- 只要查询或查看时，不得执行写入。")
+    lines.append("- 没有已确认绑定却假装已经自动带入时停止，先查再问。")
+    lines.append("- 不得编造字段、接口、输出或未确认关系。")
+    for item in unused:
+        title = _safe_text(item.get("title") or item.get("name"))
+        reason = _safe_text(item.get("reason") or "当前业务描述未要求")
+        if title:
+            lines.append(f"- 不要执行「{title}」：{reason}。")
+    lines.append("")
     return lines
 
 
@@ -921,101 +1144,184 @@ def _planning_skill_md_sections(skill, plans: list[dict], spec=None) -> list[str
 def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noqa: ANN001
     del slug
     heading, description = _skill_description(skill, plans, spec)
-    plan = _skill_plan_payload(skill)
-    has_write = any(item.get("requires_confirmation") or item.get("requires_verify") for item in plans)
     skill_name = _skill_frontmatter_name(skill, plans)
     lines = [
         "---",
         f"name: {skill_name}",
         f"description: {json.dumps(description, ensure_ascii=False)}",
-        'version: "1.0.0"',
-        "compatibility: 需要 Python 3 与 httpx。鉴权只来自运行期 DANO_AUTH_HEADERS 或本地会话缓存。",
-        "metadata:",
-        "  domain: recorded-business",
-        "  category: page-operation",
-        f"  risk: {'high' if has_write else 'low'}",
-        "allowed-tools: Bash Read",
         "---",
         "",
         f"# {heading}",
         "",
-        "执行面是 `scripts/` 里的命令，不要另写流程或编造接口。",
-        "",
     ]
-    lines.extend(_planning_skill_md_sections(skill, plans, spec))
-    if lines[-1] != "":
-        lines.append("")
-    lines.extend([
-        "## 输入",
+    lines.extend(_applicable_sections(skill, plans))
+    lines.extend(_workflow_table(skill, plans))
+    lines.append("")
+    lines.extend(_composition_rules(skill))
+    lines.extend(_execution_protocol())
+    lines.extend(_success_failure_section(skill))
+    lines.extend(_on_demand_resources(skill, plans))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
+    lines = [
+        "# 业务能力",
         "",
-        "- 字段名、类型、必填和候选项以 `references/CONTRACT.json` 的 `input_schema` 为准。",
-        "- 已绑定字段不重问，用上一步输出。",
-        "- 其余字段按 `references/INPUT_FORMS.md` 原生调用 `ask_user_question`。",
-        "- 写前确认。",
-    ])
-    lines.extend(["", *_route_playbook_steps(skill, plans)])
-    lines.extend([
+        "只在需要判断某个能力的输入输出边界时阅读本文件。不要把这里当成路线说明书。",
         "",
-        "## 工具",
-        "",
-        "触发后必须用本包脚本执行，不要用浏览器点击或临时脚本代替。",
-        "",
-    ])
+        "| 能力 | 何时使用 | 类型 | 必要输入概况 | 关键输出概况 | 完成判断 | 主要风险 |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for item in plans:
-        extra = f"；验证 `python scripts/verify_{item['script']}.py`" if item.get("requires_verify") else ""
+        write = bool(item.get("requires_confirmation") or item.get("requires_verify"))
+        required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无调用方必填"
+        risk = "写入前必须确认；结果未知不得重试" if write else "只读，不得升级成写入"
+        done = "已确认并执行成功" if write else "已返回可核对的业务结果"
         lines.append(
-            f"- {_safe_text(item.get('title') or item['name'])}：`python scripts/{item['script']}.py`{extra}"
+            f"| {_safe_text(item.get('title') or item.get('name'))} | {_intent_for_plan(skill, item)} | "
+            f"{'变更' if write else '只读'} | {required} | 业务结果 | {done} | {risk} |"
         )
-    lines.extend([
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _options_md(plans: list[dict]) -> str:
+    lines = [
+        "# 候选项",
         "",
-        "## 输出",
+        "说明候选如何在运行时获得和处理。不要把历史样本当成默认值，也不要在多条结果时默认第一条。",
         "",
-        "- 查询：返回业务结果；数组用 Markdown 表格，无数据时写“无数据”。",
-        "- 写入：报告已执行的操作、关键业务字段和脚本结果；不要把内部 ID 擅自命名为业务编号。",
-        "- 组合路线：按步骤汇报每步结果，最后给整条路线的结论。",
-        "",
-        "## 完成标准",
-        "",
-        "- 已走用户意图对应的那条路线，没有多执行未要求的写入。",
-        "- 查询已返回业务结果；写入已确认并执行成功。",
-        "- 仅当操作路由标明写后验证时，还须验证通过。",
-        "- 准确区分成功、待确认、取消和失败。",
-        "",
-        "## 失败处理",
-        "",
-        "- 信息不足：停止并追问缺失字段，不得编造。",
-        "- 用户取消或写操作未确认：立即停止，不得执行。",
-        "- 脚本或验证失败：立即停止并报告原因；写结果不明时不得重试同一载荷。",
-        "- 权限或鉴权失败：停止并说明需要运行期登录凭证，不得伪造身份。",
-        "- 用户要求的组合没有已确认绑定：先做查找，再请用户指定记录，不要假装已经串联。",
-        "",
-        "## 安全边界",
-        "",
-    ])
-    safety = [
-        "不输出 token、cookie、密码或其他凭证。",
-        "不跳过写前确认；有写后验证时不得跳过验证，不绕过权限。",
-        "不发明字段、接口或未确认关系，不把未规划组合当成已确认编排。",
+        "| 字段/用途 | 候选类型 | 来源 | 何时加载 | 空结果 | 多结果 | 用户自定义是否允许 |",
+        "|---|---|---|---|---|---|---|",
     ]
-    seen = set(safety)
-    lines.extend(f"- {item}" for item in safety)
-    for item in (plan.get("safety_rules") or []):
-        text = _safe_text(item)
-        if not text or _is_recording_copy(text) or text in seen:
-            continue
-        if ("确认" in text and any("确认" in existing for existing in seen)) or (
-            any(token in text for token in ("token", "cookie", "密码", "凭证"))
-            and any(token in existing for existing in seen for token in ("token", "凭证", "cookie", "密码"))
-        ):
-            continue
-        seen.add(text)
-        lines.append(f"- {text}")
+    rows = 0
+    for item in plans:
+        schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for name, raw in properties.items():
+            if not isinstance(raw, dict) or not _is_caller_field(raw):
+                continue
+            source = _option_source(raw)
+            options = _field_options(raw)
+            if not source and not options:
+                continue
+            kind = "动态" if source else "固定枚举"
+            origin = (
+                f"`{source.get('method') or 'GET'} {source.get('endpoint')}`"
+                if source
+                else "、".join(_safe_text(option.get("label") or option.get("id")) for option in options[:8] if isinstance(option, dict))
+            )
+            lines.append(
+                f"| `{name}` / {_safe_text(item.get('title') or item.get('name'))} | {kind} | {origin or '契约候选'} | "
+                f"{'需要选择该字段时' if source else '读取本表即可'} | 按指南允许自由输入、重试或停止 | "
+                f"停问，不得默认第一条 | {'允许一个自定义其他' if any(str((option or {}).get('label') or '') in {'其他', 'Other'} for option in options if isinstance(option, dict)) else '否'} |"
+            )
+            rows += 1
+    if not rows:
+        lines.append("| （当前没有独立候选字段） | — | 运行时按输入表单收集 | 缺字段时 | 停问 | 停问 | 视字段而定 |")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _route_file_md(route: dict, plans: list[dict]) -> str:
+    name = _safe_text(route.get("name") or route.get("route_id"))
+    sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+    steps = [item for item in (route.get("steps") or []) if isinstance(item, dict)]
+    checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
+    example = (route.get("examples") or [{}])[0] if route.get("examples") else {}
+    if not isinstance(example, dict):
+        example = {}
+    lines = [
+        f"# {name}",
+        "",
+        "## 何时选择",
+        "",
+        _safe_text(route.get("when_to_use") or name),
+        "",
+        "## 前置条件",
+        "",
+    ]
+    preconditions = [str(item) for item in (route.get("preconditions") or []) if str(item)]
+    if preconditions:
+        lines.extend(f"- {item}" for item in preconditions)
+    else:
+        lines.append("- 用户意图与本路线一致，且所需能力都可调用。")
     lines.extend([
         "",
-        "## 资源",
+        "## 执行步骤",
         "",
-        "触发后阅读：当前操作的 OPERATIONS 小节；CONTRACT 里该操作 input_schema。",
-        "按需阅读：INPUT_FORMS.md；CONTRACT 全文。",
+        "| 步骤 | 已打包操作 | 输入来源 | 执行后检查 | 下一步条件 |",
+        "|---|---|---|---|---|",
+    ])
+    if steps:
+        for index, step in enumerate(steps):
+            cap_id = str(step.get("capability_id") or "")
+            title = _title_for_plan_ref(plans, cap_id) or cap_id
+            script = _script_for(plans, cap_id)
+            sources = "；".join(
+                f"{item.get('field')}←{item.get('source')}"
+                for item in (step.get("input_sources") or [])
+                if isinstance(item, dict) and item.get("field")
+            ) or "当前步骤缺少的调用方输入"
+            nxt = "继续下一步" if index + 1 < len(steps) else "按完成条件结束"
+            if step.get("checkpoint"):
+                nxt = "在交接点停问，用户选定后再继续"
+            lines.append(
+                f"| {step.get('step_key') or index + 1} | {title} `{script}` | {sources} | "
+                f"{_safe_text(step.get('done_when') or '结果可核对')} | {nxt} |"
+            )
+    else:
+        for index, cap_id in enumerate(sequence):
+            title = _title_for_plan_ref(plans, cap_id) or cap_id
+            script = _script_for(plans, cap_id)
+            lines.append(
+                f"| {index + 1} | {title} `{script}` | 当前步骤缺少的调用方输入 | 结果可核对 | "
+                f"{'继续下一步' if index + 1 < len(sequence) else '按完成条件结束'} |"
+            )
+    lines.extend(["", "## 输入来源与交接点", ""])
+    if route.get("bindings"):
+        for binding in route.get("bindings") or []:
+            if not isinstance(binding, dict):
+                continue
+            lines.append(
+                f"- 已确认绑定：{_title_for_plan_ref(plans, str(binding.get('from_capability') or ''))} 的 "
+                f"`{binding.get('from_output')}` → {_title_for_plan_ref(plans, str(binding.get('to_capability') or ''))} 的 "
+                f"`{binding.get('to_input')}`。空值、超出基数或类型不符时停止自动串联。"
+            )
+    if checks:
+        for item in checks:
+            lines.append(
+                f"- 人工交接：{item.get('prompt') or '请用户选定下一步目标'}。"
+                f"取消时{item.get('on_cancel') or '停止并报告未执行'}。"
+            )
+    if not route.get("bindings") and not checks:
+        lines.append("- 各步输入独立收集，不猜测跨步字段。")
+    lines.extend([
+        "",
+        "## 变更确认",
+        "",
+        f"- {_confirm_label(route, plans)}。",
+        "",
+        "## 完成验证",
+        "",
+        f"- {_safe_text(route.get('done_when') or '路线步骤均已按完成条件核对')}。",
+        "",
+        "## 失败与停止",
+        "",
+        f"- {_safe_text(route.get('failure_behavior') or '失败、未知结果或用户取消时停止，不得静默重试')}。",
+        "",
+        "## 完整示例",
+        "",
+        f"- 用户原话：{_safe_text(example.get('user_request') or '请按本路线办理，必要输入用 <字段> 占位')}",
+        f"- 选择路线：{name}",
+        f"- 步骤：{' → '.join(_title_for_plan_ref(plans, cap_id) or cap_id for cap_id in sequence)}",
+        f"- 输入来源：{_cross_step_label(route)}",
+        f"- 问人：{_ask_when_label(route)}",
+        f"- 确认：{_confirm_label(route, plans)}",
+        f"- 完成：{_safe_text(example.get('done_when') or route.get('done_when') or '按完成条件核对')}",
+        f"- 取消/空结果/失败：{_safe_text(example.get('on_cancel') or '停止并报告未执行')}；"
+        f"{_safe_text(example.get('on_empty_or_ambiguous') or '候选为空或多条时停问')}；"
+        f"{_safe_text(example.get('on_unknown_write_result') or '写入结果未知时停止且不重试')}。",
+        "",
     ])
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1128,70 +1434,6 @@ def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
             lines.extend(option_lines)
         else:
             lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
-    lines = [f"# {_safe_text(skill.title or skill.skill_id)} capabilities", ""]
-    for plan in plans:
-        schema = plan.get("input_schema") or {}
-        properties = schema.get("properties") or {}
-        required = set(schema.get("required") or [])
-        lines.extend([
-            f"## {_safe_text(plan['title'])} (`{plan['name']}`)", "",
-            f"- Script: `scripts/{plan['script']}.py`",
-            f"- Verify script: `scripts/verify_{plan['script']}.py`",
-            f"- Requires confirmation: `{str(plan['requires_confirmation']).lower()}`",
-            f"- Requires verify: `{str(plan['requires_verify']).lower()}`", "",
-            "| Field | Type | Required | Description |", "|---|---|---|---|",
-        ])
-        if not properties:
-            lines.append("| (none) | object | no | No caller input |")
-        for name, raw in properties.items():
-            field = raw if isinstance(raw, dict) else {}
-            description = _safe_text(field.get("description") or field.get("title") or name).replace("|", "\\|")
-            lines.append(
-                f"| `{name}` | `{field.get('type') or 'string'}` | "
-                f"{'yes' if name in required else 'no'} | {description} |"
-            )
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _options_md(plans: list[dict]) -> str:
-    lines = ["# Capability options", ""]
-    found = False
-    for plan in plans:
-        for name, raw in ((plan.get("input_schema") or {}).get("properties") or {}).items():
-            field = raw if isinstance(raw, dict) else {}
-            live_source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
-            values = list(field.get("enum") or [])
-            labels = dict(field.get("x-enum-value-map") or {})
-            if not live_source and not values and not labels:
-                continue
-            found = True
-            lines.extend([f"## `{plan['name']}.{name}`", ""])
-            if isinstance(live_source, dict) and live_source:
-                method = str(live_source.get("source_method") or "GET").upper()
-                endpoint = str(live_source.get("source_url") or "")
-                value_key = str(live_source.get("value_key") or "")
-                label_key = str(live_source.get("label_key") or "")
-                lines.extend([
-                    f"- Live source: `{method} {endpoint}`",
-                    f"- Mapping: display `{label_key}` -> wire `{value_key}`",
-                    "- The script calls this source at runtime. Recorded options below are evidence only, not a fixed enum.",
-                    "",
-                ])
-            lines.extend(["| Label | Value |", "|---|---|"])
-            if labels:
-                lines.extend(f"| {_safe_text(label)} | `{value}` |" for label, value in labels.items())
-            elif values:
-                lines.extend(f"| `{value}` | `{value}` |" for value in values)
-            else:
-                lines.append("| (runtime lookup) | (runtime lookup) |")
-            lines.append("")
-    if not found:
-        lines.append("No static enum options are declared. Do not invent candidates.")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -2041,8 +2283,19 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     references = folder / "references"
     references.mkdir(parents=True, exist_ok=True)
     _write_text(folder / "SKILL.md", skill_md)
-    _write_text(references / "OPERATIONS.md", _operations_md(skill, plans, spec))
-    _write_text(references / "INPUT_FORMS.md", _input_forms_md(plans))
+    _write_text(references / "CAPABILITIES.md", _capabilities_md(skill, plans))
+    _write_text(references / "OPTIONS.md", _options_md(plans))
+    forms_text, form_files = _input_forms_bundle(plans)
+    _write_text(references / "INPUT_FORMS.md", forms_text)
+    for rel, content in form_files.items():
+        _write_text(references / rel, content)
+    routes_dir = references / "routes"
+    for route in _combination_routes(skill):
+        route_id = _safe_text(route.get("route_id") or "").strip()
+        if not route_id:
+            continue
+        routes_dir.mkdir(parents=True, exist_ok=True)
+        _write_text(routes_dir / f"{route_id}.md", _route_file_md(route, plans))
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
@@ -2118,7 +2371,6 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
                 skill,
             )
             _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, spec))
-            _write_text(stage / "references" / "OPERATIONS.md", _operations_md(skill, plans, spec))
             fallback_used = True
             validation = validate_skill_package(stage)
         if not validation["ok"]:

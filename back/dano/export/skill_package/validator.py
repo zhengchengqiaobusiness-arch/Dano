@@ -14,10 +14,20 @@ from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
 
 
 _REQUIRED_SKILL_SECTIONS = (
+    "适用场景", "不适用场景", "选择工作流", "组合与交接规则",
+    "执行协议", "成功、失败与停止", "按需读取资源",
+)
+_LEGACY_SKILL_SECTIONS = (
     "适用场景", "不适用场景", "能力关系", "操作路由", "输入",
     "操作步骤", "工具", "输出", "完成标准", "失败处理", "安全边界",
 )
-_WORKFLOW_SECTION = "操作步骤"
+_WORKFLOW_SECTION = "执行协议"
+_PROCESS_LEAK_MARKERS = (
+    "generator-guides",
+    "阶段1", "阶段 1", "阶段6", "阶段 6", "阶段7", "阶段 7", "阶段8", "阶段 8",
+    "FlowSpec", "fingerprint", "unverified",
+    "verification_id", "录制识别顺序",
+)
 _VERIFICATION_ID_RE = re.compile(
     r"\bverification_id\s*[:=]?\s*[`\[]?(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
     re.I,
@@ -73,15 +83,29 @@ def _check_skill(path: Path, text: str, issues: list[dict]) -> None:
     for key in ("name", "description"):
         if not isinstance(metadata.get(key), str) or not metadata[key].strip():
             issues.append(_issue("frontmatter", f"SKILL.md frontmatter requires non-empty {key}", path))
-    for title in _REQUIRED_SKILL_SECTIONS:
+    if "version" in metadata or "compatibility" in metadata:
+        issues.append(_issue("frontmatter", "SKILL.md frontmatter must omit version and compatibility", path))
+    if metadata.get("disable-model-invocation") is False:
+        issues.append(_issue("frontmatter", "do not emit disable-model-invocation: false", path))
+    required = _REQUIRED_SKILL_SECTIONS
+    if _section(text, "操作路由") and not _section(text, "选择工作流"):
+        required = _LEGACY_SKILL_SECTIONS
+    for title in required:
         if not _section(text, title):
             issues.append(_issue("skill_section", f"SKILL.md requires section: {title}", path))
-    steps = _section(text, _WORKFLOW_SECTION)
+    workflow = _WORKFLOW_SECTION if _section(text, _WORKFLOW_SECTION) else "操作步骤"
+    steps = _section(text, workflow)
     step_markers = re.findall(r"(?m)^(?:###\s+|\s*\d+[.)]\s+)", steps)
-    done_when = re.findall(r"(?im)\bDone\s+when\s*:", steps)
+    done_when = re.findall(r"(?im)\bDone\s+when\s*:|完成后检查\s*[：:]", steps)
     if steps and (not done_when or len(done_when) < max(1, len(step_markers))):
         issues.append(_issue("done_when", "every documented step must include `Done when:`", path))
+    if re.search(r"(必须|请)?先?(阅读|读取).{0,16}全部.{0,12}(generator-guides|references\s*下所有)", text, re.I):
+        issues.append(_issue("progressive_disclosure", "SKILL.md must not unconditionally load all references", path))
     _check_handbook_bans(path, text, issues)
+    for marker in _PROCESS_LEAK_MARKERS:
+        if marker and marker in text:
+            issues.append(_issue("process_leak", f"consumer handbook must not contain: {marker}", path))
+            break
 
 
 def _doc_intro(text: str) -> str:
@@ -225,6 +249,38 @@ def _script_slug(value: str) -> str:
     return slug
 
 
+def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
+    contract_path = root / "references" / "CONTRACT.json"
+    routes_dir = root / "references" / "routes"
+    expected: set[str] = set()
+    if contract_path.is_file():
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            contract = {}
+        for route in contract.get("routes") or []:
+            if not isinstance(route, dict):
+                continue
+            sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+            route_id = str(route.get("route_id") or "").strip()
+            if len(sequence) > 1 and route_id:
+                expected.add(f"{route_id}.md")
+    existing = {path.name for path in routes_dir.glob("*.md")} if routes_dir.is_dir() else set()
+    for name in sorted(expected - existing):
+        issues.append(_issue("missing_route_file", f"missing route file for combination: {name}", routes_dir / name))
+    for name in sorted(existing - expected):
+        issues.append(_issue("extra_route_file", f"route file has no matching combination contract: {name}", routes_dir / name))
+    if skill_text:
+        for name in expected:
+            pointer = f"references/routes/{name}"
+            if pointer not in skill_text and f"routes/{name}" not in skill_text:
+                issues.append(_issue(
+                    "route_pointer",
+                    f"SKILL.md must point directly at {pointer}",
+                    Path("SKILL.md"),
+                ))
+
+
 def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
     """When CONTRACT has a stage-8 plan, SKILL.md and packed scripts must match it.
 
@@ -303,19 +359,21 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
                     f"SKILL.md must not reference unused script scripts/{hint}.py",
                     Path("SKILL.md"),
                 ))
+    capabilities_text = ""
+    capabilities_path = root / "references" / "CAPABILITIES.md"
+    if capabilities_path.is_file():
+        capabilities_text = capabilities_path.read_text(encoding="utf-8")
+    handbook = f"{skill_text}\n{capabilities_text}"
     for item in contract.get("capabilities") or []:
         if not isinstance(item, dict):
             continue
-        labels = [
-            str(item.get("name") or "").strip(),
-            str(item.get("title") or "").strip(),
-            Path(str(item.get("script") or "")).stem,
-        ]
-        labels = [label for label in labels if label]
-        if labels and skill_text and not any(label in skill_text for label in labels):
+        title = str(item.get("title") or "").strip()
+        name = str(item.get("name") or "").strip()
+        business = title or name
+        if business and handbook and business not in handbook:
             issues.append(_issue(
                 "planning_operation_mismatch",
-                f"SKILL.md is missing packed operation {labels[0]}",
+                f"handbook is missing packed operation {business}",
                 Path("SKILL.md"),
             ))
     if selected:
@@ -461,11 +519,14 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         return {"ok": False, "issues": [_issue("missing_package", "package directory does not exist", root)]}
     skill_path = root / "SKILL.md"
     operations_path = root / "references" / "OPERATIONS.md"
+    capabilities_path = root / "references" / "CAPABILITIES.md"
+    options_path = root / "references" / "OPTIONS.md"
     reference_path = root / "reference.md"
     skill = _read(skill_path, issues, missing_as_warnings=missing_as_warnings)
+    new_layout = capabilities_path.is_file()
     operations = _read(operations_path, issues, missing_as_warnings=True) if operations_path.is_file() else ""
     reference = ""
-    if not operations and reference_path.is_file():
+    if not operations and not new_layout and reference_path.is_file():
         reference = _read(reference_path, issues, missing_as_warnings=missing_as_warnings)
     if skill:
         _check_skill(skill_path, skill, issues)
@@ -476,21 +537,41 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         forms = _read(forms_path, issues, missing_as_warnings=True)
         if forms:
             _check_handbook_bans(forms_path, _doc_intro(forms), issues)
-    chain_source = operations_path if operations else reference_path
-    chain_text = operations or reference
-    if chain_text:
-        _check_reference(
-            chain_source,
-            chain_text,
-            issues,
-            missing_as_warnings=missing_as_warnings,
-        )
-    elif not missing_as_warnings:
-        issues.append(_issue(
-            "missing_file",
-            "missing references/OPERATIONS.md",
-            operations_path,
-        ))
+            if forms.count("\n") >= 100 and "## 目录" not in forms and "/forms/" not in forms:
+                issues.append(_issue("long_reference", "INPUT_FORMS.md over 100 lines needs a TOC or split", forms_path))
+    if new_layout:
+        for required in (capabilities_path, options_path, forms_path):
+            if not required.is_file():
+                issues.append(_issue("missing_file", f"missing required file: {required.name}", required))
+            else:
+                leaked = _read(required, issues, missing_as_warnings=True)
+                for marker in _PROCESS_LEAK_MARKERS:
+                    if marker and marker in leaked:
+                        issues.append(_issue("process_leak", f"{required.name} must not contain: {marker}", required))
+                        break
+        if operations_path.is_file():
+            issues.append(_issue(
+                "duplicate_layout",
+                "new packages must not generate OPERATIONS.md alongside CAPABILITIES.md",
+                operations_path,
+            ))
+        _check_route_files(root, skill, issues)
+    else:
+        chain_source = operations_path if operations else reference_path
+        chain_text = operations or reference
+        if chain_text:
+            _check_reference(
+                chain_source,
+                chain_text,
+                issues,
+                missing_as_warnings=missing_as_warnings,
+            )
+        elif not missing_as_warnings:
+            issues.append(_issue(
+                "missing_file",
+                "missing references/OPERATIONS.md",
+                operations_path,
+            ))
     if (root / "references" / "generator-guides").exists():
         issues.append(_issue(
             "generator_guides_leaked",

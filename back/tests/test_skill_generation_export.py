@@ -10,11 +10,15 @@ from uuid import uuid4
 import pytest
 
 from dano.export.skill_package.renderer import (
+    _capabilities_md,
     _capability_plans,
     _contract_planning_fields,
     _fallback_skill_md,
     _filter_plans_for_export,
-    _operations_md,
+    _input_forms_bundle,
+    _input_forms_md,
+    _options_md,
+    _route_file_md,
     _skill_plan_payload,
     package_slug,
 )
@@ -104,11 +108,16 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
     ]
     skill_md = _fallback_skill_md(skill, package_slug(skill.skill_id), plans, None)
     (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
-    operations = (
-        "## Business hard rules\n\n- none\n\n## Fallback browser steps\n\n- none\n\n"
-        "## API chain\n\n- GET /oa/leave/page verification_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\n"
-    )
-    (references / "OPERATIONS.md").write_text(operations, encoding="utf-8")
+    (references / "CAPABILITIES.md").write_text(_capabilities_md(skill, plans), encoding="utf-8")
+    (references / "OPTIONS.md").write_text(_options_md(plans), encoding="utf-8")
+    (references / "INPUT_FORMS.md").write_text("# Native input forms\n\n## Global rules\n\n- ask_user_question\n", encoding="utf-8")
+    routes_dir = references / "routes"
+    for route in plan.get("routes") or []:
+        sequence = route.get("capability_sequence") or []
+        route_id = str(route.get("route_id") or "").strip()
+        if len(sequence) > 1 and route_id:
+            routes_dir.mkdir(parents=True, exist_ok=True)
+            (routes_dir / f"{route_id}.md").write_text(_route_file_md(route, plans), encoding="utf-8")
     contract = {
         "protocol": "dano.skill_package.contract.v1",
         "skill": {"id": skill.skill_id, "name": package_slug(skill.skill_id)},
@@ -116,6 +125,7 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
             {
                 "name": item["name"],
                 "capability_id": item["capability_id"],
+                "title": item.get("title") or item["name"],
                 "script": f"scripts/{item['script']}.py",
                 "verify_script": f"scripts/verify_{item['script']}.py",
             }
@@ -399,7 +409,7 @@ async def test_stale_package_is_rewritten_instead_of_idempotent(tmp_path: Path) 
     assert second.idempotent is False
     text = (Path(second.export_path) / "SKILL.md").read_text(encoding="utf-8")
     assert "## 适用场景" in text
-    assert "query_leave" in text
+    assert "查询待办" in text or "提交请假" in text or "query_leave" in text
 
 
 @pytest.mark.asyncio
@@ -697,32 +707,20 @@ def test_generated_skill_contains_single_and_multi_capability_examples() -> None
          "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     ]
     text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, None)
-    assert "## 适用场景" in text
-    assert "## 不适用场景" in text
-    assert "## 能力关系" in text
-    assert "## 操作路由" in text
-    assert "## 输入" in text
-    assert "## 操作步骤" in text
-    assert "## 工具" in text
-    assert "## 输出" in text
-    assert "## 完成标准" in text
-    assert "## 失败处理" in text
-    assert "## 安全边界" in text
+    for title in ("适用场景", "不适用场景", "选择工作流", "组合与交接规则", "执行协议", "成功、失败与停止", "按需读取资源"):
+        assert f"## {title}" in text
     assert "generator-guides" not in text
     assert "solo_" not in text
     assert "查询待办" in text
     assert "提交请假" in text
-    assert "python scripts/query_leave.py" in text
-    assert "python scripts/submit_leave.py" in text
-    assert "查询后" in text or "组合路线" in text
+    assert "references/routes/" in text
+    assert "查询后" in text or "人工交接" in text or "确认绑定" in text
     issues: list[dict] = []
     _check_skill(Path("SKILL.md"), text, issues)
     assert issues == []
     assert any(len(route.capability_sequence) > 1 for route in plan.routes)
-    assert "已确认绑定" in text or "组合路线" in text
     assert "规划依据（用户业务描述）" not in text
-    assert "组合约定：" in text
-    assert "有绑定则带入" in text or "无绑定则停下来问记录" in text
+    assert "组合约定：" in text or "人工交接" in text
     assert "阶段" not in text
     assert "原子能力" not in text
     assert "录制识别顺序" not in text
@@ -919,14 +917,12 @@ def test_export_keeps_stage_six_contract_and_writes_business_triggers() -> None:
     assert "不要用于" in text
     assert "等2项业务能力" not in text
     assert "不得把录制样例" not in text
-    assert "## 能力关系" in text
+    assert "## 选择工作流" in text
     description = text.split("description:", 1)[1].split("\n", 1)[0]
     assert "。不要用于" in description or "不要用于" in description
     assert "先查再问" in description or "不要写入" in description
-
-    operations = _operations_md(skill, plans, None)
-    assert "customerId=8" in operations
-    assert "页面操作" not in operations.split("\n", 1)[0]
+    assert "customerId=8" not in text
+    assert "117105" not in text
 
 
 def test_dynamic_plan_skips_recording_title_triggers() -> None:
@@ -1012,8 +1008,8 @@ def test_user_playbook_appears_in_skill_relation_and_description() -> None:
          "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     ]
     text = _fallback_skill_md(skill, "dano-oa-sale-package", plans, spec)
-    relation = text.split("## 能力关系", 1)[1].split("##", 1)[0]
-    assert playbook in relation
+    relation = text.split("## 适用场景", 1)[1].split("## 选择工作流", 1)[0]
+    assert playbook in relation or playbook in text.split("## 组合与交接规则", 1)[1]
     description = text.split("description:", 1)[1].split("\n", 1)[0]
     assert "不要改" in description or "查找" in description or "找到" in description
     assert "审批" in description
@@ -1049,9 +1045,9 @@ def test_fallback_skill_md_rejects_handbook_ban_markers() -> None:
     text = _fallback_skill_md(skill, "dano-oa-leave-package", plans, spec)
     for marker in HANDBOOK_BAN_MARKERS:
         assert marker not in text
-    for title in ("适用场景", "不适用场景", "能力关系", "操作路由", "输入", "操作步骤", "工具", "输出", "完成标准", "失败处理", "安全边界"):
+    for title in ("适用场景", "不适用场景", "选择工作流", "组合与交接规则", "执行协议", "成功、失败与停止", "按需读取资源"):
         assert f"## {title}" in text
-    steps = text.split("## 操作步骤", 1)[1].split("##", 1)[0]
+    steps = text.split("## 执行协议", 1)[1].split("##", 1)[0]
     numbered = [line for line in steps.splitlines() if line[:2].rstrip(".").isdigit() or line[:1].isdigit()]
     assert steps.count("Done when:") >= 5
     assert numbered
@@ -1127,11 +1123,10 @@ def test_sale_order_handbook_is_an_executable_agent_playbook() -> None:
         for cap in spec.capabilities
     ]
     text = _fallback_skill_md(skill, "dano-sale-package", plans, spec)
-    assert playbook in text.split("## 能力关系", 1)[1]
+    assert playbook in text
     assert "7项业务能力" not in text
-    assert "python scripts/search_sale_orders.py" in text
-    assert "先查再问" in text or "指定" in text
-    assert "ask_user_question" in text
+    assert "搜索/筛选销售订单" in text
+    assert "先查再问" in text or "指定" in text or "人工交接" in text
     assert "INPUT_FORMS.md" in text
     assert "只要查询时不要写入" in text or "不要改" in text
     for marker in HANDBOOK_BAN_MARKERS:
@@ -1142,3 +1137,160 @@ def test_sale_order_handbook_is_an_executable_agent_playbook() -> None:
     write = next(item for item in plans if item["name"] == "update_sale_order")
     assert write["input_schema"]["properties"]["status"]["option_map"] == {"通过": "1"}
     assert write["input_schema"]["properties"]["status"]["x-enum-value-map"] == {"通过": "1"}
+
+
+def test_two_combination_routes_render_as_isolated_files() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="可以先查询再提交，也可以先查选项再提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-two")
+    combos = [route for route in plan.routes if len(route.capability_sequence) > 1]
+    assert len(combos) >= 2
+    skill = SimpleNamespace(
+        skill_id="oa.leave",
+        title="请假办理",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json")},
+    )
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave"},
+        {"name": "query_leave_options", "capability_id": "cap_option", "title": "查询请假选项", "script": "query_leave_options"},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave", "requires_confirmation": True},
+    ]
+    texts = [_route_file_md(route.model_dump(mode="json"), plans) for route in combos[:2]]
+    assert texts[0] != texts[1]
+    assert all("## 完整示例" in text for text in texts)
+    skill_md = _fallback_skill_md(skill, "pkg", plans, spec)
+    assert all(f"references/routes/{route.route_id}.md" in skill_md for route in combos[:2])
+    assert skill_md.count("## 选择工作流") == 1
+
+
+def test_new_package_files_and_purity() -> None:
+    spec = _three_cap_spec(confirmed_query_submit=False, confirmed_option_submit=False)
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="先查询待办再提交请假。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-pure")
+    skill = SimpleNamespace(
+        skill_id="oa.leave",
+        title="请假办理",
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        api_request={"_skill_plan": plan.model_dump(mode="json")},
+    )
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave",
+         "requires_confirmation": False, "input_schema": {"type": "object", "properties": {}, "required": []}},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave",
+         "requires_confirmation": True,
+         "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    ]
+    skill_md = _fallback_skill_md(skill, "pkg", plans, spec)
+    capabilities = _capabilities_md(skill, plans)
+    options = _options_md(plans)
+    combo = next(route for route in plan.routes if len(route.capability_sequence) > 1)
+    route_md = _route_file_md(combo.model_dump(mode="json"), plans)
+    assert "CAPABILITIES.md" in skill_md
+    assert "OPTIONS.md" in skill_md
+    assert "INPUT_FORMS.md" in skill_md
+    assert "人工交接" in skill_md and "人工交接" in route_md
+    assert "用户原话" in route_md
+    assert "generator-guides" not in skill_md
+    assert "阶段 8" not in skill_md + capabilities + options + route_md
+    assert "version:" not in skill_md.split("---", 2)[1]
+    assert "compatibility:" not in skill_md.split("---", 2)[1]
+    assert "| 能力 |" in capabilities
+    assert "不要把历史样本当成默认值" in options
+    assert "用户原话" in route_md
+    assert "输入来源" in route_md
+    assert "确认" in route_md
+    assert "完成" in route_md
+    assert "失败" in route_md or "停止" in route_md
+    assert "当前操作缺少必填字段时" in skill_md
+    assert "选择「" in skill_md or "references/routes/" in skill_md
+
+
+def test_bound_combination_shows_only_confirmed_bindings() -> None:
+    spec = _three_cap_spec()
+    request = SkillGenerationRequest(
+        title="请假办理",
+        business_description="可以先查询再提交。",
+        planning_mode=PlanningMode.DYNAMIC,
+    )
+    plan = propose_deterministic_plan(spec, request, VERIFIED, "fp-bound-md")
+    combo = next(route for route in plan.routes if route.bindings)
+    plans = [
+        {"name": "query_leave", "capability_id": "cap_query", "title": "查询待办", "script": "query_leave"},
+        {"name": "submit_leave", "capability_id": "cap_submit", "title": "提交请假", "script": "submit_leave",
+         "requires_confirmation": True},
+    ]
+    route_md = _route_file_md(combo.model_dump(mode="json"), plans)
+    skill_md = _fallback_skill_md(
+        SimpleNamespace(skill_id="oa.leave", title="请假办理", call_metadata={"skill_plan": plan.model_dump(mode="json")}, api_request={}),
+        "pkg",
+        plans,
+        spec,
+    )
+    for binding in combo.bindings:
+        assert binding.from_output in route_md
+        assert binding.to_input in route_md
+        assert binding.from_output in skill_md or binding.to_input in skill_md
+    assert "customerId" not in route_md
+    assert "推测" not in route_md
+
+
+def test_option_facts_live_only_in_options_md() -> None:
+    plans = [{
+        "name": "submit_leave",
+        "title": "提交请假",
+        "script": "submit_leave",
+        "requires_confirmation": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "x-dano-option-source": {
+                        "endpoint": "/oa/leave/unique-options",
+                        "method": "GET",
+                        "resultPath": "data",
+                        "idField": "value",
+                        "labelField": "label",
+                    },
+                },
+            },
+            "required": ["status"],
+        },
+    }]
+    skill = SimpleNamespace(skill_id="oa.leave", title="请假", call_metadata={}, api_request={})
+    options = _options_md(plans)
+    forms = _input_forms_md(plans)
+    capabilities = _capabilities_md(skill, plans)
+    table = forms.split("| 字段 |", 1)[1].split("回答处理", 1)[0]
+    assert "/oa/leave/unique-options" in options
+    assert "/oa/leave/unique-options" not in table
+    assert "/oa/leave/unique-options" not in capabilities
+    assert "OPTIONS.md" in table
+
+
+def test_long_input_forms_get_toc_or_split() -> None:
+    properties = {
+        f"field_{index}": {"type": "string", "title": f"字段{index}"}
+        for index in range(18)
+    }
+    plans = [{
+        "name": "create_order",
+        "title": "新建销售订单",
+        "script": "create_order",
+        "input_schema": {"type": "object", "properties": properties, "required": list(properties)},
+    }]
+    text, extras = _input_forms_bundle(plans)
+    assert extras
+    rel = next(iter(extras))
+    assert rel.startswith("forms/")
+    assert f"references/{rel}" in text
+    assert "## 目录" in text or "forms/" in text
