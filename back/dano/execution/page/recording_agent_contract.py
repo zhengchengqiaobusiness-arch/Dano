@@ -6,6 +6,7 @@ import copy
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
 )
@@ -24,6 +25,133 @@ from dano.execution.page.flow_spec_core.fingerprints import (
 )
 
 
+def _field_semantic_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    identity = str(item.get("field_identity_id") or "")
+    if identity:
+        return ("identity", identity)
+    context = item.get("page_context") if isinstance(item.get("page_context"), dict) else {}
+    return (
+        "structure",
+        str(item.get("page_id") or ""),
+        str(item.get("frame_id") or ""),
+        str(context.get("path") or context.get("url") or ""),
+        str(item.get("surface") or item.get("control_surface") or ""),
+        str(item.get("form_root") or ""),
+        str(item.get("table_id") or ""),
+        item.get("column_index"),
+        str(item.get("label") or item.get("field") or ""),
+        str(item.get("control_kind") or item.get("input_type") or ""),
+    )
+
+
+def _field_semantic_group(item: dict[str, Any]) -> tuple[Any, ...]:
+    wire_path = re.sub(r"\[\d+\]", "[]", str(item.get("wire_path") or ""))
+    op = str(item.get("op") or "").lower()
+    return (
+        *_field_semantic_identity(item),
+        str(item.get("request_id") or ""),
+        wire_path,
+        str(item.get("binding_status") or ""),
+        str(item.get("required_state") or "unknown"),
+        op if op in {"fill", "select", "pick", "toggle", "upload"} else "observation",
+    )
+
+
+def _field_semantic_rank(item: dict[str, Any]) -> tuple[int, ...]:
+    op = str(item.get("op") or "").lower()
+    return (
+        int(op in {"fill", "select", "pick", "toggle", "upload"}),
+        int(str(item.get("binding_status") or "") in {"bound", "bound_unsupported"}),
+        int(isinstance(item.get("required_observed"), bool)),
+        int(bool(item.get("options") or item.get("enum_source"))),
+        int(item.get("value") not in (None, "")),
+        int(float(item.get("observed_at") or 0)),
+    )
+
+
+def _model_visible_field_evidence(
+    raw_items: list[dict[str, Any]], *, limit: int = 120,
+) -> list[dict[str, Any]]:
+    """Compact repaint churn without dropping distinct field semantics."""
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        key = _field_semantic_group(raw)
+        current = grouped.get(key)
+        if current is None or _field_semantic_rank(raw) >= _field_semantic_rank(current):
+            grouped[key] = raw
+
+    coverage: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in grouped.values():
+        key = _field_semantic_identity(item)
+        current = coverage.get(key)
+        if current is None or _field_semantic_rank(item) > _field_semantic_rank(current):
+            coverage[key] = item
+    selected = list(coverage.values())
+    selected_ids = {id(item) for item in selected}
+    extras = sorted(
+        (item for item in grouped.values() if id(item) not in selected_ids),
+        key=_field_semantic_rank,
+        reverse=True,
+    )
+    if len(selected) < limit:
+        selected.extend(extras[:limit - len(selected)])
+    elif len(selected) > limit:
+        selected = sorted(selected, key=_field_semantic_rank, reverse=True)[:limit]
+    return sorted(
+        selected,
+        key=lambda item: (
+            float(item.get("observed_at") or 0),
+            str(item.get("evidence_id") or item.get("occurrence_id") or ""),
+        ),
+    )
+
+
+def _action_request_ledger(
+    request_facts: list[dict[str, Any]], page_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expose request causality per action, including repeated endpoints."""
+    events_by_id = {
+        str(item.get("event_id") or ""): item
+        for item in page_events if isinstance(item, dict) and item.get("event_id")
+    }
+    events_by_action: dict[str, list[dict[str, Any]]] = {}
+    for item in page_events:
+        if not isinstance(item, dict):
+            continue
+        action_id = str(item.get("action_id") or "")
+        if action_id:
+            events_by_action.setdefault(action_id, []).append(item)
+    out = []
+    for request in request_facts:
+        action_id = str(request.get("trigger_action_id") or "")
+        transaction_id = str(request.get("trigger_transaction_id") or "")
+        if not action_id and not transaction_id:
+            continue
+        event_id = str(request.get("trigger_event_id") or "")
+        event = events_by_id.get(event_id)
+        if event is None and action_id:
+            candidates = events_by_action.get(action_id) or []
+            event = candidates[-1] if candidates else None
+        out.append({
+            "action_id": action_id,
+            "transaction_id": transaction_id,
+            "event_id": event_id or str((event or {}).get("event_id") or ""),
+            "op": request.get("trigger_op") or (event or {}).get("op"),
+            "locator": (event or {}).get("locator") or request.get("trigger_locator"),
+            "request_id": request.get("request_id"),
+            "method": request.get("method"),
+            "path": request.get("path") or request.get("url"),
+            "sequence": request.get("sequence"),
+            "role": request.get("role"),
+            "keep": request.get("keep"),
+            "response_status": request.get("response_status") or request.get("status"),
+            "causality_confidence": request.get("causality_confidence"),
+        })
+    return sorted(out, key=lambda item: (int(item.get("sequence") or 0), str(item.get("request_id") or "")))
+
+
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
     from dano.execution.page.recording_live import compact_model_payload
@@ -33,6 +161,12 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     option_sources = _compact_repeated_endpoint_observations(
         copy.deepcopy(spec.request_facts.option_sources or []),
     )
+    field_evidence = _model_visible_field_evidence(
+        copy.deepcopy(getattr(spec.request_facts, "field_evidence", []) or []),
+    )
+    page_events = [
+        item for item in (spec.request_facts.page_events or []) if isinstance(item, dict)
+    ]
     return {
         "protocol": "dano.recording-semantic-facts.v1",
         "tenant": spec.tenant,
@@ -140,10 +274,11 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
             for request in _model_visible_request_facts(request_facts)
         ],
         "captured_request_count": len(request_facts),
+        "action_request_ledger": _action_request_ledger(request_facts, page_events),
         "field_evidence_count": len(getattr(spec.request_facts, "field_evidence", []) or []),
         "field_evidence": _client_redact_sensitive(
             compact_model_payload(
-                copy.deepcopy((getattr(spec.request_facts, "field_evidence", []) or [])[-120:]),
+                field_evidence,
                 max_depth=6,
                 max_items=120,
                 max_string=800,
@@ -169,7 +304,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 )
                 if event.get(key) not in (None, "", [], {})
             }
-            for event in (spec.request_facts.page_events or [])[-120:]
+            for event in page_events[-120:]
             # Raw mutation batches describe framework repaint churn, not field
             # semantics.  Keeping them in the model state added tens of
             # thousands of characters per page without helping matching.
