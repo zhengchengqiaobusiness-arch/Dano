@@ -2544,6 +2544,12 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                         if str((control or {}).get("op") or "").lower() == "snapshot"
                         else None
                     ),
+                    "unsupported_execution": bool((control or {}).get("unsupported_execution")),
+                    "wire_path_observed": (control or {}).get("wire_path_observed"),
+                    "filename": str((control or {}).get("filename") or ""),
+                    "mime_type": str((control or {}).get("mime_type") or ""),
+                    "file_count": int((control or {}).get("file_count") or 0),
+                    "multiple": bool((control or {}).get("multiple")),
                     "system_value": False})
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):

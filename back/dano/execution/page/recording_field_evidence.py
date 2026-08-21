@@ -625,6 +625,29 @@ def _narrow_candidates_by_surface(
     """
     if not candidates:
         return candidates
+    if (
+        str(evidence.get("control_surface") or "").strip().lower() == "table_inline"
+        or evidence.get("table_id") not in (None, "")
+        or _evidence_row_index(evidence) is not None
+    ):
+        row_index = _evidence_row_index(evidence)
+        array_candidates = [
+            item for item in candidates
+            if _array_indexes(str(item.get("wire_path") or ""))
+        ]
+        if row_index is not None:
+            same_row = [
+                item for item in array_candidates
+                if row_index in _array_indexes(str(item.get("wire_path") or ""))
+            ]
+            if same_row:
+                return _prefer_one_surface_candidate(
+                    _narrow_temporal_candidates(evidence, same_row, request_by_id),
+                )
+        if array_candidates:
+            return _prefer_one_surface_candidate(
+                _narrow_temporal_candidates(evidence, array_candidates, request_by_id),
+            )
     hint = _evidence_container_hint(evidence)
     if hint:
         narrowed = [
@@ -770,6 +793,18 @@ def _evidence_id(evidence: dict[str, Any], index: int = 0) -> str:
         "transaction_id": evidence.get("transaction_id"),
         "observed_at": evidence.get("observed_at"),
         "request_id": evidence.get("request_id"),
+        "field_identity_id": evidence.get("field_identity_id"),
+        "occurrence_id": evidence.get("occurrence_id"),
+        "locator": evidence.get("locator"),
+        "form_root": evidence.get("form_root"),
+        "form_index": evidence.get("form_index"),
+        "table_id": evidence.get("table_id"),
+        "row_index": evidence.get("row_index"),
+        "row_identity": evidence.get("row_identity"),
+        "column_index": evidence.get("column_index"),
+        "column_label": evidence.get("column_label"),
+        "control_surface": evidence.get("control_surface"),
+        "control_kind": evidence.get("control_kind") or evidence.get("input_type"),
     }
     digest = hashlib.sha1(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -800,6 +835,32 @@ def _synthetic_file_wire_leaf(evidence: dict[str, Any]) -> str:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", value):
             return value
     return "file"
+
+
+def _existing_file_wire_path(
+    request: dict[str, Any], evidence: dict[str, Any],
+) -> str:
+    """Return one existing request leaf that structurally represents a file.
+
+    An empty picker cannot value-match. Prefer an exact control alias, then a
+    unique file/attachment/upload leaf already present in the same request.
+    Multiple candidates remain unresolved and fall back to the explicit
+    synthetic unsupported field.
+    """
+    aliases = _structural_evidence_aliases(evidence)
+    fields = [path for path in _request_fields(request) if path.startswith("body.")]
+    exact = [path for path in fields if _field_match_score(aliases, path)]
+    if len(exact) == 1:
+        return exact[0]
+
+    def file_semantic(path: str) -> bool:
+        leaf = str(path or "").rsplit(".", 1)[-1]
+        tokens = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", leaf)
+        tokens = re.sub(r"[^a-zA-Z0-9]+", " ", tokens).casefold().split()
+        return bool(set(tokens) & {"file", "files", "attachment", "attachments", "upload", "uploads"})
+
+    semantic = [path for path in fields if file_semantic(path)]
+    return semantic[0] if len(semantic) == 1 else ""
 
 
 def _associate_unsubmitted_file_controls(
@@ -881,25 +942,44 @@ def _associate_unsubmitted_file_controls(
         if len(candidates) != 1:
             continue
         request_id = next(iter(candidates))
-        leaf = _synthetic_file_wire_leaf(evidence)
-        wire_path = f"body.{leaf}"
-        suffix = 2
-        while (request_id, wire_path) in used_paths:
-            wire_path = f"body.{leaf}_{suffix}"
-            suffix += 1
-        used_paths.add((request_id, wire_path))
+        wire_path = _existing_file_wire_path(request_by_id[request_id], evidence)
+        observed_path = bool(wire_path)
+        if not wire_path:
+            leaf = _synthetic_file_wire_leaf(evidence)
+            wire_path = f"body.{leaf}"
+            suffix = 2
+            while (request_id, wire_path) in used_paths:
+                wire_path = f"body.{leaf}_{suffix}"
+                suffix += 1
+            used_paths.add((request_id, wire_path))
         evidence.update({
             "binding_status": "bound_unsupported",
-            "binding_method": "exact_form_scope_unsubmitted_file",
+            "binding_method": (
+                "exact_form_scope_existing_file_field"
+                if observed_path else "exact_form_scope_unsubmitted_file"
+            ),
             "binding_reason": (
                 "file control belongs to the exact captured form, but no file "
                 "part was submitted during recording"
             ),
             "request_id": request_id,
             "wire_path": wire_path,
-            "wire_path_observed": False,
+            "wire_path_observed": observed_path,
             "unsupported_execution": True,
         })
+
+
+def _script_alias_is_unverified_empty_picker(evidence: dict[str, Any]) -> bool:
+    """A static label/prop guess cannot choose an empty picker's wire leaf."""
+    sources = {
+        str(item) for item in (evidence.get("identity_sources") or []) if str(item)
+    }
+    return bool(
+        sources == {"script_form_declaration"}
+        and _control_kind(evidence) in {"select", "combobox"}
+        and evidence.get("value") in (None, "")
+        and str(evidence.get("op") or "snapshot").lower() in {"", "snapshot"}
+    )
 
 
 def bind_field_evidence(
@@ -943,7 +1023,11 @@ def bind_field_evidence(
                     evidence[key] = related_event[key]
         evidence["evidence_id"] = _evidence_id(evidence, index)
         structural_aliases = _structural_evidence_aliases(evidence)
-        aliases = structural_aliases
+        aliases = (
+            set()
+            if _script_alias_is_unverified_empty_picker(evidence)
+            else structural_aliases
+        )
         derived_value_binding = bool(
             not structural_aliases
             and evidence.get("binding_status")
@@ -1149,6 +1233,14 @@ def bind_field_evidence(
             for request in requests
         }
         if candidates:
+            if (
+                str(evidence.get("control_surface") or "").strip().lower() == "table_inline"
+                or evidence.get("table_id") not in (None, "")
+                or _evidence_row_index(evidence) is not None
+            ):
+                candidates = _narrow_candidates_by_surface(
+                    evidence, candidates, request_by_id,
+                )
             best_score = max(int(item["match_score"]) for item in candidates)
             candidates = [item for item in candidates if int(item["match_score"]) == best_score]
             # The same leaf often appears on a list query and the later write.

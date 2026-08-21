@@ -386,8 +386,8 @@ async def test_action_menu_item_is_recorded_as_its_own_business_action() -> None
         await context.expose_binding("__danoRecord", receive)
         await context.add_init_script(f"({_RECORDER_JS})()")
         page = await context.new_page()
-        await page.set_content(
-            """
+        await page.goto(
+            """data:text/html,
             <button id="actions" type="button" aria-haspopup="menu">Actions</button>
             <div role="menu" aria-label="Record actions">
               <button id="inspect" role="menuitem" type="button">Inspect record</button>
@@ -1011,6 +1011,33 @@ def test_table_row_field_does_not_bind_to_same_named_form_field() -> None:
     }])
     assert evidence[0]["binding_status"] == "bound"
     assert evidence[0]["wire_path"] == "body.lines[0].note"
+
+
+def test_empty_select_script_alias_does_not_lock_onto_display_echo() -> None:
+    request = {
+        "request_id": "req_choice_save",
+        "method": "PATCH",
+        "url": "http://random.invalid/v4/records/save",
+        "post_data": json.dumps({"zoneId": 8, "zoneName": "North"}),
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+        "trigger_action_id": "action_choice_save",
+        "trigger_transaction_id": "tx_choice_save",
+        "role": "business_write",
+    }
+    evidence = bind_field_evidence([request], [], [{
+        "label": "Zone",
+        "field_aliases": ["zoneName"],
+        "identity_sources": ["script_form_declaration"],
+        "control_kind": "select",
+        "value": "",
+        "op": "snapshot",
+        "surface": "dialog",
+        "page_id": "page_1",
+        "frame_id": "frame_1",
+    }])
+    assert evidence[0]["binding_status"] == "unbound"
+    assert evidence[0].get("wire_path") is None
 
 
 def test_same_event_same_label_in_different_structures_has_distinct_evidence_ids() -> None:

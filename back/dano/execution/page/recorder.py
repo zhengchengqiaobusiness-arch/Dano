@@ -776,7 +776,8 @@ _RECORDER_JS = r"""() => {
             disabled: !!evidence.disabled,
             read_only: !!evidence.read_only,
             in_dialog: !!evidence.in_dialog,
-            surface: evidence.surface || 'page'
+            surface: evidence.surface || 'page',
+            form_index: i
           };
           ['form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
             if (evidence[key] !== undefined && evidence[key] !== '') radioItem[key] = evidence[key];
@@ -825,7 +826,8 @@ _RECORDER_JS = r"""() => {
           minimum: evidence.minimum,
           maximum: evidence.maximum,
           in_dialog: !!evidence.in_dialog,
-          surface: evidence.surface || 'page'
+          surface: evidence.surface || 'page',
+          form_index: i
         };
         ['checked','filename','mime_type','size','multiple','file_count','files',
          'form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
@@ -1433,6 +1435,10 @@ _RECORDER_JS = r"""() => {
     }
     return null;
   }
+  function isFieldPickerTrigger(trig) {
+    var kind = controlKind(trig);
+    return ['select','date','datetime','time'].indexOf(kind) >= 0;
+  }
   function emitControlOpen(trig, actionId) {
     try {
       var inp = trig && trig.querySelector ? trig.querySelector('input,select,[role="combobox"]') : trig;
@@ -1510,8 +1516,9 @@ _RECORDER_JS = r"""() => {
   document.addEventListener('click', function (e) {
     // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;先把**此刻弹层里可见的选项**抓下来(地面真值枚举),
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
-    if (e.target.closest && e.target.closest(POPUP)) {
-      var _opts = isEnumTrigger(activeTrigger) ? popupOptions(e.target.closest(POPUP)) : [];
+    var clickedPopup = e.target.closest && e.target.closest(POPUP);
+    if (clickedPopup && activeTrigger && isFieldPickerTrigger(activeTrigger)) {
+      var _opts = isEnumTrigger(activeTrigger) ? popupOptions(clickedPopup) : [];
       if (_opts.length) {
         lastPickOptions = _opts;
         // Persist the owned popup before the page hides it or a following
@@ -1521,9 +1528,10 @@ _RECORDER_JS = r"""() => {
       }
       pollPick(activeTrigger, false, activeControlActionId); return;
     }
+    if (clickedPopup) clearActiveControl();
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
-    if (trig) {
+    if (trig && isFieldPickerTrigger(trig)) {
       actionSeq += 1;
       activeControlActionId = 'action_' + actionSeq;
       activeTrigger = trig;
