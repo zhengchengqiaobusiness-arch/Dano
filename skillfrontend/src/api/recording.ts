@@ -2,19 +2,13 @@ import { api } from "./client";
 import {
   normalizeSkillExportDraft,
   serializeSkillExportDraft,
-} from "./skillExportDraft.mjs";
+} from "./skillExportDraft";
+import type { SkillExportDraft } from "./skillExportDraft";
+
+export type { SkillExportDraft, RouteSummary, SkillPlanningMode } from "./skillExportDraft";
 
 export const EXPORT_DIR_LS = "dano.exportDir";
 export const SKILL_EXPORT_DRAFT_LS = "dano.skillExportDrafts";
-
-export interface SkillExportDraft {
-  title?: string;
-  description?: string;
-  planningMode?: "dynamic" | "fixed";
-  exampleRequests?: string;
-  successCriteria?: string;
-  forbiddenActions?: string;
-}
 
 export function rememberedSkillExportDraft(resultId: string): SkillExportDraft {
   const key = String(resultId || "").trim();
@@ -22,7 +16,7 @@ export function rememberedSkillExportDraft(resultId: string): SkillExportDraft {
   try {
     const parsed = JSON.parse(localStorage.getItem(SKILL_EXPORT_DRAFT_LS) || "{}");
     const row = parsed && typeof parsed === "object" ? parsed[key] : null;
-    if (!row || typeof row !== "object") return {};
+    if (!row || typeof row !== "object") return normalizeSkillExportDraft({});
     return normalizeSkillExportDraft(row);
   } catch {
     return normalizeSkillExportDraft({});
@@ -136,6 +130,7 @@ export interface SkillGenerationRequest {
   forbidden_actions?: string;
   out_dir?: string;
   require_stage_seven?: boolean;
+  preview_only?: boolean;
 }
 
 export interface SkillExportOutcome {
@@ -164,4 +159,11 @@ export async function exportRecordingSkill(
     request,
   );
   return data as SkillExportOutcome;
+}
+
+export async function previewRecordingSkill(
+  resultId: string,
+  request: SkillGenerationRequest,
+): Promise<SkillExportOutcome> {
+  return exportRecordingSkill(resultId, { ...request, preview_only: true });
 }

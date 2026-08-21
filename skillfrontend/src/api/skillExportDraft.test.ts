@@ -4,7 +4,7 @@ import {
   normalizeSkillExportDraft,
   routeSummaryFromOutcome,
   serializeSkillExportDraft,
-} from "./skillExportDraft.mjs";
+} from "./skillExportDraft.ts";
 
 test("draft restore keeps all six planning fields", () => {
   const saved = serializeSkillExportDraft({
@@ -22,6 +22,11 @@ test("draft restore keeps all six planning fields", () => {
   assert.match(restored.exampleRequests, /帮我查鲜生的单/);
   assert.equal(restored.successCriteria, "指定订单已改完");
   assert.equal(restored.forbiddenActions, "不要删除");
+});
+
+test("unreadable draft does not invent dynamic mode", () => {
+  const restored = normalizeSkillExportDraft({ title: "x" });
+  assert.equal(restored.planningMode, undefined);
 });
 
 test("route summary uses business language only", () => {

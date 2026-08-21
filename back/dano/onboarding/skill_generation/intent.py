@@ -5,25 +5,17 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from dano.execution.page.capability_kinds import READ_CAPABILITY_KINDS
 from dano.execution.page.flow_spec_core.models import FlowCapability
-from dano.onboarding.skill_generation.catalog import capability_ref, is_write_capability
+from dano.onboarding.skill_generation.catalog import (
+    capability_family,
+    capability_ref,
+    is_write_capability,
+)
 from dano.onboarding.skill_generation.models import IntentBranch, SkillGenerationRequest
 
 
-def _family(cap: FlowCapability) -> str:
-    kind = str(cap.kind or "").strip().lower()
-    title = f"{cap.title} {cap.name} {cap.intent}"
-    if kind == "list_options" or any(token in title for token in ("选项", "字典", "下拉", "候选")):
-        return "option"
-    if kind in READ_CAPABILITY_KINDS or any(token in title for token in ("查询", "查看", "列表", "检索", "筛选")):
-        return "query"
-    if is_write_capability(cap) or any(token in title for token in ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")):
-        return "write"
-    return kind or "other"
-
 _SEQ_SPLIT = re.compile(r"[；;。.!？?\n]+")
-_LIST_SPLIT = re.compile(r"[、,/]|或者|或是|以及|和")
+_LIST_SPLIT = re.compile(r"或者|或是|以及|和|[、,/]|或")
 _ORDER_PATTERNS = (
     re.compile(r"先(?P<left>.+?)再(?:对选中的[^做]*做)?(?P<right>.+)"),
     re.compile(r"先(?P<left>.+?)后(?:再)?(?P<right>.+)"),
@@ -31,30 +23,15 @@ _ORDER_PATTERNS = (
     re.compile(r"(?P<left>.+?)之后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)后再(?P<right>.+)"),
     re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,6}后(?:再)?(?P<right>.+)"),
-    re.compile(r"(?P<left>查(?:询|出)?|查看|搜索|筛选).{0,8}再(?P<right>.+)"),
+    re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,8}再(?P<right>.+)"),
 )
 _TARGET_GIVEN = ("已指定", "已备齐", "已经提供", "目标已给出", "已给出完整")
 _READ_ONLY = ("只要查询", "只要查看", "只查", "只看", "不要写", "不要改", "不要审")
-_UNKNOWN_STOP = (
-    "办理", "使用", "操作", "处理", "完成", "确认", "结果", "用户", "订单",
-    "记录", "字段", "对象", "业务", "页面", "本页", "单独", "创建", "选定",
-    "选中", "一条", "一张", "目标", "写入", "只读",
-)
 _GENERIC_VERBS = (
     "查询", "查看", "搜索", "筛选", "检索", "列表", "新增", "新建", "创建",
     "编辑", "修改", "更新", "审核", "审批", "反审", "反审核", "删除", "提交",
     "保存", "导出", "打印", "下载", "同步", "作废", "撤回", "撤销",
 )
-_FAMILY_HINTS = {
-    "query": ("查询", "搜索", "筛选", "检索", "列表", "查"),
-    "detail": ("查看", "详情", "明细"),
-    "write": ("提交", "保存", "写入"),
-    "create": ("新增", "新建", "创建"),
-    "update": ("编辑", "修改", "更新"),
-    "approve": ("审核", "审批"),
-    "unapprove": ("反审核", "反审"),
-    "delete": ("删除", "作废"),
-}
 
 
 def _cap_title(cap: FlowCapability) -> str:
@@ -65,7 +42,7 @@ def _aliases(cap: FlowCapability) -> list[str]:
     title = _cap_title(cap)
     name = str(cap.name or "")
     aliases = [item for item in (title, name) if item]
-    family = _family(cap)
+    family = capability_family(cap)
     kind = str(cap.kind or "").strip().lower()
     if family == "query" or kind == "query":
         if "详情" in title or "查看" in title:
@@ -100,25 +77,73 @@ def _unique_caps(caps: list[FlowCapability]) -> list[FlowCapability]:
     return unique
 
 
-def _match_caps(text: str, caps: list[FlowCapability]) -> list[FlowCapability]:
-    scored: list[tuple[int, FlowCapability]] = []
+def _alias_hits(text: str, caps: list[FlowCapability]) -> list[tuple[int, int, FlowCapability, str]]:
+    """Find non-overlapping alias spans, longest match first."""
+    raw = str(text or "")
+    candidates: list[tuple[int, int, FlowCapability, str]] = []
     for cap in caps:
-        best = 0
         for alias in _aliases(cap):
-            if alias and alias in text:
-                best = max(best, len(alias))
-        if best:
-            scored.append((best, cap))
-    if not scored:
-        return []
-    top = max(score for score, _cap in scored)
-    if top >= 4:
-        return [cap for score, cap in scored if score >= 4]
-    return [cap for score, cap in scored if score == top]
+            if not alias:
+                continue
+            start = 0
+            while True:
+                index = raw.find(alias, start)
+                if index < 0:
+                    break
+                candidates.append((index, index + len(alias), cap, alias))
+                start = index + len(alias)
+    candidates.sort(key=lambda item: (-(item[1] - item[0]), item[0]))
+    occupied: list[tuple[int, int]] = []
+    accepted: list[tuple[int, int, FlowCapability, str]] = []
+    for start, end, cap, alias in candidates:
+        if any(not (end <= left or start >= right) for left, right in occupied):
+            continue
+        occupied.append((start, end))
+        accepted.append((start, end, cap, alias))
+    accepted.sort(key=lambda item: item[0])
+    return accepted
+
+
+def _match_caps(text: str, caps: list[FlowCapability]) -> list[FlowCapability]:
+    return _unique_caps([cap for _start, _end, cap, _alias in _alias_hits(text, caps)])
 
 
 def _parts(text: str) -> list[str]:
     return [item.strip() for item in _LIST_SPLIT.split(text) if item and item.strip()]
+
+
+def _match_alternatives(text: str, caps: list[FlowCapability]) -> tuple[list[FlowCapability], list[str]]:
+    """Parse a parallel list into capabilities. Unmapped items become clarifications."""
+    raw = str(text or "").strip()
+    if not raw:
+        return [], []
+    parts = _parts(raw) or [raw]
+    found: list[FlowCapability] = []
+    unresolved: list[str] = []
+    for part in parts:
+        hits = _match_caps(part, caps) or _match_prefix_aliases(part, caps)
+        if hits:
+            found.extend(hits)
+            continue
+        unresolved.append(part)
+    return _unique_caps(found), unresolved
+
+
+def _match_prefix_aliases(text: str, caps: list[FlowCapability]) -> list[FlowCapability]:
+    """Resolve short leftovers like「查」when they uniquely prefix a known alias."""
+    part = str(text or "").strip()
+    if len(part) < 1:
+        return []
+    scored: list[tuple[int, FlowCapability]] = []
+    for cap in caps:
+        aliases = [alias for alias in _aliases(cap) if alias and alias.startswith(part)]
+        if aliases:
+            scored.append((min(len(alias) for alias in aliases), cap))
+    if not scored:
+        return []
+    shortest = min(length for length, _cap in scored)
+    winners = _unique_caps([cap for length, cap in scored if length == shortest])
+    return winners if len(winners) == 1 else []
 
 
 def _mutation(caps: list[FlowCapability]) -> str:
@@ -137,9 +162,14 @@ def _target_given(text: str) -> bool:
 def _unknown_actions(text: str, caps: list[FlowCapability]) -> list[str]:
     known = {alias for cap in caps for alias in _aliases(cap)}
     unknown: list[str] = []
-    for verb in _GENERIC_VERBS:
-        if verb in text and verb not in known and not any(verb in alias for alias in known):
-            unknown.append(verb)
+    for verb in sorted(_GENERIC_VERBS, key=len, reverse=True):
+        if verb not in text:
+            continue
+        if verb in known or any(verb in alias for alias in known):
+            continue
+        if any(verb != other and verb in other and other in text for other in _GENERIC_VERBS):
+            continue
+        unknown.append(verb)
     return list(dict.fromkeys(unknown))
 
 
@@ -169,22 +199,38 @@ def _branch(
     )
 
 
-def _expand_order(left_text: str, right_text: str, caps: list[FlowCapability]) -> list[list[FlowCapability]]:
-    left = _unique_caps(_match_caps(left_text, caps) or [cap for part in _parts(left_text) for cap in _match_caps(part, caps)])
-    right = _unique_caps(_match_caps(right_text, caps) or [cap for part in _parts(right_text) for cap in _match_caps(part, caps)])
+def _expand_order(
+    left_text: str,
+    right_text: str,
+    caps: list[FlowCapability],
+) -> tuple[list[list[FlowCapability]], list[str]]:
+    left, left_unresolved = _match_alternatives(left_text, caps)
+    right, right_unresolved = _match_alternatives(right_text, caps)
+    unresolved = [*left_unresolved, *right_unresolved]
+    if unresolved:
+        return [], [
+            f"无法把「{'、'.join(unresolved)}」映射到当前页面已有操作，请改用已有动作或补充说明"
+        ]
     if not left or not right:
-        return []
+        missing = left_text.strip() if not left else right_text.strip()
+        return [], [f"无法把「{missing}」映射到当前页面已有操作，请改用已有动作或补充说明"]
     sequences: list[list[FlowCapability]] = []
     for start in left:
         for end in right:
             if capability_ref(start) == capability_ref(end):
                 continue
             sequences.append([start, end])
-    return sequences
+    if not sequences:
+        return [], [f"「{left_text.strip()} → {right_text.strip()}」没有可执行的能力顺序"]
+    return sequences, []
 
 
-def _sentence_orders(text: str, caps: list[FlowCapability]) -> list[list[FlowCapability]]:
+def _sentence_orders(
+    text: str,
+    caps: list[FlowCapability],
+) -> tuple[list[list[FlowCapability]], list[str]]:
     found: list[list[FlowCapability]] = []
+    unresolved: list[str] = []
     for sentence in _SEQ_SPLIT.split(text):
         raw = sentence.strip()
         if not raw:
@@ -193,9 +239,11 @@ def _sentence_orders(text: str, caps: list[FlowCapability]) -> list[list[FlowCap
             match = pattern.search(raw)
             if not match:
                 continue
-            found.extend(_expand_order(match.group("left"), match.group("right"), caps))
+            sequences, problems = _expand_order(match.group("left"), match.group("right"), caps)
+            unresolved.extend(problems)
+            found.extend(sequences)
             break
-    return found
+    return found, unresolved
 
 
 def _orders_conflict(orders: Iterable[list[FlowCapability]]) -> bool:
@@ -236,7 +284,15 @@ def extract_intent_branches(
         seen.add(key)
         branches.append(branch)
 
-    orders = _sentence_orders(description, selected)
+    orders, order_problems = _sentence_orders(description, selected)
+    if order_problems:
+        add(_branch(
+            branch_id="desc_unresolved_order",
+            trigger=description,
+            caps=[],
+            source="description",
+            unresolved=list(dict.fromkeys(order_problems)),
+        ))
     if _orders_conflict(orders):
         add(_branch(
             branch_id="conflict_order",
@@ -300,8 +356,17 @@ def extract_intent_branches(
                 ))
 
     for index, example in enumerate(examples):
-        example_orders = _sentence_orders(example, selected)
+        example_orders, example_problems = _sentence_orders(example, selected)
         example_unknown = _unknown_actions(example, selected)
+        if example_problems:
+            add(_branch(
+                branch_id=f"example_unresolved_{index + 1}",
+                trigger=example,
+                caps=[],
+                source="example",
+                unresolved=list(dict.fromkeys(example_problems)),
+            ))
+            continue
         if example_unknown:
             add(_branch(
                 branch_id=f"example_unknown_{index + 1}",

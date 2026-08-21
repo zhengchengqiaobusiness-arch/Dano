@@ -16,6 +16,7 @@ from dano.export.skill_package.renderer import (
     _fallback_skill_md,
     _filter_plans_for_export,
     _input_forms_bundle,
+    _project_plan_inputs,
     _input_forms_md,
     _options_md,
     _route_file_md,
@@ -33,8 +34,10 @@ from dano.onboarding.skill_generation.export import (
     export_recording_skill,
 )
 from stage8_sale_order_fixture import (
+    SALE_ORDER_EXPLICIT_COMBOS,
     SALE_ORDER_TITLES,
     combination_routes,
+    combo_pair,
     route_has_human_checkpoint,
     sale_order_request,
     sale_order_spec,
@@ -102,28 +105,36 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
     ]
     if not caps and raw_caps:
         caps = list(raw_caps)
-    plans = [
-        {
-            "name": cap.get("name") or cap.get("capability_id"),
-            "capability_id": cap.get("capability_id") or "",
-            "title": cap.get("title") or cap.get("name"),
-            "kind": cap.get("kind") or "operation",
-            "script": str(cap.get("name") or cap.get("capability_id")),
-            "requires_confirmation": bool(cap.get("requires_human_confirm")),
-            "requires_verify": bool(cap.get("requires_human_confirm")),
-            "input_schema": cap.get("input_schema") or {"type": "object", "properties": {}},
-            "output_schema": cap.get("output_schema") or {"type": "object"},
-            "preconditions": [],
-            "caller_responsibilities": [],
-            "skill_responsibilities": [],
-        }
-        for cap in caps
-    ]
+    plans = _project_plan_inputs(
+        [
+            {
+                "name": cap.get("name") or cap.get("capability_id"),
+                "capability_id": cap.get("capability_id") or "",
+                "title": cap.get("title") or cap.get("name"),
+                "kind": cap.get("kind") or "operation",
+                "script": str(cap.get("name") or cap.get("capability_id")),
+                "requires_confirmation": bool(cap.get("requires_human_confirm")),
+                "requires_verify": bool(cap.get("requires_human_confirm")),
+                "input_schema": cap.get("input_schema") or {"type": "object", "properties": {}},
+                "output_schema": cap.get("output_schema") or {"type": "object"},
+                "preconditions": [],
+                "caller_responsibilities": [],
+                "skill_responsibilities": [],
+            }
+            for cap in caps
+        ],
+        plan,
+    )
     skill_md = _fallback_skill_md(skill, package_slug(skill.skill_id), plans, None)
     (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
     (references / "CAPABILITIES.md").write_text(_capabilities_md(skill, plans), encoding="utf-8")
     (references / "OPTIONS.md").write_text(_options_md(plans), encoding="utf-8")
-    (references / "INPUT_FORMS.md").write_text("# Native input forms\n\n## Global rules\n\n- ask_user_question\n", encoding="utf-8")
+    forms_text, form_files = _input_forms_bundle(plans)
+    (references / "INPUT_FORMS.md").write_text(forms_text, encoding="utf-8")
+    for rel, content in form_files.items():
+        target = references / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
     routes_dir = references / "routes"
     for route in plan.get("routes") or []:
         sequence = route.get("capability_sequence") or []
@@ -141,6 +152,7 @@ def _write_valid_package(root: Path, skill, plan: dict) -> None:
                 "title": item.get("title") or item["name"],
                 "script": f"scripts/{item['script']}.py",
                 "verify_script": f"scripts/verify_{item['script']}.py",
+                "input_schema": item.get("input_schema") or {"type": "object", "properties": {}},
             }
             for item in plans
         ],
@@ -351,7 +363,9 @@ async def test_reexport_deletes_previous_package_and_stale_stage(tmp_path: Path)
         proposer=_deterministic_proposer,
     )
     assert first.status == "exported"
+    assert first.export_path
     old = Path(first.export_path)
+    assert old.is_dir()
     (old / "STALE.txt").write_text("old-output", encoding="utf-8")
     stale_stage = old.parent / f".{old.name}-leftover"
     stale_stage.mkdir()
@@ -389,7 +403,11 @@ async def test_stale_package_is_rewritten_instead_of_idempotent(tmp_path: Path) 
         render=_render_valid,
         proposer=_deterministic_proposer,
     )
-    (Path(first.export_path) / "SKILL.md").write_text(
+    assert first.status == "exported"
+    assert first.export_path
+    export_root = Path(first.export_path)
+    assert export_root.is_dir()
+    (export_root / "SKILL.md").write_text(
         "---\nname: stale\ndescription: old\n---\n# stale\n",
         encoding="utf-8",
     )
@@ -447,11 +465,12 @@ async def test_incomplete_relation_export_uses_user_inputs(tmp_path: Path) -> No
     assert outcome.export_path
     assert stored[-1]["published"] is True
     routes = (outcome.plan or {}).get("routes") or []
-    assert {route.get("route_id") for route in routes} >= {"query_only", "write_direct"}
+    sequences = {tuple(route.get("capability_sequence") or []) for route in routes}
+    assert ("cap_query",) in sequences
     combo = next(route for route in routes if len(route.get("capability_sequence") or []) > 1)
     assert not combo.get("bindings")
     assert combo.get("checkpoints") or any(step.get("checkpoint") for step in (combo.get("steps") or []))
-    write = next(route for route in routes if route.get("route_id") == "write_direct")
+    write = next(route for route in routes if (route.get("capability_sequence") or [""])[0] == "cap_submit")
     assert not write.get("bindings")
     assert "id" in (write.get("required_user_inputs") or [])
 
@@ -1397,10 +1416,11 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
     plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), working_fingerprint(spec))
     combos = combination_routes(plan)
     assert len(spec.capabilities) == 7
-    assert combos
+    assert {combo_pair(route) for route in combos} >= set(SALE_ORDER_EXPLICIT_COMBOS)
+    assert len({route.route_id for route in plan.routes}) == len(plan.routes)
     assert all(not route.bindings for route in combos)
     assert all(route_has_human_checkpoint(route) for route in combos)
-    assert not plan.clarification_questions or all(str(item) for item in plan.clarification_questions)
+    assert not plan.clarification_questions
 
     outcome = await export_recording_skill(
         result_id=uuid4(),
@@ -1425,6 +1445,8 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
     assert "## 选择工作流" in skill_md
     assert "GET /" not in skill_md
     assert "generator-guides" not in skill_md
+    route_files = list((root / "references" / "routes").glob("*.md"))
+    assert len(route_files) == len(combos)
     for route in combos:
         route_file = root / "references" / "routes" / f"{route.route_id}.md"
         assert route_file.is_file()
@@ -1433,12 +1455,44 @@ async def test_sale_order_package_regenerates_from_generator(tmp_path: Path) -> 
         assert "用户原话" in text
         assert "人工交接" in text or "请" in text
         assert not route.bindings
+    contract = json.loads((root / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     packed = {
         str(item.get("name") or "")
-        for item in json.loads((root / "references" / "CONTRACT.json").read_text(encoding="utf-8")).get("capabilities") or []
+        for item in contract.get("capabilities") or []
     }
     assert packed >= {name for _cid, name, _title, _kind in SALE_ORDER_TITLES}
+    contract_ids = [str(item.get("route_id") or "") for item in contract.get("routes") or []]
+    assert len(contract_ids) == len(set(contract_ids))
+    forms = (root / "references" / "INPUT_FORMS.md").read_text(encoding="utf-8")
+    update = next(item for item in contract["capabilities"] if item.get("capability_id") == "cap_update")
+    assert "id" in (update.get("input_schema") or {}).get("properties") or {}
+    assert "id" in (update.get("input_schema") or {}).get("required") or []
+    assert "id" in forms
     result = validate_skill_package(root)
     assert result["ok"], result["issues"]
     atomic_only = [line for line in skill_md.splitlines() if "不必读取组合路线" in line]
     assert atomic_only
+
+
+@pytest.mark.asyncio
+async def test_preview_only_does_not_write_package(tmp_path: Path) -> None:
+    spec = sale_order_spec()
+    request = sale_order_request()
+    request.out_dir = str(tmp_path)
+    request.preview_only = True
+    stored: list[dict] = []
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body=_sale_verified_body(spec),
+        tenant="tenant",
+        request=request,
+        persist=stored.append,
+        publish=_ok_publish,
+        render=_default_render,
+        proposer=_deterministic_proposer,
+    )
+    assert outcome.status == "previewed", outcome.errors or outcome.clarification_questions
+    assert not outcome.export_path
+    assert outcome.routes
+    assert not list(tmp_path.glob("*-package"))
+    assert stored[-1]["skill_export_status"] == "previewed"

@@ -9,9 +9,9 @@ from typing import Any
 
 import structlog
 
-from dano.execution.page.capability_kinds import READ_CAPABILITY_KINDS
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
 from dano.onboarding.skill_generation.catalog import (
+    capability_family,
     capability_ref,
     confirmed_fixed_or_system_inputs,
     is_write_capability,
@@ -81,10 +81,29 @@ def _is_recording_copy(value: Any) -> bool:
     return handbook_text_is_banned(value) or is_stock_playbook(value)
 
 
-def _operation_route_id(cap: FlowCapability) -> str:
-    raw = str(cap.name or capability_ref(cap) or "operation")
-    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
-    return f"op_{slug or capability_ref(cap)}"
+def _stable_route_id(sequence: list[FlowCapability]) -> str:
+    parts: list[str] = []
+    for cap in sequence:
+        raw = str(capability_ref(cap) or cap.name or "cap")
+        slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
+        parts.append(slug or "cap")
+    return "_then_".join(parts) or "route"
+
+
+_WRITE_DONE_MARKERS = ("写入已确认", "写操作已确认", "写入已确认且", "写完要能确认")
+
+
+def _route_done_when(request: SkillGenerationRequest, writes: list[FlowCapability]) -> str:
+    page = str(request.success_criteria or "").strip()
+    if writes:
+        return page or "写操作已确认并执行成功，结果已核对"
+    if page and not any(token in page for token in _WRITE_DONE_MARKERS):
+        return page
+    return "已返回可核对的查询结果"
+
+
+def _family(cap: FlowCapability) -> str:
+    return capability_family(cap)
 
 
 def _text(request: SkillGenerationRequest) -> str:
@@ -100,18 +119,6 @@ def _text(request: SkillGenerationRequest) -> str:
 
 def _mentions(text: str, hints: tuple[str, ...]) -> bool:
     return any(hint in text for hint in hints)
-
-
-def _family(cap: FlowCapability) -> str:
-    kind = str(cap.kind or "").strip().lower()
-    title = f"{cap.title} {cap.name} {cap.intent}"
-    if kind == "list_options" or _mentions(title, _OPTION_HINTS):
-        return "option"
-    if kind in READ_CAPABILITY_KINDS or _mentions(title, _QUERY_HINTS):
-        return "query"
-    if is_write_capability(cap) or _mentions(title, _SUBMIT_HINTS):
-        return "write"
-    return kind or "other"
 
 
 def _score_capability(cap: FlowCapability, text: str) -> int:
@@ -579,9 +586,7 @@ def _route(
     required = list(dict.fromkeys(required))
     writes = [cap for cap in sequence if is_write_capability(cap)]
     confirmation = [_cap_title(cap) for cap in writes]
-    done = str(request.success_criteria or "").strip() or (
-        "写操作已确认并执行成功，结果已核对" if writes else "已返回可核对的查询结果"
-    )
+    done = _route_done_when(request, writes)
     cleaned_when = _clean_when(
         when_to_use,
         " → ".join(_cap_title(cap) for cap in sequence) or "按本页已打包操作办理",
@@ -704,30 +709,21 @@ def _compile_branch_route(
     text = _text(request)
     if len(sequence) == 1 and is_write_capability(sequence[0]) and _mentions(text, _LOOKUP_HINTS):
         sequence = _append_lookup(sequence, queries, text)
+    elif len(sequence) > 1:
+        sequence = _append_lookup(sequence, queries, text)
     bindings: list[RouteBinding] = []
     for left, right in zip(sequence, sequence[1:], strict=False):
         bindings.extend(_relation_pair(spec, left, right))
     if len(sequence) == 1:
-        route_id = "query_only" if _family(sequence[0]) == "query" else _operation_route_id(sequence[0])
-        if is_write_capability(sequence[0]) and len([cap for cap in selected if is_write_capability(cap)]) == 1:
-            route_id = "write_direct"
         when = _operation_when(sequence[0])
         if branch.target_given and is_write_capability(sequence[0]):
             when = f"要执行「{_cap_title(sequence[0])}」且目标或必要字段已经给出"
     else:
-        tail = sequence[-1]
         head = sequence[0]
-        if _family(head) == "query" and is_write_capability(tail) and len(sequence) <= 3:
-            route_id = "query_then_write" if sum(1 for cap in selected if is_write_capability(cap)) == 1 else f"query_then_{capability_ref(tail)}"
-        else:
-            route_id = "handoff_" + "_".join(capability_ref(cap) for cap in sequence)
+        tail = sequence[-1]
         when = branch.trigger if len(branch.trigger) <= 80 else f"按「{_cap_title(head)} → {_cap_title(tail)}」办理"
-        sequence = _append_lookup(sequence, queries, text)
-        bindings = []
-        for left, right in zip(sequence, sequence[1:], strict=False):
-            bindings.extend(_relation_pair(spec, left, right))
     return _route(
-        route_id=route_id,
+        route_id=_stable_route_id(sequence),
         name=" → ".join(_cap_title(cap) for cap in sequence),
         when_to_use=when,
         sequence=sequence,
@@ -754,11 +750,12 @@ def _confirmed_relation_routes(
         if queries:
             bindings = _relation_pair(spec, queries[0], write)
             if bindings:
+                sequence = _append_lookup([queries[0], write], queries, _text(request))
                 routes.append(_route(
-                    route_id="query_then_write" if len(writes) == 1 else f"query_then_{capability_ref(write)}",
+                    route_id=_stable_route_id(sequence),
                     name=f"查询后{_cap_title(write)}",
                     when_to_use=f"需要先查询记录，再对选中记录执行「{_cap_title(write)}」",
-                    sequence=_append_lookup([queries[0], write], queries, _text(request)),
+                    sequence=sequence,
                     bindings=bindings,
                     request=request,
                     spec=spec,
@@ -766,11 +763,12 @@ def _confirmed_relation_routes(
         if options:
             bindings = _relation_pair(spec, options[0], write)
             if bindings:
+                sequence = _append_lookup([options[0], write], queries, _text(request))
                 routes.append(_route(
-                    route_id="option_then_write" if len(writes) == 1 else f"option_then_{capability_ref(write)}",
+                    route_id=_stable_route_id(sequence),
                     name=f"选项后{_cap_title(write)}",
                     when_to_use=f"「{_cap_title(write)}」字段需要从选项中选择",
-                    sequence=_append_lookup([options[0], write], queries, _text(request)),
+                    sequence=sequence,
                     bindings=bindings,
                     request=request,
                     spec=spec,
@@ -798,19 +796,15 @@ def _atomic_fallback_routes(
             continue
         sequence = [cap]
         extra = None
-        route_id = _operation_route_id(cap)
-        if _family(cap) == "query" and "query_only" not in {route.route_id for route in existing}:
-            route_id = "query_only"
-        elif is_write_capability(cap) and len(writes) == 1:
+        if is_write_capability(cap) and len(writes) == 1:
             sequence = _append_lookup([cap], queries, _text(request))
-            route_id = "write_direct"
             extra = (
                 ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
                 if len(sequence) > 1
                 else None
             )
         routes.append(_route(
-            route_id=route_id,
+            route_id=_stable_route_id(sequence),
             name=_cap_title(cap),
             when_to_use=_operation_when(cap),
             sequence=sequence,

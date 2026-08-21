@@ -36,6 +36,19 @@ def is_write_capability(cap: FlowCapability) -> bool:
     return bool(cap.requires_human_confirm)
 
 
+def capability_family(cap: FlowCapability) -> str:
+    """Classify a packed capability for route compilation. Does not invent kinds."""
+    kind = str(cap.kind or "").strip().lower()
+    title = f"{cap.title} {cap.name} {cap.intent}"
+    if kind == "list_options" or any(token in title for token in ("选项", "字典", "下拉", "候选")):
+        return "option"
+    if kind in READ_CAPABILITY_KINDS or any(token in title for token in ("查询", "查看", "列表", "检索", "筛选")):
+        return "query"
+    if is_write_capability(cap) or any(token in title for token in ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")):
+        return "write"
+    return kind or "other"
+
+
 def is_risk_write(cap: FlowCapability) -> bool:
     return str(cap.kind or "").strip().lower() in RISK_WRITE_KINDS or is_write_capability(cap)
 

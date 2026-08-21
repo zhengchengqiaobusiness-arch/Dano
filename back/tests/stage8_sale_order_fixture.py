@@ -41,6 +41,24 @@ SALE_ORDER_EXAMPLES = [
     "新增一张销售订单",
 ]
 
+SALE_ORDER_EXPLICIT_COMBOS = (
+    ("cap_search", "cap_update"),
+    ("cap_search", "cap_approve"),
+    ("cap_search", "cap_unapprove"),
+    ("cap_search", "cap_delete"),
+    ("cap_detail", "cap_update"),
+    ("cap_detail", "cap_approve"),
+    ("cap_detail", "cap_unapprove"),
+    ("cap_detail", "cap_delete"),
+)
+
+
+def combo_pair(route) -> tuple[str, ...]:  # noqa: ANN001
+    sequence = [str(item) for item in route.capability_sequence if str(item)]
+    if len(sequence) >= 3 and sequence[-1] == sequence[0]:
+        sequence = sequence[:-1]
+    return tuple(sequence)
+
 
 def _cap(
     *,
@@ -159,3 +177,8 @@ def route_has_human_checkpoint(route) -> bool:  # noqa: ANN001
 
 def combination_routes(plan) -> list:  # noqa: ANN001
     return [route for route in plan.routes if len(route.capability_sequence) > 1]
+
+
+def route_by_sequence(plan, *capability_ids):  # noqa: ANN001
+    target = tuple(capability_ids)
+    return next(route for route in plan.routes if tuple(route.capability_sequence) == target)

@@ -55,12 +55,14 @@ import {
   exportRecordingSkill,
   getRecordingResult,
   listRecordingResults,
+  previewRecordingSkill,
   rememberExportDir,
   rememberSkillExportDraft,
   rememberedExportDir,
   rememberedSkillExportDraft,
 } from "../api/recording";
-import { routeSummaryFromOutcome } from "../api/skillExportDraft.mjs";
+import { routeSummaryFromOutcome } from "../api/skillExportDraft";
+import type { SkillGenerationRequest } from "../api/recording";
 import { getExportDirectory } from "../api/skills";
 import type {
   RecordingResultDetail,
@@ -716,6 +718,7 @@ export default function PageRecorder({
   const [skillSuccessCriteria, setSkillSuccessCriteria] = useState("");
   const [skillForbiddenActions, setSkillForbiddenActions] = useState("");
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
+  const [skillPreviewKey, setSkillPreviewKey] = useState("");
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
 
   const status = snapshot?.status || "idle";
@@ -1634,7 +1637,7 @@ export default function PageRecorder({
     setSkillTitle(saved.title?.trim() || resultMeta?.skill_export_title?.trim() || defaultTitle);
     const rememberedDescription = saved.description?.trim() || resultMeta?.skill_export_description?.trim() || "";
     setSkillDescription(isStockSkillDescription(rememberedDescription) ? defaultDescription : rememberedDescription);
-    const savedMode = saved.planningMode || resultMeta?.skill_export_planning_mode;
+    const savedMode = saved.planningMode ?? resultMeta?.skill_export_planning_mode;
     setSkillPlanningMode(savedMode === "fixed" ? "fixed" : "dynamic");
     const savedExamples = saved.exampleRequests?.trim()
       || (Array.isArray(resultMeta?.skill_export_example_requests)
@@ -1651,7 +1654,87 @@ export default function PageRecorder({
     setSkillClarifications([]);
     setSkillExportErrors([]);
     setSkillExportProgress("");
+    setSkillPreviewKey("");
     setSkillExportOpen(true);
+  }
+
+  function currentSkillDraftKey() {
+    return JSON.stringify({
+      title: skillTitle.trim(),
+      description: skillDescription.trim(),
+      planningMode: skillPlanningMode,
+      exampleRequests: skillExampleRequests,
+      successCriteria: skillSuccessCriteria,
+      forbiddenActions: skillForbiddenActions,
+    });
+  }
+
+  function skillExportRequest(previewOnly: boolean): SkillGenerationRequest {
+    return {
+      title: skillTitle.trim(),
+      business_description: skillDescription.trim(),
+      planning_mode: skillPlanningMode,
+      example_requests: skillExampleRequests.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+      success_criteria: skillSuccessCriteria.trim(),
+      forbidden_actions: skillForbiddenActions.trim(),
+      out_dir: skillOutDir.trim(),
+      require_stage_seven: false,
+      preview_only: previewOnly,
+    };
+  }
+
+  async function previewSkillRoutes() {
+    const resultId = currentResultId();
+    if (!resultId) {
+      message.error("没有可导出的录制结果");
+      return false;
+    }
+    persistSkillDraft();
+    if (!skillTitle.trim()) {
+      message.error("请填写 Skill 显示名称");
+      return false;
+    }
+    if (!skillDescription.trim()) {
+      message.error("请填写业务描述");
+      return false;
+    }
+    if (skillExporting) return false;
+    setSkillExporting(true);
+    setSkillExportProgress("正在编译路线，尚未写出 Skill 包…");
+    setSkillClarifications([]);
+    setSkillExportErrors([]);
+    try {
+      const outcome = await previewRecordingSkill(resultId, skillExportRequest(true));
+      if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
+        setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
+        setSkillClarifications(outcome.clarification_questions || outcome.unresolved_branches || []);
+        setSkillPreviewKey("");
+        setSkillExportProgress("");
+        message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
+        return false;
+      }
+      if (outcome.status !== "previewed") {
+        setSkillExportErrors(outcome.errors || ["路线预览失败"]);
+        setSkillPreviewKey("");
+        setSkillExportProgress("");
+        message.error("路线预览失败");
+        return false;
+      }
+      setSkillExportOutcome(outcome);
+      setSkillPreviewKey(currentSkillDraftKey());
+      setSkillExportProgress("");
+      message.success("已编译路线，请确认理解后再导出");
+      return true;
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setSkillExportErrors([typeof detail === "string" ? detail : "路线预览失败"]);
+      setSkillPreviewKey("");
+      setSkillExportProgress("");
+      message.error(typeof detail === "string" ? detail : "路线预览失败");
+      return false;
+    } finally {
+      setSkillExporting(false);
+    }
   }
 
   async function submitSkillExport() {
@@ -1660,17 +1743,20 @@ export default function PageRecorder({
       message.error("没有可导出的录制结果");
       return;
     }
-    const description = skillDescription.trim();
     persistSkillDraft();
     if (!skillTitle.trim()) {
       message.error("请填写 Skill 显示名称");
       return;
     }
-    if (!description) {
+    if (!skillDescription.trim()) {
       message.error("请填写业务描述");
       return;
     }
     if (skillExporting) return;
+    if (skillPreviewKey !== currentSkillDraftKey() || skillExportOutcome?.status !== "previewed") {
+      await previewSkillRoutes();
+      return;
+    }
     setSkillExporting(true);
     setSkillExportProgress("正在规划并导出 Skill…");
     setSkillClarifications([]);
@@ -1685,19 +1771,11 @@ export default function PageRecorder({
     try {
       const outDir = skillOutDir.trim();
       if (outDir) rememberExportDir(outDir);
-      const outcome = await exportRecordingSkill(resultId, {
-        title: skillTitle.trim(),
-        business_description: description,
-        planning_mode: skillPlanningMode,
-        example_requests: skillExampleRequests.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
-        success_criteria: skillSuccessCriteria.trim(),
-        forbidden_actions: skillForbiddenActions.trim(),
-        out_dir: outDir,
-        require_stage_seven: false,
-      });
+      const outcome = await exportRecordingSkill(resultId, skillExportRequest(false));
       if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
         setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
         setSkillClarifications(outcome.clarification_questions || outcome.unresolved_branches || []);
+        setSkillPreviewKey("");
         setSkillExportProgress("");
         message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
         await refreshResultMeta(resultId);
@@ -1711,6 +1789,7 @@ export default function PageRecorder({
         return;
       }
       setSkillExportOutcome(outcome);
+      setSkillPreviewKey("");
       setSkillExportProgress("");
       if (outcome.export_path) rememberExportDir(outcome.export_path.replace(/[\\/][^\\/]+$/, "") || outDir);
       await refreshResultMeta(resultId);
@@ -3450,7 +3529,13 @@ export default function PageRecorder({
       {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
       {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
       <Modal
-        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "配置并导出 Skill"}
+        title={
+          skillExportOutcome?.status === "exported"
+            ? "Skill 已导出"
+            : skillExportOutcome?.status === "previewed"
+              ? "确认编译结果后再导出"
+              : "配置并导出 Skill"
+        }
         open={skillExportOpen}
         onCancel={() => {
           if (!skillExporting) setSkillExportOpen(false);
@@ -3467,7 +3552,10 @@ export default function PageRecorder({
           ) : (
             <Space>
               <Button disabled={skillExporting} onClick={() => setSkillExportOpen(false)}>取消</Button>
-              <Button type="primary" loading={skillExporting} disabled={skillExporting} onClick={() => void submitSkillExport()}>导出 Skill</Button>
+              <Button loading={skillExporting} disabled={skillExporting} onClick={() => void previewSkillRoutes()}>预览路线</Button>
+              <Button type="primary" loading={skillExporting} disabled={skillExporting} onClick={() => void submitSkillExport()}>
+                {skillExportOutcome?.status === "previewed" && skillPreviewKey === currentSkillDraftKey() ? "确认并导出" : "导出 Skill"}
+              </Button>
             </Space>
           )
         }
@@ -3482,7 +3570,12 @@ export default function PageRecorder({
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在规划和导出 Skill…"} /> : null}
-            {skillExportOutcome?.status === "needs_clarification" ? renderSkillRouteSummary(skillExportOutcome) : null}
+            {skillExportOutcome?.status === "previewed" ? (
+              <Alert type="info" showIcon message="以下路线来自导出前编译，尚未写出 Skill 包。请确认理解后再导出。" />
+            ) : null}
+            {skillExportOutcome?.status === "needs_clarification" || skillExportOutcome?.status === "previewed"
+              ? renderSkillRouteSummary(skillExportOutcome)
+              : null}
             {skillClarifications.length ? (
               <Alert
                 type="warning"

@@ -172,12 +172,75 @@ def _filter_plans_for_export(plans: list[dict], skill) -> list[dict]:  # noqa: A
     payload = _skill_plan_payload(skill)
     selected = [str(item) for item in (payload.get("selected_capability_ids") or []) if str(item)]
     if not selected:
-        return plans
+        return _project_plan_inputs(plans, payload)
     selected_set = set(selected)
     kept = [plan for plan in plans if _plan_keys(plan) & selected_set]
     if not kept:
         raise ValueError(f"{skill.skill_id} skill plan selected capabilities are not in the compiled contract")
-    return kept
+    return _project_plan_inputs(kept, payload)
+
+
+def _project_plan_inputs(plans: list[dict], payload: dict) -> list[dict]:
+    """Project route step inputs into capability schemas so CONTRACT and forms share one fact."""
+    user_fields: dict[str, dict[str, dict]] = {}
+    required_fields: dict[str, list[str]] = {}
+    bound_fields: dict[str, set[str]] = {}
+    for route in payload.get("routes") or []:
+        if not isinstance(route, dict):
+            continue
+        for step in route.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            cap_id = str(step.get("capability_id") or "").strip()
+            if not cap_id:
+                continue
+            for source in step.get("input_sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                field = str(source.get("field") or "").strip()
+                kind = str(source.get("source") or "").strip()
+                if not field:
+                    continue
+                if kind == "user":
+                    user_fields.setdefault(cap_id, {})[field] = {
+                        "type": "string",
+                        "description": str(source.get("notes") or ""),
+                    }
+                    bucket = required_fields.setdefault(cap_id, [])
+                    if field not in bucket:
+                        bucket.append(field)
+                elif kind == "confirmed_binding":
+                    bound_fields.setdefault(cap_id, set()).add(field)
+    projected: list[dict] = []
+    for plan in plans:
+        schema = dict(plan.get("input_schema") or {"type": "object", "properties": {}})
+        properties = dict(schema.get("properties") or {})
+        required = [str(item) for item in (schema.get("required") or []) if str(item)]
+        keys = {str(plan.get("capability_id") or ""), str(plan.get("name") or "")} - {""}
+        for key in keys:
+            for field, spec in (user_fields.get(key) or {}).items():
+                current = properties.get(field)
+                if not isinstance(current, dict):
+                    properties[field] = dict(spec)
+                for item in required_fields.get(key) or []:
+                    if item not in required:
+                        required.append(item)
+            for field in bound_fields.get(key) or set():
+                current = properties.get(field)
+                if not isinstance(current, dict):
+                    properties[field] = {"type": "string", "x-dano-derived-from-query": True}
+                elif current.get("x-dano-derived-from-query") is not True and field not in required:
+                    properties[field] = {**current, "x-dano-derived-from-query": True}
+        projected.append({
+            **plan,
+            "input_schema": {
+                **schema,
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        })
+    return projected
 
 
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001

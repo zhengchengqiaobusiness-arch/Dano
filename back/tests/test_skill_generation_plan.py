@@ -417,7 +417,7 @@ def test_model_wording_cannot_replace_recorded_plan_structure() -> None:
     assert {tuple(route.capability_sequence) for route in merged.routes} == {
         tuple(route.capability_sequence) for route in base.routes
     }
-    query = next(route for route in merged.routes if route.route_id == "query_only")
+    query = next(route for route in merged.routes if route.capability_sequence == ["cap_query"])
     assert query.when_to_use == "只看待办，不要提交"
     assert query.examples[0].user_request == "帮我看一下待办"
     skinny.summary = "模型另写的摘要，丢掉用户约定"
@@ -471,12 +471,12 @@ async def test_incomplete_relation_plans_independent_routes() -> None:
     )
     assert result.status == "planned"
     assert result.plan is not None
-    route_ids = {route.route_id for route in result.plan.routes}
-    assert route_ids >= {"query_only", "write_direct"}
+    sequences = {tuple(route.capability_sequence) for route in result.plan.routes}
+    assert ("cap_query",) in sequences
     combo = next(route for route in result.plan.routes if len(route.capability_sequence) > 1)
     assert combo.bindings == []
     assert combo.checkpoints or any(step.checkpoint for step in combo.steps)
-    write = next(route for route in result.plan.routes if route.route_id == "write_direct")
+    write = next(route for route in result.plan.routes if route.capability_sequence[0] == "cap_submit")
     assert write.bindings == []
     assert "id" in write.required_user_inputs
 
@@ -616,12 +616,14 @@ async def test_dynamic_lookup_appends_to_write_routes_not_standalone_c3_c1() -> 
     assert plan is not None
     route_ids = {route.route_id for route in plan.routes}
     assert "write_then_query" not in route_ids
+    assert len(route_ids) == len(plan.routes)
     sequences = [tuple(route.capability_sequence) for route in plan.routes]
     assert ("cap_query",) in sequences
-    write_direct = next(route for route in plan.routes if route.route_id == "write_direct")
+    write_direct = next(route for route in plan.routes if route.capability_sequence == ["cap_submit", "cap_query"])
     assert write_direct.capability_sequence == ["cap_submit", "cap_query"]
-    query_then_write = next(route for route in plan.routes if route.route_id == "query_then_write")
-    assert query_then_write.capability_sequence == ["cap_query", "cap_submit", "cap_query"]
+    query_then_write = next(
+        route for route in plan.routes if route.capability_sequence == ["cap_query", "cap_submit", "cap_query"]
+    )
     assert query_then_write.step_ids == ["query_before", "submit_selected", "query_after"]
     checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-lookup")
     assert checked.ok, checked.errors
@@ -642,10 +644,15 @@ def test_dynamic_plan_keeps_all_packed_operations_with_confirmed_query_write() -
     checked = validate_skill_plan(plan, spec, verified_capability_ids=VERIFIED, expected_fingerprint="fp-all")
     assert checked.ok, checked.errors
     assert set(plan.selected_capability_ids) == {"cap_query", "cap_option", "cap_submit"}
-    combo = next(route for route in plan.routes if route.route_id == "query_then_write")
+    combo = next(
+        route
+        for route in plan.routes
+        if route.capability_sequence[:2] == ["cap_query", "cap_submit"] and route.bindings
+    )
     assert combo.bindings
-    assert any(route.route_id.startswith("op_") for route in plan.routes)
+    assert any(route.capability_sequence == ["cap_option"] for route in plan.routes)
     assert not any(route.route_id.startswith("solo_") for route in plan.routes)
+    assert len({route.route_id for route in plan.routes}) == len(plan.routes)
     singles = [route for route in plan.routes if len(route.capability_sequence) == 1]
     assert {route.capability_sequence[0] for route in singles} >= {"cap_query", "cap_option", "cap_submit"}
 
@@ -687,7 +694,9 @@ async def test_empty_business_description_fails() -> None:
 def test_sale_order_baseline_is_description_without_combo() -> None:
     """Sales-order description now compiles to handoff combos, not notes-only."""
     from stage8_sale_order_fixture import (
+        SALE_ORDER_EXPLICIT_COMBOS,
         combination_routes,
+        combo_pair,
         route_has_human_checkpoint,
         sale_order_request,
         sale_order_spec,
@@ -700,13 +709,20 @@ def test_sale_order_baseline_is_description_without_combo() -> None:
     assert len(spec.capabilities) == 7
     assert spec.capability_relations == []
     combos = combination_routes(plan)
-    assert combos
     assert plan.clarification_questions == []
+    assert {combo_pair(route) for route in combos} >= set(SALE_ORDER_EXPLICIT_COMBOS)
+    assert ("cap_search", "cap_create") not in {combo_pair(route) for route in combos}
+    assert ("cap_detail", "cap_create") not in {combo_pair(route) for route in combos}
+    assert len({route.route_id for route in plan.routes}) == len(plan.routes)
     assert all(not route.bindings for route in combos)
     assert all(route_has_human_checkpoint(route) for route in combos if not route.bindings)
     assert {cap.capability_id for cap in spec.capabilities} <= {
         cap_id for route in plan.routes for cap_id in route.capability_sequence
     }
+    for route in plan.routes:
+        if list(route.capability_sequence) in (["cap_search"], ["cap_detail"]):
+            assert "写入已确认" not in route.done_when
+            assert "写操作已确认" not in route.done_when
 
 
 def test_explicit_multistep_description_requires_combo_or_clarification() -> None:
@@ -718,12 +734,14 @@ def test_explicit_multistep_description_requires_combo_or_clarification() -> Non
         sale_order_verified_ids,
     )
 
+    from stage8_sale_order_fixture import SALE_ORDER_EXPLICIT_COMBOS, combo_pair
+
     spec = sale_order_spec()
     request = sale_order_request()
     plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-sale-order")
-    assert combination_routes(plan) or plan.clarification_questions, (
-        "明确写出的查询后再编辑/审核/反审核/删除不能静默降级成原子列表"
-    )
+    combos = combination_routes(plan)
+    assert {combo_pair(route) for route in combos} >= set(SALE_ORDER_EXPLICIT_COMBOS)
+    assert not plan.clarification_questions
 
 
 def test_unbound_dependent_route_requires_human_checkpoint() -> None:
@@ -754,8 +772,8 @@ def test_single_query_intent_stays_atomic() -> None:
         "fp-single-query",
     )
     combos = [route for route in plan.routes if len(route.capability_sequence) > 1]
-    assert all("cap_submit" not in route.capability_sequence or len(route.capability_sequence) == 1 for route in plan.routes if route.route_id == "query_only")
     query = next(route for route in plan.routes if route.capability_sequence == ["cap_query"])
+    assert "cap_submit" not in query.capability_sequence
     assert query.composition_mode == query.composition_mode.__class__("atomic") or str(query.composition_mode) == "atomic"
     assert not any(route.capability_sequence == ["cap_query", "cap_submit"] and "只查询" in route.when_to_use for route in combos)
 
@@ -948,3 +966,22 @@ def test_sale_order_contract_quality_gates() -> None:
     assert all(route_has_human_checkpoint(route) for route in combination_routes(plan) if not route.bindings)
     assert all(route.requires_confirmation for route in plan.routes if any(cap_id.startswith("cap_") and cap_id not in {"cap_search", "cap_detail"} for cap_id in route.capability_sequence if cap_id in {"cap_update", "cap_approve", "cap_unapprove", "cap_create", "cap_delete"}))
     assert all(route.done_when and all(step.done_when for step in route.steps) for route in plan.routes)
+
+
+def test_unmapped_parallel_action_needs_clarification() -> None:
+    from stage8_sale_order_fixture import sale_order_request, sale_order_spec, sale_order_verified_ids
+
+    spec = sale_order_spec()
+    request = sale_order_request()
+    request.business_description = "先查询或查看，再对选中的订单做编辑、审核、反审核或注销。"
+    request.example_requests = []
+    plan = propose_deterministic_plan(spec, request, sale_order_verified_ids(spec), "fp-partial")
+    assert plan.clarification_questions
+    checked = validate_skill_plan(
+        plan,
+        spec,
+        verified_capability_ids=sale_order_verified_ids(spec),
+        expected_fingerprint="fp-partial",
+    )
+    assert checked.clarifications
+    assert not checked.ok or checked.clarifications

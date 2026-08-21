@@ -188,3 +188,12 @@ These are Skill-handbook metrics, not interface-correctness metrics:
 - Cases that should stop but continue = 0.
 - Every documented step has a decidable done condition.
 - Loading a combination route file for a single atomic request = 0.
+
+Runnable checks live in `back/tests/test_skill_generation_quality.py`.
+They measure Skill hit/miss, complete route match, silent branch drops,
+unnecessary asks, should-stop-but-continued, and on-demand context load.
+They do not score whether a business API field was discovered correctly.
+
+`route_id` must be generated from the full capability sequence and stay
+globally unique. Package validation rejects duplicate IDs before file-set
+comparison, so two combination contracts cannot silently share one file.

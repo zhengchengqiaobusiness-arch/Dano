@@ -121,6 +121,7 @@ def validate_skill_plan(
         result.error("固定规划模式只能有一条主要路线")
     if plan.planning_mode == PlanningMode.DYNAMIC and not plan.routes:
         result.error("动态规划模式至少需要一条有效路线")
+    _validate_unique_route_ids(result, plan)
     used_in_routes: set[str] = set()
     for route in plan.routes:
         used_in_routes.update(_validate_route(result, route, plan, spec, caps, verified))
@@ -154,7 +155,40 @@ def validate_skill_plan(
     _validate_intent_coverage(result, plan)
     _validate_route_execution_contracts(result, plan, caps)
     _validate_forbidden_routes(result, plan)
+    _validate_done_when_matches_route(result, plan, caps)
     return result
+
+
+def _validate_unique_route_ids(result: PlanValidation, plan: SkillPlan) -> None:
+    seen: dict[str, int] = {}
+    for route in plan.routes:
+        route_id = str(route.route_id or "").strip()
+        if not route_id:
+            result.error("路线缺少 route_id")
+            continue
+        seen[route_id] = seen.get(route_id, 0) + 1
+    duplicates = [route_id for route_id, count in seen.items() if count > 1]
+    for route_id in duplicates:
+        result.error(f"路线 ID 重复，不能覆盖路线文件: {route_id}")
+
+
+def _validate_done_when_matches_route(
+    result: PlanValidation,
+    plan: SkillPlan,
+    caps: dict[str, FlowCapability],
+) -> None:
+    write_markers = ("写入已确认", "写操作已确认")
+    for route in plan.routes:
+        writes = [
+            cap_id
+            for cap_id in route.capability_sequence
+            if caps.get(cap_id) and is_write_capability(caps[cap_id])
+        ]
+        if writes:
+            continue
+        done = str(route.done_when or "")
+        if any(marker in done for marker in write_markers):
+            result.error(f"只读路线 {route.route_id} 不能继承写入完成标准")
 
 
 def _sequence_covers(route_sequence: list[str], branch_sequence: list[str]) -> bool:
@@ -247,6 +281,14 @@ def _validate_route_execution_contracts(
         if any(caps.get(cap_id) and is_write_capability(caps[cap_id]) for cap_id in route.capability_sequence):
             if "不得重试" not in failure and "不能重试" not in failure:
                 result.error(f"路线 {route.route_id} 写结果未知时必须禁止自动重试")
+        user_fields = [
+            source.field
+            for step in route.steps
+            for source in step.input_sources
+            if source.source == InputSourceKind.USER and source.field
+        ]
+        if list(dict.fromkeys(user_fields)) != list(route.required_user_inputs):
+            result.error(f"路线 {route.route_id} 的调用方字段与步骤输入来源不一致")
 
 
 def _needs_user_or_prior(cap: FlowCapability) -> bool:

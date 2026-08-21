@@ -252,7 +252,8 @@ def _script_slug(value: str) -> str:
 def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
     contract_path = root / "references" / "CONTRACT.json"
     routes_dir = root / "references" / "routes"
-    expected: set[str] = set()
+    combo_ids: list[str] = []
+    all_ids: list[str] = []
     if contract_path.is_file():
         try:
             contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -263,15 +264,35 @@ def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
                 continue
             sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
             route_id = str(route.get("route_id") or "").strip()
+            if route_id:
+                all_ids.append(route_id)
             if len(sequence) > 1 and route_id:
-                expected.add(f"{route_id}.md")
+                combo_ids.append(route_id)
+    seen: set[str] = set()
+    for route_id in all_ids:
+        if route_id in seen:
+            issues.append(_issue(
+                "duplicate_route_id",
+                f"duplicate route_id would overwrite route file: {route_id}",
+                contract_path,
+            ))
+            continue
+        seen.add(route_id)
+    expected = [f"{route_id}.md" for route_id in combo_ids]
+    expected_set = set(expected)
+    if len(expected) != len(expected_set):
+        issues.append(_issue(
+            "duplicate_combo_route",
+            "combination contracts must map one-to-one to route files",
+            contract_path,
+        ))
     existing = {path.name for path in routes_dir.glob("*.md")} if routes_dir.is_dir() else set()
-    for name in sorted(expected - existing):
+    for name in sorted(expected_set - existing):
         issues.append(_issue("missing_route_file", f"missing route file for combination: {name}", routes_dir / name))
-    for name in sorted(existing - expected):
+    for name in sorted(existing - expected_set):
         issues.append(_issue("extra_route_file", f"route file has no matching combination contract: {name}", routes_dir / name))
     if skill_text:
-        for name in expected:
+        for name in expected_set:
             pointer = f"references/routes/{name}"
             if pointer not in skill_text and f"routes/{name}" not in skill_text:
                 issues.append(_issue(
@@ -399,6 +420,68 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
                     f"packed script is not in selected capabilities: {script.name}",
                     script,
                 ))
+
+
+def _check_input_truth(root: Path, issues: list[dict]) -> None:
+    """CONTRACT, route steps, and INPUT_FORMS must share one caller-field fact."""
+    contract_path = root / "references" / "CONTRACT.json"
+    forms_path = root / "references" / "INPUT_FORMS.md"
+    if not contract_path.is_file():
+        return
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    forms = forms_path.read_text(encoding="utf-8") if forms_path.is_file() else ""
+    forms_dir = root / "references" / "forms"
+    if forms_dir.is_dir():
+        for path in forms_dir.glob("*.md"):
+            forms += "\n" + path.read_text(encoding="utf-8")
+    caps: dict[str, dict] = {}
+    for item in contract.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in (item.get("capability_id"), item.get("name")):
+            if key:
+                caps[str(key)] = item
+    for route in contract.get("routes") or []:
+        if not isinstance(route, dict):
+            continue
+        route_id = str(route.get("route_id") or "")
+        for step in route.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            cap = caps.get(str(step.get("capability_id") or ""))
+            if cap is None:
+                continue
+            schema = cap.get("input_schema") if isinstance(cap.get("input_schema"), dict) else {}
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required = {str(item) for item in (schema.get("required") or [])}
+            title = str(cap.get("title") or cap.get("name") or "")
+            for source in step.get("input_sources") or []:
+                if not isinstance(source, dict) or source.get("source") != "user":
+                    continue
+                field = str(source.get("field") or "").strip()
+                if not field:
+                    continue
+                if field not in properties:
+                    issues.append(_issue(
+                        "input_truth_contract",
+                        f"route {route_id} asks for {field} but CONTRACT capability {title or step.get('capability_id')} has no such field",
+                        contract_path,
+                    ))
+                elif field not in required:
+                    issues.append(_issue(
+                        "input_truth_required",
+                        f"route {route_id} user field {field} must be required in CONTRACT",
+                        contract_path,
+                    ))
+                if forms and field not in forms:
+                    issues.append(_issue(
+                        "input_truth_forms",
+                        f"INPUT_FORMS.md is missing caller field {field} required by route {route_id}",
+                        forms_path,
+                    ))
 
 
 def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
@@ -556,6 +639,7 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
                 operations_path,
             ))
         _check_route_files(root, skill, issues)
+        _check_input_truth(root, issues)
     else:
         chain_source = operations_path if operations else reference_path
         chain_text = operations or reference

@@ -430,7 +430,7 @@ async def export_recording_skill(
             title=title,
         )
         raise SkillExportError(400, "业务描述不能为空")
-    if not str(request.out_dir or "").strip():
+    if not request.preview_only and not str(request.out_dir or "").strip():
         _log_export(
             "skill.export.failed",
             summary="导出目录为空，拒绝导出",
@@ -476,7 +476,11 @@ async def export_recording_skill(
         stage_seven_fingerprint=fingerprint,
         request=request,
     )
-    if str(body.get("skill_request_fingerprint") or "") == request_fp and _already_exported(body):
+    if (
+        not request.preview_only
+        and str(body.get("skill_request_fingerprint") or "") == request_fp
+        and _already_exported(body)
+    ):
         plan = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else {}
         used = list((plan or {}).get("used_capabilities") or [])
         if not used and plan:
@@ -517,12 +521,13 @@ async def export_recording_skill(
             idempotent=True,
         )
 
-    await _call_persist(persist, {
-        **body,
-        "skill_export_status": "generating",
-        "skill_plan_valid": False,
-        **_skill_draft_fields(request, title),
-    })
+    if not request.preview_only:
+        await _call_persist(persist, {
+            **body,
+            "skill_export_status": "generating",
+            "skill_plan_valid": False,
+            **_skill_draft_fields(request, title),
+        })
     _log_export(
         "skill.export.planning",
         summary="开始规划 Skill 路线",
@@ -570,6 +575,28 @@ async def export_recording_skill(
         )
 
     plan = planned.plan
+    if request.preview_only:
+        await _call_persist(persist, {
+            **body,
+            "skill_export_status": "previewed",
+            "skill_plan": plan.model_dump(mode="json"),
+            "skill_plan_valid": True,
+            "published": bool(body.get("published")),
+            **_skill_draft_fields(request, title),
+        })
+        return SkillExportOutcome(
+            status="previewed",
+            skill_name=str(request.title or body.get("title") or ""),
+            planning_mode=str(plan.planning_mode),
+            used_capabilities=[
+                {"capability_id": cap_id}
+                for cap_id in plan.selected_capability_ids
+            ],
+            unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
+            routes=_route_rows(plan, spec),
+            unresolved_branches=_unresolved_rows(plan),
+            plan=plan.model_dump(mode="json"),
+        )
     title = str(request.title or body.get("title") or spec.title or "").strip()
     skill_id = _stable_skill_id(body, title)
     _log_export(
