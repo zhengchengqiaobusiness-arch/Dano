@@ -13,7 +13,7 @@ from dano.execution.page.recording_facts import (
 
 
 def _model_visible_request_facts(
-    request_facts: list[dict[str, Any]], *, max_items: int = 80,
+    request_facts: list[dict[str, Any]], *, max_items: int = 50,
 ) -> list[dict[str, Any]]:
     """Keep late/candidate requests visible without expanding model context.
 
@@ -22,7 +22,10 @@ def _model_visible_request_facts(
     fills remaining slots from the newest observations.
     """
     request_facts = _compact_repeated_endpoint_observations(request_facts)
-    priority_roles = {"business_get", "business_write", "submit_anchor", "read_option"}
+    priority_roles = {
+        "business_get", "business_read", "business_write", "submit_anchor",
+        "read_option", "option",
+    }
     priority = [
         item for item in request_facts
         if item.get("keep") is True
@@ -31,8 +34,13 @@ def _model_visible_request_facts(
         or str(item.get("trigger_op") or "").lower() in {"click", "submit", "select", "pick"}
         or _request_fact_has_record_identity(item)
     ]
+    static_resources = {"script", "stylesheet", "image", "font", "media", "manifest"}
+    candidates = [
+        item for item in request_facts
+        if str(item.get("resource_type") or "").strip().lower() not in static_resources
+    ]
     selected: dict[str, dict[str, Any]] = {}
-    for item in [*reversed(priority), *reversed(request_facts)]:
+    for item in [*reversed(priority), *reversed(candidates)]:
         request_id = str(item.get("request_id") or item.get("request_index") or id(item))
         selected.setdefault(request_id, item)
         if len(selected) >= max_items:
@@ -69,7 +77,11 @@ def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
         "validation": compact_model_payload(report, max_depth=6, max_items=40, max_string=500),
         "projection": {
             "bounded": True,
-            "note": "Large collections and payload branches include explicit __truncated_* markers.",
+            "note": (
+                "This is a bounded semantic state view; raw recording facts remain unchanged. "
+                "Use get_recording_delta paging for complete request-window evidence. "
+                "Truncated branches include explicit __truncated_* markers."
+            ),
         },
     }
 

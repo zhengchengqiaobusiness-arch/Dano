@@ -49,6 +49,7 @@ def _field_semantic_identity(item: dict[str, Any]) -> tuple[Any, ...]:
         str(context.get("path") or context.get("url") or ""),
         str(item.get("surface") or item.get("control_surface") or ""),
         str(item.get("form_root") or ""),
+        item.get("form_index"),
         str(item.get("table_id") or ""),
         item.get("column_index"),
         str(item.get("label") or item.get("field") or ""),
@@ -120,6 +121,38 @@ def _model_visible_field_evidence(
     )
 
 
+_MODEL_FIELD_EVIDENCE_KEYS = frozenset({
+    "kind", "evidence_id", "occurrence_id", "field_identity_id", "identity_sources",
+    "event_id", "event_refs", "action_id", "transaction_id", "page_id", "frame_id",
+    "surface", "control_surface", "form_index", "table_id", "column_index",
+    "display_order", "field", "label", "field_aliases", "control_kind", "input_type",
+    "op", "value", "sample_values", "value_kind", "required", "required_observed",
+    "required_state", "disabled", "read_only", "editable", "in_dialog", "axes",
+    "options", "option_count", "enum_source", "selected_option_field", "minimum",
+    "maximum", "multiple", "accept", "request_id", "wire_path", "binding_status",
+    "binding_candidates",
+})
+
+
+def _model_field_evidence_projection(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep contract evidence while removing repeated browser structure prose."""
+
+    projected = {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        if key in _MODEL_FIELD_EVIDENCE_KEYS and value not in (None, "", [], {})
+    }
+    context = item.get("page_context") if isinstance(item.get("page_context"), dict) else {}
+    page_path = str(context.get("path") or context.get("url") or "")
+    if page_path:
+        projected["page_path"] = page_path
+    # A stable identity already carries the form scope. Keep a raw structural
+    # root only for legacy evidence that has no identity yet.
+    if not item.get("field_identity_id") and item.get("form_root"):
+        projected["form_root"] = item.get("form_root")
+    return projected
+
+
 def _action_request_ledger(
     request_facts: list[dict[str, Any]], page_events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -182,6 +215,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     field_evidence = _model_visible_field_evidence(
         copy.deepcopy(getattr(spec.request_facts, "field_evidence", []) or []),
     )
+    field_evidence = [_model_field_evidence_projection(item) for item in field_evidence]
     page_events = [
         item for item in (spec.request_facts.page_events or []) if isinstance(item, dict)
     ]
@@ -284,9 +318,9 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "trigger_action_id_samples": list(request.get("trigger_action_id_samples") or []),
                 "response_schema": compact_model_payload(
                     request.get("response_schema") or {},
-                    max_depth=6,
-                    max_items=50,
-                    max_string=500,
+                    max_depth=4,
+                    max_items=25,
+                    max_string=200,
                 ),
             }
             for request in _model_visible_request_facts(request_facts)
@@ -317,12 +351,12 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 key: event.get(key)
                 for key in (
                     "event_id", "kind", "action_id", "transaction_id", "op", "locator", "field",
-                    "required", "has_value", "observed_at", "page_id", "frame_id", "changes",
+                    "required", "has_value", "observed_at", "page_id", "frame_id",
                     "option_count", "field_count", "required_fields", "page_context",
                 )
                 if event.get(key) not in (None, "", [], {})
             }
-            for event in page_events[-120:]
+            for event in page_events[-60:]
             # Raw mutation batches describe framework repaint churn, not field
             # semantics.  Keeping them in the model state added tens of
             # thousands of characters per page without helping matching.

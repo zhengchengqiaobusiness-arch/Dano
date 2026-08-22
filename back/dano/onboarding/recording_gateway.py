@@ -17,9 +17,7 @@ from dano.execution.page.flow_spec import (
     apply_client_flow_patch,
     ensure_flow_version,
     flow_spec_fingerprint,
-    flow_spec_to_client,
     to_flow_spec,
-    validate_flow_spec,
 )
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.recording_field_identity import bind_field_evidence
@@ -35,25 +33,18 @@ from dano.onboarding.recording_workflow import (
     WorkflowQuestion,
     WorkflowSnapshot,
     WorkflowStatus,
+    _draft_fingerprint,
 )
 
 
 SendMessage = Callable[[dict[str, Any]], Awaitable[None]]
 PiFactory = Callable[[bool], Awaitable[Any]]
-_HEAVY_SNAPSHOT_STATUSES = frozenset({
-    WorkflowStatus.EDITABLE,
-    WorkflowStatus.PUBLISHED,
-    WorkflowStatus.FAILED,
-    WorkflowStatus.CANCELLED,
-})
-
-
 def workflow_snapshot_client_payload(snapshot: WorkflowSnapshot) -> dict[str, Any]:
     """Project a workflow snapshot for the recorder UI.
 
-    Processing frames must stay cheap: ``validate_flow_spec`` / ``flow_spec_to_client``
-    compile the whole draft and would block the WebSocket until the analysis page
-    looks empty. Full check reports are only built for terminal editor states.
+    Sending a snapshot must stay a projection, including terminal editor states.
+    Recompiling a real recording here used to block the WebSocket for tens of
+    seconds after the workflow had already completed.
     """
 
     payload = snapshot.model_dump(mode="json", exclude={"draft", "operator_answers"})
@@ -70,20 +61,8 @@ def workflow_snapshot_client_payload(snapshot: WorkflowSnapshot) -> dict[str, An
     if draft is None:
         payload["draft"] = None
         return payload
-    if snapshot.status not in _HEAVY_SNAPSHOT_STATUSES:
-        payload["draft"] = client_recording_draft(draft)
-        return payload
-    try:
-        spec = FlowSpec.model_validate(draft)
-        payload["draft"] = flow_spec_to_client(spec)
-        payload["draft_fingerprint"] = flow_spec_fingerprint(spec)
-        payload["check_report"] = validate_flow_spec(spec)
-    except Exception as exc:  # noqa: BLE001 - resume must still show the draft
-        payload["draft"] = client_recording_draft(draft)
-        payload["check_report"] = {
-            "passed": False,
-            "errors": [f"草稿投影失败：{exc}"],
-        }
+    payload["draft"] = client_recording_draft(draft)
+    payload["draft_fingerprint"] = _draft_fingerprint(draft)
     return payload
 
 
@@ -407,11 +386,17 @@ class RecordingGatewaySession:
         if command == "patch_draft":
             if self.workflow.snapshot.draft is None:
                 raise ValueError("没有可修改的能力草稿")
+            expected_fingerprint = str(message.get("expected_fingerprint") or "")
+            actual_fingerprint = _draft_fingerprint(self.workflow.snapshot.draft)
+            if expected_fingerprint != actual_fingerprint:
+                raise ValueError(
+                    f"草稿版本冲突: expected={expected_fingerprint}, actual={actual_fingerprint}"
+                )
             spec = FlowSpec.model_validate(self.workflow.snapshot.draft)
             updated = apply_client_flow_patch(
                 spec,
                 list(message.get("edits") or []),
-                expected_fingerprint=str(message.get("expected_fingerprint") or ""),
+                expected_fingerprint=flow_spec_fingerprint(spec),
             )
             await self.workflow.patch_draft(
                 updated.model_dump(mode="json"),
@@ -580,6 +565,31 @@ class RecordingGatewaySession:
                 }
         return spec
 
+    def _live_plan_is_complete_for_freeze(self) -> bool:
+        """True when the drained live queue already owns a non-empty full plan."""
+
+        pi = self._pi
+        if pi is None or str(getattr(pi, "last_submission_kind", "")) != "plan":
+            return False
+        if self._live_pending_reason or self._live_failed_batches:
+            return False
+        spec = getattr(pi, "flow_spec", None)
+        meta = dict(getattr(spec, "meta", None) or {})
+        capability_model = (
+            meta.get("capability_model")
+            if isinstance(meta.get("capability_model"), dict)
+            else {}
+        )
+        semantic_plan = (
+            capability_model.get("semantic_plan")
+            if isinstance(capability_model.get("semantic_plan"), dict)
+            else {}
+        )
+        return bool(
+            isinstance(semantic_plan.get("capabilities"), list)
+            and semantic_plan.get("capabilities")
+        )
+
     async def _freeze_capture(self) -> None:
         if self._capture_frozen or self.capture is None:
             return
@@ -609,11 +619,13 @@ class RecordingGatewaySession:
         # The normal live queue is coalesced while Pi is busy.  A recording can
         # therefore stop with a short final tail that never reached the batch
         # threshold.  Drain that same queue once more with the same Skill.
-        if self.capture.captured_all_requests():
+        if (
+            self.capture.captured_all_requests()
+            and not self._live_plan_is_complete_for_freeze()
+        ):
             # The final tail is a consolidation phase, not merely a count
-            # threshold. Run it once even when the latest request was already
-            # seen by a live batch so the Skill can resubmit the complete
-            # collection from the frozen facts.
+            # threshold. It is only needed when the drained live queue did not
+            # already persist a complete capability collection.
             self._live_pending_reason = "final_request_tail"
             self._live_task = asyncio.create_task(self._drain_live())
             await self._live_task

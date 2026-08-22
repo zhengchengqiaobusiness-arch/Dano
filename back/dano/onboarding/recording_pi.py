@@ -236,6 +236,11 @@ class RecordingPiSession:
         self._prompt_lock = asyncio.Lock()
         self._active_prompt_mode = ""
         self._state_lock = asyncio.Lock()
+        # get_recording_state and get_recording_delta are often emitted in one
+        # assistant message and therefore execute concurrently.  Field binding
+        # is CPU-heavy and must publish one shared snapshot, not bind the same
+        # repaint history twice and race the second result over the first.
+        self._live_refresh_lock = asyncio.Lock()
         self._write_verification_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
         self.flow_spec: Any = None
@@ -466,8 +471,12 @@ class RecordingPiSession:
                 try:
                     await self._command("cancel", timeout_s=min(self.timeout_s, 10.0))
                 except BaseException as cancel_exc:  # noqa: BLE001
+                    # A missing cancel acknowledgement must not leave the Node
+                    # sidecar or its provider request running after the page
+                    # has already moved to a terminal state.
+                    await asyncio.shield(self.close(force=True))
                     raise RecordingPiError(
-                        "录制 Pi 操作超时且取消确认失败；会话不可继续使用"
+                        "录制 Pi 操作超时，取消未确认，已强制终止会话"
                     ) from cancel_exc
                 if prompt_mode == "recording_analysis":
                     emit_run_exception(
@@ -575,37 +584,59 @@ class RecordingPiSession:
         floor = int(self._live_delta_floor)
         captured = list(self._live_recorder.captured_all_requests() or [])
         page_events = list(self._live_recorder.recorded_page_events() or [])
+        # Publish and bind one shared semantic snapshot first.  Passing the
+        # already-bound fields below prevents recording_delta from rebinding
+        # thousands of raw form snapshots on the event-loop thread.
+        await self.refresh_live_evidence(
+            captured_requests=captured,
+            page_events=page_events,
+        )
+        async with self._state_lock:
+            bound_fields = deepcopy(
+                list(getattr(self.flow_spec.request_facts, "field_evidence", None) or [])
+            )
         # Mid-batch turns may rewind to see older request identities, but those
         # pages stay compact so the live window is not drowned in payloads.
         # The forced tail already sets floor=0 and returns full facts.
         if requested < floor:
-            delta = recording_delta(
+            delta = await asyncio.to_thread(
+                recording_delta,
                 self._live_recorder,
                 since_seq=requested,
                 limit=limit,
                 goal_text=self._live_goal_text,
                 captured_requests=captured,
                 page_events=page_events,
+                field_evidence=bound_fields,
                 stop_before=floor,
                 compact=True,
             )
         else:
-            delta = recording_delta(
+            delta = await asyncio.to_thread(
+                recording_delta,
                 self._live_recorder,
                 since_seq=max(requested, floor),
                 limit=limit,
                 goal_text=self._live_goal_text,
                 captured_requests=captured,
                 page_events=page_events,
+                field_evidence=bound_fields,
             )
-        # Keep edit grounding aligned with the exact batch just returned.
-        await self.refresh_live_evidence(
-            captured_requests=captured,
-            page_events=page_events,
-        )
         return delta
 
     async def refresh_live_evidence(
+        self,
+        *,
+        captured_requests: list[dict] | None = None,
+        page_events: list[dict] | None = None,
+    ) -> None:
+        async with self._live_refresh_lock:
+            await self._refresh_live_evidence(
+                captured_requests=captured_requests,
+                page_events=page_events,
+            )
+
+    async def _refresh_live_evidence(
         self,
         *,
         captured_requests: list[dict] | None = None,
@@ -635,7 +666,17 @@ class RecordingPiSession:
             if page_events is not None
             else list(read_events() or []) if callable(read_events) else []
         )
-        raw_fields = list(read_fields() or []) if callable(read_fields) else []
+        all_raw_fields = list(read_fields() or []) if callable(read_fields) else []
+        # Browser frameworks emit the same form snapshot after many unrelated
+        # repaints.  Keep one latest occurrence for every distinct semantic
+        # control state in the live Pi working copy.  The recorder and final
+        # materialization still retain and bind the complete raw evidence.
+        from dano.execution.page.recording_agent_contract import _model_visible_field_evidence
+
+        raw_fields = _model_visible_field_evidence(
+            all_raw_fields,
+            limit=max(1, len(all_raw_fields)),
+        )
         page_enums = dict(read_enums() or {}) if callable(read_enums) else {}
 
         def _request_sig(item: dict) -> tuple:
@@ -1239,10 +1280,11 @@ class RecordingPiSession:
                 elif event_type == "runtime_error":
                     future.set_exception(RecordingPiError(str(event.get("error") or "Pi runtime error")))
         finally:
-            if not recording_pi_process_has_exited(self._proc):
-                log.warning("recording_pi.stdout_closed_while_alive", run_id=self.run_id)
-                return
-            self._fail_pending(RecordingPiError("录制 Pi 进程已结束"))
+            if not self._closed:
+                if not recording_pi_process_has_exited(self._proc):
+                    log.warning("recording_pi.stdout_closed_while_alive", run_id=self.run_id)
+                else:
+                    self._fail_pending(RecordingPiError("录制 Pi 进程已结束"))
 
     async def _read_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None

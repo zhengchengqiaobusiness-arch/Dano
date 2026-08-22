@@ -103,7 +103,16 @@ export function requireRecordingSubmissionPrerequisite(name, params, turn = acti
     }
   };
   if (name === "submit_recording_plan") {
-    requireVersion("get_recording_state", turn.freshStateVersion);
+    // Python refreshes live facts immediately before applying a plan and
+    // rejects a stale base_flow_version atomically.  A Pi context compaction
+    // can split one analysis request into two model turns and clear this
+    // process-local read marker even though the model just read the state.
+    // Keep the fast local mismatch check when the marker is available, but do
+    // not discard an otherwise valid full plan merely because the marker was
+    // lost at that compaction boundary.
+    if (Number.isInteger(turn.freshStateVersion)) {
+      requireVersion("get_recording_state", turn.freshStateVersion);
+    }
   } else if (name === "submit_recording_repair") {
     requireVersion("get_validation_report", turn.freshValidationVersion);
   }

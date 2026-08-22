@@ -180,13 +180,10 @@ async function verifyIncompleteCapabilityPlanDoesNotEndTurn() {
 function verifyFreshReadPrerequisites() {
   beginRecordingToolTurn();
   try {
-    let missingReadRejected = false;
-    try {
-      requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 4 });
-    } catch (error) {
-      missingReadRejected = /get_recording_state/.test(String(error?.message || error));
-    }
-    assert(missingReadRejected, "plan submission without a fresh state read must be rejected");
+    assert(
+      requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 4 }) === undefined,
+      "plan submission must survive a model-context compaction that loses the local read marker",
+    );
     recordRecordingToolRead("get_recording_state", { flow_version: 4 });
     requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 4 });
     let staleVersionRejected = false;
@@ -196,7 +193,7 @@ function verifyFreshReadPrerequisites() {
       staleVersionRejected = /does not match/.test(String(error?.message || error));
     }
     assert(staleVersionRejected, "stale plan base version must be rejected before consuming submission budget");
-    assert(guardRecordingToolAttempt("submit_recording_plan") === 1, "fresh-read rejection consumed the submission budget");
+    assert(guardRecordingToolAttempt("submit_recording_plan") === 1, "version rejection consumed the submission budget");
   } finally {
     endRecordingToolTurn();
   }

@@ -46,12 +46,13 @@ collaborate, not compete.
 - For `request_batch`, call `get_recording_state`, then page through `get_recording_delta` from the
   supplied `since_seq` until `has_more=false`. Delta includes this batch's `requests`,
   `page_events`, and related `field_evidence`. If you rewind below the batch floor, older pages
-  arrive as `compact_history=true` identity rows; full payloads stay in state. State keeps the
-  newest field evidence and retained/identity-bearing requests; do not assume early dialog fills
-  were dropped.
-- For `final_request_tail`, start delta from `since_seq=0` and page until `has_more=false`, then
-  include every conclusion already accepted earlier in the session. This is tail completion, not
-  a separate final planning pass. Missing this submission fails freeze.
+  arrive as `compact_history=true` identity rows. State is a bounded semantic view; page deltas are
+  the complete current-window evidence, while the server retains the immutable raw facts. Do not
+  assume early dialog fills were dropped merely because repaint duplicates were compacted.
+- For `final_request_tail`, call `get_recording_state` once first, then start delta from
+  `since_seq=0` and page until `has_more=false`. Include every conclusion already accepted earlier
+  in the session. This is tail completion, not a separate final planning pass. Missing this
+  submission fails freeze.
 - Do not reread an identical projection unless a rejected operation requires a fresh version.
 
 ## Identify capabilities from evidence
@@ -291,8 +292,7 @@ override and can otherwise lock a wrong origin or optional state into later repr
 
 Your tool contract uses exactly `caller_input`, `constant`, `session`, `context`,
 `response_binding`, `computed`, and `generated`. That answers *who supplies the value*.
-Python keeps a finer origin for *how the page produced it*. Judge each field independently
-in this order:
+Python keeps a finer origin for *how the page produced it*. Judge each field independently in this order:
 
 1. Is there a real editable control and user input action?
 2. Does the value come from an observed upstream response?
@@ -380,7 +380,7 @@ new dependency types.
   caller choice per required label. The runtime must fetch the current keys and assemble the wire
   object; never expose the dynamic internal keys or require the caller to construct that object.
 - For an edit/update action, an earlier record read may hydrate the later write only when the same
-  record identity and several same-path leaves are observed in both response and request. Values
+  record identity and several exact same-path values are observed in both response and request. Values
   may differ when the operator edited the form; that is still hydration with caller override, not
   a new origin. Keep the GET record id as the caller selector. The write-body id / line id, audit
   timestamps, and `*Name` echoes of a chosen `*Id` stay system-owned. Other form leaves keep the

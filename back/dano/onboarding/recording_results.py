@@ -67,6 +67,8 @@ def _redact_request_entry(entry: Any) -> Any:
         item["headers"] = _redact_headers(item["headers"])
     if item.get("post_data") is not None:
         item["post_data"] = ""
+    if item.get("response_text") is not None:
+        item["response_text"] = ""
     item["body_source"] = ""
     item["backup_body_source"] = ""
     if item.get("response_json") is not None:
@@ -84,6 +86,7 @@ def client_recording_draft(draft: dict[str, Any] | None) -> dict[str, Any] | Non
     if draft is None:
         return None
     projected = dict(draft)
+    projected["diagnostics"] = []
     steps = projected.get("steps")
     if isinstance(steps, list):
         projected["steps"] = [_redact_request_entry(step) for step in steps]
@@ -92,10 +95,15 @@ def client_recording_draft(draft: dict[str, Any] | None) -> dict[str, Any] | Non
         facts = dict(facts)
         if isinstance(facts.get("requests"), list):
             facts["requests"] = [_redact_request_entry(req) for req in facts["requests"]]
-        for key in ("field_evidence", "option_sources", "page_events"):
-            if facts.get(key):
-                facts[key] = []
+        for key in ("diagnostics", "field_evidence", "option_sources", "page_events"):
+            facts[key] = []
         projected["request_facts"] = facts
+    meta = projected.get("meta")
+    if isinstance(meta, dict):
+        meta = dict(meta)
+        meta.pop("field_evidence", None)
+        meta.pop("diagnostics", None)
+        projected["meta"] = meta
     return projected
 
 
