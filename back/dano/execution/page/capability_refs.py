@@ -64,6 +64,24 @@ def _capability_scoped_step_ids(cap: FlowCapability) -> list[str]:
     return ids
 
 
+def _capability_public_input_step_ids(cap: FlowCapability) -> list[str]:
+    """Return only public action steps whose fields form caller inputs."""
+    scoped = list(dict.fromkeys([
+        *[str(step_id) for step_id in (cap.step_ids or []) if str(step_id)],
+        *_capability_scoped_step_ids(cap),
+    ]))
+    scoped_set = set(scoped)
+    execute = list(dict.fromkeys(
+        str(ref.step_id)
+        for ref in (cap.request_refs or [])
+        if str(ref.usage or "") == "execute"
+        and str(ref.step_id or "") in scoped_set
+    ))
+    # Frozen legacy contracts predate usage metadata. Preserve their existing
+    # input surface instead of silently narrowing it on load.
+    return execute or scoped
+
+
 def _step_request_fact_for_capability(spec: FlowSpec, step: FlowStep) -> RequestFact | None:
     rid = str((step.source_meta or {}).get("request_id") or "").strip()
     if rid:

@@ -37,6 +37,7 @@ from dano.execution.page.flow_materialization.links import (
 from dano.execution.page.capability_kinds import (
     ALLOWED_CAPABILITY_KINDS,
 )
+from dano.execution.page.capability_refs import _capability_public_input_step_ids
 
 
 def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
@@ -97,11 +98,15 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         previous_inputs = list(cap.inputs or [])
         old_dependencies = list(cap.dependencies or [])
         request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
+        public_input_step_ids = set(_capability_public_input_step_ids(cap))
         for st in step_objs:
             request_id = request_id_by_step.get(st.step_id, "")
             for param in st.params:
                 request_fields.append(_capability_field_from_param(st, param, scope="request_field", request_id=request_id))
-                if _param_exposed_to_caller(param, set(cap_step_ids)):
+                if (
+                    st.step_id in public_input_step_ids
+                    and _param_exposed_to_caller(param, set(cap_step_ids))
+                ):
                     key = param.key or param.label or param.path
                     inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
                 else:

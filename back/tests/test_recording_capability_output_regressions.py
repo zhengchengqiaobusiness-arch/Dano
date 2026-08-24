@@ -340,6 +340,76 @@ def test_compiler_preserves_submitted_preflight_membership_without_inferred_link
     ]
 
 
+def test_auxiliary_request_params_do_not_expand_public_capability_inputs() -> None:
+    preflight = FlowStep(
+        step_id="page-context",
+        method="GET",
+        path="/orders/page",
+        params=[ParamField(
+            path="query.no",
+            key="query_no",
+            value="XSDD-RECORDED",
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-page", "role": "business_get"},
+    )
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[ParamField(
+            path="body.customerId",
+            key="customerId",
+            label="客户",
+            value=5,
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    fact_check = FlowStep(
+        step_id="verify",
+        method="GET",
+        path="/orders/get",
+        params=[ParamField(
+            path="query.id",
+            key="verify_id",
+            value=70,
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-verify", "role": "business_get"},
+    )
+    spec = FlowSpec(steps=[preflight, create, fact_check])
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [{
+            "name": "create_order",
+            "title": "Create order",
+            "kind": "create",
+            "anchor_step_id": "create",
+            "request_refs": [
+                {"request_id": "req-page", "step_id": "page-context", "usage": "preflight"},
+                {"request_id": "req-create", "step_id": "create", "usage": "execute"},
+                {"request_id": "req-verify", "step_id": "verify", "usage": "fact_check"},
+            ],
+        }],
+        "unresolved_items": [],
+    }
+
+    capability = compile_capabilities(spec, plan).capabilities[0]
+
+    assert set(capability.input_schema["properties"]) == {"customerId"}
+    assert {field.key for field in capability.inputs} == {"customerId"}
+    memberships = {(ref.step_id, ref.usage) for ref in capability.request_refs}
+    assert ("create", "execute") in memberships
+    assert ("verify", "fact_check") in memberships
+
+
 def test_grounded_actions_produce_capabilities_without_a_model_plan() -> None:
     from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 

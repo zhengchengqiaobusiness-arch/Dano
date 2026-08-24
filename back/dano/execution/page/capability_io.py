@@ -39,6 +39,7 @@ from dano.execution.page.flow_materialization.links import (
     _link_is_auto_generated,
     _previous_response_source_step_id,
 )
+from dano.execution.page.capability_refs import _capability_public_input_step_ids
 
 
 def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
@@ -894,6 +895,10 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
             continue
+        public_input_step_ids = set(_capability_public_input_step_ids(cap))
+        input_steps = [
+            step for step in cap_steps if step.step_id in public_input_step_ids
+        ]
         label_steps = list(cap_steps)
         if cap.kind == "query_status":
             query_route_terms = set().union(*(entity_route_terms(step) for step in cap_steps))
@@ -923,7 +928,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             if len(labels) == 1
         }
         _disambiguate_capability_param_keys(cap_steps)
-        params = [p for st in cap_steps for p in (st.params or [])]
+        params = [p for st in input_steps for p in (st.params or [])]
         include_required_state = _schema_emits_required_state(cap.input_schema)
         derived_input = _capability_input_schema(
             params,
@@ -933,7 +938,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         derived_input = _expand_response_key_map_inputs(spec, cap, derived_input)
         if _capability_is_batch(spec, cap):
             derived_input = _batch_capability_input_schema(
-                cap_steps,
+                input_steps,
                 include_required_state=include_required_state,
             )
         cap.input_schema = reconcile_schema(derived_input, cap.input_schema or {})
