@@ -98,7 +98,7 @@ _WRITE_DONE_MARKERS = ("写入已确认", "写操作已确认", "写入已确认
 def _route_done_when(request: SkillGenerationRequest, writes: list[FlowCapability]) -> str:
     page = str(request.success_criteria or "").strip()
     if writes:
-        return page or "写操作已确认并执行成功，结果已核对"
+        return page or "用户已确认且写操作返回成功；有可用只读核查时已核查，否则明确标记为未回查"
     if page and not any(token in page for token in _WRITE_DONE_MARKERS):
         return page
     return "已返回可核对的查询结果"
@@ -438,9 +438,9 @@ def _append_lookup(
     lookup = queries[0]
     if not sequence:
         return [lookup]
-    if sequence[-1] is lookup or capability_ref(sequence[-1]) == capability_ref(lookup):
+    if any(item is lookup or capability_ref(item) == capability_ref(lookup) for item in sequence):
         return list(sequence)
-    return [*sequence, lookup]
+    return [lookup, *sequence]
 
 
 def _pair_bindings(
@@ -472,7 +472,7 @@ def _needs_target(cap: FlowCapability) -> bool:
 def _step_done_when(cap: FlowCapability) -> str:
     title = _cap_title(cap)
     if is_write_capability(cap):
-        return f"「{title}」已展示影响、获得确认并执行成功，结果已核对"
+        return f"「{title}」已展示影响、获得确认且返回成功；未配置只读回查时不得宣称业务状态已复核"
     return f"「{title}」已返回可核对的业务结果"
 
 
@@ -556,15 +556,19 @@ def _route(
             and not pair
             and not independent
             and _needs_target(cap)
-            and not is_write_capability(prev)
         ):
+            previous_is_write = is_write_capability(prev)
             checkpoint = HumanCheckpoint(
                 after_step=step_ids[index - 1],
                 before_step=step_key,
                 required_fields=user_fields,
-                prompt=f"请从「{_cap_title(prev)}」的结果中选定下一步「{_cap_title(cap)}」的目标，不要默认第一条",
-                choice_source="previous_result",
-                selection_mode="single",
+                prompt=(
+                    f"请确认下一步「{_cap_title(cap)}」的目标和必要字段，不得沿用或猜测上一步输入"
+                    if previous_is_write
+                    else f"请从「{_cap_title(prev)}」的结果中选定下一步「{_cap_title(cap)}」的目标，不要默认第一条"
+                ),
+                choice_source="free_text" if previous_is_write else "previous_result",
+                selection_mode="text" if previous_is_write else "single",
                 resume_when="用户已选定有效目标并通过输入校验",
                 on_cancel="停止并报告未执行",
             )
@@ -572,7 +576,7 @@ def _route(
             if steps:
                 steps[-1] = steps[-1].model_copy(update={"checkpoint": checkpoint})
             mode = CompositionMode.HANDOFF
-        confirm = bool(cap.requires_human_confirm)
+        confirm = bool(cap.requires_human_confirm) or is_write_capability(cap)
         steps.append(RouteStep(
             step_key=step_key,
             capability_id=cap_id,
@@ -585,7 +589,11 @@ def _route(
         ))
     required = list(dict.fromkeys(required))
     writes = [cap for cap in sequence if is_write_capability(cap)]
-    confirmation = [_cap_title(cap) for cap in sequence if cap.requires_human_confirm]
+    confirmation = [
+        _cap_title(cap)
+        for cap in sequence
+        if cap.requires_human_confirm or is_write_capability(cap)
+    ]
     done = _route_done_when(request, writes)
     cleaned_when = _clean_when(
         when_to_use,
@@ -706,11 +714,12 @@ def _compile_branch_route(
         return f"无法把「{branch.trigger}」映射到已验证能力，请说明要使用哪一个已有操作"
     if not sequence:
         return branch.unresolved[0] if branch.unresolved else f"无法解释「{branch.trigger}」"
-    text = _text(request)
-    if len(sequence) == 1 and is_write_capability(sequence[0]) and _mentions(text, _LOOKUP_HINTS):
-        sequence = _append_lookup(sequence, queries, text)
-    elif len(sequence) > 1:
-        sequence = _append_lookup(sequence, queries, text)
+    if (
+        len(sequence) == 1
+        and is_write_capability(sequence[0])
+        and _mentions(branch.trigger, _LOOKUP_HINTS)
+    ):
+        sequence = _append_lookup(sequence, queries, branch.trigger)
     bindings: list[RouteBinding] = []
     for left, right in zip(sequence, sequence[1:], strict=False):
         bindings.extend(_relation_pair(spec, left, right))
@@ -779,7 +788,6 @@ def _confirmed_relation_routes(
 def _atomic_fallback_routes(
     selected: list[FlowCapability],
     request: SkillGenerationRequest,
-    queries: list[FlowCapability],
     spec: FlowSpec,
     existing: list[SkillRoute],
 ) -> list[SkillRoute]:
@@ -789,20 +797,11 @@ def _atomic_fallback_routes(
         if len(route.capability_sequence) == 1
     }
     routes: list[SkillRoute] = []
-    writes = [cap for cap in selected if is_write_capability(cap)]
     for cap in selected:
         cap_id = capability_ref(cap)
         if cap_id in existing_singles:
             continue
         sequence = [cap]
-        extra = None
-        if is_write_capability(cap) and len(writes) == 1:
-            sequence = _append_lookup([cap], queries, _text(request))
-            extra = (
-                ["提交后回查使用独立步骤身份，不得单独生成 C3→C1 路线"]
-                if len(sequence) > 1
-                else None
-            )
         routes.append(_route(
             route_id=_stable_route_id(sequence),
             name=_cap_title(cap),
@@ -810,7 +809,6 @@ def _atomic_fallback_routes(
             sequence=sequence,
             bindings=[],
             request=request,
-            extra_preconditions=extra,
             spec=spec,
         ))
         existing_singles.add(cap_id)
@@ -919,7 +917,7 @@ def propose_deterministic_plan(
                 request=request,
                 spec=spec,
             ))
-        routes.extend(_atomic_fallback_routes(selected, request, queries, spec, routes))
+        routes.extend(_atomic_fallback_routes(selected, request, spec, routes))
         routes = _merge_equivalent_routes(routes)
 
     if request.planning_mode == PlanningMode.FIXED:

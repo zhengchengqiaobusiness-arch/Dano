@@ -32,6 +32,8 @@ _ORDER_PATTERNS = (
     re.compile(r"(?P<left>.+?)然后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)之后(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)后再(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)后重新(?P<right>.+)"),
+    re.compile(r"(?P<left>.+?)[，,]?后续(?:再)?(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)接着(?P<right>.+)"),
     re.compile(
         r"(?P<left>.+?)(?:完成|完毕|做完|完了)(?:后|了)?(?:就|再|立即|马上|紧接着|帮我)?(?P<right>.+)"
@@ -54,6 +56,8 @@ _SEQUENCE_HINTS = (
     "下一步",
     "跟着",
     "后再",
+    "后重新",
+    "后续",
     "连着",
     "连续办理",
     "衔接",
@@ -90,6 +94,7 @@ _GENERIC_VERBS = (
 _NARRATIVE_PHRASES = (
     "保存修改",
     "撤回修改",
+    "撤回审核",
     "重新更新",
     "重新修改",
     "统计存档",
@@ -121,6 +126,8 @@ def _aliases(cap: FlowCapability) -> list[str]:
             aliases.extend(["编辑", "修改", "更新"])
         elif "取消审核" in title or "反审" in title:
             aliases.extend(["取消审核", "反审核", "反审"])
+            if "反审核" in title:
+                aliases.append(title.replace("反审核", "取消审核"))
         elif any(token in title for token in ("审核", "审批")):
             aliases.extend(["审核", "审批"])
         elif "删除" in title:
@@ -409,6 +416,12 @@ def _sentence_orders(
         raw = sentence.strip()
         if not raw:
             continue
+        # 「先查再问」描述的是人工交接策略，不是一个可调用的业务动作。
+        if "先查再问" in raw:
+            continue
+        if any(token in raw for token in ("停下来", "停问", "问人", "人工交接", "让用户确认")):
+            if len(_match_caps(raw, caps)) < 2:
+                continue
         matched = False
         for pattern in _ORDER_PATTERNS:
             match = pattern.search(raw)
@@ -489,7 +502,7 @@ def extract_intent_branches(
                 trigger=description,
                 caps=sequence,
                 source="description",
-                independent=_looks_independent(sequence),
+                independent=False,
             ))
 
     mentioned = _match_caps(description, selected)
@@ -576,7 +589,7 @@ def extract_intent_branches(
                     trigger=example,
                     caps=sequence,
                     source="example",
-                    independent=_looks_independent(sequence),
+                    independent=False,
                     target_given=_target_given(example),
                 ))
             continue

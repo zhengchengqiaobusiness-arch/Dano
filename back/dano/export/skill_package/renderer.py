@@ -165,6 +165,7 @@ def _contract_planning_fields(skill) -> dict[str, Any]:  # noqa: ANN001
         "composition_summary": plan.get("composition_summary") or "",
         "composition_notes": list(plan.get("composition_notes") or []),
         "intent_branches": list(plan.get("intent_branches") or []),
+        "clarification_questions": list(plan.get("clarification_questions") or []),
     }
 
 
@@ -471,12 +472,13 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             "steps": cap_steps,
             "links": links,
             "fact_checks": fact_checks,
+            "is_write": is_write,
             "requires_confirmation": (
-                bool(cap.get("requires_human_confirm"))
+                is_write or bool(cap.get("requires_human_confirm"))
                 if capability_owned
-                else _capability_confirm_flag(cap, spec)
+                else is_write or _capability_confirm_flag(cap, spec)
             ),
-            "requires_verify": is_write,
+            "requires_verify": is_write and bool(fact_checks),
             "execution_contract": execution,
             "contract": _scrub(cap),
         })
@@ -620,7 +622,7 @@ def _option_source(field: dict) -> dict | None:
         return None
     data_source: dict[str, Any] = {
         "type": "api",
-        "endpoint": endpoint,
+        "endpoint": _source_path(endpoint),
         "method": str(source.get("method") or source.get("source_method") or "GET").upper(),
         "idField": id_field,
         "labelField": label_field,
@@ -664,6 +666,29 @@ def _field_options(field: dict) -> list[dict]:
     else:
         options.extend({"id": value, "label": str(value)} for value in values)
     return options
+
+
+def _static_field_options(field: dict) -> list[dict]:
+    """Return only schema-owned fixed values, never recorded runtime snapshots."""
+    raw_options = field.get("x-enum-options")
+    if isinstance(raw_options, list):
+        options: list[dict] = []
+        for raw in raw_options:
+            if isinstance(raw, dict):
+                value = raw.get("id", raw.get("value"))
+                label = raw.get("label", raw.get("name", value))
+            else:
+                value = raw
+                label = raw
+            if value is not None:
+                options.append({"id": value, "label": str(label)})
+        if options:
+            return options
+    values = list(field.get("enum") or [])
+    labels = dict(field.get("x-enum-value-map") or {})
+    if labels:
+        return [{"id": value, "label": str(label)} for label, value in labels.items()]
+    return [{"id": value, "label": str(value)} for value in values]
 
 
 def _is_caller_field(field: dict) -> bool:
@@ -1167,11 +1192,44 @@ def _required_fields(plan: dict) -> list[str]:
     return [str(name) for name in (schema.get("required") or []) if str(name)]
 
 
-def _script_for(plans: list[dict], cap_id: str) -> str:
+def _script_invocation(plan: dict) -> str:
+    schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    payload = {
+        name: _example_input_value(name, properties.get(name) or {})
+        for name in _required_fields(plan)
+    }
+    command = (
+        f"python scripts/{plan['script']}.py "
+        f"--input-json '{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}'"
+    )
+    if plan.get("requires_confirmation"):
+        command += " --confirm"
+    return command
+
+
+def _example_input_value(path: str, field: dict) -> Any:
+    kind = str(field.get("type") or "string")
+    if kind == "array":
+        items = field.get("items") if isinstance(field.get("items"), dict) else {}
+        return [_example_input_value(f"{path}[]", items)]
+    if kind == "object":
+        properties = field.get("properties") if isinstance(field.get("properties"), dict) else {}
+        required = [str(name) for name in (field.get("required") or []) if str(name)]
+        return {
+            name: _example_input_value(f"{path}.{name}", properties.get(name) or {})
+            for name in required
+        }
+    if kind in {"number", "integer"}:
+        return f"<{kind}:{path}>"
+    if kind == "boolean":
+        return f"<boolean:{path}>"
+    return f"<{path}>"
+
+
+def _script_invocation_for(plans: list[dict], cap_id: str) -> str:
     item = _plan_by_ref(plans).get(str(cap_id or ""))
-    if item:
-        return f"python scripts/{item['script']}.py"
-    return ""
+    return _script_invocation(item) if item else ""
 
 
 def _cross_step_label(route: dict) -> str:
@@ -1239,8 +1297,8 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "",
         "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。",
         "",
-        "| 用户意图 | 路线 | 步骤顺序 | 跨步数据 | 何时问人 | 确认点 | 完成条件 | 详情 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 用户意图 | 路线 | 步骤顺序 | 调用入口 | 跨步数据 | 何时问人 | 确认点 | 完成条件 | 详情 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for route in _all_routes(skill):
         titles = [
@@ -1250,7 +1308,9 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         lines.append(
             f"| {_safe_text(route.get('when_to_use') or route.get('name'))} | "
             f"{_safe_text(route.get('name') or route.get('route_id'))} | "
-            f"{' → '.join(titles)} | {_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
+            f"{' → '.join(titles)} | "
+            f"{'见组合路线文件中的逐步命令' if len(titles) > 1 else f'`{_script_invocation_for(plans, str((route.get("capability_sequence") or [""])[0]))}`'} | "
+            f"{_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
             f"{_confirm_label(route, plans)} | {_safe_text(route.get('done_when') or '按该行完成条件核对')} | "
             f"{_route_detail_link(route)} |"
         )
@@ -1258,7 +1318,7 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         for item in plans:
             lines.append(
                 f"| {_intent_for_plan(skill, item)} | {_safe_text(item.get('title') or item.get('name'))} | "
-                f"{_safe_text(item.get('title') or item.get('name'))} | 不涉及 | "
+                f"{_safe_text(item.get('title') or item.get('name'))} | `{_script_invocation(item)}` | 不涉及 | "
                 f"{_operation_collect_hint(item)} | "
                 f"{'写前确认' if item.get('requires_confirmation') else '无'} | "
                 f"{'已返回业务结果' if not item.get('requires_confirmation') else '已确认并执行成功'} | "
@@ -1308,7 +1368,7 @@ def _execution_protocol() -> list[str]:
         "   Done when: 当前步骤必填已齐，或用户取消。",
         "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
-        "5. 契约要求确认的操作先展示目标、关键字段和影响，获得确认后再执行对应脚本；未要求确认的操作收集齐输入后直接执行。",
+        "5. 所有变更操作先展示目标、关键字段和影响，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
         "   Done when: 已按契约确认或跳过确认，脚本返回成功，或用户拒绝后未执行。",
         "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
         "   Done when: 已按完成条件判定成功、失败或未知。",
@@ -1633,35 +1693,17 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
     return "\n".join(lines).rstrip() + "\n"
 
 
-_HANDBOOK_PROCESS_KEYS = frozenset({
-    "evidence", "verification_id", "verification_ids", "confirmation_hash",
-    "confidence", "confidence_tier", "actor", "updated_by",
-})
-
-
-def _handbook_contract(node: Any) -> Any:
-    if isinstance(node, dict):
-        return {
-            str(key): _handbook_contract(value)
-            for key, value in node.items()
-            if str(key) not in _HANDBOOK_PROCESS_KEYS
-        }
-    if isinstance(node, list):
-        return [_handbook_contract(item) for item in node]
-    return node
-
-
 def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
     lines = [
         "# 业务能力",
         "",
         "只在需要判断某个能力的输入输出边界时阅读本文件。不要把这里当成路线说明书。",
         "",
-        "| 能力 | 何时使用 | 类型 | 必要输入概况 | 关键输出概况 | 完成判断 | 主要风险 |",
+        "| 能力 | 何时使用 | 类型 | 调用入口 | 必要输入概况 | 完成判断 | 主要风险 |",
         "|---|---|---|---|---|---|---|",
     ]
     for item in plans:
-        write = bool(item.get("requires_verify"))
+        write = bool(item.get("is_write"))
         confirm = bool(item.get("requires_confirmation"))
         required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无调用方必填"
         if confirm:
@@ -1670,42 +1712,15 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
             risk = "结果未知不得重试"
         else:
             risk = "只读，不得升级成写入"
-        done = "已确认并执行成功" if confirm else "已返回可核对的业务结果"
+        done = (
+            "已确认且调用返回成功；仅在有已验证回查时声明状态已复核"
+            if write
+            else "已返回可核对的业务结果"
+        )
         lines.append(
             f"| {_safe_text(item.get('title') or item.get('name'))} | {_intent_for_plan(skill, item)} | "
-            f"{'变更' if write else '只读'} | {required} | 业务结果 | {done} | {risk} |"
+            f"{'变更' if write else '只读'} | `{_script_invocation(item)}` | {required} | {done} | {risk} |"
         )
-    lines.extend([
-        "",
-        "## 完整能力契约",
-        "",
-        "以下 JSON 是生成脚本使用的完整契约；字段、来源、规则、步骤和依赖均不省略。",
-    ])
-    for item in plans:
-        execution = dict(item.get("execution_contract") or {})
-        execution.setdefault("steps", list(item.get("steps") or []))
-        execution.setdefault("links", list(item.get("links") or []))
-        payload = {
-            **dict(item.get("contract") or {}),
-            "name": item.get("name"),
-            "capability_id": item.get("capability_id"),
-            "title": item.get("title"),
-            "kind": item.get("kind"),
-            "input_schema": item.get("input_schema") or {},
-            "output_schema": item.get("output_schema") or {},
-            "preconditions": item.get("preconditions") or [],
-            "caller_responsibilities": item.get("caller_responsibilities") or [],
-            "skill_responsibilities": item.get("skill_responsibilities") or [],
-            "execution_contract": execution,
-        }
-        lines.extend([
-            "",
-            f"### {_safe_text(item.get('title') or item.get('name'))}",
-            "",
-            "```json",
-            json.dumps(_handbook_contract(_scrub(payload)), ensure_ascii=False, indent=2, sort_keys=True),
-            "```",
-        ])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1713,62 +1728,61 @@ def _options_md(plans: list[dict]) -> str:
     lines = [
         "# 候选项",
         "",
-        "说明候选如何在运行时获得和处理。不要把历史样本当成默认值，也不要在多条结果时默认第一条。",
+        "说明候选如何在运行时获得和处理。动态候选必须实时获取，多条结果时不得默认第一条。",
         "",
         "| 字段/用途 | 候选类型 | 来源 | 何时加载 | 空结果 | 多结果 | 用户自定义是否允许 |",
         "|---|---|---|---|---|---|---|",
     ]
     rows = 0
-    contracts: list[tuple[str, str, dict[str, Any]]] = []
+    fixed_sections: list[tuple[str, str, list[dict]]] = []
     for item in plans:
         schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
-        for name, field_name, raw in _iter_schema_fields(schema):
+        for name, _field_path, raw in _iter_schema_fields(schema):
             source = _option_source(raw)
-            options = _field_options(raw)
+            options = [] if source else _static_field_options(raw)
             raw_source = raw.get("x-dano-option-source") or raw.get("x-options-source-meta")
             if not source and not options and not isinstance(raw_source, dict):
                 continue
-            kind = "动态" if source else "固定枚举"
+            incomplete_source = not source and isinstance(raw_source, dict)
+            kind = "动态" if source else ("动态（来源不完整）" if incomplete_source else "固定枚举")
             origin = (
                 f"`{source.get('method') or 'GET'} {source.get('endpoint')}`"
                 if source
-                else f"完整契约共 {len(options)} 项"
+                else ("缺少可执行来源，必须停问" if incomplete_source else f"本文件固定值映射（{len(options)} 项）")
             )
             lines.append(
                 f"| `{name}` / {_safe_text(item.get('title') or item.get('name'))} | {kind} | {origin or '契约候选'} | "
-                f"{'需要选择该字段时' if source else '读取本表即可'} | 按指南允许自由输入、重试或停止 | "
+                f"{'需要选择该字段时' if source else '读取本表即可'} | 停问，请用户重试或取消 | "
                 f"停问，不得默认第一条 | {'允许一个自定义其他' if any(str((option or {}).get('label') or '') in {'其他', 'Other'} for option in options if isinstance(option, dict)) else '否'} |"
             )
-            contracts.append((
-                _safe_text(item.get("title") or item.get("name")),
-                str(name),
-                {
-                    "field": field_name,
-                    "schema": _scrub(raw),
-                    "source": _scrub(raw_source) if isinstance(raw_source, dict) else None,
-                    "options": _scrub(options),
-                    "count": len(options),
-                },
-            ))
+            if not source and options:
+                fixed_sections.append((
+                    _safe_text(item.get("title") or item.get("name")),
+                    str(name),
+                    options,
+                ))
             rows += 1
     if not rows:
         lines.append("| （当前没有独立候选字段） | — | 运行时按输入表单收集 | 缺字段时 | 停问 | 停问 | 视字段而定 |")
-    else:
+    if fixed_sections:
         lines.extend([
             "",
-            "## 完整候选契约",
+            "## 固定值映射",
             "",
-            "固定枚举逐项保留显示值与提交值；接口候选保留完整来源契约，不截断。",
+            "只列出合同中稳定的固定值；动态候选始终在运行时获取。",
         ])
-        for title, name, contract in contracts:
+        for title, name, options in fixed_sections:
             lines.extend([
                 "",
                 f"### {title} / `{name}`",
                 "",
-                "```json",
-                json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True),
-                "```",
+                "| 显示值 | 提交值 |",
+                "|---|---|",
             ])
+            for option in options:
+                label = _safe_text(option.get("label")).replace("|", "\\|")
+                value = _safe_text(option.get("id")).replace("|", "\\|")
+                lines.append(f"| {label} | `{value}` |")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1815,33 +1829,39 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
         "",
         "## 执行步骤",
         "",
-        "| 步骤 | 已打包操作 | 输入来源 | 执行后检查 | 下一步条件 |",
-        "|---|---|---|---|---|",
+        "| 步骤 | 已打包操作 | 输入来源 | 执行前确认 | 执行后检查 | 下一步条件 |",
+        "|---|---|---|---|---|---|",
     ])
     if steps:
         for index, step in enumerate(steps):
             cap_id = str(step.get("capability_id") or "")
             title = _title_for_plan_ref(plans, cap_id) or cap_id
-            script = _script_for(plans, cap_id)
+            script = _script_invocation_for(plans, cap_id)
             allowed = _schema_field_names(_plan_by_ref(plans).get(cap_id) or {})
             sources = "；".join(
                 _input_source_label(item, allowed)
                 for item in (step.get("input_sources") or [])
-                if isinstance(item, dict) and item.get("field")
+                if (
+                    isinstance(item, dict)
+                    and item.get("field")
+                    and (allowed is None or str(item.get("field")) in allowed)
+                )
             ) or ("按已有契约收集" if allowed is not None else "当前步骤缺少的调用方输入")
             nxt = "继续下一步" if index + 1 < len(steps) else "按完成条件结束"
             if step.get("checkpoint"):
                 nxt = "在交接点停问，用户选定后再继续"
+            confirmation = "必须，确认后使用 `--confirm`" if step.get("confirm_before_execute") else "只读步骤，无需变更确认"
             lines.append(
-                f"| 第{index + 1}步 | {title} `{script}` | {sources} | "
+                f"| 第{index + 1}步 | {title} `{script}` | {sources} | {confirmation} | "
                 f"{_safe_text(step.get('done_when') or '结果可核对')} | {nxt} |"
             )
     else:
         for index, cap_id in enumerate(sequence):
             title = _title_for_plan_ref(plans, cap_id) or cap_id
-            script = _script_for(plans, cap_id)
+            script = _script_invocation_for(plans, cap_id)
             lines.append(
-                f"| {index + 1} | {title} `{script}` | 按已有契约收集 | 结果可核对 | "
+                f"| {index + 1} | {title} `{script}` | 按已有契约收集 | "
+                f"{'必须，确认后使用 `--confirm`' if (_plan_by_ref(plans).get(cap_id) or {}).get('requires_confirmation') else '只读步骤，无需变更确认'} | 结果可核对 | "
                 f"{'继续下一步' if index + 1 < len(sequence) else '按完成条件结束'} |"
             )
     lines.extend(["", "## 输入来源与交接点", ""])
@@ -2964,7 +2984,10 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
                 "script": f"scripts/{plan['script']}.py",
                 "verify_script": f"scripts/verify_{plan['script']}.py" if plan["requires_verify"] else "",
                 "requires_confirmation": plan["requires_confirmation"],
+                "requires_human_confirm": plan["requires_confirmation"],
                 "requires_verify": plan["requires_verify"],
+                "is_write": plan["is_write"],
+                "fact_checks": plan["fact_checks"],
                 "input_schema": plan["input_schema"],
                 "output_schema": plan["output_schema"],
                 "preconditions": plan["preconditions"],

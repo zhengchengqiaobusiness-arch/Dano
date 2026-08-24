@@ -267,7 +267,8 @@ def _validate_route_execution_contracts(
                 cap = caps.get(step.capability_id)
                 if cap is None:
                     continue
-                if bool(cap.requires_human_confirm) != bool(step.confirm_before_execute):
+                needs_confirm = bool(cap.requires_human_confirm) or is_write_capability(cap)
+                if needs_confirm != bool(step.confirm_before_execute):
                     result.error(
                         f"路线 {route.route_id} 步骤 {step.step_key} 的确认点必须与能力契约一致"
                     )
@@ -392,14 +393,14 @@ def _validate_route(
         if is_write_capability(cap):
             write_caps.append(cap)
     needs_confirm = any(
-        caps[cap_id].requires_human_confirm
+        caps[cap_id].requires_human_confirm or is_write_capability(caps[cap_id])
         for cap_id in route.capability_sequence
         if cap_id in caps
     )
     if needs_confirm != bool(route.requires_confirmation):
         result.error(f"路线 {route.route_id} 的确认要求必须与能力契约一致")
     for cap in write_caps:
-        if is_risk_write(cap) and cap.requires_human_confirm and not _route_mentions_risk(route, cap):
+        if is_risk_write(cap) and not _route_mentions_risk(route, cap):
             result.error(
                 f"路线 {route.route_id} 的风险操作 {cap.title or cap.name} 必须明确提示确认"
             )

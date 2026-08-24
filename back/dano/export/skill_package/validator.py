@@ -27,6 +27,9 @@ _PROCESS_LEAK_MARKERS = (
     "阶段1", "阶段 1", "阶段6", "阶段 6", "阶段7", "阶段 7", "阶段8", "阶段 8",
     "FlowSpec", "fingerprint", "unverified",
     "verification_id", "录制识别顺序",
+    "录制页面", "录制未", "录制值", "request_id", "source_step_id",
+    "occurrence_id", "execution_contract", "x-options-snapshot",
+    "x-options-source-meta", "x-flow-", "x-dano-", "GET_get",
 )
 _INTERNAL_ROUTE_MARKERS = (
     "←user",
@@ -34,6 +37,10 @@ _INTERNAL_ROUTE_MARKERS = (
     "←system_context",
     "←confirmed_binding",
 )
+_WRITE_KINDS = frozenset({
+    "create", "update", "delete", "submit", "withdraw", "approve", "reject",
+    "write", "mutation", "upload", "import", "sync", "execute",
+})
 _VERIFICATION_ID_RE = re.compile(
     r"\bverification_id\s*[:=]?\s*[`\[]?(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
     re.I,
@@ -325,6 +332,7 @@ def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
     if routes_dir.is_dir():
         for path in routes_dir.glob("*.md"):
             text = path.read_text(encoding="utf-8")
+            _check_handbook_bans(path, text, issues)
             for marker in _INTERNAL_ROUTE_MARKERS:
                 if marker in text:
                     issues.append(_issue(
@@ -333,6 +341,95 @@ def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
                         path,
                     ))
                     break
+
+
+def _contract_capability_is_write(item: dict) -> bool:
+    if item.get("is_write") is True:
+        return True
+    if str(item.get("kind") or "").strip().lower() in _WRITE_KINDS:
+        return True
+    execution = item.get("execution_contract") if isinstance(item.get("execution_contract"), dict) else {}
+    steps = execution.get("steps") if isinstance(execution.get("steps"), list) else []
+    return any(
+        isinstance(step, dict)
+        and str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}
+        for step in steps
+    )
+
+
+def _check_contract_semantics(root: Path, contract: dict, issues: list[dict]) -> None:
+    """Reject packages that are structurally valid but unsafe or falsely composed."""
+    contract_path = root / "references" / "CONTRACT.json"
+    capabilities = [
+        item for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    by_ref: dict[str, dict] = {}
+    for item in capabilities:
+        for key in (item.get("capability_id"), item.get("name")):
+            if key:
+                by_ref[str(key)] = item
+        if not _contract_capability_is_write(item):
+            continue
+        if not item.get("requires_confirmation") or not item.get("requires_human_confirm"):
+            issues.append(_issue(
+                "write_confirmation",
+                f"write capability must require confirmation: {item.get('title') or item.get('name') or '?'}",
+                contract_path,
+            ))
+        fact_checks = [
+            check for check in (item.get("fact_checks") or [])
+            if isinstance(check, dict) and check.get("verified") is True
+        ]
+        if item.get("requires_verify") and not fact_checks:
+            issues.append(_issue(
+                "verification_truthfulness",
+                f"requires_verify needs a verified read-back contract: {item.get('title') or item.get('name') or '?'}",
+                contract_path,
+            ))
+
+    routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
+    route_sequences = {
+        tuple(str(cap_id) for cap_id in (route.get("capability_sequence") or []) if str(cap_id))
+        for route in routes
+    }
+    for route in routes:
+        route_id = str(route.get("route_id") or "?")
+        sequence = [str(cap_id) for cap_id in (route.get("capability_sequence") or []) if str(cap_id)]
+        write_refs = {
+            cap_id for cap_id in sequence
+            if cap_id in by_ref and _contract_capability_is_write(by_ref[cap_id])
+        }
+        if write_refs and not route.get("requires_confirmation"):
+            issues.append(_issue(
+                "write_confirmation",
+                f"route {route_id} contains a write but does not require confirmation",
+                contract_path,
+            ))
+        for step in route.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            cap_id = str(step.get("capability_id") or "")
+            cap = by_ref.get(cap_id)
+            if cap is not None and _contract_capability_is_write(cap) and not step.get("confirm_before_execute"):
+                issues.append(_issue(
+                    "write_confirmation",
+                    f"route {route_id} write step {cap_id} must confirm before execute",
+                    contract_path,
+                ))
+
+    for branch in contract.get("intent_branches") or []:
+        if not isinstance(branch, dict) or branch.get("unresolved") or branch.get("conflicting"):
+            continue
+        sequence = tuple(
+            str(cap_id) for cap_id in (branch.get("capability_sequence") or []) if str(cap_id)
+        )
+        if len(sequence) > 1 and sequence not in route_sequences:
+            issues.append(_issue(
+                "intent_combo_missing",
+                f"explicit multi-step intent has no executable route: {' -> '.join(sequence)}",
+                contract_path,
+            ))
 
 
 def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
@@ -354,6 +451,7 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
     selected = [str(item) for item in (contract.get("selected_capability_ids") or []) if str(item)]
     if not contract.get("planning_mode") and not routes and not selected:
         return
+    _check_contract_semantics(root, contract, issues)
     packed = {
         str(item.get("name") or "")
         for item in (contract.get("capabilities") or [])
@@ -705,10 +803,28 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
                 issues.append(_issue("missing_file", f"missing required file: {required.name}", required))
             else:
                 leaked = _read(required, issues, missing_as_warnings=True)
+                _check_handbook_bans(required, leaked, issues)
                 for marker in _PROCESS_LEAK_MARKERS:
                     if marker and marker in leaked:
                         issues.append(_issue("process_leak", f"{required.name} must not contain: {marker}", required))
                         break
+                if required == capabilities_path and (
+                    "## 完整能力契约" in leaked or "```json" in leaked
+                ):
+                    issues.append(_issue(
+                        "consumer_contract_leak",
+                        "CAPABILITIES.md must be a business index, not a machine-contract dump",
+                        required,
+                    ))
+                if required == options_path and any(
+                    marker in leaked
+                    for marker in ("## 完整候选契约", "```json", "x-options-snapshot")
+                ):
+                    issues.append(_issue(
+                        "consumer_contract_leak",
+                        "OPTIONS.md must describe runtime selection rules without recorded snapshots",
+                        required,
+                    ))
         if operations_path.is_file():
             issues.append(_issue(
                 "duplicate_layout",
