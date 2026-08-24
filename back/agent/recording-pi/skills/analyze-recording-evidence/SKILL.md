@@ -164,6 +164,14 @@ value/default, business type and wire format, source, requiredness, caller-vs-sy
 and enum/constraints independently. Do not infer one axis only because another axis looks
 plausible. `category` is not an editable field axis and must not be submitted.
 
+Use `facts.field_decision_workset` as the primary per-field index when it is present. Each entry
+keeps the five semantic axes separate and includes exact materialized projections plus scoped
+candidate sources for controls that are not materialized yet. `api_option_candidate` is a
+candidate pointer, never a conclusion: compare its response shape, page/frame scope, selected
+value and field evidence before submitting a source or enum operation. One source request may
+legitimately appear on many field entries with different `response_path` values; decide every
+target field independently instead of assigning an endpoint to only one field.
+
 - Name and wire key are different axes. Preserve the captured wire path and recorded value.
   Use `rename_field` only for a grounded page/business label; never copy the label onto the
   invocation key.

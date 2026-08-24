@@ -65,7 +65,10 @@ from dano.execution.page.flow_spec_core.models import (
     SelectBinding,
 )
 from dano.execution.page.flow_spec_validate import validate_flow_spec
-from dano.execution.page.recording_agent_contract import recording_capability_plan_complete
+from dano.execution.page.recording_agent_contract import (
+    _semantic_fact_snapshot,
+    recording_capability_plan_complete,
+)
 from dano.execution.page.recording_facts import _list_payload_has_reference_contract
 from dano.execution.page.recording_field_evidence import (
     _associate_unsubmitted_file_controls,
@@ -1404,6 +1407,86 @@ def test_exact_option_scope_binds_api_source_and_selected_row_projections() -> N
     assert by_key["productBarCode"].source["response_path"] == "barCode"
     assert by_key["productUnitName"].source["selector_path"] == "body.items[0].productId"
     assert by_key["id"].source_kind != "selected_option_field"
+
+
+def test_pi_field_workset_exposes_independent_axes_and_multi_field_projections() -> None:
+    spec = _sale_order_option_spec()
+    _repair_structural_option_bindings(spec)
+    _infer_selected_option_row_fields(spec)
+
+    snapshot = _semantic_fact_snapshot(spec)
+    by_path = {
+        item["wire_path"]: item
+        for item in snapshot["field_decision_workset"]
+    }
+
+    unit = by_path["body.items[0].productUnitName"]
+    barcode = by_path["body.items[0].productBarCode"]
+    assert set(unit["axes"]) == {
+        "name", "type", "source", "requiredness", "ownership",
+    }
+    unit_projection = next(
+        item for item in unit["axes"]["source"]["candidates"]
+        if item.get("origin_kind") == "selected_option_field"
+    )
+    barcode_projection = next(
+        item for item in barcode["axes"]["source"]["candidates"]
+        if item.get("origin_kind") == "selected_option_field"
+    )
+    assert unit_projection["source_request_id"] == "req-product-options"
+    assert barcode_projection["source_request_id"] == "req-product-options"
+    assert unit_projection["response_path"] == "unitName"
+    assert barcode_projection["response_path"] == "barCode"
+    assert unit_projection["selector_path"] == "body.items[0].productId"
+    assert barcode_projection["selector_path"] == "body.items[0].productId"
+
+
+def test_pi_field_workset_keeps_unmaterialized_editable_controls_visible() -> None:
+    spec = FlowSpec()
+    spec.request_facts.field_evidence = [{
+        "evidence_id": "field-customer",
+        "field_identity_id": "customer-select",
+        "label": "客户",
+        "field_aliases": ["customerId"],
+        "control_kind": "select",
+        "editable": True,
+        "disabled": False,
+        "required_observed": True,
+        "binding_status": "unbound",
+        "binding_candidates": ["body.customerId", "body.customerName"],
+        "page_id": "p1",
+        "frame_id": "f1",
+    }]
+    spec.request_facts.option_sources = [{
+        "kind": "api_response",
+        "request_id": "req-customer-options",
+        "method": "GET",
+        "path": "/customers/simple-list",
+        "page_id": "p1",
+        "frame_id": "f1",
+        "response_schema": {
+            "type": "object",
+            "properties": {"data": {"type": "array"}},
+        },
+    }]
+
+    snapshot = _semantic_fact_snapshot(spec)
+
+    assert snapshot["field_decision_count"] == 1
+    field = snapshot["field_decision_workset"][0]
+    assert field["field_identity_id"] == "customer-select"
+    assert field["wire_path"] == ""
+    assert field["binding_candidates"] == ["body.customerId", "body.customerName"]
+    assert field["axes"]["name"]["candidates"][0]["value"] == "客户"
+    assert field["axes"]["requiredness"]["evidence"][0]["required"] is True
+    assert field["axes"]["ownership"]["editable"] is True
+    assert field["axes"]["source"]["candidates"] == [{
+        "origin_kind": "api_option_candidate",
+        "source_request_id": "req-customer-options",
+        "method": "GET",
+        "path": "/customers/simple-list",
+        "actor": "capture",
+    }]
 
 
 def test_selected_option_row_projects_multiple_editable_siblings_without_hiding_them() -> None:

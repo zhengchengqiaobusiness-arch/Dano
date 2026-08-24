@@ -203,6 +203,294 @@ def _action_request_ledger(
     )
 
 
+def _field_decision_workset(spec: FlowSpec) -> list[dict[str, Any]]:
+    """Expose independent field axes and exact source candidates to Pi."""
+    from dano.execution.page.recording_field_identity import canonical_wire_path
+
+    api_option_sources = [
+        item for item in (spec.request_facts.option_sources or [])
+        if isinstance(item, dict) and item.get("kind") == "api_response"
+    ]
+
+    def scoped_api_candidates(page_id: str, frame_id: str) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for source in api_option_sources:
+            source_page = str(source.get("page_id") or "")
+            source_frame = str(source.get("frame_id") or "")
+            if page_id and source_page and page_id != source_page:
+                continue
+            if frame_id and source_frame and frame_id != source_frame:
+                continue
+            candidates.append({
+                "origin_kind": "api_option_candidate",
+                "source_request_id": str(source.get("request_id") or ""),
+                "method": str(source.get("method") or "GET").upper(),
+                "path": str(source.get("path") or ""),
+                "actor": "capture",
+            })
+        return candidates
+
+    source_step_by_request = {
+        str((step.source_meta or {}).get("request_id") or ""): step.step_id
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    workset: list[dict[str, Any]] = []
+    for step in spec.steps:
+        request_id = str((step.source_meta or {}).get("request_id") or "")
+        for param in step.params:
+            wire_path = canonical_wire_path(step, param.path)
+            path_variants = {
+                str(param.path or ""),
+                wire_path,
+                str(param.path or "").removeprefix("body.").removeprefix("query."),
+                wire_path.removeprefix("body.").removeprefix("query."),
+            }
+            evidence = [
+                item for item in (param.evidence or [])
+                if isinstance(item, dict)
+            ]
+            evidence_refs = list(dict.fromkeys(
+                str(item.get("evidence_id") or item.get("event_id") or "")
+                for item in evidence
+                if str(item.get("evidence_id") or item.get("event_id") or "")
+            ))
+
+            name_candidates: list[dict[str, Any]] = []
+            for value, source, evidence_ref in [
+                (param.label, "current_label", ""),
+                (param.key, "captured_key", ""),
+                *(
+                    (
+                        str(item.get("label") or item.get("visible_label") or item.get("field") or ""),
+                        "page_control",
+                        str(item.get("evidence_id") or item.get("event_id") or ""),
+                    )
+                    for item in evidence
+                ),
+            ]:
+                if value and not any(candidate["value"] == value for candidate in name_candidates):
+                    name_candidates.append({
+                        "value": value,
+                        "source": source,
+                        **({"evidence_ref": evidence_ref} if evidence_ref else {}),
+                    })
+
+            source_candidates: list[dict[str, Any]] = []
+
+            def add_source_candidate(candidate: dict[str, Any]) -> None:
+                compact = {
+                    key: copy.deepcopy(value)
+                    for key, value in candidate.items()
+                    if value not in (None, "", [], {})
+                }
+                identity = json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)
+                if not any(item[0] == identity for item in source_candidates_with_ids):
+                    source_candidates_with_ids.append((identity, compact))
+
+            source_candidates_with_ids: list[tuple[str, dict[str, Any]]] = []
+            current_source = dict(param.source or {})
+            if param.source_kind != "unknown" or current_source:
+                add_source_candidate({
+                    "origin_kind": param.source_kind,
+                    "actor": current_source.get("actor") or "materializer",
+                    "source_request_id": current_source.get("source_request_id"),
+                    "source_step_id": current_source.get("step_id"),
+                    "response_path": current_source.get("response_path"),
+                    "selector_path": current_source.get("selector_path"),
+                    "allow_caller_override": current_source.get("allow_caller_override"),
+                })
+            for binding in step.selects or []:
+                binding_path = str(binding.path or binding.param or "")
+                if binding_path in path_variants:
+                    add_source_candidate({
+                        "origin_kind": "api_option",
+                        "source_request_id": binding.source_request_id,
+                        "source_step_id": source_step_by_request.get(binding.source_request_id),
+                        "selector_path": binding.path,
+                        "value_key": binding.value_key,
+                        "label_key": binding.label_key,
+                        "actor": binding.actor,
+                        "confidence": binding.confidence,
+                    })
+                for target_path, response_path in (binding.field_projections or {}).items():
+                    if str(target_path or "") not in path_variants:
+                        continue
+                    add_source_candidate({
+                        "origin_kind": "selected_option_field",
+                        "source_request_id": binding.source_request_id,
+                        "source_step_id": source_step_by_request.get(binding.source_request_id),
+                        "response_path": response_path,
+                        "selector_path": binding.path,
+                        "actor": binding.actor,
+                        "confidence": binding.confidence,
+                    })
+            for link in spec.links or []:
+                if link.target_step_id != step.step_id or str(link.target_path or "") not in path_variants:
+                    continue
+                add_source_candidate({
+                    "origin_kind": "previous_response",
+                    "source_step_id": link.source_step_id,
+                    "source_path": link.source_path,
+                    "target_path": link.target_path,
+                    "confirmed": link.confirmed,
+                    "confidence": link.confidence,
+                })
+            source_candidates = [item for _identity, item in source_candidates_with_ids]
+
+            required_evidence = [
+                {
+                    "required": item.get("required_observed", item.get("required")),
+                    "source": item.get("kind") or item.get("source"),
+                    "evidence_ref": item.get("evidence_id") or item.get("event_id"),
+                }
+                for item in evidence
+                if isinstance(item.get("required_observed", item.get("required")), bool)
+            ]
+            control_evidence = [
+                {
+                    "control_kind": item.get("control_kind") or item.get("input_type"),
+                    "editable": item.get("editable"),
+                    "disabled": item.get("disabled"),
+                    "read_only": item.get("read_only"),
+                    "interacted": item.get("interacted") or item.get("recorded_user_input"),
+                    "evidence_ref": item.get("evidence_id") or item.get("event_id"),
+                }
+                for item in evidence
+                if item.get("control_kind") or item.get("input_type")
+            ]
+            if any(
+                str(item.get("control_kind") or "").lower() in {"select", "combobox", "radio"}
+                for item in control_evidence
+            ):
+                for candidate in scoped_api_candidates(
+                    str((step.source_meta or {}).get("page_id") or ""),
+                    str((step.source_meta or {}).get("frame_id") or ""),
+                ):
+                    add_source_candidate(candidate)
+                source_candidates = [item for _identity, item in source_candidates_with_ids]
+            required_state = str(current_source.get("required_state") or "unknown")
+            workset.append({
+                "step_id": step.step_id,
+                "request_id": request_id,
+                "wire_path": wire_path,
+                "stable_key": param.key,
+                "evidence_refs": evidence_refs,
+                "axes": {
+                    "name": {
+                        "current_label": param.label,
+                        "candidates": name_candidates,
+                    },
+                    "type": {
+                        "business_type": param.type,
+                        "wire_type": param.wire_type,
+                        "wire_format": param.wire_format,
+                        "control_evidence": control_evidence,
+                    },
+                    "source": {
+                        "current_origin_kind": param.source_kind,
+                        "candidates": source_candidates,
+                    },
+                    "requiredness": {
+                        "state": required_state,
+                        "required": bool(param.required),
+                        "evidence": required_evidence,
+                    },
+                    "ownership": {
+                        "caller_supplied": _param_requires_caller_input(param),
+                        "editable": bool(param.editable),
+                        "exposed_to_caller": bool(param.exposed_to_user),
+                        "allow_caller_override": current_source.get("allow_caller_override"),
+                        "control_evidence": control_evidence,
+                    },
+                },
+            })
+    represented_evidence = {
+        str(evidence_ref)
+        for item in workset
+        for evidence_ref in item.get("evidence_refs") or []
+        if str(evidence_ref)
+    }
+    for item in getattr(spec.request_facts, "field_evidence", []) or []:
+        if not isinstance(item, dict):
+            continue
+        evidence_ref = str(item.get("evidence_id") or item.get("event_id") or "")
+        if evidence_ref and evidence_ref in represented_evidence:
+            continue
+        label = str(item.get("label") or item.get("visible_label") or item.get("field") or "")
+        required = item.get("required_observed", item.get("required"))
+        editable = item.get("editable") is True and item.get("disabled") is not True
+        control_kind = str(item.get("control_kind") or item.get("input_type") or "")
+        source_candidates = (
+            scoped_api_candidates(
+                str(item.get("page_id") or ""),
+                str(item.get("frame_id") or ""),
+            )
+            if control_kind.lower() in {"select", "combobox", "radio"}
+            else []
+        )
+        workset.append({
+            "step_id": str(item.get("step_id") or ""),
+            "request_id": str(item.get("request_id") or ""),
+            "wire_path": str(item.get("wire_path") or ""),
+            "stable_key": str((item.get("field_aliases") or [""])[0] or ""),
+            "field_identity_id": str(item.get("field_identity_id") or ""),
+            "binding_candidates": list(item.get("binding_candidates") or []),
+            "evidence_refs": [evidence_ref] if evidence_ref else [],
+            "axes": {
+                "name": {
+                    "current_label": "",
+                    "candidates": ([{
+                        "value": label,
+                        "source": "page_control",
+                        **({"evidence_ref": evidence_ref} if evidence_ref else {}),
+                    }] if label else []),
+                },
+                "type": {
+                    "business_type": "unknown",
+                    "wire_type": "",
+                    "wire_format": "",
+                    "control_evidence": [{
+                        "control_kind": control_kind,
+                        "evidence_ref": evidence_ref,
+                    }],
+                },
+                "source": {
+                    "current_origin_kind": "unknown",
+                    "candidates": source_candidates,
+                },
+                "requiredness": {
+                    "state": (
+                        "required" if required is True
+                        else "optional" if required is False
+                        else "unknown"
+                    ),
+                    "required": required,
+                    "evidence": ([{
+                        "required": required,
+                        "source": "page_control",
+                        "evidence_ref": evidence_ref,
+                    }] if isinstance(required, bool) else []),
+                },
+                "ownership": {
+                    "caller_supplied": None,
+                    "editable": editable,
+                    "exposed_to_caller": None,
+                    "allow_caller_override": editable,
+                    "control_evidence": [{
+                        "control_kind": control_kind,
+                        "editable": item.get("editable"),
+                        "disabled": item.get("disabled"),
+                        "read_only": item.get("read_only"),
+                        "interacted": item.get("recorded_user_input") or bool(item.get("op")),
+                        "evidence_ref": evidence_ref,
+                    }],
+                },
+            },
+        })
+    return workset
+
+
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
     from dano.execution.page.recording_live import compact_model_payload
@@ -219,6 +507,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     page_events = [
         item for item in (spec.request_facts.page_events or []) if isinstance(item, dict)
     ]
+    field_decision_workset = _field_decision_workset(spec)
     return {
         "protocol": "dano.recording-semantic-facts.v1",
         "tenant": spec.tenant,
@@ -336,6 +625,8 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 max_string=800,
             ),
         ),
+        "field_decision_count": len(field_decision_workset),
+        "field_decision_workset": _client_redact_sensitive(field_decision_workset),
         "option_source_count": len(spec.request_facts.option_sources or []),
         "option_sources": _client_redact_sensitive(
             compact_model_payload(
