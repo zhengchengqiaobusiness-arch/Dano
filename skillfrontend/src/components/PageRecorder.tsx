@@ -364,6 +364,23 @@ function looksPaginationField(field: { key?: string; path?: string } | null | un
   return /(?:pageno|pagenum|pagesize|pageindex|currentpage|limit|offset)$/.test(raw);
 }
 
+function normalizedFieldPath(value: unknown) {
+  return safeString(value)
+    .replace(/\[(?:\d+)?\]/g, "[]")
+    .replace(/^\.+|\.+$/g, "");
+}
+
+function pathWithoutLocation(value: unknown) {
+  return normalizedFieldPath(value).replace(/^(?:body|query|path|headers?)\./i, "");
+}
+
+function nestedSchemaPath(parentPath: string, key: string, rawPath: unknown) {
+  const explicit = safeString(rawPath);
+  if (!explicit) return parentPath ? `${parentPath}.${key}` : key;
+  if (!parentPath || /[.[]/.test(explicit)) return explicit;
+  return `${parentPath}.${explicit}`;
+}
+
 function paramSourceTagColor(param: FlowParam) {
   const kind = param.source_kind || "";
   if (["api_option", "page_enum", "static_enum", "manual_enum", "form_option"].includes(kind)) {
@@ -2510,16 +2527,44 @@ export default function PageRecorder({
   function capabilityPublicParams(capability: FlowCapability, capabilitySteps: FlowStep[]) {
     const inputSchema = asRecord(capability.input_schema);
     if (!Object.prototype.hasOwnProperty.call(inputSchema, "properties")) return null;
-    const properties = asRecord(inputSchema.properties);
-    const required = new Set(
-      Array.isArray(inputSchema.required) ? inputSchema.required.map((value) => String(value)) : [],
-    );
     const anchor = capabilitySteps.at(-1) || {
       step_id: String(capability.capability_id || capability.name || "capability"),
       name: String(capability.title || capability.name || "能力输入"),
     };
-    return Object.entries(properties).flatMap(([key, rawSchema]) => {
-      const schema = asRecord(rawSchema);
+    const stepParams = capabilitySteps.flatMap((step) => (
+      (step.params || []).map((param) => ({ step, param }))
+    ));
+    const schemaFields: Array<{
+      key: string;
+      path: string;
+      required: boolean;
+      schema: Record<string, unknown>;
+    }> = [];
+
+    function collectSchemaFields(schemaNode: Record<string, unknown>, parentPath = "") {
+      const properties = asRecord(schemaNode.properties);
+      const required = new Set(
+        Array.isArray(schemaNode.required) ? schemaNode.required.map((value) => String(value)) : [],
+      );
+      Object.entries(properties).forEach(([key, rawSchema]) => {
+        const schema = asRecord(rawSchema);
+        const flowPath = nestedSchemaPath(parentPath, key, schema["x-flow-path"]);
+        const itemSchema = asRecord(schema.items);
+        if (Object.keys(asRecord(itemSchema.properties)).length) {
+          collectSchemaFields(itemSchema, `${flowPath}[0]`);
+          return;
+        }
+        if (Object.keys(asRecord(schema.properties)).length) {
+          collectSchemaFields(schema, flowPath);
+          return;
+        }
+        schemaFields.push({ key, path: flowPath, required: required.has(key), schema });
+      });
+    }
+
+    collectSchemaFields(inputSchema);
+
+    return schemaFields.flatMap(({ key, path: flowPath, required, schema }) => {
       const optionSource = asRecord(schema["x-dano-option-source"]);
       const externalSource = asRecord(schema["x-dano-external-source"]);
       const sourceCapability = safeString(schema["x-dano-source-capability"]);
@@ -2532,19 +2577,33 @@ export default function PageRecorder({
       else if (businessType === "multi_enum") type = "list-enum";
       else if (format === "date") type = "date";
       else if (format === "date-time") type = "datetime";
-      const flowPath = safeString(schema["x-flow-path"]) || key;
       if (looksPaginationField({ key, path: flowPath })) return [];
-      const matched = capabilitySteps
-        .flatMap((step) => (step.params || []).map((param) => ({ step, param })))
-        .find(({ param }) => (
-          safeString(param.key) === key
-          || safeString(param.path) === flowPath
-          || safeString(param.path).endsWith(`.${key}`)
-        ));
+      const normalizedSchemaPath = normalizedFieldPath(flowPath);
+      const schemaPathWithoutLocation = pathWithoutLocation(flowPath);
+      const matched = stepParams
+        .map((entry) => {
+          const paramPath = normalizedFieldPath(entry.param.path);
+          const paramPathWithoutLocation = pathWithoutLocation(entry.param.path);
+          let score = 0;
+          if (paramPath && paramPath === normalizedSchemaPath) score = 100;
+          else if (paramPathWithoutLocation && paramPathWithoutLocation === schemaPathWithoutLocation) score = 80;
+          else if (
+            paramPathWithoutLocation.endsWith(`.${schemaPathWithoutLocation}`)
+            || schemaPathWithoutLocation.endsWith(`.${paramPathWithoutLocation}`)
+          ) score = 60;
+          else if (safeString(entry.param.key) === key) score = 20;
+          if (entry.param.exposed_to_user !== false) score += 1;
+          return { ...entry, score };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => right.score - left.score)[0];
+      const hasOptionSource = Boolean(optionSource.source_url);
+      const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
+      const schemaSourceKind = hasOptionSource
+        ? "api_option"
+        : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "";
       if (matched) {
-        if (looksPaginationField(matched.param) || matched.param.exposed_to_user === false) {
-          return [];
-        }
+        if (looksPaginationField(matched.param)) return [];
         return [{
           step: matched.step,
           param: {
@@ -2553,18 +2612,13 @@ export default function PageRecorder({
             path: flowPath || matched.param.path,
             label: safeString(schema.label || schema.title) || matched.param.label || key,
             type: type || matched.param.type,
-            required: typeof matched.param.required === "boolean"
-              ? matched.param.required
-              : required.has(key),
-            exposed_to_user: matched.param.exposed_to_user !== false,
+            source_kind: schemaSourceKind || matched.param.source_kind,
+            source: hasOptionSource ? optionSource : matched.param.source,
+            required,
+            exposed_to_user: true,
           } satisfies FlowParam,
         }];
       }
-      const hasOptionSource = Boolean(optionSource.source_url);
-      const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
-      const sourceKind = hasOptionSource
-        ? "api_option"
-        : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "user_input";
       return [{
         step: anchor,
         param: {
@@ -2572,10 +2626,10 @@ export default function PageRecorder({
           key,
           label: safeString(schema.label || schema.title) || key,
           type,
-          source_kind: sourceKind,
+          source_kind: schemaSourceKind || "user_input",
           source: optionSource,
           exposed_to_user: true,
-          required: required.has(key),
+          required,
           reason: safeString(schema.description),
           enum_options: Array.isArray(snapshot)
             ? snapshot
@@ -2673,11 +2727,14 @@ export default function PageRecorder({
     const params = capabilityParams(capabilitySteps);
     const publicParams = capabilityPublicParams(capability, capabilitySteps);
     const callerInputs = publicParams ?? params.filter(({ param }) => paramIsCallerInput(param));
-    const publicKeys = new Set(callerInputs.flatMap(({ param }) => [param.key, param.path]));
+    const publicKeys = new Set(callerInputs.flatMap(({ param }) => [
+      safeString(param.key), normalizedFieldPath(param.path), pathWithoutLocation(param.path),
+    ]));
     const automaticInputs = params.filter(({ param }) => (
       !paramIsCallerInput(param)
-      && !publicKeys.has(param.key)
-      && !publicKeys.has(param.path)
+      && !publicKeys.has(safeString(param.key))
+      && !publicKeys.has(normalizedFieldPath(param.path))
+      && !publicKeys.has(pathWithoutLocation(param.path))
     ));
     const stepById = new Map(steps.map((step) => [step.step_id, step]));
     const links: FlowLink[] = [
@@ -3685,7 +3742,7 @@ export default function PageRecorder({
         title="录制助手"
         placement="right"
         width={440}
-        open={assistantOpen}
+        open={viewStage === 1 && assistantOpen}
         onClose={() => setAssistantOpen(false)}
         destroyOnClose={false}
       >
