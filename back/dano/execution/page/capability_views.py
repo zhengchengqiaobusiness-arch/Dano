@@ -280,6 +280,57 @@ def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, An
     return out
 
 
+def _capability_view_step_ids(spec: FlowSpec, cap: FlowCapability) -> list[str]:
+    """Keep calls plus option providers needed to compile their field bindings."""
+    by_id = {step.step_id: step for step in spec.steps}
+    by_request_id = {
+        str((step.source_meta or {}).get("request_id") or ""): step.step_id
+        for step in spec.steps
+        if (step.source_meta or {}).get("request_id")
+    }
+    keep = {
+        step_id
+        for step_id in _capability_node_step_ids(cap)
+        if step_id in by_id
+    }
+    option_request_ids = {
+        str(ref.request_id or "")
+        for ref in (cap.request_refs or [])
+        if ref.usage == "option_source" and ref.request_id
+    }
+    for ref in cap.request_refs or []:
+        if ref.usage != "option_source":
+            continue
+        step_id = str(ref.step_id or by_request_id.get(str(ref.request_id or ""), ""))
+        if step_id in by_id:
+            keep.add(step_id)
+
+    for step_id in list(keep):
+        step = by_id[step_id]
+        for param in step.params or []:
+            source = dict(param.source or {})
+            nested = source.get("option_source")
+            if isinstance(nested, dict):
+                source = nested
+            if param.source_kind not in {"api_option", "form_option", "selected_option_field"}:
+                continue
+            source_step_id = str(source.get("source_step_id") or "")
+            source_request_id = str(source.get("source_request_id") or "")
+            if source_step_id in by_id:
+                keep.add(source_step_id)
+            elif source_request_id in option_request_ids:
+                matched = by_request_id.get(source_request_id, "")
+                if matched in by_id:
+                    keep.add(matched)
+        for binding in step.selects or []:
+            source_request_id = str(binding.source_request_id or "")
+            matched = by_request_id.get(source_request_id, "")
+            if source_request_id in option_request_ids and matched in by_id:
+                keep.add(matched)
+
+    return [step.step_id for step in spec.steps if step.step_id in keep]
+
+
 def capability_to_flow_spec_view(
     spec: FlowSpec,
     capability: str | FlowCapability | None = None,
@@ -301,7 +352,7 @@ def capability_to_flow_spec_view(
     if cap is None:
         raise ValueError(f"capability not found: {ref}")
     by_step = {s.step_id: s for s in current.steps}
-    step_ids = [sid for sid in _capability_node_step_ids(cap) if sid in by_step]
+    step_ids = _capability_view_step_ids(current, cap)
     keep = set(step_ids)
     view = current.model_copy(deep=True)
     view.steps = [s for s in view.steps if s.step_id in keep]

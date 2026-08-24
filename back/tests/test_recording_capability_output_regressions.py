@@ -6,11 +6,13 @@ import dano.onboarding.recording_gateway as recording_gateway
 from dano.agent_tools.tools import _apply_recording_submission_atomic
 from dano.execution.page.capability_compiler import compile_capabilities
 from dano.execution.page.capability_io import _sync_capability_io_schemas
+from dano.execution.page.capability_views import _capability_view_step_ids
 from dano.execution.page.capability_contracts import (
     _mark_repeated_write_observations,
     _planned_capability_has_public_anchor,
 )
 from dano.execution.page.flow_spec_core.models import (
+    CapabilityRequestRef,
     FlowCapability,
     FlowLink,
     FlowSpec,
@@ -19,6 +21,7 @@ from dano.execution.page.flow_spec_core.models import (
     RequestAnalysis,
     RequestFact,
     RequestUsage,
+    SelectBinding,
 )
 from dano.execution.page.recording_agent_contract import (
     apply_recording_agent_submission,
@@ -48,6 +51,94 @@ def _capability_plan(name: str, request_id: str, *, kind: str = "create") -> dic
         }],
         "unresolved_items": [],
     }
+
+
+def test_capability_compile_keeps_transitive_option_source_steps() -> None:
+    options = FlowStep(
+        step_id="product-options",
+        method="GET",
+        path="/products/options",
+        response_json={"data": [{"id": 7, "name": "Laptop"}]},
+        source_meta={"request_id": "req-options", "role": "read_option"},
+    )
+    stock = FlowStep(
+        step_id="stock",
+        method="GET",
+        path="/stock/count",
+        params=[ParamField(
+            path="query.productId",
+            key="productId",
+            value=7,
+            category="user_param",
+            source_kind="api_option",
+            source={
+                "kind": "api_option",
+                "source_step_id": "product-options",
+                "source_request_id": "req-options",
+                "source_url": "/products/options",
+                "value_key": "id",
+                "label_key": "name",
+            },
+        )],
+        selects=[SelectBinding(
+            param="productId",
+            path="query.productId",
+            source_url="/products/options",
+            source_request_id="req-options",
+            value_key="id",
+            label_key="name",
+            enum_confirmed=True,
+        )],
+        response_json={"data": 2},
+        source_meta={"request_id": "req-stock", "role": "business_get"},
+    )
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        body_source='{"productId":7,"stockCount":2}',
+        body_template={"productId": "{{productId}}", "stockCount": "{{stockCount}}"},
+        params=[
+            ParamField(path="productId", key="productId", value=7),
+            ParamField(
+                path="stockCount",
+                key="stockCount",
+                value=2,
+                category="runtime_var",
+                source_kind="previous_response",
+                exposed_to_user=False,
+                editable=False,
+                source={"kind": "previous_response", "step_id": "stock", "response_path": "data"},
+            ),
+        ],
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    capability = FlowCapability(
+        name="create_order",
+        kind="create",
+        request_refs=[
+            CapabilityRequestRef(
+                request_id="req-options", step_id="product-options", usage="option_source",
+            ),
+            CapabilityRequestRef(
+                request_id="req-stock", step_id="stock", usage="preflight",
+            ),
+            CapabilityRequestRef(
+                request_id="req-create", step_id="create", usage="execute",
+            ),
+        ],
+        nodes=[
+            {"id": "stock-call", "type": "call", "step_id": "stock", "usage": "preflight"},
+            {"id": "create-call", "type": "call", "step_id": "create", "usage": "execute"},
+        ],
+    )
+    spec = FlowSpec()
+    spec.steps = [options, stock, create]
+    spec.capabilities = [capability]
+
+    assert _capability_view_step_ids(spec, capability) == [
+        "product-options", "stock", "create",
+    ]
 
 
 def test_field_and_relation_backlog_does_not_block_complete_capability_snapshot() -> None:
