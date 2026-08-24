@@ -36,6 +36,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _screenshot_control_supports_axis,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _apply_selected_option_field_caller_ownership,
     _param_has_editable_control_evidence,
 )
 
@@ -1293,7 +1294,6 @@ def _repair_structural_option_bindings(
                         ):
                             continue
                         selector.field_projections[sibling.path] = response_path
-                        sibling.category = "runtime_var"
                         sibling.source_kind = "selected_option_field"
                         sibling.source = {
                             "kind": "selected_option_field",
@@ -1304,18 +1304,20 @@ def _repair_structural_option_bindings(
                             "source_request_id": str(match.get("source_request_id") or ""),
                             "response_path": response_path,
                             "target_path": sibling.path,
+                            **({
+                                "allow_caller_override": True,
+                            } if sibling_source.get("allow_caller_override") else {}),
                         }
                         projected_value = _flow_path_lookup(selected_row, response_path)
                         if isinstance(projected_value, str) or isinstance(sibling.value, str):
                             sibling.type = "string"
                             if isinstance(sibling.value, str):
                                 sibling.wire_type = "string"
-                        sibling.exposed_to_user = False
-                        sibling.editable = False
-                        sibling.required = False
-                        sibling.need_human_confirm = False
+                        caller_override = _apply_selected_option_field_caller_ownership(sibling)
                         sibling.reason = (
-                            f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
+                            f"该字段默认来自所选记录的 `{response_path}`，调用方可修改"
+                            if caller_override
+                            else f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
                         )
                         projected_paths.add(sibling.path)
                     for sibling in target.params or []:
@@ -1358,7 +1360,6 @@ def _repair_structural_option_bindings(
                         if not response_path:
                             continue
                         selector.field_projections[sibling.path] = response_path
-                        sibling.category = "runtime_var"
                         sibling.source_kind = "selected_option_field"
                         sibling.source = {
                             "kind": "selected_option_field",
@@ -1375,12 +1376,11 @@ def _repair_structural_option_bindings(
                             sibling.type = "string"
                             if isinstance(sibling.value, str):
                                 sibling.wire_type = "string"
-                        sibling.exposed_to_user = False
-                        sibling.editable = False
-                        sibling.required = False
-                        sibling.need_human_confirm = False
+                        caller_override = _apply_selected_option_field_caller_ownership(sibling)
                         sibling.reason = (
-                            f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
+                            f"该字段默认来自所选记录的 `{response_path}`，调用方可修改"
+                            if caller_override
+                            else f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
                         )
                         projected_paths.add(sibling.path)
                     if projected_paths:

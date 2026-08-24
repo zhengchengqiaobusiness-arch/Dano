@@ -1404,6 +1404,116 @@ def test_exact_option_scope_binds_api_source_and_selected_row_projections() -> N
     assert by_key["id"].source_kind != "selected_option_field"
 
 
+def test_selected_option_row_projects_multiple_editable_siblings_without_hiding_them() -> None:
+    spec = _sale_order_option_spec()
+    product_rows = [
+        {
+            "id": 5,
+            "name": "联想thinkpad",
+            "unitName": "份",
+            "barCode": "313131",
+            "productPrice": 2,
+            "taxPercent": 13,
+        },
+        {
+            "id": 6,
+            "name": "apple",
+            "unitName": "台",
+            "barCode": "616161",
+            "productPrice": 3,
+            "taxPercent": 17,
+        },
+    ]
+    spec.steps[0].response_json = {"data": product_rows}
+    spec.request_facts.requests[0].response_json = {"data": product_rows}
+    spec.steps[1].params.extend([
+        ParamField(
+            path="body.items[0].productPrice",
+            key="productPrice",
+            label="产品单价",
+            value=2,
+            type="number",
+            wire_type="number",
+            required=True,
+            source_kind="unknown",
+            source={"kind": "unknown"},
+            category="runtime_var",
+            exposed_to_user=False,
+            editable=False,
+            evidence=[{
+                "kind": "page_control",
+                "control_kind": "number",
+                "disabled": False,
+                "read_only": False,
+                "required_observed": True,
+            }, {
+                "kind": "page_required",
+                "binding_status": "bound",
+            }],
+        ),
+        ParamField(
+            path="body.items[0].taxPercent",
+            key="taxPercent",
+            label="税率",
+            value=13,
+            type="number",
+            wire_type="number",
+            required=False,
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "step_id": "edit-detail",
+                "response_path": "data.items[0].taxPercent",
+            },
+            category="runtime_var",
+            exposed_to_user=False,
+            editable=False,
+            evidence=[{
+                "kind": "page_control",
+                "control_kind": "number",
+                "disabled": False,
+                "read_only": False,
+            }],
+        ),
+    ])
+
+    _repair_structural_option_bindings(spec)
+    _apply_mechanical_field_contracts(spec)
+    sync_flow_spec_models(spec)
+
+    by_key = {param.key: param for param in spec.steps[1].params}
+    for key, response_path in {
+        "productUnitName": "unitName",
+        "productBarCode": "barCode",
+        "productPrice": "productPrice",
+        "taxPercent": "taxPercent",
+    }.items():
+        assert by_key[key].source_kind == "selected_option_field"
+        assert by_key[key].source["source_request_id"] == "req-product-options"
+        assert by_key[key].source["response_path"] == response_path
+
+    for key in ("productPrice", "taxPercent"):
+        assert by_key[key].source["allow_caller_override"] is True
+        assert by_key[key].category == "user_param"
+        assert by_key[key].exposed_to_user is True
+        assert by_key[key].editable is True
+    assert by_key["productPrice"].required is True
+    assert by_key["taxPercent"].required is False
+    assert by_key["productUnitName"].exposed_to_user is False
+    assert by_key["productBarCode"].exposed_to_user is False
+
+    selector = next(
+        binding for binding in spec.steps[1].selects
+        if binding.path == "body.items[0].productId"
+    )
+    assert selector.field_projections == {
+        "body.items[0].productUnitName": "unitName",
+        "body.items[0].productBarCode": "barCode",
+        "body.items[0].productPrice": "productPrice",
+        "body.items[0].taxPercent": "taxPercent",
+    }
+
+
 def test_form_option_is_upgraded_to_executable_api_option() -> None:
     spec = _sale_order_option_spec(target_source_kind="form_option")
 

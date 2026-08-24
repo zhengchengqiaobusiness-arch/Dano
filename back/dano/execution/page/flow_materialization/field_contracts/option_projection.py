@@ -29,14 +29,13 @@ from dano.execution.page.recording_facts import (
     _request_path,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _apply_selected_option_field_caller_ownership,
     _field_has_unlocked_editable_control,
     _param_has_editable_control_evidence,
-    _param_was_caller_typed,
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_audit_system_leaf,
     _looks_page_context_field,
-    _param_control_is_readonly,
     _param_control_kinds,
     _param_group_prefix,
     _param_has_manual_contract,
@@ -731,6 +730,19 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             if len(unique_rows) != 1:
                 continue
             _count, request_id, row = winners[0]
+            source_fact = next((
+                fact for fact in spec.request_facts.requests or []
+                if str(fact.request_id or "") == request_id
+            ), None)
+            source_step = next((
+                candidate for candidate in spec.steps or []
+                if str((candidate.source_meta or {}).get("request_id") or "") == request_id
+            ), None)
+            source_url = str(
+                (source_fact.path or source_fact.url) if source_fact is not None
+                else (source_step.path or source_step.url) if source_step is not None
+                else ""
+            )
             projected_paths: set[str] = set()
             for sibling in members:
                 if sibling.locked or _param_has_manual_contract(sibling):
@@ -780,15 +792,9 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                         sibling.need_human_confirm = False
                         sibling.reason = "所选目录行的标识由调用方选择，运行期再带出同行字段"
                     continue
-                if _param_is_quantity_or_formula_leaf(sibling.key, sibling.path):
-                    continue
                 if (
-                    _param_has_editable_control_evidence(sibling)
-                    and not _param_control_is_readonly(sibling)
-                    and (
-                        sibling.source_kind == "previous_response"
-                        or _param_was_caller_typed(sibling)
-                    )
+                    _param_is_quantity_or_formula_leaf(sibling.key, sibling.path)
+                    and not _param_has_editable_control_evidence(sibling)
                 ):
                     continue
                 response_path = _best_option_projection_path(
@@ -823,22 +829,24 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                             _field_leaf_token(item.key, item.path).endswith("id")
                             or _field_leaf_token(item.key, item.path) in {"id", "ids"}
                         )
-                    ), None)
-                sibling.category = "runtime_var"
+                ), None)
                 sibling.source_kind = "selected_option_field"
                 sibling.source = {
                     "kind": "selected_option_field",
                     "selector_path": selector.path if selector is not None else "",
                     "selector_param": selector.key if selector is not None else "",
+                    "source_url": source_url,
+                    "source_step_id": source_step.step_id if source_step is not None else "",
                     "source_request_id": request_id,
                     "response_path": response_path,
                     "target_path": sibling.path,
                 }
-                sibling.exposed_to_user = False
-                sibling.editable = False
-                sibling.required = False
-                sibling.need_human_confirm = False
-                sibling.reason = f"该字段来自所选记录的 `{response_path}`，运行期随选择自动写入"
+                caller_override = _apply_selected_option_field_caller_ownership(sibling)
+                sibling.reason = (
+                    f"该字段默认来自所选记录的 `{response_path}`，调用方可修改"
+                    if caller_override
+                    else f"该字段来自所选记录的 `{response_path}`，运行期随选择自动写入"
+                )
                 projected_paths.add(str(sibling.path or ""))
             if projected_paths:
                 step.selects = [

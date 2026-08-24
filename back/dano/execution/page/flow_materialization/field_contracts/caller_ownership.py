@@ -59,6 +59,29 @@ def _param_was_caller_typed(param: ParamField) -> bool:
     return False
 
 
+def _apply_selected_option_field_caller_ownership(param: ParamField) -> bool:
+    """Keep selected-row origin while preserving an editable caller override."""
+    source = dict(param.source or {})
+    caller_override = bool(
+        source.get("allow_caller_override")
+        or source.get("caller_override")
+        or _param_has_editable_control_evidence(param)
+    )
+    if caller_override:
+        source["allow_caller_override"] = True
+        param.category = "user_param"
+        param.exposed_to_user = True
+        param.editable = True
+    else:
+        param.category = "runtime_var"
+        param.exposed_to_user = False
+        param.editable = False
+        param.required = False
+    param.source = source
+    param.need_human_confirm = False
+    return caller_override
+
+
 _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
     "previous_response", "current_user", "storage", "cookie", "page_context",
     "request_header", "system_time", "system_generated", "computed",

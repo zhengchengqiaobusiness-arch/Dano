@@ -32,6 +32,9 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_field_manually_edited,
     _param_has_manual_contract,
 )
+from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _apply_selected_option_field_caller_ownership,
+)
 from dano.execution.page.flow_materialization.request_steps import (
     _step_sequence,
 )
@@ -690,10 +693,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         if not type_owned:
             param.type = "list-enum" if binding.multi else "enum"
         if param.source_kind == "selected_option_field" and not category_owned:
-            param.category = "runtime_var"
-            param.exposed_to_user = False
-            param.editable = False
-            param.required = False
+            _apply_selected_option_field_caller_ownership(param)
         elif (
             not category_owned
             and param.category not in {"runtime_var", "system_const"}
@@ -788,6 +788,7 @@ def _sync_selected_option_field_projections(step: FlowStep) -> None:
     for param in step.params or []:
         if param.source_kind != "selected_option_field":
             continue
+        _apply_selected_option_field_caller_ownership(param)
         source = dict(param.source or {})
         target_path = str(source.get("target_path") or param.path or "")
         response_path = str(source.get("response_path") or "")
