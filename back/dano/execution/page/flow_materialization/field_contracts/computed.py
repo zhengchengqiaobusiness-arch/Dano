@@ -23,6 +23,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_control_kinds,
     _param_field_manually_edited,
     _param_group_prefix,
+    _param_source_agent_classified,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _param_has_editable_control_evidence,
@@ -186,7 +187,11 @@ def _is_stable_operand(param: ParamField) -> bool:
 
 def _arithmetic_target_allowed(param: ParamField) -> bool:
     """Formulas hide derived numbers, never caller filters or typed controls."""
-    if param.locked or _param_was_caller_typed(param):
+    if (
+        param.locked
+        or _param_was_caller_typed(param)
+        or _param_source_agent_classified(param)
+    ):
         return False
     if str(param.path or "").startswith("query."):
         return False
@@ -762,6 +767,7 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
         for param in step.params or []:
             if (
                 param.locked
+                or _param_source_agent_classified(param)
                 or _param_has_editable_control_evidence(param)
                 or _param_is_temporal(param)
                 or _looks_pagination_field(param.key, param.path)

@@ -773,6 +773,10 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
         for param in step.params or []:
             if param.locked or _param_has_manual_contract(param) or param.source_kind == "computed":
                 continue
+            if _param_source_agent_classified(param):
+                # Pi already compiled this exact field's semantic origin and
+                # caller ownership. Name hints must not reclassify it later.
+                continue
             has_editable_control = _param_has_editable_control_evidence(param)
             if _param_is_document_record_identity(param) or _looks_row_identity_leaf(param.key, param.path):
                 _mark_system_hydrated_field(

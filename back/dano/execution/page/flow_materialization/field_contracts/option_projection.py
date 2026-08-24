@@ -39,6 +39,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_control_kinds,
     _param_group_prefix,
     _param_has_manual_contract,
+    _param_source_agent_classified,
 )
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _looks_row_identity_leaf,
@@ -745,7 +746,11 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             )
             projected_paths: set[str] = set()
             for sibling in members:
-                if sibling.locked or _param_has_manual_contract(sibling):
+                if (
+                    sibling.locked
+                    or _param_has_manual_contract(sibling)
+                    or _param_source_agent_classified(sibling)
+                ):
                     continue
                 # The chooser is the input that selects the row; it cannot also
                 # be a projection from that same row. This matters for schemas

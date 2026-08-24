@@ -587,6 +587,25 @@ def _param_source_agent_classified(param: ParamField) -> bool:
     )
 
 
+def _param_type_agent_classified(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("actor") == "agent"
+        and item.get("kind") == "param_type"
+        and str(item.get("business_type") or "") == str(param.type or "")
+        for item in (param.evidence or [])
+    )
+
+
+def _param_enum_agent_classified(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("actor") == "agent"
+        and item.get("kind") == "enum_options"
+        for item in (param.evidence or [])
+    )
+
+
 def _param_has_full_lock(param: ParamField) -> bool:
     return bool(param.locked)
 
@@ -1007,7 +1026,11 @@ def _propagate_grounded_parallel_field_names(spec: FlowSpec) -> int:
 
 def _param_has_grounded_type(param: ParamField) -> bool:
     """Return whether evidence grounds the business type, not its wire shape."""
-    if _param_has_full_lock(param) or _param_field_manually_edited(param, "type"):
+    if (
+        _param_has_full_lock(param)
+        or _param_field_manually_edited(param, "type")
+        or _param_type_agent_classified(param)
+    ):
         return True
     if str(param.type or "") in {"", "unknown"}:
         return False

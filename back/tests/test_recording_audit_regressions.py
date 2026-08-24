@@ -54,6 +54,9 @@ from dano.execution.page.flow_materialization.field_contracts.page_rules import 
 from dano.execution.page.flow_materialization.field_contracts.query_form import (
     _apply_query_form_field_contracts,
 )
+from dano.execution.page.flow_materialization.field_contracts.row_command import (
+    _apply_row_command_field_contracts,
+)
 from dano.execution.page.flow_materialization.request_usage import _same_request_cohort
 from dano.execution.page.flow_materialization.response_maps import (
     _latest_response_key_map_candidates,
@@ -651,6 +654,7 @@ def test_field_axis_edits_run_before_semantic_plan_compilation() -> None:
         "control_kind": "select",
         "editable": True,
         "disabled": False,
+        "required_observed": False,
         "page_id": "p1",
         "frame_id": "f1",
     }]
@@ -673,14 +677,40 @@ def test_field_axis_edits_run_before_semantic_plan_compilation() -> None:
             }],
             "unresolved_items": [],
         },
-        "ops": [{
-            "op": "rename_field",
-            "step_id": "create",
-            "path": "accountId",
-            "label": "结算账户",
-            "reason": "页面表单明确标注该字段为结算账户。",
-            "evidence_refs": ["field-account"],
-        }],
+        "ops": [
+            {
+                "op": "set_param_source",
+                "step_id": "create",
+                "path": "accountId",
+                "source_kind": "caller_input",
+                "reason": "该选择由调用方在页面上提供。",
+                "evidence_refs": ["field-account"],
+            },
+            {
+                "op": "set_param_type",
+                "step_id": "create",
+                "path": "accountId",
+                "business_type": "enum",
+                "reason": "页面证据表明这是单选控件。",
+                "evidence_refs": ["field-account"],
+            },
+            {
+                "op": "set_param_required",
+                "step_id": "create",
+                "path": "accountId",
+                "required": False,
+                "reason": "页面控件没有必填标记。",
+                "evidence_refs": ["field-account"],
+            },
+            {
+                "op": "rename_field",
+                "step_id": "create",
+                "path": "accountId",
+                "label": "结算账户",
+                "reason": "页面表单明确标注该字段为结算账户。",
+                "evidence_refs": ["field-account"],
+            },
+        ],
         "_submitted_semantic_keys": [
             "business_understanding", "capabilities", "unresolved_items",
         ],
@@ -693,9 +723,28 @@ def test_field_axis_edits_run_before_semantic_plan_compilation() -> None:
     ))
 
     account = next(param for param in result.steps[0].params if param.path == "accountId")
+    assert [
+        (item["op"], item["status"], item["reason"])
+        for item in result.meta["recording_agent_session"]["op_results"]
+    ] == [
+        ("set_param_source", "applied", ""),
+        ("set_param_type", "applied", ""),
+        ("set_param_required", "applied", ""),
+        ("rename_field", "applied", ""),
+    ]
     assert account.label == "结算账户"
     assert account.key == "accountId"
     assert account.path == "accountId"
+    assert account.type == "enum"
+    assert account.source_kind == "user_input"
+    assert account.category == "user_param"
+    assert account.exposed_to_user is True
+    assert account.required is False
+    assert {
+        item.get("kind")
+        for item in account.evidence
+        if isinstance(item, dict) and item.get("actor") == "agent"
+    } >= {"param_source", "param_type", "param_required", "field_name"}
     assert result.meta["capability_model"]["semantic_coverage"]["complete"] is True
     assert len(result.capabilities) == 1
     assert recording_capability_plan_complete(result)
@@ -993,6 +1042,76 @@ def test_edit_form_editable_hydrated_field_beats_audit_name_hint() -> None:
 
     assert creator.source_kind == "previous_response"
     assert creator.source["allow_caller_override"] is True
+    assert creator.category == "user_param"
+    assert creator.exposed_to_user is True
+    assert creator.editable is True
+
+
+def test_edit_form_preserves_pi_source_decision_without_name_override() -> None:
+    creator = ParamField(
+        path="body.creator",
+        key="creator",
+        value="operator-1",
+        source_kind="user_input",
+        source={
+            "kind": "user_input",
+            "actor": "agent",
+            "reason": "Pi classified this exact field as caller input.",
+        },
+        category="user_param",
+        exposed_to_user=True,
+        editable=True,
+        evidence=[{
+            "actor": "agent",
+            "kind": "param_source",
+            "source_kind": "caller_input",
+            "evidence_refs": ["req-update"],
+        }],
+    )
+    step = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=[
+            creator,
+            ParamField(
+                path="body.customerId", key="customerId", value=8,
+                source_kind="previous_response",
+                source={
+                    "kind": "previous_response", "step_id": "detail",
+                    "link_id": "detail-to-update-customer",
+                    "response_path": "data.customerId",
+                },
+            ),
+            ParamField(
+                path="body.remark", key="remark", value="note",
+                source_kind="previous_response",
+                source={
+                    "kind": "previous_response", "step_id": "detail",
+                    "link_id": "detail-to-update-remark",
+                    "response_path": "data.remark",
+                },
+            ),
+            ParamField(
+                path="body.orderTime", key="orderTime", value=1,
+                source_kind="previous_response",
+                source={
+                    "kind": "previous_response", "step_id": "detail",
+                    "link_id": "detail-to-update-time",
+                    "response_path": "data.orderTime",
+                },
+            ),
+        ],
+    )
+    spec = FlowSpec.model_construct(
+        steps=[step],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _apply_edit_form_field_contracts(spec)
+
+    assert creator.source_kind == "user_input"
+    assert creator.source["actor"] == "agent"
     assert creator.category == "user_param"
     assert creator.exposed_to_user is True
     assert creator.editable is True
@@ -1597,6 +1716,131 @@ def test_exact_option_scope_binds_api_source_and_selected_row_projections() -> N
     assert by_key["productBarCode"].source["response_path"] == "barCode"
     assert by_key["productUnitName"].source["selector_path"] == "body.items[0].productId"
     assert by_key["id"].source_kind != "selected_option_field"
+
+
+def test_selected_row_projection_preserves_pi_source_decision() -> None:
+    spec = _sale_order_option_spec()
+    _repair_structural_option_bindings(spec)
+    unit = next(
+        param for param in spec.steps[1].params
+        if param.key == "productUnitName"
+    )
+    unit.category = "user_param"
+    unit.source_kind = "user_input"
+    unit.source = {
+        "kind": "user_input",
+        "actor": "agent",
+        "reason": "Pi classified this exact target field as caller input.",
+    }
+    unit.exposed_to_user = True
+    unit.editable = True
+    unit.evidence.append({
+        "actor": "agent",
+        "kind": "param_source",
+        "source_kind": "caller_input",
+        "evidence_refs": ["req-create", "req-product-options"],
+    })
+
+    _infer_selected_option_row_fields(spec)
+
+    assert unit.source_kind == "user_input"
+    assert unit.source["actor"] == "agent"
+    assert unit.category == "user_param"
+    assert unit.exposed_to_user is True
+
+
+def test_computed_inference_preserves_pi_source_decision() -> None:
+    total = ParamField(
+        path="body.totalPrice",
+        key="totalPrice",
+        value=10,
+        type="number",
+        wire_type="number",
+        category="user_param",
+        source_kind="user_input",
+        source={
+            "kind": "user_input",
+            "actor": "agent",
+            "reason": "Pi classified this exact field as caller input.",
+        },
+        exposed_to_user=True,
+        editable=True,
+        evidence=[{
+            "actor": "agent",
+            "kind": "param_source",
+            "source_kind": "caller_input",
+            "evidence_refs": ["req-create"],
+        }],
+    )
+    spec = FlowSpec.model_construct(steps=[FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[
+            ParamField(
+                path="body.productPrice", key="productPrice", value=5,
+                type="number", wire_type="number", source_kind="user_input",
+            ),
+            ParamField(
+                path="body.count", key="count", value=2,
+                type="number", wire_type="number", source_kind="user_input",
+            ),
+            total,
+        ],
+    )])
+
+    _infer_arithmetic_computed_fields(spec)
+
+    assert total.source_kind == "user_input"
+    assert total.source["actor"] == "agent"
+    assert total.category == "user_param"
+    assert total.exposed_to_user is True
+
+
+def test_row_command_preserves_pi_source_decision() -> None:
+    status = ParamField(
+        path="query.status",
+        key="status",
+        value=20,
+        type="number",
+        wire_type="number",
+        category="user_param",
+        source_kind="user_input",
+        source={
+            "kind": "user_input",
+            "actor": "agent",
+            "reason": "Pi classified this exact field as caller input.",
+        },
+        exposed_to_user=True,
+        editable=True,
+        evidence=[{
+            "actor": "agent",
+            "kind": "param_source",
+            "source_kind": "caller_input",
+            "evidence_refs": ["req-command"],
+        }],
+    )
+    spec = FlowSpec.model_construct(steps=[FlowStep(
+        step_id="command",
+        method="PUT",
+        path="/orders/update-status",
+        params=[
+            ParamField(
+                path="query.id",
+                key="id",
+                value=70,
+                source_kind="selected_record_identity",
+            ),
+            status,
+        ],
+    )])
+
+    _apply_row_command_field_contracts(spec)
+
+    assert status.source_kind == "user_input"
+    assert status.source["actor"] == "agent"
+    assert status.category == "user_param"
+    assert status.exposed_to_user is True
 
 
 def test_pi_field_workset_exposes_independent_axes_and_multi_field_projections() -> None:

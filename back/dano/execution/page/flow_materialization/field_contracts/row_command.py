@@ -8,6 +8,7 @@ from dano.execution.page.flow_spec_core.models import (
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_has_manual_contract,
+    _param_source_agent_classified,
 )
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _param_is_document_record_identity,
@@ -58,7 +59,11 @@ def _apply_row_command_field_contracts(spec: FlowSpec) -> None:
         if not _step_is_row_command(step):
             continue
         for param in step.params or []:
-            if param.locked or _param_has_manual_contract(param):
+            if (
+                param.locked
+                or _param_has_manual_contract(param)
+                or _param_source_agent_classified(param)
+            ):
                 continue
             if _param_is_document_record_identity(param):
                 param.category = "user_param"

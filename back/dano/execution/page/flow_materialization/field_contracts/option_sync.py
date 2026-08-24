@@ -29,8 +29,11 @@ from dano.execution.page.recording_facts import (
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_axis_manually_edited,
+    _param_enum_agent_classified,
     _param_field_manually_edited,
     _param_has_manual_contract,
+    _param_source_agent_classified,
+    _param_type_agent_classified,
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _apply_selected_option_field_caller_ownership,
@@ -552,12 +555,22 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         if param.locked:
             grounded_bindings.append(binding)
             continue
-        type_owned = _param_field_manually_edited(param, "type")
+        type_owned = (
+            _param_field_manually_edited(param, "type")
+            or _param_type_agent_classified(param)
+        )
+        agent_source_owned = _param_source_agent_classified(param)
         category_owned = _param_axis_manually_edited(
             param, "category", "exposed_to_user", "editable",
+        ) or agent_source_owned
+        source_owned = (
+            _param_axis_manually_edited(param, "source_kind", "source")
+            or agent_source_owned
         )
-        source_owned = _param_axis_manually_edited(param, "source_kind", "source")
-        options_owned = _param_axis_manually_edited(param, "enum_options", "enum_value_map")
+        options_owned = (
+            _param_axis_manually_edited(param, "enum_options", "enum_value_map")
+            or _param_enum_agent_classified(param)
+        )
         page_contract = _page_enum_contract_for_param(spec, step, param, binding)
         if page_contract:
             page_options, page_value_map, page_meta = page_contract
