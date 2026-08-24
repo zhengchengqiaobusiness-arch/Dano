@@ -3017,3 +3017,56 @@ def test_line_and_collection_formulas_are_executable() -> None:
     )
     assert runtime["discountPrice"] == 4400
     assert runtime["totalPrice"] == 39600
+
+
+def test_readonly_collection_totals_use_unique_row_structure_when_samples_are_stale() -> None:
+    aggregate = ParamField(
+        path="items",
+        key="items",
+        value=[
+            {"count": 2, "totalProductPrice": 20, "taxPrice": 2},
+            {"count": 3, "totalProductPrice": 60, "taxPrice": 6},
+        ],
+        type="array",
+        source_kind="user_input",
+        source={
+            "kind": "dynamic_structure_input",
+            "structure_kind": "array_object",
+            "array_container_path": "items",
+        },
+    )
+    step = FlowStep(
+        step_id="update",
+        params=[
+            aggregate,
+            ParamField(path="items[0].count", key="count", value=2, type="number", source_kind="user_input"),
+            ParamField(path="items[0].productPrice", key="productPrice", value=10, type="number", source_kind="user_input"),
+            ParamField(path="items[0].totalProductPrice", key="totalProductPrice", value=20, type="number", source_kind="computed"),
+            ParamField(path="items[0].taxPrice", key="taxPrice", value=2, type="number", source_kind="computed"),
+            readonly_number("totalCount", "totalCount", 999),
+            readonly_number("totalProductPrice", "totalProductPrice", 999),
+            readonly_number("totalTaxPrice", "totalTaxPrice", 999),
+        ],
+    )
+    spec = FlowSpec()
+    spec.steps = [step]
+
+    _infer_collection_computed_fields(spec)
+
+    by_key = {
+        param.key: param
+        for param in step.params
+        if "[" not in param.path and param is not aggregate
+    }
+    assert by_key["totalCount"].source == {
+        "kind": "computed",
+        "strategy": "collection_sum",
+        "container_field": "items",
+        "item_field": "count",
+        "result_field": "totalCount",
+        "path": "totalCount",
+        "sample_verified": False,
+        "structural_verified": True,
+    }
+    assert by_key["totalProductPrice"].source["item_field"] == "totalProductPrice"
+    assert by_key["totalTaxPrice"].source["item_field"] == "taxPrice"

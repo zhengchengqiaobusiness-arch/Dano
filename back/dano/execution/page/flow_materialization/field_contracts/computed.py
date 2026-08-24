@@ -559,13 +559,17 @@ def _infer_collection_computed_fields(spec: FlowSpec) -> None:
                     for param, _number in values
                 )
             ]
-            if not base_candidates:
-                continue
-            best_rank = max(item[2] for item in base_candidates)
-            strongest = [item for item in base_candidates if item[2] == best_rank]
-            if len(strongest) != 1:
-                continue
-            item_field, collection_sum, _rank = strongest[0]
+            if base_candidates:
+                best_rank = max(item[2] for item in base_candidates)
+                strongest = [item for item in base_candidates if item[2] == best_rank]
+            else:
+                strongest = []
+            if len(strongest) == 1:
+                item_field, collection_sum, _rank = strongest[0]
+            else:
+                # Sample arithmetic is ambiguous, but the independent
+                # root↔row structural pass below can still prove a unique sum.
+                item_field, collection_sum = "", float("nan")
             root_params = [
                 param for param in step.params or []
                 if "[" not in str(param.path or "")
@@ -574,7 +578,13 @@ def _infer_collection_computed_fields(spec: FlowSpec) -> None:
             ]
             assigned: set[str] = set()
 
-            def assign(target: ParamField, strategy: str, **source: Any) -> None:
+            def assign(
+                target: ParamField,
+                strategy: str,
+                *,
+                sample_verified: bool = True,
+                **source: Any,
+            ) -> None:
                 target.category = "runtime_var"
                 target.source_kind = "computed"
                 target.source = {
@@ -584,7 +594,8 @@ def _infer_collection_computed_fields(spec: FlowSpec) -> None:
                     "item_field": item_field,
                     "result_field": target.key,
                     "path": target.path,
-                    "sample_verified": True,
+                    "sample_verified": sample_verified,
+                    **({"structural_verified": True} if not sample_verified else {}),
                     **source,
                 }
                 target.type = "number"
@@ -592,7 +603,11 @@ def _infer_collection_computed_fields(spec: FlowSpec) -> None:
                 target.editable = False
                 target.required = False
                 target.need_human_confirm = False
-                target.reason = "录制样例和动态明细结构共同证明该字段由明细集合运行期汇总计算"
+                target.reason = (
+                    "录制样例和动态明细结构共同证明该字段由明细集合运行期汇总计算"
+                    if sample_verified
+                    else "只读汇总字段与重复明细字段具有唯一结构对应，运行期按全部明细汇总计算"
+                )
                 step.sample_inputs.pop(target.key, None)
                 assigned.add(target.key)
 
@@ -642,6 +657,47 @@ def _infer_collection_computed_fields(spec: FlowSpec) -> None:
                     )
                 elif _numbers_match(target_number, collection_sum) and _looks_total_formula_leaf(target.key, target.path):
                     assign(target, "collection_sum")
+
+            item_params_by_leaf: dict[str, list[ParamField]] = {}
+            for param in step.params or []:
+                match = pattern.match(str(param.path or "").removeprefix("body."))
+                if match:
+                    item_params_by_leaf.setdefault(match.group(1), []).append(param)
+            for target in root_params:
+                if (
+                    target.key in assigned
+                    or target.source_kind == "computed"
+                    or not _arithmetic_target_allowed(target)
+                    or not _looks_total_formula_leaf(target.key, target.path)
+                ):
+                    continue
+                target_leaf = _field_leaf_token(target.key, target.path)
+                ranked_matches: list[tuple[int, str]] = []
+                for item_path, item_params in item_params_by_leaf.items():
+                    item_leaf = _field_leaf_token(
+                        item_params[0].key if item_params else item_path,
+                        item_path,
+                    )
+                    rank = (
+                        2 if target_leaf == item_leaf
+                        else 1 if target_leaf == f"total{item_leaf}" else 0
+                    )
+                    if rank:
+                        ranked_matches.append((rank, item_path))
+                if not ranked_matches:
+                    continue
+                best_rank = max(rank for rank, _item_path in ranked_matches)
+                strongest_paths = {
+                    item_path for rank, item_path in ranked_matches if rank == best_rank
+                }
+                if len(strongest_paths) != 1:
+                    continue
+                assign(
+                    target,
+                    "collection_sum",
+                    sample_verified=False,
+                    item_field=next(iter(strongest_paths)),
+                )
 
 
 def _param_is_temporal(param: ParamField) -> bool:
