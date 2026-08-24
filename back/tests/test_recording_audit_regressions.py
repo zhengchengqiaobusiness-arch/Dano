@@ -1246,7 +1246,7 @@ def test_prepared_capability_view_does_not_rematerialize_flow(monkeypatch) -> No
     assert len(views) == 1
 
 
-def test_unmapped_query_enum_is_raw_input_and_detail_id_is_record_selector() -> None:
+def test_unmapped_query_enum_keeps_page_choices_and_detail_id_is_record_selector() -> None:
     query = FlowStep(
         step_id="search",
         method="GET",
@@ -1292,10 +1292,10 @@ def test_unmapped_query_enum_is_raw_input_and_detail_id_is_record_selector() -> 
     _apply_query_form_field_contracts(spec)
 
     out_status = query.params[0]
-    assert out_status.source_kind == "user_input"
-    assert out_status.type == "string"
-    assert out_status.enum_options is None
-    assert out_status.source["unmapped_page_options"] is True
+    assert out_status.source_kind == "page_enum"
+    assert out_status.type == "enum"
+    assert out_status.enum_options == ["未出库", "部分出库", "全部出库"]
+    assert out_status.source["enum_confirmed"] is False
     query.selects = [SelectBinding(
         param="outStatus",
         path="query.outStatus",
@@ -1314,9 +1314,11 @@ def test_unmapped_query_enum_is_raw_input_and_detail_id_is_record_selector() -> 
 
     _apply_query_form_field_contracts(spec)
 
-    assert out_status.source_kind == "user_input"
-    assert out_status.source["unmapped_page_options"] is True
-    assert query.selects == []
+    assert out_status.source_kind == "page_enum"
+    assert out_status.type == "enum"
+    assert out_status.enum_options == ["未出库", "部分出库", "全部出库"]
+    assert out_status.source["enum_confirmed"] is False
+    assert len(query.selects) == 1
     record_id = detail.params[0]
     assert record_id.label == "记录"
     assert record_id.source_kind == "selected_record_identity"

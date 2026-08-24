@@ -185,37 +185,27 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 and source.get("enum_confirmed") is False
                 and not _page_enum_has_complete_wire_mapping(param)
             ):
-                # The page proves this is a chooser, but labels alone cannot
-                # be submitted as backend codes. Keep the optional filter
-                # executable as a raw caller wire value instead of advertising
-                # a fake label→value enum contract.
-                param.type = (
-                    param.wire_type
-                    if param.wire_type in {"string", "number", "integer", "boolean"}
-                    else "string"
-                )
-                param.source_kind = "user_input"
+                # The page control is authoritative evidence that this field
+                # is a chooser even when only part of its label→wire mapping
+                # was observed. Keep the captured choices as a non-binding
+                # snapshot; capability I/O already submits the caller's wire
+                # value without turning an incomplete snapshot into a schema
+                # restriction.
+                param.type = "enum"
+                param.source_kind = "page_enum"
                 param.source = {
-                    "kind": "business_query_filter",
-                    "path": param.path,
-                    "recorded": True,
-                    "control_kind": "select",
-                    "unmapped_page_options": True,
+                    **source,
+                    "kind": "page_enum",
+                    "enum_confirmed": False,
                     "required_state": str(
-                        (param.source or {}).get("required_state") or "optional"
+                        source.get("required_state") or "optional"
                     ),
                 }
-                param.enum_options = None
-                param.enum_value_map = None
                 param.need_human_confirm = False
                 param.reason = (
-                    "页面证明该字段为可选筛选控件，但未捕获完整 label→wire 映射；"
-                    "调用方直接提供接口值"
+                    "页面证明该字段为选择控件；已保留录制到的枚举候选，"
+                    "未捕获的 label→wire 映射不作为执行限制"
                 )
-                step.selects = [
-                    binding for binding in (step.selects or [])
-                    if str(binding.path or binding.id_path or "") != str(param.path or "")
-                ]
             if param.source_kind in caller_kinds:
                 if (
                     refresh_required
