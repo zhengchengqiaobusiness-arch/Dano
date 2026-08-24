@@ -42,6 +42,15 @@ from dano.execution.page.flow_materialization.field_contracts.computed import (
     _infer_arithmetic_computed_fields,
     _infer_collection_computed_fields,
 )
+from dano.execution.page.flow_materialization.field_contracts.create_form import (
+    _apply_create_form_field_contracts,
+)
+from dano.execution.page.flow_materialization.field_contracts.edit_form import (
+    _apply_edit_form_field_contracts,
+)
+from dano.execution.page.flow_materialization.field_contracts.page_rules import (
+    _apply_page_rule_caller_override,
+)
 from dano.execution.page.flow_materialization.field_contracts.query_form import (
     _apply_query_form_field_contracts,
 )
@@ -882,6 +891,187 @@ def test_short_semantic_scalar_is_materialized_as_runtime_dependency() -> None:
         for link in spec.links
     )
     assert spec.steps[1].params[0].source_kind == "previous_response"
+
+
+def test_create_form_editable_control_beats_system_name_hint() -> None:
+    creator = ParamField(
+        path="body.creator",
+        key="creator",
+        value="operator-1",
+        source_kind="unknown",
+        source={"kind": "unknown"},
+        category="runtime_var",
+        exposed_to_user=False,
+        editable=False,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "text",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+            "binding_status": "bound",
+        }],
+    )
+    step = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[
+            creator,
+            ParamField(path="body.remark", key="remark", value="note"),
+        ],
+    )
+    spec = FlowSpec(steps=[step])
+
+    _apply_create_form_field_contracts(spec)
+
+    assert creator.source_kind == "user_input"
+    assert creator.category == "user_param"
+    assert creator.exposed_to_user is True
+    assert creator.editable is True
+
+
+def test_edit_form_editable_hydrated_field_beats_audit_name_hint() -> None:
+    creator = ParamField(
+        path="body.creator",
+        key="creator",
+        value="operator-1",
+        source_kind="previous_response",
+        source={
+            "kind": "previous_response",
+            "step_id": "detail",
+            "link_id": "detail-to-update-creator",
+            "response_path": "data.creator",
+            "allow_caller_override": False,
+        },
+        category="runtime_var",
+        exposed_to_user=False,
+        editable=False,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "text",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+            "binding_status": "bound",
+        }],
+    )
+    step = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=[
+            creator,
+            ParamField(
+                path="body.customerId", key="customerId", value=8,
+                source_kind="previous_response",
+                source={
+                    "kind": "previous_response",
+                    "step_id": "detail",
+                    "link_id": "detail-to-update-customer",
+                    "response_path": "data.customerId",
+                },
+            ),
+            ParamField(
+                path="body.remark", key="remark", value="note",
+                source_kind="previous_response",
+                source={
+                    "kind": "previous_response",
+                    "step_id": "detail",
+                    "link_id": "detail-to-update-remark",
+                    "response_path": "data.remark",
+                },
+            ),
+        ],
+    )
+    spec = FlowSpec.model_construct(
+        steps=[step],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _apply_edit_form_field_contracts(spec)
+
+    assert creator.source_kind == "previous_response"
+    assert creator.source["allow_caller_override"] is True
+    assert creator.category == "user_param"
+    assert creator.exposed_to_user is True
+    assert creator.editable is True
+
+
+def test_query_editable_control_beats_system_name_hint() -> None:
+    template_id = ParamField(
+        path="query.templateId",
+        key="templateId",
+        value=7,
+        source_kind="unknown",
+        source={"kind": "unknown"},
+        category="runtime_var",
+        exposed_to_user=False,
+        editable=False,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "select",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+            "binding_status": "bound",
+        }],
+    )
+    spec = FlowSpec.model_construct(steps=[FlowStep(
+        step_id="list",
+        method="GET",
+        path="/orders/page",
+        params=[template_id],
+    )])
+
+    _apply_query_form_field_contracts(spec)
+
+    assert template_id.source_kind == "form_option"
+    assert template_id.category == "user_param"
+    assert template_id.exposed_to_user is True
+    assert template_id.editable is True
+
+
+def test_editable_selected_projection_beats_audit_name_hint() -> None:
+    creator_name = ParamField(
+        path="body.creatorName",
+        key="creatorName",
+        value="operator-1",
+        source_kind="selected_option_field",
+        source={
+            "kind": "selected_option_field",
+            "source_field": "name",
+            "allow_caller_override": False,
+        },
+        category="runtime_var",
+        exposed_to_user=False,
+        editable=False,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "text",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+            "binding_status": "bound",
+        }],
+    )
+    spec = FlowSpec.model_construct(
+        steps=[FlowStep(
+            step_id="save",
+            method="POST",
+            path="/orders/save",
+            params=[creator_name],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _apply_page_rule_caller_override(spec)
+
+    assert creator_name.source_kind == "selected_option_field"
+    assert creator_name.source["allow_caller_override"] is True
+    assert creator_name.category == "user_param"
+    assert creator_name.exposed_to_user is True
+    assert creator_name.editable is True
 
 
 def test_parallel_create_and_edit_fields_share_grounded_business_name() -> None:

@@ -773,13 +773,18 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
         for param in step.params or []:
             if param.locked or _param_has_manual_contract(param) or param.source_kind == "computed":
                 continue
+            has_editable_control = _param_has_editable_control_evidence(param)
             if _param_is_document_record_identity(param) or _looks_row_identity_leaf(param.key, param.path):
                 _mark_system_hydrated_field(
                     param,
                     "该字段是记录或行项目标识，由详情接口回填，不作为调用方输入",
                 )
                 continue
-            if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
+            if (
+                _looks_audit_system_leaf(param.key, param.path)
+                and not has_editable_control
+                and not _param_has_command_local_control(step, param)
+            ):
                 _mark_system_hydrated_field(
                     param,
                     "该字段是审计/系统时间或创建人痕迹，由详情接口回填，不作为调用方输入",
@@ -787,6 +792,7 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 continue
             if (
                 _field_leaf_token(param.key, param.path) in {"status", "state"}
+                and not has_editable_control
                 and not _param_has_command_local_control(step, param)
             ):
                 _mark_system_hydrated_field(
@@ -794,7 +800,11 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                     "该字段是单据状态回写，编辑提交随详情带出，不是列表筛选或行级命令",
                 )
                 continue
-            if _looks_display_echo_field(step, param) and not _param_has_command_local_control(step, param):
+            if (
+                _looks_display_echo_field(step, param)
+                and not has_editable_control
+                and not _param_has_command_local_control(step, param)
+            ):
                 _mark_system_hydrated_field(
                     param,
                     "该字段是选项显示名回写，随所选标识自动带出，不作为调用方输入",
@@ -804,7 +814,7 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 param.source_kind == "previous_response"
                 and param.value in (None, "")
                 and not _param_has_command_local_control(step, param)
-                and not _param_has_editable_control_evidence(param)
+                and not has_editable_control
             ):
                 _mark_system_hydrated_field(
                     param,
@@ -814,7 +824,10 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
             if (
                 param.source_kind == "previous_response"
                 and not _param_control_is_readonly(param)
-                and not _looks_audit_system_leaf(param.key, param.path)
+                and (
+                    not _looks_audit_system_leaf(param.key, param.path)
+                    or has_editable_control
+                )
             ):
                 hydrated_option = (
                     (param.source or {}).get("option_source")
@@ -828,7 +841,7 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 )
                 if (
                     strict_edit_evidence
-                    and not _param_has_editable_control_evidence(param)
+                    and not has_editable_control
                     and not executable_hydrated_option
                 ):
                     _mark_system_hydrated_field(

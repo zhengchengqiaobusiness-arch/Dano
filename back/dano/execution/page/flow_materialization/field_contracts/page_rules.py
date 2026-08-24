@@ -96,21 +96,32 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                     param.reason = "页面只读值疑似由前端生成，但录制证据没有公式，不能标记为可执行页面规则"
             if _looks_pagination_field(param.key, param.path):
                 continue
-            if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
+            has_editable_control = _param_has_editable_control_evidence(param)
+            if (
+                (
+                    _looks_runtime_field(param.key, param.path)
+                    or _looks_system_const_field(param.key, param.path)
+                )
+                and not has_editable_control
+            ):
                 continue
             if (
                 _param_is_document_record_identity(param)
                 and param.source_kind != "user_input"
             ):
                 continue
-            if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
+            if (
+                _looks_audit_system_leaf(param.key, param.path)
+                and not has_editable_control
+                and not _param_has_command_local_control(step, param)
+            ):
                 continue
             if _param_control_is_readonly(param):
                 continue
             if (
                 param.source_kind == "selected_option_field"
                 and (
-                    _param_has_editable_control_evidence(param)
+                    has_editable_control
                     or not strict_edit_evidence
                 )
             ):
@@ -119,11 +130,11 @@ def _apply_page_rule_caller_override(spec: FlowSpec) -> None:
                     refresh_required=strict_edit_evidence,
                 )
                 continue
-            if _looks_display_echo_field(step, param) and not _param_has_editable_control_evidence(param):
+            if _looks_display_echo_field(step, param) and not has_editable_control:
                 continue
             if (
                 param.source_kind == "computed"
-                and _param_has_editable_control_evidence(param)
+                and has_editable_control
             ):
                 _mark_auto_fill_caller_override(
                     param, "页面自动计算，但仍允许调用方修改",

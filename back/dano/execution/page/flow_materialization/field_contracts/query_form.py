@@ -26,6 +26,9 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
 from dano.execution.page.flow_materialization.field_contracts.edit_form import (
     _editable_required_state,
 )
+from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
+    _param_has_editable_control_evidence,
+)
 from dano.execution.page.flow_materialization.field_contracts.required import (
     _param_has_local_required_marker,
 )
@@ -172,7 +175,13 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 continue
             if not _caller_filter_key(param.key, param.path):
                 continue
-            if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
+            if (
+                (
+                    _looks_runtime_field(param.key, param.path)
+                    or _looks_system_const_field(param.key, param.path)
+                )
+                and not _param_has_editable_control_evidence(param)
+            ):
                 continue
             if param.source_kind in {
                 "page_context", "request_header", "session", "current_user",

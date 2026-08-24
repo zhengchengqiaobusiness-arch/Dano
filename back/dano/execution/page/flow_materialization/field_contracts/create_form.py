@@ -62,6 +62,12 @@ def _create_form_field_is_system_owned(step: FlowStep, param: ParamField) -> boo
         "command_literal", "recorded_control_default",
     }:
         return True
+    if _param_control_is_readonly(param):
+        return True
+    if _param_has_editable_control_evidence(param) or _param_was_caller_typed(param):
+        # Structural page evidence outranks a field-name hint.  A field called
+        # creator/status/id may still be a real editable business input.
+        return False
     if _looks_runtime_field(param.key, param.path) or _looks_system_const_field(param.key, param.path):
         return True
     if _looks_audit_system_leaf(param.key, param.path) and not _param_has_command_local_control(step, param):
@@ -72,8 +78,6 @@ def _create_form_field_is_system_owned(step: FlowStep, param: ParamField) -> boo
         _param_is_document_record_identity(param)
         and not _record_identity_is_caller_owned(str(step.method or ""), param.value)
     ):
-        return True
-    if _param_control_is_readonly(param):
         return True
     return False
 
