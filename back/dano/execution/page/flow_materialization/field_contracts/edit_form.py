@@ -737,7 +737,7 @@ def _editable_required_state(param: ParamField) -> str:
     if any(
         isinstance(item, dict)
         and item.get("kind") == "page_required"
-        and str(item.get("binding_status") or "bound") == "bound"
+        and str(item.get("binding_status") or "bound") in {"bound", "parallel_contract"}
         for item in (param.evidence or [])
     ):
         return "required"

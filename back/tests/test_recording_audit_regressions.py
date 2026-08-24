@@ -49,6 +49,7 @@ from dano.execution.page.flow_materialization.response_maps import (
 )
 from dano.execution.page.flow_spec import apply_recording_agent_submission
 from dano.execution.page.flow_spec_core.models import (
+    CapabilityRequestRef,
     FlowCapability,
     FlowLink,
     FlowSpec,
@@ -808,6 +809,165 @@ def test_parallel_create_and_edit_fields_share_grounded_business_name() -> None:
         param for param in unrelated.params if param.key == "stockCount"
     )
     assert unrelated_stock.label == "stockCount"
+
+
+def test_parallel_edit_form_recovers_missing_editable_control_contract() -> None:
+    field_values = {"accountId": 1, "productId": 10}
+
+    def control_param(path: str, key: str, label: str, *, required: bool) -> ParamField:
+        return ParamField(
+            path=path,
+            key=key,
+            label=label,
+            value=field_values.get(key, 2),
+            type="enum" if key.endswith("Id") else "number",
+            wire_type="number",
+            required=required,
+            name_source="dom",
+            confidence_tier="grounded",
+            evidence=[{
+                "kind": "page_control",
+                "source": "recorder_dom",
+                "control_kind": "select" if key.endswith("Id") else "number",
+                "editable": True,
+                "disabled": False,
+                "read_only": False,
+                "required": required,
+                "required_observed": required,
+            }],
+        )
+
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[
+            control_param("accountId", "accountId", "结算账户", required=False),
+            control_param("items[0].productId", "productId", "产品名称", required=True),
+            control_param("items[0].count", "count", "数量", required=True),
+            control_param("items[0].productPrice", "productPrice", "产品单价", required=False),
+            control_param("items[0].taxPercent", "taxPercent", "税率", required=False),
+        ],
+        source_meta={
+            "request_id": "req-create", "sequence": 3,
+            "page_id": "orders", "frame_id": "main",
+        },
+    )
+    update_params = [
+        ParamField(
+            path=path,
+            key=key,
+            label=key,
+            value=field_values.get(key, 2),
+            type="number",
+            wire_type="number",
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "link_id": f"link-{key}",
+                "step_id": "detail",
+                "response_path": f"data.{path}",
+                "allow_caller_override": False,
+            },
+        )
+        for path, key in (
+            ("accountId", "accountId"),
+            ("items[0].productId", "productId"),
+            ("items[0].count", "count"),
+            ("items[0].productPrice", "productPrice"),
+            ("items[0].taxPercent", "taxPercent"),
+        )
+    ]
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=update_params,
+        source_meta={
+            "request_id": "req-update", "sequence": 6,
+            "page_id": "orders", "frame_id": "main",
+        },
+    )
+    spec = FlowSpec(
+        steps=[create, update],
+        capabilities=[FlowCapability(
+            name="update_order",
+            step_ids=["update"],
+            request_refs=[CapabilityRequestRef(
+                request_id="req-stale-option",
+                usage="option_source",
+            )],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id="req-product-options",
+            method="GET",
+            path="/products/simple-list",
+            url="/products/simple-list",
+            response_json={"data": [
+                {"id": 10, "name": "Widget"},
+                {"id": 11, "name": "Gadget"},
+            ]},
+            sequence=4,
+            page_id="orders",
+            frame_id="main",
+        ),
+        RequestFact(
+            request_id="req-account-options",
+            method="GET",
+            path="/accounts/simple-list",
+            url="/accounts/simple-list",
+            response_json={"data": [
+                {"id": 1, "name": "Main"},
+                {"id": 2, "name": "Backup"},
+            ]},
+            sequence=5,
+            page_id="orders",
+            frame_id="main",
+        ),
+    ]
+    spec.request_facts.analysis = {
+        request_id: RequestAnalysis(
+            request_id=request_id, role="read_option", keep=True,
+        )
+        for request_id in ("req-product-options", "req-account-options")
+    }
+
+    _apply_mechanical_field_contracts(spec)
+
+    account = next(param for param in update.params if param.key == "accountId")
+    product = next(param for param in update.params if param.key == "productId")
+    count = next(param for param in update.params if param.key == "count")
+    assert account.label == "结算账户"
+    assert account.exposed_to_user is True
+    assert account.editable is True
+    assert account.type == "enum"
+    account_options = account.source.get("option_source") or account.source
+    assert account_options["source_request_id"] == "req-account-options"
+    assert any(
+        item.get("source") == "recorded_parallel_form"
+        for item in account.evidence
+        if isinstance(item, dict)
+    )
+    if account.source_kind == "previous_response":
+        assert account.source["allow_caller_override"] is True
+    assert product.label == "产品名称"
+    assert product.type == "enum"
+    assert product.required is True
+    product_options = product.source.get("option_source") or product.source
+    assert product_options["source_request_id"] == "req-product-options"
+    assert any(
+        item.get("source") == "recorded_parallel_form"
+        for item in product.evidence
+        if isinstance(item, dict)
+    )
+    assert not any(
+        item.get("source") == "recorded_parallel_form"
+        for item in count.evidence
+        if isinstance(item, dict)
+    )
 
 
 def test_readonly_recorded_default_does_not_override_confirmed_edit_hydration() -> None:

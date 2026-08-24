@@ -81,6 +81,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _audit_step_param_contracts,
     _param_field_manually_edited,
     _param_has_manual_contract,
+    _propagate_grounded_parallel_field_controls,
     _propagate_grounded_parallel_field_names,
 )
 from dano.execution.page.flow_materialization.links import (
@@ -1801,6 +1802,7 @@ def to_flow_spec(
 def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
     """Apply the same origin/ownership rules to every capability family."""
     _reconcile_unbound_editable_controls(spec)
+    _propagate_grounded_parallel_field_controls(spec)
     # Reconciliation may be the first point where an aliasless choice control
     # acquires a field-local label/candidate-set identity. Re-run the existing
     # option matcher on that stronger evidence before projecting row fields.

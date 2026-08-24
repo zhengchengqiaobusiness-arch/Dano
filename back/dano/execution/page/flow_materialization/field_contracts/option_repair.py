@@ -560,7 +560,10 @@ def _repair_structural_option_bindings(
         return has_screenshot_choice(param) or any(
             isinstance(item, dict)
             and str(item.get("source") or item.get("kind") or "").lower()
-            in {"recorder_dom", "page", "page_snapshot", "page_control"}
+            in {
+                "recorder_dom", "recorded_parallel_form",
+                "page", "page_snapshot", "page_control",
+            }
             and str(item.get("control_kind") or "").lower()
             in _SCREENSHOT_OPTION_CONTROL_KINDS
             for item in (param.evidence or [])
@@ -972,6 +975,18 @@ def _repair_structural_option_bindings(
             or str(source.get("source_step_id") or "") in exact_step_ids
         ]
         for param in target.params or []:
+            parallel_form_choice = any(
+                isinstance(item, dict)
+                and item.get("source") == "recorded_parallel_form"
+                and str(item.get("control_kind") or "").lower()
+                in _SCREENSHOT_OPTION_CONTROL_KINDS
+                for item in (param.evidence or [])
+            )
+            param_candidates = (
+                candidates
+                if has_exact_option_scope and parallel_form_choice
+                else target_candidates
+            )
             source = dict(param.source or {})
             hydrated_option = (
                 source.get("option_source")
@@ -1104,7 +1119,7 @@ def _repair_structural_option_bindings(
             target_families = _option_binding_semantic_families(target_text)
             page_contracts = page_evidence_for(target, param, value)
             matches: list[dict[str, Any]] = []
-            for source in target_candidates:
+            for source in param_candidates:
                 if source.get("entity_collection_source") is True and not selected_entity_target:
                     continue
                 items = source["items"]

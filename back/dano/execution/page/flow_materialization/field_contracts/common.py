@@ -1,6 +1,7 @@
 """Stage 5: shared field-contract helpers without scenario rules."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 import re
 from dano.execution.page.flow_spec_core.models import (
@@ -809,7 +810,10 @@ def _param_has_grounded_public_name(param: ParamField) -> bool:
         isinstance(item, dict)
         and item.get("source") == "recorder_dom"
         and item.get("kind") == "page_control"
-        and (item.get("field_aliases") or [])
+        and (
+            (item.get("field_aliases") or [])
+            or str(item.get("binding_status") or "") == "bound"
+        )
         and public_name
         and not looks_internal_param_name(public_name)
         for item in (param.evidence or [])
@@ -838,45 +842,124 @@ def _parallel_form_resource(step: FlowStep) -> str:
     return "/".join(segments).casefold()
 
 
+def _parallel_form_paths(step: FlowStep) -> set[str]:
+    return {
+        _parallel_form_schema_path(param)
+        for param in step.params
+        if _parallel_form_schema_path(param)
+    }
+
+
+def _parallel_form_steps_equivalent(left: FlowStep, right: FlowStep) -> bool:
+    left_meta = left.source_meta or {}
+    right_meta = right.source_meta or {}
+    left_page = str(left_meta.get("page_id") or "")
+    right_page = str(right_meta.get("page_id") or "")
+    if not left_page or left_page != right_page:
+        return False
+    if str(left_meta.get("frame_id") or "") != str(right_meta.get("frame_id") or ""):
+        return False
+    if _parallel_form_resource(left) != _parallel_form_resource(right):
+        return False
+    left_paths = _parallel_form_paths(left)
+    right_paths = _parallel_form_paths(right)
+    shared = left_paths & right_paths
+    return bool(
+        len(shared) >= 3
+        and len(shared) / min(len(left_paths), len(right_paths)) >= 0.75
+    )
+
+
+def _propagate_grounded_parallel_field_controls(spec: FlowSpec) -> int:
+    """Recover a missing choice contract from the equivalent sibling form."""
+    write_steps = [
+        step for step in spec.steps
+        if str(step.method or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+    ]
+    changed = 0
+    for target_step in write_steps:
+        peers = [
+            step for step in write_steps
+            if step is not target_step
+            and _parallel_form_steps_equivalent(target_step, step)
+        ]
+        for target in target_step.params:
+            if target.locked or _param_has_manual_contract(target):
+                continue
+            if any(
+                isinstance(item, dict) and item.get("kind") == "page_control"
+                for item in target.evidence or []
+            ):
+                continue
+            schema_path = _parallel_form_schema_path(target)
+            donors = [
+                (peer, param, control)
+                for peer in peers
+                for param in peer.params
+                if _parallel_form_schema_path(param) == schema_path
+                for control in param.evidence or []
+                if isinstance(control, dict)
+                and control.get("kind") == "page_control"
+                and control.get("source") == "recorder_dom"
+                and str(control.get("control_kind") or "").casefold()
+                in _SCREENSHOT_OPTION_CONTROL_KINDS
+            ]
+            signatures = {
+                (
+                    str(control.get("control_kind") or "").casefold(),
+                    bool(control.get("editable")),
+                    bool(control.get("disabled")),
+                    bool(control.get("read_only")),
+                    control.get("required_observed"),
+                )
+                for _peer, _param, control in donors
+            }
+            if len(signatures) != 1:
+                continue
+            donor_step, donor, control = donors[-1]
+            projected = {
+                key: deepcopy(copy_value)
+                for key, copy_value in control.items()
+                if key not in {
+                    "evidence_id", "occurrence_id", "field_identity_id",
+                    "request_path", "request_id", "step_id", "interacted",
+                }
+            }
+            projected.update({
+                "kind": "page_control",
+                "source": "recorded_parallel_form",
+                "request_path": target.path,
+                "binding_status": "parallel_contract",
+                "interacted": False,
+                "parallel_source_step_id": donor_step.step_id,
+                "parallel_source_path": donor.path,
+                "parallel_source_evidence_id": str(control.get("evidence_id") or ""),
+            })
+            target.evidence = [*(target.evidence or []), projected]
+            if control.get("required_observed") is True:
+                target.evidence.append({
+                    "kind": "page_required",
+                    "source": "recorded_parallel_form",
+                    "request_path": target.path,
+                    "binding_status": "parallel_contract",
+                    "parallel_source_step_id": donor_step.step_id,
+                })
+            changed += 1
+    return changed
+
+
 def _propagate_grounded_parallel_field_names(spec: FlowSpec) -> int:
     """Share a recorder-grounded name across equivalent create/edit forms."""
     write_steps = [
         step for step in spec.steps
         if str(step.method or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
     ]
-    paths_by_step = {
-        step.step_id: {
-            _parallel_form_schema_path(param)
-            for param in step.params
-            if _parallel_form_schema_path(param)
-        }
-        for step in write_steps
-    }
-
-    def equivalent(left: FlowStep, right: FlowStep) -> bool:
-        left_meta = left.source_meta or {}
-        right_meta = right.source_meta or {}
-        left_page = str(left_meta.get("page_id") or "")
-        right_page = str(right_meta.get("page_id") or "")
-        if not left_page or left_page != right_page:
-            return False
-        if str(left_meta.get("frame_id") or "") != str(right_meta.get("frame_id") or ""):
-            return False
-        if _parallel_form_resource(left) != _parallel_form_resource(right):
-            return False
-        left_paths = paths_by_step[left.step_id]
-        right_paths = paths_by_step[right.step_id]
-        shared = left_paths & right_paths
-        return bool(
-            len(shared) >= 3
-            and len(shared) / min(len(left_paths), len(right_paths)) >= 0.75
-        )
-
     changed = 0
     for target_step in write_steps:
         peers = [
             step for step in write_steps
-            if step is not target_step and equivalent(target_step, step)
+            if step is not target_step
+            and _parallel_form_steps_equivalent(target_step, step)
         ]
         if not peers:
             continue

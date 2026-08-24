@@ -429,6 +429,13 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
             "control_preflight_for_write_ids": ["update"],
         },
     )
+    edit_account_options = FlowStep(
+        step_id="edit-account-options",
+        method="GET",
+        path="/accounts/simple-list",
+        response_json={"data": [{"id": 1, "name": "Main"}]},
+        source_meta={"request_id": "req-edit-account-options", "role": "read_option"},
+    )
     update = FlowStep(
         step_id="update",
         method="PUT",
@@ -455,14 +462,20 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
                 "title": "Inspect order",
                 "kind": "inspect",
                 "anchor_step_id": "edit-hydration",
-                "request_refs": [{"step_id": "edit-hydration", "usage": "execute"}],
+                "request_refs": [
+                    {"step_id": "edit-hydration", "usage": "execute"},
+                    {"step_id": "edit-account-options", "usage": "option_source"},
+                ],
             },
             {
                 "name": "update_order",
                 "title": "Update order",
                 "kind": "update",
                 "anchor_step_id": "update",
-                "request_refs": [{"step_id": "update", "usage": "execute"}],
+                "request_refs": [
+                    {"step_id": "edit-hydration", "usage": "preflight"},
+                    {"step_id": "update", "usage": "execute"},
+                ],
             },
             {
                 "name": "inspect_fallback",
@@ -475,7 +488,7 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
         "unresolved_items": [],
     }
     spec = FlowSpec(
-        steps=[detail, hydration, update],
+        steps=[detail, hydration, edit_account_options, update],
         links=[FlowLink(
             source_step_id="edit-hydration",
             source_path="data.id",
@@ -511,6 +524,13 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
             trigger_action_id="open-edit",
         ),
         RequestFact(
+            request_id="req-edit-account-options",
+            method="GET",
+            path="/accounts/simple-list",
+            url="/accounts/simple-list",
+            trigger_action_id="open-edit",
+        ),
+        RequestFact(
             request_id="req-update",
             method="PUT",
             path="/orders/update",
@@ -526,6 +546,9 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
         "req-edit-hydration": RequestAnalysis(
             request_id="req-edit-hydration", role="business_get", keep=True,
         ),
+        "req-edit-account-options": RequestAnalysis(
+            request_id="req-edit-account-options", role="read_option", keep=True,
+        ),
         "req-update": RequestAnalysis(
             request_id="req-update", role="business_write", keep=True,
         ),
@@ -537,6 +560,11 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
         "req-edit-hydration": RequestUsage(
             request_id="req-edit-hydration",
             materialized_step_id="edit-hydration",
+            state="materialized",
+        ),
+        "req-edit-account-options": RequestUsage(
+            request_id="req-edit-account-options",
+            materialized_step_id="edit-account-options",
             state="materialized",
         ),
         "req-update": RequestUsage(
@@ -557,6 +585,9 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
         (ref.request_id, ref.usage) for ref in compiled_update.request_refs
     ]
     assert ("req-update", "execute") in [
+        (ref.request_id, ref.usage) for ref in compiled_update.request_refs
+    ]
+    assert ("req-edit-account-options", "option_source") in [
         (ref.request_id, ref.usage) for ref in compiled_update.request_refs
     ]
     assert result.meta["capability_model"]["fallback_added_capabilities"] == []

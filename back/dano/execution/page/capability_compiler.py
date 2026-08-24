@@ -189,9 +189,57 @@ def _retarget_read_capabilities_from_write_preflight(
                 "step_id": candidate.step_id,
                 "usage": "execute",
             })
+        previous_request_id = _request_id_for_step(spec, previous)
+        write_owners: list[dict[str, Any]] = []
+        for owner in plan_items:
+            if owner is item:
+                continue
+            owner_anchor = plan_anchor(owner)
+            if owner_anchor is None or str(owner_anchor.method or "GET").upper() in {"GET", "HEAD"}:
+                continue
+            explicitly_uses_preflight = any(
+                isinstance(ref, dict)
+                and str(ref.get("usage") or "") == "preflight"
+                and (
+                    str(ref.get("step_id") or "") == previous.step_id
+                    or str(ref.get("request_id") or "") == previous_request_id
+                )
+                for ref in owner.get("request_refs") or []
+            )
+            dependency_ids, _errors = _grounded_dependency_order(
+                spec, owner_anchor.step_id,
+            )
+            if explicitly_uses_preflight or previous.step_id in dependency_ids[:-1]:
+                write_owners.append(owner)
+        if len(write_owners) == 1:
+            owner_refs = write_owners[0].setdefault("request_refs", [])
+            existing_option_ids = {
+                (
+                    str(ref.get("request_id") or ""),
+                    str(ref.get("step_id") or ""),
+                )
+                for ref in owner_refs
+                if isinstance(ref, dict) and str(ref.get("usage") or "") == "option_source"
+            }
+            transferred = [
+                ref for ref in item.get("request_refs") or []
+                if isinstance(ref, dict) and str(ref.get("usage") or "") == "option_source"
+            ]
+            item["request_refs"] = [
+                ref for ref in item.get("request_refs") or []
+                if not (isinstance(ref, dict) and str(ref.get("usage") or "") == "option_source")
+            ]
+            for ref in transferred:
+                identity = (
+                    str(ref.get("request_id") or ""),
+                    str(ref.get("step_id") or ""),
+                )
+                if identity not in existing_option_ids:
+                    owner_refs.append(deepcopy(ref))
+                    existing_option_ids.add(identity)
         retargeted.append({
             "capability": str(item.get("name") or ""),
-            "from_request_id": _request_id_for_step(spec, previous),
+            "from_request_id": previous_request_id,
             "to_request_id": request_id,
         })
     return retargeted
