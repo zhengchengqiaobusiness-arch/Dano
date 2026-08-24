@@ -890,8 +890,14 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
         node_ids = node_ids_by_capability.get(capability.capability_id, set())
         source_ids: set[str] = set()
         captured_source_facts: dict[str, RequestFact] = {}
+        bound_request_ids_by_path: dict[str, set[str]] = {}
         for step_id in node_ids:
             step = by_id.get(step_id)
+            for binding in (step.selects if step else []):
+                source_path = _request_path({"url": str(binding.source_url or "")})
+                source_request_id = str(binding.source_request_id or "")
+                if source_path and source_request_id:
+                    bound_request_ids_by_path.setdefault(source_path, set()).add(source_request_id)
             for param in (step.params if step else []):
                 source = param.source or {}
                 if param.source_kind == "previous_response" and isinstance(
@@ -902,6 +908,9 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
                     continue
                 source_id = str(source.get("source_step_id") or "")
                 source_request_id = str(source.get("source_request_id") or "")
+                source_path = _request_path({"url": str(source.get("source_url") or "")})
+                if source_path and source_request_id:
+                    bound_request_ids_by_path.setdefault(source_path, set()).add(source_request_id)
                 if not source_id and not source_request_id and source.get("source_url"):
                     source_step = by_path.get(_request_path({"url": str(source.get("source_url"))}))
                     source_id = source_step.step_id if source_step else ""
@@ -966,6 +975,18 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
             ]
             capability.request_refs.append(ref)
 
+        capability.request_refs = [
+            ref for ref in (capability.request_refs or [])
+            if not (
+                ref.usage == "option_source"
+                and ref.origin not in {"manual", "user"}
+                and _request_path({"url": ref.path}) in bound_request_ids_by_path
+                and ref.request_id
+                and str(ref.request_id) not in bound_request_ids_by_path[
+                    _request_path({"url": ref.path})
+                ]
+            )
+        ]
         deduped: dict[tuple[str, str, str], CapabilityRequestRef] = {}
         for ref in capability.request_refs or []:
             identity = (

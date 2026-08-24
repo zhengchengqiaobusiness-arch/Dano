@@ -6,6 +6,7 @@ import dano.execution.page.request_capture as request_capture
 import dano.onboarding.recording_gateway as recording_gateway
 from dano.agent_tools.tools import _apply_recording_submission_atomic
 from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.capability_refs import _attach_option_source_memberships
 from dano.execution.page.capability_io import _sync_capability_io_schemas
 from dano.execution.page.capability_views import _capability_view_step_ids
 from dano.execution.page.capability_contracts import (
@@ -460,6 +461,81 @@ def test_edit_hydration_preserves_caller_overrides_and_expands_system_rows() -> 
     assert request_capture._link_value_overrides(response, stock_link, fields) == [
         (("items", 0, "stockCount"), 2),
         (("items", 1, "stockCount"), 0),
+    ]
+
+
+def test_capability_keeps_only_the_option_request_bound_to_its_field() -> None:
+    old_options = FlowStep(
+        step_id="old-options",
+        method="GET",
+        path="/accounts/options",
+        source_meta={"request_id": "req-old"},
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=[ParamField(
+            path="accountId",
+            key="accountId",
+            value=2,
+            category="user_param",
+            source_kind="api_option",
+            source={
+                "kind": "api_option",
+                "source_url": "/accounts/options",
+                "source_request_id": "req-current",
+            },
+        )],
+        selects=[SelectBinding(
+            param="accountId",
+            path="accountId",
+            source_url="/accounts/options",
+            source_request_id="req-current",
+            value_key="id",
+            label_key="name",
+            enum_confirmed=True,
+        )],
+        source_meta={"request_id": "req-update"},
+    )
+    capability = FlowCapability(
+        name="update_order",
+        nodes=[
+            {"type": "call", "step_id": "old-options", "usage": "option_source"},
+            {"type": "call", "step_id": "update", "usage": "execute"},
+        ],
+        request_refs=[
+            CapabilityRequestRef(
+                request_id="req-old",
+                step_id="old-options",
+                path="/accounts/options",
+                usage="option_source",
+                origin="compiler",
+                confirmed=True,
+            ),
+            CapabilityRequestRef(
+                request_id="req-update",
+                step_id="update",
+                path="/orders/update",
+                usage="execute",
+            ),
+        ],
+    )
+    spec = FlowSpec()
+    spec.steps = [old_options, update]
+    spec.capabilities = [capability]
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-current",
+        method="GET",
+        path="/accounts/options",
+        response_json={"data": [{"id": 2, "name": "Main"}]},
+    )]
+
+    _attach_option_source_memberships(spec)
+
+    option_refs = [ref for ref in capability.request_refs if ref.usage == "option_source"]
+    assert [(ref.request_id, ref.path) for ref in option_refs] == [
+        ("req-current", "/accounts/options"),
     ]
 
 

@@ -933,10 +933,26 @@ def flow_spec_to_api_request(
         for ref in (capability.request_refs or [])
         if ref.usage == "execute" and ref.step_id
     }
-    for source_idx, count in deferred_provider_links.items():
+    option_source_step_ids = {
+        str(ref.step_id or "")
+        for capability in (spec.capabilities or [])
+        for ref in (capability.request_refs or [])
+        if ref.usage == "option_source" and ref.step_id
+    }
+    deferred_provider_indexes = {
+        index
+        for step_id, index in step_id_to_index.items()
+        if step_id in option_source_step_ids
+    }
+    deferred_provider_indexes.update(deferred_provider_links)
+    for source_idx in deferred_provider_indexes:
+        count = deferred_provider_links.get(source_idx, 0)
         source_step_id = str(built_steps[source_idx].get("step_id") or "")
         if (
-            count == outgoing_links.get(source_idx)
+            (
+                source_step_id in option_source_step_ids
+                or count == outgoing_links.get(source_idx)
+            )
             and source_step_id not in public_execute_step_ids
         ):
             built_steps[source_idx]["deferred_selection_provider"] = True
