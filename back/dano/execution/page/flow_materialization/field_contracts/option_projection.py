@@ -497,6 +497,8 @@ def _best_option_projection_path(
         return ""
     if not allow_unique_value_fallback:
         return ""
+    if str(value if value is not None else "").strip().casefold() in _BORING_COMPOSITE_VALUES:
+        return ""
     # Last-resort evidence tier: the captured target value occurs on exactly
     # one scalar leaf of the already selected row. This recovers projections
     # when frontend and backend use unrelated names without guessing from

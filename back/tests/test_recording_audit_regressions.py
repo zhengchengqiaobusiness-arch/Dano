@@ -30,6 +30,7 @@ from dano.execution.page.flow_materialization.field_contracts.option_repair impo
     _restore_executable_option_request_ids,
 )
 from dano.execution.page.flow_materialization.field_contracts.option_projection import (
+    _best_option_projection_path,
     _infer_selected_option_row_fields,
 )
 from dano.execution.page.flow_materialization.builder import (
@@ -1716,6 +1717,40 @@ def test_exact_option_scope_binds_api_source_and_selected_row_projections() -> N
     assert by_key["productBarCode"].source["response_path"] == "barCode"
     assert by_key["productUnitName"].source["selector_path"] == "body.items[0].productId"
     assert by_key["id"].source_kind != "selected_option_field"
+
+
+def test_selected_row_projection_does_not_cross_structural_groups() -> None:
+    spec = _sale_order_option_spec()
+    target = spec.steps[1]
+    target.params.append(ParamField(
+        path="body.customerId",
+        key="customerId",
+        label="客户",
+        value=5,
+        type="number",
+        wire_type="number",
+        source_kind="api_option",
+        source={
+            "kind": "api_option",
+            "source_url": "/product/simple-list",
+            "source_request_id": "req-product-options",
+            "value_key": "id",
+            "label_key": "name",
+        },
+    ))
+
+    _repair_structural_option_bindings(spec)
+
+    customer = next(param for param in target.params if param.key == "customerId")
+    assert customer.source_kind != "selected_option_field"
+    assert customer.source.get("selector_path") != "body.items[0].productId"
+
+
+def test_selected_row_projection_does_not_guess_from_boring_scalar_values() -> None:
+    row = {"id": 1, "name": "管理员"}
+
+    assert _best_option_projection_path(row, "body.remark", "1") == ""
+    assert _best_option_projection_path(row, "body.id", 1) == "id"
 
 
 def test_selected_row_projection_preserves_pi_source_decision() -> None:

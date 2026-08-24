@@ -30,6 +30,7 @@ from dano.execution.page.flow_materialization.field_contracts.edit_form import (
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_user_entered_business_field,
+    _param_group_prefix,
     _param_has_grounded_direct_input_contract,
     _param_has_manual_contract,
     _screenshot_control_evidence,
@@ -1248,11 +1249,14 @@ def _repair_structural_option_bindings(
                 selector = _find_select_binding(target, param)
                 if len(selected_rows) == 1 and selector is not None:
                     selected_row = selected_rows[0]
+                    selector_group = _param_group_prefix(param.path)
                     projected_paths: set[str] = set()
                     for sibling in target.params or []:
                         if sibling is param or sibling.source_kind not in {
                             "api_option", "selected_option_field",
                         }:
+                            continue
+                        if _param_group_prefix(sibling.path) != selector_group:
                             continue
                         sibling_source = sibling.source or {}
                         selector_matches = bool(
@@ -1330,6 +1334,7 @@ def _repair_structural_option_bindings(
                         )
                         if (
                             sibling is param
+                            or _param_group_prefix(sibling.path) != selector_group
                             or sibling.path in projected_paths
                             or sibling.locked
                             or (
