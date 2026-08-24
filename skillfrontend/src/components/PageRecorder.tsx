@@ -2612,7 +2612,9 @@ export default function PageRecorder({
             path: flowPath || matched.param.path,
             label: safeString(schema.label || schema.title) || matched.param.label || key,
             type: type || matched.param.type,
-            source_kind: schemaSourceKind || matched.param.source_kind,
+            source_kind: hasOptionSource
+              ? "api_option"
+              : hasUpstreamSource ? "previous_response" : matched.param.source_kind || schemaSourceKind,
             source: hasOptionSource ? optionSource : matched.param.source,
             required,
             exposed_to_user: true,
