@@ -8,6 +8,7 @@ import json
 import re
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
+    FlowStep,
     ParamField,
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
@@ -24,6 +25,18 @@ from dano.execution.page.flow_spec_core.fingerprints import (
 )
 
 
+def _step_is_write_preflight(step: FlowStep | None) -> bool:
+    """Return whether a read exists only to hydrate a later write."""
+    if step is None or str(step.method or "GET").upper() != "GET":
+        return False
+    source_meta = step.source_meta or {}
+    return bool(
+        source_meta.get("control_preflight_for_write")
+        or source_meta.get("record_hydration_for_write_ids")
+        or source_meta.get("control_preflight_for_write_ids")
+    )
+
+
 def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
     """Return the recorded requests that each require a public capability.
 
@@ -34,6 +47,10 @@ def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
     hydration for a later command rather than separate caller abilities.
     """
     facts = _request_fact_items(spec)
+    step_by_id = {str(step.step_id or ""): step for step in spec.steps}
+
+    def materialized_step(item: dict[str, Any]) -> FlowStep | None:
+        return step_by_id.get(_materialized_step_id_for_request(spec, item))
 
     def action_key(item: dict[str, Any]) -> str:
         return str(
@@ -61,6 +78,7 @@ def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
             and str(item.get("request_id") or "")
             and action_key(item)
             and action_key(item) not in write_action_keys
+            and not _step_is_write_preflight(materialized_step(item))
         )
     )
     return required

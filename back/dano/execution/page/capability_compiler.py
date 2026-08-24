@@ -32,6 +32,7 @@ from dano.execution.page.capability_semantic import (
     _required_public_action_request_ids,
     _semantic_plan_execute_request_ids,
     _semantic_plan_coverage,
+    _step_is_write_preflight,
 )
 from dano.execution.page.capability_nodes import (
     _default_capability_nodes,
@@ -48,7 +49,11 @@ from dano.execution.page.capability_io import (
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _step_has_stable_record_identity,
 )
-from dano.execution.page.request_identity import unique_request_identity_match
+from dano.execution.page.request_identity import (
+    normalized_request_path,
+    request_query_signature,
+    unique_request_identity_match,
+)
 
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -88,6 +93,108 @@ def _request_id_for_step(spec: FlowSpec, step: FlowStep) -> str:
         if str(usage.materialized_step_id or "") == step.step_id
     ), "")
     return str(usage_match or "")
+
+
+def _read_operation_signature(spec: FlowSpec, step: FlowStep) -> tuple:
+    """Identify the same recorded read independently of its occurrence."""
+    request_id = _request_id_for_step(spec, step)
+    fact = next((
+        item for item in spec.request_facts.requests or []
+        if str(item.request_id or "") == request_id
+    ), None)
+    url_or_path = str(
+        (fact.url or fact.path if fact is not None else "")
+        or step.url
+        or step.path
+        or ""
+    )
+    query = (
+        fact.query
+        if fact is not None and isinstance(fact.query, dict) and fact.query
+        else url_or_path
+    )
+
+    def query_values(key: str, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
+        return (
+            ("<record-identity>",)
+            if normalized_key.endswith(("id", "ids"))
+            else values
+        )
+
+    query_contract = tuple(
+        (key, query_values(key, values))
+        for key, values in request_query_signature(query)
+    )
+    return (
+        str((fact.method if fact is not None else step.method) or "GET").upper(),
+        normalized_request_path(url_or_path),
+        query_contract,
+    )
+
+
+def _retarget_read_capabilities_from_write_preflight(
+    spec: FlowSpec,
+    plan_items: list[dict[str, Any]],
+    candidates: list[tuple[str, FlowStep]],
+) -> list[dict[str, str]]:
+    """Move a read ability from edit hydration to its standalone occurrence."""
+    by_step = {str(step.step_id or ""): step for step in spec.steps}
+    by_request = _step_by_request_id(spec)
+
+    def plan_anchor(item: dict[str, Any]) -> FlowStep | None:
+        anchor_id = str(item.get("anchor_step_id") or "")
+        anchor = by_step.get(anchor_id) or by_request.get(anchor_id)
+        if anchor is not None:
+            return anchor
+        for ref in item.get("request_refs") or []:
+            if not isinstance(ref, dict) or str(ref.get("usage") or "") != "execute":
+                continue
+            identifier = str(ref.get("step_id") or ref.get("request_id") or "")
+            return by_step.get(identifier) or by_request.get(identifier)
+        return None
+
+    retargeted: list[dict[str, str]] = []
+    for request_id, candidate in candidates:
+        if (
+            str(candidate.method or "GET").upper() != "GET"
+            or _step_is_write_preflight(candidate)
+        ):
+            continue
+        signature = _read_operation_signature(spec, candidate)
+        matches: list[tuple[dict[str, Any], FlowStep]] = []
+        for item in plan_items:
+            anchor = plan_anchor(item)
+            if (
+                anchor is not None
+                and _step_is_write_preflight(anchor)
+                and _read_operation_signature(spec, anchor) == signature
+            ):
+                matches.append((item, anchor))
+        if len(matches) != 1:
+            continue
+        item, previous = matches[0]
+        item["anchor_step_id"] = candidate.step_id
+        execute_ref_found = False
+        for ref in item.get("request_refs") or []:
+            if not isinstance(ref, dict) or str(ref.get("usage") or "") != "execute":
+                continue
+            ref["step_id"] = candidate.step_id
+            if "request_id" in ref:
+                ref["request_id"] = request_id
+            execute_ref_found = True
+        if not execute_ref_found:
+            item.setdefault("request_refs", []).append({
+                "request_id": request_id,
+                "step_id": candidate.step_id,
+                "usage": "execute",
+            })
+        retargeted.append({
+            "capability": str(item.get("name") or ""),
+            "from_request_id": _request_id_for_step(spec, previous),
+            "to_request_id": request_id,
+        })
+    return retargeted
 
 
 def _request_ref(
@@ -734,11 +841,34 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
         ]
 
     model = dict((current.meta or {}).get("capability_model") or {})
+    previous_fallback_names = {
+        str(name or "")
+        for name in model.get("fallback_added_capabilities") or []
+        if str(name or "")
+    }
+    if previous_fallback_names:
+        current.capabilities = [
+            capability for capability in current.capabilities
+            if capability.name not in previous_fallback_names
+            or capability.locked
+            or capability.updated_by == "user"
+            or any(
+                ref.origin in {"manual", "user"}
+                for ref in capability.request_refs or []
+            )
+        ]
     existing_plan = (
         model.get("submitted_semantic_plan")
         if isinstance(model.get("submitted_semantic_plan"), dict)
         else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
     )
+    if previous_fallback_names and isinstance(existing_plan, dict):
+        existing_plan = deepcopy(existing_plan)
+        existing_plan["capabilities"] = [
+            item for item in existing_plan.get("capabilities") or []
+            if not isinstance(item, dict)
+            or str(item.get("name") or "") not in previous_fallback_names
+        ]
     plan = _complete_semantic_plan_from_spec(current, existing_plan)
     plan.setdefault("business_understanding", {
         "business_name": str(current.title or "").strip(),
@@ -749,6 +879,9 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
         deepcopy(item) for item in plan.get("capabilities") or [] if isinstance(item, dict)
     ]
     plan["capabilities"] = plan_items
+    retargeted_capabilities = _retarget_read_capabilities_from_write_preflight(
+        current, plan_items, candidates,
+    )
     covered = _semantic_plan_execute_request_ids(current, plan)
     used_names = {str(item.get("name") or "") for item in plan_items}
     goal_slots = list(_recording_goal_contract(current).get("capabilities") or [])
@@ -788,6 +921,7 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
     planned_names = [str(item.get("name") or "") for item in plan_items]
     if not plan_items or (
         not fallback_names
+        and not retargeted_capabilities
         and len(current_names) == len(planned_names)
         and set(current_names) == set(planned_names)
     ):
@@ -804,7 +938,10 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
         "capability_model": {
             **model,
             "status": "ready" if not missing_names else "needs_review",
-            "source": "grounded_action_fallback",
+            "source": (
+                "grounded_action_fallback"
+                if fallback_names else "grounded_action_reconciliation"
+            ),
             "semantic_plan": plan,
             "submitted_semantic_plan": plan,
             "submitted_count": len(plan_items),
@@ -817,6 +954,7 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
             "capability_compilation": compilation.audit,
             "capability_compilation_errors": [*promotion_errors, *compilation.errors],
             "fallback_added_capabilities": fallback_names,
+            "retargeted_capabilities": retargeted_capabilities,
         },
     }
     return current

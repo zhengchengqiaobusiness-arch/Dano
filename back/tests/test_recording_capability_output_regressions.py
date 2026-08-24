@@ -11,6 +11,7 @@ from dano.execution.page.capability_contracts import (
 )
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
+    FlowLink,
     FlowSpec,
     FlowStep,
     ParamField,
@@ -403,6 +404,168 @@ def test_grounded_fallback_restores_eight_submitted_capabilities_from_seven() ->
         f"ability_{index}" for index in range(8)
     ]
     assert result.meta["capability_model"]["missing_submitted_names"] == []
+
+
+def test_detail_capability_retargets_from_edit_hydration_without_extra_ability() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    detail = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get?id=69",
+        response_json={"data": {"id": 69}},
+        source_meta={"request_id": "req-detail", "role": "business_get"},
+    )
+    hydration = FlowStep(
+        step_id="edit-hydration",
+        method="GET",
+        path="/orders/get?id=70",
+        response_json={"data": {"id": 70}},
+        source_meta={
+            "request_id": "req-edit-hydration",
+            "role": "business_get",
+            "control_preflight_for_write": True,
+            "record_hydration_for_write_ids": ["update"],
+            "control_preflight_for_write_ids": ["update"],
+        },
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        body_source='{"id":70}',
+        params=[ParamField(
+            path="body.id",
+            key="id",
+            value=70,
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "step_id": "edit-hydration",
+                "response_path": "data.id",
+            },
+        )],
+        source_meta={"request_id": "req-update", "role": "business_write"},
+    )
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [
+            {
+                "name": "inspect_order",
+                "title": "Inspect order",
+                "kind": "inspect",
+                "anchor_step_id": "edit-hydration",
+                "request_refs": [{"step_id": "edit-hydration", "usage": "execute"}],
+            },
+            {
+                "name": "update_order",
+                "title": "Update order",
+                "kind": "update",
+                "anchor_step_id": "update",
+                "request_refs": [{"step_id": "update", "usage": "execute"}],
+            },
+            {
+                "name": "inspect_fallback",
+                "title": "GET get",
+                "kind": "inspect",
+                "anchor_step_id": "detail",
+                "request_refs": [{"step_id": "detail", "usage": "execute"}],
+            },
+        ],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=[detail, hydration, update],
+        links=[FlowLink(
+            source_step_id="edit-hydration",
+            source_path="data.id",
+            target_step_id="update",
+            target_path="body.id",
+            confirmed=True,
+            confidence=1.0,
+            reason="编辑页详情回填后提交更新",
+            meta={"captured_record_hydration": True},
+        )],
+        meta={"capability_model": {
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+            "source": "grounded_action_fallback",
+            "fallback_added_capabilities": ["inspect_fallback"],
+        }},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id="req-detail",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=69",
+            query={"id": ["69"]},
+            trigger_action_id="open-detail",
+        ),
+        RequestFact(
+            request_id="req-edit-hydration",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=70",
+            query={"id": ["70"]},
+            trigger_action_id="open-edit",
+        ),
+        RequestFact(
+            request_id="req-update",
+            method="PUT",
+            path="/orders/update",
+            url="/orders/update",
+            post_data={"id": 70},
+            trigger_action_id="save-edit",
+        ),
+    ]
+    spec.request_facts.analysis = {
+        "req-detail": RequestAnalysis(
+            request_id="req-detail", role="business_get", keep=True,
+        ),
+        "req-edit-hydration": RequestAnalysis(
+            request_id="req-edit-hydration", role="business_get", keep=True,
+        ),
+        "req-update": RequestAnalysis(
+            request_id="req-update", role="business_write", keep=True,
+        ),
+    }
+    spec.request_facts.usage = {
+        "req-detail": RequestUsage(
+            request_id="req-detail", materialized_step_id="detail", state="materialized",
+        ),
+        "req-edit-hydration": RequestUsage(
+            request_id="req-edit-hydration",
+            materialized_step_id="edit-hydration",
+            state="materialized",
+        ),
+        "req-update": RequestUsage(
+            request_id="req-update", materialized_step_id="update", state="materialized",
+        ),
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert [capability.name for capability in result.capabilities] == [
+        "inspect_order", "update_order",
+    ]
+    inspect, compiled_update = result.capabilities
+    assert [
+        (ref.request_id, ref.usage) for ref in inspect.request_refs
+    ] == [("req-detail", "execute")]
+    assert ("req-edit-hydration", "preflight") in [
+        (ref.request_id, ref.usage) for ref in compiled_update.request_refs
+    ]
+    assert ("req-update", "execute") in [
+        (ref.request_id, ref.usage) for ref in compiled_update.request_refs
+    ]
+    assert result.meta["capability_model"]["fallback_added_capabilities"] == []
+    assert result.meta["capability_model"]["capability_compilation_errors"] == []
+    assert result.meta["capability_model"]["retargeted_capabilities"] == [{
+        "capability": "inspect_order",
+        "from_request_id": "req-edit-hydration",
+        "to_request_id": "req-detail",
+    }]
 
 
 def test_submission_tool_returns_exact_capability_diagnostics() -> None:
