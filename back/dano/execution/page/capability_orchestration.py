@@ -20,6 +20,7 @@ from dano.execution.page.request_capture import (
 )
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _param_exposed_to_caller,
+    _param_requires_caller_input,
 )
 from dano.execution.page.flow_materialization.field_contracts.option_repair import (
     _repair_structural_option_bindings,
@@ -108,7 +109,13 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                     and _param_exposed_to_caller(param, set(cap_step_ids))
                 ):
                     key = param.key or param.label or param.path
-                    inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
+                    field = _capability_field_from_param(
+                        st, param, scope="input", request_id=request_id,
+                    )
+                    field.required = _param_requires_caller_input(
+                        param, set(cap_step_ids),
+                    )
+                    inputs.setdefault(key, field)
                 else:
                     internal_fields.append(_capability_field_from_param(st, param, scope="internal", request_id=request_id))
         # steps/params 是请求字段的唯一真相；能力自身的聚合输入（例如批量 entries）

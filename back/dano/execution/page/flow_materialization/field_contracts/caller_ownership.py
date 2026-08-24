@@ -135,10 +135,17 @@ def _param_requires_caller_input(
     param: ParamField,
     capability_step_ids: set[str] | None = None,
 ) -> bool:
-    return bool(
-        _external_capability_input(param, capability_step_ids)
+    if _external_capability_input(param, capability_step_ids):
+        return True
+    if not param.required or not _param_exposed_to_caller(param, capability_step_ids):
+        return False
+    source_step_id = _previous_response_source_step_id(param)
+    runtime_prefill = bool(
+        param.source_kind in {"selected_option_field", "computed"}
         or (
-            param.required
-            and _param_exposed_to_caller(param, capability_step_ids)
+            param.source_kind == "previous_response"
+            and capability_step_ids is not None
+            and source_step_id in capability_step_ids
         )
     )
+    return not runtime_prefill

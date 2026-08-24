@@ -5,6 +5,7 @@ import asyncio
 import dano.onboarding.recording_gateway as recording_gateway
 from dano.agent_tools.tools import _apply_recording_submission_atomic
 from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.capability_io import _sync_capability_io_schemas
 from dano.execution.page.capability_contracts import (
     _mark_repeated_write_observations,
     _planned_capability_has_public_anchor,
@@ -408,6 +409,81 @@ def test_auxiliary_request_params_do_not_expand_public_capability_inputs() -> No
     memberships = {(ref.step_id, ref.usage) for ref in capability.request_refs}
     assert ("create", "execute") in memberships
     assert ("verify", "fact_check") in memberships
+
+
+def test_edit_hydration_is_an_optional_override_without_recorded_default() -> None:
+    detail = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get",
+        response_json={"data": {"remark": "old-record-value"}},
+        source_meta={"request_id": "req-detail", "role": "business_get"},
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=[ParamField(
+            path="body.remark",
+            key="remark",
+            label="备注",
+            value="old-record-value",
+            default_value="old-record-value",
+            required=True,
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "step_id": "detail",
+                "response_path": "data.remark",
+                "allow_caller_override": True,
+            },
+            category="user_param",
+            exposed_to_user=True,
+            editable=True,
+            evidence=[{
+                "kind": "page_control",
+                "control_kind": "textarea",
+                "disabled": False,
+                "read_only": False,
+                "binding_status": "bound",
+                "request_path": "body.remark",
+            }],
+        )],
+        source_meta={"request_id": "req-update", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[detail, update],
+        links=[FlowLink(
+            source_step_id="detail",
+            source_path="data.remark",
+            target_step_id="update",
+            target_path="body.remark",
+            confirmed=True,
+        )],
+        capabilities=[FlowCapability(
+            name="update_order",
+            kind="update",
+            step_ids=["detail", "update"],
+            nodes=[
+                {"type": "call", "step_id": "detail"},
+                {"type": "call", "step_id": "update"},
+            ],
+            request_refs=[
+                {"request_id": "req-detail", "step_id": "detail", "usage": "preflight"},
+                {"request_id": "req-update", "step_id": "update", "usage": "execute"},
+            ],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _sync_capability_io_schemas(spec)
+
+    capability = spec.capabilities[0]
+    remark_schema = capability.input_schema["properties"]["remark"]
+    assert "default" not in remark_schema
+    assert "remark" not in capability.input_schema["required"]
+    assert len(capability.inputs) == 1
+    assert capability.inputs[0].required is False
 
 
 def test_grounded_actions_produce_capabilities_without_a_model_plan() -> None:

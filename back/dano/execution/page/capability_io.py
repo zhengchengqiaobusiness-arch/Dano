@@ -217,6 +217,13 @@ def _schema_default_for_param(param: ParamField) -> Any:
     are wire values, so expose the matching human label when the evidence map
     proves one instead of leaking an internal code as the default.
     """
+    # Hydrated, selected-row, and computed values are produced afresh for each
+    # invocation. A value observed while editing one record is evidence of the
+    # wire shape, never a reusable caller default.
+    if param.source_kind in {
+        "previous_response", "selected_option_field", "computed",
+    }:
+        return _NO_SCHEMA_DEFAULT
     # ``value`` is the sample captured in this particular recording. It proves
     # transport shape for replay, but it is not evidence of a page default.
     value = param.default_value
