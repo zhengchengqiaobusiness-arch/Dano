@@ -276,6 +276,7 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
         return 0
     _restore_selected_option_projections(spec)
     from dano.execution.page.flow_materialization.field_contracts.computed import (
+        _looks_percent_formula_leaf,
         _param_is_quantity_or_formula_leaf,
     )
 
@@ -512,6 +513,45 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
             _project_reconciled_control(step, param, control)
             used_labels.add(label)
             used_params.add(id(param))
+            repaired += 1
+
+        # Unit symbols are language-independent field evidence. They recover
+        # aliasless percentage controls inside one repeating row without a
+        # page-specific label dictionary (for example `税率（%）` → `taxPercent`).
+        for label, control in representatives.items():
+            raw_label = str(control.get("label") or control.get("field") or "")
+            if (
+                label in used_labels
+                or "%" not in raw_label.replace("％", "%")
+                or str(control.get("binding_status") or "") == "bound"
+                or str(control.get("control_kind") or "").lower()
+                in {"select", "combobox", "radio", "table_column"}
+            ):
+                continue
+            row_index = control.get("row_index")
+            candidates: list[ParamField] = []
+            for param in step.params or []:
+                indexes = [
+                    int(part) for part in re.findall(r"\[(\d+)\]", str(param.path or ""))
+                ]
+                if (
+                    param.locked
+                    or _param_has_manual_contract(param)
+                    or _param_has_editable_control_evidence(param)
+                    or not _looks_percent_formula_leaf(param.key, param.path)
+                    or (row_index is None and bool(indexes))
+                    or (
+                        row_index is not None
+                        and (not indexes or int(row_index) not in indexes)
+                    )
+                ):
+                    continue
+                candidates.append(param)
+            if len(candidates) != 1:
+                continue
+            _project_reconciled_control(step, candidates[0], control)
+            used_labels.add(label)
+            used_params.add(id(candidates[0]))
             repaired += 1
 
         for control in controls:

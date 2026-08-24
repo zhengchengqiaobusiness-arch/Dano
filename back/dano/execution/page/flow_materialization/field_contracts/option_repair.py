@@ -262,6 +262,40 @@ def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
                     binding.source_request_id = ""
 
 
+def _clear_cross_group_selected_row_bindings(spec: FlowSpec) -> int:
+    """Remove automatic projections whose selector belongs to another object."""
+    cleared = 0
+    for step in spec.steps or []:
+        stale_paths: set[str] = set()
+        for param in step.params or []:
+            source = dict(param.source or {})
+            selector_path = str(source.get("selector_path") or "")
+            if (
+                param.source_kind != "selected_option_field"
+                or not selector_path
+                or _param_group_prefix(param.path) == _param_group_prefix(selector_path)
+                or param.locked
+                or _param_has_manual_contract(param)
+            ):
+                continue
+            param.source_kind = "unknown"
+            param.source = {
+                "kind": "unknown",
+                "reason": "discarded_cross_group_selected_row_projection",
+            }
+            param.need_human_confirm = False
+            stale_paths.add(str(param.path or ""))
+            cleared += 1
+        if stale_paths:
+            for binding in step.selects or []:
+                binding.field_projections = {
+                    target_path: response_path
+                    for target_path, response_path in (binding.field_projections or {}).items()
+                    if str(target_path) not in stale_paths
+                }
+    return cleared
+
+
 def _restore_executable_option_request_ids(spec: FlowSpec) -> int:
     """Attach a concrete captured occurrence to URL-grounded option contracts.
 
@@ -394,6 +428,7 @@ def _repair_structural_option_bindings(
         and int((spec.meta or {}).get("stage_1_6_contract_version") or 0) < 2
     ):
         return 0
+    repaired = _clear_cross_group_selected_row_bindings(spec)
     _clear_ambiguous_automatic_option_request_ids(spec)
     candidates: list[dict[str, Any]] = []
     materialized_request_ids: set[str] = set()
@@ -547,8 +582,6 @@ def _repair_structural_option_bindings(
             )
             current_request_ids.update(request_ids)
             current_step_ids.update(step_ids)
-
-    repaired = 0
 
     def has_screenshot_choice(param: ParamField) -> bool:
         control = _screenshot_control_evidence({"evidence": param.evidence})

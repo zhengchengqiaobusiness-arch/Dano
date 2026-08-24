@@ -42,12 +42,14 @@ from dano.execution.page.flow_materialization.builder import (
 from dano.execution.page.flow_materialization.field_contracts.computed import (
     _infer_arithmetic_computed_fields,
     _infer_collection_computed_fields,
+    _infer_computed_runtime_fields,
 )
 from dano.execution.page.flow_materialization.field_contracts.create_form import (
     _apply_create_form_field_contracts,
 )
 from dano.execution.page.flow_materialization.field_contracts.edit_form import (
     _apply_edit_form_field_contracts,
+    _reconcile_unbound_editable_controls,
 )
 from dano.execution.page.flow_materialization.field_contracts.page_rules import (
     _apply_page_rule_caller_override,
@@ -1722,6 +1724,17 @@ def test_exact_option_scope_binds_api_source_and_selected_row_projections() -> N
 def test_selected_row_projection_does_not_cross_structural_groups() -> None:
     spec = _sale_order_option_spec()
     target = spec.steps[1]
+    product = next(param for param in target.params if param.key == "productId")
+    product.source_kind = "selected_option_field"
+    product.source = {
+        "kind": "selected_option_field",
+        "selector_path": "body.customerId",
+        "selector_param": "customerId",
+        "source_url": "/customers/simple-list",
+        "source_request_id": "req-customer-options",
+        "response_path": "id",
+        "target_path": product.path,
+    }
     target.params.append(ParamField(
         path="body.customerId",
         key="customerId",
@@ -1741,6 +1754,8 @@ def test_selected_row_projection_does_not_cross_structural_groups() -> None:
 
     _repair_structural_option_bindings(spec)
 
+    assert product.source_kind != "selected_option_field"
+    assert product.source.get("selector_path") != "body.customerId"
     customer = next(param for param in target.params if param.key == "customerId")
     assert customer.source_kind != "selected_option_field"
     assert customer.source.get("selector_path") != "body.items[0].productId"
@@ -1830,6 +1845,99 @@ def test_computed_inference_preserves_pi_source_decision() -> None:
     assert total.source["actor"] == "agent"
     assert total.category == "user_param"
     assert total.exposed_to_user is True
+
+
+def test_percentage_input_is_not_a_coincidental_difference_result() -> None:
+    percent = ParamField(
+        path="body.items[0].taxPercent",
+        key="taxPercent",
+        value=111,
+        type="number",
+        wire_type="number",
+        source_kind="computed",
+        source={
+            "kind": "computed",
+            "strategy": "difference",
+            "left_field": "totalPrice",
+            "right_field": "taxPrice",
+        },
+        category="runtime_var",
+        exposed_to_user=False,
+        editable=False,
+    )
+    spec = FlowSpec.model_construct(steps=[FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[
+            ParamField(
+                path="body.items[0].totalPrice", key="totalPrice", value=234.21,
+                type="number", wire_type="number", source_kind="computed",
+            ),
+            ParamField(
+                path="body.items[0].taxPrice", key="taxPrice", value=123.21,
+                type="number", wire_type="number", source_kind="computed",
+            ),
+            percent,
+        ],
+    )])
+
+    _infer_computed_runtime_fields(spec)
+
+    assert percent.source_kind == "user_input"
+    assert percent.category == "user_param"
+    assert percent.exposed_to_user is True
+    assert percent.editable is True
+
+
+def test_percent_unit_control_binds_only_matching_repeating_row_field() -> None:
+    row_percent = ParamField(
+        path="items[0].taxPercent",
+        key="taxPercent",
+        value=13,
+        type="number",
+        wire_type="number",
+        source_kind="computed",
+        source={"kind": "computed", "strategy": "difference"},
+    )
+    root_percent = ParamField(
+        path="discountPercent",
+        key="discountPercent",
+        value=10,
+        type="number",
+        wire_type="number",
+        source_kind="user_input",
+    )
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="create",
+            method="POST",
+            path="/orders/create",
+            params=[row_percent, root_percent],
+            source_meta={"request_id": "req-create", "page_id": "orders", "frame_id": "main"},
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+    spec.request_facts.field_evidence = [{
+        "label": "Tax rate (%)",
+        "control_kind": "number",
+        "editable": True,
+        "disabled": False,
+        "read_only": False,
+        "binding_status": "unbound",
+        "in_dialog": True,
+        "row_index": 0,
+        "page_id": "orders",
+        "frame_id": "main",
+        "evidence_id": "tax-rate-control",
+    }]
+
+    repaired = _reconcile_unbound_editable_controls(spec)
+
+    assert repaired == 1
+    assert row_percent.label == "Tax rate (%)"
+    assert any(item.get("evidence_id") == "tax-rate-control" for item in row_percent.evidence)
+    assert root_percent.evidence == []
 
 
 def test_row_command_preserves_pi_source_decision() -> None:
@@ -2066,6 +2174,132 @@ def test_selected_option_row_projects_multiple_editable_siblings_without_hiding_
         "body.items[0].productPrice": "productPrice",
         "body.items[0].taxPercent": "taxPercent",
     }
+
+
+def test_planned_option_catalog_replaces_stale_same_group_projection() -> None:
+    spec = _sale_order_option_spec()
+    spec.capabilities[0].request_refs = [
+        CapabilityRequestRef(
+            request_id="req-product-options",
+            step_id="product-options",
+            usage="option_source",
+        ),
+        CapabilityRequestRef(
+            request_id="req-create",
+            step_id="create",
+            usage="execute",
+        ),
+    ]
+    spec.request_facts.analysis["req-product-options"].role = "read_context"
+    target = spec.steps[1]
+    product = next(param for param in target.params if param.key == "productId")
+    product.source_kind = "api_option"
+    product.source = {
+        "kind": "api_option",
+        "source_request_id": "req-product-options",
+        "source_url": "/product/simple-list",
+        "value_key": "id",
+        "label_key": "name",
+    }
+    price = ParamField(
+        path="body.items[0].productPrice",
+        key="productPrice",
+        label="产品单价",
+        value=999,
+        type="number",
+        wire_type="number",
+        source_kind="selected_option_field",
+        source={
+            "kind": "selected_option_field",
+            "selector_path": "body.items[0].productId",
+            "source_request_id": "req-unrelated-page",
+            "source_url": "/orders/page",
+            "response_path": "items[0].productPrice",
+        },
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "number",
+            "disabled": False,
+            "read_only": False,
+            "binding_status": "bound",
+            "request_path": "body.items[0].productPrice",
+        }],
+    )
+    target.params.append(price)
+
+    _infer_selected_option_row_fields(spec)
+
+    assert price.source_kind == "unknown"
+
+
+def test_catalog_identity_selector_projects_other_id_fields_from_same_row() -> None:
+    spec = _sale_order_option_spec()
+    rows = [
+        {"id": 5, "name": "联想thinkpad", "unitId": 3, "unitName": "份", "barCode": "313131"},
+        {"id": 6, "name": "apple", "unitId": 4, "unitName": "台", "barCode": "616161"},
+    ]
+    spec.steps[0].response_json = {"data": rows}
+    spec.request_facts.requests[0].response_json = {"data": rows}
+    target = spec.steps[1]
+    product = next(param for param in target.params if param.key == "productId")
+    product.source_kind = "previous_response"
+    product.source = {
+        "kind": "previous_response",
+        "step_id": "detail",
+        "response_path": "data.items[0].productId",
+        "allow_caller_override": True,
+        "option_source": {
+            "kind": "api_option",
+            "source_request_id": "req-product-options",
+            "source_url": "/product/simple-list",
+            "value_key": "id",
+            "label_key": "name",
+        },
+    }
+    product.category = "user_param"
+    product.exposed_to_user = True
+    unit_id = ParamField(
+        path="body.items[0].productUnitId",
+        key="productUnitId",
+        label="产品名称",
+        value=3,
+        type="enum",
+        wire_type="number",
+        required=True,
+        source_kind="previous_response",
+        source={
+            "kind": "previous_response",
+            "step_id": "detail",
+            "response_path": "data.items[0].productUnitId",
+            "allow_caller_override": True,
+            "option_source": {
+                "kind": "api_option",
+                "source_request_id": "req-product-options",
+                "source_url": "/product/simple-list",
+                "value_key": "id",
+                "label_key": "name",
+            },
+        },
+        category="user_param",
+        exposed_to_user=True,
+        editable=True,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "select",
+            "binding_status": "bound",
+            "request_path": "body.items[0].productUnitId",
+        }],
+    )
+    target.params.append(unit_id)
+
+    _infer_selected_option_row_fields(spec)
+
+    assert product.label == "产品名称"
+    assert unit_id.source_kind == "selected_option_field"
+    assert unit_id.source["selector_path"] == product.path
+    assert unit_id.source["response_path"] == "unitId"
+    assert unit_id.exposed_to_user is False
+    assert unit_id.required is False
 
 
 def test_form_option_is_upgraded_to_executable_api_option() -> None:

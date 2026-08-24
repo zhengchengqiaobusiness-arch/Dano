@@ -406,6 +406,11 @@ def _arithmetic_strong_structure(
     kind: str,
 ) -> bool:
     """Single-sample formulas need a readonly/derived target and typed operands."""
+    # These strategies calculate amounts/totals from rates; none calculates a
+    # rate itself. A coincidental numeric equality must not turn an editable
+    # percentage field into a difference/sum result.
+    if _looks_percent_formula_leaf(target.key, target.path):
+        return False
     if _param_has_editable_control_evidence(target) and not _param_control_is_readonly(target):
         return False
     target_leaf = _field_leaf_token(target.key, target.path)
@@ -714,6 +719,32 @@ def _repair_invalid_date_span_contracts(spec: FlowSpec) -> int:
 
 def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
     """Hide recorded computed fields only when their samples prove the formula."""
+    for step in spec.steps or []:
+        for param in step.params or []:
+            strategy = str((param.source or {}).get("strategy") or "")
+            if (
+                param.source_kind != "computed"
+                or strategy not in {item[0] for item in _ARITHMETIC_STRATEGIES}
+                or not _looks_percent_formula_leaf(param.key, param.path)
+                or param.locked
+                or _param_source_agent_classified(param)
+                or any(
+                    _param_field_manually_edited(param, field)
+                    for field in ("source", "source_kind", "category")
+                )
+            ):
+                continue
+            param.category = "user_param"
+            param.source_kind = "user_input"
+            param.source = {
+                "kind": "sample",
+                "path": param.path,
+                "reason": "unsupported_percentage_result_formula_removed",
+            }
+            param.exposed_to_user = True
+            param.editable = True
+            param.need_human_confirm = False
+            param.reason = "该百分比字段没有可执行的百分比结果公式，按调用方可提供字段处理"
     _apply_date_range_companions(spec)
     _infer_arithmetic_computed_fields(spec)
     _infer_collection_computed_fields(spec)

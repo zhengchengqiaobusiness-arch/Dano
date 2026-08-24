@@ -660,6 +660,12 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
     modern_contract = int(
         (spec.meta or {}).get("stage_1_6_contract_version") or 0
     ) >= 2
+    planned_option_request_ids = {
+        str(ref.request_id or "")
+        for capability in (spec.capabilities or [])
+        for ref in (capability.request_refs or [])
+        if ref.usage == "option_source" and str(ref.request_id or "")
+    }
     catalogs: list[tuple[str, list[dict[str, Any]]]] = []
     for fact in spec.request_facts.requests or []:
         analysis = spec.request_facts.analysis.get(str(fact.request_id or "")) if fact.request_id else None
@@ -668,6 +674,7 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
         if not (
             read["role"] in {"option", "read_option", "option_source", "explicit_read_option"}
             or _choice_control_triggered(read)
+            or str(fact.request_id or "") in planned_option_request_ids
         ):
             continue
         rows = [item for item in (as_list_payload(fact.response_json) or []) if isinstance(item, dict)]
@@ -701,6 +708,24 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
             has_catalog_anchor, owned_request_ids = _group_option_source_request_ids(members)
             if modern_contract and not has_catalog_anchor:
                 continue
+            if modern_contract and owned_request_ids:
+                for member in members:
+                    source = dict(member.source or {})
+                    source_request_id = str(source.get("source_request_id") or "")
+                    if (
+                        member.source_kind != "selected_option_field"
+                        or not source_request_id
+                        or source_request_id in owned_request_ids
+                        or member.locked
+                        or _param_has_manual_contract(member)
+                        or _param_source_agent_classified(member)
+                    ):
+                        continue
+                    member.source_kind = "unknown"
+                    member.source = {
+                        "kind": "unknown",
+                        "reason": "discarded_projection_outside_owned_option_catalog",
+                    }
             scored: list[tuple[int, str, dict[str, Any]]] = []
             for request_id, rows in step_catalogs:
                 if modern_contract and owned_request_ids and request_id not in owned_request_ids:
@@ -746,6 +771,31 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                 else (source_step.path or source_step.url) if source_step is not None
                 else ""
             )
+            selector_candidates: list[tuple[ParamField, dict[str, Any]]] = []
+            for candidate in members:
+                candidate_source = dict(candidate.source or {})
+                option_contract = (
+                    candidate_source
+                    if candidate.source_kind in {"api_option", "form_option"}
+                    else candidate_source.get("option_source")
+                )
+                if not isinstance(option_contract, dict):
+                    continue
+                contract_request_id = str(option_contract.get("source_request_id") or "")
+                value_key = str(option_contract.get("value_key") or "")
+                if (
+                    value_key
+                    and (not request_id or contract_request_id in {"", request_id})
+                    and _composite_values_match(
+                        candidate.value, _flow_path_lookup(row, value_key),
+                    )
+                ):
+                    selector_candidates.append((candidate, option_contract))
+            primary_selector, primary_option_contract = (
+                selector_candidates[0]
+                if len(selector_candidates) == 1
+                else (None, {})
+            )
             projected_paths: set[str] = set()
             for sibling in members:
                 if (
@@ -781,6 +831,68 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                         row, sibling.path, sibling.value, min_score=40,
                         allow_unique_value_fallback=modern_contract,
                     )
+                    sibling_source = dict(sibling.source or {})
+                    sibling_option = sibling_source.get("option_source")
+                    sibling_option = sibling_option if isinstance(sibling_option, dict) else {}
+                    if (
+                        response_path
+                        and primary_selector is not None
+                        and sibling is not primary_selector
+                        and response_path != str(primary_option_contract.get("value_key") or "")
+                        and str(sibling_option.get("source_request_id") or "")
+                        in {"", request_id}
+                    ):
+                        moved_choice_evidence = [
+                            item for item in (sibling.evidence or [])
+                            if isinstance(item, dict)
+                            and (
+                                str(item.get("control_kind") or "").lower()
+                                in _SCREENSHOT_OPTION_CONTROL_KINDS
+                                or item.get("kind") == "page_required"
+                            )
+                        ]
+                        sibling.evidence = [
+                            item for item in (sibling.evidence or [])
+                            if item not in moved_choice_evidence
+                        ]
+                        if moved_choice_evidence:
+                            primary_selector.evidence = [
+                                *(primary_selector.evidence or []),
+                                *[
+                                    {
+                                        **dict(item),
+                                        "request_path": primary_selector.path,
+                                    }
+                                    for item in moved_choice_evidence
+                                ],
+                            ]
+                            if sibling.label:
+                                primary_selector.label = sibling.label
+                                sibling.label = sibling.key or str(sibling.path or "").split(".")[-1]
+                            primary_selector.required = bool(
+                                primary_selector.required or sibling.required
+                            )
+                            primary_selector.category = "user_param"
+                            primary_selector.exposed_to_user = True
+                            primary_selector.editable = True
+                        sibling.source_kind = "selected_option_field"
+                        sibling.source = {
+                            "kind": "selected_option_field",
+                            "selector_path": primary_selector.path,
+                            "selector_param": primary_selector.key,
+                            "source_url": source_url,
+                            "source_step_id": source_step.step_id if source_step is not None else "",
+                            "source_request_id": request_id,
+                            "response_path": response_path,
+                            "target_path": sibling.path,
+                        }
+                        sibling.required = False
+                        _apply_selected_option_field_caller_ownership(sibling)
+                        sibling.reason = (
+                            f"该字段来自所选记录的 `{response_path}`，运行期随选择自动写入"
+                        )
+                        projected_paths.add(str(sibling.path or ""))
+                        continue
                     if (
                         response_path
                         and sibling.source_kind in {"", "unknown", "page_default"}
@@ -848,6 +960,10 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                     "response_path": response_path,
                     "target_path": sibling.path,
                 }
+                projected_value = _flow_path_lookup(row, response_path)
+                if isinstance(projected_value, str) or isinstance(sibling.value, str):
+                    sibling.type = "string"
+                    sibling.wire_type = "string"
                 caller_override = _apply_selected_option_field_caller_ownership(sibling)
                 sibling.reason = (
                     f"该字段默认来自所选记录的 `{response_path}`，调用方可修改"
