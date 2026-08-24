@@ -814,80 +814,10 @@ async def orchestrate_flow_capabilities(
         for item in _request_fact_items(current)
         if str(item.get("request_id") or "")
     }
-    if strict_semantic_submission and previous_strict_plan:
-        # Live batches are complete snapshots, but a model may accidentally
-        # omit an earlier ability while focusing on new facts. Preserve each
-        # still-grounded boundary unless the new plan replaces the same name or
-        # the same public anchor. Explicit operator removals remain authoritative.
-        proposed_semantic_plan = copy.deepcopy(proposed_semantic_plan)
-        proposed_items = [
-            item for item in proposed_semantic_plan.get("capabilities") or []
-            if isinstance(item, dict)
-        ]
-        proposed_by_name = {
-            str(item.get("name") or ""): item for item in proposed_items
-            if str(item.get("name") or "")
-        }
-        proposed_by_boundary = {
-            (
-                _capability_kind_family(str(item.get("kind") or "")),
-                str(item.get("anchor_step_id") or ""),
-            ): item
-            for item in proposed_items
-        }
-        step_ids = {step.step_id for step in current.steps}
-        removed_names = _removed_capability_names(current)
-        merged_items: list[dict[str, Any]] = []
-        emitted_names: set[str] = set()
-        for previous_item in previous_semantic_plan.get("capabilities") or []:
-            previous_name = str(previous_item.get("name") or "")
-            replacement = proposed_by_name.get(previous_name)
-            if replacement is None:
-                replacement = proposed_by_boundary.get((
-                    _capability_kind_family(str(previous_item.get("kind") or "")),
-                    str(previous_item.get("anchor_step_id") or ""),
-                ))
-            if replacement is not None:
-                replacement_name = str(replacement.get("name") or "")
-                if replacement_name not in emitted_names:
-                    merged_items.append(replacement)
-                    emitted_names.add(replacement_name)
-                continue
-            previous_anchor = str(previous_item.get("anchor_step_id") or "")
-            previous_refs = [
-                str(ref.get("step_id") or "")
-                for ref in previous_item.get("request_refs") or []
-                if isinstance(ref, dict)
-            ]
-            if current.steps:
-                still_grounded = bool(
-                    previous_anchor in step_ids
-                    and all(ref in step_ids for ref in previous_refs)
-                    and _planned_capability_has_public_anchor(
-                        current,
-                        str(previous_item.get("kind") or ""),
-                        [previous_anchor],
-                    )
-                )
-            else:
-                still_grounded = bool(
-                    previous_anchor in fact_request_ids
-                    and all(ref in fact_request_ids for ref in previous_refs)
-                )
-            if (
-                previous_name
-                and previous_name not in removed_names
-                and previous_name not in emitted_names
-                and still_grounded
-            ):
-                merged_items.append(copy.deepcopy(previous_item))
-                emitted_names.add(previous_name)
-        for proposed_item in proposed_items:
-            proposed_name = str(proposed_item.get("name") or "")
-            if proposed_name not in emitted_names:
-                merged_items.append(proposed_item)
-                emitted_names.add(proposed_name)
-        proposed_semantic_plan["capabilities"] = merged_items
+    # A strict Skill submission is a complete replacement snapshot. Carrying
+    # forward an omitted machine-owned boundary made an 8-capability plan
+    # materialize as 9 during live analysis. Operator-owned capabilities are
+    # preserved separately by the compiler and do not need semantic-plan merge.
     effective_semantic_plan = (
         proposed_semantic_plan
         if strict_semantic_submission

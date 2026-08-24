@@ -907,6 +907,28 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
         if isinstance(model.get("submitted_semantic_plan"), dict)
         else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
     )
+    strict_plan_items = [
+        item for item in (existing_plan.get("capabilities") or [])
+        if isinstance(item, dict)
+    ] if isinstance(existing_plan, dict) else []
+    accepted_strict_snapshot = bool(
+        strict_plan_items
+        and len(strict_plan_items) == len(existing_plan.get("capabilities") or [])
+        and all(
+            item.get("name")
+            and item.get("kind")
+            and item.get("anchor_step_id")
+            and isinstance(item.get("request_refs"), list)
+            and item.get("request_refs")
+            for item in strict_plan_items
+        )
+        and (model.get("proposal_gate") or {}).get("accepted") is True
+    )
+    if accepted_strict_snapshot:
+        # The Skill's accepted boundary list is authoritative. Grounded
+        # fallback is for missing/rejected plans; supplementing an accepted
+        # snapshot invents transient abilities (8 submitted became 9).
+        return current
     previous_fallback_names = {
         str(name or "")
         for name in model.get("fallback_added_capabilities") or []

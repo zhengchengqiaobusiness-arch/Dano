@@ -154,6 +154,95 @@ def test_rejected_field_operation_keeps_the_applied_capability_plan_terminal() -
     assert status["submission_complete"] is True
 
 
+def test_complete_semantic_snapshot_replaces_stale_machine_capabilities() -> None:
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/orders/page",
+        response_json={"data": {"list": [{"id": 1}]}},
+        source_meta={"request_id": "req-query", "role": "business_get"},
+    )
+    inspect = FlowStep(
+        step_id="inspect",
+        method="GET",
+        path="/orders/get",
+        params=[ParamField(
+            path="query.id", key="id", value=1,
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+        response_json={"data": {"id": 1}},
+        source_meta={"request_id": "req-inspect", "role": "business_get"},
+    )
+
+    def planned(name: str, kind: str, step_id: str, request_id: str) -> dict:
+        return {
+            "name": name,
+            "title": name,
+            "kind": kind,
+            "anchor_step_id": step_id,
+            "request_refs": [{
+                "request_id": request_id,
+                "step_id": step_id,
+                "usage": "execute",
+            }],
+        }
+
+    old_plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [
+            planned("sale_order_query", "query", "query", "req-query"),
+            planned("inspect_legacy", "inspect", "inspect", "req-inspect"),
+        ],
+        "unresolved_items": [],
+    }
+    new_plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [
+            planned("sale_order_query", "query", "query", "req-query"),
+        ],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=[query, inspect],
+        capabilities=[
+            FlowCapability(name="sale_order_query", kind="query"),
+            FlowCapability(name="inspect_legacy", kind="inspect"),
+        ],
+        meta={
+            "stage_1_6_contract_version": 2,
+            "capability_model": {
+                "source": "verified_request_graph",
+                "semantic_plan": old_plan,
+                "submitted_semantic_plan": old_plan,
+            },
+        },
+    )
+    for step, request_id in ((query, "req-query"), (inspect, "req-inspect")):
+        spec.request_facts.requests.append(RequestFact(
+            request_id=request_id,
+            method="GET",
+            path=step.path,
+            response_json=step.response_json,
+        ))
+        spec.request_facts.analysis[request_id] = RequestAnalysis(
+            request_id=request_id, role="business_get", keep=True,
+        )
+        spec.request_facts.usage[request_id] = RequestUsage(
+            request_id=request_id, materialized_step_id=step.step_id, state="materialized",
+        )
+
+    result = asyncio.run(apply_recording_agent_submission(
+        spec,
+        submission={"semantic_plan": new_plan, "ops": []},
+        mode="plan",
+    ))
+
+    assert [capability.name for capability in result.capabilities] == ["sale_order_query"]
+    model = result.meta["capability_model"]
+    assert model["submitted_count"] == model["materialized_count"] == 1
+    assert model["extra_materialized_names"] == []
+
+
 def _row_command(
     step_id: str,
     *,
