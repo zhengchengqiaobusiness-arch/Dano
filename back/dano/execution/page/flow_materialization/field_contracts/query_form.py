@@ -82,6 +82,11 @@ def _mark_query_filter_caller(
     param.need_human_confirm = False
     if refresh_required:
         required_state = _editable_required_state(param)
+        if required_state == "unknown":
+            # Search criteria are optional unless the page recorded an
+            # explicit required marker. Presence in one captured URL only
+            # proves that the operator used the filter in that run.
+            required_state = "optional"
         param.required = required_state == "required"
         param.source = {**(param.source or {}), "required_state": required_state}
     elif _param_has_local_required_marker(param):

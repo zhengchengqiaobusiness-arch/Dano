@@ -804,6 +804,61 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
             param.need_human_confirm = False
             param.reason = "查询页上的可编辑筛选控件；调用方可省略或覆盖录制时的筛选值"
 
+    def refresh_required_axis(
+        step: FlowStep,
+        param: ParamField,
+        control: dict[str, Any],
+    ) -> None:
+        """Replace stale recorder-required facts with the current DOM fact."""
+        modern_contract = int(
+            (spec.meta or {}).get("stage_1_6_contract_version") or 0
+        ) >= 2
+        if not modern_contract or "required_observed" not in control:
+            return
+        observed = control.get("required_observed")
+        recorder_sources = {"", "recorder_dom", "page", "page_snapshot"}
+        if observed is True:
+            if not any(
+                isinstance(item, dict)
+                and item.get("kind") == "page_required"
+                and str(item.get("binding_status") or "bound") == "bound"
+                for item in (param.evidence or [])
+            ):
+                param.evidence.append({
+                    "kind": "page_required",
+                    "source": "recorder_dom",
+                    "request_path": param.path,
+                    "binding_status": "bound",
+                    "evidence_id": control.get("evidence_id") or "",
+                })
+        else:
+            param.evidence = [
+                item for item in (param.evidence or [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("kind") == "page_required"
+                    and str(item.get("source") or "") in recorder_sources
+                    and str(item.get("actor") or "") not in {"agent", "manual", "operator"}
+                )
+            ]
+        if _param_field_manually_edited(param, "required") or _param_required_agent_classified(param):
+            return
+        is_query_filter = (
+            str(step.method or "").upper() in {"GET", "HEAD"}
+            and str(param.path or "").startswith("query.")
+        )
+        if isinstance(observed, bool):
+            param.required = bool(observed and _param_exposed_to_caller(param))
+            required_state = "required" if observed else "optional"
+        elif is_query_filter:
+            # A business search filter is optional unless the page explicitly
+            # marks it required. A captured value alone is not such evidence.
+            param.required = False
+            required_state = "optional"
+        else:
+            return
+        param.source = {**(param.source or {}), "required_state": required_state}
+
     for step in spec.steps:
         for param in step.params:
             discard_displaced_control(step, param)
@@ -850,6 +905,7 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                     if modern_contract and control.get(key):
                         updates[key] = str(control[key])
                 existing_control.update(updates)
+                refresh_required_axis(step, param, control)
                 continue
             control_kind = str(control.get("control_kind") or "").lower()
             projected_control = {
@@ -878,34 +934,7 @@ def _rebind_saved_field_evidence(spec: FlowSpec) -> None:
                 "transaction_id": str(control.get("transaction_id") or ""),
             }
             param.evidence = [*(param.evidence or []), projected_control]
-            if isinstance(control.get("required_observed"), bool):
-                if control["required_observed"]:
-                    if not any(
-                        isinstance(item, dict) and item.get("kind") == "page_required"
-                        for item in (param.evidence or [])
-                    ):
-                        param.evidence.append({
-                            "kind": "page_required",
-                            "source": "recorder_dom",
-                            "request_path": param.path,
-                            "binding_status": "bound",
-                            "evidence_id": control.get("evidence_id") or "",
-                        })
-                else:
-                    param.evidence = [
-                        item for item in (param.evidence or [])
-                        if not (isinstance(item, dict) and item.get("kind") == "page_required")
-                    ]
-                if (
-                    not _param_field_manually_edited(param, "required")
-                    and not _param_required_agent_classified(param)
-                ):
-                    observed = bool(control["required_observed"])
-                    param.required = bool(observed and _param_exposed_to_caller(param))
-                    param.source = {
-                        **(param.source or {}),
-                        "required_state": "required" if observed else "optional",
-                    }
+            refresh_required_axis(step, param, control)
 
 
 _DEFAULT_RECORDED_FORBIDDEN_ACTIONS = [

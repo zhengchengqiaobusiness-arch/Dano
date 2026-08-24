@@ -1511,6 +1511,80 @@ def test_existing_textarea_evidence_refreshes_numeric_looking_string_type() -> N
     assert param.type == "string"
 
 
+def test_refreshed_optional_query_control_removes_stale_required_marker() -> None:
+    customer = ParamField(
+        path="query.customerId",
+        key="customerId",
+        label="客户",
+        value=8,
+        type="number",
+        wire_type="number",
+        required=True,
+        source_kind="api_option",
+        source={
+            "kind": "api_option",
+            "request_id": "req-customer-options",
+            "required_state": "required",
+        },
+        category="user_param",
+        exposed_to_user=True,
+        editable=True,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "select",
+            "request_path": "query.customerId",
+            "binding_status": "bound",
+            "required": True,
+            "required_observed": True,
+        }, {
+            "kind": "page_required",
+            "source": "recorder_dom",
+            "request_path": "query.customerId",
+            "binding_status": "bound",
+        }],
+    )
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            path="/sale-order/page",
+            url="/sale-order/page?customerId=8",
+            params=[customer],
+            source_meta={"request_id": "req-page", "query": {"customerId": 8}},
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-page",
+        method="GET",
+        url="/sale-order/page?customerId=8",
+        path="/sale-order/page",
+        query={"customerId": 8},
+    )]
+    spec.request_facts.field_evidence = [{
+        "binding_status": "bound",
+        "request_id": "req-page",
+        "wire_path": "query.customerId",
+        "label": "客户",
+        "control_kind": "select",
+        "editable": True,
+        "disabled": False,
+        "read_only": False,
+        "required": False,
+        "required_observed": None,
+    }]
+
+    _rebind_saved_field_evidence(spec)
+    _apply_mechanical_field_contracts(spec)
+
+    assert customer.required is False
+    assert customer.source["required_state"] == "optional"
+    assert not any(
+        isinstance(item, dict) and item.get("kind") == "page_required"
+        for item in customer.evidence
+    )
+
+
 def test_weak_form_order_binding_moves_control_to_matching_alias() -> None:
     creator = ParamField(
         path="creator",
