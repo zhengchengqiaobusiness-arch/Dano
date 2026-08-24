@@ -149,6 +149,33 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
                 continue
             if str(param.path or "").startswith("query.") and not _param_has_command_local_control(step, param):
                 continue
+            option_source = (
+                (param.source or {}).get("option_source")
+                if isinstance((param.source or {}).get("option_source"), dict)
+                else None
+            )
+            if param.source_kind == "previous_response" and option_source:
+                previous_source = dict(param.source or {})
+                required_state = str(
+                    previous_source.get("required_state") or "unknown"
+                )
+                param.source_kind = "api_option"
+                param.source = {
+                    **option_source,
+                    "kind": "api_option",
+                    "required_state": required_state,
+                    **{
+                        key: previous_source[key]
+                        for key in (
+                            "original_key", "collision_resolved", "name_disambiguation",
+                        )
+                        if key in previous_source
+                    },
+                }
+                _mark_create_form_caller_input(
+                    param, reason="", refresh_required=refresh_required,
+                )
+                continue
             if param.source_kind in caller_kinds:
                 _mark_create_form_caller_input(
                     param, reason="", refresh_required=refresh_required,

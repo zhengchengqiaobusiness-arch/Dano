@@ -704,6 +704,10 @@ def _step_is_record_edit_form(step: FlowStep) -> bool:
         param for param in params
         if param.source_kind == "previous_response"
         and not _param_is_document_record_identity(param)
+        # A selectable value list supplies candidates, not an existing
+        # business record. Several dropdown APIs on a create form must not
+        # make that form look like record hydration.
+        and not isinstance((param.source or {}).get("option_source"), dict)
     ]
     if len(hydrated) >= 3:
         return True

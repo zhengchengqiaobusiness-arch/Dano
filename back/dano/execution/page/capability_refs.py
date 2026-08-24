@@ -64,8 +64,11 @@ def _capability_scoped_step_ids(cap: FlowCapability) -> list[str]:
     return ids
 
 
-def _capability_public_input_step_ids(cap: FlowCapability) -> list[str]:
-    """Return only public action steps whose fields form caller inputs."""
+def _capability_public_input_step_ids(
+    cap: FlowCapability,
+    step_by_id: dict[str, FlowStep] | None = None,
+) -> list[str]:
+    """Return action steps whose caller values are needed by orchestration."""
     scoped = list(dict.fromkeys([
         *[str(step_id) for step_id in (cap.step_ids or []) if str(step_id)],
         *_capability_scoped_step_ids(cap),
@@ -77,9 +80,41 @@ def _capability_public_input_step_ids(cap: FlowCapability) -> list[str]:
         if str(ref.usage or "") == "execute"
         and str(ref.step_id or "") in scoped_set
     ))
-    # Frozen legacy contracts predate usage metadata. Preserve their existing
-    # input surface instead of silently narrowing it on load.
-    return execute or scoped
+    if not execute:
+        # Frozen legacy contracts predate usage metadata. Preserve their
+        # existing input surface instead of silently narrowing it on load.
+        return scoped
+    if not step_by_id:
+        return execute
+
+    needed = list(execute)
+    fact_check_ids = {
+        str(ref.step_id or "")
+        for ref in (cap.request_refs or [])
+        if ref.usage == "fact_check" and str(ref.step_id or "")
+    }
+    for ref in cap.request_refs or []:
+        step_id = str(ref.step_id or "")
+        if (
+            ref.usage != "preflight"
+            or step_id not in scoped_set
+            or step_id in needed
+            or step_id in fact_check_ids
+        ):
+            continue
+        step = step_by_id.get(step_id)
+        if step is None:
+            continue
+        include = False
+        for param in step.params or []:
+            if not param.exposed_to_user:
+                continue
+            if param.source_kind in {"selected_record_identity", "record_identity"}:
+                include = True
+                break
+        if include:
+            needed.append(step_id)
+    return needed
 
 
 def _step_request_fact_for_capability(spec: FlowSpec, step: FlowStep) -> RequestFact | None:

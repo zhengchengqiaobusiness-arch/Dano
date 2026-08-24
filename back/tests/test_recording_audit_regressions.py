@@ -2060,6 +2060,93 @@ def test_row_command_preserves_pi_source_decision() -> None:
     assert status.exposed_to_user is True
 
 
+def test_create_option_reads_do_not_turn_form_into_edit_hydration() -> None:
+    params: list[ParamField] = []
+    for key, request_id in (
+        ("customerId", "req-customers"),
+        ("accountId", "req-accounts"),
+        ("saleUserId", "req-users"),
+    ):
+        params.append(ParamField(
+            path=f"body.{key}",
+            key=key,
+            label=key,
+            value=1,
+            type="enum",
+            wire_type="number",
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "response_path": "data[].id",
+                "option_source": {
+                    "kind": "api_option",
+                    "source_request_id": request_id,
+                    "source_url": f"/{key}/simple-list",
+                    "value_key": "id",
+                    "label_key": "name",
+                },
+            },
+            category="user_param",
+            exposed_to_user=True,
+            editable=True,
+            evidence=[{
+                "kind": "page_control",
+                "control_kind": "select",
+                "editable": True,
+                "disabled": False,
+                "read_only": False,
+                "binding_status": "bound",
+                "request_path": f"body.{key}",
+            }],
+        ))
+    for key in ("discountPercent", "productPrice"):
+        params.append(ParamField(
+            path=f"body.{key}",
+            key=key,
+            label=key,
+            value=10,
+            type="number",
+            wire_type="number",
+            source_kind="unknown",
+            source={"kind": "unknown"},
+            category="runtime_var",
+            exposed_to_user=False,
+            editable=False,
+            evidence=[{
+                "kind": "page_control",
+                "control_kind": "number",
+                "editable": True,
+                "disabled": False,
+                "read_only": False,
+                "binding_status": "bound",
+                "request_path": f"body.{key}",
+            }],
+        ))
+    step = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        body_source='{"customerId":1,"accountId":1,"saleUserId":1,"discountPercent":10,"productPrice":10}',
+        params=params,
+    )
+    spec = FlowSpec(
+        steps=[step],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _apply_create_form_field_contracts(spec)
+
+    by_key = {param.key: param for param in step.params}
+    for key in ("customerId", "accountId", "saleUserId"):
+        assert by_key[key].source_kind == "api_option"
+        assert by_key[key].source["source_request_id"]
+        assert by_key[key].exposed_to_user is True
+    for key in ("discountPercent", "productPrice"):
+        assert by_key[key].source_kind == "user_input"
+        assert by_key[key].category == "user_param"
+        assert by_key[key].exposed_to_user is True
+
+
 def test_pi_field_workset_exposes_independent_axes_and_multi_field_projections() -> None:
     spec = _sale_order_option_spec()
     _repair_structural_option_bindings(spec)

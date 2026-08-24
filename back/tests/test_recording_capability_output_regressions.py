@@ -500,6 +500,245 @@ def test_auxiliary_request_params_do_not_expand_public_capability_inputs() -> No
     assert ("verify", "fact_check") in memberships
 
 
+def test_record_selector_preflight_remains_a_public_capability_input() -> None:
+    detail = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get",
+        params=[ParamField(
+            path="query.id",
+            key="id",
+            label="记录",
+            value=70,
+            required=True,
+            source_kind="selected_record_identity",
+            source={"kind": "selected_record_identity", "required_state": "required"},
+            category="user_param",
+            exposed_to_user=True,
+            editable=True,
+        )],
+        source_meta={"request_id": "req-detail", "role": "business_get"},
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        body_source='{"remark":"updated"}',
+        params=[ParamField(
+            path="body.remark",
+            key="remark",
+            label="备注",
+            value="updated",
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-update", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[detail, update],
+        capabilities=[FlowCapability(
+            name="update_order",
+            kind="update",
+            step_ids=["detail", "update"],
+            nodes=[
+                {"type": "call", "step_id": "detail"},
+                {"type": "call", "step_id": "update"},
+            ],
+            request_refs=[
+                {"request_id": "req-detail", "step_id": "detail", "usage": "preflight"},
+                {"request_id": "req-update", "step_id": "update", "usage": "execute"},
+            ],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _sync_capability_io_schemas(spec)
+
+    capability = spec.capabilities[0]
+    assert set(capability.input_schema["properties"]) == {"id", "remark"}
+    assert "id" in capability.input_schema["required"]
+
+
+def test_array_option_preflight_does_not_duplicate_structured_execute_input() -> None:
+    option_source = {
+        "kind": "api_option",
+        "source_request_id": "req-products",
+        "source_url": "/products/simple-list",
+        "value_key": "id",
+        "label_key": "name",
+    }
+    stock = FlowStep(
+        step_id="stock",
+        method="GET",
+        path="/stock/get-count",
+        params=[ParamField(
+            path="query.productId",
+            key="get_stock_query_productId",
+            label="产品",
+            type="enum",
+            wire_type="number",
+            source_kind="api_option",
+            source={**option_source, "original_key": "productId", "collision_resolved": True},
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-stock", "role": "read_context"},
+    )
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        body_source='{"items":[{"productId":5}]}',
+        params=[ParamField(
+            path="body.items[0].productId",
+            key="productId",
+            label="产品",
+            value=5,
+            type="enum",
+            wire_type="number",
+            source_kind="api_option",
+            source=dict(option_source),
+            category="user_param",
+            exposed_to_user=True,
+        )],
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[stock, create],
+        capabilities=[FlowCapability(
+            name="create_order",
+            kind="create",
+            step_ids=["stock", "create"],
+            nodes=[
+                {"type": "call", "step_id": "stock"},
+                {"type": "call", "step_id": "create"},
+            ],
+            request_refs=[
+                {"request_id": "req-stock", "step_id": "stock", "usage": "preflight"},
+                {"request_id": "req-create", "step_id": "create", "usage": "execute"},
+            ],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _sync_capability_io_schemas(spec)
+
+    capability = spec.capabilities[0]
+    assert set(capability.input_schema["properties"]) == {"items"}
+    assert create.params[0].key == "productId"
+
+
+def test_stale_collision_key_restores_when_auxiliary_field_leaves_scope() -> None:
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        body_source='{"customerId":5}',
+        params=[ParamField(
+            path="body.customerId",
+            key="body_customerId",
+            label="客户",
+            value=5,
+            type="enum",
+            wire_type="number",
+            source_kind="api_option",
+            source={
+                "kind": "api_option",
+                "source_request_id": "req-customers",
+                "source_url": "/customers/simple-list",
+                "value_key": "id",
+                "label_key": "name",
+            },
+            category="user_param",
+            exposed_to_user=True,
+            evidence=[{
+                "kind": "field_key_collision_resolved",
+                "original_key": "customerId",
+                "resolved_key": "body_customerId",
+                "path": "body.customerId",
+                "step_id": "create",
+                "actor": "heuristic",
+            }],
+        )],
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[create],
+        capabilities=[FlowCapability(
+            name="create_order",
+            kind="create",
+            step_ids=["create"],
+            nodes=[{"type": "call", "step_id": "create"}],
+            request_refs=[{
+                "request_id": "req-create", "step_id": "create", "usage": "execute",
+            }],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _sync_capability_io_schemas(spec)
+
+    assert create.params[0].key == "customerId"
+    assert set(spec.capabilities[0].input_schema["properties"]) == {"customerId"}
+
+
+def test_top_level_and_array_item_keys_keep_their_structural_namespaces() -> None:
+    def stale_remark(path: str, resolved_key: str) -> ParamField:
+        return ParamField(
+            path=path,
+            key=resolved_key,
+            label="备注",
+            value="note",
+            source_kind="user_input",
+            source={"kind": "user_input"},
+            category="user_param",
+            exposed_to_user=True,
+            evidence=[{
+                "kind": "field_key_collision_resolved",
+                "original_key": "remark",
+                "resolved_key": resolved_key,
+                "path": path,
+                "step_id": "update",
+                "actor": "heuristic",
+            }],
+        )
+
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        body_source='{"remark":"note","items":[{"remark":"line note"}]}',
+        params=[
+            stale_remark("body.remark", "put_orders_update_body_remark"),
+            stale_remark("body.items[0].remark", "put_orders_update_body_remark_abcd1234"),
+        ],
+        source_meta={"request_id": "req-update", "role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[update],
+        capabilities=[FlowCapability(
+            name="update_order",
+            kind="update",
+            step_ids=["update"],
+            nodes=[{"type": "call", "step_id": "update"}],
+            request_refs=[{
+                "request_id": "req-update", "step_id": "update", "usage": "execute",
+            }],
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _sync_capability_io_schemas(spec)
+
+    assert [param.key for param in update.params if param.path.endswith("remark")] == [
+        "remark", "remark",
+    ]
+    properties = spec.capabilities[0].input_schema["properties"]
+    assert "remark" in properties
+    assert "remark" in properties["items"]["items"]["properties"]
+
+
 def test_edit_hydration_is_an_optional_override_without_recorded_default() -> None:
     detail = FlowStep(
         step_id="detail",

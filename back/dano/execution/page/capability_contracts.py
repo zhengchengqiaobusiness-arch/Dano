@@ -261,6 +261,20 @@ def _params_can_share_caller_key(left: ParamField, right: ParamField) -> bool:
         return False
     if left is right or (left.field_id and left.field_id == right.field_id):
         return True
+    def option_identity(param: ParamField) -> tuple[str, str, str, str]:
+        source = param.source or {}
+        if isinstance(source.get("option_source"), dict):
+            source = source["option_source"]
+        return (
+            str(source.get("source_request_id") or ""),
+            str(source.get("source_url") or ""),
+            str(source.get("value_key") or ""),
+            str(source.get("label_key") or ""),
+        )
+    left_option = option_identity(left)
+    right_option = option_identity(right)
+    if any(left_option) and left_option == right_option:
+        return True
     return any(
         _param_identity_values(left, identity_key)
         & _param_identity_values(right, identity_key)
@@ -338,13 +352,61 @@ def _apply_contextual_param_key(
 def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str, Any]]:
     """Disambiguate same-name caller inputs from stable request structure."""
     entries = [(step, param) for step in steps for param in (step.params or []) if _param_exposed_to_caller(param)]
-    grouped: dict[str, list[tuple[FlowStep, ParamField]]] = {}
+    for step, param in entries:
+        source = dict(param.source or {})
+        collision_evidence = next((
+            item for item in reversed(param.evidence or [])
+            if isinstance(item, dict)
+            and item.get("kind") == "field_key_collision_resolved"
+            and item.get("actor") == "heuristic"
+            and str(item.get("resolved_key") or "") == str(param.key or "")
+        ), {})
+        original = str(
+            source.get("original_key")
+            or collision_evidence.get("original_key")
+            or ""
+        ).strip()
+        if (
+            not original
+            or (
+                source.get("collision_resolved") is not True
+                and not collision_evidence
+            )
+            or param.locked
+            or param.name_source == "manual"
+        ):
+            continue
+        param.key = original
+        param.source = {
+            key: value for key, value in source.items()
+            if key not in {"original_key", "collision_resolved", "name_disambiguation"}
+        }
+        if (param.source or {}).get("array_item_member") is True:
+            param.source = {**(param.source or {}), "array_item_key": original}
+        param.evidence = [
+            item for item in (param.evidence or [])
+            if not (
+                isinstance(item, dict)
+                and item.get("kind") == "field_key_collision_resolved"
+                and item.get("actor") == "heuristic"
+            )
+        ]
+        for binding in step.selects or []:
+            if binding.path and _strip_body_prefix(binding.path) == _strip_body_prefix(param.path):
+                binding.param = original
+    def key_namespace(param: ParamField) -> str:
+        source = param.source or {}
+        if source.get("array_item_member") is True:
+            return str(source.get("array_container_path") or "")
+        return ""
+
+    grouped: dict[tuple[str, str], list[tuple[FlowStep, ParamField]]] = {}
     for step, param in entries:
         key = str(param.key or param.path or "").strip() or "field"
-        grouped.setdefault(key, []).append((step, param))
+        grouped.setdefault((key_namespace(param), key), []).append((step, param))
     used = set(grouped)
     changes: list[dict[str, Any]] = []
-    for base, same_name in grouped.items():
+    for (namespace, base), same_name in grouped.items():
         clusters: list[list[tuple[FlowStep, ParamField]]] = []
         for entry in same_name:
             cluster = next((
@@ -368,9 +430,9 @@ def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str,
         ]
         for cluster, simple_key in zip(pending, simple_keys):
             candidate = simple_key
-            if simple_keys.count(simple_key) > 1 or candidate in used:
+            if simple_keys.count(simple_key) > 1 or (namespace, candidate) in used:
                 candidate = _contextual_caller_key(cluster[0][0], cluster[0][1], base, rich=True)
-            if candidate in used:
+            if (namespace, candidate) in used:
                 identity = "\0".join(
                     str(value or "")
                     for value in (
@@ -381,7 +443,7 @@ def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str,
                     )
                 )
                 candidate = f"{candidate}_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:8]}"
-            used.add(candidate)
+            used.add((namespace, candidate))
             for step, param in cluster:
                 if not param.locked:
                     _apply_contextual_param_key(

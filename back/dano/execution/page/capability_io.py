@@ -902,7 +902,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
             continue
-        public_input_step_ids = set(_capability_public_input_step_ids(cap))
+        public_input_step_ids = set(_capability_public_input_step_ids(cap, by_id))
         input_steps = [
             step for step in cap_steps if step.step_id in public_input_step_ids
         ]
@@ -934,7 +934,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             for name, labels in recorded_label_candidates.items()
             if len(labels) == 1
         }
-        _disambiguate_capability_param_keys(cap_steps)
+        _disambiguate_capability_param_keys(input_steps)
         params = [p for st in input_steps for p in (st.params or [])]
         include_required_state = _schema_emits_required_state(cap.input_schema)
         derived_input = _capability_input_schema(

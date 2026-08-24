@@ -99,7 +99,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         previous_inputs = list(cap.inputs or [])
         old_dependencies = list(cap.dependencies or [])
         request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
-        public_input_step_ids = set(_capability_public_input_step_ids(cap))
+        public_input_step_ids = set(_capability_public_input_step_ids(cap, by_step))
         for st in step_objs:
             request_id = request_id_by_step.get(st.step_id, "")
             for param in st.params:
