@@ -2829,6 +2829,73 @@ def _get_many_by_path(node, path: str) -> list:
     return values
 
 
+_ARRAY_LINK_PATH_RE = _re.compile(
+    r"^(?P<container>.+?)\[(?:\d+|\*)\]\.(?P<field>.+)$"
+)
+
+
+def _path_exists(node, path: str) -> bool:
+    current = node
+    for token in _split_path(path):
+        if isinstance(current, dict):
+            if token not in current:
+                return False
+            current = current[token]
+        elif isinstance(current, list) and isinstance(token, int) and 0 <= token < len(current):
+            current = current[token]
+        else:
+            return False
+    return True
+
+
+def _link_fallback_was_supplied(
+    fields: dict,
+    link: dict,
+    *,
+    row_index: int | None = None,
+) -> bool:
+    fallback = link.get("fallback_input")
+    if not isinstance(fallback, dict):
+        return False
+    param = str(fallback.get("param") or "")
+    if not param or param not in fields:
+        return False
+    item_path = str(fallback.get("item_path") or "")
+    if not item_path:
+        return True
+    rows = fields.get(param)
+    if not isinstance(rows, list) or row_index is None or not 0 <= row_index < len(rows):
+        return False
+    return _path_exists(rows[row_index], item_path)
+
+
+def _link_value_overrides(source, link: dict, fields: dict) -> list[tuple[tuple, object]]:
+    source_path = str(link.get("source_path") or "")
+    target_path = str(link.get("target_path") or "")
+    source_match = _ARRAY_LINK_PATH_RE.fullmatch(source_path)
+    target_match = _ARRAY_LINK_PATH_RE.fullmatch(target_path)
+    if source_match is not None and target_match is not None:
+        source_rows = _get_by_path(source, source_match.group("container"))
+        target_rows = fields.get(target_match.group("container"))
+        if isinstance(source_rows, list) and isinstance(target_rows, list):
+            out: list[tuple[tuple, object]] = []
+            for index, source_row in enumerate(source_rows[:len(target_rows)]):
+                if _link_fallback_was_supplied(fields, link, row_index=index):
+                    continue
+                value = _get_by_path(source_row, source_match.group("field"))
+                if value is not None:
+                    target = f"{target_match.group('container')}[{index}].{target_match.group('field')}"
+                    out.append((tuple(_split_path(target)), value))
+            return out
+    if _link_fallback_was_supplied(fields, link):
+        return []
+    value = _get_by_path(source, link.get("source_tokens") or source_path)
+    if value is None:
+        return []
+    target = tuple(_split_path(link.get("target_tokens") or target_path))
+    return [(target, value)]
+
+
 def _set_by_path(node, path, value) -> bool:
     """返回是否写入成功(C5 修复:不再静默吞所有异常,区分 KeyError(路径错)与 TypeError(节点非容器))。
 
@@ -4266,9 +4333,8 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
         for lk in step.get("links") or []:
             src = responses[lk["source_step"]] if 0 <= lk.get("source_step", -1) < len(responses) else None
             if src is not None:
-                val = _get_by_path(src, lk.get("source_tokens") or lk.get("source_path", ""))
-                if val is not None:                          # tokens 优先,且用元组(可 hash)做 overrides 键
-                    overrides[tuple(_split_path(lk.get("target_tokens") or lk.get("target_path", "")))] = val
+                for target, value in _link_value_overrides(src, lk, fields):
+                    overrides[target] = value
         for lk in step.get("structure_links") or []:
             source_index = lk.get("source_step", -1)
             source = responses[source_index] if isinstance(source_index, int) and 0 <= source_index < len(responses) else None
@@ -4766,9 +4832,8 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
                 source_step_id = str(steps[old_src].get("step_id") or "")
             src = ctx["responses_by_step"].get(source_step_id)
             if src is not None:
-                val = _get_by_path(src, lk.get("source_tokens") or lk.get("source_path", ""))
-                if val is not None:
-                    overrides[tuple(_split_path(lk.get("target_tokens") or lk.get("target_path", "")))] = val
+                for target, value in _link_value_overrides(src, lk, local_fields):
+                    overrides[target] = value
         out = await execute_api_request(step, local_fields, **kw, overrides=overrides)
         out = {**out, "final": out}
         idx = step_index.get(step_id, len(ctx["responses"]))

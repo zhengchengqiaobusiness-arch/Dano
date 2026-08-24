@@ -333,6 +333,32 @@ def _compile_option_provider_link(
     return len(matches) == 1
 
 
+def _compiled_link_target_param(step: FlowStep, target_path: str) -> ParamField | None:
+    normalized = _strip_body_prefix(str(target_path or ""))
+    return next((
+        param for param in (step.params or [])
+        if _strip_body_prefix(str(param.path or "")) == normalized
+    ), None)
+
+
+def _link_fallback_input(step: FlowStep, param: ParamField | None) -> dict[str, str] | None:
+    if param is None or (param.source or {}).get("allow_caller_override") is not True:
+        return None
+    container = str((param.source or {}).get("array_container_path") or "")
+    item_path = str((param.source or {}).get("array_item_path") or "")
+    if container and item_path:
+        aggregate = next((
+            candidate for candidate in (step.params or [])
+            if str((candidate.source or {}).get("kind") or "") == "dynamic_structure_input"
+            and str((candidate.source or {}).get("array_container_path") or candidate.path or "") == container
+        ), None)
+        return {
+            "param": str((aggregate.key if aggregate is not None else container) or container),
+            "item_path": item_path,
+        }
+    return {"param": str(param.key or param.path or "")}
+
+
 def _flow_step_query_template(
     step: FlowStep,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, str], list[dict[str, Any]]]:
@@ -819,6 +845,7 @@ def flow_spec_to_api_request(
     if not built_steps:
         return None, ["FlowSpec 没有可发布的请求步骤"]
 
+    model_step_by_id = {step.step_id: step for step in spec.steps}
     outgoing_links: dict[int, int] = {}
     deferred_provider_links: dict[int, int] = {}
     for lk in spec.links:
@@ -840,6 +867,19 @@ def flow_spec_to_api_request(
         if not target_path or not source_path:
             errors.append(f"链接 `{lk.link_id}` 缺少 source_path 或 target_path")
             continue
+        target_model = model_step_by_id.get(lk.target_step_id)
+        target_param = (
+            _compiled_link_target_param(target_model, target_path)
+            if target_model is not None else None
+        )
+        if target_param is not None and target_param.source_kind in {
+            "computed", "selected_option_field",
+        }:
+            continue
+        fallback_input = (
+            _link_fallback_input(target_model, target_param)
+            if target_model is not None else None
+        )
         link_kind = str(lk.kind or "value")
         if link_kind in {"structure", "response_key_map"}:
             structure_link = {
@@ -877,13 +917,16 @@ def flow_spec_to_api_request(
         ):
             deferred_provider_links[source_idx] = deferred_provider_links.get(source_idx, 0) + 1
             continue
-        built_steps[target_idx].setdefault("links", []).append({
+        compiled_link = {
             "target_path": target_path,
             "target_tokens": lk.target_tokens,
             "source_step": source_idx,
             "source_path": source_path,
             "source_tokens": lk.source_tokens,
-        })
+        }
+        if fallback_input:
+            compiled_link["fallback_input"] = fallback_input
+        built_steps[target_idx].setdefault("links", []).append(compiled_link)
     public_execute_step_ids = {
         str(ref.step_id or "")
         for capability in (spec.capabilities or [])

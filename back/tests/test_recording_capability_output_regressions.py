@@ -415,6 +415,54 @@ def test_repeating_row_selector_runs_dependent_source_for_each_row(monkeypatch) 
     ]
 
 
+def test_edit_hydration_preserves_caller_overrides_and_expands_system_rows() -> None:
+    response = {
+        "data": {
+            "customerId": 8,
+            "items": [
+                {"id": 73, "count": 111, "stockCount": 2},
+                {"id": 74, "count": 11, "stockCount": 0},
+            ],
+        },
+    }
+    fields = {
+        "customerId": "李白",
+        "items": [
+            {"productId": 7, "count": 2},
+            {"productId": 8, "count": 3},
+        ],
+    }
+    customer_link = {
+        "source_path": "data.customerId",
+        "target_path": "customerId",
+        "fallback_input": {"param": "customerId"},
+    }
+    count_link = {
+        "source_path": "data.items[0].count",
+        "target_path": "items[0].count",
+        "fallback_input": {"param": "items", "item_path": "count"},
+    }
+    id_link = {
+        "source_path": "data.items[0].id",
+        "target_path": "items[0].id",
+    }
+    stock_link = {
+        "source_path": "data.items[0].stockCount",
+        "target_path": "items[0].stockCount",
+    }
+
+    assert request_capture._link_value_overrides(response, customer_link, fields) == []
+    assert request_capture._link_value_overrides(response, count_link, fields) == []
+    assert request_capture._link_value_overrides(response, id_link, fields) == [
+        (("items", 0, "id"), 73),
+        (("items", 1, "id"), 74),
+    ]
+    assert request_capture._link_value_overrides(response, stock_link, fields) == [
+        (("items", 0, "stockCount"), 2),
+        (("items", 1, "stockCount"), 0),
+    ]
+
+
 def test_field_and_relation_backlog_does_not_block_complete_capability_snapshot() -> None:
     plan = _capability_plan("create_sale_order", "req-create")
     plan["unresolved_items"] = [{
