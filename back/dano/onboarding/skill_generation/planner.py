@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -85,12 +86,13 @@ def _is_recording_copy(value: Any) -> bool:
 
 
 def _stable_route_id(sequence: list[FlowCapability]) -> str:
-    parts: list[str] = []
-    for cap in sequence:
-        raw = str(capability_ref(cap) or cap.name or "cap")
-        slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
-        parts.append(slug or "cap")
-    return "_then_".join(parts) or "route"
+    raw = "-然后-".join(_cap_title(cap) for cap in sequence if _cap_title(cap)) or "业务路线"
+    safe = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "-", raw)
+    safe = re.sub(r"\s+", "-", safe).strip(" .-")
+    if len(safe) > 96:
+        suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+        safe = f"{safe[:85].rstrip(' .-')}-{suffix}"
+    return safe or "业务路线"
 
 
 _WRITE_DONE_MARKERS = ("写入已确认", "写操作已确认", "写入已确认且", "写完要能确认")
@@ -495,11 +497,14 @@ def _step_failure(cap: FlowCapability) -> str:
 
 
 def _placeholder_request(sequence: list[FlowCapability], fallback: str) -> str:
-    titles = "、".join(_cap_title(cap) for cap in sequence if _cap_title(cap))
-    if any(is_write_capability(cap) for cap in sequence) and len(sequence) > 1:
-        return f"请先查出目标，再办理{titles}。目标用 <业务编号> 占位，不要填历史样本。"
+    titles = [_cap_title(cap) for cap in sequence if _cap_title(cap)]
+    if len(titles) > 1:
+        tail = "，再".join(titles[1:])
+        if _family(sequence[0]) == "query":
+            return f"请先{titles[0]}，需要单条目标时由我选择，再{tail}。必要输入用 <字段> 占位。"
+        return f"请先{titles[0]}，完成并核对结果后再{tail}。必要输入用 <字段> 占位。"
     if titles:
-        return fallback if fallback and "<" in fallback else f"请办理{titles}，必要输入用 <字段> 占位"
+        return fallback if fallback and "<" in fallback else f"请办理{titles[0]}，必要输入用 <字段> 占位"
     return fallback
 
 
@@ -796,6 +801,72 @@ def _confirmed_relation_routes(
     return routes
 
 
+_TARGET_FIELD_NAMES = frozenset({
+    "id", "ids", "recordid", "recordids", "orderid", "orderids",
+    "bizid", "businessid", "单据id", "记录id", "订单id",
+})
+
+
+def _is_lookup_capability(cap: FlowCapability) -> bool:
+    title = _cap_title(cap)
+    return (
+        _family(cap) == "query"
+        and not any(token in title for token in ("详情", "详细", "导出", "下载"))
+        and any(token in title for token in ("查询", "搜索", "筛选", "检索", "列表"))
+    )
+
+
+def _needs_record_selection(cap: FlowCapability) -> bool:
+    required = {
+        str(field).replace("_", "").casefold()
+        for field in schema_required(cap.input_schema)
+    }
+    title = _cap_title(cap)
+    return bool(required & _TARGET_FIELD_NAMES) or any(
+        token in title for token in ("详情", "详细", "修改", "更新", "编辑", "审核", "反审", "删除", "撤回")
+    )
+
+
+def _selection_handoff_routes(
+    spec: FlowSpec,
+    selected: list[FlowCapability],
+    request: SkillGenerationRequest,
+    existing: list[SkillRoute],
+) -> list[SkillRoute]:
+    """Plan lookup → select → operate without inventing an automatic binding."""
+
+    lookups = [cap for cap in selected if _is_lookup_capability(cap)]
+    if not lookups:
+        return []
+    lookup = lookups[0]
+    existing_sequences = {tuple(route.capability_sequence) for route in existing}
+    routes: list[SkillRoute] = []
+    for target in selected:
+        if capability_ref(target) == capability_ref(lookup) or not _needs_record_selection(target):
+            continue
+        sequence = [lookup, target]
+        refs = tuple(capability_ref(cap) for cap in sequence)
+        if refs in existing_sequences:
+            continue
+        bindings = _relation_pair(spec, lookup, target)
+        title = _cap_title(target)
+        routes.append(_route(
+            route_id=_stable_route_id(sequence),
+            name=f"先{_cap_title(lookup)}，再{title}",
+            when_to_use=(
+                f"要{title}但尚未指定目标时：先{_cap_title(lookup)}；"
+                + ("按已确认绑定带入目标" if bindings else "展示结果并请用户选定目标")
+                + f"，再{title}"
+            ),
+            sequence=sequence,
+            bindings=bindings,
+            request=request,
+            spec=spec,
+        ))
+        existing_sequences.add(refs)
+    return routes
+
+
 def _atomic_fallback_routes(
     selected: list[FlowCapability],
     request: SkillGenerationRequest,
@@ -928,6 +999,7 @@ def propose_deterministic_plan(
                 request=request,
                 spec=spec,
             ))
+        routes.extend(_selection_handoff_routes(spec, selected, request, routes))
         routes.extend(_atomic_fallback_routes(selected, request, spec, routes))
         routes = _merge_equivalent_routes(routes)
 

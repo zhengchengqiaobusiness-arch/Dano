@@ -278,6 +278,65 @@ def _script_slug(value: str) -> str:
     return slug
 
 
+def _route_operation_sequence(route: dict) -> list[str]:
+    raw = route.get("operation_sequence") or route.get("capability_sequence") or []
+    return [str(item) for item in raw if str(item)]
+
+
+def _step_operation(step: dict) -> str:
+    return str(step.get("operation") or step.get("capability_id") or "")
+
+
+def _selected_operations(contract: dict) -> list[str]:
+    raw = contract.get("selected_operations") or contract.get("selected_capability_ids") or []
+    return [str(item) for item in raw if str(item)]
+
+
+_CONSUMER_CONTRACT_PRIVATE_KEYS = frozenset({
+    "anchor_step_id", "call_order", "capability_id", "compiled_step_ids",
+    "confirmation_hash", "evidence", "execution_contract", "intent_branches",
+    "nodes", "request_id", "request_index", "source_flow_fingerprint",
+    "source_headers", "source_request_id", "step_id", "step_ids",
+    "unused_capabilities",
+})
+_CONSUMER_CONTRACT_PRIVATE_VALUE = re.compile(
+    r"\bcap_[0-9a-f]{8,}\b|\breq_[0-9a-f]{2,}\b|\bget_get\b|\bfingerprint\b|"
+    r"sample_verified|occurrence|录制(?:页面|时|值|样本|结果)",
+    re.I,
+)
+_PACKED_GENERATION_MARKERS = (
+    "sample_verified", "occurrence", "录制页面", "录制时", "录制样本", "录制结果", "历史样本",
+)
+
+
+def _check_consumer_contract_purity(path: Path, contract: dict, issues: list[dict]) -> None:
+    if str(contract.get("protocol") or "") != "dano.skill.runtime.v2":
+        return
+
+    def walk(node) -> None:  # noqa: ANN001
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key) in _CONSUMER_CONTRACT_PRIVATE_KEYS:
+                    issues.append(_issue(
+                        "consumer_contract_internal_key",
+                        f"consumer contract must not contain generation key: {key}",
+                        path,
+                    ))
+                    return
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str) and _CONSUMER_CONTRACT_PRIVATE_VALUE.search(node):
+            issues.append(_issue(
+                "consumer_contract_internal_value",
+                "consumer contract exposes a generation identifier or fallback name",
+                path,
+            ))
+
+    walk(contract)
+
+
 def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
     contract_path = root / "references" / "CONTRACT.json"
     routes_dir = root / "references" / "routes"
@@ -291,7 +350,7 @@ def _check_route_files(root: Path, skill_text: str, issues: list[dict]) -> None:
         for route in contract.get("routes") or []:
             if not isinstance(route, dict):
                 continue
-            sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+            sequence = _route_operation_sequence(route)
             route_id = str(route.get("route_id") or "").strip()
             if route_id:
                 all_ids.append(route_id)
@@ -381,7 +440,7 @@ def _check_contract_semantics(root: Path, contract: dict, issues: list[dict]) ->
             check for check in (item.get("fact_checks") or [])
             if isinstance(check, dict) and check.get("verified") is True
         ]
-        if item.get("requires_verify") and not fact_checks:
+        if item.get("requires_verify") and not fact_checks and item.get("verification_available") is not True:
             issues.append(_issue(
                 "verification_truthfulness",
                 f"requires_verify needs a verified read-back contract: {item.get('title') or item.get('name') or '?'}",
@@ -390,12 +449,12 @@ def _check_contract_semantics(root: Path, contract: dict, issues: list[dict]) ->
 
     routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
     route_sequences = {
-        tuple(str(cap_id) for cap_id in (route.get("capability_sequence") or []) if str(cap_id))
+        tuple(_route_operation_sequence(route))
         for route in routes
     }
     for route in routes:
         route_id = str(route.get("route_id") or "?")
-        sequence = [str(cap_id) for cap_id in (route.get("capability_sequence") or []) if str(cap_id)]
+        sequence = _route_operation_sequence(route)
         write_refs = {
             cap_id for cap_id in sequence
             if cap_id in by_ref and _contract_capability_is_write(by_ref[cap_id])
@@ -409,7 +468,7 @@ def _check_contract_semantics(root: Path, contract: dict, issues: list[dict]) ->
         for step in route.get("steps") or []:
             if not isinstance(step, dict):
                 continue
-            cap_id = str(step.get("capability_id") or "")
+            cap_id = _step_operation(step)
             cap = by_ref.get(cap_id)
             if cap is not None and _contract_capability_is_write(cap) and not step.get("confirm_before_execute"):
                 issues.append(_issue(
@@ -448,9 +507,10 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
     if not isinstance(contract, dict):
         return
     routes = contract.get("routes") if isinstance(contract.get("routes"), list) else []
-    selected = [str(item) for item in (contract.get("selected_capability_ids") or []) if str(item)]
+    selected = _selected_operations(contract)
     if not contract.get("planning_mode") and not routes and not selected:
         return
+    _check_consumer_contract_purity(contract_path, contract, issues)
     _check_contract_semantics(root, contract, issues)
     packed = {
         str(item.get("name") or "")
@@ -476,7 +536,7 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
         route_id = str(route.get("route_id") or "").strip()
         if route_id:
             route_ids.append(route_id)
-        for cap_id in route.get("capability_sequence") or []:
+        for cap_id in _route_operation_sequence(route):
             if str(cap_id) not in selected and selected:
                 issues.append(_issue(
                     "planning_route_capability",
@@ -633,7 +693,7 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
         for step in route.get("steps") or []:
             if not isinstance(step, dict):
                 continue
-            cap = caps.get(str(step.get("capability_id") or ""))
+            cap = caps.get(_step_operation(step))
             if cap is None:
                 continue
             allowed = _capability_caller_fields(cap)
@@ -654,7 +714,7 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
             if not name:
                 continue
             present = False
-            for cap_id in route.get("capability_sequence") or []:
+            for cap_id in _route_operation_sequence(route):
                 cap = caps.get(str(cap_id))
                 if cap is not None and name in _capability_caller_fields(cap):
                     present = True
@@ -672,6 +732,24 @@ def _check_runtime_artifacts(root: Path, issues: list[dict]) -> None:
         issues.append(_issue("runtime_artifact", "Skill package must not contain __pycache__", path))
     for path in root.rglob("*.pyc"):
         issues.append(_issue("runtime_artifact", f"Skill package must not contain {path.name}", path))
+
+
+def _check_packaged_generation_language(root: Path, issues: list[dict]) -> None:
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".md", ".json", ".py"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for marker in _PACKED_GENERATION_MARKERS:
+            if marker in text:
+                issues.append(_issue(
+                    "packaged_generation_language",
+                    f"finished Skill must not contain generation language: {marker}",
+                    path,
+                ))
+                break
 
 
 def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
@@ -870,8 +948,9 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
             root / "references" / "generator-guides",
         ))
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
-    _check_credentials(root, issues)
     _check_runtime_artifacts(root, issues)
+    _check_packaged_generation_language(root, issues)
+    _check_credentials(root, issues)
     if skill:
         _check_planning(root, skill, issues)
     return {"ok": not any(issue["severity"] == "error" for issue in issues), "issues": issues}

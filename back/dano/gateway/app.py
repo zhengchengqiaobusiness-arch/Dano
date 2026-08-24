@@ -1723,6 +1723,7 @@ class ExportRecordingSkillReq(BaseModel):
     forbidden_actions: str = ""
     out_dir: str = ""
     require_stage_seven: bool | None = None
+    preview_only: bool = False
 
 
 @app.post("/v1/recording-results/{result_id}/export-skill")
@@ -1820,11 +1821,13 @@ async def export_recording_result_skill(
     emit_run_event(
         "skill.export.summary",
         stage="export",
-        status="succeeded" if outcome.status == "exported" else "failed",
-        level="info" if outcome.status == "exported" else "error",
+        status="succeeded" if outcome.status in {"exported", "previewed"} else "failed",
+        level="info" if outcome.status in {"exported", "previewed"} else "error",
         summary=(
             "Skill 导出完成"
             if outcome.status == "exported"
+            else "Skill 规划预览完成"
+            if outcome.status == "previewed"
             else "Skill 导出未完成"
         ),
         skill_id=outcome.skill_id,

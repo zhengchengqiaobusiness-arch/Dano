@@ -61,7 +61,8 @@ early behavior that is still valid.
 | Generation | this spec, `doc/skill-generator-ask-user-question-guide.md`, recording pipeline docs, FlowSpec, verification evidence | those paths, stage numbers, generator notes |
 | Consumption | `SKILL.md`, selected route/form/option/capability files, public scripts | `generator-guides`, raw request chains, sample people/orders, Python internals |
 
-Machine audit facts that users do not need to read stay in `CONTRACT.json`.
+Machine audit facts that consumers do not need remain in the recording result,
+internal plan, and generation logs; they are not packed into the Skill.
 
 ## Required layout
 
@@ -126,8 +127,9 @@ route files, when_to_use, composition, summary) must not contain:
 `原样来自`, `生成器`.
 「已确认绑定」may appear as an execution rule.
 
-Do not require an `API chain` section in consumer Markdown. Verification
-evidence stays in `CONTRACT.json` or executor-owned FlowSpec fields.
+Do not require an `API chain` section in consumer Markdown. The public contract
+states whether verified read-back is available; detailed verification evidence
+stays in executor-owned internal records.
 
 `references/CAPABILITIES.md` is a business capability index: when to use,
 read/write, input/output overview, done check, main risk. It must not copy
@@ -144,10 +146,13 @@ runtime defaults instead of historical samples. Keep every capability form in
 this file. If it exceeds a reasonable read, add a TOC; do not create
 `references/forms/`.
 
-The packed contract is copied as-is: field identity, option maps, request
-templates, sample evidence, defaults, and success rules must not be rewritten
-or dropped. Stage 8 consumes upstream capability schemas; it must not invent
-fields, required lists, or derived-from-query marks from route steps.
+Stage 8 must preserve execution fidelity internally while projecting a clean
+consumer contract. Public field identity, stable option mappings, request
+templates needed by runtime execution, and success rules must not be invented
+or silently changed. Recorded samples, discovery evidence, request/step IDs,
+source headers, and generator-only defaults are removed from the packed view.
+Stage 8 consumes upstream capability schemas; it must not invent fields,
+required lists, or derived-from-query marks from route steps.
 If compilation emptied a capability `input_schema`, restore the FlowSpec
 capability schema that the planner already used. Do not add fields that
 exist only on route steps.
@@ -157,9 +162,10 @@ PLAN, and route files must project the same caller fields. If the schema has
 no caller fields, say so and collect “按已有契约收集”; do not write
 `` `id` 由用户提供 ``.
 `SKILL.md` description is the routing trigger. The 适用场景 body must not
-repeat that identity paragraph. Scripts may still contain PLAN JSON;
-the handbook must not tell the Agent to read PLAN, `x-dano`, or
-`capability_id`. Route files may name business fields such as `id` only when
+repeat that identity paragraph. Scripts may contain only the minimal runtime
+plan needed to execute their public operation; they must not embed generation
+evidence or the upstream capability object. The handbook must not tell the
+Agent to read runtime PLAN internals. Route files may name business fields such as `id` only when
 the capability schema has them, and they must not expose internal step keys
 or `field←source` markers. A consumer package must not contain `__pycache__`
 or `.pyc` files.
@@ -177,21 +183,26 @@ Credentials come from environment variables or the documented local session
 cache. A package must never contain a recorded token, cookie, password, session,
 or other plaintext credential.
 
-## Optional stage-8 planning fields
+## Stage-8 consumer contract
 
-When a recording result is exported through manual Skill planning, `references/CONTRACT.json` also includes:
+`references/CONTRACT.json` is the executable contract delivered to a Skill
+consumer, not a generation audit dump. It contains:
 
-- `planning_mode`: `dynamic` or `fixed`
-- `selected_capability_ids`
-- `routes` with `steps`, `input_sources`, `bindings`, `checkpoints`,
-  `composition_mode`, `done_when`, and `failure_behavior`
-- `unused_capabilities`
-- `source_flow_fingerprint`
-- `intent_branches` when the compiler produced them; keep the compiled
-  natural-language branches so auditors can map user wording to routes
-  and detect dropped combinations
+- `planning_mode`: `dynamic` or `fixed`;
+- `selected_operations`, using public business operation names;
+- `capabilities`, limited to the public name/title, command, confirmation and
+  verification flags, and caller-facing input/output schemas;
+- `routes` with a business `route_id`, `operation_sequence`, public input
+  sources, confirmed bindings, checkpoints, confirmation gates, done
+  conditions, failure behavior, and one matching example.
 
-Public scripts and `SKILL.md` may only name selected capabilities. Unused capabilities stay in the original FlowSpec but must not appear as packed scripts. Packages without these fields remain valid single-capability exports.
+Generation evidence stays in the recording result, logs, and internal plan. A
+consumer package must not copy `capability_id`, request/step IDs, fingerprints,
+compiled nodes, recorded samples, fallback operation names, source headers, or
+unused-capability audit rows into `CONTRACT.json`, scripts, or handbooks.
+Public scripts and `SKILL.md` may only name selected operations. Unused
+capabilities stay in the original FlowSpec and internal plan but do not appear
+in the package.
 
 The model may only rewrite `when_to_use` and examples for those frozen routes.
 It must not replace `selected_capability_ids`, route sequences, steps,
@@ -220,6 +231,7 @@ telemetry. Generation-time checks only prove the handbook exposes the
 measurement points: every step has a capability and a done condition,
 writes confirm, and unbound write combinations stop at a checkpoint.
 
-`route_id` must be generated from the full capability sequence and stay
-globally unique. Package validation rejects duplicate IDs before file-set
-comparison, so two combination contracts cannot silently share one file.
+The public `route_id` must be generated from the full sequence of business
+operation titles and stay globally unique. Package validation rejects duplicate
+IDs before file-set comparison, so two combination contracts cannot silently
+share one file or expose internal capability identifiers.

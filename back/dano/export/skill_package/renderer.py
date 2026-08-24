@@ -145,31 +145,6 @@ def _skill_plan_payload(skill) -> dict[str, Any]:  # noqa: ANN001
     return {}
 
 
-def _contract_planning_fields(skill) -> dict[str, Any]:  # noqa: ANN001
-    plan = _skill_plan_payload(skill)
-    if not plan:
-        return {}
-    bindings = [
-        dict(binding)
-        for route in (plan.get("routes") or [])
-        if isinstance(route, dict)
-        for binding in (route.get("bindings") or [])
-        if isinstance(binding, dict)
-    ]
-    return {
-        "planning_mode": plan.get("planning_mode") or "",
-        "selected_capability_ids": list(plan.get("selected_capability_ids") or []),
-        "routes": list(plan.get("routes") or []),
-        "bindings": bindings,
-        "unused_capabilities": list(plan.get("unused_capabilities") or []),
-        "source_flow_fingerprint": plan.get("source_flow_fingerprint") or "",
-        "composition_summary": plan.get("composition_summary") or "",
-        "composition_notes": list(plan.get("composition_notes") or []),
-        "intent_branches": list(plan.get("intent_branches") or []),
-        "clarification_questions": list(plan.get("clarification_questions") or []),
-    }
-
-
 def _plan_keys(plan: dict) -> set[str]:
     return {
         str(plan.get("name") or ""),
@@ -274,7 +249,7 @@ def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
     slugs = [_slug(str(plan.get("name") or "")) for plan in plans if str(plan.get("name") or "")]
     token_sets = [{_norm_name_token(part) for part in item.split("-") if part} for item in slugs]
     shared: set[str] = set.intersection(*token_sets) if token_sets else set()
-    shared.discard("")
+    shared.difference_update({"", "skill", "capability", "action", "operation", "operations"})
     ordered = [
         _norm_name_token(part)
         for part in (slugs[0].split("-") if slugs else [])
@@ -286,9 +261,11 @@ def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
     if len(shared) == 1:
         return _slug(next(iter(shared)) + "-operations")[:64]
     action = _slug(str(getattr(skill, "action", "") or ""))
-    if action and action not in {"skill", "action"}:
+    if action and action not in {"skill", "action"} and not re.fullmatch(r"action-[0-9a-f-]{12,}", action):
         return action[:64]
-    return (_slug(slugs[0]) if slugs else "page-operations")[:64]
+    heading = _page_object_heading(skill, plans)
+    identity = hashlib.sha256(heading.encode("utf-8")).hexdigest()[:10]
+    return f"business-{identity}-operations"
 
 
 def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
@@ -658,21 +635,14 @@ def _clip_description(text: str, limit: int = 1024) -> str:
 
 
 def _skill_description(skill, plans: list[dict], spec) -> tuple[str, str]:  # noqa: ANN001
-    heading, generated = _business_identity(skill, plans, spec)
-    plan = _skill_plan_payload(skill)
-    what = _safe_text(plan.get("composition_summary") or plan.get("summary"))
-    if not what or _is_recording_copy(what):
-        what = generated.rsplit("不要用于", 1)[0] if "不要用于" in generated else generated
-        if not what or _is_recording_copy(what):
-            what = f"办理本页{heading}：{'、'.join(_action_labels(plans)) or '已打包操作'}"
-    text = what.rstrip("。")
-    if "不要写入" not in text and "不要改" not in text and "不要" not in text:
-        text = f"{text}。只要查询时不要写入。要改或审批但用户没指定哪一条时，先查再问"
-    if "不要用于" not in text and "不用于" not in text and "Do not" not in text:
-        text = f"{text}。不要用于其它业务对象或未列出的动作"
-    if not text.endswith("。"):
-        text += "。"
-    return heading, _clip_description(text)
+    heading, _generated = _business_identity(skill, plans, spec)
+    actions = "、".join(_action_labels(plans)) or "已打包操作"
+    text = (
+        f"办理{heading}的{actions}请求。"
+        "只读请求不得写入；变更请求未指定目标时，先查询并请用户选择。"
+        "不用于其它业务对象或未打包动作。"
+    )
+    return heading, _clip_description(text, limit=260)
 
 
 def _schema_field_names(plan: dict) -> set[str] | None:
@@ -701,9 +671,23 @@ def _route_schema_fields(route: dict, plans: list[dict]) -> set[str] | None:
 
 
 def _field_label(name: str, field: dict) -> str:
-    return _safe_text(
-        field.get("title") or field.get("label") or field.get("description") or name
-    )
+    explicit = _safe_text(field.get("title") or field.get("label") or field.get("description"))
+    if explicit and explicit.casefold() != str(name).casefold():
+        return explicit
+    business_fallbacks = {
+        "id": "记录编号",
+        "ids": "记录编号（可多选）",
+        "items": "明细",
+        "customerid": "客户",
+        "orderid": "订单编号",
+        "ordertime": "订单时间",
+        "productid": "商品",
+        "creator": "创建人",
+        "remark": "备注",
+        "no": "业务编号",
+    }
+    normalized = re.sub(r"[_\-\s]+", "", str(name)).casefold()
+    return business_fallbacks.get(normalized, explicit or str(name))
 
 
 def _option_source(field: dict) -> dict | None:
@@ -722,14 +706,17 @@ def _option_source(field: dict) -> dict | None:
         "type": "api",
         "endpoint": _source_path(endpoint),
         "method": str(source.get("method") or source.get("source_method") or "GET").upper(),
+        "params": {},
+        "resultPath": str(result_path or "data"),
         "idField": id_field,
         "labelField": label_field,
     }
-    if result_path:
-        data_source["resultPath"] = result_path
     params = source.get("params") or source.get("source_params") or source.get("source_body")
-    if isinstance(params, dict) and params:
-        data_source["params"] = params
+    if isinstance(params, dict):
+        data_source["params"].update(params)
+    category_key = str(source.get("category_key") or "").strip()
+    if category_key and source.get("category_value") not in (None, ""):
+        data_source["params"][category_key] = source.get("category_value")
     children = source.get("childrenField") or source.get("children_key")
     if children:
         data_source["childrenField"] = children
@@ -1146,7 +1133,7 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
         guidance = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
     else:
         guidance = f"根据当前用户意图生成可编辑的“{label}”推荐值"
-    return f"<调用前必须替换：{guidance}；禁止使用历史样本值>"
+    return f"<调用前必须替换：{guidance}；只能使用当前请求中已确认或实时取得的有效值>"
 
 
 def _question_spec(name: str, field: dict, *, required: bool) -> dict:
@@ -1260,10 +1247,12 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "## Global rules",
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
-        "- 下列 `default` 是生成规则占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选生成的非空推荐值；不得把占位符本身传给工具，也不得使用历史样本值。",
+        "- 复制某能力的表单模板前，先删除已由当前对话提供且通过校验的字段；只询问当前步骤仍缺少的字段，不重复问有效答案。",
+        "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
         "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
         "- 能力契约要求执行前确认时，整理完参数后另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
+        "- 写操作的字段若已全部在当前对话中给出、因而没有可确认的 formId，先用这些已校验值发起一次预填的分组复核表单；取得 `answered.formId` 后再单独确认。这是变更复核，不把已知字段说成缺失字段。",
         "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
@@ -1376,11 +1365,26 @@ def _confirm_label(route: dict, plans: list[dict]) -> str:
     return "无"
 
 
-def _route_detail_link(route: dict) -> str:
+def _public_route_id(route: dict, plans: list[dict]) -> str:
+    titles = [
+        _title_for_plan_ref(plans, str(item)) or str(item)
+        for item in (route.get("capability_sequence") or [])
+        if str(item)
+    ]
+    raw = "-然后-".join(titles) or _safe_text(route.get("name") or "业务路线")
+    safe = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "-", raw)
+    safe = re.sub(r"\s+", "-", safe).strip(" .-")
+    if len(safe) > 96:
+        suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+        safe = f"{safe[:85].rstrip(' .-')}-{suffix}"
+    return safe or "业务路线"
+
+
+def _route_detail_link(route: dict, plans: list[dict]) -> str:
     sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
     if len(sequence) <= 1:
         return "原子操作，不必读取组合路线"
-    route_id = _safe_text(route.get("route_id") or "route")
+    route_id = _public_route_id(route, plans)
     return f"[`references/routes/{route_id}.md`](references/routes/{route_id}.md)"
 
 
@@ -1410,7 +1414,7 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
             f"{'见组合路线文件中的逐步命令' if len(titles) > 1 else f'`{_script_invocation_for(plans, str((route.get("capability_sequence") or [""])[0]))}`'} | "
             f"{_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
             f"{_confirm_label(route, plans)} | {_safe_text(route.get('done_when') or '按该行完成条件核对')} | "
-            f"{_route_detail_link(route)} |"
+            f"{_route_detail_link(route, plans)} |"
         )
     if len(lines) == 6:
         for item in plans:
@@ -1519,7 +1523,6 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
 
 def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
-    unused = [item for item in (plan.get("unused_capabilities") or []) if isinstance(item, dict)]
     identity = _safe_text(plan.get("composition_summary") or plan.get("summary"))
     lines = ["## 适用场景", ""]
     lines.append("- 用户原话能对应「选择工作流」中恰好一行时使用。")
@@ -1557,11 +1560,6 @@ def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines.append("- 只要查询或查看时，不得执行写入。")
     lines.append("- 没有已确认绑定却假装已经自动带入时停止，先查再问。")
     lines.append("- 不得编造字段、接口、输出或未确认关系。")
-    for item in unused:
-        title = _safe_text(item.get("title") or item.get("name"))
-        reason = _safe_text(item.get("reason") or "当前业务描述未要求")
-        if title:
-            lines.append(f"- 不要执行「{title}」：{reason}。")
     lines.append("")
     return lines
 
@@ -2124,7 +2122,7 @@ def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
 
 def _format_list_py(plans: list[dict]) -> str:
     schemas = {
-        str(plan["name"]): dict(plan.get("output_schema") or {})
+        str(plan["name"]): _public_schema(deepcopy(plan.get("output_schema") or {}))
         for plan in plans
     }
     return f'''from __future__ import annotations
@@ -2181,9 +2179,6 @@ def main():
     columns = []
     for row in rows:
         for key in row:
-            field = properties.get(key) or {{}}
-            if field.get("x-dano-display") is False or field.get("x-dano-internal") is True:
-                continue
             if key not in columns:
                 columns.append(key)
     if not columns:
@@ -2925,6 +2920,7 @@ def parser():
     command.add_argument("--input-json", default="{}", help="JSON object merged before named arguments")
     command.add_argument("--confirm", action="store_true", help="confirm an explicitly reviewed write")
     for name, schema in (PLAN.get("input_schema", {}).get("properties") or {}).items():
+        schema = schema if isinstance(schema, dict) else {{}}
         command.add_argument(f"--{name}", dest=name, help=str(schema.get("description") or schema.get("title") or name))
     return command
 
@@ -3032,6 +3028,282 @@ def _clean_runtime_artifacts(folder: Path) -> None:
             pass
 
 
+_PRIVATE_SCHEMA_KEYS = frozenset({
+    "default",
+    "examples",
+    "x-flow-path",
+    "x-options-snapshot",
+    "x-options-source-meta",
+    "x-dano-business-type",
+    "x-dano-derived-from-query",
+    "x-dano-external-source",
+    "x-dano-internal",
+    "x-dano-required-state",
+    "x-dano-source-capability",
+    "x-dano-source-output",
+    "x-dano-wire-format",
+    "x-dano-wire-type",
+})
+
+
+def _public_schema(node: Any, key: str = "") -> Any:
+    if isinstance(node, dict):
+        dynamic_options = bool(
+            node.get("x-options-source")
+            or node.get("x-dano-option-source")
+            or node.get("x-options-source-meta")
+        )
+        result = {
+            str(child_key): _public_schema(value, str(child_key))
+            for child_key, value in node.items()
+            if str(child_key) not in _PRIVATE_SCHEMA_KEYS
+            and not str(child_key).startswith("x-flow-")
+            and not str(child_key).startswith("x-dano-")
+            and str(child_key) not in {"source_request_id", "source_step_id", "request_id", "step_id", "x-options-source"}
+            and not (dynamic_options and str(child_key) == "x-enum-value-map")
+            and not (
+                key == "properties"
+                and isinstance(value, dict)
+                and (value.get("x-dano-internal") is True or value.get("x-dano-display") is False)
+            )
+        }
+        if (
+            key
+            and key not in {"properties", "patternProperties", "$defs", "definitions"}
+            and any(name in result for name in ("type", "properties", "items", "format"))
+        ):
+            result["label"] = _field_label(key, result)
+        return result
+    if isinstance(node, list):
+        return [_public_schema(item, key) for item in node]
+    if isinstance(node, str) and re.search(
+        r"\bcap_[0-9a-f]{8,}\b|\breq_[0-9a-f]{2,}\b|\bget_get\b|\bfingerprint\b",
+        node,
+        re.I,
+    ):
+        return ""
+    if isinstance(node, str) and key in {"description", "reason"}:
+        if "接口候选选项" in node:
+            return "运行时从接口候选中选择当前有效值。"
+        if "页面枚举选项" in node:
+            return "从当前业务枚举中选择有效值。"
+        if any(marker in node for marker in ("录制", "occurrence", "样本", "预填")):
+            return "由调用方根据当前请求提供并通过输入校验。"
+    return node
+
+
+def _runtime_step(step: dict) -> dict:
+    keys = (
+        "method", "url", "url_template", "path", "content_type", "body_template",
+        "query_template", "params", "success_rule", "wire_formats", "runtime_fields",
+        "selects", "system_values",
+    )
+    packed = {key: deepcopy(step[key]) for key in keys if step.get(key) is not None}
+    packed["selects"] = [
+        {
+            key: value
+            for key, value in item.items()
+            if not (item.get("source_url") and key == "option_map")
+        }
+        for item in (packed.get("selects") or [])
+        if isinstance(item, dict)
+    ]
+    runtime_keys = {
+        "name", "kind", "strategy", "start_field", "end_field", "output_key",
+        "output_format", "left_field", "right_field", "result_field",
+        "container_field", "item_field", "array_container_path", "array_item_key",
+    }
+    packed["runtime_fields"] = [
+        {key: value for key, value in item.items() if key in runtime_keys}
+        for item in (packed.get("runtime_fields") or [])
+        if isinstance(item, dict)
+    ]
+    return _scrub(packed)
+
+
+def _runtime_link(link: dict) -> dict:
+    keys = (
+        "source_step", "target_step", "kind", "source_path", "source_collection_path",
+        "source_key_path", "source_label_path", "target_path", "target_container_path",
+        "value_binding",
+    )
+    return _scrub({key: deepcopy(link[key]) for key in keys if link.get(key) is not None})
+
+
+def _runtime_fact_check(check: dict) -> dict:
+    keys = ("backoff_s", "endpoint", "assertion", "match_field", "param")
+    return {
+        **{key: deepcopy(check[key]) for key in keys if check.get(key) is not None},
+        "verified": True,
+    }
+
+
+def _runtime_plan(plan: dict) -> dict:
+    """Keep only fields needed by the self-contained command at runtime."""
+
+    return {
+        "name": str(plan.get("name") or "operation"),
+        "title": str(plan.get("title") or plan.get("name") or "operation"),
+        "input_schema": _public_schema(deepcopy(plan.get("input_schema") or {"type": "object"})),
+        "requires_confirmation": bool(plan.get("requires_confirmation")),
+        "requires_verify": bool(plan.get("requires_verify")),
+        "fact_checks": [
+            _runtime_fact_check(item)
+            for item in (plan.get("fact_checks") or [])
+            if isinstance(item, dict) and item.get("verified") is True
+        ],
+        "steps": [
+            _runtime_step(item)
+            for item in (plan.get("steps") or [])
+            if isinstance(item, dict)
+        ],
+        "links": [
+            _runtime_link(item)
+            for item in (plan.get("links") or [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _operation_name_map(plans: list[dict]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for plan in plans:
+        public = str(plan.get("name") or plan.get("title") or "")
+        for key in (plan.get("capability_id"), plan.get("name"), plan.get("title")):
+            if key:
+                mapping[str(key)] = public
+    return mapping
+
+
+def _consumer_route(route: dict, plans: list[dict]) -> dict:
+    names = _operation_name_map(plans)
+
+    def operation(value: Any) -> str:
+        return names.get(str(value or ""), str(value or ""))
+
+    bindings = [
+        {
+            "from_operation": operation(item.get("from_capability")),
+            "from_output": item.get("from_output") or "",
+            "to_operation": operation(item.get("to_capability")),
+            "to_input": item.get("to_input") or "",
+        }
+        for item in (route.get("bindings") or [])
+        if isinstance(item, dict)
+    ]
+    checkpoints = [
+        {
+            "prompt": item.get("prompt") or "请用户选定下一步目标",
+            "required_fields": list(item.get("required_fields") or []),
+            "choice_source": item.get("choice_source") or "previous_result",
+            "selection_mode": item.get("selection_mode") or "single",
+            "resume_when": item.get("resume_when") or "用户已选定有效目标并通过输入校验",
+            "on_cancel": item.get("on_cancel") or "停止并报告未执行",
+        }
+        for item in (route.get("checkpoints") or [])
+        if isinstance(item, dict)
+    ]
+    steps = [
+        {
+            "operation": operation(item.get("capability_id")),
+            "input_sources": [
+                {
+                    "field": source.get("field") or "",
+                    "source": source.get("source") or "user",
+                }
+                for source in (item.get("input_sources") or [])
+                if isinstance(source, dict) and source.get("field")
+            ],
+            "confirm_before_execute": bool(item.get("confirm_before_execute")),
+            "done_when": item.get("done_when") or "结果可核对",
+            "on_failure": item.get("on_failure") or "停止并报告未执行",
+        }
+        for item in (route.get("steps") or [])
+        if isinstance(item, dict)
+    ]
+    examples = [
+        {
+            "user_request": item.get("user_request") or "",
+            "collected_fields": list(item.get("collected_fields") or []),
+            "confirmation_points": list(item.get("confirmation_points") or []),
+            "done_when": item.get("done_when") or route.get("done_when") or "",
+            "on_cancel": item.get("on_cancel") or "停止并报告未执行",
+            "on_empty_or_ambiguous": item.get("on_empty_or_ambiguous") or "候选不唯一时停问",
+            "on_unknown_write_result": item.get("on_unknown_write_result") or "停止且不重试",
+        }
+        for item in (route.get("examples") or [])[:1]
+        if isinstance(item, dict)
+    ]
+    return {
+        "route_id": _public_route_id(route, plans),
+        "name": route.get("name") or _public_route_id(route, plans),
+        "when_to_use": route.get("when_to_use") or route.get("name") or "",
+        "operation_sequence": [
+            operation(item) for item in (route.get("capability_sequence") or []) if str(item)
+        ],
+        "required_user_inputs": list(route.get("required_user_inputs") or []),
+        "bindings": bindings,
+        "preconditions": list(route.get("preconditions") or []),
+        "requires_confirmation": bool(route.get("requires_confirmation")),
+        "composition_mode": route.get("composition_mode") or "atomic",
+        "steps": steps,
+        "checkpoints": checkpoints,
+        "done_when": route.get("done_when") or "结果可核对",
+        "failure_behavior": route.get("failure_behavior") or "失败即停止",
+        "examples": examples,
+    }
+
+
+def _consumer_contract(skill, plans: list[dict], skill_plan: dict) -> dict:  # noqa: ANN001
+    """Build the consumer/runtime contract; generation evidence stays internal."""
+
+    capabilities = []
+    for plan in plans:
+        capabilities.append({
+            "name": plan["name"],
+            "title": plan["title"],
+            "kind": plan["kind"],
+            "script": f"scripts/{plan['script']}.py",
+            "verify_script": f"scripts/verify_{plan['script']}.py" if plan["requires_verify"] else "",
+            "requires_confirmation": bool(plan["requires_confirmation"]),
+            "requires_human_confirm": bool(plan["requires_confirmation"]),
+            "requires_verify": bool(plan["requires_verify"]),
+            "verification_available": bool(plan["fact_checks"]),
+            "is_write": bool(plan["is_write"]),
+            "input_schema": _public_schema(deepcopy(plan["input_schema"])),
+            "output_schema": _public_schema(deepcopy(plan["output_schema"])),
+        })
+    routes = [
+        _consumer_route(route, plans)
+        for route in (skill_plan.get("routes") or [])
+        if isinstance(route, dict)
+    ]
+    selected_internal = {
+        str(item) for item in (skill_plan.get("selected_capability_ids") or []) if str(item)
+    }
+    names = _operation_name_map(plans)
+    selected = [
+        str(plan["name"])
+        for plan in plans
+        if not selected_internal
+        or selected_internal & {
+            str(plan.get("capability_id") or ""),
+            str(plan.get("name") or ""),
+        }
+    ]
+    return {
+        "protocol": "dano.skill.runtime.v2",
+        "skill": {
+            "name": _skill_frontmatter_name(skill, plans),
+            "title": str(getattr(skill, "title", "") or _page_object_heading(skill, plans)),
+        },
+        "planning_mode": skill_plan.get("planning_mode") or "dynamic",
+        "selected_operations": selected or [names.get(str(plan.get("capability_id") or ""), plan["name"]) for plan in plans],
+        "capabilities": capabilities,
+        "routes": routes,
+    }
+
+
 def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], bool]:  # noqa: ANN001
     api_request = _compiled_request(skill, None)
     plans = _filter_plans_for_export(_capability_plans(skill, None, api_request), skill)
@@ -3051,7 +3323,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     _write_text(references / "INPUT_FORMS.md", _input_forms_md(plans))
     routes_dir = references / "routes"
     for route in _combination_routes(skill):
-        route_id = _safe_text(route.get("route_id") or "").strip()
+        route_id = _public_route_id(route, plans)
         if not route_id:
             continue
         routes_dir.mkdir(parents=True, exist_ok=True)
@@ -3069,49 +3341,13 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         Path(wire_format_module.__file__).read_text(encoding="utf-8"),
     )
     _write_text(scripts / "format_list.py", _format_list_py(plans))
-    contract = {
-        "protocol": "dano.skill_package.contract.v1",
-        "skill": {"id": skill.skill_id, "name": slug, "title": skill.title or skill.action},
-        "capabilities": [
-            _scrub({
-                **dict(plan.get("contract") or {}),
-                "name": plan["name"],
-                "capability_id": plan.get("capability_id") or "",
-                "title": plan["title"],
-                "kind": plan["kind"],
-                "script": f"scripts/{plan['script']}.py",
-                "verify_script": f"scripts/verify_{plan['script']}.py" if plan["requires_verify"] else "",
-                "requires_confirmation": plan["requires_confirmation"],
-                "requires_human_confirm": plan["requires_confirmation"],
-                "requires_verify": plan["requires_verify"],
-                "is_write": plan["is_write"],
-                "fact_checks": plan["fact_checks"],
-                "input_schema": plan["input_schema"],
-                "output_schema": plan["output_schema"],
-                "preconditions": plan["preconditions"],
-                "caller_responsibilities": plan["caller_responsibilities"],
-                "skill_responsibilities": plan["skill_responsibilities"],
-                "execution_contract": plan.get("execution_contract") or {
-                    "protocol": "dano.capability_plan.v2",
-                    "steps": plan.get("steps") or [],
-                    "links": plan.get("links") or [],
-                },
-            })
-            for plan in plans
-        ],
-        "capability_relations": [
-            _scrub(dict(relation))
-            for relation in (api_request.get("capability_relations") or [])
-            if isinstance(relation, dict)
-        ],
-    }
-    contract.update(_contract_planning_fields(skill))
+    contract = _consumer_contract(skill, plans, _skill_plan_payload(skill))
     _write_text(
         references / "CONTRACT.json",
         json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     )
     for plan in plans:
-        plan_payload = {**plan, "fact_checks": plan["fact_checks"]}
+        plan_payload = _runtime_plan(plan)
         module = plan["script"]
         _write_text(
             scripts / f"{module}.py",

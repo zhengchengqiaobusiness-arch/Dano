@@ -1684,7 +1684,11 @@ export default function PageRecorder({
     setSkillExportOpen(true);
   }
 
-  function skillExportRequest(): SkillGenerationRequest {
+  function invalidateSkillPreview() {
+    if (skillExportOutcome?.status === "previewed") setSkillExportOutcome(null);
+  }
+
+  function skillExportRequest(previewOnly = false): SkillGenerationRequest {
     return {
       title: skillTitle.trim(),
       business_description: skillDescription.trim(),
@@ -1694,6 +1698,7 @@ export default function PageRecorder({
       forbidden_actions: skillForbiddenActions.trim(),
       out_dir: skillOutDir.trim(),
       require_stage_seven: false,
+      preview_only: previewOnly,
     };
   }
 
@@ -1713,21 +1718,22 @@ export default function PageRecorder({
       return;
     }
     if (skillExporting) return;
+    const confirmingPreview = skillExportOutcome?.status === "previewed";
     setSkillExporting(true);
-    setSkillExportProgress("正在规划并导出 Skill…");
+    setSkillExportProgress(confirmingPreview ? "正在按已确认路线导出 Skill…" : "正在规划 Skill 路线预览…");
     setSkillClarifications([]);
     setSkillExportErrors([]);
-    if (resultMeta) {
+    if (confirmingPreview && resultMeta) {
       setResultMeta({ ...resultMeta, skill_lifecycle: "generating", skill_export_status: "generating" });
     }
     const historyRow = history.find((row) => row.id === resultId);
-    if (historyRow) {
+    if (confirmingPreview && historyRow) {
       upsertHistory({ ...historyRow, skill_lifecycle: "generating", skill_export_status: "generating" });
     }
     try {
       const outDir = skillOutDir.trim();
       if (outDir) rememberExportDir(outDir);
-      const outcome = await exportRecordingSkill(resultId, skillExportRequest());
+      const outcome = await exportRecordingSkill(resultId, skillExportRequest(!confirmingPreview));
       if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
         setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
         setSkillClarifications(outcome.clarification_questions || outcome.unresolved_branches || []);
@@ -1737,6 +1743,12 @@ export default function PageRecorder({
         return;
       }
       if (outcome.status !== "exported") {
+        if (outcome.status === "previewed") {
+          setSkillExportOutcome(outcome);
+          setSkillExportProgress("");
+          message.success("路线规划完成，请核对后确认导出");
+          return;
+        }
         setSkillExportErrors(outcome.errors || ["Skill 导出失败"]);
         setSkillExportProgress("");
         message.error("Skill 导出失败");
@@ -3572,7 +3584,7 @@ export default function PageRecorder({
       {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
       {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
       <Modal
-        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "配置并导出 Skill"}
+        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : skillExportOutcome?.status === "previewed" ? "核对路线并确认导出" : "配置并导出 Skill"}
         open={skillExportOpen}
         onCancel={() => {
           if (!skillExporting) setSkillExportOpen(false);
@@ -3590,7 +3602,7 @@ export default function PageRecorder({
             <Space>
               <Button disabled={skillExporting} onClick={() => setSkillExportOpen(false)}>取消</Button>
               <Button type="primary" loading={skillExporting} disabled={skillExporting} onClick={() => void submitSkillExport()}>
-                导出 Skill
+                {skillExportOutcome?.status === "previewed" ? "确认并导出 Skill" : "先预览路线"}
               </Button>
             </Space>
           )
@@ -3606,7 +3618,7 @@ export default function PageRecorder({
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在规划和导出 Skill…"} /> : null}
-            {skillExportOutcome?.status === "needs_clarification"
+            {skillExportOutcome?.status === "needs_clarification" || skillExportOutcome?.status === "previewed"
               ? renderSkillRouteSummary(skillExportOutcome)
               : null}
             {skillClarifications.length ? (
@@ -3635,6 +3647,7 @@ export default function PageRecorder({
                 style={{ marginTop: 6 }}
                 value={skillTitle}
                 onChange={(event) => {
+                  invalidateSkillPreview();
                   const next = event.target.value;
                   setSkillTitle(next);
                   persistSkillDraft({ title: next });
@@ -3649,6 +3662,7 @@ export default function PageRecorder({
                 style={{ marginTop: 6 }}
                 value={skillDescription}
                 onChange={(event) => {
+                  invalidateSkillPreview();
                   const next = event.target.value;
                   setSkillDescription(next);
                   persistSkillDraft({ description: next });
@@ -3664,6 +3678,7 @@ export default function PageRecorder({
                 style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}
                 value={skillPlanningMode}
                 onChange={(event) => {
+                  invalidateSkillPreview();
                   const next = event.target.value;
                   setSkillPlanningMode(next);
                   persistSkillDraft({ planningMode: next });
@@ -3686,6 +3701,7 @@ export default function PageRecorder({
                         style={{ marginTop: 6 }}
                         value={skillExampleRequests}
                         onChange={(event) => {
+                          invalidateSkillPreview();
                           const next = event.target.value;
                           setSkillExampleRequests(next);
                           persistSkillDraft({ exampleRequests: next });
@@ -3701,6 +3717,7 @@ export default function PageRecorder({
                         style={{ marginTop: 6 }}
                         value={skillSuccessCriteria}
                         onChange={(event) => {
+                          invalidateSkillPreview();
                           const next = event.target.value;
                           setSkillSuccessCriteria(next);
                           persistSkillDraft({ successCriteria: next });
@@ -3715,6 +3732,7 @@ export default function PageRecorder({
                         style={{ marginTop: 6 }}
                         value={skillForbiddenActions}
                         onChange={(event) => {
+                          invalidateSkillPreview();
                           const next = event.target.value;
                           setSkillForbiddenActions(next);
                           persistSkillDraft({ forbiddenActions: next });

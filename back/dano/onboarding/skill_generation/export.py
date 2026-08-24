@@ -26,7 +26,6 @@ from dano.onboarding.skill_generation.models import (
     generation_request_fingerprint,
 )
 from dano.onboarding.skill_generation.planner import generate_skill_plan
-from dano.onboarding.skill_generation.validate import plan_to_contract_payload
 
 log = structlog.get_logger(__name__)
 
@@ -489,6 +488,8 @@ async def export_recording_skill(
         request=request,
     )
     if (
+        not request.preview_only
+        and
         str(body.get("skill_request_fingerprint") or "") == request_fp
         and _already_exported(body)
     ):
@@ -532,12 +533,13 @@ async def export_recording_skill(
             idempotent=True,
         )
 
-    await _call_persist(persist, {
-        **body,
-        "skill_export_status": "generating",
-        "skill_plan_valid": False,
-        **_skill_draft_fields(request, title),
-    })
+    if not request.preview_only:
+        await _call_persist(persist, {
+            **body,
+            "skill_export_status": "generating",
+            "skill_plan_valid": False,
+            **_skill_draft_fields(request, title),
+        })
     _log_export(
         "skill.export.planning",
         summary="开始规划 Skill 路线",
@@ -567,14 +569,15 @@ async def export_recording_skill(
             clarification_questions=list(planned.clarification_questions or []),
             routes=_route_rows(planned.plan, spec),
         )
-        await _call_persist(persist, {
-            **body,
-            "skill_export_status": planned.status,
-            "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
-            "skill_plan_valid": False,
-            "published": bool(body.get("published")),
-            **_skill_draft_fields(request, title),
-        })
+        if not request.preview_only:
+            await _call_persist(persist, {
+                **body,
+                "skill_export_status": planned.status,
+                "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
+                "skill_plan_valid": False,
+                "published": bool(body.get("published")),
+                **_skill_draft_fields(request, title),
+            })
         return SkillExportOutcome(
             status=planned.status,
             clarification_questions=planned.clarification_questions,
@@ -599,6 +602,28 @@ async def export_recording_skill(
         routes=_route_rows(plan, spec),
         planning_mode=str(plan.planning_mode),
     )
+    if request.preview_only:
+        used_rows = _used_capability_rows(spec, plan)
+        _log_export(
+            "skill.export.previewed",
+            summary="Skill 路线预览完成，等待确认导出",
+            status="succeeded",
+            duration_ms=(time.monotonic() - started) * 1000,
+            result_id=str(result_id),
+            skill_id=skill_id,
+            routes=_route_rows(plan, spec),
+        )
+        return SkillExportOutcome(
+            status="previewed",
+            skill_id=skill_id,
+            skill_name=title,
+            planning_mode=str(plan.planning_mode),
+            used_capabilities=used_rows,
+            unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
+            routes=_route_rows(plan, spec),
+            unresolved_branches=_unresolved_rows(plan),
+            plan=plan.model_dump(mode="json"),
+        )
     view = build_export_view(spec, plan.selected_capability_ids)
     _log_export(
         "skill.export.view_ready",
@@ -814,31 +839,33 @@ def _assert_package_matches_plan(export_path: str, plan: SkillPlan) -> None:
         raise RuntimeError("Skill 包校验失败：" + json.dumps(validation["issues"], ensure_ascii=False))
     contract_path = root / "references" / "CONTRACT.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    selected = [str(item) for item in (contract.get("selected_capability_ids") or [])]
-    if selected != list(plan.selected_capability_ids):
-        raise RuntimeError("CONTRACT.json 所选能力与规划不一致")
-    route_ids = {str(item.get("route_id") or "") for item in (contract.get("routes") or [])}
-    if route_ids != {route.route_id for route in plan.routes}:
-        raise RuntimeError("CONTRACT.json 路线与规划不一致")
-    unused = {str(item.get("capability_id") or "") for item in (contract.get("unused_capabilities") or [])}
-    selected_set = set(plan.selected_capability_ids)
-    for item in plan.unused_capabilities:
-        if item.capability_id in selected_set:
-            raise RuntimeError(f"未使用能力进入了导出 CONTRACT: {item.capability_id}")
-        if item.capability_id not in unused:
-            raise RuntimeError(f"未使用能力未写入 CONTRACT: {item.capability_id}")
+    selected = [str(item) for item in (contract.get("selected_operations") or []) if str(item)]
+    if len(selected) != len(plan.selected_capability_ids):
+        raise RuntimeError("CONTRACT.json 公开操作数量与规划不一致")
+    contract_routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
+    contract_shapes = {
+        (
+            str(item.get("name") or ""),
+            len(item.get("operation_sequence") or []),
+            bool(item.get("requires_confirmation")),
+        )
+        for item in contract_routes
+    }
+    planned_shapes = {
+        (route.name, len(route.capability_sequence), bool(route.requires_confirmation))
+        for route in plan.routes
+    }
+    if contract_shapes != planned_shapes:
+        raise RuntimeError("CONTRACT.json 公开路线与规划不一致")
     names = {
-        str(item.get("name") or item.get("capability_id") or "")
+        str(item.get("name") or "")
         for item in (contract.get("capabilities") or [])
     }
     for item in plan.unused_capabilities:
-        if item.name and item.name in names and item.capability_id not in selected_set:
+        if item.name and item.name in names:
             raise RuntimeError(f"未使用能力出现在公共脚本列表: {item.name}")
-    payload = plan_to_contract_payload(plan)
-    if payload["planning_mode"] != contract.get("planning_mode"):
+    if str(plan.planning_mode) != contract.get("planning_mode"):
         raise RuntimeError("SKILL 规划模式与 CONTRACT 不一致")
-    if plan.intent_branches and not contract.get("intent_branches"):
-        raise RuntimeError("CONTRACT.json 缺少 intent_branches，无法审计自然语言分支")
 
 
 def _default_render(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001

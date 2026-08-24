@@ -138,6 +138,7 @@ export interface SkillGenerationRequest {
   forbidden_actions?: string;
   out_dir?: string;
   require_stage_seven?: boolean;
+  preview_only?: boolean;
 }
 
 export interface SkillExportOutcome {

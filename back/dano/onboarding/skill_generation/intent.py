@@ -387,6 +387,13 @@ def _expand_order(
 ) -> tuple[list[list[FlowCapability]], list[str]]:
     left, left_unresolved = _match_alternatives(left_text, caps)
     right, right_unresolved = _match_alternatives(right_text, caps)
+    # Narrative clauses often contain earlier context before the real connector,
+    # for example「审核后……反审核后重新修改」.  Without an explicit parallel
+    # list, the operation nearest the connector is the only safe left-hand side.
+    if len(left) > 1 and not _LIST_SPLIT.search(left_text):
+        left = left[-1:]
+    if len(right) > 1 and not _LIST_SPLIT.search(right_text):
+        right = right[:1]
     unresolved = [*left_unresolved, *right_unresolved]
     if unresolved:
         return [], [
@@ -404,6 +411,35 @@ def _expand_order(
     if not sequences:
         return [], [f"「{left_text.strip()} → {right_text.strip()}」没有可执行的能力顺序"]
     return sequences, []
+
+
+def _narrative_lookup_orders(
+    text: str,
+    caps: list[FlowCapability],
+) -> list[list[FlowCapability]]:
+    """Recognize the narrow, common「搜索定位，查看详情」handoff."""
+
+    hits = _alias_hits(text, caps)
+    found: list[list[FlowCapability]] = []
+    seen: set[tuple[str, str]] = set()
+    for index in range(len(hits) - 1):
+        _start, end, left, _alias = hits[index]
+        right_start, _right_end, right, _right_alias = hits[index + 1]
+        left_title = _cap_title(left)
+        right_title = _cap_title(right)
+        between = str(text or "")[end:right_start]
+        pair = (capability_ref(left), capability_ref(right))
+        if pair in seen or pair[0] == pair[1]:
+            continue
+        if is_write_capability(left) or is_write_capability(right):
+            continue
+        left_is_lookup = any(token in left_title for token in ("查询", "搜索", "筛选", "检索"))
+        right_is_detail = any(token in right_title for token in ("详情", "详细"))
+        connector_is_lookup = any(token in between for token in ("定位", "选定", "找到", "查到"))
+        if left_is_lookup and right_is_detail and connector_is_lookup:
+            seen.add(pair)
+            found.append([left, right])
+    return found
 
 
 def _sentence_orders(
@@ -435,7 +471,7 @@ def _sentence_orders(
         if matched:
             continue
         mention_orders = _orders_from_mentions(raw, caps)
-        found.extend(mention_orders)
+        found.extend(mention_orders or _narrative_lookup_orders(raw, caps))
     return found, unresolved
 
 
