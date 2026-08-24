@@ -756,6 +756,60 @@ def test_short_semantic_scalar_is_materialized_as_runtime_dependency() -> None:
     assert spec.steps[1].params[0].source_kind == "previous_response"
 
 
+def test_parallel_create_and_edit_fields_share_grounded_business_name() -> None:
+    def fields(stock_label: str, *, grounded: bool) -> list[ParamField]:
+        return [
+            ParamField(path="customerId", key="customerId", label="客户"),
+            ParamField(path="items[0].count", key="count", label="数量"),
+            ParamField(
+                path="items[0].stockCount",
+                key="stockCount",
+                label=stock_label,
+                type="number",
+                wire_type="number",
+                name_source="dom" if grounded else "auto",
+                confidence_tier="linked" if grounded else "clarify",
+            ),
+        ]
+
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=fields("stockCount", grounded=False),
+        source_meta={"page_id": "orders", "frame_id": "main"},
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        params=fields("库存", grounded=True),
+        source_meta={"page_id": "orders", "frame_id": "main"},
+    )
+    unrelated = FlowStep(
+        step_id="customer-create",
+        method="POST",
+        path="/customers/create",
+        params=fields("stockCount", grounded=False),
+        source_meta={"page_id": "orders", "frame_id": "main"},
+    )
+    spec = FlowSpec(
+        steps=[create, update, unrelated],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _apply_mechanical_field_contracts(spec)
+
+    create_stock = next(param for param in create.params if param.key == "stockCount")
+    assert create_stock.label == "库存"
+    assert create_stock.name_source == "recorded_parallel_field"
+    assert create_stock.type == "number"
+    unrelated_stock = next(
+        param for param in unrelated.params if param.key == "stockCount"
+    )
+    assert unrelated_stock.label == "stockCount"
+
+
 def test_readonly_recorded_default_does_not_override_confirmed_edit_hydration() -> None:
     stock_param = ParamField(
         path="items[0].stockCount",

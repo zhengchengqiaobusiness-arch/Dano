@@ -816,6 +816,112 @@ def _param_has_grounded_public_name(param: ParamField) -> bool:
     )
 
 
+_PARALLEL_FORM_OPERATION_SEGMENTS = frozenset({
+    "create", "add", "insert", "update", "edit", "modify", "save",
+})
+
+
+def _parallel_form_schema_path(param: ParamField) -> str:
+    source = param.source or {}
+    path = str(source.get("schema_identity_path") or param.path or "")
+    path = path.removeprefix("request.")
+    for prefix in ("body.", "query.", "path."):
+        path = path.removeprefix(prefix)
+    return re.sub(r"\[(?:\d+|\*)\]", "[]", path)
+
+
+def _parallel_form_resource(step: FlowStep) -> str:
+    path = str(step.path or step.url or "").split("?", 1)[0].rstrip("/")
+    segments = [segment for segment in path.split("/") if segment]
+    if segments and segments[-1].casefold() in _PARALLEL_FORM_OPERATION_SEGMENTS:
+        segments.pop()
+    return "/".join(segments).casefold()
+
+
+def _propagate_grounded_parallel_field_names(spec: FlowSpec) -> int:
+    """Share a recorder-grounded name across equivalent create/edit forms."""
+    write_steps = [
+        step for step in spec.steps
+        if str(step.method or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+    ]
+    paths_by_step = {
+        step.step_id: {
+            _parallel_form_schema_path(param)
+            for param in step.params
+            if _parallel_form_schema_path(param)
+        }
+        for step in write_steps
+    }
+
+    def equivalent(left: FlowStep, right: FlowStep) -> bool:
+        left_meta = left.source_meta or {}
+        right_meta = right.source_meta or {}
+        left_page = str(left_meta.get("page_id") or "")
+        right_page = str(right_meta.get("page_id") or "")
+        if not left_page or left_page != right_page:
+            return False
+        if str(left_meta.get("frame_id") or "") != str(right_meta.get("frame_id") or ""):
+            return False
+        if _parallel_form_resource(left) != _parallel_form_resource(right):
+            return False
+        left_paths = paths_by_step[left.step_id]
+        right_paths = paths_by_step[right.step_id]
+        shared = left_paths & right_paths
+        return bool(
+            len(shared) >= 3
+            and len(shared) / min(len(left_paths), len(right_paths)) >= 0.75
+        )
+
+    changed = 0
+    for target_step in write_steps:
+        peers = [
+            step for step in write_steps
+            if step is not target_step and equivalent(target_step, step)
+        ]
+        if not peers:
+            continue
+        for target in target_step.params:
+            if (
+                _param_field_manually_edited(target, "label")
+                or _param_has_grounded_public_name(target)
+            ):
+                continue
+            current_name = str(target.label or target.key or "").strip()
+            path_leaf = str(target.path or "").split(".")[-1]
+            if current_name not in {"", str(target.key or ""), path_leaf}:
+                continue
+            schema_path = _parallel_form_schema_path(target)
+            donors = [
+                (peer, param)
+                for peer in peers
+                for param in peer.params
+                if _parallel_form_schema_path(param) == schema_path
+                and _param_has_grounded_public_name(param)
+                and str(param.label or "").strip()
+            ]
+            labels = {str(param.label or "").strip() for _, param in donors}
+            if len(labels) != 1:
+                continue
+            donor_step, donor = donors[-1]
+            label = labels.pop()
+            if label == current_name:
+                continue
+            target.label = label
+            target.name_source = "recorded_parallel_field"
+            target.confidence = max(float(target.confidence or 0.0), 0.95)
+            target.confidence_tier = "linked"
+            target.evidence = [*(target.evidence or []), {
+                "kind": "parallel_field_name",
+                "source": "recorder_dom",
+                "step_id": donor_step.step_id,
+                "wire_path": donor.path,
+                "schema_identity_path": schema_path,
+                "label": label,
+            }]
+            changed += 1
+    return changed
+
+
 def _param_has_grounded_type(param: ParamField) -> bool:
     """Return whether evidence grounds the business type, not its wire shape."""
     if _param_has_full_lock(param) or _param_field_manually_edited(param, "type"):

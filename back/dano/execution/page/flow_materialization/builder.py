@@ -81,6 +81,7 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
     _audit_step_param_contracts,
     _param_field_manually_edited,
     _param_has_manual_contract,
+    _propagate_grounded_parallel_field_names,
 )
 from dano.execution.page.flow_materialization.links import (
     _auto_dependency_link_allowed,
@@ -1808,6 +1809,7 @@ def _apply_mechanical_field_contracts(spec: FlowSpec) -> None:
     _infer_computed_runtime_fields(spec)
     _apply_create_form_field_contracts(spec)
     _apply_edit_form_field_contracts(spec)
+    _propagate_grounded_parallel_field_names(spec)
     _apply_row_command_field_contracts(spec)
     _apply_query_form_field_contracts(spec)
     _apply_successful_omit_optional(spec)
