@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import dano.execution.page.request_capture as request_capture
 import dano.onboarding.recording_gateway as recording_gateway
 from dano.agent_tools.tools import _apply_recording_submission_atomic
 from dano.execution.page.capability_compiler import compile_capabilities
@@ -24,6 +25,8 @@ from dano.execution.page.flow_spec_core.models import (
     SelectBinding,
 )
 from dano.execution.page.flow_spec_core.request_contract import _runtime_select_bindings
+from dano.execution.page.flow_spec_core.request_contract import _compile_row_enrichment
+from dano.execution.page.flow_spec_core.request_contract import _compile_option_provider_link
 from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
     _materialize_dynamic_array_inputs,
 )
@@ -279,6 +282,137 @@ def test_edit_prefill_option_binding_remains_runtime_executable() -> None:
     )
 
     assert [binding["param"] for binding in _runtime_select_bindings(step)] == ["customerId"]
+
+
+def test_repeating_row_preflight_is_compiled_as_row_enrichment() -> None:
+    source = {
+        "step_id": "stock",
+        "method": "GET",
+        "path": "/stock/count",
+        "query_template": {"productId": "{{stock_product_id}}"},
+        "params": ["stock_product_id"],
+        "selects": [{
+            "param": "stock_product_id",
+            "path": "query.productId",
+            "source_url": "/products/options",
+            "value_key": "id",
+            "label_key": "name",
+        }],
+    }
+    target = {
+        "step_id": "create",
+        "method": "POST",
+        "path": "/orders/create",
+        "selects": [{
+            "param": "items",
+            "path": "items",
+            "multi": True,
+            "label_subkey": "productId",
+            "source_url": "/products/options",
+            "value_key": "id",
+            "label_key": "name",
+        }],
+    }
+
+    assert _compile_row_enrichment(
+        source,
+        target,
+        target_path="items[0].stockCount",
+        source_path="data",
+    )
+    enrichment = target["selects"][0]["row_enrichments"][0]
+    assert enrichment["source_param"] == "stock_product_id"
+    assert enrichment["selector_field"] == "productId"
+    assert enrichment["target_field"] == "stockCount"
+    assert enrichment["response_path"] == "data"
+
+
+def test_option_collection_link_is_not_compiled_as_scalar_override() -> None:
+    source = {
+        "step_id": "customers",
+        "method": "GET",
+        "path": "/customers/options",
+    }
+    target = {
+        "step_id": "create",
+        "method": "POST",
+        "path": "/orders/create",
+        "selects": [{
+            "param": "customerId",
+            "path": "customerId",
+            "source_url": "/customers/options",
+            "value_key": "id",
+            "label_key": "name",
+        }],
+    }
+
+    assert _compile_option_provider_link(
+        source,
+        target,
+        target_path="customerId",
+        source_path="data[].id",
+    )
+
+
+def test_repeating_row_selector_runs_dependent_source_for_each_row(monkeypatch) -> None:
+    async def fetch_products(*_args, **_kwargs):
+        return request_capture._FetchedItems([
+            {"id": 7, "name": "Laptop", "unitName": "box"},
+            {"id": 8, "name": "Phone", "unitName": "piece"},
+        ])
+
+    calls: list[int] = []
+
+    async def execute_enrichment(_request, fields, **_kwargs):
+        product_id = int(fields["stock_product_id"])
+        calls.append(product_id)
+        return {"ok": True, "response": {"data": {7: 12, 8: 3}[product_id]}}
+
+    monkeypatch.setattr(request_capture, "_fetch_select_list", fetch_products)
+    monkeypatch.setattr(request_capture, "execute_api_request", execute_enrichment)
+    api_request = {
+        "selects": [{
+            "param": "items",
+            "path": "items",
+            "multi": True,
+            "label_subkey": "productId",
+            "source_url": "/products/options",
+            "value_key": "id",
+            "label_key": "name",
+            "element_template": {
+                "productId": {"item_key": "id"},
+                "unitName": {"item_key": "unitName"},
+            },
+            "row_enrichments": [{
+                "request": {"method": "GET", "path": "/stock/count"},
+                "source_param": "stock_product_id",
+                "selector_field": "productId",
+                "target_field": "stockCount",
+                "response_path": "data",
+            }],
+        }],
+    }
+    fields = {
+        "items": [
+            {"productId": "Laptop", "count": 2},
+            {"productId": "Phone", "count": 1},
+        ],
+    }
+
+    resolved = asyncio.run(request_capture._resolve_list_selects(
+        api_request,
+        fields,
+        base_url="https://example.test",
+        storage_state=None,
+        token_key=None,
+        verify=True,
+    ))
+
+    assert calls == [7, 8]
+    assert resolved["items"] == [
+        {"productId": 7, "count": 2, "unitName": "box", "stockCount": 12},
+        {"productId": 8, "count": 1, "unitName": "piece", "stockCount": 3},
+    ]
 
 
 def test_field_and_relation_backlog_does_not_block_complete_capability_snapshot() -> None:

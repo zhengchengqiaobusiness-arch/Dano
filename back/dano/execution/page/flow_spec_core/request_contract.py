@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 import copy
 import hashlib
+import re
 from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
@@ -224,7 +225,7 @@ def _compiled_capability_step(step: dict[str, Any]) -> dict[str, Any]:
         "step_id", "step_name", "method", "url", "url_template", "path",
         "content_type", "body_template", "query_template", "params", "success_rule",
         "field_types", "wire_formats", "runtime_fields", "selects", "system_values",
-        "fact_check",
+        "fact_check", "deferred_selection_provider",
     }
     contract = {
         key: copy.deepcopy(value)
@@ -242,6 +243,94 @@ def _compiled_capability_step(step: dict[str, Any]) -> dict[str, Any]:
         if isinstance(binding, dict)
     ]
     return contract
+
+
+_ARRAY_LINK_TARGET_RE = re.compile(
+    r"^(?P<container>.+?)\[(?:\d+|\*)\]\.(?P<field>.+)$"
+)
+
+
+def _select_endpoint(value: Any) -> str:
+    return (urlparse(str(value or "")).path or str(value or "")).rstrip("/")
+
+
+def _compile_row_enrichment(
+    source_step: dict[str, Any],
+    target_step: dict[str, Any],
+    *,
+    target_path: str,
+    source_path: str,
+) -> bool:
+    """Fold a captured per-row preflight into its repeating-row selector."""
+    match = _ARRAY_LINK_TARGET_RE.fullmatch(str(target_path or ""))
+    if match is None:
+        return False
+    container = str(match.group("container") or "")
+    target_field = str(match.group("field") or "")
+    target_bindings = [
+        binding for binding in (target_step.get("selects") or [])
+        if isinstance(binding, dict)
+        and binding.get("multi") is True
+        and str(binding.get("path") or binding.get("param") or "") == container
+        and binding.get("label_subkey")
+    ]
+    source_bindings = [
+        binding for binding in (source_step.get("selects") or [])
+        if isinstance(binding, dict)
+        and binding.get("multi") is not True
+        and binding.get("param")
+    ]
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for target_binding in target_bindings:
+        for source_binding in source_bindings:
+            if (
+                _select_endpoint(target_binding.get("source_url"))
+                and _select_endpoint(target_binding.get("source_url"))
+                == _select_endpoint(source_binding.get("source_url"))
+                and str(target_binding.get("value_key") or "")
+                == str(source_binding.get("value_key") or "")
+                and str(target_binding.get("label_key") or "")
+                == str(source_binding.get("label_key") or "")
+            ):
+                pairs.append((target_binding, source_binding))
+    if len(pairs) != 1:
+        return False
+    target_binding, source_binding = pairs[0]
+    request = copy.deepcopy(source_step)
+    request.pop("links", None)
+    request.pop("structure_links", None)
+    request.pop("deferred_selection_provider", None)
+    enrichment = {
+        "request": request,
+        "source_param": str(source_binding["param"]),
+        "selector_field": str(target_binding["label_subkey"]),
+        "target_field": target_field,
+        "response_path": source_path,
+    }
+    target_binding.setdefault("row_enrichments", []).append(enrichment)
+    return True
+
+
+def _compile_option_provider_link(
+    source_step: dict[str, Any],
+    target_step: dict[str, Any],
+    *,
+    target_path: str,
+    source_path: str,
+) -> bool:
+    """Recognize collection-to-selector evidence without injecting the collection."""
+    if "[]" not in str(source_path or "") and "[*]" not in str(source_path or ""):
+        return False
+    source_endpoint = _select_endpoint(source_step.get("url") or source_step.get("path"))
+    matches = [
+        binding for binding in (target_step.get("selects") or [])
+        if isinstance(binding, dict)
+        and binding.get("multi") is not True
+        and str(binding.get("path") or binding.get("id_path") or "") == str(target_path or "")
+        and source_endpoint
+        and _select_endpoint(binding.get("source_url")) == source_endpoint
+    ]
+    return len(matches) == 1
 
 
 def _flow_step_query_template(
@@ -730,6 +819,8 @@ def flow_spec_to_api_request(
     if not built_steps:
         return None, ["FlowSpec 没有可发布的请求步骤"]
 
+    outgoing_links: dict[int, int] = {}
+    deferred_provider_links: dict[int, int] = {}
     for lk in spec.links:
         if active_step_ids is not None and not (
             lk.source_step_id in active_step_ids and lk.target_step_id in active_step_ids
@@ -740,6 +831,7 @@ def flow_spec_to_api_request(
             continue
         target_idx = step_id_to_index[lk.target_step_id]
         source_idx = step_id_to_index[lk.source_step_id]
+        outgoing_links[source_idx] = outgoing_links.get(source_idx, 0) + 1
         if source_idx >= target_idx:
             errors.append(f"链接 `{lk.link_id}` 的来源步骤必须早于目标步骤")
             continue
@@ -769,6 +861,22 @@ def flow_spec_to_api_request(
                 })
             built_steps[target_idx].setdefault("structure_links", []).append(structure_link)
             continue
+        if _compile_row_enrichment(
+            built_steps[source_idx],
+            built_steps[target_idx],
+            target_path=target_path,
+            source_path=source_path,
+        ):
+            deferred_provider_links[source_idx] = deferred_provider_links.get(source_idx, 0) + 1
+            continue
+        if _compile_option_provider_link(
+            built_steps[source_idx],
+            built_steps[target_idx],
+            target_path=target_path,
+            source_path=source_path,
+        ):
+            deferred_provider_links[source_idx] = deferred_provider_links.get(source_idx, 0) + 1
+            continue
         built_steps[target_idx].setdefault("links", []).append({
             "target_path": target_path,
             "target_tokens": lk.target_tokens,
@@ -776,6 +884,19 @@ def flow_spec_to_api_request(
             "source_path": source_path,
             "source_tokens": lk.source_tokens,
         })
+    public_execute_step_ids = {
+        str(ref.step_id or "")
+        for capability in (spec.capabilities or [])
+        for ref in (capability.request_refs or [])
+        if ref.usage == "execute" and ref.step_id
+    }
+    for source_idx, count in deferred_provider_links.items():
+        source_step_id = str(built_steps[source_idx].get("step_id") or "")
+        if (
+            count == outgoing_links.get(source_idx)
+            and source_step_id not in public_execute_step_ids
+        ):
+            built_steps[source_idx]["deferred_selection_provider"] = True
     if errors:
         return None, errors
 

@@ -3845,13 +3845,41 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             projected = _build_element(it, tmpl, nm, label_sub)
             if rows is None:
                 _apply_list_option_projections(projected, it, s, str(param))
-                built.append(projected)
-                continue
-            row = copy.deepcopy(rows[index])
-            for key, value in projected.items():
-                if key == label_sub or _get_by_path(row, key) in (None, ""):
-                    _set_by_path(row, key, value)
-            _apply_list_option_projections(row, it, s, str(param))
+                row = projected
+            else:
+                row = copy.deepcopy(rows[index])
+                for key, value in projected.items():
+                    if key == label_sub or _get_by_path(row, key) in (None, ""):
+                        _set_by_path(row, key, value)
+                _apply_list_option_projections(row, it, s, str(param))
+            for enrichment in s.get("row_enrichments") or []:
+                request = enrichment.get("request") if isinstance(enrichment, dict) else None
+                source_param = str((enrichment or {}).get("source_param") or "")
+                selector_field = str((enrichment or {}).get("selector_field") or label_sub or "")
+                target_field = str((enrichment or {}).get("target_field") or "")
+                response_path = str((enrichment or {}).get("response_path") or "")
+                selector_value = _get_by_path(row, selector_field)
+                if not isinstance(request, dict) or not source_param or not target_field or selector_value is None:
+                    continue
+                enrichment_fields = {**fields, source_param: selector_value}
+                enrichment_result = await execute_api_request(
+                    request,
+                    enrichment_fields,
+                    base_url=base_url,
+                    storage_state=storage_state,
+                    send=True,
+                    verify=verify,
+                    token_key=token_key,
+                )
+                if not enrichment_result.get("ok"):
+                    raise RuntimeError(
+                        enrichment_result.get("detail")
+                        or f"选择字段 {param} 的逐行来源接口执行失败"
+                    )
+                response = enrichment_result.get("response")
+                value = _get_by_path(response, response_path) if response_path else response
+                if value is not None:
+                    _set_by_path(row, target_field, value)
             built.append(row)
         fields[param] = built
     return fields
@@ -4083,6 +4111,14 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     覆盖 identity 字段(申请人=谁调用就是谁,不冻结成录制者);③ overrides 把上一步响应值注入本步 body
     (Q3 步链,如 taskId)。dry 不连网,只校验参数齐全。
     """
+    if api_request.get("deferred_selection_provider") is True:
+        return {
+            "ok": True,
+            "skipped": True,
+            "deferred_selection_provider": True,
+            "response": None,
+            "detail": "该选项来源由目标字段选择器在运行期执行",
+        }
     fields = _apply_runtime_fields(dict(fields), api_request)
     sel_overrides: dict = {}
     if send:                                                 # 选择型:名字→ID(需连网查候选列表);名/ID 配对返回 id 覆盖
