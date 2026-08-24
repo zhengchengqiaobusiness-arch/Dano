@@ -2327,7 +2327,6 @@ def apply_recording_agent_edit(spec, edit: dict, *, record: bool = True) -> dict
             _require_label_grounding(
                 spec, step, param, label, evidence_refs=evidence_refs,
             )
-            param.key = label
             param.label = label
             param.name_source = "agent"
             param.evidence = [

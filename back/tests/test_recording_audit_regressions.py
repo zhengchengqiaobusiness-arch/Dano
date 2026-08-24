@@ -682,6 +682,8 @@ def test_field_axis_edits_run_before_semantic_plan_compilation() -> None:
 
     account = next(param for param in result.steps[0].params if param.path == "accountId")
     assert account.label == "结算账户"
+    assert account.key == "accountId"
+    assert account.path == "accountId"
     assert result.meta["capability_model"]["semantic_coverage"]["complete"] is True
     assert len(result.capabilities) == 1
     assert recording_capability_plan_complete(result)
