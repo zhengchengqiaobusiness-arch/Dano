@@ -368,6 +368,23 @@ def _select_param_for_runtime(step: FlowStep, binding: SelectBinding) -> ParamFi
             if param.path == binding.path
         ), None)
         if matched is not None:
+            if (
+                binding.multi
+                and str((matched.source or {}).get("kind") or "") == "dynamic_structure_input"
+                and binding.label_subkey
+            ):
+                container = str(
+                    (matched.source or {}).get("array_container_path")
+                    or matched.path
+                    or ""
+                )
+                nested = next((
+                    param for param in (step.params or [])
+                    if str((param.source or {}).get("array_container_path") or "") == container
+                    and str((param.source or {}).get("array_item_path") or "") == str(binding.label_subkey)
+                ), None)
+                if nested is not None:
+                    return nested
             return matched
     if binding.id_path:
         return next((
@@ -391,6 +408,11 @@ def _select_binding_is_runtime_executable(step: FlowStep, binding: SelectBinding
     if param is None or param.category != "user_param" or not param.exposed_to_user:
         return False
     source_kind = str(param.source_kind or "")
+    source = dict(param.source or {})
+    nested_option = source.get("option_source")
+    if isinstance(nested_option, dict) and nested_option:
+        source_kind = "api_option"
+        source = nested_option
     if source_kind not in {"api_option", *_ENUM_SOURCE_KINDS}:
         return False
     if (
@@ -400,7 +422,7 @@ def _select_binding_is_runtime_executable(step: FlowStep, binding: SelectBinding
     ):
         return False
     if source_kind == "api_option":
-        configured_url = str((param.source or {}).get("source_url") or "").strip()
+        configured_url = str(source.get("source_url") or "").strip()
         if configured_url and _request_path({"url": configured_url}) != _request_path({"url": binding.source_url}):
             return False
         return bool(binding.source_url and binding.value_key and binding.label_key)

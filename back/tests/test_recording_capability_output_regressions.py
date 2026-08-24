@@ -23,6 +23,10 @@ from dano.execution.page.flow_spec_core.models import (
     RequestUsage,
     SelectBinding,
 )
+from dano.execution.page.flow_spec_core.request_contract import _runtime_select_bindings
+from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+    _materialize_dynamic_array_inputs,
+)
 from dano.execution.page.recording_agent_contract import (
     apply_recording_agent_submission,
     recording_agent_submission_status,
@@ -139,6 +143,142 @@ def test_capability_compile_keeps_transitive_option_source_steps() -> None:
     assert _capability_view_step_ids(spec, capability) == [
         "product-options", "stock", "create",
     ]
+
+
+def test_dynamic_array_selector_replaces_stale_aggregate_binding() -> None:
+    aggregate = ParamField(
+        path="items",
+        key="items",
+        value=[{"productId": 7, "count": 1}],
+        type="array",
+        wire_type="array",
+        category="user_param",
+        source_kind="user_input",
+        source={
+            "kind": "dynamic_structure_input",
+            "structure_kind": "array_object",
+            "array_container_path": "items",
+        },
+    )
+    product = ParamField(
+        path="items[0].productId",
+        key="productId",
+        value=7,
+        category="user_param",
+        source_kind="api_option",
+        source={
+            "kind": "api_option",
+            "source_url": "/products/options",
+            "source_request_id": "req-products",
+            "array_container_path": "items",
+            "array_item_path": "productId",
+        },
+    )
+    unit = ParamField(
+        path="items[0].unitName",
+        key="unitName",
+        value="box",
+        category="runtime_var",
+        source_kind="selected_option_field",
+        exposed_to_user=False,
+        editable=False,
+        source={
+            "kind": "selected_option_field",
+            "selector_path": "items[0].productId",
+            "response_path": "unitName",
+            "array_container_path": "items",
+            "array_item_path": "unitName",
+        },
+    )
+    count = ParamField(
+        path="items[0].count",
+        key="count",
+        value=1,
+        category="user_param",
+        source_kind="user_input",
+        source={"array_container_path": "items", "array_item_path": "count"},
+    )
+    stale = SelectBinding(
+        param="items",
+        path="items",
+        source_url="/products/options",
+        value_key="id",
+        label_key="name",
+        multi=True,
+        label_subkey="productId",
+        element_template={
+            "productId": {"item_key": "id"},
+            "count": {"item_key": "items[0].count"},
+            "stockCount": {"item_key": "accountId"},
+        },
+        field_projections={
+            "count": "items[0].count",
+            "stockCount": "accountId",
+        },
+        enum_confirmed=True,
+    )
+    selector = SelectBinding(
+        param="productId",
+        path="items[0].productId",
+        source_url="/products/options",
+        source_request_id="req-products",
+        value_key="id",
+        label_key="name",
+        enum_confirmed=True,
+    )
+    step = FlowStep(
+        step_id="create",
+        params=[aggregate, product, unit, count],
+        selects=[stale, selector],
+    )
+    spec = FlowSpec()
+    spec.steps = [step]
+
+    _materialize_dynamic_array_inputs(spec)
+
+    bindings = [binding for binding in step.selects if binding.path == "items"]
+    assert len(bindings) == 1
+    assert bindings[0].source_request_id == "req-products"
+    assert bindings[0].element_template == {
+        "productId": {"item_key": "id"},
+        "unitName": {"item_key": "unitName"},
+    }
+    assert bindings[0].field_projections == {"items[*].unitName": "unitName"}
+    runtime = _runtime_select_bindings(step)
+    assert len(runtime) == 1
+    assert runtime[0]["param"] == "items"
+
+
+def test_edit_prefill_option_binding_remains_runtime_executable() -> None:
+    step = FlowStep(
+        step_id="update",
+        params=[ParamField(
+            path="customerId",
+            key="customerId",
+            value=8,
+            category="user_param",
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "allow_caller_override": True,
+                "option_source": {
+                    "source_url": "/customers/options",
+                    "value_key": "id",
+                    "label_key": "name",
+                },
+            },
+        )],
+        selects=[SelectBinding(
+            param="customerId",
+            path="customerId",
+            source_url="/customers/options",
+            value_key="id",
+            label_key="name",
+            enum_confirmed=True,
+        )],
+    )
+
+    assert [binding["param"] for binding in _runtime_select_bindings(step)] == ["customerId"]
 
 
 def test_field_and_relation_backlog_does_not_block_complete_capability_snapshot() -> None:

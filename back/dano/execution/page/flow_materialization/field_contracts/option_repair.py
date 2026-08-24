@@ -1121,6 +1121,7 @@ def _repair_structural_option_bindings(
             if (
                 param.locked
                 or param.source_kind in {"dynamic_structure", "selected_option_field"}
+                or str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
                 or _param_has_manual_contract(param)
                 or _param_has_grounded_direct_input_contract(param)
                 or (
