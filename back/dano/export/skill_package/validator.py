@@ -560,6 +560,20 @@ def _capability_schema_fields(item: dict) -> set[str]:
     return {str(name) for name, raw in properties.items() if isinstance(raw, dict)}
 
 
+def _capability_caller_fields(item: dict) -> set[str]:
+    schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    return {
+        str(name)
+        for name, raw in properties.items()
+        if isinstance(raw, dict)
+        and raw.get("x-dano-derived-from-query") is not True
+        and raw.get("x-dano-internal") is not True
+        and raw.get("x-dano-display") is not False
+        and raw.get("x-dano-visibility") != "internal"
+    }
+
+
 def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) -> None:
     caps: dict[str, dict] = {}
     for item in contract.get("capabilities") or []:
@@ -573,7 +587,8 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
     for item in contract.get("capabilities") or []:
         if not isinstance(item, dict):
             continue
-        fields = _capability_schema_fields(item)
+        schema_fields = _capability_schema_fields(item)
+        fields = _capability_caller_fields(item)
         title = str(item.get("title") or item.get("name") or "")
         name = str(item.get("name") or "")
         section = ""
@@ -597,12 +612,12 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
             ))
         script = Path(str(item.get("script") or ""))
         script_path = root / script if str(script) else None
-        if script_path and script_path.is_file() and fields:
+        if script_path and script_path.is_file() and schema_fields:
             source = script_path.read_text(encoding="utf-8")
             if "PLAN = json.loads" in source or "PLAN=json.loads" in source:
                 missing = [
                     field
-                    for field in sorted(fields)
+                    for field in sorted(schema_fields)
                     if f'"{field}"' not in source and f"'{field}'" not in source
                 ]
                 if missing:
@@ -621,7 +636,7 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
             cap = caps.get(str(step.get("capability_id") or ""))
             if cap is None:
                 continue
-            allowed = _capability_schema_fields(cap)
+            allowed = _capability_caller_fields(cap)
             for source in step.get("input_sources") or []:
                 if not isinstance(source, dict):
                     continue
@@ -641,7 +656,7 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
             present = False
             for cap_id in route.get("capability_sequence") or []:
                 cap = caps.get(str(cap_id))
-                if cap is not None and name in _capability_schema_fields(cap):
+                if cap is not None and name in _capability_caller_fields(cap):
                     present = True
                     break
             if not present:

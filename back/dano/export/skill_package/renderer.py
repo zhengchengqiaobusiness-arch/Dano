@@ -1,6 +1,7 @@
 """Render published page recordings as self-contained, direct-API skill packages."""
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -357,6 +358,99 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
     return schema
 
 
+def _capability_aliases(capability: dict) -> set[str]:
+    return {
+        str(capability.get("capability_id") or ""),
+        str(capability.get("name") or ""),
+    } - {""}
+
+
+def _confirmed_acyclic_derived_fields(spec, capabilities: list[dict]) -> set[tuple[str, str]]:  # noqa: ANN001
+    """Return Stage-8 bindings that are selected, confirmed and reachable."""
+
+    if spec is None:
+        return set()
+    from dano.onboarding.skill_generation.catalog import relation_is_usable
+
+    canonical: dict[str, str] = {}
+    for capability in capabilities:
+        aliases = _capability_aliases(capability)
+        key = str(capability.get("capability_id") or capability.get("name") or "")
+        for alias in aliases:
+            canonical[alias] = key
+    confirmed = []
+    for relation in spec.capability_relations or []:
+        if not relation_is_usable(relation):
+            continue
+        source = canonical.get(str(relation.from_capability or ""))
+        target = canonical.get(str(relation.to_capability or ""))
+        if source and target and relation.to_input:
+            confirmed.append((source, target, str(relation.from_output or ""), str(relation.to_input)))
+
+    candidates: dict[tuple[str, str], str] = {}
+    graph: dict[str, set[str]] = {}
+    for capability in capabilities:
+        target = str(capability.get("capability_id") or capability.get("name") or "")
+        schema = capability.get("input_schema") if isinstance(capability.get("input_schema"), dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for field_name, raw in properties.items():
+            if not isinstance(raw, dict) or raw.get("x-dano-derived-from-query") is not True:
+                continue
+            source = canonical.get(str(raw.get("x-dano-source-capability") or ""))
+            source_output = str(raw.get("x-dano-source-output") or "")
+            if not source or not any(
+                relation_source == source
+                and relation_target == target
+                and relation_input == str(field_name)
+                and (not source_output or not relation_output or source_output == relation_output)
+                for relation_source, relation_target, relation_output, relation_input in confirmed
+            ):
+                continue
+            candidates[(target, str(field_name))] = source
+            graph.setdefault(target, set()).add(source)
+
+    def reaches(current: str, target: str, seen: set[str]) -> bool:
+        if current in seen:
+            return False
+        next_seen = {*seen, current}
+        return any(
+            next_node == target or reaches(next_node, target, next_seen)
+            for next_node in graph.get(current, set())
+        )
+
+    return {
+        key
+        for key, source in candidates.items()
+        if source != key[0] and not reaches(source, key[0], set())
+    }
+
+
+def _stage8_input_schema(
+    schema: dict[str, Any],
+    capability: dict,
+    confirmed_fields: set[tuple[str, str]],
+) -> dict[str, Any]:
+    packed = deepcopy(schema)
+    properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+    target = str(capability.get("capability_id") or capability.get("name") or "")
+    for field_name, raw in properties.items():
+        if not isinstance(raw, dict) or raw.get("x-dano-derived-from-query") is not True:
+            continue
+        if (target, str(field_name)) in confirmed_fields:
+            continue
+        source = str(raw.get("x-dano-source-capability") or "")
+        for key in (
+            "x-dano-derived-from-query",
+            "x-dano-source-capability",
+            "x-dano-source-output",
+            "x-dano-require-current-value",
+        ):
+            raw.pop(key, None)
+        if source and source in str(raw.get("description") or ""):
+            raw["description"] = "没有已确认的可达绑定时，由调用方提供并通过输入校验。"
+    return packed
+
+
 def _upstream_capability_schema(spec, skill, cap: dict) -> dict[str, Any]:  # noqa: ANN001
     keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
     if spec is not None:
@@ -395,7 +489,10 @@ def restore_compiled_capability_schemas(api_request: dict, spec) -> dict:  # noq
 def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
     plans: list[dict] = []
     used_scripts: set[str] = set()
-    for index, cap in enumerate(_capabilities(skill, spec, api_request), 1):
+    spec = spec or _flow_spec(skill)
+    capabilities = _capabilities(skill, spec, api_request)
+    confirmed_derived = _confirmed_acyclic_derived_fields(spec, capabilities)
+    for index, cap in enumerate(capabilities, 1):
         execution = dict(cap.get("execution_contract") or {})
         owned_steps = [
             dict(step) for step in (execution.get("steps") or [])
@@ -416,6 +513,7 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             cap.get("input_schema") or cap.get("parameters") or {},
             {} if capability_owned else _upstream_capability_schema(spec, skill, cap),
         )
+        schema = _stage8_input_schema(schema, cap, confirmed_derived)
         step_ids = (
             list(by_id)
             if capability_owned

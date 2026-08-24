@@ -6,12 +6,12 @@ from typing import Any
 
 from dano.execution.page.capability_kinds import READ_CAPABILITY_KINDS, WRITE_CAPABILITY_KINDS
 from dano.execution.page.flow_spec_core.models import CapabilityRelation, FlowCapability, FlowSpec
+from dano.execution.page.request_identity import normalized_request_path
 
 RISK_WRITE_KINDS = frozenset({
     "delete", "withdraw", "submit", "submit_batch", "approve", "reject",
 })
 _CONFIRMED_EVIDENCE = frozenset({"user_confirmed", "manual", "manual_relation", "typed_capability_contract"})
-_FIELD_MAPPED = frozenset({"external_transform", "data_mapping", "field_mapping"})
 
 
 def capability_ref(cap: FlowCapability) -> str:
@@ -47,6 +47,63 @@ def capability_family(cap: FlowCapability) -> str:
     if is_write_capability(cap) or any(token in title for token in ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")):
         return "write"
     return kind or "other"
+
+
+def _execute_endpoint_keys(spec: FlowSpec, cap: FlowCapability) -> set[tuple[str, str]]:
+    steps = {step.step_id: step for step in spec.steps}
+    step_ids = {
+        str(ref.step_id)
+        for ref in cap.request_refs or []
+        if str(ref.usage or "") == "execute" and str(ref.step_id or "")
+    }
+    if not step_ids:
+        step_ids = {str(item) for item in cap.step_ids or [] if str(item)}
+    return {
+        (
+            str(steps[step_id].method or "GET").upper(),
+            normalized_request_path(steps[step_id].url or steps[step_id].path),
+        )
+        for step_id in step_ids
+        if step_id in steps and normalized_request_path(steps[step_id].url or steps[step_id].path)
+    }
+
+
+def distinct_stage8_capabilities(
+    spec: FlowSpec,
+    caps: list[FlowCapability],
+) -> tuple[list[FlowCapability], dict[str, str]]:
+    """Hide only grounded fallback reads already represented by a named ability."""
+
+    model = dict((spec.meta or {}).get("capability_model") or {})
+    fallback_refs = {
+        str(item) for item in model.get("fallback_added_capabilities") or [] if str(item)
+    }
+    if not fallback_refs:
+        return list(caps), {}
+    primary = [
+        cap for cap in caps
+        if not ({capability_ref(cap), str(cap.name or "")} & fallback_refs)
+    ]
+    primary_keys = {
+        key
+        for cap in primary
+        if not is_write_capability(cap)
+        for key in _execute_endpoint_keys(spec, cap)
+    }
+    kept: list[FlowCapability] = []
+    duplicates: dict[str, str] = {}
+    for cap in caps:
+        refs = {capability_ref(cap), str(cap.name or "")}
+        duplicate = bool(
+            refs & fallback_refs
+            and not is_write_capability(cap)
+            and _execute_endpoint_keys(spec, cap) & primary_keys
+        )
+        if duplicate:
+            duplicates[capability_ref(cap)] = "与已选择能力使用相同只读接口，已合并重复能力"
+        else:
+            kept.append(cap)
+    return kept, duplicates
 
 
 def is_risk_write(cap: FlowCapability) -> bool:
@@ -191,15 +248,10 @@ def verified_capability_ids(
 
 def relation_is_usable(relation: CapabilityRelation) -> bool:
     relation_type = str(relation.type or "").strip().lower()
-    mode = str(relation.mode or "").strip().lower()
     evidence_kind = str((relation.evidence or {}).get("kind") or "").strip().lower()
     if relation_type == "suggested_call_chain" and not relation.confirmed:
         return False
-    if relation.confirmed or evidence_kind in _CONFIRMED_EVIDENCE:
-        return True
-    if mode in _FIELD_MAPPED and relation.from_output and relation.to_input:
-        return True
-    return False
+    return bool(relation.confirmed or evidence_kind in _CONFIRMED_EVIDENCE)
 
 
 def usable_relations(spec: FlowSpec) -> list[CapabilityRelation]:
@@ -208,10 +260,13 @@ def usable_relations(spec: FlowSpec) -> list[CapabilityRelation]:
 
 def public_capability_catalog(spec: FlowSpec, verified_ids: set[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for cap in spec.capabilities:
+    verified = [
+        cap for cap in spec.capabilities
+        if capability_ref(cap) in verified_ids or cap.name in verified_ids
+    ]
+    visible, _duplicates = distinct_stage8_capabilities(spec, verified)
+    for cap in visible:
         cap_id = capability_ref(cap)
-        if cap_id not in verified_ids and cap.name not in verified_ids:
-            continue
         rows.append({
             "capability_id": cap.capability_id,
             "name": cap.name,

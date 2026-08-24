@@ -142,7 +142,7 @@ def validate_skill_plan(
             result.error(f"动态模式必须覆盖全部已打包操作: {extra}")
         for item in plan.unused_capabilities:
             reason = str(item.reason or "")
-            if "禁止" not in reason and "限制" not in reason:
+            if not any(marker in reason for marker in ("禁止", "限制", "重复")):
                 result.error(f"动态模式不得因描述未点名而丢弃操作: {item.capability_id}")
     for cap in spec.capabilities:
         cap_id = capability_ref(cap)

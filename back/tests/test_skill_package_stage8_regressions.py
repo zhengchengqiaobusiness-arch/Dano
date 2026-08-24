@@ -5,19 +5,29 @@ from __future__ import annotations
 from pathlib import Path
 
 from dano.execution.page.flow_spec import FlowCapability, FlowSpec
+from dano.execution.page.flow_spec_core.models import (
+    CapabilityRelation,
+    CapabilityRequestRef,
+    FlowStep,
+)
 from dano.export.skill_package.renderer import (
     _capabilities_md,
     _capability_plans,
+    _input_forms_md,
     _options_md,
     _script_invocation,
 )
-from dano.export.skill_package.validator import _check_contract_semantics
+from dano.export.skill_package.validator import (
+    _check_contract_semantics,
+    _check_input_fact_alignment,
+)
 from dano.onboarding.skill_generation import (
     PlanningMode,
     SkillGenerationRequest,
     propose_deterministic_plan,
     validate_skill_plan,
 )
+from dano.onboarding.skill_generation.catalog import relation_is_usable
 
 
 def _cap(
@@ -269,3 +279,220 @@ def test_package_semantics_rejects_unconfirmed_writes_and_missing_combo(tmp_path
     codes = {issue["code"] for issue in issues}
     assert "write_confirmation" in codes
     assert "intent_combo_missing" in codes
+
+
+def test_stage8_drops_duplicate_grounded_fallback_read() -> None:
+    detail = FlowCapability(
+        capability_id="detail",
+        name="查看销售订单详情",
+        title="查看销售订单详情",
+        kind="inspect",
+        request_refs=[CapabilityRequestRef(
+            request_id="req-detail",
+            step_id="detail-step",
+            usage="execute",
+        )],
+        input_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    )
+    fallback = detail.model_copy(deep=True, update={
+        "capability_id": "fallback-detail",
+        "name": "get_get",
+        "title": "get_get",
+        "request_refs": [CapabilityRequestRef(
+            request_id="req-fallback",
+            step_id="fallback-step",
+            usage="execute",
+        )],
+    })
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="detail-step", method="GET", path="/orders/get"),
+            FlowStep(step_id="fallback-step", method="GET", path="/orders/get"),
+        ],
+        capabilities=[detail, fallback],
+        meta={"capability_model": {"fallback_added_capabilities": ["get_get"]}},
+    )
+    # Stage 8 receives the already materialized Stage-6 capability snapshot.
+    detail.request_refs = [CapabilityRequestRef(
+        request_id="req-detail", step_id="detail-step", usage="execute",
+    )]
+    fallback.request_refs = [CapabilityRequestRef(
+        request_id="req-fallback", step_id="fallback-step", usage="execute",
+    )]
+    spec.capabilities = [detail, fallback]
+
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="销售订单",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="查看销售订单详情。",
+        ),
+        {"detail", "fallback-detail"},
+        "fp-duplicate-read",
+    )
+
+    assert plan.selected_capability_ids == ["detail"]
+    duplicate = next(item for item in plan.unused_capabilities if item.capability_id == "fallback-detail")
+    assert "重复" in duplicate.reason
+    checked = validate_skill_plan(
+        plan,
+        spec,
+        verified_capability_ids={"detail", "fallback-detail"},
+        expected_fingerprint="fp-duplicate-read",
+    )
+    assert checked.ok, checked.errors
+
+
+def test_stage8_turns_dangling_derived_id_into_caller_input() -> None:
+    api_request = {
+        "steps": [{"step_id": "detail", "method": "GET", "path": "/orders/get"}],
+        "capabilities": [{
+            "capability_id": "detail",
+            "name": "查看销售订单详情",
+            "title": "查看销售订单详情",
+            "kind": "inspect",
+            "compiled_step_ids": ["detail"],
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {
+                    "type": "string",
+                    "x-dano-derived-from-query": True,
+                    "x-dano-source-capability": "get_get",
+                    "x-dano-source-output": "data.id",
+                }},
+                "required": ["id"],
+            },
+        }],
+    }
+    skill = type("Skill", (), {"api_request": api_request})()
+
+    plan = _capability_plans(skill, None, api_request)[0]
+    field = plan["input_schema"]["properties"]["id"]
+    forms = _input_forms_md([plan])
+
+    assert field.get("x-dano-derived-from-query") is not True
+    assert "| `id` |" in forms
+    assert "该能力没有调用方字段" not in forms
+
+
+def test_stage8_breaks_confirmed_derived_input_cycles() -> None:
+    def capability(name: str, source: str, step_id: str) -> dict:
+        return {
+            "capability_id": name,
+            "name": name,
+            "title": name,
+            "kind": "inspect",
+            "compiled_step_ids": [step_id],
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {
+                    "type": "string",
+                    "x-dano-derived-from-query": True,
+                    "x-dano-source-capability": source,
+                    "x-dano-source-output": "data.id",
+                }},
+                "required": ["id"],
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {"data": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                }},
+            },
+        }
+
+    api_request = {
+        "steps": [
+            {"step_id": "a-step", "method": "GET", "path": "/orders/get"},
+            {"step_id": "b-step", "method": "GET", "path": "/orders/get"},
+        ],
+        "capabilities": [capability("a", "b", "a-step"), capability("b", "a", "b-step")],
+    }
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability.model_validate(item) for item in api_request["capabilities"]
+        ],
+        capability_relations=[
+            CapabilityRelation(
+                relation_id="a-to-b",
+                type="external_transform",
+                mode="external_transform",
+                from_capability="a",
+                from_output="data.id",
+                to_capability="b",
+                to_input="id",
+                confirmed=True,
+            ),
+            CapabilityRelation(
+                relation_id="b-to-a",
+                type="external_transform",
+                mode="external_transform",
+                from_capability="b",
+                from_output="data.id",
+                to_capability="a",
+                to_input="id",
+                confirmed=True,
+            ),
+        ],
+    )
+    skill = type("Skill", (), {"api_request": api_request})()
+
+    plans = _capability_plans(skill, spec, api_request)
+
+    assert all(
+        plan["input_schema"]["properties"]["id"].get("x-dano-derived-from-query") is not True
+        for plan in plans
+    )
+
+
+def test_package_validator_only_requires_caller_visible_form_fields(tmp_path: Path) -> None:
+    forms = tmp_path / "references" / "INPUT_FORMS.md"
+    forms.parent.mkdir(parents=True)
+    forms.write_text(
+        "# Native input forms\n\n## 查看销售订单详情 (`detail`)\n\n"
+        "该能力没有调用方字段，不调用 `ask_user_question`。\n",
+        encoding="utf-8",
+    )
+    contract = {
+        "capabilities": [{
+            "capability_id": "detail",
+            "name": "detail",
+            "title": "查看销售订单详情",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {
+                    "type": "string",
+                    "x-dano-derived-from-query": True,
+                    "x-dano-source-capability": "query",
+                    "x-dano-source-output": "rows[].id",
+                }},
+                "required": ["id"],
+            },
+        }],
+    }
+    issues: list[dict] = []
+
+    _check_input_fact_alignment(tmp_path, contract, issues)
+
+    assert not [item for item in issues if item["code"] == "input_form_missing_field"]
+
+
+def test_stage8_does_not_auto_route_unconfirmed_field_mapping() -> None:
+    relation = CapabilityRelation(
+        relation_id="suggested",
+        type="external_transform",
+        mode="external_transform",
+        from_capability="query",
+        from_output="rows[].id",
+        to_capability="detail",
+        to_input="id",
+        confirmed=False,
+    )
+
+    assert relation_is_usable(relation) is False

@@ -14,6 +14,7 @@ from dano.onboarding.skill_generation.catalog import (
     capability_family,
     capability_ref,
     confirmed_fixed_or_system_inputs,
+    distinct_stage8_capabilities,
     is_write_capability,
     public_capability_catalog,
     schema_properties,
@@ -165,14 +166,24 @@ def _select_capabilities(
     request: SkillGenerationRequest,
     verified_ids: set[str],
 ) -> tuple[list[FlowCapability], list[UnusedCapability]]:
-    caps = [
+    verified = [
         cap for cap in spec.capabilities
         if capability_ref(cap) in verified_ids or cap.name in verified_ids
     ]
+    caps, duplicates = distinct_stage8_capabilities(spec, verified)
     if not caps:
         return [], []
     forbidden = _forbidden_capability_ids(caps, request)
     unused = [
+        UnusedCapability(
+            capability_id=capability_ref(cap),
+            name=cap.name,
+            title=cap.title or cap.name,
+            reason=duplicates[capability_ref(cap)],
+        )
+        for cap in verified
+        if capability_ref(cap) in duplicates
+    ] + [
         UnusedCapability(
             capability_id=capability_ref(cap),
             name=cap.name,
