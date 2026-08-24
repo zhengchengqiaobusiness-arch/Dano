@@ -37,7 +37,90 @@ def _step_is_write_preflight(step: FlowStep | None) -> bool:
     )
 
 
-def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
+def _semantic_plan_write_support_request_ids(
+    spec: FlowSpec,
+    semantic_plan: dict[str, Any] | None,
+) -> set[str]:
+    """Return reads the accepted plan attaches to a write as supporting traffic."""
+    if not isinstance(semantic_plan, dict):
+        model = (spec.meta or {}).get("capability_model") or {}
+        semantic_plan = (
+            model.get("submitted_semantic_plan")
+            if isinstance(model.get("submitted_semantic_plan"), dict)
+            else model.get("semantic_plan")
+            if isinstance(model.get("semantic_plan"), dict)
+            else None
+        )
+        fallback_names = {
+            str(name or "") for name in model.get("fallback_added_capabilities") or []
+            if str(name or "")
+        }
+    else:
+        fallback_names = set()
+    if not isinstance(semantic_plan, dict):
+        return set()
+
+    request_id_by_step_id = {
+        str(step.step_id): str((step.source_meta or {}).get("request_id") or "")
+        for step in spec.steps
+        if str(step.step_id or "")
+    }
+    step_by_id = {str(step.step_id or ""): step for step in spec.steps}
+    step_by_request_id = {
+        str((step.source_meta or {}).get("request_id") or ""): step
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+    facts_by_request_id = {
+        str(item.get("request_id") or ""): item
+        for item in _request_fact_items(spec)
+        if str(item.get("request_id") or "")
+    }
+
+    def resolve(ref: dict[str, Any]) -> str:
+        request_id = str(ref.get("request_id") or "")
+        step_id = str(ref.get("step_id") or "")
+        return request_id or request_id_by_step_id.get(step_id, "") or step_id
+
+    def is_write_request(ref: dict[str, Any]) -> bool:
+        request_id = resolve(ref)
+        step_id = str(ref.get("step_id") or "")
+        step = step_by_id.get(step_id) or step_by_request_id.get(request_id)
+        if step is not None:
+            return str(step.method or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+        fact = facts_by_request_id.get(request_id)
+        return bool(
+            fact
+            and str(fact.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+        )
+
+    support_ids: set[str] = set()
+    execute_ids: set[str] = set()
+    for capability in semantic_plan.get("capabilities") or []:
+        if (
+            not isinstance(capability, dict)
+            or str(capability.get("name") or "") in fallback_names
+        ):
+            continue
+        refs = [
+            ref for ref in capability.get("request_refs") or []
+            if isinstance(ref, dict)
+        ]
+        executes = [ref for ref in refs if str(ref.get("usage") or "") == "execute"]
+        execute_ids.update(filter(None, (resolve(ref) for ref in executes)))
+        if not any(is_write_request(ref) for ref in executes):
+            continue
+        support_ids.update(filter(None, (
+            resolve(ref) for ref in refs
+            if str(ref.get("usage") or "") in {"preflight", "option_source", "fact_check"}
+        )))
+    return support_ids - execute_ids
+
+
+def _required_public_action_request_ids(
+    spec: FlowSpec,
+    semantic_plan: dict[str, Any] | None = None,
+) -> set[str]:
     """Return the recorded requests that each require a public capability.
 
     Writes remain mandatory even when recorder action metadata is incomplete.
@@ -80,6 +163,9 @@ def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
             and action_key(item) not in write_action_keys
             and not _step_is_write_preflight(materialized_step(item))
         )
+    )
+    required.difference_update(
+        _semantic_plan_write_support_request_ids(spec, semantic_plan)
     )
     return required
 
@@ -242,7 +328,7 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     elif capability_contract_invalid:
         missing.append("capability_contracts")
     missing_public_action_request_ids = sorted(
-        _required_public_action_request_ids(spec)
+        _required_public_action_request_ids(spec, plan)
         - _semantic_plan_execute_request_ids(spec, plan)
     )
     if missing_public_action_request_ids:
@@ -321,7 +407,7 @@ def _pre_materialization_semantic_plan_coverage(
     if not capability_items:
         missing.append("capabilities")
     missing_public_action_request_ids = sorted(
-        _required_public_action_request_ids(spec)
+        _required_public_action_request_ids(spec, semantic_plan)
         - _semantic_plan_execute_request_ids(spec, semantic_plan)
     )
     if missing_public_action_request_ids:

@@ -599,6 +599,140 @@ def test_detail_capability_retargets_from_edit_hydration_without_extra_ability()
     }]
 
 
+def test_submitted_preflight_read_does_not_become_an_extra_public_ability() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    detail = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get?id=69",
+        response_json={"data": {"id": 69}},
+        source_meta={"request_id": "req-detail", "role": "business_get"},
+    )
+    hydration = FlowStep(
+        step_id="edit-hydration",
+        method="GET",
+        path="/orders/get?id=70",
+        response_json={"data": {"id": 70}},
+        source_meta={"request_id": "req-edit-hydration", "role": "business_get"},
+    )
+    update = FlowStep(
+        step_id="update",
+        method="PUT",
+        path="/orders/update",
+        body_source='{"id":70}',
+        params=[ParamField(
+            path="body.id",
+            key="id",
+            value=70,
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "step_id": "edit-hydration",
+                "response_path": "data.id",
+            },
+        )],
+        source_meta={"request_id": "req-update", "role": "business_write"},
+    )
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [
+            {
+                "name": "inspect_order",
+                "title": "Inspect order",
+                "kind": "inspect",
+                "anchor_step_id": "detail",
+                "request_refs": [{
+                    "request_id": "req-detail",
+                    "step_id": "detail",
+                    "usage": "execute",
+                }],
+            },
+            {
+                "name": "update_order",
+                "title": "Update order",
+                "kind": "update",
+                "anchor_step_id": "update",
+                "request_refs": [
+                    {
+                        "request_id": "req-edit-hydration",
+                        "step_id": "edit-hydration",
+                        "usage": "preflight",
+                    },
+                    {
+                        "request_id": "req-update",
+                        "step_id": "update",
+                        "usage": "execute",
+                    },
+                ],
+            },
+        ],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=[detail, hydration, update],
+        meta={"capability_model": {
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+        }},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id="req-detail",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=69",
+            trigger_action_id="open-detail",
+        ),
+        RequestFact(
+            request_id="req-edit-hydration",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=70",
+            trigger_action_id="open-edit",
+        ),
+        RequestFact(
+            request_id="req-update",
+            method="PUT",
+            path="/orders/update",
+            url="/orders/update",
+            post_data={"id": 70},
+            trigger_action_id="save-edit",
+        ),
+    ]
+    spec.request_facts.analysis = {
+        "req-detail": RequestAnalysis(
+            request_id="req-detail", role="business_get", keep=True,
+        ),
+        "req-edit-hydration": RequestAnalysis(
+            request_id="req-edit-hydration", role="business_get", keep=True,
+        ),
+        "req-update": RequestAnalysis(
+            request_id="req-update", role="business_write", keep=True,
+        ),
+    }
+    spec.request_facts.usage = {
+        "req-detail": RequestUsage(
+            request_id="req-detail", materialized_step_id="detail", state="materialized",
+        ),
+        "req-edit-hydration": RequestUsage(
+            request_id="req-edit-hydration",
+            materialized_step_id="edit-hydration",
+            state="materialized",
+        ),
+        "req-update": RequestUsage(
+            request_id="req-update", materialized_step_id="update", state="materialized",
+        ),
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert [capability.name for capability in result.capabilities] == [
+        "inspect_order", "update_order",
+    ]
+    assert result.meta["capability_model"].get("fallback_added_capabilities", []) == []
+
+
 def test_submission_tool_returns_exact_capability_diagnostics() -> None:
     class Session:
         def __init__(self) -> None:
