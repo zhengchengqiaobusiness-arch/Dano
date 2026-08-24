@@ -17,10 +17,12 @@ collaborate, not compete.
 - Stage 2 Python captures controls, actions, requests, structural order, and immutable evidence.
 - Stages 3–4 expose that evidence; this Skill decides business meaning and submits grounded ops.
 - Stages 5–6 Python materialize the submitted meaning and enforce deterministic field/request
-  contracts. Field, source, enum and relation findings become non-blocking repair backlog. If a
-  model turn fails to submit or omits an independently recorded public action, Python preserves a
-  structurally grounded generic ability from that immutable action so Stage 6 still has output.
-  Do not compensate for missing capture facts by inventing a semantic conclusion.
+  contracts. Field, source, enum and relation findings become non-blocking repair backlog. Before
+  a complete semantic snapshot is accepted, Python may preserve structurally grounded generic
+  abilities so Stage 6 still has output. Once this Skill submits a complete accepted snapshot,
+  that exact capability collection replaces the provisional machine collection; Python must not
+  append another ability to it. Do not compensate for missing capture facts by inventing a
+  semantic conclusion.
 
 - You decide capability boundaries, public `name` / `title` / `intent` / `kind`, request roles,
   who supplies a field (`set_param_source` 7-kind contract), requiredness, enum conclusions,
@@ -37,9 +39,10 @@ collaborate, not compete.
   an editable page prefill. If Python already bound `page_default` (caller-overridable
   prefill), `page_rule`, `selected_option_field`, `computed`, `previous_response`, or
   `unknown`, leave that origin in place unless the evidence changed.
-- Python preserves every name, title and kind you submit. Its fallback may supplement only a
-  missing independently recorded public action with a stable generic grounded ability; it does not
-  replace or relabel submitted abilities. Use this Skill to provide the richer business meaning.
+- Python preserves every name, title and kind you submit. A complete accepted capability array is
+  authoritative and exact. Provisional fallback applies only before such a snapshot exists; it
+  never supplements, replaces, or relabels that accepted array. Use this Skill to provide the
+  richer business meaning.
 - If evidence is missing, keep the item in `unresolved_items` or `ask_operator`. An empty
   capability list is valid only while no independent business action has been recorded.
 
@@ -61,8 +64,8 @@ collaborate, not compete.
 ## Identify capabilities from evidence
 
 You are the primary author of business semantics during recording. Python saves, validates
-references, and compiles what you submit. It never relabels a submitted ability; its only fallback
-is to retain a missing independently recorded public action as a generic grounded ability.
+references, and compiles what you submit. It never relabels a submitted ability. Machine fallback
+is provisional only: the first complete accepted Skill snapshot replaces it exactly.
 
 1. Read the natural-language `goal_text` to understand what the operator wants to preserve, but
    never require a numbered template, explicit count, or fixed wording format.
@@ -104,8 +107,9 @@ it explicitly unresolved with the missing fact.
 - Before submitting, compare the ledger with the complete capability array. A request used by an
   earlier accepted capability must not disappear when a later action is analyzed.
 - After submission, treat every ID in `missing_public_action_request_ids` as a concrete omitted
-  action ledger entry retained by Python's grounded fallback. Do not move it to `unresolved_items`,
-  do not ask the operator to repair it, and do not resubmit the unchanged array.
+  action ledger entry. Reread the ledger and either add the missing grounded business action or
+  correct its existing membership. Do not invent an extra ability, move a captured action to an
+  unrelated ability, ask the operator for internal IDs, or resubmit an unchanged array.
 
 ## Use the recording goal as the public boundary
 
@@ -170,7 +174,10 @@ candidate sources for controls that are not materialized yet. `api_option_candid
 candidate pointer, never a conclusion: compare its response shape, page/frame scope, selected
 value and field evidence before submitting a source or enum operation. One source request may
 legitimately appear on many field entries with different `response_path` values; decide every
-target field independently instead of assigning an endpoint to only one field.
+target field independently instead of assigning an endpoint to only one field. An option row is
+not a one-field resource: its `id`, display label, unit, barcode, price, contact, or other captured
+members may feed different request fields when the same selected row and exact response paths
+prove those projections.
 
 - Name and wire key are different axes. Preserve the captured wire path and recorded value.
   Use `rename_field` only for a grounded page/business label; never copy the label onto the
@@ -186,8 +193,10 @@ target field independently instead of assigning an endpoint to only one field.
   Submit `set_param_source` only when you can add a *new* executable fact Python cannot
   prove, or when you must correct a wrong origin with cited evidence.
 - Use `set_param_required` only when required markers, successful/failed request evidence, API
-  contract evidence, or an equivalent strong fact proves the value. Missing a DOM marker does not
-  prove optional. A system-owned field is never caller-required.
+  contract evidence, or an equivalent strong fact proves the value. On create/edit forms, missing
+  a DOM marker does not prove optional. On a business list/search form, an editable filter is
+  optional unless the page explicitly marks it required; the fact that one recorded URL contained
+  the filter does not make it mandatory. A system-owned field is never caller-required.
 - Use `set_param_enum` only when the field is an observed enumerable control or dictionary.
   Cite the control or dictionary fact. Do not invent options or confuse labels with values.
   Python binds the observed label/value map from page evidence; you do not need to transcribe
@@ -218,8 +227,8 @@ matching to override a structural/value conflict. Equal-strength candidates stay
 - A non-pagination query leaf on a business list/search execute GET is caller-owned only
   when an editable filter control maps to that exact request, or repeated same-family
   recordings prove the same field mapping. An unbound control or query leaf alone does
-  not authorize `set_param_source=caller_input`. Its requiredness is `unknown` unless an
-  explicit required/optional marker or same-method successful omission proves otherwise.
+  not authorize `set_param_source=caller_input`. Once the editable mapping is grounded,
+  its requiredness is optional unless an explicit page/API marker proves it required.
   A list-shaped business result is not evidence that the request is an option endpoint.
   Option-source leftover query params and transport keys (`nonce`, `token`, `timestamp`)
   stay internal or `unknown`. A detail GET that only names the opened record is not a
@@ -232,6 +241,11 @@ matching to override a structural/value conflict. Equal-strength candidates stay
   dates, and selects all follow this judgment. Do not hide a writable auto-fill as a
   system-owned default merely because the operator did not overwrite it during recording.
   Readonly or disabled is the page rule that keeps a field on the system side.
+- A grounded enabled create/submit control with no executable upstream, formula, session,
+  generated, or readonly source is caller input. Use the page label and control type, preserve the
+  recorded wire type, and do not leave it `unknown` merely because the page initialized a value or
+  no separate fill event was captured. This semantic fallback is field-local and must never turn a
+  hidden, readonly, computed, selected-row echo, or unrelated request leaf into caller input.
 - Extra request leaves with no control, no upstream, and no formula stay `unknown` only
   when they are not a business list filter and not a create/submit form body leaf. Show
   remaining unknowns as 未知. Keep the recorded wire value so the original request still
@@ -272,6 +286,10 @@ matching to override a structural/value conflict. Equal-strength candidates stay
   control-to-wire binding fallback within one form snapshot; it is never a response-field
   projection rule. A writable selected-row echo keeps its automatic origin and caller
   override; a readonly echo stays system-owned.
+- For repeating request rows, the array container is transport structure, not an additional
+  business field. Expose editable row members in the nested input schema; let Python assemble
+  `array<object>` and inject selected-row projections and computed members. Do not ask the caller
+  to provide both the raw array and duplicate top-level copies of its row fields.
 - Numeric coincidence is not a formula. Do not mark `computed` from IDs, status codes, or
   unrelated selects just because three numbers happen to add or multiply. Python only keeps
   sample-proven arithmetic between quantity/money operands.
@@ -294,9 +312,11 @@ execute request fields:
 Build a required-control inventory independently. For every control with an explicit required
 marker, submit `set_param_required` against the exact mapped wire field and cite that marker. An
 explicit optional marker or same-family successful omission may prove optional. An absent marker
-remains `unknown`; never submit optional merely because the recorded request succeeded or the
-operator left the control unchanged. Finish only after every required marker is represented or
-explicitly unresolved.
+remains `unknown` on create/edit forms; a grounded business search filter remains optional unless
+explicitly required. Never infer optional merely because a write request succeeded or the operator
+left the control unchanged. Finish the field analysis only after every required marker is
+represented or explicitly unresolved, but do not shrink or block the capability collection for a
+field-axis backlog.
 
 Do not submit source or requiredness operations merely to fill an unresolved field before the
 evidence-order binding above has completed. In particular, do not replace Python's grounded
@@ -437,17 +457,20 @@ new dependency types.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.
    Also compare `submitted_capability_count`, `materialized_capability_count`,
    `missing_submitted_capabilities`, `missing_public_action_request_ids`, and `field_axis_gaps`
-   with the exact array you sent. Count/name differences, missing public actions,
-   `field_axis_gaps`, rejected field/dependency ops and release validation findings are explicit
-   fallback/repair diagnostics. Retain them, but do not resubmit an unchanged capability array and
-   do not treat them as `submission_complete=false` when `capability_plan_complete=true`.
+   with the exact array you sent. Count/name differences and missing public actions mean the
+   capability snapshot was not read back exactly and must be reconciled from the action ledger.
+   `field_axis_gaps`, rejected field/dependency ops and release validation findings are non-blocking
+   repair diagnostics: retain the full capability array, but do not resubmit it unchanged and do
+   not treat those field findings as `submission_complete=false` when
+   `capability_plan_complete=true`.
 7. Do not claim success for skipped, rejected, or rolled-back operations. Do not replace a valid
    full plan with a partial correction. When a field or dependency operation is rejected, retain
    the complete current `semantic_plan` and move only that operation to the repair backlog; never
    drop accepted capabilities or resubmit the unchanged ability array solely for that operation.
 8. In `final_request_tail`, drain all deltas, rebuild the complete current capability array, submit
    it once, and inspect the returned result. If the model/tool fails, stop retrying the same tail;
-   Python retains the last plan and fills only structurally grounded missing public actions.
+   Python retains the last accepted plan. A failed tail must not erase abilities or create an extra
+   fallback ability beside an already complete accepted snapshot.
 
 ## Repair submissions in stage seven
 
@@ -496,7 +519,8 @@ live recording, respect `deferred_until_final_analysis` and continue submitting 
 
 Before ending the turn, ensure the latest delta is drained, every grounded business action is
 represented or explicitly unresolved, all accepted earlier capabilities remain present, every
-exposed caller field has direct input evidence, internal values have executable sources, every
+exposed caller field has editable/default/selection evidence supporting caller ownership, internal
+values have executable sources, every
 dependency has two observed endpoints, and the latest `submit_recording_plan` result has been
 inspected. Never emit a failure conclusion merely because the grounded capability count differs
 from informal goal wording.
