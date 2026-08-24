@@ -146,6 +146,8 @@ def _sequence(request: dict, fallback: int) -> tuple[float, int]:
 def _same_value(left: object, right: object) -> bool:
     if isinstance(left, bool) or isinstance(right, bool):
         return False
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
     if type(left) is type(right):
         return left == right
     if isinstance(left, (int, float, str)) and isinstance(right, (int, float, str)):
