@@ -559,25 +559,36 @@ def _request_step(spec, request_id: str):  # noqa: ANN001, ANN202
 def _canonical_request_role(spec, request_id: str, role: str) -> str:  # noqa: ANN001
     """Translate model vocabulary to the finite role contract used by materialization."""
     normalized = re.sub(r"[^a-z0-9]+", "_", str(role or "").strip().casefold()).strip("_")
-    if normalized in _CANONICAL_REQUEST_ROLES:
-        return normalized
-    tokens = frozenset(normalized.split("_"))
-    for canonical, family in _REQUEST_ROLE_FAMILIES:
-        if tokens & family:
-            return canonical
-    if normalized == "execute":
-        fact = next(
-            (item for item in spec.request_facts.requests if item.request_id == request_id),
-            None,
-        )
-        method = str(getattr(fact, "method", "") or "").upper()
-        if method in {"POST", "PUT", "PATCH", "DELETE"}:
-            return "business_write"
-        if method in {"GET", "HEAD", "OPTIONS"}:
-            return "business_read"
-    raise ValueError(
-        f"unsupported request role {role!r}; use one of {sorted(_CANONICAL_REQUEST_ROLES)}"
+    canonical = normalized if normalized in _CANONICAL_REQUEST_ROLES else ""
+    if not canonical:
+        tokens = frozenset(normalized.split("_"))
+        canonical = next((
+            candidate
+            for candidate, family in _REQUEST_ROLE_FAMILIES
+            if tokens & family
+        ), "")
+    fact = next(
+        (item for item in spec.request_facts.requests if item.request_id == request_id),
+        None,
     )
+    step = _request_step(spec, request_id)
+    method = str(
+        getattr(fact, "method", "")
+        or getattr(step, "method", "")
+        or ""
+    ).upper()
+    if normalized == "execute" and not canonical:
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            canonical = "business_write"
+        elif method in {"GET", "HEAD", "OPTIONS"}:
+            canonical = "business_read"
+    if not canonical:
+        raise ValueError(
+            f"unsupported request role {role!r}; use one of {sorted(_CANONICAL_REQUEST_ROLES)}"
+        )
+    if canonical == "business_write" and method in {"GET", "HEAD", "OPTIONS"}:
+        return "business_read"
+    return canonical
 
 
 def _field_target(spec, step_or_request_id: str, path: str):  # noqa: ANN001, ANN202
@@ -3426,6 +3437,24 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 step_id_by_request_id=step_id_by_request_id,
             )
             if not resolved_anchor:
+                # The live step id may be stale after canonical materialization,
+                # while the same submitted ability still carries an exact
+                # execute request reference. Prefer that grounded identity.
+                resolved_anchor = next((
+                    _resolve_live_plan_step_id(
+                        str(ref.get("request_id") or ref.get("step_id") or ""),
+                        step_ids=step_ids,
+                        step_id_by_request_id=step_id_by_request_id,
+                    )
+                    for ref in capability.get("request_refs") or []
+                    if isinstance(ref, dict) and str(ref.get("usage") or "") == "execute"
+                    if _resolve_live_plan_step_id(
+                        str(ref.get("request_id") or ref.get("step_id") or ""),
+                        step_ids=step_ids,
+                        step_id_by_request_id=step_id_by_request_id,
+                    )
+                ), "")
+            if not resolved_anchor:
                 unresolved_anchors.append(anchor or "<missing>")
                 continue
             capability["anchor_step_id"] = resolved_anchor
@@ -3470,7 +3499,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 },
             }
             compilation = compile_capabilities(candidate, compile_plan)
-            if not compilation.errors and len(compilation.capabilities) == len(submitted_items):
+            if compilation.capabilities:
                 merged = compilation.spec
             if compilation.errors:
                 unresolved.append({

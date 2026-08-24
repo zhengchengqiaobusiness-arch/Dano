@@ -296,6 +296,13 @@ def _tool_output_summary(name: str, params: dict, out: dict, before: dict, after
             "unchanged": bool(out.get("unchanged", False)),
             "flow_version_after": out.get("flow_version", after.get("flow_version")),
             "capability_plan_complete": bool(out.get("capability_plan_complete", after.get("capability_count", 0) > 0)),
+            "capability_plan_received": bool(out.get("capability_plan_received")),
+            "submission_complete": bool(out.get("submission_complete")),
+            "submitted_capability_count": int(out.get("submitted_capability_count") or 0),
+            "materialized_capability_count": int(out.get("materialized_capability_count") or 0),
+            "missing_submitted_capabilities": out.get("missing_submitted_capabilities") or [],
+            "missing_public_action_request_ids": out.get("missing_public_action_request_ids") or [],
+            "field_axis_gap_count": len(out.get("field_axis_gaps") or []),
             **ops,
             "must_retry": out.get("must_retry") or [],
             "capability_count": after.get("capability_count", 0),
@@ -313,7 +320,11 @@ def _done_summary(name: str, output_summary: dict, unchanged: bool) -> str:
             return "录制计划被拒绝"
         if output_summary.get("unchanged"):
             return "录制计划无变化"
-        return "录制计划已接受"
+        if output_summary.get("submission_complete"):
+            return "录制能力计划已保存"
+        if output_summary.get("capability_plan_received"):
+            return "录制能力计划已保存，继续补充缺失能力边界"
+        return "录制分析结论已保存"
     if name == "get_recording_state":
         return "读取录制状态"
     if name == "get_recording_delta":

@@ -547,6 +547,9 @@ class RecordingGatewaySession:
         )
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
+        from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+        spec = ensure_grounded_capability_output(spec)
         if not spec.capabilities:
             capability_model = dict((spec.meta or {}).get("capability_model") or {})
             plan = (
@@ -961,8 +964,6 @@ class RecordingGatewaySession:
                         request_count=request_count,
                         insights=insights[-100:],
                     )
-                if reason == "final_request_tail":
-                    raise
                 failed_key = (reason, self._last_live_count)
                 self._live_failed_batches.add(failed_key)
                 if not self._live_pending_reason:

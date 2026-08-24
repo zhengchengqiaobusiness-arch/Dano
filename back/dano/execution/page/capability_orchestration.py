@@ -917,7 +917,7 @@ async def orchestrate_flow_capabilities(
         }
     )
     live_blocking_gaps = set(pre_materialization_coverage.get("missing") or []) & {
-        "capability_contracts", "capabilities", "goal_capability_count", "unresolved_blockers",
+        "capability_contracts", "capabilities", "goal_capability_count",
     }
     pre_materialization_strict_plan = bool(
         pre_materialization_candidate and not live_blocking_gaps
@@ -1102,6 +1102,11 @@ async def orchestrate_flow_capabilities(
         semantic_plan = copy.deepcopy(effective_semantic_plan)
     elif strict_anchor_contract and not capability_compilation_errors:
         semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
+    elif strict_anchor_contract and current.capabilities:
+        # Field/relation compilation warnings may keep the package in review,
+        # but the latest complete ability boundary snapshot is still the
+        # authoritative Stage 6 plan. Never silently restore an older plan.
+        semantic_plan = copy.deepcopy(effective_semantic_plan)
     elif previous_strict_plan:
         semantic_plan = copy.deepcopy(previous_semantic_plan)
     else:

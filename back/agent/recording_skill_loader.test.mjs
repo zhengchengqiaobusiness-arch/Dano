@@ -188,7 +188,7 @@ test("missing and malformed Skills produce diagnostics and runtime rejects diagn
   }
 });
 
-test("Skill contract preserves full capabilities, rejected operations, and the final tail", async () => {
+test("Skill contract preserves full capabilities and keeps field and final-tail failures non-blocking", async () => {
   const skill = await readFile(SKILL_FILE, "utf8");
   const runtime = await readFile(RUNTIME_FILE, "utf8");
 
@@ -198,7 +198,7 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /`rejected` or `rolled_back`/i);
   assert.match(skill, /final_request_tail/);
   assert.match(skill, /until `has_more=false`/);
-  assert.match(skill, /completing the turn without an accepted `submit_recording_plan` result/i);
+  assert.match(skill, /must not erase an earlier plan or abort freeze/i);
   assert.match(skill, /Different concrete goal slots must not share one execute anchor/i);
   assert.match(skill, /captured while opening an edit form may also anchor a separately requested inspect\s+capability/i);
   assert.match(skill, /must not be presented\s+as instance progress/i);
@@ -209,10 +209,11 @@ test("Skill contract preserves full capabilities, rejected operations, and the f
   assert.match(skill, /Field origin and caller editability are separate facts/i);
   assert.match(skill, /allow caller override/i);
   assert.match(skill, /exact current request identities/i);
-  assert.match(skill, /sole author of business semantics/i);
+  assert.match(skill, /primary author of business semantics/i);
   assert.match(skill, /Never treat a mismatch between goal wording and observed actions as a failure/i);
   assert.match(skill, /source_request_id/i);
-  assert.match(skill, /resubmit\s+the complete current `semantic_plan`/i);
+  assert.match(skill, /do not resubmit an unchanged capability array/i);
+  assert.match(skill, /do not remove, shrink, or block the grounded capability collection/i);
   assert.match(skill, /Judge each field independently in this order/i);
   assert.match(runtime, /recording_submission_retry/);
   assert.match(runtime, /missing_submission/);

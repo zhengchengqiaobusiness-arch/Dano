@@ -17,7 +17,10 @@ collaborate, not compete.
 - Stage 2 Python captures controls, actions, requests, structural order, and immutable evidence.
 - Stages 3–4 expose that evidence; this Skill decides business meaning and submits grounded ops.
 - Stages 5–6 Python materialize the submitted meaning and enforce deterministic field/request
-  contracts. Do not compensate for missing capture facts by inventing a semantic conclusion.
+  contracts. Field, source, enum and relation findings become non-blocking repair backlog. If a
+  model turn fails to submit or omits an independently recorded public action, Python preserves a
+  structurally grounded generic ability from that immutable action so Stage 6 still has output.
+  Do not compensate for missing capture facts by inventing a semantic conclusion.
 
 - You decide capability boundaries, public `name` / `title` / `intent` / `kind`, request roles,
   who supplies a field (`set_param_source` 7-kind contract), requiredness, enum conclusions,
@@ -34,11 +37,11 @@ collaborate, not compete.
   an editable page prefill. If Python already bound `page_default` (caller-overridable
   prefill), `page_rule`, `selected_option_field`, `computed`, `previous_response`, or
   `unknown`, leave that origin in place unless the evidence changed.
-- Python must never invent, relabel, or supplement capabilities, titles, or kinds after you
-  submit. If a later recording needs different business meaning, change this Skill. Do not
-  expect another Python special case.
+- Python preserves every name, title and kind you submit. Its fallback may supplement only a
+  missing independently recorded public action with a stable generic grounded ability; it does not
+  replace or relabel submitted abilities. Use this Skill to provide the richer business meaning.
 - If evidence is missing, keep the item in `unresolved_items` or `ask_operator`. An empty
-  capability list stays empty until you submit a grounded plan.
+  capability list is valid only while no independent business action has been recorded.
 
 ## Follow the recording phase
 
@@ -51,15 +54,15 @@ collaborate, not compete.
   assume early dialog fills were dropped merely because repaint duplicates were compacted.
 - For `final_request_tail`, call `get_recording_state` once first, then start delta from
   `since_seq=0` and page until `has_more=false`. Include every conclusion already accepted earlier
-  in the session. This is tail completion, not a separate final planning pass. Missing this
-  submission fails freeze.
+  in the session. This is tail completion, not a separate final planning pass. A tail model/tool
+  failure is recorded for repair but must not erase an earlier plan or abort freeze.
 - Do not reread an identical projection unless a rejected operation requires a fresh version.
 
 ## Identify capabilities from evidence
 
-You are the sole author of business semantics during recording. Python only saves, validates
-references, and compiles what you submit; it must never invent, relabel, or supplement
-capabilities after the fact.
+You are the primary author of business semantics during recording. Python saves, validates
+references, and compiles what you submit. It never relabels a submitted ability; its only fallback
+is to retain a missing independently recorded public action as a generic grounded ability.
 
 1. Read the natural-language `goal_text` to understand what the operator wants to preserve, but
    never require a numbered template, explicit count, or fixed wording format.
@@ -101,9 +104,8 @@ it explicitly unresolved with the missing fact.
 - Before submitting, compare the ledger with the complete capability array. A request used by an
   earlier accepted capability must not disappear when a later action is analyzed.
 - After submission, treat every ID in `missing_public_action_request_ids` as a concrete omitted
-  action ledger entry. Reread that request/action, add its grounded standalone capability to the
-  full array, and resubmit. Do not move a server-proven public action to `unresolved_items` merely
-  to make the plan complete.
+  action ledger entry retained by Python's grounded fallback. Do not move it to `unresolved_items`,
+  do not ask the operator to repair it, and do not resubmit the unchanged array.
 
 ## Use the recording goal as the public boundary
 
@@ -427,17 +429,17 @@ new dependency types.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.
    Also compare `submitted_capability_count`, `materialized_capability_count`,
    `missing_submitted_capabilities`, `missing_public_action_request_ids`, and `field_axis_gaps`
-   with the exact array you sent. Resolve each named field axis from evidence. Any count/name
-   mismatch, missing public action, field-axis gap, ignored capability, retry reason, or
-   `capability_plan_complete=false` means the plan is not accepted; drain facts and resubmit the
-   complete corrected snapshot.
+   with the exact array you sent. Count/name differences, missing public actions,
+   `field_axis_gaps`, rejected field/dependency ops and release validation findings are explicit
+   fallback/repair diagnostics. Retain them, but do not resubmit an unchanged capability array and
+   do not treat them as `submission_complete=false` when `capability_plan_complete=true`.
 7. Do not claim success for skipped, rejected, or rolled-back operations. Do not replace a valid
-   full plan with a partial correction. When one field or dependency operation is rejected, resubmit
-   the complete current `semantic_plan` together with corrected ops; never drop already accepted
-   capabilities or field conclusions.
-8. In `final_request_tail`, completing the turn without an accepted `submit_recording_plan` result
-   is a protocol failure. Drain all deltas, rebuild the complete current capability array, submit
-   it once, and inspect the returned result before producing any final text.
+   full plan with a partial correction. When a field or dependency operation is rejected, retain
+   the complete current `semantic_plan` and move only that operation to the repair backlog; never
+   drop accepted capabilities or resubmit the unchanged ability array solely for that operation.
+8. In `final_request_tail`, drain all deltas, rebuild the complete current capability array, submit
+   it once, and inspect the returned result. If the model/tool fails, stop retrying the same tail;
+   Python retains the last plan and fills only structurally grounded missing public actions.
 
 ## Repair submissions in stage seven
 
@@ -493,5 +495,5 @@ from informal goal wording.
 
 Run the completion check in three passes: (1) action ledger and capability membership/order,
 (2) every field's name/type/source/requiredness plus option and computed contracts, and (3) exact
-submitted-plan readback. `unresolved_items` may be empty only when the server reports no remaining
-unknown field axes or validation blockers.
+submitted-plan readback. Unknown field axes and validation findings remain explicit repair backlog;
+they do not remove, shrink, or block the grounded capability collection.

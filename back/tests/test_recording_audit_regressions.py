@@ -1323,7 +1323,7 @@ def test_unmapped_query_enum_is_raw_input_and_detail_id_is_record_selector() -> 
     assert record_id.required is True
 
 
-def test_independent_detail_action_is_required_by_capability_plan() -> None:
+def test_missing_public_action_is_nonblocking_and_left_for_grounded_fallback() -> None:
     from dano.execution.page.capability_semantic import _required_public_action_request_ids
 
     spec = FlowSpec()
@@ -1395,7 +1395,7 @@ def test_independent_detail_action_is_required_by_capability_plan() -> None:
             "semantic_plan": incomplete_plan,
         },
     }
-    assert not recording_capability_plan_complete(spec)
+    assert recording_capability_plan_complete(spec)
 
 
 def test_write_refresh_and_initial_read_are_not_extra_public_capabilities() -> None:

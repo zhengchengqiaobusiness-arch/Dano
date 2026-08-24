@@ -41,11 +41,17 @@ ALLOWED_CAPABILITY_KINDS = READ_CAPABILITY_KINDS | WRITE_CAPABILITY_KINDS
 def _is_write_step(step: FlowStep) -> bool:
     meta = step.source_meta or {}
     role = str(meta.get("role") or step.semantic_role or "").strip().lower()
+    method = (step.method or "").upper()
+    # Safe HTTP methods cannot become write commands merely because a model
+    # supplied a contradictory role. This also keeps GET exports/inspects in
+    # the public read family instead of silently dropping them.
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return False
     if role in {"business_get", "read_context", "read_option", "option_source", "explicit_read_option"}:
         return False
     if role in {"business_write", "submit_anchor"}:
         return True
-    return (step.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}
+    return True
 
 
 def _looks_batch_step(step: FlowStep) -> bool:
@@ -103,6 +109,15 @@ _WRITE_COMMAND_DISCRIMINATOR_RE = re.compile(
     re.I,
 )
 
+_NON_COMMAND_CONSTANT_KEYS = frozenset({
+    "id", "ids", "uuid", "record_id", "row_id", "primary_key", "pk",
+    "page", "page_no", "page_num", "page_number", "page_size", "limit", "offset",
+    "nonce", "timestamp", "time_stamp", "token",
+})
+_ROW_COMMAND_DISCRIMINATOR_KEYS = frozenset({
+    "status", "state", "decision", "result",
+})
+
 
 def _write_command_discriminators(step: FlowStep) -> tuple[tuple[str, str], ...]:
     """Keep RPC-style commands distinct while ignoring record-specific values."""
@@ -129,6 +144,31 @@ def _write_command_discriminators(step: FlowStep) -> tuple[tuple[str, str], ...]
                 visit(child, prefix)
 
     visit(body)
+    # Row commands often carry their verb as a fixed query/form scalar while
+    # the body is empty (for example one endpoint plus different status/mode
+    # values). Preserve those stable command constants, but ignore selected
+    # record identities and transport/pagination values so repeated clicks on
+    # different rows still collapse to one reusable operation.
+    for param in step.params or []:
+        value = param.value
+        if not isinstance(value, (str, int, float, bool)):
+            continue
+        raw_key = str(param.path or param.key or "").split(".")[-1]
+        normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", raw_key).casefold()
+        normalized_key = re.sub(r"[^a-z0-9_]+", "_", normalized_key).strip("_")
+        named_command_value = bool(
+            _WRITE_COMMAND_DISCRIMINATOR_RE.search(normalized_key)
+            or normalized_key in _ROW_COMMAND_DISCRIMINATOR_KEYS
+        )
+        if not (
+            str(param.source_kind or "") == "constant"
+            or str(param.category or "") == "system_const"
+            or named_command_value
+        ):
+            continue
+        if normalized_key in _NON_COMMAND_CONSTANT_KEYS:
+            continue
+        found.append((str(param.path or param.key or "").casefold(), str(value).casefold()))
     return tuple(sorted(set(found)))
 
 

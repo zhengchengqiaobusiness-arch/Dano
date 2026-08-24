@@ -1068,6 +1068,9 @@ async def _apply_recording_submission_atomic(
                 "unresolved_targets", "accepted", "unchanged", "warning",
                 "capability_plan_complete", "capability_plan_received",
                 "capability_retry_reasons", "submission_complete",
+                "submitted_capability_count", "materialized_capability_count",
+                "missing_submitted_capabilities", "missing_public_action_request_ids",
+                "field_axis_gaps",
             )
             if key in result
         }

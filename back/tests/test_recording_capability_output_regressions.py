@@ -1,0 +1,496 @@
+from __future__ import annotations
+
+import asyncio
+
+import dano.onboarding.recording_gateway as recording_gateway
+from dano.agent_tools.tools import _apply_recording_submission_atomic
+from dano.execution.page.capability_compiler import compile_capabilities
+from dano.execution.page.capability_contracts import (
+    _mark_repeated_write_observations,
+    _planned_capability_has_public_anchor,
+)
+from dano.execution.page.flow_spec_core.models import (
+    FlowCapability,
+    FlowSpec,
+    FlowStep,
+    ParamField,
+    RequestAnalysis,
+    RequestFact,
+    RequestUsage,
+)
+from dano.execution.page.recording_agent_contract import (
+    apply_recording_agent_submission,
+    recording_agent_submission_status,
+    recording_capability_plan_complete,
+)
+from dano.execution.page.recording_live import apply_recording_agent_edit
+from dano.onboarding.recording_gateway import (
+    RecordingGatewaySession,
+    RecordingSessionConfig,
+)
+
+
+def _capability_plan(name: str, request_id: str, *, kind: str = "create") -> dict:
+    return {
+        "business_understanding": {"business_name": "Orders", "summary": "Manage orders"},
+        "capabilities": [{
+            "name": name,
+            "title": name,
+            "kind": kind,
+            "anchor_step_id": request_id,
+            "request_refs": [{
+                "request_id": request_id,
+                "step_id": request_id,
+                "usage": "execute",
+            }],
+        }],
+        "unresolved_items": [],
+    }
+
+
+def test_field_and_relation_backlog_does_not_block_complete_capability_snapshot() -> None:
+    plan = _capability_plan("create_sale_order", "req-create")
+    plan["unresolved_items"] = [{
+        "type": "field_source",
+        "title": "accountId source remains unresolved",
+        "blocking": True,
+    }]
+    spec = FlowSpec(
+        capabilities=[FlowCapability(name="create_sale_order")],
+        meta={
+            "capability_model": {
+                "status": "needs_review",
+                "proposal_gate": {"accepted": False, "reasons": ["field_axis_contract"]},
+                "semantic_coverage": {
+                    "complete": False,
+                    "missing": ["field_axis_contract"],
+                    "field_axis_gaps": [{"step_id": "create", "path": "accountId", "axes": ["source"]}],
+                },
+                "submitted_semantic_plan": plan,
+                "semantic_plan": plan,
+                "submitted_count": 1,
+                "materialized_count": 1,
+                "capability_compilation_errors": ["field source remains unresolved"],
+            },
+            "recording_agent_session": {
+                "op_results": [{
+                    "index": 7,
+                    "op": "set_param_source",
+                    "status": "rejected",
+                    "requested_target": {"request_id": "req-create", "wire_path": "body.accountId"},
+                    "reason": "field source remains unresolved",
+                }],
+            },
+        },
+    )
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-create",
+        method="POST",
+        path="/orders/create",
+        trigger_action_id="create-order",
+    )]
+    spec.request_facts.analysis = {
+        "req-create": RequestAnalysis(
+            request_id="req-create", role="business_write", keep=True,
+        ),
+    }
+
+    status = recording_agent_submission_status(spec)
+
+    assert recording_capability_plan_complete(spec)
+    assert status["capability_plan_complete"] is True
+    assert status["submission_complete"] is True
+    assert status["must_retry"] == [7]
+    assert status["field_axis_gaps"]
+
+
+def test_rejected_field_operation_keeps_the_applied_capability_plan_terminal() -> None:
+    step = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        params=[ParamField(path="accountId", key="accountId", value=2)],
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    spec = FlowSpec(steps=[step])
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-create",
+        method="POST",
+        path="/orders/create",
+        post_data={"accountId": 2},
+        trigger_action_id="create-order",
+    )]
+    spec.request_facts.analysis = {
+        "req-create": RequestAnalysis(
+            request_id="req-create", role="business_write", keep=True,
+        ),
+    }
+    spec.request_facts.usage = {
+        "req-create": RequestUsage(
+            request_id="req-create", materialized_step_id="create", state="materialized",
+        ),
+    }
+    submission = {
+        "semantic_plan": _capability_plan("create_sale_order", "req-create"),
+        "ops": [{
+            "op": "set_param_type",
+            "request_id": "req-create",
+            "path": "accountId",
+            "business_type": "unsupported-type",
+            "reason": "Deliberately invalid field repair for the regression seam.",
+            "evidence_refs": ["req-create"],
+        }],
+    }
+
+    result = asyncio.run(apply_recording_agent_submission(
+        spec, submission=submission, mode="plan",
+    ))
+    status = recording_agent_submission_status(result)
+
+    assert [capability.name for capability in result.capabilities] == ["create_sale_order"]
+    assert status["must_retry"] == [0]
+    assert status["submission_complete"] is True
+
+
+def _row_command(
+    step_id: str,
+    *,
+    record_id: int,
+    status: int,
+    classified_status: bool = True,
+) -> FlowStep:
+    return FlowStep(
+        step_id=step_id,
+        method="PUT",
+        path="/orders/update-status",
+        params=[
+            ParamField(
+                path="query.id",
+                key="id",
+                value=record_id,
+                source_kind="selected_record_identity",
+            ),
+            ParamField(
+                path="query.status",
+                key="status",
+                value=status,
+                category="system_const" if classified_status else "user_param",
+                source_kind="constant" if classified_status else "unknown",
+                exposed_to_user=False,
+                editable=False,
+            ),
+        ],
+        source_meta={
+            "request_id": step_id,
+            "role": "business_write",
+            "trigger_op": "click",
+            "trigger_locator": "button:确定",
+            "page_id": "orders",
+            "frame_id": "main",
+        },
+    )
+
+
+def test_row_command_discriminator_separates_approve_and_withdraw() -> None:
+    approve = _row_command("approve-1", record_id=101, status=20)
+    withdraw = _row_command(
+        "withdraw-1", record_id=101, status=10, classified_status=False,
+    )
+    repeated_approve = _row_command("approve-2", record_id=202, status=20)
+    spec = FlowSpec(steps=[approve, withdraw, repeated_approve])
+    spec.request_facts.usage = {
+        step.step_id: RequestUsage(
+            request_id=step.step_id,
+            materialized_step_id=step.step_id,
+            state="materialized",
+        )
+        for step in spec.steps
+    }
+    spec.request_facts.analysis = {
+        step.step_id: RequestAnalysis(
+            request_id=step.step_id,
+            role="business_write",
+            keep=True,
+        )
+        for step in spec.steps
+    }
+
+    _mark_repeated_write_observations(spec)
+
+    assert "duplicate_observation_of" not in withdraw.source_meta
+    assert repeated_approve.source_meta["duplicate_observation_of"] == approve.step_id
+
+
+def test_safe_export_request_role_is_canonicalized_to_business_read() -> None:
+    step = FlowStep(
+        step_id="export",
+        method="GET",
+        path="/orders/export",
+        response_json={"downloadUrl": "/files/orders.xlsx"},
+        source_meta={
+            "request_id": "req-export",
+            "trigger_op": "click",
+            "trigger_locator": "button:导出",
+        },
+    )
+    spec = FlowSpec(steps=[step])
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-export",
+        method="GET",
+        path="/orders/export",
+        trigger_action_id="export-orders",
+    )]
+
+    apply_recording_agent_edit(spec, {
+        "op": "set_request_role",
+        "request_id": "req-export",
+        "role": "business_write",
+        "reason": "The export button produced this request.",
+        "evidence_refs": ["req-export"],
+    }, record=False)
+
+    assert spec.request_facts.analysis["req-export"].role == "business_get"
+    assert spec.steps[0].source_meta["role"] == "business_get"
+    assert _planned_capability_has_public_anchor(spec, "export", ["export"])
+
+
+def test_compiler_recovers_stale_anchor_from_grounded_execute_reference() -> None:
+    step = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get",
+        response_json={"data": {"id": 1}},
+        source_meta={"request_id": "req-detail", "role": "business_get"},
+    )
+    spec = FlowSpec(steps=[step])
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-detail", method="GET", path="/orders/get", query={"id": 1},
+    )]
+    spec.request_facts.analysis = {
+        "req-detail": RequestAnalysis(request_id="req-detail", role="business_get", keep=True),
+    }
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [{
+            "name": "inspect_order",
+            "title": "Inspect order",
+            "kind": "inspect",
+            "anchor_step_id": "stale-live-step",
+            "request_refs": [{
+                "request_id": "req-detail",
+                "step_id": "detail",
+                "usage": "execute",
+            }],
+        }],
+        "unresolved_items": [],
+    }
+
+    compilation = compile_capabilities(spec, plan)
+
+    assert [capability.name for capability in compilation.capabilities] == ["inspect_order"]
+    assert compilation.capabilities[0].step_ids[-1] == "detail"
+
+
+def test_grounded_actions_produce_capabilities_without_a_model_plan() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    step = FlowStep(
+        step_id="create",
+        name="create-order",
+        method="POST",
+        path="/orders/create",
+        source_meta={
+            "request_id": "req-create",
+            "role": "business_write",
+            "trigger_op": "submit",
+            "trigger_locator": "button:新增",
+        },
+    )
+    spec = FlowSpec(steps=[step])
+    spec.request_facts.requests = [RequestFact(
+        request_id="req-create",
+        method="POST",
+        path="/orders/create",
+        trigger_action_id="create-order",
+    )]
+    spec.request_facts.analysis = {
+        "req-create": RequestAnalysis(
+            request_id="req-create", role="business_write", keep=True,
+        ),
+    }
+    spec.request_facts.usage = {
+        "req-create": RequestUsage(
+            request_id="req-create", materialized_step_id="create", state="materialized",
+        ),
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert len(result.capabilities) == 1
+    assert result.capabilities[0].step_ids[-1] == "create"
+    assert result.meta["capability_model"]["source"] == "grounded_action_fallback"
+
+
+def test_grounded_fallback_restores_eight_submitted_capabilities_from_seven() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    steps = [
+        FlowStep(
+            step_id=f"action-{index}",
+            method="POST",
+            path=f"/orders/action/{index}",
+            source_meta={"request_id": f"req-{index}", "role": "business_write"},
+        )
+        for index in range(8)
+    ]
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [
+            {
+                "name": f"ability_{index}",
+                "title": f"Ability {index}",
+                "kind": "submit",
+                "anchor_step_id": f"action-{index}",
+                "request_refs": [{
+                    "request_id": f"req-{index}",
+                    "step_id": f"action-{index}",
+                    "usage": "execute",
+                }],
+            }
+            for index in range(8)
+        ],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=steps,
+        capabilities=[
+            FlowCapability(name=f"ability_{index}", step_ids=[f"action-{index}"])
+            for index in range(7)
+        ],
+        meta={"capability_model": {
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+            "submitted_count": 8,
+            "materialized_count": 7,
+            "missing_submitted_names": ["ability_7"],
+        }},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id=f"req-{index}",
+            method="POST",
+            path=f"/orders/action/{index}",
+            trigger_action_id=f"action-{index}",
+        )
+        for index in range(8)
+    ]
+    spec.request_facts.analysis = {
+        request_id: RequestAnalysis(request_id=request_id, role="business_write", keep=True)
+        for request_id in (f"req-{index}" for index in range(8))
+    }
+    spec.request_facts.usage = {
+        f"req-{index}": RequestUsage(
+            request_id=f"req-{index}",
+            materialized_step_id=f"action-{index}",
+            state="materialized",
+        )
+        for index in range(8)
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert [capability.name for capability in result.capabilities] == [
+        f"ability_{index}" for index in range(8)
+    ]
+    assert result.meta["capability_model"]["missing_submitted_names"] == []
+
+
+def test_submission_tool_returns_exact_capability_diagnostics() -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.spec = FlowSpec()
+            self.last_submission_kind = ""
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.spec.model_copy(deep=True)
+
+        async def apply_submission(self, *_args, **_kwargs) -> dict:
+            return {
+                "flow_version": 3,
+                "submission_complete": True,
+                "submitted_capability_count": 8,
+                "materialized_capability_count": 7,
+                "missing_submitted_capabilities": ["export_orders"],
+                "missing_public_action_request_ids": ["req-export"],
+                "field_axis_gaps": [{"step_id": "create", "path": "accountId"}],
+            }
+
+    result = asyncio.run(_apply_recording_submission_atomic(
+        Session(), {}, mode="plan", base_flow_version=0,
+    ))
+
+    assert result["submitted_capability_count"] == 8
+    assert result["materialized_capability_count"] == 7
+    assert result["missing_submitted_capabilities"] == ["export_orders"]
+    assert result["missing_public_action_request_ids"] == ["req-export"]
+    assert result["field_axis_gaps"]
+
+
+def test_final_tail_model_failure_does_not_abort_freeze(monkeypatch) -> None:
+    class Capture:
+        def captured_all_requests(self) -> list[dict]:
+            return [{"request_id": "req-create"}]
+
+        def recorded_page_events(self) -> list[dict]:
+            return []
+
+        def recorded_field_evidence(self) -> list[dict]:
+            return []
+
+        def recorded_page_enum_options(self) -> dict:
+            return {}
+
+    class Pi:
+        def __init__(self) -> None:
+            self.flow_spec = FlowSpec(meta={
+                "capability_model": {
+                    "semantic_plan": _capability_plan("create_sale_order", "req-create"),
+                },
+            })
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:
+            return None
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        async def notify_live_batch(self, _delta: dict) -> dict:
+            raise RuntimeError("model timeout")
+
+    pi = Pi()
+
+    async def pi_factory(_fresh: bool) -> Pi:
+        return pi
+
+    monkeypatch.setattr(recording_gateway, "emit_run_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(recording_gateway, "emit_run_exception", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(recording_gateway, "note_run_fact", lambda *_args, **_kwargs: None)
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="default",
+            subsystem="default",
+            recording_id="recording_" + "a" * 32,
+            action="record",
+            start_url="https://example.test/orders",
+        ),
+        send=None,
+        pi_factory=pi_factory,
+        publisher=None,  # type: ignore[arg-type]
+    )
+    session.capture = Capture()  # type: ignore[assignment]
+    session._live_pending_reason = "final_request_tail"
+
+    asyncio.run(session._drain_live())
+
+    assert session._live_pending_reason == ""
+    assert session._live_notebook is not None

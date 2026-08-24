@@ -528,7 +528,11 @@ def recording_agent_submission_status(spec: FlowSpec) -> dict[str, Any]:
         ),
         "missing_public_action_request_ids": missing_public_action_request_ids,
         "field_axis_gaps": field_axis_gaps,
-        "submission_complete": not must_retry and capability_plan_complete,
+        # A capability snapshot is the Stage 6 deliverable. Field, source,
+        # relation and enum operations remain visible repair backlog, but they
+        # must not keep Pi resubmitting the same complete ability collection.
+        "accepted": capability_plan_received,
+        "submission_complete": capability_plan_complete,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }
@@ -577,7 +581,6 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
 
 _LIVE_PLAN_BLOCKING_GAPS = frozenset({
     "capability_contracts", "capabilities", "goal_capability_count",
-    "public_action_coverage", "unresolved_blockers",
 })
 
 
@@ -592,7 +595,11 @@ def _live_capability_plan_is_terminal(spec: FlowSpec) -> bool:
     if spec.steps:
         return False
     model = dict((spec.meta or {}).get("capability_model") or {})
-    plan = model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    plan = (
+        model.get("submitted_semantic_plan")
+        if isinstance(model.get("submitted_semantic_plan"), dict)
+        else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    )
     capabilities = [
         item for item in (plan.get("capabilities") or [])
         if isinstance(item, dict)
@@ -611,18 +618,14 @@ def _live_capability_plan_is_terminal(spec: FlowSpec) -> bool:
 
 
 def recording_capability_plan_complete(spec: FlowSpec) -> bool:
-    """Whether the authoritative semantic boundary plan reached a safe terminal state."""
+    """Whether the complete submitted capability boundary set was retained.
+
+    This deliberately does not answer whether every field, relation or release
+    contract is valid. Those are independent repair/verification results and
+    must never turn an already produced Stage 6 ability set into "no output".
+    """
     meta = spec.meta or {}
     model = dict(meta.get("capability_model") or {})
-    status = str(model.get("status") or "")
-    if status not in {"awaiting_materialization", "ready"}:
-        return False
-    if (model.get("proposal_gate") or {}).get("accepted") is False:
-        return False
-    if model.get("capability_compilation_errors") or model.get("ignored_non_public_capabilities"):
-        return False
-    if not bool((model.get("semantic_coverage") or {}).get("complete")):
-        return False
     submitted = (
         model.get("submitted_semantic_plan")
         if isinstance(model.get("submitted_semantic_plan"), dict)
@@ -635,23 +638,8 @@ def recording_capability_plan_complete(spec: FlowSpec) -> bool:
     ]
     if not submitted_names:
         return False
-    from dano.execution.page.capability_semantic import (
-        _required_public_action_request_ids,
-        _semantic_plan_execute_request_ids,
-    )
-
-    if (
-        _required_public_action_request_ids(spec)
-        - _semantic_plan_execute_request_ids(spec, submitted)
-    ):
-        return False
-    if status == "awaiting_materialization" and not spec.steps:
-        semantic_names = [
-            str(item.get("name") or "")
-            for item in (model.get("semantic_plan") or {}).get("capabilities") or []
-            if isinstance(item, dict) and str(item.get("name") or "")
-        ]
-        return len(semantic_names) == len(submitted_names) and set(semantic_names) == set(submitted_names)
+    if not spec.steps:
+        return _live_capability_plan_is_terminal(spec)
     materialized_names = [str(cap.name or "") for cap in spec.capabilities or [] if str(cap.name or "")]
     return (
         len(materialized_names) == len(submitted_names)
@@ -1043,6 +1031,10 @@ async def apply_recording_agent_submission(
             ))
         op_results.sort(key=lambda item: int(item["index"]))
 
+    if current.steps:
+        from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+        current = ensure_grounded_capability_output(current)
     current = _auto_confirm_ready_capabilities(
         _sync_capability_io_schemas(sync_flow_spec_models(current)),
         refresh_machine_owned=True,

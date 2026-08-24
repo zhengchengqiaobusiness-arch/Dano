@@ -1,6 +1,7 @@
 """Compile public capabilities from anchors and grounded request facts."""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import re
@@ -27,6 +28,9 @@ from dano.execution.page.capability_kinds import (
 )
 from dano.execution.page.capability_semantic import (
     _apply_semantic_business_understanding,
+    _complete_semantic_plan_from_spec,
+    _required_public_action_request_ids,
+    _semantic_plan_execute_request_ids,
     _semantic_plan_coverage,
 )
 from dano.execution.page.capability_nodes import (
@@ -169,6 +173,38 @@ def _step_by_request_id(spec: FlowSpec) -> dict[str, FlowStep]:
         if request_id:
             out[request_id] = step
     return out
+
+
+def _planned_anchor(
+    item: dict[str, Any],
+    *,
+    by_step: dict[str, FlowStep],
+    by_request: dict[str, FlowStep],
+    seen_anchors: set[str],
+) -> FlowStep | None:
+    """Resolve the real execute anchor even when a stale live ID survived freeze."""
+    identifiers = [item.get("anchor_step_id")]
+    identifiers.extend(
+        value
+        for ref in item.get("request_refs") or []
+        if isinstance(ref, dict) and str(ref.get("usage") or "") == "execute"
+        for value in (ref.get("step_id"), ref.get("request_id"))
+    )
+    candidates: list[FlowStep] = []
+    for identifier in identifiers:
+        raw = str(identifier or "")
+        step = by_step.get(raw) or by_request.get(raw)
+        if step is not None and step not in candidates and step.step_id not in seen_anchors:
+            candidates.append(step)
+    requested_kind = str(item.get("kind") or "")
+    requested_write = requested_kind in WRITE_CAPABILITY_KINDS
+    same_family = [
+        step for step in candidates
+        if (_capability_operation_kind(step) in WRITE_CAPABILITY_KINDS) == requested_write
+    ]
+    if same_family:
+        return same_family[0]
+    return candidates[0] if candidates else None
 
 
 def _match_option_source_step(spec: FlowSpec, source: dict[str, Any]) -> FlowStep | None:
@@ -473,27 +509,32 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         name = str(item.get("name") or "").strip()
         title = str(item.get("title") or name).strip()
         kind = str(item.get("kind") or "").strip()
-        anchor_step_id = str(item.get("anchor_step_id") or "").strip()
-        anchor = by_step.get(anchor_step_id) or by_request.get(anchor_step_id)
-        if anchor is not None:
-            anchor_step_id = anchor.step_id
+        anchor = _planned_anchor(
+            item,
+            by_step=by_step,
+            by_request=by_request,
+            seen_anchors=seen_anchors,
+        )
+        anchor_step_id = anchor.step_id if anchor is not None else ""
         prefix = f"semantic_plan.capabilities[{index}]"
         if not name or name in seen_names:
             errors.append(f"{prefix}: capability name is missing or duplicated")
             continue
         if not anchor_step_id or anchor is None:
-            errors.append(f"{prefix}: anchor_step_id does not identify one materialized step")
-            continue
-        if anchor_step_id in seen_anchors:
-            errors.append(f"{prefix}: public anchor is already owned by another capability")
+            errors.append(
+                f"{prefix}: anchor_step_id and execute references do not identify "
+                "one unused materialized step"
+            )
             continue
         grounded_kind = _capability_operation_kind(anchor)
         is_write = grounded_kind in WRITE_CAPABILITY_KINDS
         if (is_write and kind not in WRITE_CAPABILITY_KINDS) or (
             not is_write and kind not in READ_CAPABILITY_KINDS
         ):
-            errors.append(f"{prefix}: capability kind does not match the grounded business operation")
-            continue
+            warnings.append(
+                f"{prefix}: capability kind {kind!r} was normalized to grounded kind {grounded_kind!r}"
+            )
+            kind = grounded_kind
         grounded_batch = bool(is_write and _write_contract_is_batch(current, [anchor]))
         grounded_goal_update = _goal_update_is_grounded_by_sibling_create(
             plan_items, by_step, item, anchor, grounded_kind,
@@ -514,7 +555,9 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         )
         errors.extend(f"{prefix}: {message}" for message in dependency_errors)
         if dependency_errors:
-            continue
+            # A broken optional relation must not erase the public action. Keep
+            # the executable anchor and leave the relation error for repair.
+            step_ids = [anchor_step_id]
         member_steps = [by_step[step_id] for step_id in step_ids]
         refs = [
             _request_ref(
@@ -635,3 +678,145 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
         warnings=warnings,
         audit=audit,
     )
+
+
+def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
+    """Keep every recorded independent business action as a Stage 6 ability.
+
+    The model-authored plan remains the primary source of public semantics.
+    This fallback only fills a missing structural boundary from an immutable
+    request/action and lets the normal compiler derive membership and order.
+    """
+    from dano.execution.page.capability_contracts import (
+        _mark_repeated_write_observations,
+        _planned_capability_has_public_anchor,
+    )
+    from dano.execution.page.capability_kinds import _is_write_step
+    from dano.execution.page.flow_materialization.request_steps import promote_request_to_step
+    from dano.execution.page.recording_live import _recording_goal_contract
+
+    current = spec.model_copy(deep=True)
+    _mark_repeated_write_observations(current)
+    required = _required_public_action_request_ids(current)
+    ordered_request_ids = [
+        str(fact.request_id or "")
+        for fact in current.request_facts.requests or []
+        if str(fact.request_id or "") in required
+    ]
+    by_request = _step_by_request_id(current)
+    promotion_errors: list[str] = []
+    for request_id in ordered_request_ids:
+        if request_id in by_request:
+            continue
+        try:
+            promote_request_to_step(current, request_id=request_id)
+        except (TypeError, ValueError) as exc:
+            promotion_errors.append(f"{request_id}: {exc}")
+    by_request = _step_by_request_id(current)
+
+    candidates: list[tuple[str, FlowStep]] = [
+        (request_id, by_request[request_id])
+        for request_id in ordered_request_ids
+        if request_id in by_request
+        and not (by_request[request_id].source_meta or {}).get("duplicate_observation_of")
+    ]
+    if not candidates:
+        candidates = [
+            (_request_id_for_step(current, step) or step.step_id, step)
+            for step in current.steps
+            if not (step.source_meta or {}).get("duplicate_observation_of")
+            and (
+                _is_write_step(step)
+                or _planned_capability_has_public_anchor(
+                    current, _capability_operation_kind(step), [step.step_id],
+                )
+            )
+        ]
+
+    model = dict((current.meta or {}).get("capability_model") or {})
+    existing_plan = (
+        model.get("submitted_semantic_plan")
+        if isinstance(model.get("submitted_semantic_plan"), dict)
+        else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    )
+    plan = _complete_semantic_plan_from_spec(current, existing_plan)
+    plan.setdefault("business_understanding", {
+        "business_name": str(current.title or "").strip(),
+        "summary": str(current.business_description or "").strip(),
+    })
+    plan.setdefault("unresolved_items", [])
+    plan_items = [
+        deepcopy(item) for item in plan.get("capabilities") or [] if isinstance(item, dict)
+    ]
+    plan["capabilities"] = plan_items
+    covered = _semantic_plan_execute_request_ids(current, plan)
+    used_names = {str(item.get("name") or "") for item in plan_items}
+    goal_slots = list(_recording_goal_contract(current).get("capabilities") or [])
+    fallback_names: list[str] = []
+
+    for index, (request_id, step) in enumerate(candidates):
+        if request_id in covered or step.step_id in covered:
+            continue
+        kind = _capability_operation_kind(step)
+        goal_title = str(
+            (goal_slots[index].get("name") if index < len(goal_slots) else "") or ""
+        ).strip()
+        title = goal_title or str(step.name or "").strip() or kind.replace("_", " ")
+        raw_name = re.sub(
+            r"[^a-z0-9]+", "_", (goal_title or str(step.name or "")).casefold(),
+        ).strip("_")
+        name = raw_name or f"{kind}_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:8]}"
+        if name in used_names:
+            name = f"{name}_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:6]}"
+        used_names.add(name)
+        fallback_names.append(name)
+        plan_items.append({
+            "name": name,
+            "title": title,
+            "intent": title,
+            "kind": kind,
+            "anchor_step_id": step.step_id,
+            "request_refs": [{
+                "request_id": request_id,
+                "step_id": step.step_id,
+                "usage": "execute",
+            }],
+        })
+        covered.add(request_id)
+
+    current_names = [str(capability.name or "") for capability in current.capabilities]
+    planned_names = [str(item.get("name") or "") for item in plan_items]
+    if not plan_items or (
+        not fallback_names
+        and len(current_names) == len(planned_names)
+        and set(current_names) == set(planned_names)
+    ):
+        return current
+
+    compilation = compile_capabilities(current, plan)
+    if compilation.capabilities:
+        current = compilation.spec
+    materialized_names = [str(capability.name or "") for capability in current.capabilities]
+    submitted_names = [str(item.get("name") or "") for item in plan_items]
+    missing_names = sorted(set(submitted_names) - set(materialized_names))
+    current.meta = {
+        **(current.meta or {}),
+        "capability_model": {
+            **model,
+            "status": "ready" if not missing_names else "needs_review",
+            "source": "grounded_action_fallback",
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+            "submitted_count": len(plan_items),
+            "submitted_names": submitted_names,
+            "materialized_count": len(current.capabilities),
+            "materialized_names": materialized_names,
+            "missing_submitted_names": missing_names,
+            "extra_materialized_names": sorted(set(materialized_names) - set(submitted_names)),
+            "semantic_coverage": _semantic_plan_coverage(current, {"semantic_plan": plan}),
+            "capability_compilation": compilation.audit,
+            "capability_compilation_errors": [*promotion_errors, *compilation.errors],
+            "fallback_added_capabilities": fallback_names,
+        },
+    }
+    return current
