@@ -292,6 +292,54 @@ def test_compiler_recovers_stale_anchor_from_grounded_execute_reference() -> Non
     assert compilation.capabilities[0].step_ids[-1] == "detail"
 
 
+def test_compiler_preserves_submitted_preflight_membership_without_inferred_link() -> None:
+    context = FlowStep(
+        step_id="customer-options",
+        method="GET",
+        path="/customers/simple-list",
+        source_meta={"request_id": "req-customer-options", "role": "business_get"},
+    )
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    spec = FlowSpec(steps=[context, create])
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [{
+            "name": "create_order",
+            "title": "Create order",
+            "kind": "create",
+            "anchor_step_id": "create",
+            "request_refs": [
+                {
+                    "request_id": "req-customer-options",
+                    "step_id": "customer-options",
+                    "usage": "preflight",
+                },
+                {
+                    "request_id": "req-create",
+                    "step_id": "create",
+                    "usage": "execute",
+                },
+            ],
+        }],
+        "unresolved_items": [],
+    }
+
+    compilation = compile_capabilities(spec, plan)
+
+    assert [
+        (ref.request_id, ref.usage)
+        for ref in compilation.capabilities[0].request_refs
+    ] == [
+        ("req-customer-options", "preflight"),
+        ("req-create", "execute"),
+    ]
+
+
 def test_grounded_actions_produce_capabilities_without_a_model_plan() -> None:
     from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 
@@ -729,6 +777,96 @@ def test_submitted_preflight_read_does_not_become_an_extra_public_ability() -> N
 
     assert [capability.name for capability in result.capabilities] == [
         "inspect_order", "update_order",
+    ]
+    assert result.meta["capability_model"].get("fallback_added_capabilities", []) == []
+
+
+def test_grounded_fallback_respects_submitted_support_membership() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    context = FlowStep(
+        step_id="detail-context",
+        method="GET",
+        path="/orders/get",
+        source_meta={"request_id": "req-detail-context", "role": "business_get"},
+    )
+    create = FlowStep(
+        step_id="create",
+        method="POST",
+        path="/orders/create",
+        source_meta={"request_id": "req-create", "role": "business_write"},
+    )
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [{
+            "name": "create_order",
+            "title": "Create order",
+            "kind": "create",
+            "anchor_step_id": "create",
+            "request_refs": [
+                {
+                    "request_id": "req-detail-context",
+                    "step_id": "detail-context",
+                    "usage": "preflight",
+                },
+                {
+                    "request_id": "req-create",
+                    "step_id": "create",
+                    "usage": "execute",
+                },
+            ],
+        }],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=[context, create],
+        meta={"capability_model": {
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+        }},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id="req-detail-context",
+            method="GET",
+            path="/orders/get",
+            trigger_action_id="open-create",
+        ),
+        RequestFact(
+            request_id="req-create",
+            method="POST",
+            path="/orders/create",
+            trigger_action_id="save-create",
+        ),
+    ]
+    spec.request_facts.analysis = {
+        "req-detail-context": RequestAnalysis(
+            request_id="req-detail-context", role="business_get", keep=True,
+        ),
+        "req-create": RequestAnalysis(
+            request_id="req-create", role="business_write", keep=True,
+        ),
+    }
+    spec.request_facts.usage = {
+        "req-detail-context": RequestUsage(
+            request_id="req-detail-context",
+            materialized_step_id="detail-context",
+            state="materialized",
+        ),
+        "req-create": RequestUsage(
+            request_id="req-create", materialized_step_id="create", state="materialized",
+        ),
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert [capability.name for capability in result.capabilities] == ["create_order"]
+    assert [
+        (ref.request_id, ref.usage)
+        for ref in result.capabilities[0].request_refs
+    ] == [
+        ("req-detail-context", "preflight"),
+        ("req-create", "execute"),
     ]
     assert result.meta["capability_model"].get("fallback_added_capabilities", []) == []
 

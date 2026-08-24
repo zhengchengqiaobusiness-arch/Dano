@@ -501,6 +501,35 @@ def _step_matching_request(
     })
 
 
+def _submitted_capability_request_refs(
+    spec: FlowSpec,
+    capability_plan: dict[str, Any],
+    *,
+    anchor: FlowStep,
+    by_request: dict[str, FlowStep],
+    by_step: dict[str, FlowStep],
+) -> list[CapabilityRequestRef]:
+    """Compile exact Pi memberships without asking heuristics to reinterpret them."""
+    refs: list[CapabilityRequestRef] = []
+    for item in capability_plan.get("request_refs") or []:
+        if not isinstance(item, dict):
+            continue
+        usage = str(item.get("usage") or "")
+        if usage not in {"execute", "preflight", "option_source", "fact_check"}:
+            continue
+        request_id = str(item.get("request_id") or "")
+        step_id = str(item.get("step_id") or "")
+        step = by_step.get(step_id) or by_request.get(request_id)
+        if usage == "execute":
+            step = anchor
+        elif step is None and request_id:
+            step = _step_matching_request(spec, request_id, by_request, by_step)
+        if step is None and not request_id:
+            continue
+        refs.append(_request_ref(spec, step, usage=usage, request_id=request_id))
+    return refs
+
+
 def _compiled_nodes_from_refs(
     refs: list[CapabilityRequestRef],
     anchor_step_id: str,
@@ -641,12 +670,12 @@ def _normalize_compiled_call_keys(
 
 
 def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> CapabilityCompilation:
-    """Return a copy whose generated abilities use only verified graph membership.
+    """Compile Pi semantics and complete them with mechanically grounded dependencies.
 
     The Skill plan names the capability, public copy, and public anchor. Kind
     and title stay Skill-owned when they match the recorded read/write family.
-    Model-supplied request membership is ignored; the grounded graph supplies
-    members.
+    Exact submitted memberships remain authoritative; the grounded graph may
+    only supplement dependencies omitted from the plan.
     """
     bind_owner_runtime()
     current = spec.model_copy(deep=True)
@@ -722,6 +751,22 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             )
             for step in member_steps
         ]
+        refs_by_identity = {
+            str(ref.request_id or ref.step_id): ref
+            for ref in refs
+            if str(ref.request_id or ref.step_id)
+        }
+        for ref in _submitted_capability_request_refs(
+            current,
+            item,
+            anchor=anchor,
+            by_request=by_request,
+            by_step=by_step,
+        ):
+            identity = str(ref.request_id or ref.step_id)
+            if identity:
+                refs_by_identity[identity] = ref
+        refs = list(refs_by_identity.values())
         occupied_ids = {ref.request_id for ref in refs if ref.request_id}
         for request_id in _option_source_request_ids(
             current, member_steps, plan, capability_plan=item,
@@ -745,6 +790,10 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
                 request_id=fact_check_request_id,
             ))
         refs = _ordered_capability_request_refs(refs)
+        compiled_step_ids = [
+            ref.step_id for ref in refs
+            if ref.step_id and ref.usage != "option_source"
+        ]
 
         compiled.append(FlowCapability(
             name=name,
@@ -753,7 +802,7 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             kind=kind,
             capability_id=_stable_capability_id(name, kind, anchor_step_id),
             request_refs=refs,
-            step_ids=step_ids,
+            step_ids=(step_ids if kind == "submit_batch" else compiled_step_ids),
             nodes=(
                 _default_capability_nodes(member_steps, kind="submit_batch")
                 if kind == "submit_batch"
@@ -762,9 +811,9 @@ def compile_capabilities(spec: FlowSpec, semantic_plan: dict[str, Any]) -> Capab
             confirmed=False,
             confidence=1.0,
             evidence=[{
-                "source": "grounded_request_graph",
+                "source": "semantic_plan_with_grounded_request_graph",
                 "anchor_step_id": anchor_step_id,
-                "ignored_model_request_refs": len(item.get("request_refs") or []),
+                "submitted_request_refs": len(item.get("request_refs") or []),
             }],
             status="draft",
             updated_by="planner",
@@ -852,7 +901,25 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
 
     current = spec.model_copy(deep=True)
     _mark_repeated_write_observations(current)
-    required = _required_public_action_request_ids(current)
+    model = dict((current.meta or {}).get("capability_model") or {})
+    existing_plan = (
+        model.get("submitted_semantic_plan")
+        if isinstance(model.get("submitted_semantic_plan"), dict)
+        else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    )
+    previous_fallback_names = {
+        str(name or "")
+        for name in model.get("fallback_added_capabilities") or []
+        if str(name or "")
+    }
+    if previous_fallback_names and isinstance(existing_plan, dict):
+        existing_plan = deepcopy(existing_plan)
+        existing_plan["capabilities"] = [
+            item for item in existing_plan.get("capabilities") or []
+            if not isinstance(item, dict)
+            or str(item.get("name") or "") not in previous_fallback_names
+        ]
+    required = _required_public_action_request_ids(current, existing_plan)
     ordered_request_ids = [
         str(fact.request_id or "")
         for fact in current.request_facts.requests or []
@@ -888,12 +955,6 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
             )
         ]
 
-    model = dict((current.meta or {}).get("capability_model") or {})
-    previous_fallback_names = {
-        str(name or "")
-        for name in model.get("fallback_added_capabilities") or []
-        if str(name or "")
-    }
     if previous_fallback_names:
         current.capabilities = [
             capability for capability in current.capabilities
@@ -904,18 +965,6 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
                 ref.origin in {"manual", "user"}
                 for ref in capability.request_refs or []
             )
-        ]
-    existing_plan = (
-        model.get("submitted_semantic_plan")
-        if isinstance(model.get("submitted_semantic_plan"), dict)
-        else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
-    )
-    if previous_fallback_names and isinstance(existing_plan, dict):
-        existing_plan = deepcopy(existing_plan)
-        existing_plan["capabilities"] = [
-            item for item in existing_plan.get("capabilities") or []
-            if not isinstance(item, dict)
-            or str(item.get("name") or "") not in previous_fallback_names
         ]
     plan = _complete_semantic_plan_from_spec(current, existing_plan)
     plan.setdefault("business_understanding", {

@@ -1194,11 +1194,9 @@ def _consume_dependency_executor_evidence(spec):  # noqa: ANN001, ANN202
 
     current = _consume_write_executor_evidence(current)
 
-    # Capability membership is compiled from the verified dependency graph,
-    # not from the model's proposed request_refs.  Dependency verification can
-    # therefore expand the executable closure after the original capability
-    # plan was compiled.  Refresh that same stored plan here so verified
-    # preflight steps do not remain orphaned until another planning turn.
+    # Refresh the stored Pi membership after verification.  The compiler keeps
+    # exact submitted refs and supplements them with newly verified dependency
+    # edges, so later evidence cannot orphan a real preflight step.
     capability_model = dict((current.meta or {}).get("capability_model") or {})
     semantic_plan = capability_model.get("semantic_plan")
     if isinstance(semantic_plan, dict) and semantic_plan.get("capabilities"):

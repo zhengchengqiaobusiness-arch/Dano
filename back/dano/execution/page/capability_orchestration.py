@@ -977,9 +977,9 @@ async def orchestrate_flow_capabilities(
             "complete_semantic_submission": complete_semantic_submission,
         }
     # Field/source/required/enum edits are applied through the live operation
-    # channel before this function. Capability membership is compiler-owned;
-    # translating the semantic plan back into generic edit ops would reintroduce
-    # a second producer.
+    # channel before this function.  The Pi plan is the single semantic producer
+    # for capability membership; the compiler only materializes that plan and
+    # supplements mechanically grounded dependencies.
     _normalize_capability_references(current)
     if initial_generation:
         current = _repair_generated_capability_contracts(
