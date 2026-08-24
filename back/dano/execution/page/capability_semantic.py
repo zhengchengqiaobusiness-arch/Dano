@@ -24,6 +24,72 @@ from dano.execution.page.flow_spec_core.fingerprints import (
 )
 
 
+def _required_public_action_request_ids(spec: FlowSpec) -> set[str]:
+    """Return the recorded requests that each require a public capability.
+
+    Writes remain mandatory even when recorder action metadata is incomplete.
+    A read is public only when analysis classified it as a business read and it
+    has its own user action/transaction. Reads caused by a write action are
+    refresh/fact-check traffic, while ``read_context`` requests are preflight
+    hydration for a later command rather than separate caller abilities.
+    """
+    facts = _request_fact_items(spec)
+
+    def action_key(item: dict[str, Any]) -> str:
+        return str(
+            item.get("trigger_transaction_id")
+            or item.get("trigger_action_id")
+            or ""
+        ).strip()
+
+    write_action_keys = {
+        action_key(item)
+        for item in facts
+        if _eligible_business_write_fact(item) and action_key(item)
+    }
+    required = {
+        str(item.get("request_id") or "")
+        for item in facts
+        if _eligible_business_write_fact(item) and str(item.get("request_id") or "")
+    }
+    required.update(
+        str(item.get("request_id") or "")
+        for item in facts
+        if (
+            item.get("keep")
+            and str(item.get("role") or "") == "business_get"
+            and str(item.get("request_id") or "")
+            and action_key(item)
+            and action_key(item) not in write_action_keys
+        )
+    )
+    return required
+
+
+def _semantic_plan_execute_request_ids(
+    spec: FlowSpec,
+    semantic_plan: dict[str, Any],
+) -> set[str]:
+    request_id_by_step_id = {
+        str(step.step_id): str((step.source_meta or {}).get("request_id") or "")
+        for step in spec.steps
+        if str(step.step_id or "")
+    }
+    execute_ids: set[str] = set()
+    for capability in semantic_plan.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        for ref in capability.get("request_refs") or []:
+            if not isinstance(ref, dict) or str(ref.get("usage") or "") != "execute":
+                continue
+            request_id = str(ref.get("request_id") or "")
+            step_id = str(ref.get("step_id") or "")
+            resolved = request_id or request_id_by_step_id.get(step_id, "") or step_id
+            if resolved:
+                execute_ids.add(resolved)
+    return execute_ids
+
+
 def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str, Any]:
     plan = result.get("semantic_plan") or result.get("plan")
     if not isinstance(plan, dict):
@@ -62,9 +128,18 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     ]
 
     def field_contract_complete(param: ParamField) -> bool:
+        public_label = str(param.label or param.key or "").strip()
+        wire_leaf = str(param.key or param.path or "").split(".")[-1]
+        wire_style_public_id = bool(
+            param.exposed_to_user
+            and public_label == str(param.key or "").strip()
+            and public_label.isascii()
+            and re.search(r"(?:Id|IDs?|_ids?)$", wire_leaf)
+        )
         return bool(
             str(param.path or "").strip()
-            and str(param.label or param.key or "").strip()
+            and public_label
+            and not wire_style_public_id
             and str(param.type or "").strip().lower() not in {"", "unknown"}
             and str(param.category or "").strip().lower() not in {"", "unknown"}
             and bool(str(param.source_kind or "").strip())
@@ -77,6 +152,23 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         for step_id, param in required_fields
         if field_contract_complete(param)
     }
+    field_axis_gaps = [
+        {
+            "step_id": step_id,
+            "path": str(param.path or ""),
+            "axes": [
+                "name"
+                if (
+                    param.exposed_to_user
+                    and str(param.label or "").strip() == str(param.key or "").strip()
+                    and str(param.label or "").isascii()
+                    and re.search(r"(?:Id|IDs?|_ids?)$", str(param.key or param.path or "").split(".")[-1])
+                ) else "contract"
+            ],
+        }
+        for step_id, param in required_fields
+        if (step_id, param.path) not in covered_fields
+    ]
     covered_steps: set[str] = set()
     names: set[str] = set()
     anchors: set[str] = set()
@@ -131,6 +223,12 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         missing.append("capabilities")
     elif capability_contract_invalid:
         missing.append("capability_contracts")
+    missing_public_action_request_ids = sorted(
+        _required_public_action_request_ids(spec)
+        - _semantic_plan_execute_request_ids(spec, plan)
+    )
+    if missing_public_action_request_ids:
+        missing.append("public_action_coverage")
     understanding = plan.get("business_understanding")
     if not isinstance(understanding, dict) or not any(
         str(understanding.get(key) or "").strip()
@@ -153,6 +251,8 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         "total_steps": len(capability_items),
         "covered_fields": len(covered_fields),
         "total_fields": len(required_fields),
+        "field_axis_gaps": field_axis_gaps,
+        "missing_public_action_request_ids": missing_public_action_request_ids,
     }
 
 
@@ -202,6 +302,12 @@ def _pre_materialization_semantic_plan_coverage(
 
     if not capability_items:
         missing.append("capabilities")
+    missing_public_action_request_ids = sorted(
+        _required_public_action_request_ids(spec)
+        - _semantic_plan_execute_request_ids(spec, semantic_plan)
+    )
+    if missing_public_action_request_ids:
+        missing.append("public_action_coverage")
     from dano.execution.page.recording_live import _recording_goal_contract
 
     expected_count = int(_recording_goal_contract(spec).get("expected_count") or 0)
@@ -231,6 +337,7 @@ def _pre_materialization_semantic_plan_coverage(
         "covered_fields": 0,
         "total_fields": 0,
         "phase": "request_facts",
+        "missing_public_action_request_ids": missing_public_action_request_ids,
     }
 
 

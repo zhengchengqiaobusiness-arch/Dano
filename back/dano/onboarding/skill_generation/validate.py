@@ -14,7 +14,6 @@ from dano.onboarding.skill_generation.catalog import (
     field_type,
     is_risk_write,
     is_write_capability,
-    relation_is_usable,
     schema_has_field,
     schema_required,
     types_compatible,

@@ -38,7 +38,6 @@ from dano.execution.page.flow_materialization.field_contracts.common import (
 from dano.execution.page.flow_materialization.field_contracts.caller_ownership import (
     _param_has_editable_control_evidence,
 )
-from dano.execution.page.request_identity import request_identity_matches
 
 
 def _option_binding_tokens(value: Any) -> set[str]:
@@ -98,7 +97,7 @@ def _option_binding_semantic_families(value: Any) -> set[str]:
     text = str(value or "").casefold()
     families: set[str] = set()
     patterns = {
-        "person": r"(?:user|users|assignee|approver|reviewer|auditor|employee|member|person|people|审批|审核|人员|用户|负责人)",
+        "person": r"(?:user|users|assignee|approver|reviewer|auditor|employee|member|person|people|creator|createdby|author|审批|审核|人员|用户|负责人|创建人|创建者)",
         "organization": r"(?:dept|department|org|organization|division|unit|部门|组织|机构)",
         "team": r"(?:team|group|squad|团队|班组|小组)",
         "project": r"(?:project|initiative|项目)",
@@ -255,6 +254,121 @@ def _clear_ambiguous_automatic_option_request_ids(spec: FlowSpec) -> None:
             for binding in step.selects or []:
                 if _strip_body_prefix(binding.path or binding.id_path or "") == _strip_body_prefix(param.path):
                     binding.source_request_id = ""
+
+
+def _restore_executable_option_request_ids(spec: FlowSpec) -> int:
+    """Attach a concrete captured occurrence to URL-grounded option contracts.
+
+    Repeated option loads share one renewable endpoint contract. Clearing a
+    false exact occurrence is correct, but leaving both request and step IDs
+    empty makes an otherwise executable source fail validation. For a target
+    request, the nearest matching occurrence at or before that request is the
+    page's active catalog snapshot; later dialog loads belong to later actions.
+    """
+    step_id_by_request_id = {
+        str((step.source_meta or {}).get("request_id") or ""): step.step_id
+        for step in spec.steps
+        if str((step.source_meta or {}).get("request_id") or "")
+    }
+
+    def sequence(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return -1.0
+
+    def target_sequence(step: FlowStep) -> float:
+        meta = step.source_meta or {}
+        return sequence(meta.get("sequence", meta.get("request_index")))
+
+    repaired = 0
+    for target in spec.steps:
+        target_meta = target.source_meta or {}
+        target_pos = target_sequence(target)
+        for param in target.params or []:
+            source = dict(param.source or {})
+            contracts: list[tuple[dict[str, Any], bool]] = []
+            if param.source_kind == "api_option":
+                contracts.append((source, False))
+            nested = source.get("option_source")
+            if isinstance(nested, dict) and str(nested.get("kind") or "") == "api_option":
+                contracts.append((dict(nested), True))
+            for contract, nested_contract in contracts:
+                if (
+                    contract.get("source_request_id")
+                    or contract.get("source_step_id")
+                    or not contract.get("source_url")
+                    or not contract.get("value_key")
+                    or not contract.get("label_key")
+                ):
+                    continue
+                endpoint = _option_source_contract_endpoint(
+                    str(contract.get("source_url") or "")
+                )
+                candidates: list[tuple[float, Any]] = []
+                for fact in spec.request_facts.requests or []:
+                    if str(fact.method or "GET").upper() not in {"GET", "HEAD"}:
+                        continue
+                    if _option_source_contract_endpoint(
+                        str(fact.url or fact.path or "")
+                    ) != endpoint:
+                        continue
+                    if (
+                        fact.page_id and target_meta.get("page_id")
+                        and str(fact.page_id) != str(target_meta.get("page_id"))
+                    ):
+                        continue
+                    if (
+                        fact.frame_id and target_meta.get("frame_id")
+                        and str(fact.frame_id) != str(target_meta.get("frame_id"))
+                    ):
+                        continue
+                    rows = [
+                        item for item in (as_list_payload(fact.response_json) or [])
+                        if isinstance(item, dict)
+                    ]
+                    category_key = str(contract.get("category_key") or "")
+                    category_value = contract.get("category_value")
+                    if category_key and category_value not in (None, ""):
+                        rows = [
+                            item for item in rows
+                            if str(item.get(category_key)) == str(category_value)
+                        ]
+                    if not any(
+                        contract["value_key"] in item and contract["label_key"] in item
+                        for item in rows
+                    ):
+                        continue
+                    fact_pos = sequence(
+                        fact.sequence if fact.sequence is not None else fact.request_index
+                    )
+                    candidates.append((fact_pos, fact))
+                if not candidates:
+                    continue
+                before = [item for item in candidates if item[0] <= target_pos]
+                _chosen_pos, chosen = (
+                    max(before, key=lambda item: item[0])
+                    if before else min(candidates, key=lambda item: item[0])
+                )
+                request_id = str(chosen.request_id or "")
+                if not request_id:
+                    continue
+                contract = {
+                    **contract,
+                    "source_request_id": request_id,
+                    "source_step_id": step_id_by_request_id.get(request_id, ""),
+                }
+                if nested_contract:
+                    param.source = {**source, "option_source": contract}
+                    source = dict(param.source)
+                else:
+                    param.source = contract
+                    source = dict(contract)
+                binding = _find_select_binding(target, param)
+                if binding is not None:
+                    binding.source_request_id = request_id
+                repaired += 1
+    return repaired
 
 
 def _repair_structural_option_bindings(
@@ -648,7 +762,12 @@ def _repair_structural_option_bindings(
                                 item for item in items
                                 if str(item.get(category_key)) == str(category_value)
                             ]
-                            if len(subset) >= 2:
+                            # A scalar repeated by every row is metadata, not a
+                            # category (for example the same avatar URL on all
+                            # users). Treating it as a filter creates a second,
+                            # indistinguishable option contract and makes an
+                            # otherwise unique source look ambiguous.
+                            if 2 <= len(subset) < len(items):
                                 subsets.append((category_key, category_value, subset))
                 seen_subsets: set[str] = set()
                 for category_key, category_value, subset in subsets:
@@ -773,11 +892,23 @@ def _repair_structural_option_bindings(
                 **({"transaction_id": page_tx} if page_tx else {}),
                 **({"action_id": page_action} if page_action else {}),
             }
-        if not request_identity_matches(
-            {key: value for key, value in ownership_scope.items() if value},
-            source,
+        # Page/frame are an ownership scope, not a complete request identity.
+        # Reusing the strict request identity matcher here made every
+        # page-only scope fail because it intentionally requires method+URL.
+        # Scope coordinates reject known conflicts; explicitly supplied
+        # source action/transaction coordinates remain hard constraints.
+        for scope_key in ("page_id", "frame_id"):
+            expected = str(ownership_scope.get(scope_key) or "")
+            actual = str(source.get(scope_key) or "")
+            if expected and actual and expected != actual:
+                return False
+        for scope_key, source_key in (
+            ("transaction_id", "trigger_transaction_id"),
+            ("action_id", "trigger_action_id"),
         ):
-            return False
+            expected = str(ownership_scope.get(scope_key) or "")
+            if expected and str(source.get(source_key) or "") != expected:
+                return False
         if page_contract is not None and page_contract.get("candidate_set_bridge") is True:
             # row_contracts runs next and accepts this bridge only when the
             # complete DOM label set equals the candidate response label set.
@@ -842,6 +973,45 @@ def _repair_structural_option_bindings(
         ]
         for param in target.params or []:
             source = dict(param.source or {})
+            hydrated_option = (
+                source.get("option_source")
+                if isinstance(source.get("option_source"), dict) else {}
+            )
+            readonly_control = any(
+                isinstance(item, dict)
+                and item.get("kind") == "page_control"
+                and bool(
+                    item.get("disabled")
+                    or item.get("read_only")
+                    or item.get("editable") is False
+                )
+                for item in (param.evidence or [])
+            )
+            if (
+                param.source_kind == "previous_response"
+                and hydrated_option.get("source_url")
+                and hydrated_option.get("value_key")
+                and hydrated_option.get("label_key")
+                and not readonly_control
+                and not param.locked
+                and not _param_has_manual_contract(param)
+            ):
+                # Edit hydration is a default-value layer. A captured option
+                # contract on the same field proves that callers may retain or
+                # replace that value using the same choices as Create.
+                param.category = "user_param"
+                param.type = "enum"
+                param.editable = True
+                param.exposed_to_user = True
+                param.need_human_confirm = False
+                param.source = {
+                    **source,
+                    "kind": "previous_response",
+                    "allow_caller_override": True,
+                    "option_source": hydrated_option,
+                }
+                source = dict(param.source)
+                repaired += 1
             primary_source_request_ids = {
                 str(value)
                 for value in (
@@ -860,7 +1030,13 @@ def _repair_structural_option_bindings(
                 )
             displaced_automatic_option = bool(
                 has_exact_option_scope
-                and param.source_kind in {"api_option", "previous_response"}
+                and (
+                    param.source_kind == "api_option"
+                    or (
+                        param.source_kind == "previous_response"
+                        and has_recorded_choice(param)
+                    )
+                )
                 and (
                     not primary_source_request_ids
                     or primary_source_request_ids.isdisjoint(exact_request_ids)
@@ -875,10 +1051,12 @@ def _repair_structural_option_bindings(
                 or (
                     has_exact_option_scope
                     and _is_idlike(leaf)
+                    and re.sub(r"[^a-z0-9]+", "", leaf.casefold()) != "id"
                 )
             )
             rebindable_option = bool(
-                param.source_kind == "api_option" and has_recorded_choice(param)
+                param.source_kind in {"api_option", "form_option"}
+                and has_recorded_choice(param)
             ) or bool(
                 param.source_kind == "page_enum"
                 and (
@@ -893,8 +1071,9 @@ def _repair_structural_option_bindings(
                 or _param_has_grounded_direct_input_contract(param)
                 or (
                     param.source_kind == "previous_response"
-                    and isinstance((param.source or {}).get("option_source"), dict)
-                    and not displaced_automatic_option
+                    and not has_recorded_choice(param)
+                    and not hydrated_option
+                    and not selected_entity_target
                 )
                 or (
                     param.source_kind in _OPTION_SOURCE_KINDS
@@ -1107,6 +1286,11 @@ def _repair_structural_option_bindings(
                             "response_path": response_path,
                             "target_path": sibling.path,
                         }
+                        projected_value = _flow_path_lookup(selected_row, response_path)
+                        if isinstance(projected_value, str) or isinstance(sibling.value, str):
+                            sibling.type = "string"
+                            if isinstance(sibling.value, str):
+                                sibling.wire_type = "string"
                         sibling.exposed_to_user = False
                         sibling.editable = False
                         sibling.required = False
@@ -1116,18 +1300,32 @@ def _repair_structural_option_bindings(
                         )
                         projected_paths.add(sibling.path)
                     for sibling in target.params or []:
+                        sibling_source = dict(sibling.source or {})
+                        automatic_recorded_default = bool(
+                            sibling.source_kind == "constant"
+                            and str(sibling_source.get("kind") or "")
+                            == "recorded_control_default"
+                            and not _param_has_manual_contract(sibling)
+                        )
                         if (
                             sibling is param
                             or sibling.path in projected_paths
                             or sibling.locked
-                            or sibling.source_kind in {
-                                "user_input", "page_default", "constant", "system_time",
-                                "system_generated", "computed", "current_user",
-                                "dynamic_structure", "selected_option_field",
-                            }
+                            or (
+                                sibling.source_kind in {
+                                    "user_input", "page_default", "constant", "system_time",
+                                    "system_generated", "computed", "current_user",
+                                    "dynamic_structure", "selected_option_field",
+                                }
+                                and not automatic_recorded_default
+                            )
+                            or _param_has_manual_contract(sibling)
                             or _param_has_editable_control_evidence(sibling)
-                            or _looks_user_entered_business_field(
-                                sibling.key, sibling.path,
+                            or (
+                                _looks_user_entered_business_field(
+                                    sibling.key, sibling.path,
+                                )
+                                and not automatic_recorded_default
                             )
                             or _param_is_quantity_or_formula_leaf(sibling.key, sibling.path)
                         ):
@@ -1153,6 +1351,11 @@ def _repair_structural_option_bindings(
                             "response_path": response_path,
                             "target_path": sibling.path,
                         }
+                        projected_value = _flow_path_lookup(selected_row, response_path)
+                        if isinstance(projected_value, str) or isinstance(sibling.value, str):
+                            sibling.type = "string"
+                            if isinstance(sibling.value, str):
+                                sibling.wire_type = "string"
                         sibling.exposed_to_user = False
                         sibling.editable = False
                         sibling.required = False
@@ -1169,6 +1372,7 @@ def _repair_structural_option_bindings(
                         ]
             repaired += 1
 
+    repaired += _restore_executable_option_request_ids(spec)
     return repaired
 
 _PENDING_FLOW_SPEC_HELPERS = {'_OPTION_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_best_option_projection_path': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_bind_option_source': 'dano.execution.page.flow_materialization.field_contracts.option_sync', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_find_select_binding': 'dano.execution.page.flow_materialization.field_contracts.option_sync', '_flow_path_lookup': 'dano.execution.page.flow_spec_core.normalization', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_looks_unit_price_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_option_source_contract_endpoint': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_is_quantity_or_formula_leaf': 'dano.execution.page.flow_materialization.field_contracts.computed', '_read_is_business_entity_collection': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_read_is_option_source': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_read_transport_can_supply_options': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_recorded_scalar_values_match': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_refresh_param_enum_description': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization'}

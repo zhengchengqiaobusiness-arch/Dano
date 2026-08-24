@@ -36,8 +36,7 @@ def _response_shape_evidence_score(value: Any, *, depth: int = 0) -> int:
     if isinstance(value, list):
         if not value:
             return 0
-        samples = value[:3]
-        return 5 + max(_response_shape_evidence_score(item, depth=depth + 1) for item in samples)
+        return 5 + max(_response_shape_evidence_score(item, depth=depth + 1) for item in value)
     return 1 if value is not None else 0
 
 
@@ -45,13 +44,62 @@ def _response_list_paths(value: Any, *, path: str = "") -> set[str]:
     paths: set[str] = set()
     if isinstance(value, list):
         paths.add(path or "$.")
-        for item in value[:3]:
+        for item in value:
             paths.update(_response_list_paths(item, path=f"{path}[]"))
     elif isinstance(value, dict):
         for key, item in value.items():
             child = f"{path}.{key}" if path else str(key)
             paths.update(_response_list_paths(item, path=child))
     return paths
+
+
+def _shape_signature(value: Any) -> str:
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            f"{key}:{_shape_signature(item)}" for key, item in sorted(value.items())
+        ) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(sorted({_shape_signature(item) for item in value})) + "]"
+    return type(value).__name__
+
+
+def _merge_observed_shapes(current: Any, observed: Any) -> Any:
+    """Union structure while retaining only rows and values actually observed."""
+    if isinstance(current, dict) and isinstance(observed, dict):
+        merged = copy.deepcopy(current)
+        for key, value in observed.items():
+            merged[key] = (
+                _merge_observed_shapes(merged[key], value)
+                if key in merged else copy.deepcopy(value)
+            )
+        return merged
+    if isinstance(current, list) and isinstance(observed, list):
+        merged = copy.deepcopy(current)
+        signatures = {_shape_signature(item) for item in merged}
+        for item in observed:
+            signature = _shape_signature(item)
+            if signature not in signatures:
+                merged.append(copy.deepcopy(item))
+                signatures.add(signature)
+        return merged
+    return copy.deepcopy(current)
+
+
+def _same_response_cohort(step: FlowStep, fact: Any) -> bool:
+    meta = step.source_meta or {}
+    raw = fact.model_dump(exclude_none=True) if hasattr(fact, "model_dump") else dict(fact or {})
+    step_request_id = str(meta.get("request_id") or "")
+    fact_request_id = str(raw.get("request_id") or "")
+    if step_request_id and fact_request_id and step_request_id == fact_request_id:
+        return True
+    for key in ("page_id", "frame_id"):
+        if str(meta.get(key) or "") != str(raw.get(key) or ""):
+            return False
+    left_action = str(meta.get("trigger_action_id") or meta.get("action_id") or "")
+    right_action = str(raw.get("trigger_action_id") or raw.get("action_id") or "")
+    left_tx = str(meta.get("trigger_transaction_id") or meta.get("transaction_id") or "")
+    right_tx = str(raw.get("trigger_transaction_id") or raw.get("transaction_id") or "")
+    return bool((left_action and left_action == right_action) or (left_tx and left_tx == right_tx))
 
 
 def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
@@ -74,6 +122,7 @@ def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
             fact for fact in (spec.request_facts.requests or [])
             if (fact.method or "GET").upper() == method
             and _request_path({"url": fact.path or fact.url}) == path
+            and _same_response_cohort(step, fact)
             and fact.response_json is not None
             and current_list_paths.intersection(
                 _response_list_paths(fact.response_json)
@@ -85,7 +134,7 @@ def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
         richest_score = _response_shape_evidence_score(richest.response_json)
         if richest_score <= current_score:
             continue
-        step.response_json = copy.deepcopy(richest.response_json)
+        step.response_json = _merge_observed_shapes(step.response_json, richest.response_json)
         step.source_meta = {
             **(step.source_meta or {}),
             "response_shape_request_id": richest.request_id,
@@ -114,6 +163,11 @@ def _latest_response_key_map_candidates(
         for position, (_original_index, request) in enumerate(ordered)
         if str(request.get("request_id") or "")
     }
+    request_by_id = {
+        str(request.get("request_id") or ""): request
+        for request in captured_requests or []
+        if str(request.get("request_id") or "")
+    }
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for candidate in discover_response_key_maps(captured_requests):
         signature = (
@@ -124,6 +178,33 @@ def _latest_response_key_map_candidates(
 
     selected: list[dict[str, Any]] = []
     for candidates in grouped.values():
+        target_id = str(candidates[0].get("target_request_id") or "") if candidates else ""
+        target = request_by_id.get(target_id, {})
+        scoped: list[dict[str, Any]] = []
+        for item in candidates:
+            source = request_by_id.get(str(item.get("source_request_id") or ""), {})
+            if not source or not target:
+                continue
+            if any(
+                str(source.get(key) or "") != str(target.get(key) or "")
+                for key in ("page_id", "frame_id")
+            ):
+                continue
+            scoped.append(item)
+        if not scoped:
+            continue
+        cohorts = {
+            (
+                str(request_by_id.get(str(item.get("source_request_id") or ""), {}).get("trigger_action_id") or ""),
+                str(request_by_id.get(str(item.get("source_request_id") or ""), {}).get("trigger_transaction_id") or ""),
+            )
+            for item in scoped
+        }
+        # A nearest timestamp cannot choose between independent actions that
+        # happened to expose the same key/value shape.
+        if len(cohorts) != 1:
+            continue
+        candidates = scoped
         nearest_position = max(
             position_by_request_id.get(str(item.get("source_request_id") or ""), -1)
             for item in candidates

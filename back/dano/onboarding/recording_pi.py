@@ -564,7 +564,16 @@ class RecordingPiSession:
         if asyncio.iscoroutine(result) or inspect.isawaitable(result):
             await result
 
-    async def get_recording_delta(self, since_seq: int = 0, *, limit: int = 25) -> dict[str, Any]:
+    async def get_recording_delta(
+        self,
+        since_seq: int = 0,
+        *,
+        limit: int = 25,
+        request_id: str = "",
+        branch_path: str = "",
+        branch_cursor: int = 0,
+        branch_limit: int = 25,
+    ) -> dict[str, Any]:
         from dano.execution.page.recording_live import recording_delta
 
         if self._live_recorder is None:
@@ -610,6 +619,10 @@ class RecordingPiSession:
                 field_evidence=bound_fields,
                 stop_before=floor,
                 compact=True,
+                request_id=request_id,
+                branch_path=branch_path,
+                branch_cursor=branch_cursor,
+                branch_limit=branch_limit,
             )
         else:
             delta = await asyncio.to_thread(
@@ -621,6 +634,10 @@ class RecordingPiSession:
                 captured_requests=captured,
                 page_events=page_events,
                 field_evidence=bound_fields,
+                request_id=request_id,
+                branch_path=branch_path,
+                branch_cursor=branch_cursor,
+                branch_limit=branch_limit,
             )
         return delta
 

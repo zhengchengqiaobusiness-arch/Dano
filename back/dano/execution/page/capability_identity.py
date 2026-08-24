@@ -65,7 +65,7 @@ def _annotate_identifier_sources(
         values = sample if isinstance(sample, list) else []
         item_path = f"{path}[]" if path else "[]"
         if values:
-            for item in values[:80]:
+            for item in values:
                 found.extend(_annotate_identifier_sources(item_schema, item, path=item_path))
         else:
             found.extend(_annotate_identifier_sources(item_schema, None, path=item_path))
@@ -130,11 +130,7 @@ def _target_input_values(
 
 def _identifier_value_is_grounding_evidence(value: str) -> bool:
     text = str(value or "").strip()
-    return (
-        len(text) >= 6
-        and text.casefold() not in _BORING_LINK_VALUES
-        and not re.fullmatch(r"\d{1,5}", text)
-    )
+    return bool(text and text.casefold() not in _BORING_LINK_VALUES)
 
 
 def _ground_recorded_identifier_relations(
@@ -219,6 +215,18 @@ def _ground_recorded_identifier_relations(
             ]
             if same_page:
                 matches = same_page
+            short_values = {
+                value for value in target_values
+                if len(value.strip()) < 6 or re.fullmatch(r"\d{1,5}", value.strip())
+            }
+            if short_values:
+                # Short IDs are valid, but collisions are common.  Require one
+                # exact same-page source observation with the same semantic
+                # identifier role; identity-set deduplication must not hide a
+                # second coincidental occurrence.
+                matches = [source for source in same_page if source["role"] == wire_role]
+                if len(matches) != 1:
+                    continue
             identities = {
                 (
                     source["capability"].name or source["capability"].capability_id,

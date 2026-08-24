@@ -797,17 +797,33 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                 )
                 if not response_path:
                     continue
-                selector = next(
-                    (
+                selector = next((
+                    item for item in members
+                    if item is not sibling
+                    and (
+                        item.source_kind in {"api_option", "form_option", "page_enum"}
+                        or (
+                            item.source_kind == "previous_response"
+                            and isinstance((item.source or {}).get("option_source"), dict)
+                            and (
+                                not request_id
+                                or str(((item.source or {}).get("option_source") or {}).get("source_request_id") or "")
+                                in {"", request_id}
+                            )
+                        )
+                    )
+                ), None)
+                if selector is None:
+                    selector = next((
                         item for item in members
                         if item is not sibling
+                        and not _looks_row_identity_leaf(item.key, item.path)
+                        and not _param_is_document_record_identity(item)
                         and (
                             _field_leaf_token(item.key, item.path).endswith("id")
                             or _field_leaf_token(item.key, item.path) in {"id", "ids"}
                         )
-                    ),
-                    None,
-                )
+                    ), None)
                 sibling.category = "runtime_var"
                 sibling.source_kind = "selected_option_field"
                 sibling.source = {

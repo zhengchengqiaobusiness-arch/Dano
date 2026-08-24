@@ -234,9 +234,27 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 continue
             if not _auto_dependency_link_allowed(p, lk.source_path, lk):
                 continue
-            if p.source_kind in {
-                "constant", "page_context", "system_time", "system_generated", "computed", "current_user",
-            } or (p.category == "system_const" and p.source_kind != "page_default"):
+            captured_match = (lk.evidence or {}).get("captured_value_match")
+            captured_scalar_projection = bool(
+                isinstance(captured_match, dict)
+                and captured_match.get("evidence_kind")
+                == "unique_scalar_semantic_projection"
+                and p.source_kind == "constant"
+                and str((p.source or {}).get("kind") or "")
+                == "recorded_control_default"
+            )
+            if (
+                p.source_kind in {
+                    "constant", "page_context", "system_time", "system_generated", "computed", "current_user",
+                }
+                and not captured_scalar_projection
+                and not hydration
+            ) or (
+                p.category == "system_const"
+                and p.source_kind != "page_default"
+                and not captured_scalar_projection
+                and not hydration
+            ):
                 continue
             caller_editable = (
                 not _param_control_is_readonly(p)

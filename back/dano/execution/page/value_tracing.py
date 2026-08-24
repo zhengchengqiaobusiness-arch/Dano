@@ -368,8 +368,76 @@ def discover_workflow_value_links(all_requests: list[dict]) -> list[dict]:
                             "value_sample": str(source_raw)[:128],
                             "occurrences": 1,
                         })
+        # Scalar lookup endpoints (stock counts, balances, quotas, sequence
+        # numbers) legitimately return a short number in a generic `data`
+        # leaf.  Bind it only when route semantics and one later wire leaf
+        # agree inside the same page/causal scope.
+        scalar_leaves = [
+            (path, raw) for path, raw in _leaves(response)
+            if raw not in (None, "") and not isinstance(raw, (dict, list, bool))
+        ]
+        payload_scalar_leaves = [
+            (path, raw) for path, raw in scalar_leaves
+            if str(path or "").casefold()
+            not in {"code", "msg", "message", "status", "success"}
+        ]
+        if len(payload_scalar_leaves) == 1:
+            # Common API envelopes add transport metadata beside one business
+            # scalar (for example ``{code, msg, data: stockCount}``). Those
+            # metadata leaves must not stop the unique-scalar workflow link.
+            scalar_leaves = payload_scalar_leaves
+        if len(scalar_leaves) == 1:
+            source_path, source_raw = scalar_leaves[0]
+
+            def semantic_tokens(value: str) -> set[str]:
+                spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+                return {
+                    token for token in re.findall(r"[a-z0-9]+", spaced.casefold())
+                    if token not in {"api", "v1", "v2", "get", "post", "put", "query", "body", "response"}
+                }
+
+            route_tokens = semantic_tokens(str(source.get("url") or source.get("path") or ""))
+            scalar_matches: list[dict] = []
+            for target_index in range(source_index + 1, len(ordered)):
+                target, _ = ordered[target_index]
+                same_page = bool(
+                    str(source.get("page_id") or "")
+                    and str(source.get("page_id") or "") == str(target.get("page_id") or "")
+                    and str(source.get("frame_id") or "") == str(target.get("frame_id") or "")
+                )
+                same_cause = bool(
+                    (
+                        source.get("trigger_transaction_id")
+                        and source.get("trigger_transaction_id") == target.get("trigger_transaction_id")
+                    )
+                    or (
+                        source.get("trigger_action_id")
+                        and source.get("trigger_action_id") == target.get("trigger_action_id")
+                    )
+                )
+                if not (same_page or same_cause):
+                    continue
+                matching_inputs = [
+                    target_path for target_path, target_raw in input_leaves[target_index]
+                    if _same_value(source_raw, target_raw)
+                    and len(route_tokens & semantic_tokens(target_path)) >= 2
+                ]
+                if len(matching_inputs) == 1:
+                    scalar_matches.append({
+                        "source_request_id": source_id,
+                        "source_path": f"response.{source_path}",
+                        "target_request_id": str(target.get("request_id") or f"req_{target_index}"),
+                        "target_path": matching_inputs[0],
+                        "value_sample": str(source_raw)[:128],
+                        "occurrences": 1,
+                        "evidence_kind": "unique_scalar_semantic_projection",
+                        "target_order": target_index,
+                    })
+            if scalar_matches:
+                candidates.append(min(scalar_matches, key=lambda item: int(item["target_order"])))
     unique: dict[tuple[str, str, str, str], dict] = {}
     for item in candidates:
+        item.pop("target_order", None)
         signature = tuple(str(item.get(key) or "") for key in (
             "source_request_id", "source_path", "target_request_id", "target_path",
         ))

@@ -50,8 +50,60 @@ def request_body_signature(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def request_identity_is_strong(source: dict[str, Any]) -> bool:
+    """A route alone is never an occurrence identity."""
+    if str(source.get("request_id") or source.get("source_request_id") or ""):
+        return True
+    if str(source.get("step_id") or source.get("source_step_id") or ""):
+        return True
+    url = str(source.get("source_url") or source.get("url") or source.get("path") or "")
+    method = str(source.get("source_method") or source.get("method") or "")
+    if not normalized_request_path(url) or not method:
+        return False
+    return any(
+        source.get(key) not in (None, "", {}, [])
+        for key in (
+            "page_id", "frame_id", "transaction_id", "trigger_transaction_id",
+            "source_transaction_id", "action_id", "trigger_action_id",
+            "source_action_id", "query", "body", "source_body", "content_type",
+            "source_content_type", "request_index", "index", "sequence",
+        )
+    ) or "?" in url
+
+
+def request_composite_signature(source: dict[str, Any]) -> str:
+    if not request_identity_is_strong(source):
+        return ""
+    request_id = str(source.get("request_id") or source.get("source_request_id") or "")
+    if request_id:
+        return f"id:{request_id}"
+    payload = {
+        "method": str(source.get("source_method") or source.get("method") or "").upper(),
+        "path": normalized_request_path(
+            source.get("source_url") or source.get("url") or source.get("path")
+        ),
+        "host": urlparse(str(source.get("source_url") or source.get("url") or "")).netloc.casefold(),
+        "page_id": str(source.get("page_id") or ""),
+        "frame_id": str(source.get("frame_id") or ""),
+        "transaction_id": str(source.get("transaction_id") or source.get("trigger_transaction_id") or source.get("source_transaction_id") or ""),
+        "action_id": str(source.get("action_id") or source.get("trigger_action_id") or source.get("source_action_id") or ""),
+        "query": request_query_signature(
+            source.get("query") if "query" in source else source.get("source_url") or source.get("url")
+        ),
+        "body": request_body_signature(
+            source.get("source_body") if "source_body" in source else source.get("body", source.get("post_data"))
+        ),
+        "content_type": str(source.get("source_content_type") or source.get("content_type") or "").casefold(),
+        "request_index": source.get("request_index", source.get("index", source.get("sequence"))),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return "composite:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def request_identity_matches(source: dict[str, Any], candidate: dict[str, Any]) -> bool:
     """Return true only when every identity component supplied by source matches."""
+    if not request_identity_is_strong(source):
+        return False
     expected_request = str(source.get("request_id") or source.get("source_request_id") or "")
     if expected_request and expected_request != str(candidate.get("request_id") or ""):
         return False
@@ -119,5 +171,7 @@ def unique_request_identity_match(
     source: dict[str, Any],
     candidates: Iterable[tuple[T, dict[str, Any]]],
 ) -> T | None:
+    if not request_identity_is_strong(source):
+        return None
     matches = [item for item, identity in candidates if request_identity_matches(source, identity)]
     return matches[0] if len(matches) == 1 else None

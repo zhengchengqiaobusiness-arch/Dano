@@ -468,10 +468,46 @@ def recording_agent_submission_status(spec: FlowSpec) -> dict[str, Any]:
     capability_plan_received = capability_plan_complete or bool(spec.capabilities) or any(
         isinstance(item, dict) for item in (semantic_plan.get("capabilities") or [])
     )
+    from dano.execution.page.capability_semantic import (
+        _required_public_action_request_ids,
+        _semantic_plan_execute_request_ids,
+    )
+
+    missing_public_action_request_ids = sorted(
+        _required_public_action_request_ids(spec)
+        - _semantic_plan_execute_request_ids(spec, semantic_plan)
+    )
+    field_axis_gaps = list(
+        (capability_model.get("semantic_coverage") or {}).get("field_axis_gaps") or []
+    )
     capability_retry_reasons = [] if capability_plan_complete else list(dict.fromkeys([
         *list((capability_model.get("proposal_gate") or {}).get("reasons") or []),
         *list((capability_model.get("semantic_coverage") or {}).get("missing") or []),
         *list(capability_model.get("capability_compilation_errors") or []),
+        *(
+            ["ignored_non_public_capabilities: " + ", ".join(
+                str(item) for item in capability_model.get("ignored_non_public_capabilities") or []
+            )]
+            if capability_model.get("ignored_non_public_capabilities") else []
+        ),
+        *(
+            [
+                "submitted/materialized capability mismatch: "
+                f"{int(capability_model.get('submitted_count') or 0)} -> "
+                f"{int(capability_model.get('materialized_count') or len(spec.capabilities or []))}"
+            ]
+            if int(capability_model.get("submitted_count") or 0)
+            != int(capability_model.get("materialized_count") or len(spec.capabilities or []))
+            else []
+        ),
+        *list(capability_model.get("missing_submitted_names") or []),
+        *(
+            [
+                "missing public action requests: "
+                + ", ".join(missing_public_action_request_ids)
+            ]
+            if missing_public_action_request_ids else []
+        ),
     ]))[:20]
     return {
         "flow_version": int((spec.meta or {}).get("current_version") or 0),
@@ -483,7 +519,16 @@ def recording_agent_submission_status(spec: FlowSpec) -> dict[str, Any]:
         "capability_plan_received": capability_plan_received,
         "capability_plan_complete": capability_plan_complete,
         "capability_retry_reasons": capability_retry_reasons,
-        "submission_complete": not must_retry,
+        "submitted_capability_count": int(capability_model.get("submitted_count") or 0),
+        "materialized_capability_count": int(
+            capability_model.get("materialized_count") or len(spec.capabilities or [])
+        ),
+        "missing_submitted_capabilities": list(
+            capability_model.get("missing_submitted_names") or []
+        ),
+        "missing_public_action_request_ids": missing_public_action_request_ids,
+        "field_axis_gaps": field_axis_gaps,
+        "submission_complete": not must_retry and capability_plan_complete,
         "must_retry": must_retry,
         "unresolved_targets": unresolved_targets,
     }
@@ -531,7 +576,8 @@ def recording_agent_validation(spec: FlowSpec) -> dict[str, Any]:
 
 
 _LIVE_PLAN_BLOCKING_GAPS = frozenset({
-    "capability_contracts", "capabilities", "goal_capability_count", "unresolved_blockers",
+    "capability_contracts", "capabilities", "goal_capability_count",
+    "public_action_coverage", "unresolved_blockers",
 })
 
 
@@ -567,16 +613,50 @@ def _live_capability_plan_is_terminal(spec: FlowSpec) -> bool:
 def recording_capability_plan_complete(spec: FlowSpec) -> bool:
     """Whether the authoritative semantic boundary plan reached a safe terminal state."""
     meta = spec.meta or {}
-    generation = dict(meta.get("capability_generation") or {})
     model = dict(meta.get("capability_model") or {})
     status = str(model.get("status") or "")
-    if status in {"awaiting_materialization", "ready"}:
-        return True
-    if _live_capability_plan_is_terminal(spec):
-        return True
-    if generation:
-        return bool(generation.get("initial_completed"))
-    return False
+    if status not in {"awaiting_materialization", "ready"}:
+        return False
+    if (model.get("proposal_gate") or {}).get("accepted") is False:
+        return False
+    if model.get("capability_compilation_errors") or model.get("ignored_non_public_capabilities"):
+        return False
+    if not bool((model.get("semantic_coverage") or {}).get("complete")):
+        return False
+    submitted = (
+        model.get("submitted_semantic_plan")
+        if isinstance(model.get("submitted_semantic_plan"), dict)
+        else model.get("semantic_plan") if isinstance(model.get("semantic_plan"), dict) else {}
+    )
+    submitted_names = [
+        str(item.get("name") or "")
+        for item in submitted.get("capabilities") or []
+        if isinstance(item, dict) and str(item.get("name") or "")
+    ]
+    if not submitted_names:
+        return False
+    from dano.execution.page.capability_semantic import (
+        _required_public_action_request_ids,
+        _semantic_plan_execute_request_ids,
+    )
+
+    if (
+        _required_public_action_request_ids(spec)
+        - _semantic_plan_execute_request_ids(spec, submitted)
+    ):
+        return False
+    if status == "awaiting_materialization" and not spec.steps:
+        semantic_names = [
+            str(item.get("name") or "")
+            for item in (model.get("semantic_plan") or {}).get("capabilities") or []
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+        return len(semantic_names) == len(submitted_names) and set(semantic_names) == set(submitted_names)
+    materialized_names = [str(cap.name or "") for cap in spec.capabilities or [] if str(cap.name or "")]
+    return (
+        len(materialized_names) == len(submitted_names)
+        and set(materialized_names) == set(submitted_names)
+    )
 
 
 _RECORDING_FIELD_OPS = frozenset({
@@ -710,16 +790,51 @@ async def apply_recording_agent_submission(
             LIVE_RECORDING_AGENT_OPS,
             apply_recording_agent_edit,
         )
+        from dano.execution.page.flow_materialization.builder import (
+            _materialize_semantic_plan_request_refs,
+        )
 
         field_ops = {
             "set_param_source", "set_param_type", "set_param_required",
             "set_param_enum", "rename_field",
         }
 
+        # A frozen recording can receive one complete submission containing
+        # both new exact request anchors and field-axis corrections. Promote
+        # those exact facts first so field edits participate in the semantic
+        # coverage gate that compiles the capability plan. Applying the edits
+        # only after orchestration made a valid all-in-one submission fail on
+        # its stale field contracts and silently retain the previous plan.
+        semantic_plan = submission.get("semantic_plan") or submission.get("plan")
+        if current.steps and isinstance(semantic_plan, dict):
+            _materialize_semantic_plan_request_refs(current, semantic_plan)
+
         for index, operation in enumerate(submitted_ops):
             kind = str(operation.get("op") or "")
             if kind in field_ops:
-                deferred_field_ops.append((index, operation))
+                try:
+                    outcome = apply_recording_agent_edit(current, operation, record=True)
+                    if outcome.get("deferred"):
+                        deferred_field_ops.append((index, operation))
+                        continue
+                    op_results.append(_recording_operation_result(
+                        current,
+                        operation,
+                        index=index,
+                        status=str(outcome.get("status") or "applied"),
+                        reason=str(outcome.get("reason") or ""),
+                        flow_version_before=flow_version_before,
+                    ))
+                except (TypeError, ValueError) as exc:
+                    op_results.append(_recording_operation_result(
+                        current,
+                        operation,
+                        index=index,
+                        status="rejected",
+                        reason=str(exc),
+                        flow_version_before=flow_version_before,
+                        allowed_values=_allowed_values_from_exc(exc),
+                    ))
                 continue
             if kind not in LIVE_RECORDING_AGENT_OPS:
                 residual_ops.append((index, operation))
@@ -929,7 +1044,8 @@ async def apply_recording_agent_submission(
         op_results.sort(key=lambda item: int(item["index"]))
 
     current = _auto_confirm_ready_capabilities(
-        _sync_capability_io_schemas(sync_flow_spec_models(current))
+        _sync_capability_io_schemas(sync_flow_spec_models(current)),
+        refresh_machine_owned=True,
     )
     current = _ensure_capability_explanations(
         current,
@@ -942,17 +1058,13 @@ async def apply_recording_agent_submission(
             "business_description_source": "deterministic",
         }
     current = refresh_review_items(_sync_capability_io_schemas(current))
-    final_coverage = ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
     initial_completed = bool(
-        previous_generation.get("initial_completed")
-        and str(previous_generation.get("fact_hash") or "") == fact_hash
-    )
-    if initial_generation:
-        final_gate = ((current.meta or {}).get("capability_model") or {}).get("proposal_gate") or {}
-        initial_completed = bool(
-            final_coverage.get("complete")
-            and final_gate.get("accepted") is not False
+        recording_capability_plan_complete(current)
+        and (
+            initial_generation
+            or str(previous_generation.get("fact_hash") or "") == fact_hash
         )
+    )
     semantic_plan = ((current.meta or {}).get("capability_model") or {}).get("semantic_plan") or {}
     generation_status = "ready" if initial_completed else "incomplete_agent_plan"
     now = datetime.now(timezone.utc).isoformat()

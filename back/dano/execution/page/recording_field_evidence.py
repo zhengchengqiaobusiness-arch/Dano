@@ -210,7 +210,25 @@ def _looks_range_end_label(evidence: dict[str, Any]) -> bool:
     ))
 
 
-def _time_of_day(value: Any) -> str | None:
+def _timezone_offset_minutes(*items: dict[str, Any] | None) -> int | None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        contexts = [item, item.get("page_context")]
+        for context in contexts:
+            if not isinstance(context, dict):
+                continue
+            value = context.get("timezone_offset_minutes")
+            try:
+                offset = int(value)
+            except (TypeError, ValueError):
+                continue
+            if -24 * 60 <= offset <= 24 * 60:
+                return offset
+    return None
+
+
+def _time_of_day(value: Any, timezone_offset_minutes: int | None = None) -> str | None:
     text = str(value if value is not None else "").strip()
     if not text:
         return None
@@ -221,22 +239,25 @@ def _time_of_day(value: Any) -> str | None:
         return "00:00:00"
     if text.isdigit() and len(text) in {10, 13}:
         seconds = int(text) / (1000 if len(text) == 13 else 1)
+        if timezone_offset_minutes is None:
+            return None
         try:
-            for offset in (0, 8):
-                observed = datetime.fromtimestamp(seconds + offset * 3600, tz=timezone.utc)
-                if observed.hour == observed.minute == observed.second == 0:
-                    return "00:00:00"
+            observed = datetime.fromtimestamp(
+                seconds + timezone_offset_minutes * 60,
+                tz=timezone.utc,
+            )
+            return observed.strftime("%H:%M:%S")
         except (OverflowError, OSError, ValueError):
             return None
     return None
 
 
-def _is_start_of_day(value: Any) -> bool:
-    return _time_of_day(value) == "00:00:00"
+def _is_start_of_day(value: Any, timezone_offset_minutes: int | None = None) -> bool:
+    return _time_of_day(value, timezone_offset_minutes) == "00:00:00"
 
 
-def _is_end_of_day(value: Any) -> bool:
-    return _time_of_day(value) in {"23:59:59", "23:59:00"}
+def _is_end_of_day(value: Any, timezone_offset_minutes: int | None = None) -> bool:
+    return _time_of_day(value, timezone_offset_minutes) in {"23:59:59", "23:59:00"}
 
 
 def _candidate_recorded_value(
@@ -267,6 +288,7 @@ def _narrow_temporal_candidates(
     """
     if len(candidates) <= 1 or not _looks_temporal_control(evidence):
         return candidates
+    offset = _timezone_offset_minutes(evidence)
     non_audit = [
         item for item in candidates
         if not _looks_audit_wire_path(str(item.get("wire_path") or ""))
@@ -286,13 +308,13 @@ def _narrow_temporal_candidates(
         start = next(item for item, _stem, index in indexed if index == 0)
         end = next(item for item, _stem, index in indexed if index == 1)
         recorded = evidence.get("value")
-        if _looks_range_end_label(evidence) or _is_end_of_day(recorded):
+        if _looks_range_end_label(evidence) or _is_end_of_day(recorded, offset):
             return [end]
         return [start]
     if _control_kind(evidence) == "date":
         midnight = [
             item for item in candidates
-            if _is_start_of_day(_candidate_recorded_value(item, request_by_id))
+            if _is_start_of_day(_candidate_recorded_value(item, request_by_id), offset)
         ]
         if len(midnight) == 1:
             return midnight
@@ -310,7 +332,11 @@ def _is_distinctive_recorded_value(value: Any) -> bool:
     return text.casefold() not in {"true", "false", "yes", "no", "null", "none"} and len(text) >= 4
 
 
-def _same_recorded_value(left: Any, right: Any) -> bool:
+def _same_recorded_value(
+    left: Any,
+    right: Any,
+    timezone_offset_minutes: int | None = None,
+) -> bool:
     if left is None or right is None:
         return False
     if isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
@@ -347,13 +373,14 @@ def _same_recorded_value(left: Any, right: Any) -> bool:
         if matches or not value.isdigit() or len(value) not in {10, 13}:
             return matches
         seconds = int(value) / (1000 if len(value) == 13 else 1)
+        if timezone_offset_minutes is None:
+            return set()
         try:
-            # Browser controls expose local calendar dates while JSON bodies
-            # often serialize an epoch.  Keep both UTC and UTC+8 dates; the
-            # exact action/scope/uniqueness guards still decide identity.
             return {
-                datetime.fromtimestamp(seconds + offset * 3600, tz=timezone.utc).strftime("%Y-%m-%d")
-                for offset in (0, 8)
+                datetime.fromtimestamp(
+                    seconds + timezone_offset_minutes * 60,
+                    tz=timezone.utc,
+                ).strftime("%Y-%m-%d")
             }
         except (OverflowError, OSError, ValueError):
             return set()
@@ -534,7 +561,11 @@ def _resolve_array_row_candidates(
         for key, item in unique.items():
             request = request_by_id.get(key[0]) or {}
             for wire_path, field_value in _request_field_values(request):
-                if wire_path == key[1] and _same_recorded_value(value, field_value):
+                if wire_path == key[1] and _same_recorded_value(
+                    value,
+                    field_value,
+                    _timezone_offset_minutes(evidence, request),
+                ):
                     value_matched[key] = item
         if len(value_matched) == 1:
             return value_matched, "array_row_unique_value"
@@ -549,10 +580,15 @@ def _resolve_array_row_candidates(
 
 
 def _causal_match(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
+    evidence_event = str(evidence.get("event_id") or "")
     evidence_action = str(evidence.get("action_id") or "")
     evidence_transaction = str(evidence.get("transaction_id") or "")
     return bool(
-        (evidence_action and evidence_action == str(request.get("trigger_action_id") or ""))
+        (
+            evidence_event
+            and evidence_event == str(request.get("trigger_event_id") or "")
+        )
+        or (evidence_action and evidence_action == str(request.get("trigger_action_id") or ""))
         or (
             evidence_transaction
             and evidence_transaction == str(request.get("trigger_transaction_id") or "")
@@ -763,14 +799,16 @@ _DEBOUNCE_SLACK_S = 2.0
 def _temporal_alignment(
     request_time: float | None,
     evidence_time: float | None,
+    *,
+    allow_late: bool = False,
 ) -> tuple[bool, float | None]:
-    """Treat a late debounced fill as the same burst as the request it produced."""
+    """Order is evidence; a post-request control event needs exact causality."""
     if request_time is None or evidence_time is None:
         return False, None
     delta = request_time - evidence_time
     if delta >= 0:
         return True, delta
-    if -_DEBOUNCE_SLACK_S <= delta:
+    if allow_late and -_DEBOUNCE_SLACK_S <= delta:
         return True, 0.0
     return False, None
 
@@ -823,20 +861,6 @@ def _file_form_identity(evidence: dict[str, Any]) -> tuple[str, str, str, str, s
     )
 
 
-def _synthetic_file_wire_leaf(evidence: dict[str, Any]) -> str:
-    aliases = [
-        *(evidence.get("field_aliases") or []),
-        evidence.get("path"),
-        evidence.get("key"),
-        evidence.get("name"),
-    ]
-    for raw in aliases:
-        value = str(raw or "").strip().removeprefix("request.").removeprefix("body.")
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", value):
-            return value
-    return "file"
-
-
 def _existing_file_wire_path(
     request: dict[str, Any], evidence: dict[str, Any],
 ) -> str:
@@ -844,8 +868,7 @@ def _existing_file_wire_path(
 
     An empty picker cannot value-match. Prefer an exact control alias, then a
     unique file/attachment/upload leaf already present in the same request.
-    Multiple candidates remain unresolved and fall back to the explicit
-    synthetic unsupported field.
+    Multiple candidates remain unresolved.
     """
     aliases = _structural_evidence_aliases(evidence)
     fields = [path for path in _request_fields(request) if path.startswith("body.")]
@@ -872,9 +895,7 @@ def _associate_unsubmitted_file_controls(
     An unselected file input has no multipart/body leaf to value-match.  Its
     request ownership can still be proved by an exact action/transaction or by
     bound sibling controls in the same page/frame/form root.  The resulting
-    synthetic path is explicitly marked unobserved and unsupported, so later
-    stages may expose the caller input without claiming the captured JSON
-    request already knows how to upload it.
+    evidence stays non-executable until a real upload request is recorded.
     """
     request_by_id = {
         str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
@@ -885,11 +906,6 @@ def _associate_unsubmitted_file_controls(
         for request_id, request in request_by_id.items()
         if request_id
         and str(request.get("method") or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"}
-    }
-    used_paths = {
-        (request_id, wire_path)
-        for request_id, request in request_by_id.items()
-        for wire_path in _request_fields(request)
     }
     latest_by_identity: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     for item in evidence_items:
@@ -944,16 +960,10 @@ def _associate_unsubmitted_file_controls(
         request_id = next(iter(candidates))
         wire_path = _existing_file_wire_path(request_by_id[request_id], evidence)
         observed_path = bool(wire_path)
-        if not wire_path:
-            leaf = _synthetic_file_wire_leaf(evidence)
-            wire_path = f"body.{leaf}"
-            suffix = 2
-            while (request_id, wire_path) in used_paths:
-                wire_path = f"body.{leaf}_{suffix}"
-                suffix += 1
-            used_paths.add((request_id, wire_path))
         evidence.update({
-            "binding_status": "bound_unsupported",
+            "binding_status": (
+                "bound_unsupported" if observed_path else "unresolved_non_executable"
+            ),
             "binding_method": (
                 "exact_form_scope_existing_file_field"
                 if observed_path else "exact_form_scope_unsubmitted_file"
@@ -962,11 +972,19 @@ def _associate_unsubmitted_file_controls(
                 "file control belongs to the exact captured form, but no file "
                 "part was submitted during recording"
             ),
-            "request_id": request_id,
-            "wire_path": wire_path,
+            # Preserve ownership without inventing a JSON/multipart field that
+            # was never present on the wire.  This remains review evidence and
+            # must block export until a real upload request is recorded.
+            "owner_request_id": request_id,
             "wire_path_observed": observed_path,
             "unsupported_execution": True,
         })
+        if observed_path:
+            evidence["request_id"] = request_id
+            evidence["wire_path"] = wire_path
+        else:
+            evidence.pop("request_id", None)
+            evidence.pop("wire_path", None)
 
 
 def _script_alias_is_unverified_empty_picker(evidence: dict[str, Any]) -> bool:
@@ -1233,6 +1251,11 @@ def bind_field_evidence(
         if not isinstance(raw, dict):
             continue
         evidence = deepcopy(raw)
+        if (
+            str(evidence.get("control_surface") or "").lower() == "table_inline"
+            and str(evidence.get("column_label") or "").strip()
+        ):
+            evidence["label"] = str(evidence["column_label"]).strip()
         _enrich_enum_aliases(evidence, page_enum_options)
         related_event = events_by_id.get(str(evidence.get("event_id") or ""))
         if related_event is None and evidence.get("action_id"):
@@ -1279,12 +1302,17 @@ def bind_field_evidence(
                     if match_score:
                         request_time = _timestamp(request.get("timestamp") or request.get("captured_at"))
                         evidence_time = _timestamp(evidence.get("observed_at"))
-                        temporal_match, time_delta = _temporal_alignment(request_time, evidence_time)
+                        causal_match = _causal_match(request, evidence)
+                        temporal_match, time_delta = _temporal_alignment(
+                            request_time,
+                            evidence_time,
+                            allow_late=causal_match,
+                        )
                         candidates.append({
                             "request_id": request_id,
                             "wire_path": wire_path,
                             "match_score": match_score,
-                            "causal_match": _causal_match(request, evidence),
+                            "causal_match": causal_match,
                             "temporal_match": temporal_match,
                             "time_delta": time_delta,
                             "has_request_causality": bool(
@@ -1306,13 +1334,21 @@ def bind_field_evidence(
                 request_time = _timestamp(request.get("timestamp") or request.get("captured_at"))
                 evidence_time = _timestamp(evidence.get("observed_at"))
                 causal_match = _causal_match(request, evidence)
-                temporal_match, time_delta = _temporal_alignment(request_time, evidence_time)
+                temporal_match, time_delta = _temporal_alignment(
+                    request_time,
+                    evidence_time,
+                    allow_late=causal_match,
+                )
                 if not causal_match and not temporal_match:
                     continue
                 for wire_path, value in _request_field_values(request):
                     if _looks_pagination_wire_path(wire_path):
                         continue
-                    if _same_recorded_value(evidence.get("value"), value):
+                    if _same_recorded_value(
+                        evidence.get("value"),
+                        value,
+                        _timezone_offset_minutes(evidence, request),
+                    ):
                         value_candidates.append({
                             "recorded_value": value,
                             "request_id": request_id,
@@ -1365,7 +1401,7 @@ def bind_field_evidence(
         if (
             not candidates
             and not structural_aliases
-            and _is_distinctive_recorded_value(evidence.get("value"))
+            and evidence.get("value") not in (None, "")
         ):
             distinctive: list[dict[str, Any]] = []
             for request in requests:
@@ -1377,7 +1413,11 @@ def bind_field_evidence(
                 for wire_path, value in _request_field_values(request):
                     if _looks_pagination_wire_path(wire_path):
                         continue
-                    if not _same_recorded_value(evidence.get("value"), value):
+                    if not _same_recorded_value(
+                        evidence.get("value"),
+                        value,
+                        _timezone_offset_minutes(evidence, request),
+                    ):
                         continue
                     distinctive.append({
                         "recorded_value": value,
@@ -1391,6 +1431,7 @@ def bind_field_evidence(
                             request.get("trigger_action_id") or request.get("trigger_transaction_id")
                         ),
                         "request_priority": _request_binding_priority(request),
+                        "unique_scoped_value": True,
                     })
             request_by_id = {
                 str(request.get("request_id") or request.get("id") or request.get("index") or ""): request
@@ -1420,7 +1461,12 @@ def bind_field_evidence(
                 grouped: dict[str, dict[int, str]] = {}
                 for wire_path, value in _request_field_values(request):
                     parsed = _indexed_wire_path(wire_path)
-                    if parsed is None or not (_is_start_of_day(value) or _is_end_of_day(value) or _looks_temporal_control(evidence)):
+                    offset = _timezone_offset_minutes(evidence, request)
+                    if parsed is None or not (
+                        _is_start_of_day(value, offset)
+                        or _is_end_of_day(value, offset)
+                        or _looks_temporal_control(evidence)
+                    ):
                         continue
                     grouped.setdefault(parsed[0], {})[parsed[1]] = wire_path
                 for indexes in grouped.values():
@@ -1503,7 +1549,11 @@ def bind_field_evidence(
             )
         elif len({(item["request_id"], item["wire_path"]) for item in candidates}) == 1:
             selected = candidates
-            binding_method = "exact_alias_preferred_business_request"
+            binding_method = (
+                "unique_value_same_scope"
+                if any(item.get("unique_scoped_value") for item in candidates)
+                else "exact_alias_preferred_business_request"
+            )
         else:
             selected = []
             binding_method = ""

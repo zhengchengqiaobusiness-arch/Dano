@@ -765,7 +765,10 @@ _RECORDER_JS = r"""() => {
       url: String(location.href || '').split('#')[0],
       path: String(location.pathname || ''),
       document_title: clean(document.title || ''),
-      visible_titles: texts
+      visible_titles: texts,
+      // Date controls expose local calendar values while requests often carry
+      // epochs.  Persist the browser's real offset instead of guessing UTC+8.
+      timezone_offset_minutes: -new Date().getTimezoneOffset()
     };
   };
   window.__danoFormFieldEvidence = function () {
@@ -797,6 +800,12 @@ _RECORDER_JS = r"""() => {
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
         var evidence = fieldEvidence(el);
+        // Inline table editors often have no <label>; framework form-item
+        // lookup may then pick a neighbouring column. The owning header is
+        // the exact structural display-name source for this control.
+        if (evidence.control_surface === 'table_inline' && evidence.column_label) {
+          label = clean(evidence.column_label);
+        }
         if (ty === 'radio') {
           var radioGroup = el.closest && el.closest(
             '[role="radiogroup"],.el-radio-group,.ant-radio-group,.v-radio-group,.q-option-group'

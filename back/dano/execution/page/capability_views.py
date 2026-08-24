@@ -255,9 +255,10 @@ def _capability_contract_views(
     # flow. Build that derived layer once for the whole collection, then reuse
     # it for every capability. The former implementation repeated this same
     # full-spec pass once per capability.
-    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
-        spec.model_copy(deep=True),
-    )))
+    current = spec.model_copy(deep=True)
+    if not _prepared:
+        current = _sync_capability_io_schemas(sync_flow_spec_models(current))
+    current = ensure_recorded_goal(current)
     _normalize_capability_references(current)
     if capability_id or capability_name:
         cap = _select_flow_capability(current, capability_id=capability_id, capability_name=capability_name)

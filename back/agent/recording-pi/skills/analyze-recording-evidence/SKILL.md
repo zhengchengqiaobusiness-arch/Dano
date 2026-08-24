@@ -92,11 +92,18 @@ it explicitly unresolved with the missing fact.
 - A standalone inspect/detail action returning the selected business entity is a read capability.
   A later same-endpoint read opened by Edit is edit hydration/preflight. Keep both request IDs and
   action/transaction identities; never collapse them because method and path match.
+- A low-causality read used only to populate or validate a later write (for example a lookup fired
+  by selecting a form row) is `preflight`/`option_source`, not a public query capability. It becomes
+  public only when a separate explicit query/view action with its own action or transaction exists.
 - Use the concrete clicked menu item, not only the menu trigger. If the ledger shows a request but
   only a generic menu trigger, keep the business meaning unresolved instead of naming it from the
   route alone.
 - Before submitting, compare the ledger with the complete capability array. A request used by an
   earlier accepted capability must not disappear when a later action is analyzed.
+- After submission, treat every ID in `missing_public_action_request_ids` as a concrete omitted
+  action ledger entry. Reread that request/action, add its grounded standalone capability to the
+  full array, and resubmit. Do not move a server-proven public action to `unresolved_items` merely
+  to make the plan complete.
 
 ## Use the recording goal as the public boundary
 
@@ -389,6 +396,11 @@ new dependency types.
 - When a dialog control has a visible label and exactly one write field of that control kind still
   uses a wire key as its public label, `rename_field` to the page label. Do not copy list-filter
   labels onto the write, or write labels onto the list.
+- Apply the name check after source resolution too. If an executable option source uniquely
+  identifies a write field and one same-form select remains with a visible business label, use
+  that evidence to replace the wire-style public label. Then compare create and edit contracts for
+  the same wire leaf/option entity: preserve edit hydration as its default, but keep the same
+  business name, business type, caller editability, and executable option semantics.
 - Prefer exact candidates in `heuristic_candidates.response_key_maps` only after checking them
   against captured source rows and target keys.
 - Never confirm a dependency or claim machine verification during recording analysis.
@@ -413,6 +425,12 @@ new dependency types.
    - `applied`: retain the conclusion.
    - `deferred`: retain it and do not resubmit while it awaits materialization.
    - `rejected` or `rolled_back`: reread current state and correct only that operation.
+   Also compare `submitted_capability_count`, `materialized_capability_count`,
+   `missing_submitted_capabilities`, `missing_public_action_request_ids`, and `field_axis_gaps`
+   with the exact array you sent. Resolve each named field axis from evidence. Any count/name
+   mismatch, missing public action, field-axis gap, ignored capability, retry reason, or
+   `capability_plan_complete=false` means the plan is not accepted; drain facts and resubmit the
+   complete corrected snapshot.
 7. Do not claim success for skipped, rejected, or rolled-back operations. Do not replace a valid
    full plan with a partial correction. When one field or dependency operation is rejected, resubmit
    the complete current `semantic_plan` together with corrected ops; never drop already accepted
@@ -472,3 +490,8 @@ exposed caller field has direct input evidence, internal values have executable 
 dependency has two observed endpoints, and the latest `submit_recording_plan` result has been
 inspected. Never emit a failure conclusion merely because the grounded capability count differs
 from informal goal wording.
+
+Run the completion check in three passes: (1) action ledger and capability membership/order,
+(2) every field's name/type/source/requiredness plus option and computed contracts, and (3) exact
+submitted-plan readback. `unresolved_items` may be empty only when the server reports no remaining
+unknown field axes or validation blockers.

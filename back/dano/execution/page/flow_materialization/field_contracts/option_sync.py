@@ -5,6 +5,7 @@ from typing import Any
 import copy
 import json
 import re
+from urllib.parse import urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
     FlowStep,
@@ -35,7 +36,7 @@ from dano.execution.page.flow_materialization.request_steps import (
     _step_sequence,
 )
 from dano.execution.page.request_identity import (
-    request_identity_matches,
+    normalized_request_path,
     unique_request_identity_match,
 )
 
@@ -940,11 +941,13 @@ def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | N
 
 
 def _source_url_matches_request(source_url: str, request_url: str, request_path: str) -> bool:
-    """Treat every identity component supplied by the caller as a hard constraint."""
-    return request_identity_matches(
-        {"source_url": source_url},
-        {"url": request_url or request_path, "path": request_path},
-    )
+    """Match an option endpoint contract without pretending it is an occurrence ID."""
+    candidate_url = str(request_url or request_path or "")
+    if normalized_request_path(source_url) != normalized_request_path(candidate_url):
+        return False
+    source_host = urlparse(str(source_url or "")).netloc.casefold()
+    candidate_host = urlparse(candidate_url).netloc.casefold()
+    return not (source_host and candidate_host and source_host != candidate_host)
 
 
 def _page_control_source_request_ids(param: ParamField) -> set[str]:

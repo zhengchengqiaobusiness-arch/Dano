@@ -350,60 +350,6 @@ def _build_step_from_capture(
         # identity(运行期重取)
         iden_raw = suggest_identity(pd, storage_state, samples)
 
-    existing_field_paths = {str(field.get("path") or "") for field in flat_fields}
-    for evidence in field_evidence or []:
-        if (
-            not isinstance(evidence, dict)
-            or str(evidence.get("binding_status") or "") != "bound_unsupported"
-            or str(evidence.get("control_kind") or "").lower() != "file"
-            or evidence.get("unsupported_execution") is not True
-        ):
-            continue
-        wire_path = str(evidence.get("wire_path") or "")
-        path = wire_path.removeprefix("body.")
-        if not path or path in existing_field_paths:
-            continue
-        aliases = list(evidence.get("field_aliases") or [])
-        key = path.rsplit(".", 1)[-1]
-        flat_fields.append({
-            "path": path,
-            "key": key,
-            "suggest_name": str(evidence.get("label") or evidence.get("field") or key),
-            "value": "",
-            "raw_value": "",
-            "type": "file-list" if evidence.get("multiple") else "file",
-            "wire_type": "file",
-            "required": bool(evidence.get("required_observed") is True),
-            "required_state": (
-                "required" if evidence.get("required_observed") is True
-                else "optional" if evidence.get("required_observed") is False
-                else "unknown"
-            ),
-            "required_state_grounded": isinstance(evidence.get("required_observed"), bool),
-            "confidence": 1.0,
-            "confidence_tier": "grounded",
-            "name_source": "dom",
-            "recorded_user_input": False,
-            "field_aliases": aliases,
-            "control_kind": "file",
-            "control_disabled": False,
-            "control_read_only": False,
-            "surface": evidence.get("surface"),
-            "in_dialog": evidence.get("in_dialog"),
-            "action_id": evidence.get("action_id"),
-            "transaction_id": evidence.get("transaction_id"),
-            "page_id": evidence.get("page_id"),
-            "frame_id": evidence.get("frame_id"),
-            "occurrence_id": evidence.get("evidence_id"),
-            "unsupported_execution": True,
-            "wire_path_observed": False,
-            "filename": str(evidence.get("filename") or ""),
-            "mime_type": str(evidence.get("mime_type") or ""),
-            "file_count": int(evidence.get("file_count") or 0),
-            "multiple": bool(evidence.get("multiple")),
-        })
-        existing_field_paths.add(path)
-
     flat_fields.extend(_params_from_url_path(req, grounded_samples))
     _attach_select_field_projections(selects_raw, flat_fields, option_reads)
     composite_selects = _detect_composite_entity_selects(
@@ -480,8 +426,23 @@ def _build_step_from_capture(
     params: list[ParamField] = []
     for f in flat_fields:
         path = f.get("path", "")
-        wire_type = f.get("wire_type") or _infer_type_from_value(f.get("value")) or f.get("type") or "string"
-        ptype = f.get("type") or wire_type
+        value_type = _infer_type_from_value(f.get("value"))
+        declared_wire_type = str(f.get("wire_type") or "")
+        # A generic text/table control is presentation evidence, not permission
+        # to coerce an observed JSON number/boolean into a string contract.
+        wire_type = (
+            value_type
+            if value_type in {"number", "boolean"}
+            and declared_wire_type in {"", "string", "text", "unknown"}
+            else declared_wire_type or value_type or f.get("type") or "string"
+        )
+        control_type = str(f.get("type") or "")
+        ptype = (
+            wire_type
+            if wire_type in {"number", "boolean"}
+            and control_type in {"", "string", "text", "unknown"}
+            else control_type or wire_type
+        )
         if path in list_paths:
             ptype = "list-enum"
         select_meta = select_by_path.get(path)
@@ -525,29 +486,6 @@ def _build_step_from_capture(
             query_is_option_source=query_is_option_source,
             query_is_business_query=query_is_business_query,
         )
-        if f.get("unsupported_execution") is True and str(f.get("control_kind") or "").lower() == "file":
-            source_guess = {
-                **source_guess,
-                "category": "user_param",
-                "source_kind": "user_input",
-                "source": {
-                    **dict(source_guess.get("source") or {}),
-                    "kind": "file_input",
-                    "wire_path": f"body.{path.removeprefix('body.')}",
-                    "wire_path_observed": False,
-                    "unsupported_execution": True,
-                    "filename": str(f.get("filename") or ""),
-                    "mime_type": str(f.get("mime_type") or ""),
-                    "multiple": bool(f.get("multiple")),
-                    "file_count": int(f.get("file_count") or 0),
-                },
-                "editable": True,
-                "exposed_to_user": True,
-                "reason": (
-                    "页面表单包含调用方文件输入，但录制未提交文件，保留能力输入并明确标记执行不支持"
-                ),
-                "need_human_confirm": False,
-            }
         missing_wire_placeholder = _is_missing_wire_placeholder(f.get("value"))
         if missing_wire_placeholder:
             # Values such as ``undefined`` are evidence that the page failed to

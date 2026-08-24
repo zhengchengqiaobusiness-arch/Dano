@@ -46,6 +46,28 @@ def _mark_request_materialized(
     spec.request_facts.usage[request_id] = usage
 
 
+def _same_request_cohort(source: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Repeated routes may be different forms/actions; keep their causal cohort."""
+    if (source.get("method") or "GET").upper() != (candidate.get("method") or "GET").upper():
+        return False
+    if _request_path(source) != _request_path(candidate):
+        return False
+    for key in ("page_id", "frame_id"):
+        left = str(source.get(key) or "")
+        right = str(candidate.get(key) or "")
+        if left and right and left != right:
+            return False
+    for keys in (
+        ("trigger_action_id", "action_id"),
+        ("trigger_transaction_id", "transaction_id"),
+    ):
+        left = next((str(source.get(key) or "") for key in keys if source.get(key)), "")
+        right = next((str(candidate.get(key) or "") for key in keys if candidate.get(key)), "")
+        if left != right:
+            return False
+    return True
+
+
 def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
     """Replace an initial pagination request with the richer searched instance."""
     manually_assigned_steps = {
@@ -69,6 +91,7 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
             continue
         current_query = (step.source_meta or {}).get("query")
         current = {
+            **(step.source_meta or {}),
             "method": step.method,
             "url": step.url or step.path,
             "index": (step.source_meta or {}).get("request_index"),
@@ -79,12 +102,9 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
         # names, required evidence and numeric constraints.
         if isinstance(current_query, dict) and current_query:
             current["query"] = dict(current_query)
-        current_path = _request_path(current)
         candidates: list[tuple[RequestFact, RequestAnalysis | None, dict[str, Any], str]] = []
         for fact, raw in zip(spec.request_facts.requests or [], fact_rows):
-            if (fact.method or "GET").upper() != (step.method or "GET").upper():
-                continue
-            if _request_path(raw) != current_path:
+            if not _same_request_cohort(current, raw):
                 continue
             analysis = spec.request_facts.analysis.get(fact.request_id or "")
             role = str(analysis.role if analysis is not None else raw.get("role") or "")
@@ -297,15 +317,20 @@ def _materialized_step_id_for_request(spec: FlowSpec, entry: dict[str, Any]) -> 
     if usage_id in step_ids:
         return usage_id
     request_key = _request_fact_key_from_entry(entry)
+    if not request_key:
+        return ""
     if request_key.startswith(("id:", "idx:")):
         return next(
             (step.step_id for step in spec.steps if _step_request_key(step) == request_key),
             "",
         )
     signature = _request_fact_signature_key(entry)
+    if not signature:
+        return ""
     matches = [
         step.step_id for step in spec.steps
-        if _step_request_signature_key(step) == signature
+        if _step_request_signature_key(step)
+        and _step_request_signature_key(step) == signature
     ]
     return matches[0] if len(matches) == 1 else ""
 

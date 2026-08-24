@@ -1096,7 +1096,10 @@ async def get_recording_delta(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
         required=set(),
-        optional={"recording_id", "flow_version", "since_seq", "limit"},
+        optional={
+            "recording_id", "flow_version", "since_seq", "limit",
+            "request_id", "branch_path", "branch_cursor", "branch_limit",
+        },
     )
     since_seq = params.get("since_seq", 0)
     if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
@@ -1104,7 +1107,20 @@ async def get_recording_delta(run_id: str, params: dict) -> dict:
     limit = params.get("limit", 25)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
         raise ToolError("limit 必须是 1 到 50 的整数")
-    return await _recording_session(run_id, params).get_recording_delta(since_seq, limit=limit)
+    branch_cursor = params.get("branch_cursor", 0)
+    branch_limit = params.get("branch_limit", 25)
+    if isinstance(branch_cursor, bool) or not isinstance(branch_cursor, int) or branch_cursor < 0:
+        raise ToolError("branch_cursor 必须是非负整数")
+    if isinstance(branch_limit, bool) or not isinstance(branch_limit, int) or not 1 <= branch_limit <= 100:
+        raise ToolError("branch_limit 必须是 1 到 100 的整数")
+    return await _recording_session(run_id, params).get_recording_delta(
+        since_seq,
+        limit=limit,
+        request_id=str(params.get("request_id") or ""),
+        branch_path=str(params.get("branch_path") or ""),
+        branch_cursor=branch_cursor,
+        branch_limit=branch_limit,
+    )
 
 
 async def ask_recording_operator(run_id: str, params: dict) -> dict:

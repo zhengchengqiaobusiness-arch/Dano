@@ -692,20 +692,36 @@ def _is_business_query_step(step: FlowStep) -> bool:
 def _capability_business_key(step: FlowStep) -> str:
     """Return a conservative business-domain key for automatic splitting.
 
-    Explicit recorder/planner metadata wins. Otherwise only the first stable
-    resource segment is used, so action endpoints inside one resource remain a
-    single capability while genuinely separate domains can be partitioned.
+    Explicit recorder/planner metadata wins. Otherwise retain the complete
+    stable resource route and strip only infrastructure/version prefixes and
+    terminal operation verbs.
     """
+    from dano.execution.page.capability_kinds import _CAPABILITY_PATH_PREFIXES
+
     meta = step.source_meta or {}
     explicit = str(meta.get("capability_key") or meta.get("business_domain") or "").strip()
     if explicit:
         return _flow_capability_id("domain", explicit).removeprefix("domain_")
     path = _request_path({"url": step.path or step.url}).lower()
-    segments = [
-        segment for segment in path.split("/")
-        if segment and segment not in _CAPABILITY_PATH_PREFIXES and not re.fullmatch(r"\d+", segment)
-    ]
-    domain = _flow_capability_id("domain", segments[0]).removeprefix("domain_") if segments else ""
+    segments = [segment for segment in path.split("/") if segment]
+    while segments and (
+        segments[0] in _CAPABILITY_PATH_PREFIXES
+        or re.fullmatch(r"v\d+", segments[0])
+        or segments[0] in {"api", "gateway", "service", "rest"}
+    ):
+        segments.pop(0)
+    operation_tokens = {
+        "add", "create", "save", "update", "edit", "delete", "remove",
+        "approve", "reject", "revoke", "withdraw", "detail", "get", "list",
+        "page", "search", "query", "export", "download", "preview", "validate",
+        "submit", "status", "get-count", "count",
+    }
+    while segments and (
+        segments[-1] in operation_tokens or re.fullmatch(r"\d+", segments[-1])
+    ):
+        segments.pop()
+    stable = "/".join(segments)
+    domain = _flow_capability_id("domain", stable).removeprefix("domain_") if stable else ""
     # Trigger evidence is useful for explaining and validating the chain, but
     # must not be a hard partition key. One business capability routinely has
     # several buttons (query/add/submit); hashing each locator fragmented it
@@ -734,12 +750,28 @@ def _capability_relation_requires_fields(relation: CapabilityRelation) -> bool:
 
 
 def _capability_relation_schemas_compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
-    if not _capability_types_compatible(str(source.get("type") or ""), str(target.get("type") or "")):
+    source_type = str(source.get("type") or "")
+    target_type = str(target.get("type") or "")
+    if not source_type or not target_type or not _capability_types_compatible(source_type, target_type):
         return False
     if source.get("type") == target.get("type") == "array":
         source_items = source.get("items") if isinstance(source.get("items"), dict) else {}
         target_items = target.get("items") if isinstance(target.get("items"), dict) else {}
         return _capability_relation_schemas_compatible(source_items, target_items)
+    if source_type == target_type == "object":
+        source_properties = source.get("properties") if isinstance(source.get("properties"), dict) else {}
+        target_properties = target.get("properties") if isinstance(target.get("properties"), dict) else {}
+        required = {str(item) for item in target.get("required") or []}
+        if not required.issubset(source_properties):
+            return False
+        return all(
+            isinstance(source_properties.get(name), dict)
+            and isinstance(target_properties.get(name), dict)
+            and _capability_relation_schemas_compatible(
+                source_properties[name], target_properties[name],
+            )
+            for name in required
+        )
     return True
 
 
@@ -808,7 +840,9 @@ def _capability_step_ref_keys(spec: FlowSpec | None, step_id: str) -> set[str]:
     if spec is not None:
         step = next((s for s in spec.steps if s.step_id == step_id), None)
         if step is not None:
-            refs.add(f"sig:{_step_request_signature_key(step)}")
+            signature = _step_request_signature_key(step)
+            if signature:
+                refs.add(f"sig:{signature}")
     return refs
 
 
@@ -864,6 +898,16 @@ def _planned_capability_has_public_anchor(
         if kind in WRITE_CAPABILITY_KINDS and grounded_kind in WRITE_CAPABILITY_KINDS:
             return True
         if kind in READ_CAPABILITY_KINDS and grounded_kind in READ_CAPABILITY_KINDS and _is_business_query_step(step):
+            return True
+        action_text = " ".join(str((step.source_meta or {}).get(key) or "") for key in (
+            "trigger_locator", "trigger_op", "reason",
+        )) + " " + str(step.path or step.url or "")
+        recorded_role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+        if (
+            kind in READ_CAPABILITY_KINDS
+            and recorded_role in {"business_get", "read_context"}
+            and re.search(r"导出|下载|预览|校验|export|download|preview|validate", action_text, re.I)
+        ):
             return True
     return False
 
@@ -1242,7 +1286,14 @@ def _only_grounded_screenshot_query_params_added(
 
 
 def _step_request_signature_key(step: FlowStep) -> str:
-    return f"{(step.method or '').upper()} {_request_path({'url': step.path or step.url})}"
+    from dano.execution.page.request_identity import request_composite_signature
+
+    return request_composite_signature({
+        **(step.source_meta or {}),
+        "method": step.method,
+        "url": step.path or step.url,
+        "body": step.body_source,
+    })
 
 
 def _eligible_business_write_fact(entry: dict[str, Any]) -> bool:
@@ -1349,8 +1400,12 @@ def _capability_field_looks_internal(field: CapabilityField) -> bool:
 
 
 def _capability_execute_record_selector(cap: FlowCapability, field: CapabilityField) -> bool:
-    """Update/delete-family execute anchors may expose the record id/ids selector."""
-    if str(cap.kind or "") not in _MUTATING_RECORD_KINDS:
+    """Record-bound commands may expose one abstract selected-record identity."""
+    source_kind = str(field.source_kind or "")
+    if (
+        str(cap.kind or "") not in _MUTATING_RECORD_KINDS | {"inspect", "query_status"}
+        or source_kind not in {"selected_record_identity", "selected_entity_id", "user_input"}
+    ):
         return False
     text = f"{field.path}.{field.key}"
     return bool(re.search(r"(^|[.\]])(id|ids)(\]|$)", text, re.I))

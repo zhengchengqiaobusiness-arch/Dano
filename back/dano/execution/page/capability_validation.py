@@ -45,12 +45,40 @@ def _capability_error(
     section.setdefault("errors", []).append({"code": code, "message": message, "target": target})
 
 
-def _capability_param_enum_issue(param: ParamField) -> str:
+def _capability_param_enum_issue(
+    param: ParamField,
+    spec: FlowSpec | None = None,
+) -> str:
     if param.type not in {"enum", "list-enum"}:
         return ""
     if param.source_kind == "api_option":
-        # API candidates are resolved at runtime. An empty capture snapshot (or
-        # a source that is being reselected) is valid and must not block publish.
+        source = dict(param.source or {})
+        required = ("source_url", "value_key", "label_key", "id_path")
+        missing = [key for key in required if not str(source.get(key) or "").strip()]
+        if missing:
+            return f"接口候选源缺少可执行字段: {', '.join(missing)}"
+        if not (source.get("source_step_id") or source.get("source_request_id")):
+            return "接口候选源缺少唯一 source_step_id/source_request_id"
+        if spec is not None:
+            source_step_id = str(source.get("source_step_id") or "")
+            if source_step_id:
+                source_steps = [step for step in spec.steps if step.step_id == source_step_id]
+                if len(source_steps) != 1:
+                    return "接口候选源 source_step_id 不唯一或不存在"
+                if (source_steps[0].method or "GET").upper() not in {"GET", "HEAD"}:
+                    return "接口候选源必须是只读请求"
+            source_request_id = str(source.get("source_request_id") or "")
+            if source_request_id:
+                matches = [
+                    fact for fact in spec.request_facts.requests or []
+                    if str(fact.request_id or "") == source_request_id
+                ]
+                if len(matches) != 1:
+                    return "接口候选源 source_request_id 不唯一或不存在"
+                if (matches[0].method or "GET").upper() not in {"GET", "HEAD"}:
+                    return "接口候选源请求必须是只读请求"
+        # Empty option snapshots are valid when the executable source contract
+        # above is complete; runtime will fetch candidates.
         return ""
     if not param.enum_options:
         return "缺少可执行枚举选项 label/value"
@@ -102,10 +130,25 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
     step_by_id = {s.step_id: s for s in spec.steps}
     request_items = _request_fact_items(spec)
     materialized_keys = {_step_request_key(s) for s in spec.steps}
-    materialized_signatures = {_step_request_signature_key(s) for s in spec.steps}
+    materialized_signatures = {
+        signature for step in spec.steps
+        if (signature := _step_request_signature_key(step))
+    }
+    from dano.execution.page.capability_semantic import (
+        _required_public_action_request_ids,
+    )
+
+    required_public_action_ids = _required_public_action_request_ids(spec)
+
+    def eligible_public_action(item: dict[str, Any]) -> bool:
+        return bool(
+            item.get("keep")
+            and str(item.get("request_id") or "") in required_public_action_ids
+        )
+
     unmaterialized_business = [
         item for item in request_items
-        if _eligible_business_write_fact(item)
+        if eligible_public_action(item)
         and not _materialized_step_id_for_request(spec, item)
     ]
     high_conf_unused = [
@@ -122,7 +165,10 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         if float(item.get("confidence") or 0) >= 0.9
         and (item.get("role") or "") in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}
         and _request_fact_key_from_entry(item) not in materialized_keys
-        and _request_fact_signature_key(item) not in materialized_signatures
+        and (
+            not _request_fact_signature_key(item)
+            or _request_fact_signature_key(item) not in materialized_signatures
+        )
     ]
     checked_requests: list[dict[str, Any]] = []
     checked_manual_requests: list[dict[str, Any]] = []
@@ -164,6 +210,34 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         skill_level["errors"].append(entry)
         errors.append(message)
 
+    for evidence in list(getattr(spec.request_facts, "field_evidence", None) or []):
+        raw = evidence.model_dump(exclude_none=True) if hasattr(evidence, "model_dump") else dict(evidence or {})
+        if not raw.get("unsupported_execution"):
+            continue
+        attempted_upload = bool(
+            str(raw.get("op") or "").lower() == "upload"
+            or int(raw.get("file_count") or 0) > 0
+            or str(raw.get("filename") or "").strip()
+            or list(raw.get("files") or [])
+        )
+        if not attempted_upload:
+            # Merely seeing an unused optional picker does not make upload a
+            # promised Skill ability. It has no request field and therefore
+            # must not block unrelated recorded capabilities. A real upload
+            # interaction without a captured wire contract remains blocking.
+            continue
+        target = {
+            "kind": "field_evidence",
+            "evidence_id": raw.get("evidence_id"),
+            "request_id": raw.get("request_id") or raw.get("owner_request_id"),
+            "label": raw.get("label") or raw.get("field"),
+        }
+        add_integrity_error(
+            "unsupported_file_execution",
+            f"文件字段 `{target['label'] or target['evidence_id']}` 没有录制到真实上传 wire contract",
+            target,
+        )
+
     for item in unmaterialized_business:
         target = {
             "kind": "captured_request",
@@ -195,9 +269,14 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
                 memberships_by_step.setdefault(request_ref.step_id, set()).add(capability_name)
     for item in request_items:
         role = str(item.get("role") or "")
+        request_id = str(item.get("request_id") or "")
+        is_public_business = request_id in required_public_action_ids
         requires_membership = bool(
             item.get("keep")
-            and role in {"business_write", "submit_anchor", "business_get", "read_context", "read_option"}
+            and (
+                is_public_business
+                or role in {"read_context", "read_option"}
+            )
         )
         if not requires_membership:
             continue
@@ -215,7 +294,6 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         if not memberships:
             if step_id in internal_step_ids:
                 continue
-            is_public_business = role in {"business_write", "submit_anchor", "business_get"}
             bucket = "unassigned_business_steps" if is_public_business else "unassigned_materialized_steps"
             materialization_integrity[bucket].append(target)
             add_integrity_error(
@@ -316,10 +394,11 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
             else:
                 cap_warnings.append(msg)
 
-        if not cap.confirmed or cap.requires_human_confirm:
-            cap_warnings.append(f"Capability `{label}` 尚未确认，需要确认或移除后再发布")
-        elif not cap.confirmation_hash:
-            cap_warnings.append(f"Capability `{label}` 来自旧版确认记录；下次合同编辑后将启用版本指纹校验")
+        public_capability = any(step_id not in internal_step_ids for step_id in node_step_ids)
+        if public_capability and (not cap.confirmed or cap.requires_human_confirm):
+            cap_errors.append(f"Capability `{label}` 尚未确认，公开能力不能发布")
+        elif public_capability and not cap.confirmation_hash:
+            cap_errors.append(f"Capability `{label}` 缺少当前合同的确认指纹")
         elif cap.confirmation_hash != _capability_confirmation_hash(spec, cap, prepared=prepared):
             cap_errors.append(f"Capability `{label}` 确认后合同已变化，请复核并重新确认")
 
@@ -345,7 +424,7 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
                 if req_item["manual_added"]:
                     checked_manual_requests.append(req_item)
             for param in st.params or []:
-                enum_issue = _capability_param_enum_issue(param)
+                enum_issue = _capability_param_enum_issue(param, spec)
                 target = {
                     "kind": "capability_enum",
                     "capability": label,
@@ -801,7 +880,19 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         requires_fields = _capability_relation_requires_fields(relation)
         from_type = _capability_field_type(from_cap, relation.from_output, direction="output") if from_cap and requires_fields else ""
         to_type = _capability_field_type(to_cap, relation.to_input, direction="input") if to_cap and requires_fields else ""
-        compatible = not requires_fields or _capability_types_compatible(from_type, to_type)
+        from_schema = (
+            _schema_node_at_path(from_cap.output_schema, relation.from_output)
+            if from_cap and requires_fields else None
+        )
+        to_schema = (
+            _schema_node_at_path(to_cap.input_schema, relation.to_input)
+            if to_cap and requires_fields else None
+        )
+        compatible = not requires_fields or bool(
+            isinstance(from_schema, dict)
+            and isinstance(to_schema, dict)
+            and _capability_relation_schemas_compatible(from_schema, to_schema)
+        )
         cardinality = str(relation.cardinality or "")
         transform_owner = str(relation.transform_owner or "")
         cardinality_valid = cardinality in {"one_to_one", "one_to_many", "many_to_one", "many_to_many"}
@@ -897,17 +988,19 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
                     target={"kind": "capability_relation", "relation_id": relation.relation_id},
                 )
     for cap in caps:
-        if cap.confirmed and not cap.requires_human_confirm:
+        cap_step_ids = _capability_node_step_ids(cap)
+        is_internal = bool(cap_step_ids) and all(step_id in internal_step_ids for step_id in cap_step_ids)
+        if is_internal or (cap.confirmed and not cap.requires_human_confirm and cap.confirmation_hash):
             continue
         cap_ref = cap.name or cap.capability_id
         message = f"Capability `{cap_ref}` 是未确认的公开能力；请确认该能力或从发布范围移除"
-        _capability_warning(
-            skill_level,
-            warnings,
-            code="unconfirmed_public_capability",
-            message=message,
-            target={"kind": "capability", "capability": cap_ref},
-        )
+        entry = {
+            "code": "unconfirmed_public_capability",
+            "message": message,
+            "target": {"kind": "capability", "capability": cap_ref},
+        }
+        skill_level.setdefault("errors", []).append(entry)
+        errors.append(message)
     confirmed_caps = [c for c in caps if c.confirmed]
     strict_skill_level = bool((spec.meta or {}).get("publish_gate") or (spec.meta or {}).get("strict_skill_level"))
     if confirmed_caps:
@@ -950,7 +1043,7 @@ def _capability_validation_report(spec: FlowSpec, *, prepared: bool = False) -> 
         "materialization_integrity": materialization_integrity,
     }
 
-_PENDING_FLOW_SPEC_HELPERS = {'_ROUTING_FIELD_RE': 'dano.execution.page.capability_contracts', '_capability_child_nodes': 'dano.execution.page.capability_refs', '_capability_confirmation_hash': 'dano.execution.page.capability_views', '_capability_execute_record_selector': 'dano.execution.page.capability_contracts', '_capability_field_has_valid_source': 'dano.execution.page.capability_contracts', '_capability_field_looks_internal': 'dano.execution.page.capability_contracts', '_capability_field_type': 'dano.execution.page.capability_contracts', '_capability_input_refs': 'dano.execution.page.capability_contracts', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_ref_key': 'dano.execution.page.capability_contracts', '_capability_relation_requires_fields': 'dano.execution.page.capability_contracts', '_capability_request_indexes': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_schema_array_item_props': 'dano.execution.page.capability_io', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_types_compatible': 'dano.execution.page.capability_contracts', '_capability_value_ref_exists': 'dano.execution.page.capability_contracts', '_eligible_business_write_fact': 'dano.execution.page.capability_contracts', '_enum_map_covers_recorded_value': 'dano.execution.page.flow_release', '_enum_options_look_value_only': 'dano.execution.page.flow_release', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_manual_enum_mapping_complete': 'dano.execution.page.flow_release', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_retired_capability_step_ids': 'dano.execution.page.capability_refs', '_schema_path_exists': 'dano.execution.page.capability_io', '_step_request_key': 'dano.execution.page.capability_refs', '_step_request_signature_key': 'dano.execution.page.capability_contracts', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'ALLOWED_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder'}
+_PENDING_FLOW_SPEC_HELPERS = {'_ROUTING_FIELD_RE': 'dano.execution.page.capability_contracts', '_capability_child_nodes': 'dano.execution.page.capability_refs', '_capability_confirmation_hash': 'dano.execution.page.capability_views', '_capability_execute_record_selector': 'dano.execution.page.capability_contracts', '_capability_field_has_valid_source': 'dano.execution.page.capability_contracts', '_capability_field_looks_internal': 'dano.execution.page.capability_contracts', '_capability_field_type': 'dano.execution.page.capability_contracts', '_capability_input_refs': 'dano.execution.page.capability_contracts', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_ref_key': 'dano.execution.page.capability_contracts', '_capability_relation_requires_fields': 'dano.execution.page.capability_contracts', '_capability_relation_schemas_compatible': 'dano.execution.page.capability_contracts', '_capability_request_indexes': 'dano.execution.page.capability_refs', '_capability_response_path_exists': 'dano.execution.page.capability_contracts', '_capability_schema_array_item_props': 'dano.execution.page.capability_io', '_capability_step_param_exists': 'dano.execution.page.capability_contracts', '_capability_types_compatible': 'dano.execution.page.capability_contracts', '_capability_value_ref_exists': 'dano.execution.page.capability_contracts', '_eligible_business_write_fact': 'dano.execution.page.capability_contracts', '_enum_map_covers_recorded_value': 'dano.execution.page.flow_release', '_enum_options_look_value_only': 'dano.execution.page.flow_release', '_incomplete_page_enum_is_executable': 'dano.execution.page.flow_release', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_looks_batch_step': 'dano.execution.page.capability_kinds', '_manual_enum_mapping_complete': 'dano.execution.page.flow_release', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_retired_capability_step_ids': 'dano.execution.page.capability_refs', '_schema_node_at_path': 'dano.execution.page.capability_io', '_schema_path_exists': 'dano.execution.page.capability_io', '_step_request_key': 'dano.execution.page.capability_refs', '_step_request_signature_key': 'dano.execution.page.capability_contracts', '_strip_body_prefix': 'dano.execution.page.flow_spec_core.normalization', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', 'ALLOWED_CAPABILITY_KINDS': 'dano.execution.page.capability_kinds', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:

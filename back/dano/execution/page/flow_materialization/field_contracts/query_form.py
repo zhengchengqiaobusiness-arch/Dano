@@ -90,6 +90,33 @@ def _mark_query_filter_caller(
         param.reason = reason
 
 
+def _page_enum_has_complete_wire_mapping(param: ParamField) -> bool:
+    options = list(param.enum_options or [])
+    mapping = dict(param.enum_value_map or {})
+    labels: list[str] = []
+    for option in options:
+        if isinstance(option, dict):
+            label = option.get("label", option.get("name", option.get("text")))
+            if label in (None, ""):
+                return False
+            labels.append(str(label))
+            if option.get("value") is not None:
+                mapping.setdefault(str(label), option.get("value"))
+        elif isinstance(option, (list, tuple)) and len(option) >= 2:
+            if option[0] in (None, "") or option[1] is None:
+                return False
+            labels.append(str(option[0]))
+            mapping.setdefault(str(option[0]), option[1])
+        else:
+            label = str(option or "").strip()
+            if not label:
+                return False
+            labels.append(label)
+    return bool(labels) and all(
+        label in mapping and mapping[label] is not None for label in labels
+    )
+
+
 def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
     """Business list/search filters stay caller-owned on every query capability.
 
@@ -105,6 +132,35 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
         (spec.meta or {}).get("stage_1_6_contract_version") or 0
     ) >= 2
     for step in spec.steps or []:
+        if _step_is_record_detail_query(step):
+            for param in step.params or []:
+                if (
+                    param.locked
+                    or _param_has_manual_contract(param)
+                    or not str(param.path or "").startswith("query.")
+                    or not (
+                        _param_is_document_record_identity(param)
+                        or _looks_row_identity_leaf(param.key, param.path)
+                    )
+                ):
+                    continue
+                param.category = "user_param"
+                param.source_kind = "selected_record_identity"
+                param.source = {
+                    "kind": "selected_record_identity",
+                    "path": param.path,
+                    "required_state": "required",
+                }
+                param.required = True
+                param.exposed_to_user = True
+                param.editable = True
+                param.need_human_confirm = False
+                if str(param.label or param.key or "").strip().casefold() in {
+                    "id", "ids", "recordid", "record_id",
+                }:
+                    param.label = "记录"
+                param.reason = "调用方选择要查看的业务记录，录制样例 ID 不能固化"
+            continue
         if not _step_is_business_list_query(step):
             continue
         for param in step.params or []:
@@ -123,6 +179,43 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                 "computed", "page_rule", "selected_option_field",
             }:
                 continue
+            source = param.source or {}
+            if source.get("unmapped_page_options") is True or (
+                param.source_kind == "page_enum"
+                and source.get("enum_confirmed") is False
+                and not _page_enum_has_complete_wire_mapping(param)
+            ):
+                # The page proves this is a chooser, but labels alone cannot
+                # be submitted as backend codes. Keep the optional filter
+                # executable as a raw caller wire value instead of advertising
+                # a fake label→value enum contract.
+                param.type = (
+                    param.wire_type
+                    if param.wire_type in {"string", "number", "integer", "boolean"}
+                    else "string"
+                )
+                param.source_kind = "user_input"
+                param.source = {
+                    "kind": "business_query_filter",
+                    "path": param.path,
+                    "recorded": True,
+                    "control_kind": "select",
+                    "unmapped_page_options": True,
+                    "required_state": str(
+                        (param.source or {}).get("required_state") or "optional"
+                    ),
+                }
+                param.enum_options = None
+                param.enum_value_map = None
+                param.need_human_confirm = False
+                param.reason = (
+                    "页面证明该字段为可选筛选控件，但未捕获完整 label→wire 映射；"
+                    "调用方直接提供接口值"
+                )
+                step.selects = [
+                    binding for binding in (step.selects or [])
+                    if str(binding.path or binding.id_path or "") != str(param.path or "")
+                ]
             if param.source_kind in caller_kinds:
                 if (
                     refresh_required

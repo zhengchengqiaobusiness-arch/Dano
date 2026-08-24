@@ -11,7 +11,6 @@ from dano.execution.page.flow_spec_core.models import (
 )
 from dano.execution.page.request_capture import (
     looks_internal_param_name,
-    normalized_leaf_paths,
 )
 from dano.execution.page.recording_facts import (
     _SCREENSHOT_OPTION_CONTROL_KINDS,
@@ -919,10 +918,8 @@ def _grounded_screenshot_query_path(
 ) -> str | None:
     """Resolve one screenshot control to a query param without guessing.
 
-    Existing request params are authoritative. A control missing from the
-    recorded request may be added only when the same leaf occurs exactly once
-    in that request's response schema; this covers untouched list filters while
-    rejecting label-only screenshot inventions.
+    Existing request params are authoritative. A response leaf describes
+    output, never proof that a same-named query input exists.
     """
     control = _screenshot_control_evidence(raw)
     if (
@@ -944,14 +941,7 @@ def _grounded_screenshot_query_path(
     ]
     if len(existing) == 1:
         return existing[0]
-    response_matches = [
-        path for path in normalized_leaf_paths(step.response_json)
-        if str(path).rsplit(".", 1)[-1].lower() == leaf.lower()
-    ]
-    return (
-        f"query.{response_matches[0].rsplit('.', 1)[-1]}"
-        if len(response_matches) == 1 else None
-    )
+    return None
 
 
 def _param_has_grounded_direct_input_contract(param: ParamField) -> bool:

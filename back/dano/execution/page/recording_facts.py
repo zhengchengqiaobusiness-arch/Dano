@@ -85,12 +85,13 @@ def _looks_pagination_field(key: str, path: str) -> bool:
 
 def _list_payload_has_reference_contract(payload: Any) -> bool:
     items = as_list_payload(payload) or []
-    sample = next((item for item in items[:10] if isinstance(item, dict)), None)
-    if not sample:
-        return False
-    for key in sample:
-        if _is_idlike(str(key)) and _pick_label_key(sample, str(key)) != key:
-            return True
+    # A list response is one contract, not a ten-row sample.  Sparse backends
+    # often emit labels/identifiers only on later rows, so inspect every
+    # observed object before deciding this is not a reference source.
+    for sample in (item for item in items if isinstance(item, dict)):
+        for key in sample:
+            if _is_idlike(str(key)) and _pick_label_key(sample, str(key)) != key:
+                return True
     return False
 
 
@@ -1871,7 +1872,9 @@ def _request_fact_has_record_identity(item: dict[str, Any]) -> bool:
 
 
 def _request_fact_signature_key(entry: dict[str, Any]) -> str:
-    return f"{(entry.get('method') or '').upper()} {_request_path(entry)}"
+    from dano.execution.page.request_identity import request_composite_signature
+
+    return request_composite_signature(entry)
 
 
 def _request_fact_key_from_entry(entry: dict[str, Any]) -> str:
@@ -1879,7 +1882,8 @@ def _request_fact_key_from_entry(entry: dict[str, Any]) -> str:
         return f"id:{entry.get('request_id')}"
     if entry.get("request_index") is not None:
         return f"idx:{entry.get('request_index')}"
-    return f"sig:{(entry.get('method') or '').upper()} {_request_path(entry)}"
+    signature = _request_fact_signature_key(entry)
+    return f"sig:{signature}" if signature else ""
 
 
 def _request_sequence_value(value: Any) -> float | None:

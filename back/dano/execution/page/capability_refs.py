@@ -840,11 +840,16 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
         for step_id in node_ids:
             step = by_id.get(step_id)
             for param in (step.params if step else []):
-                if param.source_kind != "api_option":
-                    continue
                 source = param.source or {}
+                if param.source_kind == "previous_response" and isinstance(
+                    source.get("option_source"), dict,
+                ):
+                    source = source["option_source"]
+                elif param.source_kind != "api_option":
+                    continue
                 source_id = str(source.get("source_step_id") or "")
-                if not source_id and source.get("source_url"):
+                source_request_id = str(source.get("source_request_id") or "")
+                if not source_id and not source_request_id and source.get("source_url"):
                     source_step = by_path.get(_request_path({"url": str(source.get("source_url"))}))
                     source_id = source_step.step_id if source_step else ""
                 if source_id in by_id and source_id not in node_ids:
@@ -907,6 +912,18 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
                 )
             ]
             capability.request_refs.append(ref)
+
+        deduped: dict[tuple[str, str, str], CapabilityRequestRef] = {}
+        for ref in capability.request_refs or []:
+            identity = (
+                str(ref.usage or "execute"),
+                "request" if ref.request_id else "step",
+                str(ref.request_id or ref.step_id or ref.path or ""),
+            )
+            previous = deduped.get(identity)
+            if previous is None or (not previous.step_id and ref.step_id):
+                deduped[identity] = ref
+        capability.request_refs = _ordered_capability_request_refs(list(deduped.values()))
 
 
 def _canonical_step_summary(step: FlowStep) -> dict[str, Any]:

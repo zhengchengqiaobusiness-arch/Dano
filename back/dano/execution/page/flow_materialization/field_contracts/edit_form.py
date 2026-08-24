@@ -253,7 +253,12 @@ def _restore_selected_option_projections(spec: FlowSpec) -> None:
                 target.editable = False
                 target.required = False
                 target.need_human_confirm = False
-                if target_controls and not distinct_local_control:
+                if (
+                    target_controls
+                    and not distinct_local_control
+                    and _normalized_control_label(target.label)
+                    == _normalized_control_label(selector.label)
+                ):
                     target.label = target.key or str(target.path or "").split(".")[-1]
                 target.reason = (
                     f"该字段来自所选记录的 `{response_path}`，运行期随实体选择自动写入"
@@ -364,6 +369,22 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
             )
             for label, items in by_label.items()
         }
+
+        def executable_option_labels(param: ParamField) -> set[str]:
+            labels = _option_labels(param.enum_options)
+            if labels:
+                return labels
+            param_path = _strip_body_prefix(param.path or "")
+            binding = next((
+                item for item in (step.selects or [])
+                if _strip_body_prefix(item.path or item.id_path or "") == param_path
+            ), None)
+            if binding is None:
+                return set()
+            return _option_labels(binding.options) or {
+                str(label) for label in (binding.option_map or {}) if str(label)
+            }
+
         option_params = [
             param for param in (step.params or [])
             if not param.locked
@@ -377,7 +398,7 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
                     and bool(param.enum_options)
                 )
             )
-            and _option_labels(param.enum_options)
+            and executable_option_labels(param)
             and not _param_has_editable_control_evidence(param)
         ]
         used_labels: set[str] = set()
@@ -405,7 +426,7 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
             matches = [
                 param for param in option_params
                 if id(param) not in used_params
-                and _option_labels(param.enum_options) == enum_sets[0]
+                and executable_option_labels(param) == enum_sets[0]
             ]
             if len(matches) != 1:
                 continue
@@ -497,6 +518,12 @@ def _reconcile_unbound_editable_controls(spec: FlowSpec) -> int:
             if str(control.get("binding_status") or "") == "bound":
                 continue
             if str(control.get("control_kind") or "").lower() in {"select", "combobox", "radio"}:
+                continue
+            if any(str(alias or "").strip() for alias in (control.get("field_aliases") or [])):
+                # A structural alias is stronger than scalar equality. If it
+                # remains request-ambiguous, do not move the control onto a
+                # different same-valued field (for example remark="1" onto
+                # creator="1").
                 continue
             value = control.get("value")
             if value in (None, ""):
@@ -789,7 +816,21 @@ def _apply_edit_form_field_contracts(spec: FlowSpec) -> None:
                 and not _param_control_is_readonly(param)
                 and not _looks_audit_system_leaf(param.key, param.path)
             ):
-                if strict_edit_evidence and not _param_has_editable_control_evidence(param):
+                hydrated_option = (
+                    (param.source or {}).get("option_source")
+                    if isinstance((param.source or {}).get("option_source"), dict)
+                    else {}
+                )
+                executable_hydrated_option = bool(
+                    hydrated_option.get("source_url")
+                    and hydrated_option.get("value_key")
+                    and hydrated_option.get("label_key")
+                )
+                if (
+                    strict_edit_evidence
+                    and not _param_has_editable_control_evidence(param)
+                    and not executable_hydrated_option
+                ):
                     _mark_system_hydrated_field(
                         param,
                         "该字段来自详情响应，但没有可编辑控件证据，保留为上游回填字段",
@@ -873,6 +914,10 @@ def _repair_readonly_control_defaults(spec: FlowSpec) -> int:
             if (
                 param.locked
                 or param.source_kind in {"computed", "selected_option_field"}
+                or (
+                    param.source_kind == "previous_response"
+                    and bool((param.source or {}).get("link_id"))
+                )
                 or _param_has_manual_contract(param)
                 or _param_source_agent_classified(param)
                 or _param_has_editable_control_evidence(param)

@@ -188,6 +188,7 @@ def _dynamic_array_aggregate_for_path(
 _EXECUTABLE_RUNTIME_RULES = frozenset({
     "date_range_end", "date_span_days", "date_span_days_json",
     "product", "sum", "difference", "percent_of", "remainder_after_percent",
+    "collection_sum", "percent_of_collection_sum", "difference_collection_sum",
 })
 
 

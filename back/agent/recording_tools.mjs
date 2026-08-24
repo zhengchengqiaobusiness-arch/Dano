@@ -755,11 +755,15 @@ export const recordingTools = [
   proxyTool({
     name: "get_recording_delta",
     label: "读取实时录制增量",
-    description: "按 since_seq 分页拉取新增且已脱敏的请求、页面事件和启发式候选。实时分析时必须以该事实增量为准；若 has_more=true，继续用 next_seq 读取，直到 has_more=false。大响应中的 __truncated_* 标记表示投影已裁剪，不表示原始事实缺失。",
+    description: "按 since_seq 分页拉取新增且已脱敏的请求、页面事件和启发式候选。若投影出现 __truncated_*，用 request_id + branch_path + branch_cursor 分页读取该原始分支，直到 branch.has_more=false。",
     parameters: Type.Object({
       ...RecordingIdentity,
       since_seq: Type.Optional(Type.Integer({ minimum: 0 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+      request_id: Type.Optional(Type.String({ minLength: 1 })),
+      branch_path: Type.Optional(Type.String({ minLength: 1 })),
+      branch_cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+      branch_limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
     }, { additionalProperties: false }),
   }),
   proxyTool({

@@ -2479,6 +2479,33 @@ def _runtime_values(step, inputs):
                     values[result_field] = computed
                 progressed = True
                 continue
+            if kind in {"collection_sum", "percent_of_collection_sum", "difference_collection_sum"}:
+                container = str(field.get("container_field") or "")
+                item_key = str(field.get("item_field") or "")
+                rows = values.get(container)
+                if not isinstance(rows, list) or not rows or not item_key:
+                    still.append(field)
+                    continue
+                item_values = [get_path(row, item_key) for row in rows if isinstance(row, dict)]
+                if len(item_values) != len(rows) or any(value is None for value in item_values):
+                    still.append(field)
+                    continue
+                total = sum(float(value) for value in item_values)
+                if kind == "collection_sum":
+                    computed = total
+                else:
+                    right_name = str(field.get("right_field") or "")
+                    if right_name not in values:
+                        still.append(field)
+                        continue
+                    right = float(values[right_name])
+                    computed = total * right / 100.0 if kind == "percent_of_collection_sum" else total - right
+                values[name] = computed
+                result_field = str(field.get("result_field") or "")
+                if result_field and result_field not in values:
+                    values[result_field] = computed
+                progressed = True
+                continue
             if kind == "array_item_formula":
                 container = str(field.get("array_container_path") or field.get("container_field") or "items")
                 item_key = str(field.get("array_item_key") or field.get("result_field") or "")

@@ -1012,18 +1012,40 @@ def _option_source_tokens(value) -> set[str]:
     return expanded - _OPTION_SOURCE_GENERIC_TOKENS
 
 
-def _field_related_to_option_source(field: dict | None, source_url: str) -> bool:
+def _field_related_to_option_source(field: dict | None, source: dict | str) -> bool:
     """A select may use an option API only when their identities share a token.
 
     Numeric IDs and display labels repeat across unrelated dictionaries. The
     field alias/leaf must overlap the endpoint path before a binding is kept.
     """
+    source_url = str(source.get("url") or source.get("path") or "") if isinstance(source, dict) else str(source or "")
     if not field or not source_url:
         return False
     field_tokens: set[str] = set()
     for name in _grounded_field_names(field):
         field_tokens |= _option_source_tokens(name)
-    return bool(field_tokens & _option_source_tokens(source_url))
+    shared = field_tokens & _option_source_tokens(source_url)
+    if not shared:
+        return False
+    generic_business_tokens = {
+        "status", "statu", "state", "type", "kind", "category", "flag", "result",
+    }
+    if shared - generic_business_tokens:
+        return True
+    if not isinstance(source, dict):
+        return False
+    # Generic status/type leaves exist in unrelated widgets and background
+    # presence APIs.  They need exact control causality, not token overlap.
+    return bool(
+        (
+            field.get("transaction_id")
+            and field.get("transaction_id") == source.get("trigger_transaction_id")
+        )
+        or (
+            field.get("action_id")
+            and field.get("action_id") == source.get("trigger_action_id")
+        )
+    )
 
 
 def _is_scalar(v) -> bool:
@@ -1179,7 +1201,7 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             field = field_by_path.get(path)
             if not _field_has_structural_select_identity(field):
                 continue
-            if not _field_related_to_option_source(field, source_url):
+            if not _field_related_to_option_source(field, r):
                 continue
             sample_vals = _sample_values_for_leaf(path, sv, samples, field)
             m = _match_select(sv, items, sample_vals)
@@ -3010,6 +3032,40 @@ def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
                     still.append(field)
                     continue
                 out[container_name] = computed_rows
+                progressed = True
+            elif kind in {
+                "collection_sum", "percent_of_collection_sum", "difference_collection_sum",
+            }:
+                container_name = str(field.get("container_field") or "")
+                item_name = str(field.get("item_field") or "")
+                rows = out.get(container_name)
+                if not isinstance(rows, list) or not rows or not item_name:
+                    still.append(field)
+                    continue
+                values = [
+                    _path_lookup(row, item_name) for row in rows if isinstance(row, dict)
+                ]
+                if len(values) != len(rows) or any(value is _PATH_MISSING for value in values):
+                    still.append(field)
+                    continue
+                total = sum(float(value) for value in values)
+                if kind == "collection_sum":
+                    computed = total
+                else:
+                    right_name = str(field.get("right_field") or "")
+                    if right_name not in out:
+                        still.append(field)
+                        continue
+                    right = float(out[right_name])
+                    computed = (
+                        total * right / 100.0
+                        if kind == "percent_of_collection_sum"
+                        else total - right
+                    )
+                out[name] = computed
+                result_field = str(field.get("result_field") or "")
+                if result_field and result_field not in out:
+                    out[result_field] = computed
                 progressed = True
             elif kind in {"product", "sum", "difference", "percent_of", "remainder_after_percent"}:
                 left_name = str(field.get("left_field") or "")

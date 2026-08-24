@@ -92,6 +92,22 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
     if param is None:
         return False
     evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
+    captured_match = evidence.get("captured_value_match")
+    if (
+        lk is not None
+        and lk.confirmed
+        and float(lk.confidence or 0.0) >= 0.95
+        and isinstance(captured_match, dict)
+        and captured_match.get("evidence_kind")
+        == "unique_scalar_semantic_projection"
+        and param.source_kind == "constant"
+        and str((param.source or {}).get("kind") or "")
+        == "recorded_control_default"
+        and not _param_has_editable_control_evidence(param)
+    ):
+        # A disabled recorded value backed by a dedicated scalar lookup is a
+        # runtime projection, not a literal page default.
+        return True
     source_leaf = re.sub(
         r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower(),
     )
@@ -235,6 +251,11 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
         evidence.get("same_action_chain") is True
         or (source_action and source_action == target_action)
         or (source_transaction and source_transaction == target_transaction)
+        or (
+            isinstance(evidence.get("captured_value_match"), dict)
+            and evidence["captured_value_match"].get("evidence_kind")
+            == "unique_scalar_semantic_projection"
+        )
         or evidence.get("kind") in {
             "response_projection", "request_dependency", "causal_transaction", "explicit_projection",
             "record_hydration",

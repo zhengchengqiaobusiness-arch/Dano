@@ -159,6 +159,24 @@ def _capability_spec(spec: FlowSpec, capability: FlowCapability) -> FlowSpec:
     request_ids = {
         str(step.source_meta.get("request_id") or "") for step in current.steps
     } | {str(ref.request_id or "") for ref in selected.request_refs}
+    for step in current.steps:
+        for param in step.params or []:
+            source = param.source or {}
+            option_source = (
+                source.get("option_source")
+                if isinstance(source.get("option_source"), dict) else {}
+            )
+            request_ids.update(
+                str(contract.get("source_request_id") or "")
+                for contract in (source, option_source)
+                if contract.get("source_request_id")
+            )
+        request_ids.update(
+            str(binding.source_request_id or "")
+            for binding in (step.selects or [])
+            if binding.source_request_id
+        )
+    request_ids.discard("")
     if current.request_facts is not None:
         current.request_facts.requests = [
             item for item in current.request_facts.requests

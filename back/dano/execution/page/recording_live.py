@@ -216,6 +216,50 @@ _DEFAULT_DELTA_LIMIT = 25
 _MAX_DELTA_LIMIT = 50
 
 
+def _branch_tokens(path: str) -> list[str | int]:
+    tokens: list[str | int] = []
+    for name, index in re.findall(r"(?:^|\.)([^.\[\]]+)|\[(\d+)\]", str(path or "")):
+        tokens.append(name if name else int(index))
+    return tokens
+
+
+def _branch_lookup(node: Any, path: str) -> Any:
+    current = node
+    for token in _branch_tokens(path):
+        if isinstance(token, int) and isinstance(current, list) and token < len(current):
+            current = current[token]
+        elif isinstance(token, str) and isinstance(current, dict) and token in current:
+            current = current[token]
+        else:
+            raise ValueError(f"branch_path 不存在: {path}")
+    return current
+
+
+def _branch_page(node: Any, *, path: str, cursor: int, limit: int) -> dict[str, Any]:
+    if isinstance(node, dict):
+        values = list(node.items())
+        page = dict(values[cursor:cursor + limit])
+    elif isinstance(node, list):
+        values = node
+        page = values[cursor:cursor + limit]
+    else:
+        values = [node]
+        page = values[cursor:cursor + limit]
+    next_cursor = min(cursor + len(page), len(values))
+    digest = hashlib.sha256(
+        json.dumps(node, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return {
+        "path": path,
+        "cursor": cursor,
+        "next_cursor": next_cursor,
+        "total": len(values),
+        "has_more": next_cursor < len(values),
+        "sha256": digest,
+        "value": compact_model_payload(_redact(page), max_depth=8, max_items=limit),
+    }
+
+
 def compact_model_payload(
     node,
     *,
@@ -361,6 +405,10 @@ def recording_delta(
     field_evidence: list[dict] | None = None,
     stop_before: int | None = None,
     compact: bool = False,
+    request_id: str = "",
+    branch_path: str = "",
+    branch_cursor: int = 0,
+    branch_limit: int = 25,
 ) -> dict:  # noqa: ANN001
     """Project a bounded, redacted append-only request delta for the model."""
     requests = (
@@ -426,7 +474,7 @@ def recording_delta(
             or str(item.get("transaction_id") or "") in transaction_ids
         )
     ] if fresh else []
-    return {
+    result = {
         "since_seq": start,
         "next_seq": next_seq,
         "total_seq": len(requests),
@@ -467,6 +515,26 @@ def recording_delta(
             "response_key_maps": structure_candidates,
         },
     }
+    if branch_path:
+        branch_root: Any
+        if branch_path in {"page_events", "field_evidence"}:
+            branch_root = page_events if branch_path == "page_events" else bound_fields
+        else:
+            matches = [
+                item for item in requests
+                if str(item.get("request_id") or item.get("id") or item.get("index") or "")
+                == str(request_id or "")
+            ]
+            if len(matches) != 1:
+                raise ValueError("branch_path 指向请求字段时必须提供唯一有效的 request_id")
+            branch_root = _branch_lookup(matches[0], branch_path)
+        result["branch"] = _branch_page(
+            branch_root,
+            path=branch_path,
+            cursor=max(0, int(branch_cursor or 0)),
+            limit=max(1, min(int(branch_limit or 25), 100)),
+        )
+    return result
 
 
 def _append_meta_list(spec, key: str, item: dict) -> None:  # noqa: ANN001
@@ -1194,10 +1262,12 @@ def _record_agent_op(spec, edit: dict) -> None:  # noqa: ANN001
             continue
         if existing.get("_deferred") and not edit.get("_deferred"):
             values[index] = deepcopy(edit)
-        spec.meta["recording_agent_ops"] = values[-500:]
+        spec.meta["recording_agent_ops"] = values
         return
     values.append(deepcopy(edit))
-    spec.meta["recording_agent_ops"] = values[-500:]
+    # This is the authoritative audit log.  UI projections may page/compact it,
+    # but persistence must never discard the first operations of a long run.
+    spec.meta["recording_agent_ops"] = values
 
 
 def _trusted_verification(spec, verification_id: str, kinds: set[str]) -> dict:  # noqa: ANN001
@@ -1263,6 +1333,111 @@ def _step_request_id(spec, step_id: str) -> str:  # noqa: ANN001
 
 class _DeferredCompile(Exception):
     """Target/origin facts exist but their steps are not materialized yet."""
+
+
+def _source_kind_has_exact_field_grounding(
+    spec,
+    step,
+    param,
+    edit: dict,
+    *,
+    source_kind: str,
+) -> bool:  # noqa: ANN001
+    """Reject source labels justified only by a request/event citation."""
+    from dano.execution.page.recording_field_evidence import _request_field_values
+
+    refs = _evidence_refs(edit)
+    evidence = _field_evidence_candidates(
+        spec, step, param, evidence_refs=refs,
+    )
+    exact_controls = [
+        item for item in evidence
+        if str(item.get("wire_path") or "").removeprefix("request.")
+        == str(param.path or "").removeprefix("request.")
+    ]
+    request_id = str((step.source_meta or {}).get("request_id") or "")
+    target_meta = step.source_meta or {}
+    target_path = urlparse(str(step.path or step.url or "")).path.rstrip("/")
+    target_method = str(step.method or "GET").upper()
+    observations: list[Any] = []
+    for request in _captured_requests(spec):
+        if request_id and str(request.get("request_id") or "") != request_id:
+            # Repeated same-route observations are also useful, but must stay
+            # on the same page/frame and causal action as the target request.
+            candidate_path = urlparse(
+                str(request.get("path") or request.get("url") or "")
+            ).path.rstrip("/")
+            if (
+                str(request.get("method") or "GET").upper() != target_method
+                or candidate_path != target_path
+            ):
+                continue
+            scope_keys = [
+                key for key in ("page_id", "frame_id")
+                if request.get(key) or target_meta.get(key)
+            ]
+            if not scope_keys or any(
+                not request.get(key)
+                or not target_meta.get(key)
+                or str(request.get(key)) != str(target_meta.get(key))
+                for key in scope_keys
+            ):
+                continue
+            causal_mismatch = False
+            for aliases in (
+                ("trigger_action_id", "action_id"),
+                ("trigger_transaction_id", "transaction_id"),
+            ):
+                left = next(
+                    (str(target_meta.get(key)) for key in aliases if target_meta.get(key)),
+                    "",
+                )
+                right = next(
+                    (str(request.get(key)) for key in aliases if request.get(key)),
+                    "",
+                )
+                if (left or right) and left != right:
+                    causal_mismatch = True
+                    break
+            if causal_mismatch:
+                continue
+        for wire_path, value in _request_field_values(request):
+            if wire_path.removeprefix("request.") == str(param.path or "").removeprefix("request."):
+                observations.append(value)
+    if source_kind == "session":
+        if str(param.path or "").startswith("headers."):
+            return bool(observations)
+        session_key = str(edit.get("session_key") or "").strip()
+        stable_values = {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) for value in observations}
+        return bool(session_key and exact_controls and len(observations) >= 2 and len(stable_values) == 1)
+    if source_kind == "context":
+        context_key = str(edit.get("context_key") or "").strip()
+        if not context_key:
+            return False
+        for request in _captured_requests(spec):
+            context = request.get("trigger_page_context") or request.get("page_context") or {}
+            if not isinstance(context, dict):
+                continue
+            try:
+                value = _branch_lookup(context, context_key)
+            except ValueError:
+                continue
+            if any(str(value) == str(observed) for observed in observations):
+                return True
+        return False
+    if source_kind == "generated":
+        readonly = any(
+            item.get("read_only") is True
+            or item.get("disabled") is True
+            or item.get("editable") is False
+            for item in exact_controls
+        )
+        varying = {
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            for value in observations if value not in (None, "")
+        }
+        return bool(readonly or (len(observations) >= 2 and len(varying) >= 2))
+    return True
 
 
 def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, reason: str) -> None:  # noqa: ANN001
@@ -1355,6 +1530,12 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.exposed_to_user = False
 
     elif source_kind == "session":
+        if not _source_kind_has_exact_field_grounding(
+            spec, step, param, edit, source_kind=source_kind,
+        ):
+            raise ValueError(
+                f"session classification for {param.path} lacks repeated exact field-level grounding"
+            )
         session_key = str(edit.get("session_key") or "").strip()
         if param.path.startswith("headers."):
             param.source_kind = "request_header"
@@ -1382,6 +1563,12 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
         param.default_value = None
 
     elif source_kind == "context":
+        if not _source_kind_has_exact_field_grounding(
+            spec, step, param, edit, source_kind=source_kind,
+        ):
+            raise ValueError(
+                f"context classification for {param.path} lacks an exact matching page-context field"
+            )
         context_key = str(edit.get("context_key") or "").strip()
         if not context_key:
             raise ValueError(f"context classification for {param.path} requires context_key")
@@ -1506,6 +1693,13 @@ def _compile_param_source(spec, step, param, edit: dict, *, source_kind: str, re
             param.editable = True
 
     elif source_kind == "generated":
+        if not _source_kind_has_exact_field_grounding(
+            spec, step, param, edit, source_kind=source_kind,
+        ):
+            raise ValueError(
+                f"generated classification for {param.path} requires a readonly system control "
+                "or two varying exact target-field observations"
+            )
         raw_source = edit.get("source") if isinstance(edit.get("source"), dict) else {}
         strategy = str(edit.get("strategy") or raw_source.get("strategy") or "").strip()
         generated_strategies = {"uuid", "random_string", "random_number"}
@@ -2874,7 +3068,13 @@ def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
         if _same_request_endpoint(source_step, target_step):
             continue
         value_sample = candidate.get("value_sample")
-        if not is_strong_runtime_value(value_sample, str(candidate.get("source_path") or "")):
+        unique_scalar_projection = bool(
+            candidate.get("evidence_kind") == "unique_scalar_semantic_projection"
+        )
+        if (
+            not is_strong_runtime_value(value_sample, str(candidate.get("source_path") or ""))
+            and not unique_scalar_projection
+        ):
             continue
         target_path = str(candidate.get("target_path") or "")
         target_param = _param_for_canonical_path(target_step, target_path)
@@ -2884,7 +3084,11 @@ def _reconcile_captured_value_dependencies(spec) -> None:  # noqa: ANN001
             target_param,
             str(candidate.get("source_path") or "").removeprefix("response."),
         )
-        if semantic_score < 30 and not _same_recorded_action(source_fact, target_fact):
+        if (
+            semantic_score < 30
+            and not _same_recorded_action(source_fact, target_fact)
+            and not unique_scalar_projection
+        ):
             continue
         candidate = {
             **candidate,
@@ -3079,9 +3283,16 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         merged.meta = {**(merged.meta or {}), "recording_goal_contract": goal_contract}
     live_capability_model = live_meta.get("capability_model")
     live_semantic_plan = (
-        deepcopy(live_capability_model.get("semantic_plan"))
+        deepcopy(
+            live_capability_model.get("submitted_semantic_plan")
+            or live_capability_model.get("semantic_plan")
+        )
         if isinstance(live_capability_model, dict)
-        and isinstance(live_capability_model.get("semantic_plan"), dict)
+        and isinstance(
+            live_capability_model.get("submitted_semantic_plan")
+            or live_capability_model.get("semantic_plan"),
+            dict,
+        )
         else None
     )
     unresolved: list[dict] = (
@@ -3187,9 +3398,9 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         live_capability_model = {
             **(live_capability_model if isinstance(live_capability_model, dict) else {}),
-            "status": "ready",
             "source": "skill_semantic_plan",
             "semantic_plan": live_semantic_plan,
+            "submitted_semantic_plan": live_semantic_plan,
         }
     if isinstance(live_semantic_plan, dict) and live_semantic_plan.get("capabilities"):
         materialized_plan = deepcopy(live_semantic_plan)
@@ -3242,7 +3453,11 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
             if isinstance(item, dict)
             and str(item.get("anchor_step_id") or "") in step_ids
         ]
-        if compile_items:
+        submitted_items = [
+            item for item in materialized_plan.get("capabilities") or []
+            if isinstance(item, dict)
+        ]
+        if compile_items and not unresolved_anchors and len(compile_items) == len(submitted_items):
             from dano.execution.page.capability_compiler import compile_capabilities
 
             compile_plan = {**materialized_plan, "capabilities": compile_items}
@@ -3255,7 +3470,7 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
                 },
             }
             compilation = compile_capabilities(candidate, compile_plan)
-            if compilation.capabilities:
+            if not compilation.errors and len(compilation.capabilities) == len(submitted_items):
                 merged = compilation.spec
             if compilation.errors:
                 unresolved.append({
@@ -3274,15 +3489,44 @@ def merge_live_agent_state(live_spec, finalized_spec):  # noqa: ANN001, ANN202
         len(live_semantic_plan.get("capabilities") or [])
         if isinstance(live_semantic_plan, dict) else 0
     )
-    expected_count = int((goal_contract or {}).get("expected_count") or submitted_count)
+    model_expected_count = int(
+        (live_capability_model or {}).get("submitted_count") or submitted_count
+    ) if isinstance(live_capability_model, dict) else submitted_count
+    expected_count = int((goal_contract or {}).get("expected_count") or model_expected_count)
+    expected_names = [
+        str(item.get("name") or "")
+        for item in (live_semantic_plan or {}).get("capabilities") or []
+        if isinstance(item, dict) and str(item.get("name") or "")
+    ]
+    materialized_names = [str(cap.name or "") for cap in merged.capabilities or []]
+    exact_capability_set = bool(expected_count) and (
+        len(merged.capabilities) == expected_count
+        and (not expected_names or set(materialized_names) == set(expected_names))
+    )
     if expected_count:
         merged.meta = {
             **(merged.meta or {}),
             "recording_goal_contract": {
                 **(goal_contract or {"source": "submitted_semantic_plan"}),
                 "expected_count": expected_count,
+                "expected_names": expected_names,
                 "materialized_count": len(merged.capabilities),
-                "satisfied": len(merged.capabilities) == expected_count,
+                "materialized_names": materialized_names,
+                "satisfied": exact_capability_set,
+            },
+        }
+    if isinstance(live_capability_model, dict):
+        merged.meta = {
+            **(merged.meta or {}),
+            "capability_model": {
+                **live_capability_model,
+                "status": "ready" if exact_capability_set and not unresolved else "needs_review",
+                "submitted_count": expected_count,
+                "submitted_names": expected_names,
+                "materialized_count": len(merged.capabilities),
+                "materialized_names": materialized_names,
+                "missing_submitted_names": sorted(set(expected_names) - set(materialized_names)),
+                "extra_materialized_names": sorted(set(materialized_names) - set(expected_names)),
             },
         }
 

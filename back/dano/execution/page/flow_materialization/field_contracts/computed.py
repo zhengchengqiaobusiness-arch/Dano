@@ -126,6 +126,7 @@ def _looks_total_formula_leaf(key: str, path: str) -> bool:
     leaf = _field_leaf_token(key, path)
     return any(token in leaf for token in (
         "total", "amount", "subtotal", "payable", "linetotal", "discountprice",
+        "taxprice", "taxamount",
     ))
 
 
@@ -311,15 +312,9 @@ def _pick_arithmetic_match(
                     continue
                 if not (_is_stable_operand(left) and _is_stable_operand(right)):
                     continue
-                if (
-                    left.source_kind == "computed"
-                    and right.source_kind == "computed"
-                    and kind in {"sum", "difference"}
-                ):
-                    continue
-                if kind in {"sum", "difference"} and any(
-                    _looks_percent_formula_leaf(param.key, param.path)
-                    for param, _number in siblings
+                if not (
+                    _arithmetic_operand_semantic_ok(left, kind=kind)
+                    and _arithmetic_operand_semantic_ok(right, kind=kind)
                 ):
                     continue
                 matches.append((kind, left, right, identity))
@@ -393,6 +388,8 @@ def _arithmetic_operand_semantic_ok(param: ParamField, *, kind: str = "") -> boo
         or "price" in _field_leaf_token(param.key, param.path)
         or "amount" in _field_leaf_token(param.key, param.path)
     ):
+        return True
+    if kind in {"sum", "difference"} and _looks_total_formula_leaf(param.key, param.path):
         return True
     return False
 
@@ -514,6 +511,129 @@ def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
             changed = True
 
 
+def _infer_collection_computed_fields(spec: FlowSpec) -> None:
+    """Infer totals over dynamic rows without hard-coding a page or endpoint."""
+    for step in spec.steps or []:
+        aggregates = [
+            param for param in step.params or []
+            if str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
+            and str((param.source or {}).get("structure_kind") or "") == "array_object"
+        ]
+        for aggregate in aggregates:
+            container = str((aggregate.source or {}).get("array_container_path") or aggregate.path or "")
+            container = container.removeprefix("body.")
+            if not container:
+                continue
+            rows_by_leaf: dict[str, list[tuple[ParamField, float]]] = {}
+            pattern = re.compile(rf"^{re.escape(container)}\[\d+\]\.(.+)$")
+            for param in step.params or []:
+                match = pattern.match(str(param.path or "").removeprefix("body."))
+                number = _as_finite_number(param.value)
+                if match and number is not None:
+                    rows_by_leaf.setdefault(match.group(1), []).append((param, number))
+            base_candidates = [
+                (
+                    leaf,
+                    sum(number for _param, number in values),
+                    max(
+                        int(str((param.source or {}).get("strategy") or "") in {"sum", "difference"}) * 4
+                        + int(_field_leaf_token(param.key, param.path) in {"totalprice", "linetotal", "linetotalprice"}) * 2
+                        + int(_looks_total_formula_leaf(param.key, param.path))
+                        for param, _number in values
+                    ),
+                )
+                for leaf, values in rows_by_leaf.items()
+                if values and all(
+                    _looks_total_formula_leaf(param.key, param.path)
+                    or param.source_kind == "computed"
+                    for param, _number in values
+                )
+            ]
+            if not base_candidates:
+                continue
+            best_rank = max(item[2] for item in base_candidates)
+            strongest = [item for item in base_candidates if item[2] == best_rank]
+            if len(strongest) != 1:
+                continue
+            item_field, collection_sum, _rank = strongest[0]
+            root_params = [
+                param for param in step.params or []
+                if "[" not in str(param.path or "")
+                and param is not aggregate
+                and _as_finite_number(param.value) is not None
+            ]
+            assigned: set[str] = set()
+
+            def assign(target: ParamField, strategy: str, **source: Any) -> None:
+                target.category = "runtime_var"
+                target.source_kind = "computed"
+                target.source = {
+                    "kind": "computed",
+                    "strategy": strategy,
+                    "container_field": str(aggregate.key or aggregate.path),
+                    "item_field": item_field,
+                    "result_field": target.key,
+                    "path": target.path,
+                    "sample_verified": True,
+                    **source,
+                }
+                target.type = "number"
+                target.exposed_to_user = False
+                target.editable = False
+                target.required = False
+                target.need_human_confirm = False
+                target.reason = "录制样例和动态明细结构共同证明该字段由明细集合运行期汇总计算"
+                step.sample_inputs.pop(target.key, None)
+                assigned.add(target.key)
+
+            percent_params = [
+                param for param in root_params
+                if _looks_percent_formula_leaf(param.key, param.path)
+            ]
+            for target in root_params:
+                if not _arithmetic_target_allowed(target):
+                    continue
+                target_number = float(_as_finite_number(target.value) or 0.0)
+                percent_matches = [
+                    percent for percent in percent_params
+                    if percent is not target
+                    and _numbers_match(
+                        target_number,
+                        collection_sum * float(_as_finite_number(percent.value) or 0.0) / 100.0,
+                    )
+                ]
+                if len(percent_matches) == 1 and (
+                    "discount" in _field_leaf_token(target.key, target.path)
+                    or "tax" in _field_leaf_token(target.key, target.path)
+                ):
+                    assign(
+                        target,
+                        "percent_of_collection_sum",
+                        right_field=percent_matches[0].key,
+                    )
+            for target in root_params:
+                if target.key in assigned or not _arithmetic_target_allowed(target):
+                    continue
+                target_number = float(_as_finite_number(target.value) or 0.0)
+                derived_matches = [
+                    other for other in root_params
+                    if other is not target
+                    and other.source_kind == "computed"
+                    and _numbers_match(
+                        target_number,
+                        collection_sum - float(_as_finite_number(other.value) or 0.0),
+                    )
+                ]
+                if len(derived_matches) == 1 and _looks_total_formula_leaf(target.key, target.path):
+                    assign(
+                        target,
+                        "difference_collection_sum",
+                        right_field=derived_matches[0].key,
+                    )
+                elif _numbers_match(target_number, collection_sum) and _looks_total_formula_leaf(target.key, target.path):
+                    assign(target, "collection_sum")
+
+
 def _param_is_temporal(param: ParamField) -> bool:
     if str(param.type or param.wire_type or "").lower() in {"date", "datetime", "time"}:
         return True
@@ -591,6 +711,7 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
     """Hide recorded computed fields only when their samples prove the formula."""
     _apply_date_range_companions(spec)
     _infer_arithmetic_computed_fields(spec)
+    _infer_collection_computed_fields(spec)
     def leaf_name(param: ParamField) -> str:
         raw = param.key or str(param.path or "").split(".")[-1]
         return re.sub(r"[^a-z0-9]+", "", str(raw).lower())
@@ -738,6 +859,10 @@ _COMPUTED_ARITHMETIC_STRATEGIES = frozenset({
     "product", "sum", "percent_of", "remainder_after_percent", "difference",
 })
 
+_COMPUTED_COLLECTION_STRATEGIES = frozenset({
+    "collection_sum", "percent_of_collection_sum", "difference_collection_sum",
+})
+
 
 def _computed_formula_is_complete(source: dict | None) -> bool:
     source = source or {}
@@ -746,6 +871,15 @@ def _computed_formula_is_complete(source: dict | None) -> bool:
         return bool(source.get("start_field") and source.get("end_field"))
     if strategy in _COMPUTED_ARITHMETIC_STRATEGIES:
         return bool(source.get("left_field") and source.get("right_field"))
+    if strategy in _COMPUTED_COLLECTION_STRATEGIES:
+        return bool(
+            source.get("container_field")
+            and source.get("item_field")
+            and (
+                strategy == "collection_sum"
+                or source.get("right_field")
+            )
+        )
     return False
 
 _PENDING_FLOW_SPEC_HELPERS = {'_apply_date_range_companions': 'dano.execution.page.flow_materialization.field_contracts.page_rules', '_capability_node_step_ids': 'dano.execution.page.capability_refs'}
