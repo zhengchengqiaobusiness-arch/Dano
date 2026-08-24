@@ -100,13 +100,11 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
         and isinstance(captured_match, dict)
         and captured_match.get("evidence_kind")
         == "unique_scalar_semantic_projection"
-        and param.source_kind == "constant"
-        and str((param.source or {}).get("kind") or "")
-        == "recorded_control_default"
         and not _param_has_editable_control_evidence(param)
     ):
-        # A disabled recorded value backed by a dedicated scalar lookup is a
-        # runtime projection, not a literal page default.
+        # A non-editable wire field backed by a dedicated scalar lookup is a
+        # runtime projection, whether capture initially called it a default or
+        # left its source unresolved.
         return True
     source_leaf = re.sub(
         r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower(),

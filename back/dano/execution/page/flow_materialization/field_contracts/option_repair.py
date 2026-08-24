@@ -55,6 +55,10 @@ def _option_binding_tokens(value: Any) -> set[str]:
         # These words describe generic payloads/endpoints and cannot establish
         # that a caller-entered field owns an option source.
         "info", "information", "name", "title", "label", "text",
+        # Generic classifier leaves occur in unrelated background endpoints
+        # (for example presence/status traffic). They need field-local control
+        # ownership rather than token equality before becoming an option API.
+        "status", "statu", "state", "type", "kind", "category", "flag", "result",
     }
 
 

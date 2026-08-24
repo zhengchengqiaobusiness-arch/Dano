@@ -16,7 +16,10 @@ from dano.execution.page.capability_validation import (
     _capability_validation_report,
     _capability_param_enum_issue,
 )
-from dano.execution.page.capability_semantic import _semantic_plan_coverage
+from dano.execution.page.capability_semantic import (
+    _required_public_action_request_ids,
+    _semantic_plan_coverage,
+)
 from dano.execution.page.capability_orchestration import sync_capability_scoped_views
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _grounded_screenshot_query_path,
@@ -33,6 +36,7 @@ from dano.execution.page.flow_materialization.builder import (
     _apply_mechanical_field_contracts,
     _rebind_saved_field_evidence,
     sync_flow_spec_models,
+    to_flow_spec,
 )
 from dano.execution.page.flow_materialization.field_contracts.computed import (
     _infer_arithmetic_computed_fields,
@@ -410,6 +414,61 @@ def test_generic_status_field_does_not_bind_to_unrelated_presence_api() -> None:
     )
 
 
+def test_structural_repair_keeps_status_filter_off_unrelated_presence_api() -> None:
+    target = FlowStep(
+        step_id="search",
+        method="GET",
+        path="/orders/page?outStatus=1",
+        params=[ParamField(
+            path="query.outStatus",
+            key="outStatus",
+            label="出库数量",
+            value="1",
+            type="enum",
+            wire_type="string",
+            source_kind="page_enum",
+            source={"kind": "page_enum", "enum_confirmed": False},
+            enum_options=["未出库", "部分出库", "全部出库"],
+            evidence=[{
+                "kind": "page_control",
+                "source": "recorder_dom",
+                "control_kind": "select",
+                "binding_status": "bound",
+                "editable": True,
+                "request_path": "query.outStatus",
+            }],
+        )],
+        source_meta={"request_id": "search", "page_id": "p1", "frame_id": "f1"},
+    )
+    presence = FlowStep(
+        step_id="presence",
+        method="GET",
+        path="/im/user/online-status",
+        response_json={"data": [
+            {"id": "1", "nickname": "管理员"},
+            {"id": "2", "nickname": "测试员"},
+        ]},
+        semantic_role="read_option",
+        source_meta={
+            "request_id": "presence",
+            "role": "read_option",
+            "page_id": "p1",
+            "frame_id": "f1",
+        },
+    )
+    spec = FlowSpec(
+        steps=[presence, target],
+        meta={"stage_1_6_contract_version": 2},
+    )
+
+    _repair_structural_option_bindings(spec)
+
+    out_status = target.params[0]
+    assert out_status.source_kind == "page_enum"
+    assert out_status.enum_options == ["未出库", "部分出库", "全部出库"]
+    assert "online-status" not in str(out_status.source)
+
+
 def test_submitted_capabilities_cannot_complete_as_smaller_subset() -> None:
     submitted = [{"name": f"ability_{index}"} for index in range(8)]
     spec = FlowSpec(
@@ -684,6 +743,69 @@ def test_scalar_lookup_ignores_standard_response_envelope_fields() -> None:
         and item["target_path"] == "body.items[0].stockCount"
         for item in links
     )
+
+
+def test_scalar_lookup_consumed_by_write_is_preflight_not_public_ability() -> None:
+    captured = [
+        {
+            "request_id": "lookup",
+            "sequence": 1,
+            "method": "GET",
+            "url": "https://example.test/catalog/availability/get-count?itemId=7",
+            "path": "/catalog/availability/get-count",
+            "query": {"itemId": ["7"]},
+            "response_json": {"code": 0, "msg": "", "data": 120.001},
+            "response_status": 200,
+            "resource_type": "xhr",
+            "content_type": "application/json",
+            "page_id": "p1",
+            "frame_id": "f1",
+            "trigger_action_id": "choose-item",
+            "trigger_transaction_id": "p1|f1|choose-item",
+            "trigger_op": "fill",
+            "trigger_locator": "label=Item",
+        },
+        {
+            "request_id": "create",
+            "sequence": 2,
+            "method": "POST",
+            "url": "https://example.test/orders/create",
+            "path": "/orders/create",
+            "post_data": (
+                '{"items":[{"itemId":7,"availabilityCount":120.001,"count":2}]}'
+            ),
+            "response_json": {"code": 0, "data": 99},
+            "response_status": 200,
+            "resource_type": "xhr",
+            "content_type": "application/json",
+            "page_id": "p1",
+            "frame_id": "f1",
+            "trigger_action_id": "save-order",
+            "trigger_transaction_id": "p1|f1|save-order",
+            "trigger_op": "fill",
+            "trigger_locator": "label=Tax rate",
+        },
+    ]
+    spec = to_flow_spec(
+        captured,
+        request_role_overrides={
+            "lookup": {"role": "business_get", "keep": True, "confidence": 0.9},
+            "create": {"role": "business_write", "keep": True, "confidence": 0.99},
+        },
+    )
+
+    lookup = next(
+        step for step in spec.steps
+        if step.path.split("?", 1)[0] == "/catalog/availability/get-count"
+    )
+    create = next(step for step in spec.steps if step.path == "/orders/create")
+    availability = next(param for param in create.params if param.key == "availabilityCount")
+
+    assert lookup.source_meta["role"] == "read_context"
+    assert lookup.source_meta["control_preflight_for_write_ids"] == [create.step_id]
+    assert availability.source_kind == "previous_response"
+    assert availability.source["step_id"] == lookup.step_id
+    assert _required_public_action_request_ids(spec) == {"create"}
 
 
 def test_short_semantic_scalar_is_materialized_as_runtime_dependency() -> None:

@@ -1039,6 +1039,15 @@ def to_flow_spec(
     # Complete the control chain upstream: a strong response value can feed the
     # request that later produces the dynamic request-key collection.
     strong_value_candidates = discover_workflow_value_links(captured_requests)
+    machine_preflight_request_ids.update(
+        str(candidate.get("source_request_id") or "")
+        for candidate in strong_value_candidates
+        if (
+            str(candidate.get("target_request_id") or "")
+            in selected_write_request_ids
+            and candidate.get("source_request_id")
+        )
+    )
     changed = True
     while changed:
         changed = False
@@ -1569,6 +1578,21 @@ def to_flow_spec(
                     _request_path(source_request),
                     str(lk.get("source_path") or "").removeprefix("response."),
                 )
+                scalar_projection = next((
+                    candidate for candidate in strong_value_candidates
+                    if (
+                        str(candidate.get("source_request_id") or "")
+                        == str(source_request.get("request_id") or "")
+                        and str(candidate.get("target_request_id") or "")
+                        == str(target_request.get("request_id") or "")
+                        and str(candidate.get("source_path") or "").removeprefix("response.")
+                        == str(lk.get("source_path") or "").removeprefix("response.")
+                        and str(candidate.get("target_path") or "").removeprefix("body.")
+                        == target_path
+                        and candidate.get("evidence_kind")
+                        == "unique_scalar_semantic_projection"
+                    )
+                ), None)
                 strong_unique_match = (
                     len(target_value) >= 4
                     and selected_source == current_source
@@ -1608,6 +1632,11 @@ def to_flow_spec(
                 if (
                     not strong_id_dependency
                     and not editable_prefill_dependency
+                    and not (
+                        scalar_projection is not None
+                        and target_param is not None
+                        and not _param_has_editable_control_evidence(target_param)
+                    )
                     and not _auto_dependency_link_allowed(
                         target_param, str(lk.get("source_path") or ""),
                     )
@@ -1649,8 +1678,11 @@ def to_flow_spec(
                                 "source_identity": list(selected_source or ()),
                                 "disambiguation": "route_semantics",
                                 "candidate_count": len(matching_sources),
+                                **({
+                                    "evidence_kind": "unique_scalar_semantic_projection",
+                                } if scalar_projection is not None else {}),
                             },
-                        } if captured_dependency_match else {}),
+                        } if captured_dependency_match or scalar_projection is not None else {}),
                     },
                     meta={
                         "actor": "heuristic",
