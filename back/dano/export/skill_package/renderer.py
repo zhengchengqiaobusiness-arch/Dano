@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import structlog
 
+from dano.catalog.identity import is_generated_action_id
 from dano.infra.run_logging import emit_run_exception, note_run_fact
 
 from dano.export.skill_package.validator import (
@@ -43,9 +44,16 @@ def _slug(value: str) -> str:
     return slug
 
 
-def package_slug(skill_id: str) -> str:
-    """Use a stable suffix so package and proxy exports can coexist."""
+def legacy_package_slug(skill_id: str) -> str:
     return f"dano-{_slug(skill_id)}-package"
+
+
+def package_slug(skill_id: str) -> str:
+    """Use the recording action directly; keep legacy wrapping for other skills."""
+    action = str(skill_id or "").rpartition(".")[-1]
+    if is_generated_action_id(action):
+        return action
+    return legacy_package_slug(skill_id)
 
 
 def _script_slug(value: str) -> str:

@@ -275,26 +275,6 @@ async def _call_persist(persist: PersistBody | None, payload: dict[str, Any]) ->
         await result
 
 
-def _already_exported(body: dict[str, Any]) -> bool:
-    path = str(body.get("export_path") or body.get("skill_export_path") or "")
-    return bool(
-        body.get("published")
-        and str(body.get("skill_export_status") or "") in {"exported", "succeeded"}
-        and path
-        and Path(path).exists()
-        and _existing_package_is_current(path)
-    )
-
-
-def _existing_package_is_current(export_path: str) -> bool:
-    root = Path(export_path)
-    if not root.is_dir():
-        return False
-    from dano.export.skill_package.validator import validate_skill_package
-
-    return bool(validate_skill_package(root).get("ok"))
-
-
 def _remove_previous_skill_output(out_dir: str, skill_id: str, body: dict[str, Any]) -> None:
     """Delete the last on-disk package and leftover stage folders before rewriting."""
     from dano.export.skill_package.renderer import package_slug
@@ -317,7 +297,7 @@ def _remove_previous_skill_output(out_dir: str, skill_id: str, body: dict[str, A
         if resolved in seen or not resolved.is_dir():
             continue
         name = resolved.name
-        if name.endswith("-package") or name.startswith(f".{slug}") or name.startswith(f".{slug}."):
+        if name == slug or name.endswith("-package") or name.startswith(f".{slug}"):
             seen.add(resolved)
             shutil.rmtree(resolved, ignore_errors=True)
     if root.is_dir() and slug:
@@ -512,50 +492,6 @@ async def export_recording_skill(
         stage_seven_fingerprint=fingerprint,
         request=request,
     )
-    if (
-        str(body.get("skill_request_fingerprint") or "") == request_fp
-        and _already_exported(body)
-    ):
-        plan = body.get("skill_plan") if isinstance(body.get("skill_plan"), dict) else {}
-        used = list((plan or {}).get("used_capabilities") or [])
-        if not used and plan:
-            try:
-                used = _used_capability_rows(spec, SkillPlan.model_validate(plan))
-            except Exception:  # noqa: BLE001 - idempotent path still returns the stored plan
-                used = []
-        skill_id = str(body.get("skill_id") or "")
-        export_path = str(body.get("export_path") or body.get("skill_export_path") or "")
-        _log_export(
-            "skill.export.completed",
-            summary="请求未变化，直接返回已导出 Skill",
-            status="succeeded",
-            duration_ms=(time.monotonic() - started) * 1000,
-            result_id=str(result_id),
-            skill_id=skill_id,
-            export_path=export_path,
-            idempotent=True,
-            used_capabilities=used,
-        )
-        stored_plan = None
-        try:
-            stored_plan = SkillPlan.model_validate(plan) if plan else None
-        except Exception:  # noqa: BLE001 - keep the stored payload if it is not a current plan
-            stored_plan = None
-        return SkillExportOutcome(
-            status="exported",
-            skill_id=skill_id,
-            skill_name=str(request.title or body.get("title") or ""),
-            version=int(body.get("skill_version") or 1),
-            planning_mode=str((plan or {}).get("planning_mode") or request.planning_mode),
-            used_capabilities=used,
-            unused_capabilities=list((plan or {}).get("unused_capabilities") or []),
-            routes=_route_rows(stored_plan, spec) if stored_plan else [],
-            unresolved_branches=_unresolved_rows(stored_plan),
-            export_path=export_path,
-            plan=plan,
-            idempotent=True,
-        )
-
     await _call_persist(persist, {
         **body,
         "skill_export_status": "generating",

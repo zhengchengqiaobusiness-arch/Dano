@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 from dano.execution.page.flow_spec import FlowCapability, FlowSpec
 from dano.execution.page.flow_spec_core.models import (
@@ -23,6 +24,7 @@ from dano.export.skill_package.renderer import (
     _script_invocation,
     _skill_description,
     _workflow_table,
+    package_slug,
     render_skill_package,
 )
 from dano.export.skill_package.validator import (
@@ -33,6 +35,8 @@ from dano.export.skill_package.validator import (
 from dano.onboarding.skill_generation import (
     PlanningMode,
     SkillGenerationRequest,
+    export_recording_skill,
+    generation_request_fingerprint,
     propose_deterministic_plan,
     validate_skill_plan,
 )
@@ -63,6 +67,152 @@ def _cap(
         },
         output_schema={"type": "object"},
     )
+
+
+def test_recorded_skill_package_uses_only_the_action_id_as_its_folder_name() -> None:
+    action = "action_8a01bc7d87ef4680b2b259147e3d3322"
+
+    assert package_slug(f"admin-dianshixinxi-com-90.{action}") == action
+
+
+def test_skill_deletion_removes_current_and_legacy_recording_packages(tmp_path: Path) -> None:
+    from dano.gateway.app import _cleanup_export_folders, _export_slugs_for_manifest
+
+    skill_id = "admin-dianshixinxi-com-90.action_8a01bc7d87ef4680b2b259147e3d3322"
+    current = tmp_path / "action_8a01bc7d87ef4680b2b259147e3d3322"
+    legacy = tmp_path / (
+        "dano-admin-dianshixinxi-com-90-action-8a01bc7d87ef4680b2b259147e3d3322-package"
+    )
+    current.mkdir()
+    legacy.mkdir()
+
+    removed = _cleanup_export_folders(
+        str(tmp_path),
+        _export_slugs_for_manifest({"name": skill_id}),
+    )
+
+    assert set(removed) == {str(current.resolve()), str(legacy.resolve())}
+    assert not current.exists()
+    assert not legacy.exists()
+
+
+async def test_reexporting_the_same_recording_republishes_the_catalog_entry(tmp_path: Path) -> None:
+    from dano.onboarding.recording_stage_seven import working_fingerprint
+
+    result_id = UUID("11111111-1111-1111-1111-111111111111")
+    action = "action_8a01bc7d87ef4680b2b259147e3d3322"
+    skill_id = f"erp.{action}"
+    spec = FlowSpec(subsystem="erp", capabilities=[_cap("query", "查询销售订单", "query")])
+    request = SkillGenerationRequest(
+        title="销售订单管理",
+        business_description="查询销售订单。",
+        out_dir=str(tmp_path),
+    )
+    fingerprint = working_fingerprint(spec)
+    plan = propose_deterministic_plan(spec, request, {"query"}, fingerprint)
+    capabilities = [{
+        "capability_id": "query",
+        "name": "query_orders",
+        "title": "查询销售订单",
+        "kind": "query",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {"type": "object"},
+        "requires_human_confirm": False,
+        "execution_contract": {
+            "steps": [{
+                "step_id": "query-step",
+                "method": "GET",
+                "url": "https://example.test/orders",
+                "path": "/orders",
+            }],
+            "links": [],
+            "verification_ids": [],
+        },
+    }]
+
+    def build_skill(_view, *, tenant: str, skill_id: str, title: str, plan):  # noqa: ANN001
+        return SkillSpec(
+            skill_id=skill_id,
+            tenant=tenant,
+            subsystem=Subsystem("erp"),
+            action=action,
+            risk_level=RiskLevel.L1,
+            title=title,
+            api_request={
+                "capabilities": capabilities,
+                "_skill_plan": plan.model_dump(mode="json"),
+            },
+            call_metadata={"skill_plan": plan.model_dump(mode="json")},
+            capabilities=capabilities,
+        )
+
+    existing_skill = build_skill(
+        spec,
+        tenant="test",
+        skill_id=skill_id,
+        title=request.title,
+        plan=plan,
+    )
+    existing_path = tmp_path / render_skill_package(existing_skill, str(tmp_path), tenant="test")
+    body = {
+        "flow_spec": spec.model_dump(mode="json"),
+        "action": action,
+        "subsystem": "erp",
+        "title": request.title,
+        "published": True,
+        "skill_id": skill_id,
+        "skill_plan": plan.model_dump(mode="json"),
+        "skill_export_status": "exported",
+        "export_path": str(existing_path),
+        "skill_request_fingerprint": generation_request_fingerprint(
+            result_id=str(result_id),
+            stage_seven_fingerprint=fingerprint,
+            request=request,
+        ),
+    }
+    published = 0
+    local_was_removed = False
+    persisted: dict = {}
+
+    async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
+        return propose_deterministic_plan(
+            current_spec,
+            current_request,
+            verified,
+            source_fingerprint,
+        )
+
+    async def publish(**_kwargs):  # noqa: ANN003
+        nonlocal published
+        published += 1
+        return {"ok": True, "asset_version": 2}
+
+    async def persist(next_body: dict) -> None:
+        persisted.update(next_body)
+
+    def render(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001
+        nonlocal local_was_removed
+        local_was_removed = not existing_path.exists()
+        return render_skill_package(skill, out_dir, tenant=tenant)
+
+    outcome = await export_recording_skill(
+        result_id=result_id,
+        body=body,
+        tenant="test",
+        request=request,
+        proposer=proposer,
+        publish=publish,
+        render=render,
+        persist=persist,
+        build_skill=build_skill,
+    )
+
+    assert outcome.status == "exported"
+    assert outcome.idempotent is False
+    assert outcome.version == 2
+    assert published == 1
+    assert local_was_removed is True
+    assert persisted["skill_export_status"] == "exported"
 
 
 def _sales_spec() -> FlowSpec:

@@ -62,6 +62,7 @@ import {
   rememberedSkillExportDraft,
 } from "../api/recording";
 import { routeSummaryFromOutcome } from "../api/skillExportDraft";
+import { notifySkillCatalogChanged } from "../api/skillCatalog";
 import {
   forgetRecordingResultId,
   rememberedRecordingResultId,
@@ -1764,8 +1765,9 @@ export default function PageRecorder({
       setSkillExportOutcome(outcome);
       setSkillExportProgress("");
       if (outcome.export_path) rememberExportDir(outcome.export_path.replace(/[\\/][^\\/]+$/, "") || outDir);
+      notifySkillCatalogChanged();
       await refreshResultMeta(resultId);
-      message.success(outcome.idempotent ? "已返回现有 Skill 导出结果" : "Skill 已导出");
+      message.success("Skill 已导出，目录已更新");
     } catch (error) {
       const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setSkillExportErrors([typeof detail === "string" ? detail : "Skill 导出失败"]);

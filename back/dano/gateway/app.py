@@ -1484,13 +1484,14 @@ def _known_export_dirs() -> list[str]:
 
 def _export_slugs_for_manifest(m: dict) -> set[str]:
     from dano.export.agent_skills import _slug
-    from dano.export.skill_package.renderer import package_slug
+    from dano.export.skill_package.renderer import legacy_package_slug, package_slug
 
     name = str(m.get("name") or "").strip()
     slugs: set[str] = set()
     if name:
         slugs.add(_slug(name))
         slugs.add(package_slug(name))
+        slugs.add(legacy_package_slug(name))
     business = str(m.get("business") or "").strip()
     subsystem = str(m.get("subsystem") or "").strip()
     if business and subsystem:

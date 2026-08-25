@@ -5,6 +5,7 @@ import { listSkills, exportAgentSkills, getExportDirectory, deleteSkill, freezeS
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
+import { observeSkillCatalogChanges, skillDisplayId } from "../api/skillCatalog";
 
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
 const INTEG_LABEL: Record<string, string> = { workflow: "复合流程", api: "接口", page: "页面" };
@@ -77,30 +78,30 @@ export default function Skills() {
     }
   }
 
-  async function doDelete(skillId: string) {
+  async function doDelete(skill: SkillManifest) {
     try {
-      const r = await deleteSkill(skillId);
-      message.success(`已删除 ${skillId}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);
+      const r = await deleteSkill(skill.name);
+      message.success(`已删除 ${skillDisplayId(skill)}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);
       load();
     } catch (e: any) {
       message.error("删除失败:" + (e?.response?.data?.detail || e.message));
     }
   }
 
-  async function doFreeze(skillId: string) {
+  async function doFreeze(skill: SkillManifest) {
     try {
-      const r = await freezeSkill(skillId);
-      message.success(`已冻结 ${skillId}(清理 ${r.removed_folders?.length || 0} 个文件夹)`);
+      const r = await freezeSkill(skill.name);
+      message.success(`已冻结 ${skillDisplayId(skill)}(清理 ${r.removed_folders?.length || 0} 个文件夹)`);
       load();
     } catch (e: any) {
       message.error("冻结失败:" + (e?.response?.data?.detail || e.message));
     }
   }
 
-  async function doResume(skillId: string) {
+  async function doResume(skill: SkillManifest) {
     try {
-      const r = await resumeSkill(skillId);
-      message.success(`已恢复 ${skillId}(${r.state})`);
+      const r = await resumeSkill(skill.name);
+      message.success(`已恢复 ${skillDisplayId(skill)}(${r.state})`);
       load();
     } catch (e: any) {
       message.error("恢复失败:" + (e?.response?.data?.detail || e.message));
@@ -118,6 +119,15 @@ export default function Skills() {
     }
   }
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const refresh = () => { void load(); };
+    const stop = observeSkillCatalogChanges(refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      stop();
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
   useEffect(() => {
     if (exportOpen) void loadExportDir();
   }, [exportOpen]);
@@ -142,7 +152,7 @@ export default function Skills() {
               ) : (
                 <div>
                   <div>{r.title || r.name}{r.frozen && <Tag color="default" style={{ marginLeft: 8 }}>已冻结</Tag>}</div>
-                  <div style={{ fontSize: 12, color: "#999" }}>{r.name}</div>
+                  <div style={{ fontSize: 12, color: "#999" }}>{skillDisplayId(r)}</div>
                 </div>
               ),
           },
@@ -169,16 +179,16 @@ export default function Skills() {
                     <Button size="small" icon={<KeyOutlined />} onClick={() => setTokenSub(r.subsystem)}>凭证</Button>
                   )}
                   {!r.frozen && (
-                    <Popconfirm title={`冻结 ${r.name}?`} description="只清理已导出的文件夹,保留数据库资产;冻结后不会再导出。" okText="冻结" cancelText="取消" onConfirm={() => doFreeze(r.name)}>
+                    <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹,保留数据库资产;冻结后不会再导出。" okText="冻结" cancelText="取消" onConfirm={() => doFreeze(r)}>
                       <Button size="small" icon={<PauseCircleOutlined />}>冻结</Button>
                     </Popconfirm>
                   )}
                   {r.frozen && (
-                    <Popconfirm title={`恢复 ${r.name}?`} description="恢复后会在下次导出时重新写出文件夹。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r.name)}>
+                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后会在下次导出时重新写出文件夹。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r)}>
                       <Button size="small" icon={<CheckCircleOutlined />}>恢复</Button>
                     </Popconfirm>
                   )}
-                  <Popconfirm title={`删除 ${r.name}?`} description="删本租户该 skill 的全部资产版本,便于重来" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => doDelete(r.name)}>
+                  <Popconfirm title={`删除 ${skillDisplayId(r)}?`} description="先清理本地包，再删除本租户该 Skill 的全部资产版本" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => doDelete(r)}>
                     <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
                   </Popconfirm>
                 </Space>
