@@ -157,10 +157,35 @@ def _unresolved_rows(plan: SkillPlan | None) -> list[str]:
     return list(dict.fromkeys(rows))
 
 
-def _skill_draft_fields(request: SkillGenerationRequest, title: str) -> dict[str, Any]:
+def _skill_draft_fields(
+    request: SkillGenerationRequest,
+    title: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    description = str(request.business_description or "").strip()
+    stored = str(body.get("skill_export_description") or "").strip()
+    stored_origin = str(body.get("skill_export_description_origin") or "").strip()
+    generated = ""
+    if not stored:
+        from dano.onboarding.recording_results import (
+            generate_business_description,
+            latest_recording_spec,
+        )
+
+        generated = generate_business_description(latest_recording_spec(body))
+    origin = (
+        "generated"
+        if stored_origin != "manual"
+        and description
+        and description in {stored, generated}
+        else "manual"
+    )
     return {
         "skill_export_title": title,
-        "skill_export_description": str(request.business_description or "").strip(),
+        "skill_export_description": description,
+        "skill_export_description_origin": origin,
+        "skill_export_description_fingerprint": str(body.get("fingerprint") or ""),
+        "skill_export_description_stale": False,
         "skill_export_planning_mode": str(request.planning_mode),
         "skill_export_example_requests": [
             str(item).strip() for item in request.example_requests if str(item).strip()
@@ -488,8 +513,6 @@ async def export_recording_skill(
         request=request,
     )
     if (
-        not request.preview_only
-        and
         str(body.get("skill_request_fingerprint") or "") == request_fp
         and _already_exported(body)
     ):
@@ -533,13 +556,12 @@ async def export_recording_skill(
             idempotent=True,
         )
 
-    if not request.preview_only:
-        await _call_persist(persist, {
-            **body,
-            "skill_export_status": "generating",
-            "skill_plan_valid": False,
-            **_skill_draft_fields(request, title),
-        })
+    await _call_persist(persist, {
+        **body,
+        "skill_export_status": "generating",
+        "skill_plan_valid": False,
+        **_skill_draft_fields(request, title, body),
+    })
     _log_export(
         "skill.export.planning",
         summary="开始规划 Skill 路线",
@@ -569,15 +591,14 @@ async def export_recording_skill(
             clarification_questions=list(planned.clarification_questions or []),
             routes=_route_rows(planned.plan, spec),
         )
-        if not request.preview_only:
-            await _call_persist(persist, {
-                **body,
-                "skill_export_status": planned.status,
-                "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
-                "skill_plan_valid": False,
-                "published": bool(body.get("published")),
-                **_skill_draft_fields(request, title),
-            })
+        await _call_persist(persist, {
+            **body,
+            "skill_export_status": planned.status,
+            "skill_plan": planned.plan.model_dump(mode="json") if planned.plan else None,
+            "skill_plan_valid": False,
+            "published": bool(body.get("published")),
+            **_skill_draft_fields(request, title, body),
+        })
         return SkillExportOutcome(
             status=planned.status,
             clarification_questions=planned.clarification_questions,
@@ -602,28 +623,6 @@ async def export_recording_skill(
         routes=_route_rows(plan, spec),
         planning_mode=str(plan.planning_mode),
     )
-    if request.preview_only:
-        used_rows = _used_capability_rows(spec, plan)
-        _log_export(
-            "skill.export.previewed",
-            summary="Skill 路线预览完成，等待确认导出",
-            status="succeeded",
-            duration_ms=(time.monotonic() - started) * 1000,
-            result_id=str(result_id),
-            skill_id=skill_id,
-            routes=_route_rows(plan, spec),
-        )
-        return SkillExportOutcome(
-            status="previewed",
-            skill_id=skill_id,
-            skill_name=title,
-            planning_mode=str(plan.planning_mode),
-            used_capabilities=used_rows,
-            unused_capabilities=[item.model_dump(mode="json") for item in plan.unused_capabilities],
-            routes=_route_rows(plan, spec),
-            unresolved_branches=_unresolved_rows(plan),
-            plan=plan.model_dump(mode="json"),
-        )
     view = build_export_view(spec, plan.selected_capability_ids)
     _log_export(
         "skill.export.view_ready",
@@ -727,7 +726,7 @@ async def export_recording_skill(
             "skill_export_path": export_path,
             "skill_request_fingerprint": request_fp,
             "skill_needs_reexport": False,
-            **_skill_draft_fields(request, title),
+            **_skill_draft_fields(request, title, body),
         }
         await _call_persist(persist, next_body)
         _log_export(

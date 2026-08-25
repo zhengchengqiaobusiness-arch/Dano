@@ -88,6 +88,9 @@ export interface RecordingResultSummary {
   skill_needs_reexport?: boolean;
   skill_export_title?: string;
   skill_export_description?: string;
+  skill_export_description_origin?: "generated" | "manual" | string;
+  skill_export_description_fingerprint?: string;
+  skill_export_description_stale?: boolean;
   skill_export_planning_mode?: "dynamic" | "fixed" | string;
   skill_export_example_requests?: string[] | string;
   skill_export_success_criteria?: string;
@@ -138,7 +141,6 @@ export interface SkillGenerationRequest {
   forbidden_actions?: string;
   out_dir?: string;
   require_stage_seven?: boolean;
-  preview_only?: boolean;
 }
 
 export interface SkillExportOutcome {

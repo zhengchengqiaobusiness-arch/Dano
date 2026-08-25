@@ -10,6 +10,7 @@ test("draft restore keeps all six planning fields", () => {
   const saved = serializeSkillExportDraft({
     title: "销售订单办理",
     description: "先查再改",
+    sourceFingerprint: "stage-six-fingerprint",
     planningMode: "fixed",
     exampleRequests: ["帮我查鲜生的单", "只看看"],
     successCriteria: "指定订单已改完",
@@ -18,6 +19,7 @@ test("draft restore keeps all six planning fields", () => {
   const restored = normalizeSkillExportDraft(saved);
   assert.equal(restored.title, "销售订单办理");
   assert.equal(restored.description, "先查再改");
+  assert.equal(restored.sourceFingerprint, "stage-six-fingerprint");
   assert.equal(restored.planningMode, "fixed");
   assert.match(restored.exampleRequests, /帮我查鲜生的单/);
   assert.equal(restored.successCriteria, "指定订单已改完");

@@ -22,10 +22,13 @@ from dano.export.skill_package.renderer import (
     _runtime_plan,
     _script_invocation,
     _skill_description,
+    _workflow_table,
+    render_skill_package,
 )
 from dano.export.skill_package.validator import (
     _check_contract_semantics,
     _check_input_fact_alignment,
+    validate_skill_package,
 )
 from dano.onboarding.skill_generation import (
     PlanningMode,
@@ -35,6 +38,8 @@ from dano.onboarding.skill_generation import (
 )
 from dano.onboarding.skill_generation.catalog import relation_is_usable
 from dano.onboarding.skill_generation.quality import match_routes
+from dano.orchestrator.types import SkillSpec
+from dano.shared.enums import RiskLevel, Subsystem
 
 
 def _cap(
@@ -588,8 +593,32 @@ def test_combination_example_never_claims_a_search_step_that_is_not_in_route() -
     combo = next(route for route in plan.routes if len(route.capability_sequence) == 2)
 
     assert "先查出目标" not in combo.examples[0].user_request
+    assert "<字段>" not in combo.examples[0].user_request
     assert "新增销售订单" in combo.examples[0].user_request
     assert "修改销售订单" in combo.examples[0].user_request
+
+
+def test_explicit_example_request_is_kept_as_the_route_example() -> None:
+    spec = FlowSpec(capabilities=[
+        _cap("search", "查询销售订单", "query"),
+        _cap("update", "修改销售订单", "update", required=["id"]),
+    ])
+    user_example = "先查询销售订单，让我选一条，再修改销售订单"
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="销售订单",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="先查询销售订单，再修改选中的销售订单。",
+            example_requests=[user_example],
+        ),
+        {"search", "update"},
+        "fp-explicit-example",
+    )
+    combo = next(route for route in plan.routes if route.capability_sequence == ["search", "update"])
+
+    assert combo.examples[0].user_request == user_example
+    assert match_routes(plan, user_example)[0].capability_sequence == ["search", "update"]
 
 
 def test_consumer_contract_and_runtime_plan_exclude_generator_audit_structure() -> None:
@@ -624,20 +653,36 @@ def test_consumer_contract_and_runtime_plan_exclude_generator_audit_structure() 
             "selects": [{
                 "param": "id",
                 "source_url": "http://admin.example.test/options",
+                "source_method": "POST",
+                "source_body": {"keyword": "{{computed_total_2}}"},
+                "source_content_type": "application/json",
                 "value_key": "id",
                 "label_key": "name",
                 "option_map": {"历史值": "recorded"},
+            }, {
+                "param": "status",
+                "option_map": {"启用": "active"},
             }],
-            "runtime_fields": [{
-                "name": "computed",
-                "kind": "sum",
-                "left_field": "left",
-                "right_field": "right",
-                "sample_verified": True,
-                "schema_identity_path": "computed",
-            }],
+            "runtime_fields": [
+                {"name": "computed_total", "kind": "copy", "result_field": "existing"},
+                {
+                    "name": "__dano_runtime_deadbeef",
+                    "kind": "sum",
+                    "left_field": "left",
+                    "right_field": "right",
+                    "result_field": "total",
+                    "sample_verified": True,
+                    "schema_identity_path": "computed",
+                },
+            ],
         }],
-        "links": [],
+        "links": [{
+            "source_step": 0,
+            "target_step": 1,
+            "source_path": "data.id",
+            "target_path": "body.id",
+            "kind": "field",
+        }],
         "contract": {
             "compiled_step_ids": ["0123456789ab"],
             "evidence": [{"request_id": "req_86"}],
@@ -683,11 +728,202 @@ def test_consumer_contract_and_runtime_plan_exclude_generator_audit_structure() 
         "source_flow_fingerprint", "fingerprint-secret", "get_get",
         "x-options-snapshot", "x-flow-path",
         "录制页面", "sample_verified", "schema_identity_path", "历史值",
+        "__dano_runtime", "source_step", "source_url", "source_method",
+        "source_body", "source_content_type",
     ):
         assert marker not in packed
     assert contract["selected_operations"] == ["查询销售订单"]
     assert contract["routes"][0]["operation_sequence"] == ["查询销售订单"]
     assert runtime["steps"][0]["path"] == "/orders/page"
+    assert runtime["steps"][0]["selects"][0]["endpoint"] == "http://admin.example.test/options"
+    assert runtime["steps"][0]["selects"][0]["method"] == "POST"
+    assert runtime["steps"][0]["selects"][0]["body_template"] == {"keyword": "{{computed_total_2}}"}
+    assert "option_map" not in runtime["steps"][0]["selects"][0]
+    assert runtime["steps"][0]["selects"][1]["option_map"] == {"启用": "active"}
+    assert runtime["steps"][0]["runtime_fields"][0]["name"] == "computed_total"
+    assert runtime["steps"][0]["runtime_fields"][1]["name"] == "computed_total_2"
+    assert runtime["links"][0]["from_index"] == 0
+    assert runtime["links"][0]["to_index"] == 1
+    assert runtime["links"][0]["read_path"] == "data.id"
+    assert runtime["links"][0]["write_path"] == "body.id"
+
+
+def test_dynamic_options_do_not_export_a_historical_enum_snapshot() -> None:
+    schema = _public_schema({
+        "type": "object",
+        "properties": {
+            "customerId": {
+                "type": "string",
+                "description": "页面枚举选项",
+                "enum": ["old-id"],
+                "x-enum-options": [{"value": "old-id", "label": "历史客户"}],
+                "x-options": [{"value": "old-id", "label": "历史客户"}],
+                "x-options-source": {"source_url": "/customers"},
+                "x-options-incomplete": True,
+            },
+        },
+    })
+
+    field = schema["properties"]["customerId"]
+    assert "enum" not in field
+    assert "x-enum-options" not in field
+    assert "x-options" not in field
+    assert "x-options-incomplete" not in field
+    assert "历史客户" not in str(schema)
+    assert field["description"] == "运行时获取当前有效候选，不使用历史候选快照。"
+
+
+def test_main_workflow_table_uses_progressive_disclosure() -> None:
+    skill = type("Skill", (), {
+        "call_metadata": {"skill_plan": {"routes": [
+            {
+                "route_id": "query-order",
+                "name": "查询订单",
+                "when_to_use": "用户只需要查询订单",
+                "capability_sequence": ["query"],
+                "requires_confirmation": False,
+            },
+            {
+                "route_id": "query-then-update",
+                "name": "查询后修改订单",
+                "when_to_use": "用户要先查询再修改选中订单",
+                "capability_sequence": ["query", "update"],
+                "requires_confirmation": True,
+            },
+        ]}},
+        "api_request": {},
+    })()
+    plans = [
+        {"capability_id": "query", "name": "query", "title": "查询订单", "requires_confirmation": False},
+        {"capability_id": "update", "name": "update", "title": "修改订单", "requires_confirmation": True},
+    ]
+
+    table = "\n".join(_workflow_table(skill, plans))
+
+    assert "调用入口" not in table
+    assert "scripts/" not in table
+    assert "references/CAPABILITIES.md" in table
+    assert "references/routes/查询订单-然后-修改订单.md" in table
+
+
+def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tmp_path: Path) -> None:
+    spec = FlowSpec(capabilities=[
+        _cap("query", "查询工作记录", "query", required=["ownerId"]),
+        _cap("create", "新增工作记录", "create", required=["items"]),
+    ])
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="工作记录",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description=(
+                "核对已有记录并补充缺失项时，先「查询工作记录」，再「新增工作记录」。"
+                "查询结果列出已有项和待处理项；新增范围仅限用户确认的未存在项目。"
+            ),
+        ),
+        {"query", "create"},
+        "rendered-package-fingerprint",
+    )
+    capabilities = [
+        {
+            "capability_id": "query",
+            "name": "query_records",
+            "title": "查询工作记录",
+            "kind": "query",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "ownerId": {
+                        "type": "string",
+                        "x-dano-option-source": {
+                            "source_url": "https://example.test/users",
+                            "source_method": "GET",
+                            "value_key": "id",
+                            "label_key": "name",
+                        },
+                    },
+                },
+                "required": ["ownerId"],
+            },
+            "output_schema": {"type": "object"},
+            "requires_human_confirm": False,
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "query-step",
+                    "method": "GET",
+                    "url": "https://example.test/records",
+                    "path": "/records",
+                    "params": ["ownerId"],
+                    "query_template": {"ownerId": "{{ownerId}}"},
+                    "selects": [{
+                        "param": "ownerId",
+                        "source_url": "https://example.test/users",
+                        "source_method": "GET",
+                        "value_key": "id",
+                        "label_key": "name",
+                    }],
+                }],
+                "links": [],
+                "verification_ids": [],
+            },
+        },
+        {
+            "capability_id": "create",
+            "name": "create_records",
+            "title": "新增工作记录",
+            "kind": "create",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object"}},
+                },
+                "required": ["items"],
+            },
+            "output_schema": {"type": "object"},
+            "requires_human_confirm": True,
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "create-step",
+                    "method": "POST",
+                    "url": "https://example.test/records",
+                    "path": "/records",
+                    "content_type": "application/json",
+                    "body_template": {"items": "{{items}}"},
+                }],
+                "links": [],
+                "verification_ids": [],
+            },
+        },
+    ]
+    skill = SkillSpec(
+        skill_id="erp.work-records",
+        tenant="test",
+        subsystem=Subsystem("erp"),
+        action="work-records",
+        risk_level=RiskLevel.L3,
+        title="工作记录",
+        api_request={"capabilities": capabilities, "_skill_plan": plan.model_dump(mode="json")},
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        capabilities=capabilities,
+    )
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="test")
+    validation = validate_skill_package(folder)
+    packed = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in folder.rglob("*")
+        if path.is_file() and path.suffix in {".md", ".json", ".py"}
+    )
+
+    assert validation["ok"] is True
+    for marker in (
+        "__dano_runtime", "source_step", "source_url", "source_method",
+        "source_body", "source_content_type", "x-options", "录制页面", "历史样本",
+    ):
+        assert marker not in packed
+    handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "references/routes/查询工作记录-然后-新增工作记录.md" in handbook
+    assert "确认哪些项目仍需新增" in handbook
 
 
 def test_business_labels_and_complete_dynamic_data_source_are_rendered() -> None:

@@ -306,6 +306,8 @@ _CONSUMER_CONTRACT_PRIVATE_VALUE = re.compile(
 )
 _PACKED_GENERATION_MARKERS = (
     "sample_verified", "occurrence", "录制页面", "录制时", "录制样本", "录制结果", "历史样本",
+    "__dano_runtime", "source_step", "source_url", "source_method", "source_body",
+    "source_content_type", "x-options",
 )
 
 

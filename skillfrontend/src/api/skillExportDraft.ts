@@ -3,6 +3,7 @@ export type SkillPlanningMode = "dynamic" | "fixed";
 export interface SkillExportDraft {
   title: string;
   description: string;
+  sourceFingerprint?: string;
   planningMode?: SkillPlanningMode;
   exampleRequests: string;
   successCriteria: string;
@@ -43,6 +44,7 @@ export function normalizeSkillExportDraft(row: unknown): SkillExportDraft {
   return {
     title: typeof src.title === "string" ? src.title : "",
     description: typeof src.description === "string" ? src.description : "",
+    sourceFingerprint: typeof src.sourceFingerprint === "string" ? src.sourceFingerprint : undefined,
     planningMode: asPlanningMode(src.planningMode),
     exampleRequests: examples,
     successCriteria: typeof src.successCriteria === "string" ? src.successCriteria : "",

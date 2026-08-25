@@ -22,7 +22,11 @@ from dano.onboarding.skill_generation.catalog import (
     schema_required,
     usable_relations,
 )
-from dano.onboarding.skill_generation.intent import branch_needs_clarification, extract_intent_branches
+from dano.onboarding.skill_generation.intent import (
+    branch_needs_clarification,
+    description_has_explicit_sequence,
+    extract_intent_branches,
+)
 from dano.onboarding.skill_generation.models import (
     CompositionMode,
     HumanCheckpoint,
@@ -482,6 +486,12 @@ def _needs_target(cap: FlowCapability) -> bool:
     return bool(required - satisfied)
 
 
+def _is_create(cap: FlowCapability) -> bool:
+    return str(cap.kind or "").strip().lower() == "create" or any(
+        token in _cap_title(cap) for token in ("新增", "新建", "创建", "录入", "添加")
+    )
+
+
 def _step_done_when(cap: FlowCapability) -> str:
     title = _cap_title(cap)
     if is_write_capability(cap):
@@ -501,11 +511,25 @@ def _placeholder_request(sequence: list[FlowCapability], fallback: str) -> str:
     if len(titles) > 1:
         tail = "，再".join(titles[1:])
         if _family(sequence[0]) == "query":
-            return f"请先{titles[0]}，需要单条目标时由我选择，再{tail}。必要输入用 <字段> 占位。"
-        return f"请先{titles[0]}，完成并核对结果后再{tail}。必要输入用 <字段> 占位。"
+            last = sequence[-1]
+            if _is_create(last):
+                return f"先帮我{titles[0]}，确认哪些项目还需要处理后再{tail}"
+            return f"先帮我{titles[0]}，结果出来后让我选择目标，再{tail}"
+        return f"先帮我{titles[0]}，完成后再{tail}"
     if titles:
-        return fallback if fallback and "<" in fallback else f"请办理{titles[0]}，必要输入用 <字段> 占位"
+        return fallback if fallback and not fallback.startswith("按「") else f"帮我{titles[0]}"
     return fallback
+
+
+def _sequence_when(sequence: list[FlowCapability]) -> str:
+    head = _cap_title(sequence[0]) if sequence else "前一步"
+    tail = _cap_title(sequence[-1]) if sequence else "后一步"
+    if sequence and _family(sequence[0]) == "query":
+        last = sequence[-1]
+        if _is_create(last):
+            return f"用户要先用「{head}」核对已有记录，再用「{tail}」补充尚未存在的项目"
+        return f"用户要先「{head}」，再对选定结果执行「{tail}」"
+    return f"用户明确要求先「{head}」，再「{tail}」"
 
 
 def _route(
@@ -574,18 +598,28 @@ def _route(
             and _needs_target(cap)
         ):
             previous_is_write = is_write_capability(prev)
+            create_handoff = _family(prev) == "query" and _is_create(cap)
+            field_labels = "、".join(f"`{field}`" for field in user_fields) or "必要字段"
             checkpoint = HumanCheckpoint(
                 after_step=step_ids[index - 1],
                 before_step=step_key,
                 required_fields=user_fields,
                 prompt=(
+                    f"请确认哪些项目仍需新增，并由调用方提供「{_cap_title(cap)}」的结构化内容（{field_labels}）；"
+                    "不得把查询结果直接当作新增输入"
+                    if create_handoff
+                    else
                     f"请确认下一步「{_cap_title(cap)}」的目标和必要字段，不得沿用或猜测上一步输入"
                     if previous_is_write
                     else f"请从「{_cap_title(prev)}」的结果中选定下一步「{_cap_title(cap)}」的目标，不要默认第一条"
                 ),
-                choice_source="free_text" if previous_is_write else "previous_result",
-                selection_mode="text" if previous_is_write else "single",
-                resume_when="用户已选定有效目标并通过输入校验",
+                choice_source="free_text" if previous_is_write or create_handoff else "previous_result",
+                selection_mode="text" if previous_is_write or create_handoff else "single",
+                resume_when=(
+                    "用户已确认剩余范围、调用方已提供结构化内容且输入校验通过"
+                    if create_handoff
+                    else "用户已选定有效目标并通过输入校验"
+                ),
                 on_cancel="停止并报告未执行",
             )
             checkpoints.append(checkpoint)
@@ -615,7 +649,26 @@ def _route(
         when_to_use,
         " → ".join(_cap_title(cap) for cap in sequence) or "按本页已打包操作办理",
     )
-    example_request = _placeholder_request(sequence, _example_request(request, cleaned_when, sequence))
+    example_request = _example_request(request, cleaned_when, sequence)
+    provided_examples = {
+        str(item).strip()
+        for item in request.example_requests
+        if str(item).strip() and not _is_recording_copy(item)
+    }
+    keep_provided_example = example_request in provided_examples and (
+        (
+            len(sequence) > 1
+            and all(_score_capability(cap, example_request) > 0 for cap in sequence)
+        )
+        or (
+            len(sequence) == 1
+            and not description_has_explicit_sequence(example_request)
+        )
+    )
+    if not keep_provided_example:
+        if example_request in provided_examples:
+            example_request = cleaned_when
+        example_request = _placeholder_request(sequence, example_request)
     failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。用户取消或候选无效时停止并报告未执行。"
     if request.forbidden_actions:
         failure = f"{failure} 禁止：{request.forbidden_actions}"
@@ -744,9 +797,7 @@ def _compile_branch_route(
         if branch.target_given and is_write_capability(sequence[0]):
             when = f"要执行「{_cap_title(sequence[0])}」且目标或必要字段已经给出"
     else:
-        head = sequence[0]
-        tail = sequence[-1]
-        when = branch.trigger if len(branch.trigger) <= 80 else f"按「{_cap_title(head)} → {_cap_title(tail)}」办理"
+        when = branch.trigger if len(branch.trigger) <= 80 else _sequence_when(sequence)
     return _route(
         route_id=_stable_route_id(sequence),
         name=" → ".join(_cap_title(cap) for cap in sequence),

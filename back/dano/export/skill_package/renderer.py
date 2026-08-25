@@ -1383,7 +1383,7 @@ def _public_route_id(route: dict, plans: list[dict]) -> str:
 def _route_detail_link(route: dict, plans: list[dict]) -> str:
     sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
     if len(sequence) <= 1:
-        return "原子操作，不必读取组合路线"
+        return "需要调用时读取 `references/CAPABILITIES.md` 对应行"
     route_id = _public_route_id(route, plans)
     return f"[`references/routes/{route_id}.md`](references/routes/{route_id}.md)"
 
@@ -1399,32 +1399,29 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "",
         "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。",
         "",
-        "| 用户意图 | 路线 | 步骤顺序 | 调用入口 | 跨步数据 | 何时问人 | 确认点 | 完成条件 | 详情 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| 用户意图 | 路线 | 何时停问 | 变更确认 | 详情 |",
+        "|---|---|---|---|---|",
     ]
+    route_count = 0
     for route in _all_routes(skill):
         titles = [
             _title_for_plan_ref(plans, str(cap_id)) or str(cap_id)
             for cap_id in (route.get("capability_sequence") or [])
         ]
+        route_count += 1
         lines.append(
             f"| {_safe_text(route.get('when_to_use') or route.get('name'))} | "
-            f"{_safe_text(route.get('name') or route.get('route_id'))} | "
-            f"{' → '.join(titles)} | "
-            f"{'见组合路线文件中的逐步命令' if len(titles) > 1 else f'`{_script_invocation_for(plans, str((route.get("capability_sequence") or [""])[0]))}`'} | "
-            f"{_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
-            f"{_confirm_label(route, plans)} | {_safe_text(route.get('done_when') or '按该行完成条件核对')} | "
+            f"{' → '.join(titles) or _safe_text(route.get('name') or route.get('route_id'))} | "
+            f"{_ask_when_label(route, plans)} | {_confirm_label(route, plans)} | "
             f"{_route_detail_link(route, plans)} |"
         )
-    if len(lines) == 6:
+    if route_count == 0:
         for item in plans:
             lines.append(
                 f"| {_intent_for_plan(skill, item)} | {_safe_text(item.get('title') or item.get('name'))} | "
-                f"{_safe_text(item.get('title') or item.get('name'))} | `{_script_invocation(item)}` | 不涉及 | "
                 f"{_operation_collect_hint(item)} | "
                 f"{'写前确认' if item.get('requires_confirmation') else '无'} | "
-                f"{'已返回业务结果' if not item.get('requires_confirmation') else '已确认并执行成功'} | "
-                f"原子操作，不必读取组合路线 |"
+                "需要调用时读取 `references/CAPABILITIES.md` 对应行 |"
             )
     return lines
 
@@ -1464,8 +1461,8 @@ def _execution_protocol() -> list[str]:
         "",
         "1. 根据用户原话选择唯一工作流；无法唯一选择时先澄清。",
         "   Done when: 选出恰好一条路线，或已提出一个可回答的澄清问题。",
-        "2. 按该行详情指针读取路线文件和当前步骤必要的输入表单。原子路线不要加载组合路线全文。",
-        "   Done when: 已打开当前路线真正需要的那一个文件。",
+        "2. 组合路线按详情指针读取对应路线文件；原子路线只在需要调用时读取 `references/CAPABILITIES.md` 对应行。缺少输入时再读取当前能力的输入表单。",
+        "   Done when: 只打开当前路线和当前步骤真正需要的资源。",
         "3. 只收集当前路线当前步骤缺少的输入。固定值、系统值和已确认绑定不重复询问。",
         "   Done when: 当前步骤必填已齐，或用户取消。",
         "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
@@ -1507,7 +1504,7 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "",
         "- 当前操作缺少必填字段时，读取 `references/INPUT_FORMS.md` 中对应能力的章节。",
         "- 字段需要动态候选，或候选为空/多条时，读取 `references/OPTIONS.md`。",
-        "- 需要判断某个能力的输入输出边界时，读取 `references/CAPABILITIES.md`。",
+        "- 原子路线需要调用命令，或需要判断能力输入输出边界时，读取 `references/CAPABILITIES.md` 对应行。",
         "- 不要在开始前读取 references 下的全部文件。",
         "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",
     ]
@@ -1990,7 +1987,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
         "",
         "## 失败与停止",
         "",
-        f"- {_safe_text(route.get('failure_behavior') or '失败、未知结果或用户取消时停止，不得静默重试')}。",
+        f"- {_safe_text(route.get('failure_behavior') or '失败、未知结果或用户取消时停止，不得静默重试').rstrip('。')}。",
         "",
         "## 完整示例",
         "",
@@ -2380,7 +2377,7 @@ def http_json(method, path="", *, url="", query=None, body=None, content_type="a
     target = url or path
     if not str(target).startswith(("http://", "https://")):
         if not BASE_URL:
-            raise RuntimeError("DANO_BUSINESS_BASE_URL is required because the recording has no absolute origin")
+            raise RuntimeError("DANO_BUSINESS_BASE_URL is required because this action has no absolute origin")
         target = urljoin(BASE_URL + "/", str(target).lstrip("/"))
     kwargs = {"params": query or None, "headers": auth_headers(), "timeout": 30}
     if body is not None:
@@ -2402,21 +2399,21 @@ def settle(seconds=0.25):
 
 
 def _live_option_rows(binding, values, cache):
-    source_url = str(binding.get("source_url") or "")
-    if not source_url:
+    endpoint = str(binding.get("endpoint") or "")
+    if not endpoint:
         return []
-    method = str(binding.get("source_method") or "GET").upper()
-    body = render(binding.get("source_body"), values) if binding.get("source_body") is not None else None
+    method = str(binding.get("method") or "GET").upper()
+    body = render(binding.get("body_template"), values) if binding.get("body_template") is not None else None
     cache_key = json.dumps(
-        [method, source_url, body], ensure_ascii=False, sort_keys=True, default=str,
+        [method, endpoint, body], ensure_ascii=False, sort_keys=True, default=str,
     )
     if cache_key not in cache:
         result = http_json(
-            method, url=source_url, body=body,
-            content_type=binding.get("source_content_type") or "application/json",
+            method, url=endpoint, body=body,
+            content_type=binding.get("content_type") or "application/json",
         )
         if not result.get("ok"):
-            raise RuntimeError(f"option source request failed: {method} {source_url}")
+            raise RuntimeError(f"option source request failed: {method} {endpoint}")
         cache[cache_key] = list_items(result.get("data"))
     rows = [item for item in cache[cache_key] if isinstance(item, dict)]
     category_key = str(binding.get("category_key") or "")
@@ -2455,7 +2452,7 @@ def _apply_selects(step, values, cache):
     current = dict(values)
     projections = {}
     for binding in step.get("selects") or []:
-        if binding.get("source_url"):
+        if binding.get("endpoint"):
             _live_option_rows(binding, current, cache)
     for binding in step.get("selects") or []:
         param = str(binding.get("param") or "")
@@ -2652,7 +2649,7 @@ def _runtime_values(step, inputs):
 
 
 def _response_key_map(link, source, body, values):
-    collection = get_path(source, link.get("source_collection_path") or link.get("source_path"))
+    collection = get_path(source, link.get("collection_path") or link.get("read_path"))
     binding = link.get("value_binding") or {}
     input_field = str(binding.get("input_field") or "")
     input_fields_by_label = {
@@ -2674,8 +2671,8 @@ def _response_key_map(link, source, body, values):
         raise RuntimeError(f"dynamic structure input {input_field} must be an object")
     rows = []
     for item in collection:
-        key = get_path(item, link.get("source_key_path"))
-        label = get_path(item, link.get("source_label_path"))
+        key = get_path(item, link.get("key_path"))
+        label = get_path(item, link.get("label_path"))
         if key in (None, "") or label in (None, ""):
             raise RuntimeError(f"dynamic structure node lacks id/name: {link.get('link_id')}")
         rows.append((str(key), str(label)))
@@ -2704,7 +2701,7 @@ def _response_key_map(link, source, body, values):
         for key in [row_by_label[label]]
         for value in [caller_map[label]]
     }
-    return deep_set(body or {}, link.get("target_container_path") or link.get("target_path"), rebuilt)
+    return deep_set(body or {}, link.get("container_path") or link.get("write_path"), rebuilt)
 
 
 def execute_plan(plan, inputs):
@@ -2729,18 +2726,18 @@ def execute_plan(plan, inputs):
             else:
                 body = deep_set(body or {}, target.removeprefix("body."), value)
         for link in plan.get("links") or []:
-            if int(link.get("target_step", -1)) != index:
+            if int(link.get("to_index", -1)) != index:
                 continue
-            source_index = int(link.get("source_step", -1))
-            if source_index < 0 or source_index >= len(outputs):
+            from_index = int(link.get("from_index", -1))
+            if from_index < 0 or from_index >= len(outputs):
                 raise RuntimeError(f"verified dependency source unavailable: {link.get('link_id')}")
             if str(link.get("kind") or "") == "response_key_map":
-                body = _response_key_map(link, outputs[source_index]["data"], body, values)
+                body = _response_key_map(link, outputs[from_index]["data"], body, values)
                 continue
-            value = get_path(outputs[source_index]["data"], link.get("source_path"))
+            value = get_path(outputs[from_index]["data"], link.get("read_path"))
             if value is None:
                 raise RuntimeError(f"verified dependency value missing: {link.get('verification_id')}")
-            target = str(link.get("target_path") or "")
+            target = str(link.get("write_path") or "")
             if target.startswith("query."):
                 query = deep_set(query or {}, target[6:], value)
             elif target.startswith("path."):
@@ -3034,6 +3031,7 @@ _PRIVATE_SCHEMA_KEYS = frozenset({
     "x-flow-path",
     "x-options-snapshot",
     "x-options-source-meta",
+    "x-options",
     "x-dano-business-type",
     "x-dano-derived-from-query",
     "x-dano-external-source",
@@ -3059,8 +3057,10 @@ def _public_schema(node: Any, key: str = "") -> Any:
             if str(child_key) not in _PRIVATE_SCHEMA_KEYS
             and not str(child_key).startswith("x-flow-")
             and not str(child_key).startswith("x-dano-")
-            and str(child_key) not in {"source_request_id", "source_step_id", "request_id", "step_id", "x-options-source"}
+            and not str(child_key).startswith("x-options")
+            and str(child_key) not in {"source_request_id", "source_step_id", "request_id", "step_id"}
             and not (dynamic_options and str(child_key) == "x-enum-value-map")
+            and not (dynamic_options and str(child_key) in {"enum", "x-enum-options", "x-options"})
             and not (
                 key == "properties"
                 and isinstance(value, dict)
@@ -3073,6 +3073,8 @@ def _public_schema(node: Any, key: str = "") -> Any:
             and any(name in result for name in ("type", "properties", "items", "format"))
         ):
             result["label"] = _field_label(key, result)
+        if dynamic_options and result.get("description"):
+            result["description"] = "运行时获取当前有效候选，不使用历史候选快照。"
         return result
     if isinstance(node, list):
         return [_public_schema(item, key) for item in node]
@@ -3099,15 +3101,31 @@ def _runtime_step(step: dict) -> dict:
         "selects", "system_values",
     )
     packed = {key: deepcopy(step[key]) for key in keys if step.get(key) is not None}
-    packed["selects"] = [
-        {
+    selects = []
+    for item in (packed.get("selects") or []):
+        if not isinstance(item, dict):
+            continue
+        endpoint = item.get("source_url") or item.get("endpoint")
+        method = item.get("source_method") or item.get("method") or "GET"
+        body_template = item.get("source_body") if item.get("source_body") is not None else item.get("body_template")
+        content_type = item.get("source_content_type") or item.get("content_type")
+        projected = {
             key: value
             for key, value in item.items()
-            if not (item.get("source_url") and key == "option_map")
+            if key not in {
+                "source_url", "source_method", "source_body", "source_content_type",
+            }
+            and not (endpoint and key == "option_map")
         }
-        for item in (packed.get("selects") or [])
-        if isinstance(item, dict)
-    ]
+        if endpoint:
+            projected["endpoint"] = endpoint
+            projected["method"] = str(method).upper()
+        if body_template is not None:
+            projected["body_template"] = body_template
+        if content_type:
+            projected["content_type"] = content_type
+        selects.append(projected)
+    packed["selects"] = selects
     runtime_keys = {
         "name", "kind", "strategy", "start_field", "end_field", "output_key",
         "output_format", "left_field", "right_field", "result_field",
@@ -3118,16 +3136,59 @@ def _runtime_step(step: dict) -> dict:
         for item in (packed.get("runtime_fields") or [])
         if isinstance(item, dict)
     ]
-    return _scrub(packed)
+    aliases: dict[str, str] = {}
+    used = {
+        str(item.get("name") or "")
+        for item in packed["runtime_fields"]
+        if str(item.get("name") or "") and not str(item.get("name") or "").startswith("__dano_runtime")
+    }
+    for index, item in enumerate(packed["runtime_fields"], 1):
+        old = str(item.get("name") or "")
+        if not old.startswith("__dano_runtime"):
+            continue
+        hint = str(item.get("result_field") or item.get("array_item_key") or index)
+        token = re.sub(r"[^a-zA-Z0-9_]+", "_", hint).strip("_") or str(index)
+        candidate = f"computed_{token}"
+        suffix = 2
+        while candidate in used:
+            candidate = f"computed_{token}_{suffix}"
+            suffix += 1
+        aliases[old] = candidate
+        used.add(candidate)
+
+    def rename(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {key: rename(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [rename(value) for value in node]
+        if isinstance(node, str):
+            if node in aliases:
+                return aliases[node]
+            for old, new in aliases.items():
+                node = node.replace("{{" + old + "}}", "{{" + new + "}}")
+            return node
+        return node
+
+    return _scrub(rename(packed))
 
 
 def _runtime_link(link: dict) -> dict:
-    keys = (
-        "source_step", "target_step", "kind", "source_path", "source_collection_path",
-        "source_key_path", "source_label_path", "target_path", "target_container_path",
-        "value_binding",
-    )
-    return _scrub({key: deepcopy(link[key]) for key in keys if link.get(key) is not None})
+    aliases = {
+        "source_step": "from_index",
+        "target_step": "to_index",
+        "source_path": "read_path",
+        "source_collection_path": "collection_path",
+        "source_key_path": "key_path",
+        "source_label_path": "label_path",
+        "target_path": "write_path",
+        "target_container_path": "container_path",
+    }
+    packed = {
+        aliases.get(key, key): deepcopy(value)
+        for key, value in link.items()
+        if key in {*aliases, "kind", "value_binding"} and value is not None
+    }
+    return _scrub(packed)
 
 
 def _runtime_fact_check(check: dict) -> dict:
