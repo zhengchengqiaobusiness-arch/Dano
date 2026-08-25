@@ -72,22 +72,59 @@ export async function createTenantWithPassword(
   return data;
 }
 
-export async function login(
-  username: string,
-  password: string,
-): Promise<{ tenant: string; api_key: string }> {
+export type TenantSession = { tenant: string; api_key: string };
+
+/** 登录结果:未开两步验证直接给 api_key,已开则给 challenge 走第二步。 */
+export type LoginResult =
+  | ({ need_totp?: false } & TenantSession)
+  | { need_totp: true; challenge: string; expires_in: number };
+
+export async function login(username: string, password: string): Promise<LoginResult> {
   const { data } = await api.post("/auth/login", { username, password });
+  return data;
+}
+
+/** 两步登录第二步:code 可以是 6 位 TOTP,也可以是备用码。 */
+export async function loginTotp(challenge: string, code: string): Promise<TenantSession> {
+  const { data } = await api.post("/auth/login/totp", { challenge, code });
   return data;
 }
 
 export async function changePassword(
   oldPassword: string,
   newPassword: string,
+  code = "",
 ): Promise<void> {
   await api.post("/auth/change-password", {
     old_password: oldPassword,
     new_password: newPassword,
+    code,
   });
+}
+
+export type TotpSetup = { secret: string; uri: string; qr_svg_data_uri: string };
+
+export async function totpSetup(): Promise<TotpSetup> {
+  const { data } = await api.post("/auth/totp/setup");
+  return data;
+}
+
+/** 确认绑定,返回一次性备用码(明文仅此一次)。 */
+export async function totpActivate(code: string): Promise<string[]> {
+  const { data } = await api.post("/auth/totp/activate", { code });
+  return data.backup_codes;
+}
+
+export async function totpDisable(password: string, code: string): Promise<void> {
+  await api.post("/auth/totp/disable", { password, code });
+}
+
+export async function regenerateBackupCodes(
+  password: string,
+  code: string,
+): Promise<string[]> {
+  const { data } = await api.post("/auth/totp/backup-codes", { password, code });
+  return data.backup_codes;
 }
 
 export async function listSkills(): Promise<SkillManifest[]> {
