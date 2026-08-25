@@ -163,6 +163,8 @@ def control_item_from_step(step: dict) -> dict:
         "row_identity": str(step.get("row_identity") or ""),
         "column_index": step.get("column_index"),
         "checked": step.get("checked"),
+        "selected_label": step.get("selected_label"),
+        "selected_value": step.get("selected_value"),
         "options": step.get("options"),
         "filename": step.get("filename"),
     }
