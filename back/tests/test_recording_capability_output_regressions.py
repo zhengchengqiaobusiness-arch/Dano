@@ -1343,6 +1343,85 @@ def test_grounded_actions_produce_capabilities_without_a_model_plan() -> None:
     assert result.meta["capability_model"]["source"] == "grounded_action_fallback"
 
 
+def test_repeated_detail_read_does_not_create_fallback_capability() -> None:
+    from dano.execution.page.capability_compiler import ensure_grounded_capability_output
+
+    first = FlowStep(
+        step_id="detail-first",
+        name="GET_get",
+        method="GET",
+        path="/orders/get?id=69",
+        source_meta={"request_id": "req-first", "role": "business_get"},
+    )
+    repeated = FlowStep(
+        step_id="detail-repeated",
+        name="GET_get",
+        method="GET",
+        path="/orders/get?id=70",
+        source_meta={"request_id": "req-repeated", "role": "business_get"},
+    )
+    plan = {
+        "business_understanding": {"business_name": "Orders"},
+        "capabilities": [{
+            "name": "inspect_order",
+            "title": "Inspect order",
+            "kind": "inspect",
+            "anchor_step_id": "detail-first",
+            "request_refs": [{
+                "request_id": "req-first",
+                "step_id": "detail-first",
+                "usage": "execute",
+            }],
+        }],
+        "unresolved_items": [],
+    }
+    spec = FlowSpec(
+        steps=[first, repeated],
+        meta={"capability_model": {
+            "semantic_plan": plan,
+            "submitted_semantic_plan": plan,
+            "proposal_gate": {"accepted": False},
+        }},
+    )
+    spec.request_facts.requests = [
+        RequestFact(
+            request_id="req-first",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=69",
+            query={"id": ["69"]},
+            trigger_action_id="open-first",
+        ),
+        RequestFact(
+            request_id="req-repeated",
+            method="GET",
+            path="/orders/get",
+            url="/orders/get?id=70",
+            query={"id": ["70"]},
+            trigger_action_id="open-repeated",
+        ),
+    ]
+    spec.request_facts.analysis = {
+        request_id: RequestAnalysis(
+            request_id=request_id, role="business_get", keep=True,
+        )
+        for request_id in ("req-first", "req-repeated")
+    }
+    spec.request_facts.usage = {
+        "req-first": RequestUsage(
+            request_id="req-first", materialized_step_id="detail-first", state="materialized",
+        ),
+        "req-repeated": RequestUsage(
+            request_id="req-repeated", materialized_step_id="detail-repeated", state="materialized",
+        ),
+    }
+
+    result = ensure_grounded_capability_output(spec)
+
+    assert [capability.name for capability in result.capabilities] == ["inspect_order"]
+    assert result.meta["capability_model"].get("fallback_added_capabilities", []) == []
+
+
 def test_grounded_fallback_restores_eight_submitted_capabilities_from_seven() -> None:
     from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 

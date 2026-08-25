@@ -1002,12 +1002,29 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
         current, plan_items, candidates,
     )
     covered = _semantic_plan_execute_request_ids(current, plan)
+    by_step = {str(step.step_id or ""): step for step in current.steps}
+    covered_read_signatures = {
+        signature
+        for identifier in covered
+        for step in [by_request.get(identifier) or by_step.get(identifier)]
+        if step is not None
+        and str(step.method or "GET").upper() in {"GET", "HEAD"}
+        and (signature := _read_operation_signature(current, step))[1]
+    }
     used_names = {str(item.get("name") or "") for item in plan_items}
     goal_slots = list(_recording_goal_contract(current).get("capabilities") or [])
     fallback_names: list[str] = []
 
     for index, (request_id, step) in enumerate(candidates):
         if request_id in covered or step.step_id in covered:
+            continue
+        read_signature = (
+            _read_operation_signature(current, step)
+            if str(step.method or "GET").upper() in {"GET", "HEAD"}
+            else ()
+        )
+        if read_signature and read_signature in covered_read_signatures:
+            covered.add(request_id)
             continue
         kind = _capability_operation_kind(step)
         goal_title = str(
@@ -1035,6 +1052,8 @@ def ensure_grounded_capability_output(spec: FlowSpec) -> FlowSpec:
             }],
         })
         covered.add(request_id)
+        if read_signature:
+            covered_read_signatures.add(read_signature)
 
     current_names = [str(capability.name or "") for capability in current.capabilities]
     planned_names = [str(item.get("name") or "") for item in plan_items]
