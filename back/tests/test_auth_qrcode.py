@@ -11,12 +11,21 @@ import base64
 
 import pytest
 
-from dano.auth.qrcode import (_MASKS, _draw_format, _draw_function_patterns, _encode_data,
-                              _interleave, _penalty, _pick_version, _place_data, encode_matrix,
-                              svg_data_uri)
+from dano.auth.qrcode import (
+    _MASKS,
+    _draw_format,
+    _draw_function_patterns,
+    _encode_data,
+    _interleave,
+    _penalty,
+    _pick_version,
+    _place_data,
+    encode_matrix,
+    svg_data_uri,
+)
 
 qrcode = pytest.importorskip("qrcode")
-from qrcode.constants import ERROR_CORRECT_M  # noqa: E402
+from qrcode.constants import ERROR_CORRECT_M
 
 OTPAUTH = ("otpauth://totp/Dano%3Aacme?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
            "&issuer=Dano&algorithm=SHA1&digits=6&period=30")

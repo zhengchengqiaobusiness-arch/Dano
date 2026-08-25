@@ -81,7 +81,7 @@ def _rs_encode(data: bytes, ec_len: int) -> bytes:
 
 # ── 数据编码 ─────────────────────────────────────────────────────────────
 def _data_capacity(version: int) -> int:
-    ec_len, g1_blocks, g1_data, g2_blocks, g2_data = _EC_M[version]
+    _, g1_blocks, g1_data, g2_blocks, g2_data = _EC_M[version]
     return g1_blocks * g1_data + g2_blocks * g2_data
 
 
