@@ -4,7 +4,6 @@ import pytest
 from playwright.async_api import async_playwright
 
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
-from dano.execution.page.recording_field_evidence import bind_field_evidence
 
 
 @pytest.mark.asyncio
@@ -58,66 +57,3 @@ async def test_recorder_survives_document_replacement() -> None:
         any("csmc" in field.get("field_aliases", []) for field in snapshot.get("fields", []))
         for snapshot in snapshots
     )
-
-
-@pytest.mark.asyncio
-async def test_persistent_tree_selection_is_recorded_as_field_evidence() -> None:
-    recorder = RecordSession()
-
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            context = await browser.new_context(viewport={"width": 1600, "height": 800})
-            await context.add_init_script(f"({_RECORDER_JS})()")
-            await context.expose_binding("__danoRecord", recorder._on_record)
-            page = await context.new_page()
-            recorder._context = context
-            recorder.page = page
-            recorder._attach_diag_handlers(page)
-            await page.set_content(
-                '<section><h2 id="departments">部门列表</h2>'
-                '<ul role="tree" aria-labelledby="departments" data-field="ssbmId">'
-                '<li role="treeitem" data-value="0202">市交通运输局(27)</li>'
-                '<li role="treeitem" data-value="0303">市农业农村局(12)</li>'
-                '</ul></section>'
-            )
-
-            item = page.get_by_role("treeitem", name="市交通运输局(27)")
-            box = await item.bounding_box()
-            assert box is not None
-            await recorder.dispatch_input({
-                "kind": "click",
-                "nx": (box["x"] + box["width"] / 2) / 1600,
-                "ny": (box["y"] + box["height"] / 2) / 800,
-            })
-            await page.wait_for_timeout(100)
-        finally:
-            await browser.close()
-
-    selection = next(step for step in recorder.steps if step.get("op") == "pick")
-    assert selection["field"] == "部门列表"
-    assert "ssbmId" in selection["field_aliases"]
-    assert selection["selected_label"] == "市交通运输局(27)"
-    assert selection["selected_value"] == "0202"
-    assert selection["options"] == [
-        {"label": "市交通运输局(27)", "value": "0202"},
-        {"label": "市农业农村局(12)", "value": "0303"},
-    ]
-
-    bound = bind_field_evidence(
-        [{
-            "request_id": "req-search",
-            "method": "POST",
-            "url": "https://example.test/search",
-            "post_data": {"pageNum": 1, "pageSize": 10, "ssbmId": "0202"},
-            "page_id": selection["page_id"],
-            "frame_id": selection["frame_id"],
-            "trigger_action_id": selection["action_id"],
-        }],
-        recorder.recorded_page_events(),
-        recorder.recorded_field_evidence(),
-        recorder.recorded_page_enum_options(),
-    )
-    department = next(item for item in bound if item.get("wire_path") == "body.ssbmId")
-    assert department["binding_status"] == "bound"
-    assert department["label"] == "部门列表"

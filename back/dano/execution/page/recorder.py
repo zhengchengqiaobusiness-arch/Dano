@@ -1105,7 +1105,7 @@ _RECORDER_JS = r"""() => {
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       };
       if (evidence) {
-        ['checked','group_name','selected_label','selected_value','filename','mime_type','size','multiple','file_count','files',
+        ['checked','group_name','selected_label','filename','mime_type','size','multiple','file_count','files',
          'form_root','table_id','row_index','row_identity','column_index','column_label','control_surface'].forEach(function (key) {
           if (evidence[key] !== undefined) payload[key] = evidence[key];
         });
@@ -1306,55 +1306,6 @@ _RECORDER_JS = r"""() => {
                   return item.label && item.label !== '清空' && item.label !== '清除' && item.label !== '搜索';
                 });
     } catch (e) { return []; }
-  }
-  function persistentChoice(t) {
-    try {
-      var item = t && t.closest && t.closest(
-        '[role="treeitem"],[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],' +
-        '.el-tree-node__content,.ant-tree-node-content-wrapper'
-      );
-      if (!item) return null;
-      var owner = item.closest && item.closest(
-        '[role="tree"],[role="listbox"],[role="radiogroup"],[role="menu"],.el-tree,.ant-tree'
-      );
-      if (!owner) return null;
-      var ownerLabel = clean(owner.getAttribute('aria-label'))
-        || referencedText(owner.getAttribute('aria-labelledby'))
-        || clean(labelText(owner));
-      if (!ownerLabel) {
-        var sibling = owner.previousElementSibling;
-        for (var i = 0; sibling && i < 3; i++, sibling = sibling.previousElementSibling) {
-          var siblingText = clean(sibling.innerText || sibling.textContent || '');
-          if (siblingText && siblingText.length <= 40) { ownerLabel = siblingText; break; }
-        }
-      }
-      var aliases = controlAliases(owner);
-      var field = ownerLabel || aliases[0] || '';
-      if (!field) return null;
-      var selectedLabel = clean(accName(item));
-      if (!selectedLabel) return null;
-      var options = popupOptions(owner);
-      var selected = null;
-      for (var j = 0; j < options.length; j++) {
-        if (clean(options[j].label) === selectedLabel) { selected = options[j]; break; }
-      }
-      var evidence = fieldEvidence(owner);
-      evidence.field_aliases = aliases;
-      evidence.control_kind = 'select';
-      evidence.enum_source = 'dom';
-      evidence.selected_label = selectedLabel;
-      evidence.selected_value = selected && selected.value !== undefined ? selected.value : null;
-      evidence.mapping_complete = !!options.length && options.every(function (option) {
-        return option && option.value !== undefined && option.value !== null && String(option.value) !== '';
-      });
-      return {
-        locator: locateClickable(item),
-        field: field,
-        selected_label: selectedLabel,
-        options: options,
-        evidence: evidence
-      };
-    } catch (_) { return null; }
   }
   // 原生 <select> 的全部 <option> 文字(去掉占位空项),返回 [{label, value}] 让标签与提交值都可追溯
   function nativeOptions(el) {
@@ -1670,14 +1621,6 @@ _RECORDER_JS = r"""() => {
       pollPick(activeTrigger, false, activeControlActionId); return;
     }
     if (clickedPopup) clearActiveControl();
-    var persistent = persistentChoice(e.target);
-    if (persistent) {
-      emit(
-        'pick', persistent.locator, persistent.selected_label, persistent.field,
-        false, persistent.options, persistent.evidence
-      );
-      return;
-    }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
     if (trig && isFieldPickerTrigger(trig)) {
@@ -3229,11 +3172,9 @@ class RecordSession:
                             mapping_conflict = True
                         merged[label] = option
                 selected_raw = s.get("value", "")
-                selected_label = str(s.get("selected_label") or "").strip()
-                selected_value = s.get("selected_value")
-                if selected_label and selected_value not in (None, ""):
-                    pass
-                elif s.get("mapping_complete") and s.get("enum_source") == "dom":
+                selected_label = ""
+                selected_value = None
+                if s.get("mapping_complete") and s.get("enum_source") == "dom":
                     selected_value = selected_raw
                     native_matches = [
                         option for option in merged.values()
