@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     token_refresh_sources: dict = Field(default_factory=dict)
     token_refresh_key: str = Field(default="", description="Linux 定时刷新内部接口密钥")
 
+    # ── 后台登录(知识因子:密码策略 + 失败退避 + TOTP 二因子)──
+    auth_min_password_length: int = 12     # 建租户/改密统一的最小密码长度
+    auth_max_failures: int = 5             # 连续失败到此次数开始锁定
+    auth_lock_max_minutes: int = 30        # 递增退避的锁定时长上限
+    auth_challenge_ttl_seconds: int = 300  # 两步登录 challenge 有效期
+
     # ── 三模型评审委员会(发布前硬闸门;强制 distinct(model_id)=3,改模型名即可)──
     review_enabled: bool = True
     review_model_acceptance: str = "mimo-v2.5"   # 成果验收:是否真满足业务意图
