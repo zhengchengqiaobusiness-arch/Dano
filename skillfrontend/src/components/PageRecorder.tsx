@@ -743,6 +743,9 @@ export default function PageRecorder({
   const draft = snapshot?.draft || null;
   const canRetryPublish = Boolean(draft) && ["editable", "failed", "cancelled"].includes(status);
   const capabilities = draft?.capabilities || [];
+  const displayedCapabilities = capabilities
+    .map((capability, index) => ({ capability, index }))
+    .filter(({ capability, index }) => !capabilityRemovalPending(capability, index));
   const steps = draft?.steps || [];
   const capturedRequests = draft?.request_facts?.requests || [];
   const runBusy = (connecting || processing) && !cancelling && status !== "cancelled";
@@ -1917,6 +1920,27 @@ export default function PageRecorder({
     return String(capability.capability_id || capability.name || index);
   }
 
+  function capabilityRemovalPending(capability: FlowCapability, index: number) {
+    return pendingEdits.some((edit) => edit.op === "remove_capability" && (
+      (Boolean(capability.capability_id) && edit.capability_id === capability.capability_id)
+      || (Boolean(capability.name) && edit.capability_name === capability.name)
+      || edit.capability_index === index
+    ));
+  }
+
+  function removeCapability(capability: FlowCapability, index: number) {
+    const reference = capabilityReference(capability, index);
+    const targetsCapability = (edit: DraftEdit) => (
+      (Boolean(capability.capability_id) && edit.capability_id === capability.capability_id)
+      || (Boolean(capability.name) && edit.capability_name === capability.name)
+      || edit.capability_index === index
+    );
+    replacePendingEdits((current) => [
+      ...current.filter((edit) => !targetsCapability(edit)),
+      { op: "remove_capability", actor: "user", ...reference },
+    ]);
+  }
+
   function serverCapabilityExecuteStepIds(capability: FlowCapability) {
     return Array.from(new Set([
       ...(capability.step_ids || []),
@@ -2880,6 +2904,12 @@ export default function PageRecorder({
         <Space wrap>
           <Text type="secondary">能力 ID</Text><Text code>{capability.capability_id || capability.name}</Text>
           <Text type="secondary">接口 {stepIds.length + auxiliaryStepIds.size}</Text>
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => removeCapability(capability, index)}
+          >删除能力</Button>
           <Select
             value={undefined}
             placeholder="添加执行接口"
@@ -2935,13 +2965,13 @@ export default function PageRecorder({
         </div>
       );
     }
-    if (!capabilities.length) {
+    if (!displayedCapabilities.length) {
       return <Empty description={processing ? "正在载入能力草稿…" : "没有生成能力"} />;
     }
     return (
       <Collapse
         defaultActiveKey={[]}
-        items={capabilities.map((capability, index) => {
+        items={displayedCapabilities.map(({ capability, index }) => {
           return {
             key: capability.capability_id || capability.name || String(index),
             label: (
@@ -3400,7 +3430,7 @@ export default function PageRecorder({
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
-            <Text strong>{editingResult ? "修改能力结果" : `能力结果 ${openingId ? "…" : capabilities.length}`}</Text>
+            <Text strong>{editingResult ? "修改能力结果" : `能力结果 ${openingId ? "…" : displayedCapabilities.length}`}</Text>
             {editingResult ? <Text type="secondary">仅修改识别错误的内容，字段路径和能力标识保持稳定</Text> : null}
             {pendingEdits.length ? <Tag color="processing">待保存修改 {pendingEdits.length}</Tag> : null}
           </Space>

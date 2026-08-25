@@ -1422,6 +1422,46 @@ def test_repeated_detail_read_does_not_create_fallback_capability() -> None:
     assert result.meta["capability_model"].get("fallback_added_capabilities", []) == []
 
 
+def test_recording_result_edit_can_remove_capability() -> None:
+    from dano.onboarding.recording_results import (
+        _draft_fingerprint,
+        apply_recording_result_edits,
+    )
+
+    spec = FlowSpec(capabilities=[
+        FlowCapability(
+            capability_id="cap-query",
+            name="query_orders",
+            title="Query orders",
+            kind="query",
+        ),
+        FlowCapability(
+            capability_id="cap-duplicate",
+            name="get_get",
+            title="GET_get",
+            kind="inspect",
+        ),
+    ])
+    flow_spec = spec.model_dump(mode="json")
+
+    result = apply_recording_result_edits(
+        {"flow_spec": flow_spec, "capability_count": 2},
+        [{
+            "op": "remove_capability",
+            "actor": "user",
+            "capability_id": "cap-duplicate",
+            "capability_name": "get_get",
+        }],
+        expected_fingerprint=_draft_fingerprint(flow_spec),
+    )
+
+    assert result["capability_count"] == 1
+    assert [item["name"] for item in result["flow_spec"]["capabilities"]] == [
+        "query_orders",
+    ]
+    assert result["flow_spec"]["meta"]["removed_capabilities"] == ["get_get"]
+
+
 def test_grounded_fallback_restores_eight_submitted_capabilities_from_seven() -> None:
     from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 
