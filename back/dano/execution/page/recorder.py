@@ -242,8 +242,16 @@ def _parse_url_query(url: str) -> dict:
 
 # 注入到每个页面的录制器:把表单输入/选择/提交点击转成语义步骤,推回 window.__danoRecord。
 _RECORDER_JS = r"""() => {
-  if (window.__danoRecorderInstalled) return;
+  var recorderHealth = {alive: false};
+  try {
+    document.dispatchEvent(new CustomEvent('__danoRecorderHealth', {detail: recorderHealth}));
+  } catch (_) {}
+  if (recorderHealth.alive) return;
+  document.addEventListener('__danoRecorderHealth', function (event) {
+    if (event && event.detail) event.detail.alive = true;
+  });
   window.__danoRecorderInstalled = true;
+  window.__danoRecorderDocument = document;
   // 通用语义引擎(与框架/语言/公司无关):ARIA role + accessible name 优先,文本/属性兜底。
   // 不按标签/class 白名单,故 Element-UI / Ant Design / 原生 / 任意自定义控件一视同仁。
   var SUBMIT = ['提交','保存','确定','确认','申请','发起','送出','申报','通过','归档','完单','审核','立案','接单','发布','完成','结案','结算','新建','新增','编辑','更新','导入','导出','打印','submit','save','ok','confirm','apply','approve','finish','archive','review'];
@@ -1825,6 +1833,7 @@ class RecordSession:
         self._attach_diag_handlers(self.page)
         # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
         await self.page.goto(full, wait_until="domcontentloaded")
+        await self._ensure_recorder_installed(self.page)
 
     @staticmethod
     def _split_browser_storage_state(storage_state: str | dict | None) -> tuple[str | dict | None, dict]:
@@ -1877,6 +1886,7 @@ class RecordSession:
             pass
         if self._closing or page.is_closed():     # 等待期间会话已在拆 / 新页已关 → 不切、不重开截屏
             return
+        await self._ensure_recorder_installed(page)
         self._mark_active()
         self.page = page
         self._attach_diag_handlers(page)         # P0-1:新页挂诊断(浏览器无 context 级 pageerror)
@@ -1889,11 +1899,42 @@ class RecordSession:
             page.on("console", self._on_console)
             page.on("pageerror", self._on_pageerror)
             page.on("requestfailed", self._on_requestfailed)
-            page.on("framenavigated", lambda _frame: self._mark_active())
-            page.on("domcontentloaded", lambda: self._mark_active())
+            page.on("framenavigated", self._on_frame_navigated)
+            page.on("domcontentloaded", lambda: self._on_document_ready(page))
             page.on("load", lambda: self._mark_active())
         except Exception:  # noqa: BLE001
             pass
+
+    async def _ensure_recorder_installed(self, target) -> None:  # noqa: ANN001
+        """Restore the recorder after a portal replaces a live document."""
+        if self._closing or target is None:
+            return
+        try:
+            is_closed = getattr(target, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return
+            is_detached = getattr(target, "is_detached", None)
+            if callable(is_detached) and is_detached():
+                return
+            await target.evaluate(_RECORDER_JS)
+        except Exception:  # noqa: BLE001 - navigation can replace the target mid-install
+            pass
+
+    def _schedule_recorder_install(self, target) -> None:  # noqa: ANN001
+        if self._closing:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._ensure_recorder_installed(target))
+        except RuntimeError:
+            pass
+
+    def _on_frame_navigated(self, frame) -> None:  # noqa: ANN001
+        self._mark_active()
+        self._schedule_recorder_install(frame)
+
+    def _on_document_ready(self, page) -> None:  # noqa: ANN001
+        self._mark_active()
+        self._schedule_recorder_install(page)
 
     async def _on_page_close(self, page) -> None:  # noqa: ANN001
         """活动页被关掉(用户关新标签/弹窗)→ 回退到仍打开的页,截屏切回去,避免黑屏。
@@ -2822,6 +2863,11 @@ class RecordSession:
         page = await self._input_page()
         if page is None:
             return {"ok": False, "recoverable": True, "kind": kind, "error": "no_active_page"}
+        # A portal may replace about:blank with its business document without a
+        # navigation event that re-runs add_init_script. Restore the recorder
+        # immediately before the user's next real interaction so that the input
+        # and the request it triggers retain the same evidence chain.
+        await self._ensure_recorder_installed(page)
         self._mark_active()
         try:
             x, y = _input_point(ev)
