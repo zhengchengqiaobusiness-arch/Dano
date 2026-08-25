@@ -36,3 +36,10 @@ export function forgetRecordingResultId(storage: Pick<Storage, "removeItem">): v
     // A disabled session store must not block starting another recording.
   }
 }
+
+export function beginFreshRecordingEntry(
+  storage: Pick<Storage, "removeItem">,
+): { freshRecordingEntry: true } {
+  forgetRecordingResultId(storage);
+  return { freshRecordingEntry: true };
+}

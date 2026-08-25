@@ -2,6 +2,7 @@ import { Layout, Menu, Button, Tag, Space, Typography } from "antd";
 import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined, GlobalOutlined } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { clearTenant, TENANT_NAME } from "../api/client";
+import { beginFreshRecordingEntry } from "../api/recordingResume";
 
 const { Header, Sider, Content } = Layout;
 
@@ -23,7 +24,9 @@ export default function AppLayout() {
           onClick={(e) => {
             if (e.key === "skills") nav("/skills");
             if (e.key === "onboard") nav("/onboard");
-            if (e.key === "recording") nav("/recording");
+            if (e.key === "recording") {
+              nav("/recording", { state: beginFreshRecordingEntry(sessionStorage) });
+            }
           }}
           items={[
             { key: "skills", icon: <AppstoreOutlined />, label: "Skill 目录" },

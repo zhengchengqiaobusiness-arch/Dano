@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  beginFreshRecordingEntry,
   forgetRecordingResultId,
   rememberedRecordingResultId,
   rememberRecordingResultId,
@@ -32,4 +33,19 @@ test("the active result id survives a same-tab reload and is cleared for a new r
   assert.equal(rememberedRecordingResultId(storage), "result-active");
   forgetRecordingResultId(storage);
   assert.equal(rememberedRecordingResultId(storage), "");
+});
+
+test("entering Recording V2 from the menu starts on recording setup", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+  };
+  rememberRecordingResultId(storage, "result-active");
+
+  const navigationState = beginFreshRecordingEntry(storage);
+
+  assert.equal(rememberedRecordingResultId(storage), "");
+  assert.deepEqual(navigationState, { freshRecordingEntry: true });
 });
