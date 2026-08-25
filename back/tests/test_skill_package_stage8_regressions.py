@@ -510,6 +510,66 @@ def test_stage8_does_not_auto_route_unconfirmed_field_mapping() -> None:
     assert relation_is_usable(relation) is False
 
 
+def test_confirmed_binding_is_executable_and_visible_in_the_main_route_table() -> None:
+    query = _cap("query", "查询销售订单", "query")
+    query.output_schema = {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+            },
+        },
+    }
+    update = _cap("update", "修改销售订单", "update", required=["id", "items"])
+    spec = FlowSpec(
+        capabilities=[query, update],
+        capability_relations=[CapabilityRelation(
+            relation_id="query-to-update",
+            type="external_transform",
+            mode="external_transform",
+            from_capability="query",
+            from_output="data.id",
+            to_capability="update",
+            to_input="id",
+            confirmed=True,
+        )],
+    )
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="销售订单",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="先查询销售订单，再修改销售订单。",
+        ),
+        {"query", "update"},
+        "fp-confirmed-binding",
+    )
+    route = next(
+        item for item in plan.routes
+        if item.capability_sequence == ["query", "update"] and item.bindings
+    )
+
+    assert route.composition_mode.value == "bound"
+    assert not route.checkpoints
+    assert route.required_user_inputs == ["items"]
+    assert [source.source.value for source in route.steps[1].input_sources] == [
+        "confirmed_binding",
+        "user",
+    ]
+
+    skill = type("Skill", (), {"call_metadata": {"skill_plan": plan.model_dump(mode="json")}})()
+    table = "\n".join(_workflow_table(skill, [
+        {"name": "query", "title": "查询销售订单", "requires_confirmation": False},
+        {"name": "update", "title": "修改销售订单", "requires_confirmation": True},
+    ]))
+
+    assert "data.id → id" in table
+    assert "人工交接，不自动带入" not in next(
+        line for line in table.splitlines() if "查询销售订单 → 修改销售订单" in line
+    )
+
+
 def test_sales_playbook_compiles_only_the_natural_business_sequences() -> None:
     spec = FlowSpec(capabilities=[
         _cap("search", "按条件搜索销售订单", "query"),
@@ -525,9 +585,10 @@ def test_sales_playbook_compiles_only_the_natural_business_sequences() -> None:
         title="销售订单",
         planning_mode=PlanningMode.DYNAMIC,
         business_description=(
-            "通过“按条件搜索销售订单”定位目标单据，“获取销售订单详细信息”了解完整信息；"
-            "使用“新增销售订单”录入新订单，后续调整内容则通过“修改销售订单信息”保存修改；"
-            "订单确认后“审核销售订单”生效，若需撤回修改则“反审核销售订单”后重新修改；"
+            "通过“按条件搜索销售订单”定位目标单据，可“获取销售订单详细信息”了解完整信息；"
+            "新增订单通过“新增销售订单”录入，后续如需调整内容则使用“修改销售订单信息”保存修改；"
+            "订单确认后由相应负责人“审核销售订单”使之生效，若已审核订单需要撤回修改，"
+            "则执行“取消审核销售订单”回退状态，再通过“更新销售订单”重新调整；"
             "无效订单通过“删除销售订单”清理；所有数据可“导出销售订单为Excel”用于存档。"
         ),
     )
@@ -788,7 +849,9 @@ def test_main_workflow_table_uses_progressive_disclosure() -> None:
                 "name": "查询后修改订单",
                 "when_to_use": "用户要先查询再修改选中订单",
                 "capability_sequence": ["query", "update"],
+                "checkpoints": [{"prompt": "请从查询结果中选定目标"}],
                 "requires_confirmation": True,
+                "done_when": "目标订单已确认修改成功",
             },
         ]}},
         "api_request": {},
@@ -802,8 +865,47 @@ def test_main_workflow_table_uses_progressive_disclosure() -> None:
 
     assert "调用入口" not in table
     assert "scripts/" not in table
+    assert "| 用户意图 | 路线 | 步骤顺序 | 跨步数据 | 何时停问 | 确认点 | 完成条件 | 详情 |" in table
+    assert "查询订单 → 修改订单" in table
+    assert "人工交接，不自动带入" in table
+    assert "请从查询结果中选定目标" in table
+    assert "目标订单已确认修改成功" in table
     assert "references/CAPABILITIES.md" in table
     assert "references/routes/查询订单-然后-修改订单.md" in table
+
+
+def test_capability_index_includes_a_business_output_overview() -> None:
+    text = _capabilities_md(type("Skill", (), {"call_metadata": {}})(), [{
+        "name": "view_order",
+        "title": "查看销售订单详情",
+        "kind": "inspect",
+        "script": "view_order",
+        "input_schema": {
+            "type": "object",
+            "properties": {"id": {"type": "number", "label": "记录编号"}},
+            "required": ["id"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "number"},
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "number", "label": "记录编号"},
+                        "no": {"type": "string", "label": "业务编号"},
+                        "items": {"type": "array", "label": "明细"},
+                    },
+                },
+                "msg": {"type": "string"},
+            },
+        },
+        "requires_confirmation": False,
+        "is_write": False,
+    }])
+
+    assert "关键输出概况" in text
+    assert "记录编号、业务编号、明细" in text
 
 
 def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tmp_path: Path) -> None:
@@ -919,6 +1021,7 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     for marker in (
         "__dano_runtime", "source_step", "source_url", "source_method",
         "source_body", "source_content_type", "x-options", "录制页面", "历史样本",
+        "step_id", "failed_step", "link_id", "verification_id",
     ):
         assert marker not in packed
     handbook = (folder / "SKILL.md").read_text(encoding="utf-8")

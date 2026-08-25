@@ -1365,6 +1365,23 @@ def _confirm_label(route: dict, plans: list[dict]) -> str:
     return "无"
 
 
+def _plan_done_label(item: dict) -> str:
+    return (
+        "已确认且调用返回成功；仅在有已验证回查时声明状态已复核"
+        if item.get("is_write")
+        else "已返回可核对的业务结果"
+    )
+
+
+def _route_done_label(route: dict, plans: list[dict]) -> str:
+    done = _safe_text(route.get("done_when"))
+    if done:
+        return done
+    sequence = [str(value) for value in (route.get("capability_sequence") or []) if str(value)]
+    last = _plan_by_ref(plans).get(sequence[-1]) if sequence else None
+    return _plan_done_label(last) if last else "路线步骤均已按完成条件核对"
+
+
 def _public_route_id(route: dict, plans: list[dict]) -> str:
     titles = [
         _title_for_plan_ref(plans, str(item)) or str(item)
@@ -1399,8 +1416,8 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "",
         "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。",
         "",
-        "| 用户意图 | 路线 | 何时停问 | 变更确认 | 详情 |",
-        "|---|---|---|---|---|",
+        "| 用户意图 | 路线 | 步骤顺序 | 跨步数据 | 何时停问 | 确认点 | 完成条件 | 详情 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     route_count = 0
     for route in _all_routes(skill):
@@ -1411,16 +1428,19 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         route_count += 1
         lines.append(
             f"| {_safe_text(route.get('when_to_use') or route.get('name'))} | "
+            f"{_safe_text(route.get('name') or route.get('route_id'))} | "
             f"{' → '.join(titles) or _safe_text(route.get('name') or route.get('route_id'))} | "
-            f"{_ask_when_label(route, plans)} | {_confirm_label(route, plans)} | "
+            f"{_cross_step_label(route)} | {_ask_when_label(route, plans)} | "
+            f"{_confirm_label(route, plans)} | {_route_done_label(route, plans)} | "
             f"{_route_detail_link(route, plans)} |"
         )
     if route_count == 0:
         for item in plans:
             lines.append(
                 f"| {_intent_for_plan(skill, item)} | {_safe_text(item.get('title') or item.get('name'))} | "
-                f"{_operation_collect_hint(item)} | "
+                f"{_safe_text(item.get('title') or item.get('name'))} | 不涉及 | {_operation_collect_hint(item)} | "
                 f"{'写前确认' if item.get('requires_confirmation') else '无'} | "
+                f"{_plan_done_label(item)} | "
                 "需要调用时读取 `references/CAPABILITIES.md` 对应行 |"
             )
     return lines
@@ -1786,14 +1806,53 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
     return "\n".join(lines).rstrip() + "\n"
 
 
+_OUTPUT_LABELS = {
+    "id": "记录编号",
+    "ids": "记录编号",
+    "list": "列表",
+    "items": "明细",
+    "no": "业务编号",
+    "total": "总数",
+}
+_OUTPUT_ENVELOPE_FIELDS = {"code", "data", "msg", "message", "success", "result", "payload"}
+
+
+def _output_overview(item: dict) -> str:
+    schema = item.get("output_schema") if isinstance(item.get("output_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    data = properties.get("data") if isinstance(properties.get("data"), dict) else None
+    if data and set(properties).issubset(_OUTPUT_ENVELOPE_FIELDS):
+        nested = data.get("properties") if isinstance(data.get("properties"), dict) else {}
+        if nested:
+            properties = nested
+        elif str(data.get("type") or "") == "array":
+            return "业务结果列表"
+        else:
+            return "操作结果" if item.get("is_write") else "业务结果"
+
+    labels: list[str] = []
+    for name, raw in properties.items():
+        if name in _OUTPUT_ENVELOPE_FIELDS or not isinstance(raw, dict):
+            continue
+        label = _safe_text(raw.get("label") or raw.get("title") or _OUTPUT_LABELS.get(str(name), ""))
+        if not label or (label == str(name) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label)):
+            label = _OUTPUT_LABELS.get(str(name), "")
+        if label and label not in labels:
+            labels.append(label.replace("|", "\\|"))
+    if labels:
+        shown = "、".join(labels[:5])
+        return shown + ("等" if len(labels) > 5 else "")
+    return "操作结果" if item.get("is_write") else "业务结果"
+
+
 def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
     lines = [
         "# 业务能力",
         "",
         "只在需要判断某个能力的输入输出边界时阅读本文件。不要把这里当成路线说明书。",
         "",
-        "| 能力 | 何时使用 | 类型 | 调用入口 | 必要输入概况 | 完成判断 | 主要风险 |",
-        "|---|---|---|---|---|---|---|",
+        "| 能力 | 何时使用 | 类型 | 调用入口 | 必要输入概况 | 关键输出概况 | 完成判断 | 主要风险 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for item in plans:
         write = bool(item.get("is_write"))
@@ -1805,14 +1864,11 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
             risk = "结果未知不得重试"
         else:
             risk = "只读，不得升级成写入"
-        done = (
-            "已确认且调用返回成功；仅在有已验证回查时声明状态已复核"
-            if write
-            else "已返回可核对的业务结果"
-        )
+        done = _plan_done_label(item)
         lines.append(
             f"| {_safe_text(item.get('title') or item.get('name'))} | {_intent_for_plan(skill, item)} | "
-            f"{'变更' if write else '只读'} | `{_script_invocation(item)}` | {required} | {done} | {risk} |"
+            f"{'变更' if write else '只读'} | `{_script_invocation(item)}` | {required} | "
+            f"{_output_overview(item)} | {done} | {risk} |"
         )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -2666,7 +2722,7 @@ def _response_key_map(link, source, body, values):
         if input_fields_by_label else values.get(input_field)
     )
     if not isinstance(collection, list) or not collection:
-        raise RuntimeError(f"dynamic structure source unavailable: {link.get('link_id')}")
+        raise RuntimeError("dynamic structure source unavailable")
     if binding.get("kind") != "caller_map_by_label" or not isinstance(caller_map, dict):
         raise RuntimeError(f"dynamic structure input {input_field} must be an object")
     rows = []
@@ -2674,12 +2730,12 @@ def _response_key_map(link, source, body, values):
         key = get_path(item, link.get("key_path"))
         label = get_path(item, link.get("label_path"))
         if key in (None, "") or label in (None, ""):
-            raise RuntimeError(f"dynamic structure node lacks id/name: {link.get('link_id')}")
+            raise RuntimeError("dynamic structure node lacks id/name")
         rows.append((str(key), str(label)))
     keys = [key for key, _label in rows]
     labels = [label for _key, label in rows]
     if len(set(keys)) != len(keys) or len(set(labels)) != len(labels):
-        raise RuntimeError(f"dynamic structure node id/name is duplicated: {link.get('link_id')}")
+        raise RuntimeError("dynamic structure node id/name is duplicated")
     required_labels = [str(label) for label in (binding.get("required_labels") or labels)]
     ignored_labels = {str(label) for label in (binding.get("ignored_labels") or [])}
     row_by_label = {label: key for key, label in rows}
@@ -2730,13 +2786,13 @@ def execute_plan(plan, inputs):
                 continue
             from_index = int(link.get("from_index", -1))
             if from_index < 0 or from_index >= len(outputs):
-                raise RuntimeError(f"verified dependency source unavailable: {link.get('link_id')}")
+                raise RuntimeError("dependency source unavailable")
             if str(link.get("kind") or "") == "response_key_map":
                 body = _response_key_map(link, outputs[from_index]["data"], body, values)
                 continue
             value = get_path(outputs[from_index]["data"], link.get("read_path"))
             if value is None:
-                raise RuntimeError(f"verified dependency value missing: {link.get('verification_id')}")
+                raise RuntimeError("dependency value missing")
             target = str(link.get("write_path") or "")
             if target.startswith("query."):
                 query = deep_set(query or {}, target[6:], value)
@@ -2754,7 +2810,7 @@ def execute_plan(plan, inputs):
         )
         outputs.append(result)
         if not result["ok"]:
-            return {"ok": False, "failed_step": step.get("step_id"), "results": outputs}
+            return {"ok": False, "operation": plan.get("title") or plan.get("name"), "results": outputs}
         if str(step.get("method") or "GET").upper() not in {"GET", "HEAD"}:
             settle()
     return {"ok": True, "results": outputs, "data": outputs[-1]["data"] if outputs else None}

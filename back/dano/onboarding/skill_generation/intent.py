@@ -268,47 +268,37 @@ def _is_sequence_connector(between: str) -> bool:
     return stripped in {"马上", "立即"} or stripped.startswith(("马上", "立即"))
 
 
-def _has_sequence_between_hits(
+def _sequence_pair_between_hits(
     text: str,
     hits: list[tuple[int, int, FlowCapability, str]],
-) -> bool:
+) -> list[FlowCapability]:
     raw = str(text or "")
     if len(hits) < 2:
-        return False
+        return []
     for index in range(len(hits) - 1):
-        _start, end, _cap, _alias = hits[index]
-        nxt_start, nxt_end, _nxt_cap, _nxt_alias = hits[index + 1]
+        _start, end, cap, _alias = hits[index]
+        nxt_start, nxt_end, nxt_cap, _nxt_alias = hits[index + 1]
         between = raw[end:nxt_start]
         after = raw[nxt_start:nxt_end + 8]
         before = raw[max(0, end - 8):end]
-        if _is_sequence_connector(between):
-            return True
-        if ("优先" in between or "优先" in before) and "其次" in after:
-            return True
-        if ("在前" in between or "在前" in before) and "在后" in after:
-            return True
-    return False
+        connected = (
+            _is_sequence_connector(between)
+            or (("优先" in between or "优先" in before) and "其次" in after)
+            or (("在前" in between or "在前" in before) and "在后" in after)
+        )
+        if connected and capability_ref(cap) != capability_ref(nxt_cap):
+            return [cap, nxt_cap]
+    return []
 
 
 def _orders_from_mentions(
     text: str,
     caps: list[FlowCapability],
 ) -> list[list[FlowCapability]]:
-    """Compile appearance order when two named capabilities have sequence language between them."""
+    """Compile the two actions directly joined by sequence language."""
     hits = _alias_hits(text, caps)
-    if not _has_sequence_between_hits(text, hits):
-        return []
-    ordered: list[FlowCapability] = []
-    seen: set[str] = set()
-    for _start, _end, cap, _alias in hits:
-        key = capability_ref(cap)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        ordered.append(cap)
-    if len(ordered) < 2:
-        return []
-    return [ordered[:2]]
+    sequence = _sequence_pair_between_hits(text, hits)
+    return [sequence] if sequence else []
 
 
 def looks_like_ordered_multi_step(text: str, caps: list[FlowCapability]) -> bool:
