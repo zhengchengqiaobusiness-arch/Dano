@@ -460,7 +460,7 @@ new dependency types.
    with the exact array you sent. Count/name differences and missing public actions mean the
    capability snapshot was not read back exactly and must be reconciled from the action ledger.
    `field_axis_gaps`, rejected field/dependency ops and release validation findings are non-blocking
-   repair diagnostics: retain the full capability array, but do not resubmit it unchanged and do
+   repair diagnostics: retain the full capability array, but do not resubmit an unchanged capability array and do
    not treat those field findings as `submission_complete=false` when
    `capability_plan_complete=true`.
 7. Do not claim success for skipped, rejected, or rolled-back operations. Do not replace a valid
