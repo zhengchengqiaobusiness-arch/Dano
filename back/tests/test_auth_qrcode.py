@@ -92,3 +92,22 @@ def test_svg_data_uri可解码且含尺寸():
     assert uri.startswith("data:image/svg+xml;base64,")
     svg = base64.b64decode(uri.split(",", 1)[1]).decode("utf-8")
     assert svg.startswith("<svg") and "viewBox" in svg and "</svg>" in svg
+
+
+def test_能被真实解码器读回原文():
+    """用 OpenCV 的 QR 解码器把生成的码读回来 —— 比矩阵对拍更贴近"扫描器能不能认"。
+
+    opencv 不在 dev 依赖里(体积大),装了才跑;日常靠上面的逐掩码对拍把关。
+    """
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+
+    detector = cv2.QRCodeDetector()
+    for text in (OTPAUTH, "hello world", "x" * 180):
+        matrix = np.array(encode_matrix(text), dtype=np.uint8)
+        quiet, scale = 4, 8
+        canvas = np.ones((len(matrix) + quiet * 2,) * 2, dtype=np.uint8)
+        canvas[quiet:quiet + len(matrix), quiet:quiet + len(matrix)] = 1 - matrix
+        image = np.kron(canvas, np.ones((scale, scale), dtype=np.uint8)) * 255
+        decoded, _, _ = detector.detectAndDecode(image)
+        assert decoded == text
