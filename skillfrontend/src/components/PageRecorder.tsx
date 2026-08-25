@@ -62,6 +62,12 @@ import {
   rememberedSkillExportDraft,
 } from "../api/recording";
 import { routeSummaryFromOutcome } from "../api/skillExportDraft";
+import {
+  forgetRecordingResultId,
+  rememberedRecordingResultId,
+  rememberRecordingResultId,
+  selectRecordingResultToResume,
+} from "../api/recordingResume";
 import type { SkillGenerationRequest } from "../api/recording";
 import { getExportDirectory } from "../api/skills";
 import type {
@@ -682,7 +688,7 @@ export default function PageRecorder({
   const [expandedTools, setExpandedTools] = useState<Record<number, boolean>>({});
   const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(Boolean(tenant));
   const [activeResultId, setActiveResultId] = useState("");
   const [deletingId, setDeletingId] = useState("");
   const [openingId, setOpeningId] = useState("");
@@ -721,6 +727,7 @@ export default function PageRecorder({
   const activeResultIdRef = useRef("");
   const deletingIdRef = useRef("");
   const acceptNextSnapshotRef = useRef(false);
+  const restoreResultAttemptedRef = useRef(false);
   const [stageSevenOpen, setStageSevenOpen] = useState(false);
   const [skillExportOpen, setSkillExportOpen] = useState(false);
   const [skillExporting, setSkillExporting] = useState(false);
@@ -891,6 +898,23 @@ export default function PageRecorder({
       cancelled = true;
     };
   }, [tenant, subsystem]);
+
+  useEffect(() => {
+    if (restoreResultAttemptedRef.current || historyLoading || activeResultIdRef.current) return;
+    restoreResultAttemptedRef.current = true;
+    const rememberedId = rememberedRecordingResultId(sessionStorage);
+    if (!rememberedId) return;
+    const item = selectRecordingResultToResume(rememberedId, history);
+    if (!item) {
+      forgetRecordingResultId(sessionStorage);
+      return;
+    }
+    void openResult(item);
+  }, [history, historyLoading]);
+
+  useEffect(() => {
+    if (activeResultId) rememberRecordingResultId(sessionStorage, activeResultId);
+  }, [activeResultId]);
 
   useEffect(() => {
     if (!["editable", "published"].includes(status) || processing) return;
@@ -1232,6 +1256,7 @@ export default function PageRecorder({
         const row = incoming.result as RecordingResultSummary;
         upsertHistory(row);
         if (row.action === actionRef.current) {
+          rememberRecordingResultId(sessionStorage, row.id);
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
         }
@@ -1343,6 +1368,7 @@ export default function PageRecorder({
     cancellingRef.current = false;
     setCancelling(false);
     closeRecordingSocket();
+    forgetRecordingResultId(sessionStorage);
     const action = newActionName();
     actionRef.current = action;
     activeResultIdRef.current = "";
@@ -1580,6 +1606,7 @@ export default function PageRecorder({
         setViewStage(0);
         snapshotRef.current = null;
         setSnapshot(null);
+        forgetRecordingResultId(sessionStorage);
       }
     } catch {
       message.error("删除录制结果失败");
