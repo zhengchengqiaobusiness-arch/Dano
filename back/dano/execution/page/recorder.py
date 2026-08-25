@@ -1179,8 +1179,7 @@ _RECORDER_JS = r"""() => {
   function popupOptions(pop) {
     if (!pop) return [];
     try {
-      var aria_sel = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"],' +
-                     '[class*="tree-node"][data-key],[class*="tree-node"][data-value]';
+      var aria_sel = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"]';
       var frame_sel = '.el-select-dropdown__item,.ant-select-item-option,.ant-cascader-menu-item,' +
                       '.el-cascader-node,.el-autocomplete-suggestion li,' +
                       '.van-picker-column__item,.van-action-sheet__item,.van-dropdown-item,' +
@@ -1312,25 +1311,21 @@ _RECORDER_JS = r"""() => {
     try {
       var item = t && t.closest && t.closest(
         '[role="treeitem"],[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],' +
-        '.el-tree-node__content,.ant-tree-node-content-wrapper,' +
-        '[class*="tree-node"][data-key],[class*="tree-node"][data-value]'
+        '.el-tree-node__content,.ant-tree-node-content-wrapper'
       );
       if (!item) return null;
-      var owner = item.parentElement && item.parentElement.closest && item.parentElement.closest(
-        '[role="tree"],[role="listbox"],[role="radiogroup"],[role="menu"],.el-tree,.ant-tree,[class*="tree"]'
+      var owner = item.closest && item.closest(
+        '[role="tree"],[role="listbox"],[role="radiogroup"],[role="menu"],.el-tree,.ant-tree'
       );
       if (!owner) return null;
       var ownerLabel = clean(owner.getAttribute('aria-label'))
         || referencedText(owner.getAttribute('aria-labelledby'))
         || clean(labelText(owner));
       if (!ownerLabel) {
-        var scope = owner;
-        for (var depth = 0; scope && depth < 6 && !ownerLabel; depth++, scope = scope.parentElement) {
-          var sibling = scope.previousElementSibling;
-          for (var i = 0; sibling && i < 3; i++, sibling = sibling.previousElementSibling) {
-            var siblingText = clean(sibling.innerText || sibling.textContent || '');
-            if (siblingText && siblingText.length <= 40) { ownerLabel = siblingText; break; }
-          }
+        var sibling = owner.previousElementSibling;
+        for (var i = 0; sibling && i < 3; i++, sibling = sibling.previousElementSibling) {
+          var siblingText = clean(sibling.innerText || sibling.textContent || '');
+          if (siblingText && siblingText.length <= 40) { ownerLabel = siblingText; break; }
         }
       }
       var aliases = controlAliases(owner);

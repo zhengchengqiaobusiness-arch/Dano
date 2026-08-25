@@ -75,13 +75,14 @@ async def test_persistent_tree_selection_is_recorded_as_field_evidence() -> None
             recorder.page = page
             recorder._attach_diag_handlers(page)
             await page.set_content(
-                '<section><div>部门列表</div><div><div class="app-tree" data-field="ssbmId">'
-                '<div class="app-tree-node" data-key="0202">市交通运输局(27)</div>'
-                '<div class="app-tree-node" data-key="0303">市农业农村局(12)</div>'
-                '</div></div></section>'
+                '<section><h2 id="departments">部门列表</h2>'
+                '<ul role="tree" aria-labelledby="departments" data-field="ssbmId">'
+                '<li role="treeitem" data-value="0202">市交通运输局(27)</li>'
+                '<li role="treeitem" data-value="0303">市农业农村局(12)</li>'
+                '</ul></section>'
             )
 
-            item = page.get_by_text("市交通运输局(27)", exact=True)
+            item = page.get_by_role("treeitem", name="市交通运输局(27)")
             box = await item.bounding_box()
             assert box is not None
             await recorder.dispatch_input({
