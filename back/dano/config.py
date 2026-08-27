@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     token_refresh_sources: dict
     token_refresh_key: str
 
+    auth_min_password_length: int = 12
+    auth_max_failures: int = 5
+    auth_lock_max_minutes: int = 30
+    auth_challenge_ttl_seconds: int = 300
+
     review_enabled: bool
     review_model_acceptance: str
     review_model_security: str

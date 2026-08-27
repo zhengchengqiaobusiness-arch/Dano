@@ -31,6 +31,25 @@ class InMemoryRegistry:
         if rec is not None:
             self._tenants[tenant] = rec.model_copy(update={"password_hash": password_hash})
 
+    # ── 两步验证(TOTP)──
+    async def set_totp_pending(self, tenant: str, secret: str) -> None:
+        self._update(tenant, {"totp_pending": secret})
+
+    async def activate_totp(self, tenant: str, secret: str, backup_hashes: list[str]) -> None:
+        self._update(tenant, {"totp_secret": secret, "totp_pending": "",
+                              "backup_codes": list(backup_hashes)})
+
+    async def disable_totp(self, tenant: str) -> None:
+        self._update(tenant, {"totp_secret": "", "totp_pending": "", "backup_codes": []})
+
+    async def set_backup_codes(self, tenant: str, backup_hashes: list[str]) -> None:
+        self._update(tenant, {"backup_codes": list(backup_hashes)})
+
+    def _update(self, tenant: str, changes: dict) -> None:
+        rec = self._tenants.get(tenant)
+        if rec is not None:
+            self._tenants[tenant] = rec.model_copy(update=changes)
+
 
 class PgRegistry:
     """PostgreSQL 持久化登记。无状态,依赖全局连接池。"""
@@ -76,3 +95,28 @@ class PgRegistry:
             await conn.execute(
                 "UPDATE tenants SET password_hash=$2 WHERE tenant=$1", tenant, password_hash
             )
+
+    # ── 两步验证(TOTP)。新列都有默认空值,create_tenant 的 INSERT 无需改动 ──
+    async def set_totp_pending(self, tenant: str, secret: str) -> None:
+        await self._execute("UPDATE tenants SET totp_pending=$2 WHERE tenant=$1", tenant, secret)
+
+    async def activate_totp(self, tenant: str, secret: str, backup_hashes: list[str]) -> None:
+        await self._execute(
+            "UPDATE tenants SET totp_secret=$2, totp_pending='', backup_codes=$3 WHERE tenant=$1",
+            tenant, secret, list(backup_hashes))
+
+    async def disable_totp(self, tenant: str) -> None:
+        await self._execute(
+            "UPDATE tenants SET totp_secret='', totp_pending='', backup_codes='{}' "
+            "WHERE tenant=$1", tenant)
+
+    async def set_backup_codes(self, tenant: str, backup_hashes: list[str]) -> None:
+        await self._execute("UPDATE tenants SET backup_codes=$2 WHERE tenant=$1",
+                            tenant, list(backup_hashes))
+
+    @staticmethod
+    async def _execute(sql: str, *args) -> None:
+        from dano.infra.db import get_pool
+
+        async with get_pool().acquire() as conn:
+            await conn.execute(sql, *args)

@@ -33,8 +33,8 @@ export default function RegisterTenant() {
           <Form.Item name="username" label="登录用户名" rules={[{ required: true, message: "填登录用户名" }]}>
             <Input placeholder="acme" autoComplete="username" />
           </Form.Item>
-          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: "至少 8 位" }]}>
-            <Input.Password placeholder="初始密码(至少 8 位)" autoComplete="new-password" />
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 12, message: "至少 12 位" }]}>
+            <Input.Password placeholder="初始密码(至少 12 位)" autoComplete="new-password" />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={loading} block>
             创建并进入

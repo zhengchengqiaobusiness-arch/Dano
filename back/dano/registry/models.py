@@ -63,8 +63,18 @@ class TenantRecord(BaseModel):
     username: str = ""
     password_hash: str = ""
     api_key: str = Field(default_factory=new_api_key)
+    # ── 两步验证(TOTP)。totp_secret 空 = 未绑定;totp_pending 是尚未验证的密钥 ──
+    totp_secret: str = ""
+    totp_pending: str = ""
+    backup_codes: list[str] = Field(default_factory=list)   # sha256 哈希,明文不入库
 
-    @field_validator("password_hash", mode="before")
+    @field_validator("password_hash", "totp_secret", "totp_pending", mode="before")
     @classmethod
-    def normalize_legacy_null_password_hash(cls, value: str | None) -> str:
+    def normalize_legacy_null_text(cls, value: str | None) -> str:
+        """迁移前建的老行这些列是 NULL,统一归一化成空串。"""
         return value or ""
+
+    @field_validator("backup_codes", mode="before")
+    @classmethod
+    def normalize_legacy_null_codes(cls, value: list[str] | None) -> list[str]:
+        return list(value or [])

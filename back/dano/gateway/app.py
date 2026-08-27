@@ -32,7 +32,11 @@ from dano.catalog.manifest import build_function_tools, build_manifests, skill_i
 from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
 from dano.execution.harness.harness import Harness
-from dano.infra.passwords import hash_password, verify_password
+from dano.auth.policy import PasswordPolicyError, validate_password
+from dano.config import get_settings
+from dano.auth.service import AuthError, AuthService
+from dano.auth.store import InMemoryAuthStore, PgAuthStore
+from dano.infra.passwords import hash_password
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload
 from dano.orchestrator.skills import SkillRegistry
@@ -94,6 +98,7 @@ def _recording_subsystem(tenant: str, configured: object, start_url: str) -> str
 
 
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
+_auth_store = InMemoryAuthStore()     # DB 就绪换 PgAuthStore(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
 _lifecycle_reconciler = LifecycleRegistrationReconciler(
     _lifecycle,
@@ -233,12 +238,13 @@ async def lifespan(app: FastAPI):
     from dano.infra.logging import configure_logging
     configure_logging()                    # **先配日志**:否则后台看不到任何记录
     log.info("gateway.starting")
-    global _registry, _lifecycle, _lifecycle_reconciler, _breaker
+    global _registry, _auth_store, _lifecycle, _lifecycle_reconciler, _breaker
     db_status = "unavailable"
     try:
         await init_pool()
         await run_migrations()
         _registry = PgRegistry()
+        _auth_store = PgAuthStore()
         # 生命周期/失败计数落 PG:重启后 Skill 状态、暂停态、失败计数不丢(否则已熔断 Skill 复活)
         from dano.lifecycle.pg_store import PgSkillStore
         from dano.lifecycle.pg_outbox import PgLifecycleOutboxStore
@@ -503,33 +509,74 @@ async def create_tenant(req: TenantCreate) -> dict:
     username = (payload.get("username") or req.tenant).strip()
     password = (payload.get("password") or "").strip()
     if username and password:
+        try:
+            validate_password(password, username=username, tenant=req.tenant,
+                              min_length=get_settings().auth_min_password_length)
+        except PasswordPolicyError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         payload["username"] = username
         payload["password_hash"] = hash_password(password)
     rec = await _registry.create_tenant(TenantRecord(**payload))
     return rec.model_dump()
 
 
-# ── 后台登录(每租户一个用户名/密码账号)──
+# ── 后台登录(每租户一个用户名/密码账号 + 可选 TOTP 二因子)──
+def _auth_service() -> AuthService:
+    """每次现取:lifespan 里 _registry/_auth_store 会被换成 Pg 版。"""
+    return AuthService(registry=_registry, store=_auth_store, settings=get_settings())
+
+
+def _http(err: AuthError) -> HTTPException:
+    return HTTPException(status_code=err.status, detail=err.detail)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 
-@app.post("/auth/login")
-async def auth_login(req: LoginRequest) -> dict:
-    """用户名+密码登录;成功返回该租户 api_key(前端沿用 X-Tenant-Key 访问)。"""
-    username = req.username.strip()
-    rec = await _registry.get_tenant_by_username(username)
-    if rec is None or not rec.password_hash:
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-    if not verify_password(req.password, rec.password_hash):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-    return {"tenant": rec.tenant, "api_key": rec.api_key}
+class TotpLoginRequest(BaseModel):
+    challenge: str
+    code: str
 
 
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
+    code: str = ""        # 已开启两步验证时必填
+
+
+class TotpCodeRequest(BaseModel):
+    code: str
+
+
+class TotpConfirmRequest(BaseModel):
+    password: str
+    code: str
+
+
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest) -> dict:
+    """用户名+密码登录。未绑定两步验证直接返回 api_key(前端沿用 X-Tenant-Key);
+    已绑定则返回 challenge,前端补验证码走 /auth/login/totp 换 api_key。"""
+    try:
+        result = await _auth_service().login(req.username, req.password)
+    except AuthError as e:
+        raise _http(e) from e
+    if result.need_totp:
+        return {"need_totp": True, "challenge": result.challenge,
+                "expires_in": result.expires_in}
+    return {"tenant": result.tenant, "api_key": result.api_key}
+
+
+@app.post("/auth/login/totp")
+async def auth_login_totp(req: TotpLoginRequest) -> dict:
+    """两步登录第二步:验证码可以是 6 位 TOTP,也可以是备用码。"""
+    try:
+        result = await _auth_service().verify_totp_login(req.challenge, req.code)
+    except AuthError as e:
+        raise _http(e) from e
+    return {"tenant": result.tenant, "api_key": result.api_key}
 
 
 @app.post("/auth/change-password")
@@ -537,18 +584,61 @@ async def auth_change_password(
     req: ChangePasswordRequest,
     x_tenant_key: str | None = Header(default=None),
 ) -> dict:
-    """已登录租户修改自己的密码;需携带 X-Tenant-Key 确认身份。"""
-    tenant = await _auth_tenant(x_tenant_key)
-    rec = await _registry.get_tenant_by_key(x_tenant_key)
-    if rec is None or not rec.password_hash:
-        raise HTTPException(status_code=403, detail="该租户未启用密码登录")
-    if not verify_password(req.old_password, rec.password_hash):
-        raise HTTPException(status_code=401, detail="原密码错误")
-    new_password = req.new_password.strip()
-    if len(new_password) < 8:
-        raise HTTPException(status_code=400, detail="新密码至少 8 位")
-    await _registry.update_tenant_password(tenant, hash_password(new_password))
+    """已登录租户修改自己的密码;已开启两步验证时必须同时给验证码。"""
+    try:
+        await _auth_service().change_password(
+            x_tenant_key or "", req.old_password, req.new_password, req.code)
+    except AuthError as e:
+        raise _http(e) from e
     return {"status": "ok"}
+
+
+@app.post("/auth/totp/setup")
+async def auth_totp_setup(x_tenant_key: str | None = Header(default=None)) -> dict:
+    """生成待绑定密钥与扫码二维码;此时尚未生效,需 activate 确认。"""
+    try:
+        return await _auth_service().totp_setup(x_tenant_key or "")
+    except AuthError as e:
+        raise _http(e) from e
+
+
+@app.post("/auth/totp/activate")
+async def auth_totp_activate(
+    req: TotpCodeRequest,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """用 Authenticator 上的码确认绑定,返回一次性备用码(明文仅此一次)。"""
+    try:
+        codes = await _auth_service().totp_activate(x_tenant_key or "", req.code)
+    except AuthError as e:
+        raise _http(e) from e
+    return {"backup_codes": codes}
+
+
+@app.post("/auth/totp/disable")
+async def auth_totp_disable(
+    req: TotpConfirmRequest,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    try:
+        await _auth_service().totp_disable(x_tenant_key or "", req.password, req.code)
+    except AuthError as e:
+        raise _http(e) from e
+    return {"status": "ok"}
+
+
+@app.post("/auth/totp/backup-codes")
+async def auth_regenerate_backup_codes(
+    req: TotpConfirmRequest,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """重新生成备用码,旧的全部作废。"""
+    try:
+        codes = await _auth_service().regenerate_backup_codes(
+            x_tenant_key or "", req.password, req.code)
+    except AuthError as e:
+        raise _http(e) from e
+    return {"backup_codes": codes}
 
 
 # ── 接入(pi 自主生成)──
