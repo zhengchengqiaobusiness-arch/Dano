@@ -9,6 +9,14 @@ const parameters = (properties: Record<string, unknown>, required: string[] = []
 }) as any;
 
 export default function businessSkillStudio(pi: ExtensionAPI) {
+  const piBaseUrl = process.env.PI_BASE_URL?.trim();
+  if (piBaseUrl && process.env.PI_API_KEY) {
+    pi.registerProvider("xiaomi-token-plan-cn", {
+      baseUrl: piBaseUrl,
+      apiKey: "$PI_API_KEY"
+    });
+  }
+
   const studio = new StudioService();
 
   pi.on("session_shutdown", async () => {
