@@ -6,6 +6,70 @@ import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
 import { UI_RECORDER_SCRIPT } from "./ui-script.js";
 
+// Construct browser-context functions from static source. When this file is
+// run through tsx/esbuild, serializing a TypeScript callback can otherwise
+// leak bundler helpers (for example `__name`) into the page context.
+const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
+  const text = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
+  const form = el.closest("form");
+  return {
+    text: text(el.textContent || el.value || ""),
+    label: el.getAttribute("aria-label") || undefined,
+    name: el.getAttribute("name") || undefined,
+    type: el.getAttribute("type") || undefined,
+    role: el.getAttribute("role") || undefined,
+    formText: text((form && form.textContent) || ""),
+    formMethod: form ? form.getAttribute("method") || undefined : undefined,
+    formAction: form ? form.getAttribute("action") || undefined : undefined
+  };
+`) as (element: Element) => unknown;
+
+const SNAPSHOT_IN_PAGE = new Function(String.raw`
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
+  const selectorOf = (el) => {
+    if (el.id) return "#" + CSS.escape(el.id);
+    const testid = el.getAttribute("data-testid");
+    if (testid) return '[data-testid="' + CSS.escape(testid) + '"]';
+    const name = el.getAttribute("name");
+    if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
+    const aria = el.getAttribute("aria-label");
+    if (aria) return el.tagName.toLowerCase() + '[aria-label="' + CSS.escape(aria) + '"]';
+    const parts = [];
+    let node = el;
+    for (let i = 0; node && i < 4; i++, node = node.parentElement) {
+      let part = node.tagName.toLowerCase();
+      const classes = Array.from(node.classList).slice(0, 2);
+      if (classes.length) part += "." + classes.map((item) => CSS.escape(item)).join(".");
+      parts.unshift(part);
+    }
+    return parts.join(" > ");
+  };
+  const controls = Array.from(document.querySelectorAll(
+    'a,button,input,select,textarea,[contenteditable="true"],[role="button"],[role="combobox"],[role="option"],[role="link"],[role="checkbox"],[role="switch"],[role="radio"],[role="tab"],[role="menuitem"]'
+  )).filter((el) => {
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  }).slice(0, 250).map((el) => ({
+    selector: selectorOf(el),
+    tag: el.tagName.toLowerCase(),
+    role: el.getAttribute("role") || undefined,
+    label: el.getAttribute("aria-label") || undefined,
+    name: el.getAttribute("name") || undefined,
+    type: el.getAttribute("type") || undefined,
+    placeholder: el.getAttribute("placeholder") || undefined,
+    required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
+    disabled: el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true",
+    text: clean(el.textContent || el.value || "").slice(0, 300)
+  }));
+  return {
+    title: document.title,
+    url: location.href,
+    text: clean(document.body.innerText),
+    controls
+  };
+`) as () => unknown;
+
 interface ActiveRecording {
   session: RecordingSession;
   browser?: Browser;
@@ -27,6 +91,29 @@ export class BrowserRecorder {
 
   activeSession() {
     return this.active?.session;
+  }
+
+  async state() {
+    if (!this.active) return { active: false as const };
+    const page = this.currentPage();
+    return {
+      active: true as const,
+      session: this.active.session,
+      url: page.url(),
+      title: await page.title().catch(() => ""),
+      viewport: page.viewportSize()
+    };
+  }
+
+  async preview(): Promise<Buffer> {
+    const page = this.currentPage();
+    return page.screenshot({ type: "png", fullPage: false });
+  }
+
+  async reload() {
+    const page = this.currentPage();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    return { url: page.url(), title: await page.title() };
   }
 
   async start(startUrl: string, name = "recording"): Promise<RecordingSession> {
@@ -71,11 +158,12 @@ export class BrowserRecorder {
 
   private async instrument(context: BrowserContext) {
     await context.exposeBinding("__bssRecordUi", async ({ page }, payload: any) => {
-      if (!this.active || !page) return;
+      const active = this.active;
+      if (!active || !page) return;
       const event: UiEvidence = {
         id: id("ui"),
         kind: "ui",
-        sessionId: this.active.session.id,
+        sessionId: active.session.id,
         at: new Date().toISOString(),
         pageUrl: String(payload?.pageUrl || page.url()),
         eventType: ["click", "input", "change", "submit"].includes(payload?.eventType) ? payload.eventType : "click",
@@ -91,8 +179,8 @@ export class BrowserRecorder {
         visibleOptions: redactValue(payload?.visibleOptions) as string[],
         form: redactValue(payload?.form) as UiEvidence["form"]
       };
-      this.active.lastUiByPage.set(page, event);
-      await appendJsonl(this.active.eventsFile, event);
+      active.lastUiByPage.set(page, event);
+      await appendJsonl(active.eventsFile, event);
     });
 
     await context.addInitScript({ content: UI_RECORDER_SCRIPT });
@@ -150,7 +238,7 @@ export class BrowserRecorder {
     const postData = request.postData();
     const rawHeaders = await request.allHeaders();
     const contentType = rawHeaders["content-type"] || "";
-    let body: unknown = parsePossiblyJson(postData);
+    let body: unknown;
     if (postData && /application\/x-www-form-urlencoded/i.test(contentType)) {
       const params = new URLSearchParams(postData);
       const form: Record<string, string | string[]> = {};
@@ -161,6 +249,14 @@ export class BrowserRecorder {
         else form[key] = [previous, value];
       }
       body = redactValue(form);
+    } else if (postData && /multipart\/form-data/i.test(contentType)) {
+      const fieldNames = [...postData.matchAll(/name="([^"]+)"/g)].map(match => match[1]!).filter(Boolean);
+      body = Object.fromEntries([...new Set(fieldNames)].map(name => [name, "[MULTIPART_VALUE_NOT_CAPTURED]"]));
+    } else if (postData && /json|graphql/i.test(contentType)) {
+      body = parsePossiblyJson(postData);
+    } else if (postData) {
+      const parsed = parsePossiblyJson(postData);
+      body = parsed && typeof parsed === "object" ? parsed : undefined;
     }
     return {
       method: request.method(),
@@ -168,34 +264,36 @@ export class BrowserRecorder {
       resourceType: request.resourceType(),
       headers: redactHeaders(rawHeaders),
       query: redactValue(this.queryOf(request.url())) as Record<string, string | string[]>,
-      body
+      body: redactValue(body)
     };
   }
 
   private async captureFailedRequest(request: Request) {
-    if (!this.active || !this.shouldCapture(request)) return;
+    const active = this.active;
+    if (!active || !this.shouldCapture(request)) return;
     const page = this.pageFor(request);
-    const ui = this.recentUi(page);
+    const ui = this.recentUi(page, active);
     const event: NetworkEvidence = {
-      id: this.active.requestIds.get(request) || id("net"),
+      id: active.requestIds.get(request) || id("net"),
       kind: "network",
-      sessionId: this.active.session.id,
+      sessionId: active.session.id,
       at: new Date().toISOString(),
       pageUrl: page?.url(),
       correlatedUiEvidenceId: ui?.id,
       request: await this.requestPart(request),
       failure: request.failure()?.errorText || "request failed"
     };
-    await appendJsonl(this.active.eventsFile, event);
+    await appendJsonl(active.eventsFile, event);
   }
 
   private async captureResponse(response: Response) {
-    if (!this.active) return;
+    const active = this.active;
+    if (!active) return;
     const request = response.request();
     if (!this.shouldCapture(request)) return;
 
     const page = this.pageFor(request);
-    const ui = this.recentUi(page);
+    const ui = this.recentUi(page, active);
 
     let body: unknown;
     let truncated = false;
@@ -221,9 +319,9 @@ export class BrowserRecorder {
     }
 
     const event: NetworkEvidence = {
-      id: this.active.requestIds.get(request) || id("net"),
+      id: active.requestIds.get(request) || id("net"),
       kind: "network",
-      sessionId: this.active.session.id,
+      sessionId: active.session.id,
       at: new Date().toISOString(),
       pageUrl: page?.url(),
       correlatedUiEvidenceId: ui?.id,
@@ -235,12 +333,12 @@ export class BrowserRecorder {
         truncated
       }
     };
-    await appendJsonl(this.active.eventsFile, event);
+    await appendJsonl(active.eventsFile, event);
   }
 
-  private recentUi(page?: Page) {
-    if (!this.active || !page) return undefined;
-    const ui = this.active.lastUiByPage.get(page);
+  private recentUi(page?: Page, active = this.active) {
+    if (!active || !page) return undefined;
+    const ui = active.lastUiByPage.get(page);
     if (!ui) return undefined;
     return Date.now() - Date.parse(ui.at) <= 8_000 ? ui : undefined;
   }
@@ -253,21 +351,48 @@ export class BrowserRecorder {
   }
 
   async inspectTarget(selector: string) {
+    const locator = await this.locate(selector);
+    return locator.evaluate(INSPECT_TARGET_IN_PAGE);
+  }
+
+  private async locate(selector: string) {
     const page = this.currentPage();
-    return page.locator(selector).first().evaluate(el => {
-      const text = (value: unknown) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
-      const form = el.closest("form");
-      return {
-        text: text(el.textContent || (el as HTMLInputElement).value || ""),
-        label: el.getAttribute("aria-label") || undefined,
-        name: el.getAttribute("name") || undefined,
-        type: el.getAttribute("type") || undefined,
-        role: el.getAttribute("role") || undefined,
-        formText: text(form?.textContent || ""),
-        formMethod: form?.getAttribute("method") || undefined,
-        formAction: form?.getAttribute("action") || undefined
-      };
-    });
+    for (const frame of page.frames()) {
+      const locator = frame.locator(selector).first();
+      if (await locator.count()) return locator;
+    }
+    throw new Error(`Selector not found in the page or its frames: ${selector}`);
+  }
+
+  async manualControl(command:
+    | { action: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: number }
+    | { action: "text"; value: string }
+    | { action: "key"; key: string }
+    | { action: "scroll"; deltaX?: number; deltaY?: number }
+  ) {
+    const page = this.currentPage();
+    if (command.action === "click") {
+      const viewport = page.viewportSize();
+      if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
+      if (command.x < 0 || command.y < 0 || command.x > viewport.width || command.y > viewport.height) {
+        throw new Error("manual click coordinates are outside the embedded browser viewport");
+      }
+      await page.mouse.click(command.x, command.y, {
+        button: command.button || "left",
+        clickCount: Math.max(1, Math.min(Number(command.clickCount) || 1, 2))
+      });
+    } else if (command.action === "text") {
+      if (typeof command.value !== "string" || command.value.length > 10_000) throw new Error("manual text requires a string no longer than 10000 characters");
+      await page.keyboard.insertText(command.value);
+    } else if (command.action === "key") {
+      if (typeof command.key !== "string" || !command.key || command.key.length > 80) throw new Error("manual key requires a valid key name");
+      await page.keyboard.press(command.key);
+    } else {
+      const deltaX = Math.max(-5_000, Math.min(Number(command.deltaX) || 0, 5_000));
+      const deltaY = Math.max(-5_000, Math.min(Number(command.deltaY) || 0, 5_000));
+      await page.mouse.wheel(deltaX, deltaY);
+    }
+    return { ok: true, url: page.url(), title: await page.title().catch(() => "") };
   }
 
   async control(command: {
@@ -286,19 +411,19 @@ export class BrowserRecorder {
         return { url: page.url(), title: await page.title() };
       case "click":
         if (!command.selector) throw new Error("click requires selector");
-        await page.locator(command.selector).first().click();
+        await (await this.locate(command.selector)).click();
         return { ok: true, url: page.url() };
       case "fill":
         if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
-        await page.locator(command.selector).first().fill(command.value);
+        await (await this.locate(command.selector)).fill(command.value);
         return { ok: true };
       case "select":
         if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
-        await page.locator(command.selector).first().selectOption(command.value);
+        await (await this.locate(command.selector)).selectOption(command.value);
         return { ok: true };
       case "press":
         if (!command.selector || !command.key) throw new Error("press requires selector and key");
-        await page.locator(command.selector).first().press(command.key);
+        await (await this.locate(command.selector)).press(command.key);
         return { ok: true };
       case "wait":
         await page.waitForTimeout(Math.max(0, Math.min(command.ms || 500, 30_000)));
@@ -311,49 +436,15 @@ export class BrowserRecorder {
         return { file, url: page.url() };
       }
       case "snapshot": {
-        const snapshot = await page.locator("body").evaluate(() => {
-          const clean = (v: unknown) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 300);
-          const selectorOf = (el: Element) => {
-            if ((el as HTMLElement).id) return `#${CSS.escape((el as HTMLElement).id)}`;
-            const testid = el.getAttribute("data-testid");
-            if (testid) return `[data-testid="${CSS.escape(testid)}"]`;
-            const name = el.getAttribute("name");
-            if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
-            const aria = el.getAttribute("aria-label");
-            if (aria) return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
-            const parts: string[] = [];
-            let node: Element | null = el;
-            for (let i = 0; node && i < 4; i++, node = node.parentElement) {
-              let part = node.tagName.toLowerCase();
-              const classes = [...node.classList].slice(0, 2);
-              if (classes.length) part += "." + classes.map(c => CSS.escape(c)).join(".");
-              parts.unshift(part);
-            }
-            return parts.join(" > ");
-          };
-          const controls = [...document.querySelectorAll(
-            'a,button,input,select,textarea,[role="button"],[role="combobox"],[role="option"],[role="link"]'
-          )].filter(el => {
-            const s = getComputedStyle(el);
-            const r = el.getBoundingClientRect();
-            return s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0;
-          }).slice(0, 250).map(el => ({
-            selector: selectorOf(el),
-            tag: el.tagName.toLowerCase(),
-            role: el.getAttribute("role") || undefined,
-            label: el.getAttribute("aria-label") || undefined,
-            name: el.getAttribute("name") || undefined,
-            type: el.getAttribute("type") || undefined,
-            text: clean(el.textContent || (el as HTMLInputElement).value || "")
-          }));
-          return {
-            title: document.title,
-            url: location.href,
-            text: clean(document.body.innerText).slice(0, 12_000),
-            controls
-          };
-        });
-        return snapshot;
+        const frames = [];
+        for (const frame of page.frames()) {
+          try {
+            frames.push({ frameUrl: frame.url(), ...(await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as any) });
+          } catch {
+            frames.push({ frameUrl: frame.url(), unavailable: true });
+          }
+        }
+        return { ...frames[0], frames: frames.slice(1) };
       }
     }
   }

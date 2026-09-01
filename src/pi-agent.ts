@@ -1,4 +1,4 @@
-import { getModel } from "@earendil-works/pi-ai";
+import { getModels } from "@earendil-works/pi-ai/compat";
 import {
   createAgentSession,
   ModelRuntime,
@@ -9,7 +9,7 @@ const prompt = process.argv.slice(2).join(" ") ||
   "Use the business-skill-studio skill to explain the next safe step.";
 
 const modelId = process.env.OPENAI_MODEL || "gpt-5.5";
-const model = getModel("openai", modelId);
+const model = getModels("openai").find(candidate => candidate.id === modelId);
 if (!model) throw new Error(`Pi built-in OpenAI model not found: ${modelId}`);
 
 const modelRuntime = await ModelRuntime.create();

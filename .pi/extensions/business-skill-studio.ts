@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StudioService } from "../../src/studio-service.js";
+import { getByPath, setByPath } from "../../src/utils.js";
 
 const parameters = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
@@ -18,23 +19,53 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   }
 
   const studio = new StudioService();
+  const browserServiceUrl = process.env.BSS_BROWSER_SERVICE_URL?.replace(/\/+$/, "");
+  const browserServiceToken = process.env.BSS_BROWSER_SERVICE_TOKEN;
+
+  const browserRequest = async <T>(path: string, body?: unknown): Promise<T> => {
+    if (!browserServiceUrl || !browserServiceToken) throw new Error("Embedded browser service is unavailable");
+    const response = await fetch(`${browserServiceUrl}/internal/browser${path}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${browserServiceToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body ?? {})
+    });
+    const payload = await response.json().catch(() => ({})) as any;
+    if (!response.ok) throw new Error(payload.error || `Embedded browser request failed: ${response.status}`);
+    return payload as T;
+  };
+
+  const startBrowser = (url: string, name?: string) => browserServiceUrl
+    ? browserRequest<any>("/start", { url, name })
+    : studio.startRecording(url, name);
+  const stopBrowser = () => browserServiceUrl
+    ? browserRequest<any>("/stop")
+    : studio.stopRecording();
+  const inspectBrowserTarget = (selector: string) => browserServiceUrl
+    ? browserRequest<any>("/inspect", { selector })
+    : studio.recorder.inspectTarget(selector);
+  const controlBrowser = (command: any) => browserServiceUrl
+    ? browserRequest<any>("/control", command)
+    : studio.recorder.control(command);
 
   pi.on("session_shutdown", async () => {
-    if (studio.recorder.isActive()) await studio.stopRecording().catch(() => {});
+    if (!browserServiceUrl && studio.recorder.isActive()) await studio.stopRecording().catch(() => {});
   });
 
   pi.registerTool({
     name: "business_skill_record_start",
     label: "Start business recording",
-    description: "Launch a headed browser and start recording real UI actions plus XHR/fetch/document requests and responses.",
+    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses.",
     parameters: parameters({
       url: { type: "string", description: "Real business-system URL" },
       name: { type: "string", description: "Optional recording name" }
     }, ["url"]),
     async execute(_toolCallId, params: any) {
-      const session = await studio.startRecording(params.url, params.name);
+      const session = await startBrowser(params.url, params.name);
       return {
-        content: [{ type: "text", text: `Recording started: ${session.id}. Operate the headed browser, then call business_skill_record_stop.` }],
+        content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
         details: session
       };
     }
@@ -46,7 +77,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     description: "Stop the active browser recording and persist its evidence.",
     parameters: parameters({}),
     async execute() {
-      const session = await studio.stopRecording();
+      const session = await stopBrowser();
       return {
         content: [{ type: "text", text: `Recording saved: ${session.id}` }],
         details: session
@@ -57,7 +88,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active headed browser with goto/snapshot/click/fill/select/press/wait/screenshot. Use snapshot first to ground selectors in the real page.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/press/wait/screenshot. Use snapshot first to ground selectors in the real page.",
     parameters: parameters({
       action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "press", "wait", "screenshot"] },
       selector: { type: "string" },
@@ -68,7 +99,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     }, ["action"]),
     async execute(_id, params: any, _signal, _onUpdate, ctx) {
       if ((params.action === "click" || (params.action === "press" && params.key === "Enter")) && params.selector) {
-        const target = await studio.recorder.inspectTarget(params.selector);
+        const target = await inspectBrowserTarget(params.selector);
         const signal = `${target.text || ""} ${target.label || ""} ${target.name || ""} ${target.formText || ""}`;
         const risky = target.type === "submit" || /save|submit|create|add|update|edit|approve|review|reject|delete|remove|保存|提交|新增|新建|创建|修改|编辑|更新|审核|审批|通过|驳回|删除|移除|作废/i.test(signal);
         if (risky) {
@@ -79,7 +110,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
           if (!ok) return { content: [{ type: "text", text: "Browser write action cancelled by user." }], details: { cancelled: true, target } };
         }
       }
-      const result = await studio.recorder.control(params);
+      const result = await controlBrowser(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result
@@ -148,6 +179,25 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       const cap = caps.find(c => c.id === params.capabilityId);
       if (!cap) throw new Error(`Unknown capability: ${params.capabilityId}`);
 
+      const executionInput = structuredClone(params.input || {});
+      for (const field of cap.inputForm.filter(item => item.source === "caller" && item.required)) {
+        if (getByPath(executionInput, field.path) !== undefined) continue;
+        if (field.candidates?.type === "capability") {
+          throw new Error(`字段 ${field.label} 需要先通过 ${field.candidates.capabilityId} 获取动态候选，并让用户选择`);
+        }
+        let value: unknown;
+        if (field.candidates?.type === "static") {
+          const display = field.candidates.values.map(item => `${item.label}（${String(item.value)}）`);
+          const selected = await ctx.ui.select(`请选择${field.label}`, display);
+          if (selected === undefined) return { content: [{ type: "text", text: "用户取消了字段选择。" }], details: { cancelled: true } };
+          value = field.candidates.values[display.indexOf(selected)]?.value;
+        } else {
+          value = await ctx.ui.input(`请输入${field.label}`, field.sourceDetail || field.name);
+          if (value === undefined) return { content: [{ type: "text", text: "用户取消了字段输入。" }], details: { cancelled: true } };
+        }
+        setByPath(executionInput, field.path, value);
+      }
+
       let confirmed = false;
       if (cap.confirmation.required) {
         confirmed = await ctx.ui.confirm(
@@ -162,7 +212,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         }
       }
 
-      const result = await studio.execute(cap.id, params.input, confirmed);
+      const result = await studio.execute(cap.id, executionInput, confirmed);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result
@@ -219,14 +269,16 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     name: "business_skill_export",
     label: "Export business skill",
     description: "Export verified capabilities as a self-contained Agent Skill package with manual, contracts, routing, forms, candidates, and executable scripts.",
-    parameters: parameters({
-      name: { type: "string" },
-      outputRoot: { type: "string" }
-    }, ["name"]),
-    async execute(_id, params: any) {
-      const result = await studio.export(params.name, params.outputRoot);
+    parameters: parameters({ name: { type: "string" } }, ["name"]),
+    async execute(_id, params: any, _signal, _onUpdate, ctx) {
+      const confirmed = await ctx.ui.confirm(
+        "确认导出 Python Skill",
+        `将只导出当前通过验证的能力，并在 Skill 目录创建或更新 ${params.name}。是否继续？`
+      );
+      if (!confirmed) return { content: [{ type: "text", text: "用户取消了 Skill 导出。" }], details: { cancelled: true } };
+      const result = await studio.exportManaged(params.name, true);
       return {
-        content: [{ type: "text", text: `Exported ${result.count} verified capabilities to ${result.dir}` }],
+        content: [{ type: "text", text: `已导出 ${result.capabilityIds.length} 项验证能力，版本 v${result.version}。` }],
         details: result
       };
     }

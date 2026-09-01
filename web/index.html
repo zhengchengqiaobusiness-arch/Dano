@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="从真实业务操作生产、验证、组合和管理 Agent Skill" />
+    <title>Pi Business Skill Studio</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">π</span>
+          <div><strong>Business Skill Studio</strong><span>真实操作 → 可执行 Skill</span></div>
+        </div>
+        <nav class="primary-nav" aria-label="工作区">
+          <button class="nav-button active" type="button" data-view="recording">录制工作台</button>
+          <button class="nav-button" type="button" data-view="catalog">能力目录</button>
+          <button class="nav-button" type="button" data-view="skills">Skill 目录</button>
+          <button class="nav-button" type="button" data-view="logs">运行日志</button>
+        </nav>
+        <div class="topbar-status">
+          <span class="status-pill" id="agent-status"><i class="status-dot"></i> Pi 启动中</span>
+          <span class="model-pill" id="model-status">读取模型配置…</span>
+        </div>
+      </header>
+
+      <main class="view recording-view active" data-view-panel="recording">
+        <section class="browser-panel" aria-label="内置浏览器">
+          <div class="panel-heading">
+            <div><span class="eyebrow">PLAYWRIGHT 内置会话</span><h1>业务系统浏览器</h1></div>
+            <div class="browser-heading-actions">
+              <div class="mode-switch" role="group" aria-label="录制操作模式">
+                <button type="button" data-browser-mode="manual">手动录制</button>
+                <button class="active" type="button" data-browser-mode="automatic">Pi 自动点击</button>
+              </div>
+              <button class="recording-state" id="recording-state" type="button" title="停止当前录制"><i></i> 等待会话</button>
+            </div>
+          </div>
+          <div class="browser-toolbar">
+            <div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></div>
+            <form class="address-form">
+              <label class="sr-only" for="browser-url">业务系统地址</label>
+              <span class="lock-icon">⌁</span>
+              <input id="browser-url" type="url" placeholder="输入业务系统地址，例如 https://crm.example.com" />
+              <button type="submit">接入并录制</button>
+            </form>
+            <button class="icon-button" id="reload-browser" type="button" aria-label="刷新页面">↻</button>
+          </div>
+          <form class="manual-controls" id="manual-controls" hidden>
+            <span><i class="status-dot"></i>手动输入</span>
+            <label class="sr-only" for="manual-text">向当前页面控件输入文字</label>
+            <input id="manual-text" autocomplete="off" placeholder="先点击画面中的输入框，再在这里输入中文或文字" />
+            <button type="submit">输入</button>
+            <button type="button" data-manual-key="Tab">Tab</button>
+            <button type="button" data-manual-key="Enter">Enter</button>
+            <button type="button" data-manual-key="Backspace">退格</button>
+          </form>
+          <div class="browser-viewport" id="browser-viewport" tabindex="0" aria-label="内置浏览器操作画面">
+            <img id="browser-frame" class="browser-frame" alt="内置 Playwright 浏览器实时画面" />
+            <div class="manual-mode-hint" id="manual-mode-hint" hidden>手动录制 · 直接点击画面，滚轮可滚动</div>
+            <div class="empty-browser">
+              <div class="orbit" aria-hidden="true"><span>π</span></div>
+              <p class="empty-kicker">真实页面与网络证据</p>
+              <h2>从一次真实业务操作开始</h2>
+              <p>输入业务系统地址。你可以自己操作，也可以让 Pi 自动控制同一个内置浏览器；页面行为和网络请求会一起留证。</p>
+              <div class="empty-features"><span>自动控制</span><span>手动录制</span><span>网络取证</span><span>不操作本地浏览器</span></div>
+            </div>
+          </div>
+          <footer class="browser-footer">
+            <span id="browser-status"><i class="status-dot muted"></i> 浏览器空闲</span>
+            <span id="browser-size">1440 × 960</span>
+          </footer>
+        </section>
+
+        <aside class="agent-panel" aria-label="Pi 助手">
+          <div class="agent-heading">
+            <div class="agent-avatar">π</div>
+            <div><strong>Pi 操作助手</strong><span>只连接本页内置 Playwright 浏览器</span></div>
+          </div>
+          <div class="conversation" id="conversation" aria-live="polite">
+            <div class="day-label">当前会话</div>
+            <article class="message assistant-message">
+              <div class="message-meta"><span>PI</span><time>刚刚</time></div>
+              <p>准备好了。接入业务系统后，告诉我需要观察或录制的操作。我会先读取页面，再控制内置浏览器执行。</p>
+            </article>
+            <div class="suggestions">
+              <button type="button" data-prompt="先对当前内置浏览器页面做 snapshot，然后告诉我页面上有哪些主要操作。">识别当前页面</button>
+              <button type="button" data-prompt="检查当前内置浏览器录制状态，记录一次真实业务操作和网络证据。">开始证据录制</button>
+              <button type="button" data-prompt="分析已经录制的证据，区分查询、新建、修改、审核和删除等原子能力。">识别原子能力</button>
+            </div>
+          </div>
+          <form class="composer">
+            <label class="sr-only" for="prompt">给 Pi 的指令</label>
+            <textarea id="prompt" rows="3" placeholder="例如：打开销售订单，录制一次查询和审核…"></textarea>
+            <div class="composer-footer"><span>Enter 发送 · Shift+Enter 换行</span><button id="send-prompt" type="submit" aria-label="发送">↑</button></div>
+          </form>
+        </aside>
+      </main>
+
+      <main class="view management-view logs-view" data-view-panel="logs" hidden>
+        <header class="management-header">
+          <div><span class="eyebrow">RUNTIME OUTPUT</span><h1>运行日志</h1><p>与 CMD 使用同一条真实日志流，集中查看启动、Pi、工具和内置浏览器状态。</p></div>
+          <div class="header-actions"><button class="secondary-button" id="copy-logs" type="button">复制日志</button></div>
+        </header>
+        <section class="runtime-console" aria-label="Pi Business Skill Studio 运行日志">
+          <header><div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></div><strong>Pi Business Skill Studio</strong><span id="log-count">0 行</span></header>
+          <div class="runtime-log-lines" id="runtime-log-lines" role="log" aria-live="polite"></div>
+        </section>
+        <section class="log-explanation-grid">
+          <article><span class="eyebrow">真实来源</span><h2>只显示实际运行事件</h2><p>启动检查、Pi 连接、工具执行、人工等待和浏览器会话都会按发生顺序写入。</p></article>
+          <article><span class="eyebrow">敏感信息保护</span><h2>配置值不会进入日志</h2><p>密钥、令牌、密码等环境配置会在进入日志前移除，业务系统证据仍保存在项目本地。</p></article>
+        </section>
+      </main>
+
+      <main class="view management-view" data-view-panel="catalog" hidden>
+        <header class="management-header">
+          <div><span class="eyebrow">证据门禁与人工校正</span><h1>能力目录</h1><p>检查原子能力、字段责任和组合关系。修改后需要重新验证。</p></div>
+          <div class="header-actions"><button class="secondary-button" id="analyze-catalog" type="button">从录制重新识别</button><button class="primary-button" id="validate-catalog" type="button">验证全部能力</button></div>
+        </header>
+        <section class="summary-grid" id="catalog-summary"></section>
+        <section class="catalog-layout">
+          <aside class="catalog-list-panel">
+            <div class="section-title"><div><span class="eyebrow">ATOMIC CAPABILITIES</span><h2>原子能力</h2></div><span id="capability-count">0 项</span></div>
+            <div class="capability-list" id="capability-list"></div>
+          </aside>
+          <section class="capability-detail-panel">
+            <div class="empty-detail" id="empty-capability"><span>选择一项能力查看接口证据、字段来源和验证结果</span></div>
+            <form id="capability-form" hidden>
+              <div class="detail-heading"><div><span class="eyebrow" id="capability-kind">原子能力</span><h2 id="capability-id"></h2></div><span class="validation-badge" id="capability-validation"></span></div>
+              <div class="form-grid">
+                <label><span>业务名称</span><input id="capability-title" required /></label>
+                <label><span>能力类型</span><select id="capability-operation"><option value="query">查询</option><option value="create">新建</option><option value="update">修改</option><option value="review">审核</option><option value="delete">删除</option><option value="authenticate">认证</option><option value="upload">上传</option><option value="download">下载</option><option value="action">业务动作</option><option value="unknown">未识别</option></select></label>
+                <label class="wide"><span>可人工修改的业务描述</span><textarea id="capability-description" rows="3" required></textarea></label>
+              </div>
+              <div class="transport-strip"><span>真实请求</span><code id="capability-transport"></code><span id="capability-confirmation"></span></div>
+              <div class="subsection-heading"><div><h3>字段责任</h3><p>名称、类型、来源、必填性，以及由调用方还是系统处理。</p></div><div class="inline-actions"><button class="secondary-button" id="add-binding" type="button">确认数据绑定</button><button class="secondary-button" id="add-candidate" type="button">配置动态候选</button></div></div>
+              <div class="table-wrap"><table><thead><tr><th>字段</th><th>业务名称</th><th>类型</th><th>来源</th><th>必填</th><th>处理规则</th></tr></thead><tbody id="field-table-body"></tbody></table></div>
+              <div class="detail-columns">
+                <section><h3>已确认绑定</h3><div id="binding-list" class="compact-list"></div></section>
+                <section><h3>验证检查</h3><div id="validation-list" class="compact-list"></div></section>
+              </div>
+              <div class="form-actions"><span>保存会把能力退回“待验证”，避免未经复核直接导出。</span><button class="primary-button" type="submit">保存修改</button></div>
+            </form>
+          </section>
+        </section>
+        <section class="boundary-grid">
+          <article><span class="boundary-label skill-change">修改 Skill</span><h3>业务表达和使用方法变化</h3><p>业务名称、描述、触发措辞、展示方式可在能力目录调整，再重新验证和导出。</p></article>
+          <article><span class="boundary-label code-change">重新录制或修改平台</span><h3>真实系统行为变化</h3><p>页面结构、接口、字段、认证、生成规则或安全门禁发生变化时，需要新证据；不能只改 Skill 文本掩盖变化。</p></article>
+        </section>
+      </main>
+
+      <main class="view management-view" data-view-panel="skills" hidden>
+        <header class="management-header">
+          <div><span class="eyebrow">PYTHON AGENT SKILLS</span><h1>Skill 目录</h1><p>导出、重新导出、冻结、删除和自然语言调用经过验证的能力。</p></div>
+        </header>
+        <section class="export-panel">
+          <div><h2>导出自包含 Python Skill</h2><p>只包含已验证能力；生成执行手册、路线、表单、候选规则、Python 脚本和机器合同。</p></div>
+          <form id="export-form"><label class="sr-only" for="skill-name">Skill 名称</label><input id="skill-name" placeholder="例如 sales-order-review" required /><button class="primary-button" type="submit">导出 Skill</button></form>
+        </section>
+        <section class="skills-grid" id="skills-list"></section>
+        <section class="progressive-card">
+          <span class="eyebrow">渐进披露</span><h2>执行时只加载当前需要的内容</h2>
+          <div class="progress-flow"><span>SKILL.md 入口</span><i>→</i><span>能力索引</span><i>→</i><span>当前表单 / 候选</span><i>→</i><span>已确认路线</span><i>→</i><span>Python 执行与验收</span></div>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <span><i class="status-dot"></i> Studio 在线</span>
+        <span>页面、网络和合同证据保存在项目本地</span>
+        <span>写操作始终需要确认</span>
+      </footer>
+    </div>
+
+    <div class="modal-backdrop" id="confirmation-modal" hidden>
+      <section class="confirmation-card" role="dialog" aria-modal="true" aria-labelledby="confirmation-title">
+        <span class="confirmation-icon">!</span><p class="eyebrow">明确确认</p>
+        <h2 id="confirmation-title">确认操作</h2><p id="confirmation-message"></p>
+        <div id="confirmation-options" class="modal-options" hidden></div>
+        <input id="confirmation-input" class="modal-input" hidden />
+        <textarea id="confirmation-editor" class="modal-input" rows="6" hidden></textarea>
+        <div class="confirmation-actions"><button type="button" class="secondary-button" id="confirmation-cancel">取消</button><button type="button" class="danger-button" id="confirmation-approve">确认执行</button></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="invoke-modal" hidden>
+      <section class="confirmation-card invoke-card" role="dialog" aria-modal="true" aria-labelledby="invoke-title">
+        <p class="eyebrow">自然语言调用</p><h2 id="invoke-title">调用 Skill</h2>
+        <p>描述业务目标。Pi 会读取导出的 Skill，选择路线，并在需要选择或确认时停下来。</p>
+        <textarea id="invoke-goal" class="modal-input" rows="5" placeholder="例如：查一下符合条件的销售订单，让我选择其中一条，然后审核。"></textarea>
+        <div class="confirmation-actions"><button type="button" class="secondary-button" id="invoke-cancel">取消</button><button type="button" class="primary-button" id="invoke-submit">交给 Pi</button></div>
+      </section>
+    </div>
+    <div class="modal-backdrop" id="mapping-modal" hidden>
+      <section class="confirmation-card mapping-card" role="dialog" aria-modal="true" aria-labelledby="mapping-title">
+        <p class="eyebrow">证据范围内配置</p><h2 id="mapping-title">确认数据绑定</h2>
+        <p id="mapping-description">只能选择已验证来源能力、真实返回字段和当前能力的已录制输入字段。</p>
+        <form id="mapping-form" class="mapping-form">
+          <label><span>来源能力</span><select id="mapping-source" required></select></label>
+          <label><span id="mapping-value-label">来源返回字段</span><select id="mapping-value-path" required></select></label>
+          <label id="mapping-label-row" hidden><span>候选显示名称字段</span><select id="mapping-label-path"></select></label>
+          <label><span>目标输入字段</span><select id="mapping-target" required></select></label>
+          <label id="mapping-note-row"><span>绑定说明</span><input id="mapping-note" placeholder="说明为什么可以自动传值" /></label>
+          <div class="confirmation-actions"><button type="button" class="secondary-button" id="mapping-cancel">取消</button><button type="submit" class="primary-button">继续确认</button></div>
+        </form>
+      </section>
+    </div>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

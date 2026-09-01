@@ -1,4 +1,4 @@
-export type OperationKind = "query" | "create" | "update" | "review" | "delete" | "unknown";
+export type OperationKind = "query" | "create" | "update" | "review" | "delete" | "authenticate" | "upload" | "download" | "action" | "unknown";
 
 export type JsonSchema = {
   type?: string | string[];
@@ -82,11 +82,29 @@ export interface CandidateRuleCapability {
 
 export type CandidateRule = CandidateRuleStatic | CandidateRuleCapability;
 
+export type FieldSource =
+  | "caller"
+  | "fixed"
+  | "session"
+  | "generated"
+  | "computed"
+  | "binding"
+  | "system";
+
+export type FieldRequiredBasis = "ui-required" | "observed-always" | "not-observed" | "manual";
+
 export interface InputFormField {
   path: string;
+  name: string;
   label: string;
+  valueType: "string" | "number" | "integer" | "boolean" | "array" | "object" | "unknown";
+  source: FieldSource;
   required: boolean;
+  requiredBasis: FieldRequiredBasis;
+  systemHandled: boolean;
+  sourceDetail: string;
   widget: "text" | "number" | "boolean" | "select" | "multiselect" | "json";
+  defaultRule?: string;
   candidates?: CandidateRule;
 }
 
@@ -113,6 +131,7 @@ export interface DataBinding {
 
 export interface CapabilityContract {
   id: string;
+  kind?: "atomic";
   title: string;
   description: string;
   operation: OperationKind;
@@ -144,6 +163,7 @@ export interface CapabilityContract {
   };
   bindings: DataBinding[];
   validation: {
+    version?: number;
     status: "candidate" | "verified" | "rejected";
     checks: Array<{ name: string; ok: boolean; detail: string }>;
     verifiedAt?: string;
@@ -153,6 +173,48 @@ export interface CapabilityContract {
     model?: string;
     generatedAt: string;
   };
+  editing?: {
+    title: "generated" | "manual";
+    description: "generated" | "manual";
+    operation?: "generated" | "manual";
+    fields: "generated" | "manual";
+    fieldPaths?: string[];
+    updatedAt?: string;
+  };
+}
+
+export interface CapabilityRouteStep {
+  order: number;
+  capabilityId: string;
+  bindingIds: string[];
+}
+
+export interface CapabilityRoute {
+  id: string;
+  title: string;
+  targetCapabilityId: string;
+  steps: CapabilityRouteStep[];
+  approvedBindingIds: string[];
+  stopConditions: string[];
+  completion: string;
+}
+
+export type SkillLifecycleStatus = "active" | "frozen" | "deleted";
+
+export interface SkillRecord {
+  id: string;
+  name: string;
+  displayName: string;
+  directory: string;
+  version: number;
+  status: SkillLifecycleStatus;
+  capabilityIds: string[];
+  routeIds: string[];
+  exportedAt: string;
+  updatedAt: string;
+  frozenAt?: string;
+  deletedAt?: string;
+  recoverableFrom?: string;
 }
 
 export interface PlanStep {

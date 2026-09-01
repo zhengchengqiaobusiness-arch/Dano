@@ -8,6 +8,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "start": "npm run web",
+    "web": "node --env-file-if-exists=.env --import tsx src/web/server.ts",
     "studio": "tsx src/cli.ts",
     "agent": "tsx src/pi-agent.ts",
     "typecheck": "tsc --noEmit",

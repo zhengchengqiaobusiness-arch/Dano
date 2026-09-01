@@ -1,346 +1,113 @@
 # Pi Business Skill Studio
 
-把现有业务系统中的**真实页面操作 + 真实 API**沉淀为可被 AI Agent 理解、选择、组合、验证并执行的 Agent Skill。
+从真实业务操作中生产、验证、组合和管理 Agent Skill 的本地平台。
 
-它不是“根据页面猜接口”的生成器。它的核心是：
+它不是普通 RPA、接口文档生成器或业务说明书系统。核心链路是：
 
-> **真实操作证据 → 原子能力 → 可编辑业务语义 → 证据校验 → 受策略约束的规划/执行 → 自包含 Skill 包**
+> 真实页面操作与请求证据 → 原子能力 → 字段责任 → 证据验证 → 已确认组合路线 → 自包含 Python Skill
 
-## 对应目标
+## 直接启动
 
-1. 接入业务系统并记录真实页面操作。
-2. 捕获真实请求、字段、选项和返回结果。
-3. 识别查询、新增、编辑、审核、删除等原子能力。
-4. 通过 OpenAI 自动生成可人工修改的业务描述。
-5. 使用证据门禁，避免发布没有真实成功证据的操作。
-6. 根据自然语言规划执行路线，并落实：
-   - 单原子调用；
-   - 仅按 `approved` 数据绑定自动串联；
-   - 无绑定/目标不明/结果歧义时询问；
-   - 写操作执行前确认；
-   - 以合同 completion 条件判断完成。
-7. 导出自包含 Skill：
-   - `SKILL.md`
-   - 路由与组合说明
-   - 输入表单/候选规则
-   - `scripts/execute.mjs`
-   - JSON 机器合同
-   - 证据引用清单
+双击项目根目录的 `start.bat`。
 
-## 技术组成
+这个文件只负责启动项目并打开前端，不安装依赖、不下载浏览器、不进入 Pi 命令行。项目已经运行时会直接打开现有页面，不会重复占用端口；启动失败时会保留错误窗口。项目自动读取根目录已有的 `.env`，支持 OpenAI 格式的兼容服务，不要求官方地址：
 
-- **Pi Coding Agent 0.84.4**
-  - 项目级 `.pi/extensions/`
-  - 项目级 `.pi/skills/`
-  - Pi SDK 嵌入模式
-- **Playwright 1.62.1**
-  - headed Chromium
-  - UI click/change/submit 录制
-  - XHR/fetch/document 请求/响应录制
-- **OpenAI official Node SDK**
-  - Responses API
-  - Structured Outputs
-  - 默认 `gpt-5.5`，可通过 `OPENAI_MODEL` 修改
-- **Evidence Gate**
-  - 真实 network evidence
-  - 成功响应
-  - 写操作 UI 关联
-  - 未识别操作禁止发布
+```dotenv
+PI_BASE_URL=https://your-compatible-service.example/v1
+PI_API_KEY=your-key
+PI_MODEL=your-model
+```
 
-## 1. 安装
+前端分为四个工作区：
 
-要求 Node.js 22+。
+- **录制工作台**：可明确切换“手动录制”和“Pi 自动点击”；两种方式都操作项目内置的同一个 Playwright 浏览器，同时保存页面与网络证据。
+- **能力目录**：区分查询、新建、修改、审核、删除等原子能力；人工修改业务名称和描述；检查字段类型、来源、必填性和处理方；运行验证门禁。
+- **Skill 目录**：导出、重新导出、冻结、可恢复删除和自然语言调用 Python Skill。
+- **运行日志**：显示与 CMD 同源的启动、Pi、工具和内置浏览器日志；密钥、令牌和密码配置不会进入日志。
+
+Pi 的页面读取、点击、填写、选择和截图全部作用于前端显示的同一个 Playwright 会话，不控制本机已经打开的 Chrome 或 Edge。
+
+## 能力与字段规则
+
+每个能力必须来自真实请求和返回证据。字段至少包含：
+
+- 合同路径与实际字段名；
+- 业务名称；
+- 字符串、整数、数字、布尔、数组、对象等类型；
+- 调用方、固定规则、会话、运行时生成、计算、上游绑定或系统处理等来源；
+- 必填性及其证据依据；
+- 由调用方提供还是由系统自动处理；
+- 静态或动态候选规则。
+
+真实页面中观察到的输入才会自动标为“调用方提供”。请求中存在、但没有用户输入证据的字段默认按“系统处理”管理；系统必填字段没有明确处理规则或已确认绑定时，验证不会放行。
+
+## 验证与组合门禁
+
+只有 `validation.status = "verified"` 且使用当前验证规则的能力可以导出。
+
+验证至少检查：
+
+- 真实网络证据和成功返回；
+- 请求方法一致；
+- 完成断言有成功证据支持；
+- 原子能力类型明确；
+- 写操作有真实页面关联；
+- 字段元数据、来源和处理方一致；
+- 调用方字段有页面输入证据；
+- 系统必填字段有可执行处理规则；
+- 绑定引用真实能力和字段，并保留确认记录。
+
+自动组合只允许使用 `approved: true` 的绑定。没有绑定、目标不唯一、上游结果为空或存在多个候选时必须停下来询问。新建、修改、审核、删除在每次执行前必须单独确认；结果不明确的写操作不得自动重试。
+
+## 导出的 Python Skill
+
+导出目录位于 `dist/skills/<skill-name>/`：
+
+```text
+<skill-name>/
+├── SKILL.md
+├── references/
+│   ├── CONTRACT.json
+│   ├── CAPABILITIES.md
+│   ├── INPUT_FORMS.md
+│   ├── OPTIONS.md
+│   ├── EVIDENCE.md
+│   └── routes/
+└── scripts/
+    ├── execute.py
+    ├── candidates.py
+    └── format_list.py
+```
+
+`references/CONTRACT.json` 是能力、字段、绑定、路线和完成条件的唯一机器事实来源。`SKILL.md` 只保留选择、询问、确认、执行和验收规则；能力索引、当前表单、候选项与组合路线按需加载，避免一次性塞入全部上下文。
+
+导出的 Skill 不包含生成器实现过程、项目代码结构、录制时凭据、Cookie 或 secret-bearing headers。运行时认证通过 `SKILL_AUTH_HEADERS` 环境变量提供。
+
+## 修改 Skill 还是修改平台
+
+- 业务名称、业务描述、触发措辞和结果展示方式变化：在能力目录修改，重新验证并导出 Skill。
+- 页面结构、接口、字段、候选来源、认证、运行时生成规则或安全门禁变化：重新录制真实证据；需要新解析能力时修改平台代码。不能只改 Skill 文本掩盖真实系统变化。
+
+## 开发验证
+
+首次开发安装需要 Node.js 22+、Python 3：
 
 ```bash
 npm install
 npm run browser:install
-cp .env.example .env
 ```
 
-设置：
+日常质量检查：
 
 ```bash
-export OPENAI_API_KEY="..."
-export OPENAI_MODEL="gpt-5.5"
+npm run typecheck
+npm test
 ```
 
-如果暂时不配置 OpenAI，也可以使用确定性的启发式分析：
+测试覆盖字段来源区分、系统必填字段门禁、已确认绑定顺序、渐进披露结构、Python 脚本语法和 Skill 包校验。
 
-```bash
-npm run studio -- analyze --no-llm
-```
+## 设计参考
 
-## 2. 录制真实业务系统
-
-```bash
-npm run studio -- record \
-  --url "https://your-business-system.example.com" \
-  --name "customer-maintenance"
-```
-
-会打开一个真实 Chromium。你可以正常登录、点击、选择、提交。
-
-录制内容写入：
-
-```text
-.business-skill-studio/
-└── recordings/
-    └── rec_xxx/
-        ├── session.json
-        └── events.jsonl
-```
-
-`events.jsonl` 包括：
-- click/change/submit；
-- 控件 label/name/type；
-- select/datalist/可见 role=option 候选；
-- form 快照；
-- 请求 method/url/query/body；
-- 响应 status/body（限大小）；
-- UI 与请求的相关 evidence id。
-
-> 默认脱敏密码、token、cookie、authorization 等敏感内容。
-
-完成操作后按 `Ctrl+C`。
-
-## 3. 生成原子能力
-
-```bash
-npm run studio -- analyze
-```
-
-结果：
-
-```text
-.business-skill-studio/catalog/capabilities.json
-```
-
-这是**人工可修改**的主目录。可以改 title、description，也可以审核数据绑定。
-
-OpenAI 只允许修改业务语义和对歧义 POST 做分类；不能凭空添加没有证据的 endpoint/字段/选项。
-
-## 4. 证据校验
-
-```bash
-npm run studio -- validate
-```
-
-只有 `validation.status = "verified"` 才能导出。
-
-写操作额外要求：
-- 存在成功真实请求；
-- 能关联到真实 UI 操作；
-- operation 已确定。
-
-## 5. 自然语言规划
-
-```bash
-npm run studio -- plan "先查客户，再把已确认客户的等级改成VIP"
-```
-
-输出包括：
-- steps；
-- capabilityId；
-- 输入；
-- binding；
-- 是否需要询问；
-- policy errors；
-- write steps。
-
-自动串联的硬规则：
-
-```text
-binding.approved === true
-```
-
-否则不允许模型仅凭“字段看起来同名”自动传值。
-
-可以通过 CLI 明确批准一个绑定：
-
-```bash
-npm run studio -- bind \
-  --from customer-search --from-path '$.items[0].id' \
-  --to customer-update --to-path '$.id' \
-  --approve
-```
-
-动态候选也必须显式指定一个**已验证 query capability**：
-
-```bash
-npm run studio -- candidate-source \
-  --target customer-update \
-  --field '$.levelCode' \
-  --source level-options \
-  --value-path '$.items[*].code' \
-  --label-path '$.items[*].name' \
-  --approve
-```
-
-在 Pi 中对应操作会弹出确认框。
-
-## 6. 执行能力
-
-先给运行时认证信息。不要把生产 token 写入能力合同。
-
-```bash
-export SKILL_AUTH_HEADERS='{"Authorization":"Bearer test-token"}'
-```
-
-查询：
-
-```bash
-npm run studio -- execute \
-  --capability customer-search \
-  --input '{"name":"张三"}'
-```
-
-写操作必须显式确认：
-
-```bash
-npm run studio -- execute \
-  --capability customer-update \
-  --input '{"id":"123","level":"VIP"}' \
-  --confirm-write
-```
-
-Pi Extension 会使用交互式 `ctx.ui.confirm`，因此在 Pi 里无需让模型自己“决定是否确认”。
-
-## 7. 导出 Skill
-
-```bash
-npm run studio -- export --name crm-business
-```
-
-生成：
-
-```text
-dist/skills/crm-business/
-├── SKILL.md
-├── skill.contract.json
-├── contracts/
-│   └── capabilities.json
-├── references/
-│   ├── routing-and-composition.md
-│   ├── forms-and-candidates.md
-│   └── evidence.md
-└── scripts/
-    ├── execute.mjs
-    └── candidates.mjs
-```
-
-导出的执行脚本只依赖 Node 内置 `fetch`，不会携带录制时的 cookie/token。
-
-## 8. 在 Pi Agent 中使用
-
-项目已包含：
-
-```text
-.pi/
-├── settings.json
-├── extensions/
-│   └── business-skill-studio.ts
-└── skills/
-    ├── business-skill-studio/
-    │   └── SKILL.md
-    └── control-in-app-browser/
-        └── SKILL.md
-```
-
-安装依赖后，从项目根目录启动 Pi。Pi 会在项目被信任后发现 extension + skill。
-
-如果你全局没有安装 Pi：
-
-```bash
-npx --package=@earendil-works/pi-coding-agent@0.84.4 pi
-```
-
-使用 OpenAI API：
-
-```bash
-export OPENAI_API_KEY="..."
-npx --package=@earendil-works/pi-coding-agent@0.84.4 pi \
-  --provider openai \
-  --model gpt-5.5
-```
-
-然后可以直接说：
-
-```text
-开始记录 https://crm.example.com ，我接下来会演示客户新增和审核。
-```
-
-Pi 可调用：
-- `business_skill_record_start`
-- `business_skill_record_stop`
-- `business_browser_control`
-- `business_skill_analyze`
-- `business_skill_validate`
-- `business_skill_plan`
-- `business_skill_execute`
-- `business_skill_approve_binding`
-- `business_skill_set_dynamic_candidates`
-- `business_skill_export`
-
-也可以显式加载：
-
-```text
-/skill:business-skill-studio
-```
-
-## 9. 以 Pi SDK 嵌入项目
-
-示例已经放在 `src/pi-agent.ts`：
-
-```bash
-export OPENAI_API_KEY="..."
-npm run agent -- "读取当前能力目录并告诉我哪些能力已验证"
-```
-
-它使用：
-- `ModelRuntime.create()`
-- OpenAI `OPENAI_API_KEY`
-- Pi 的 `getModel("openai", "gpt-5.5")`
-- `createAgentSession(...)`
-
-所以同一项目既能使用 Pi TUI，也能将 Pi Agent 嵌入你自己的 Node 服务。
-
-## 关于 Control In App Browser
-
-本项目**不依赖 Codex/ChatGPT 私有的 in-app browser bridge**。项目额外提供一个 Pi 可加载的 `.pi/skills/control-in-app-browser/SKILL.md` 便携适配层；底层使用项目可携带的 Playwright：
-
-```text
-Pi Agent
-  ↓
-business-skill-studio extension
-  ↓
-Playwright headed Chromium
-  ↓
-真实页面 + 真实网络证据
-```
-
-这样它可以放进你的 Pi Agent 项目里运行，而不是只能在 Codex 桌面端环境运行。
-
-## 当前 MVP 边界
-
-已经实现：
-- headed browser 真实录制；
-- UI + 网络证据关联；
-- 请求/响应 schema 归纳；
-- 原子操作分类；
-- OpenAI Structured Output 业务语义优化；
-- 证据发布门禁；
-- 自然语言规划；
-- approved-binding 策略；
-- 写操作确认；
-- Skill 包导出；
-- Pi extension / Pi SDK 接入。
-
-下一阶段适合增强：
-- iframe/多窗口更精细的 action/request causal graph；
-- GraphQL operationName 级拆分；
-- multipart/form-data 文件上传识别；
-- 自动生成候选 API 的 dependency graph；
-- 使用浏览器登录态执行而不仅是 `SKILL_AUTH_HEADERS`；
-- 人工审核 Web UI；
-- capability replay sandbox / test tenant；
-- 版本差异检测与 Skill 增量更新。
+- [Alibaba Cloud AIOps Skills](https://github.com/aliyun/alibabacloud-aiops-skills/tree/master/skills)：入口手册、引用资料和确定性脚本的目录分层，以及明确的任务路由与失败处理。
+- [Writing Great Skills](https://www.skills.sh/mattpocock/skills/writing-great-skills)：触发描述、单一事实来源、可检查完成条件和渐进披露。
+- [程序员 Carl：Skill 不是更长的 Prompt](https://mp.weixin.qq.com/s/upEf0dCi3qwvpwLkRIwyWA)：Skill、Tool、MCP、Memory 和 Harness 的职责边界，以及安全门禁应由运行时强制执行。

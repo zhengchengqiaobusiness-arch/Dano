@@ -27,6 +27,6 @@ export function loadConfig(cwd = process.cwd()): StudioConfig {
     profileDir: path.resolve(cwd, process.env.BSS_PROFILE_DIR || ".business-skill-studio/browser-profile"),
     maxResponseBytes: Number(process.env.BSS_MAX_RESPONSE_BYTES || 262_144),
     headless: boolEnv("BSS_HEADLESS", false),
-    openaiModel: process.env.OPENAI_MODEL || "gpt-5.5"
+    openaiModel: process.env.OPENAI_MODEL || process.env.PI_MODEL || "gpt-5.5"
   };
 }

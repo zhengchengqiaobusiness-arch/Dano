@@ -29,4 +29,8 @@ test("classifies common methods", () => {
   assert.equal(inferOperation(event("GET", "https://x.test/users")), "query");
   assert.equal(inferOperation(event("DELETE", "https://x.test/users/1")), "delete");
   assert.equal(inferOperation(event("PATCH", "https://x.test/users/1")), "update");
+  assert.equal(inferOperation(event("POST", "https://x.test/auth/login")), "authenticate");
+  assert.equal(inferOperation(event("POST", "https://x.test/files/upload")), "upload");
+  assert.equal(inferOperation(event("GET", "https://x.test/report/download")), "download");
+  assert.equal(inferOperation(event("POST", "https://x.test/orders/recalculate")), "action");
 });

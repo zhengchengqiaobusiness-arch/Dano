@@ -1,4 +1,5 @@
 import type { CapabilityContract, ExecutionPlan } from "../domain.js";
+import { buildApprovedRoutes } from "./routes.js";
 
 function score(goal: string, cap: CapabilityContract) {
   const haystack = `${cap.id} ${cap.title} ${cap.description} ${cap.operation}`.toLowerCase();
@@ -33,15 +34,28 @@ export function fallbackPlan(goal: string, capabilities: CapabilityContract[]): 
     };
   }
 
+  const selected = ranked[0]!.cap;
+  const route = buildApprovedRoutes(verified).find(item => item.targetCapabilityId === selected.id);
+  const ordered = route?.steps.map(step => verified.find(capability => capability.id === step.capabilityId)!) || [selected];
+  const steps = ordered.map((capability, index) => ({
+    capabilityId: capability.id,
+    input: {},
+    bindings: capability.bindings.filter(binding => binding.approved).map(binding => ({
+      fromStep: ordered.findIndex(item => item.id === binding.fromCapabilityId),
+      fromPath: binding.fromPath,
+      toPath: binding.toPath
+    })),
+    reason: route ? `执行已确认路线的第 ${index + 1} 步` : "最明确的已验证原子能力匹配"
+  }));
+  const missing = ordered.flatMap(capability => capability.inputForm
+    .filter(field => field.source === "caller" && field.required)
+    .map(field => `${capability.title}：${field.label}`));
+
   return {
     goal,
-    steps: [{
-      capabilityId: ranked[0]!.cap.id,
-      input: {},
-      bindings: [],
-      reason: "Best verified deterministic text match."
-    }],
-    needsUserQuestion: false,
-    completion: "The selected capability must satisfy its contract completion criteria."
+    steps,
+    needsUserQuestion: missing.length > 0,
+    question: missing.length ? `还需要以下必填信息：${missing.join("；")}` : undefined,
+    completion: route?.completion || "所选原子能力必须满足合同完成条件。"
   };
 }

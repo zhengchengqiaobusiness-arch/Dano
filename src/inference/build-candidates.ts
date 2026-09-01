@@ -9,6 +9,12 @@ import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
+const QUERY_LIKE_UI = /query|search|find|list|page|detail|lookup|查询|搜索|列表|详情|检索/i;
+const OPERATION_NAMES: Record<CapabilityContract["operation"], string> = {
+  query: "查询", create: "新建", update: "修改", review: "审核", delete: "删除",
+  authenticate: "认证", upload: "上传", download: "下载", action: "业务动作", unknown: "未识别"
+};
+
 function requestInput(event: NetworkEvidence) {
   const method = event.request.method.toUpperCase();
   if (["GET", "HEAD"].includes(method)) return event.request.query;
@@ -16,7 +22,27 @@ function requestInput(event: NetworkEvidence) {
   return event.request.query;
 }
 
-function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number], prefix = "$."): InputFormField | undefined {
+function isStudioInternal(event: NetworkEvidence) {
+  try {
+    const url = new URL(event.request.url);
+    const studioPort = String(process.env.BSS_PORT || "4310");
+    return ["127.0.0.1", "localhost"].includes(url.hostname) && url.port === studioPort;
+  } catch {
+    return false;
+  }
+}
+
+function jsonPathForName(name: string) {
+  if (name.startsWith("$.")) return name;
+  return `$.${name.replace(/\[([^\]]+)\]/g, ".$1").replace(/^\./, "")}`;
+}
+
+function valueType(raw: any): InputFormField["valueType"] {
+  const type = Array.isArray(raw?.type) ? raw.type.find((item: string) => item !== "null") : raw?.type;
+  return ["string", "number", "integer", "boolean", "array", "object"].includes(type) ? type : "unknown";
+}
+
+function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number]): InputFormField | undefined {
   if (!field?.name) return undefined;
   const type = field.type || "text";
   const widget: InputFormField["widget"] =
@@ -26,35 +52,51 @@ function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number], prefix = 
     type === "select-multiple" ? "multiselect" : "text";
   const options = field.options?.map(o => ({ value: o.value, label: o.label || o.value }));
   return {
-    path: `${prefix}${field.name}`,
+    path: jsonPathForName(field.name),
+    name: field.name,
     label: field.label || field.name,
+    valueType: type === "number" ? "number" : type === "checkbox" ? "boolean" : type === "select-multiple" ? "array" : "string",
+    source: "caller",
     required: Boolean(field.required),
+    requiredBasis: field.required ? "ui-required" : "not-observed",
+    systemHandled: false,
+    sourceDetail: "真实页面表单中观察到，由调用方提供",
     widget,
     candidates: options?.length ? { type: "static", values: options } : undefined
   };
 }
 
-
-function schemaFieldsToForm(schema: any): InputFormField[] {
+function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): InputFormField[] {
   if (!schema || schema.type !== "object" || !schema.properties) return [];
   const required = new Set<string>(schema.required || []);
-  return Object.entries(schema.properties).map(([name, raw]: [string, any]) => {
-    const type = Array.isArray(raw?.type) ? raw.type.find((t: string) => t !== "null") : raw?.type;
+  return Object.entries(schema.properties).flatMap(([name, raw]: [string, any]) => {
+    const type = valueType(raw);
+    const path = `${prefix}.${name}`;
+    const isRequired = parentRequired && required.has(name);
+    if (type === "object" && raw?.properties) {
+      return schemaFieldsToForm(raw, path, isRequired);
+    }
     const widget: InputFormField["widget"] =
       type === "number" || type === "integer" ? "number" :
       type === "boolean" ? "boolean" :
       type === "array" ? "multiselect" :
       type === "object" ? "json" :
       Array.isArray(raw?.enum) ? "select" : "text";
-    return {
-      path: `$.${name}`,
+    return [{
+      path,
+      name,
       label: raw?.title || name,
-      required: required.has(name),
+      valueType: type,
+      source: "system",
+      required: isRequired,
+      requiredBasis: isRequired ? "observed-always" : "not-observed",
+      systemHandled: true,
+      sourceDetail: "请求中观察到该字段，但未观察到用户输入；默认由业务系统处理",
       widget,
       candidates: Array.isArray(raw?.enum)
         ? { type: "static", values: raw.enum.map((value: unknown) => ({ value, label: String(value) })) }
         : undefined
-    };
+    }];
   });
 }
 
@@ -81,7 +123,9 @@ function inferCompletion(group: NetworkEvidence[], operation: string) {
 
 export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityContract[] {
   const uiById = new Map(events.filter((e): e is UiEvidence => e.kind === "ui").map(e => [e.id, e]));
-  const network = events.filter((e): e is NetworkEvidence => e.kind === "network" && Boolean(e.response));
+  const network = events.filter((e): e is NetworkEvidence =>
+    e.kind === "network" && Boolean(e.response) && ["xhr", "fetch"].includes(e.request.resourceType) && !isStudioInternal(e)
+  );
   const groups = new Map<string, NetworkEvidence[]>();
 
   for (const event of network) {
@@ -112,6 +156,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     let inputSchema = {};
     let outputSchema = {};
     const forms = new Map<string, InputFormField>();
+    const directUiNames = new Set<string>();
 
     for (const event of group) {
       inputSchema = mergeSchemas(inputSchema, schemaFromValue(requestInput(event)));
@@ -119,20 +164,36 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
       const correlated = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
       for (const field of correlated?.form || []) {
         const mapped = uiFieldToForm(field);
-        if (mapped) forms.set(mapped.path, mapped);
+        if (mapped) {
+          const previous = forms.get(mapped.path);
+          forms.set(mapped.path, previous ? {
+            ...previous,
+            ...mapped,
+            required: mapped.required || previous.required,
+            requiredBasis: mapped.required ? "ui-required" : previous.requiredBasis,
+            candidates: mapped.candidates || previous.candidates
+          } : mapped);
+        }
       }
       if (correlated?.name) {
+        directUiNames.add(correlated.name);
         const observed = correlated.options?.length
           ? correlated.options.map(o => ({ value: o.value, label: o.label || o.value }))
           : correlated.visibleOptions?.length
             ? correlated.visibleOptions.map(label => ({ value: label, label }))
             : undefined;
-        const path = `$.${correlated.name}`;
+        const path = jsonPathForName(correlated.name);
         const existing = forms.get(path);
         forms.set(path, {
           path,
+          name: correlated.name,
           label: correlated.label || existing?.label || correlated.name,
+          valueType: existing?.valueType || (correlated.inputType === "number" ? "number" : "string"),
+          source: "caller",
           required: existing?.required || false,
+          requiredBasis: existing?.requiredBasis || "not-observed",
+          systemHandled: false,
+          sourceDetail: "真实页面交互中观察到，由调用方提供",
           widget: observed?.length ? "select" : (existing?.widget || "text"),
           candidates: observed?.length ? { type: "static", values: observed } : existing?.candidates
         });
@@ -161,8 +222,9 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
 
     result.push({
       id: capId,
-      title: ui?.text || ui?.label || `${operation} ${normalized.pathTemplate}`,
-      description: `Observed ${operation} operation via ${method} ${normalized.pathTemplate}. Edit this business description after review.`,
+      kind: "atomic",
+      title: ((operation !== "query" || QUERY_LIKE_UI.test(`${ui?.text || ""} ${ui?.label || ""}`)) && (ui?.text || ui?.label)) || `${operation} ${normalized.pathTemplate}`,
+      description: `已从真实操作观察到“${OPERATION_NAMES[operation]}”能力。请结合业务含义核对并修改本描述。`,
       operation,
       confidence: operationConfidence(first, ui),
       transport: {
@@ -175,26 +237,46 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
       outputSchema,
       inputForm: (() => {
         const inferred = schemaFieldsToForm(inputSchema);
-        for (const field of inferred) if (!forms.has(field.path)) forms.set(field.path, field);
+        const observed = new Map(forms);
+        forms.clear();
+        for (const field of inferred) forms.set(field.path, observed.get(field.path) ? {
+          ...field,
+          ...observed.get(field.path),
+          required: observed.get(field.path)!.required || field.required,
+          requiredBasis: observed.get(field.path)!.required ? observed.get(field.path)!.requiredBasis : field.requiredBasis,
+          candidates: observed.get(field.path)!.candidates || field.candidates
+        } : field);
+        for (const [fieldPath, field] of observed) {
+          const isTransportInput = normalized.urlTemplate.includes(`{${field.name}}`);
+          const isDirectInteraction = directUiNames.has(field.name);
+          if (!forms.has(fieldPath) && (isTransportInput || isDirectInteraction)) forms.set(fieldPath, field);
+        }
         return [...forms.values()];
       })(),
       evidence,
-      sideEffect: ["create", "update", "review", "delete"].includes(operation),
+      sideEffect: ["create", "update", "review", "delete", "upload", "action"].includes(operation),
       confirmation: {
-        required: ["create", "update", "review", "delete"].includes(operation),
-        reason: ["create", "update", "review", "delete"].includes(operation)
-          ? `${operation} changes business data`
+        required: ["create", "update", "review", "delete", "upload", "action"].includes(operation),
+        reason: ["create", "update", "review", "delete", "upload", "action"].includes(operation)
+          ? `${OPERATION_NAMES[operation]}会改变业务或文件数据`
           : undefined
       },
       completion: inferCompletion(group, operation),
       bindings: [],
       validation: {
+        version: 2,
         status: "candidate",
         checks: []
       },
       generated: {
         source: "heuristic",
         generatedAt: new Date().toISOString()
+      },
+      editing: {
+        title: "generated",
+        description: "generated",
+        operation: "generated",
+        fields: "generated"
       }
     });
   }

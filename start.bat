@@ -1,31 +1,57 @@
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
-
+setlocal EnableExtensions
 cd /d "%~dp0"
-title Pi Business Skill Studio
 
-rem Load existing project configuration. This script does not install dependencies.
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if not "%%A"=="" set "%%A=%%B"
-  )
+if not defined BSS_PORT set "BSS_PORT=4310"
+if not defined BSS_OPEN_UI set "BSS_OPEN_UI=true"
+set "BSS_URL=http://127.0.0.1:%BSS_PORT%"
+
+echo ========================================
+echo Pi Business Skill Studio
+echo ========================================
+echo.
+echo [CHECK] Checking whether Studio is already running...
+powershell.exe -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { $r=Invoke-WebRequest -UseBasicParsing -Uri '%BSS_URL%/api/status' -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
+if not errorlevel 1 (
+  echo [INFO] Pi Business Skill Studio is already running at %BSS_URL%
+  if /I "%BSS_OPEN_UI%"=="true" start "" "%BSS_URL%"
+  endlocal
+  exit /b 0
 )
 
-if not exist ".\node_modules\.bin\pi.cmd" (
-  echo [ERROR] Pi is not installed in this project.
-  pause
-  endlocal & exit /b 1
+where node.exe >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] Node.js was not found. The project cannot start.
+  set "EXIT_CODE=1"
+  goto :failed
 )
 
-if defined PI_API_KEY if defined PI_BASE_URL if defined PI_MODEL (
-  call ".\node_modules\.bin\pi.cmd" --provider xiaomi-token-plan-cn --model "%PI_MODEL%" %*
-) else if defined OPENAI_API_KEY (
-  if not defined OPENAI_MODEL set "OPENAI_MODEL=gpt-5.5"
-  call ".\node_modules\.bin\pi.cmd" --provider openai --model "%OPENAI_MODEL%" %*
-) else (
-  call ".\node_modules\.bin\pi.cmd" %*
+where npm.cmd >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] npm was not found. The project cannot start.
+  set "EXIT_CODE=1"
+  goto :failed
 )
 
-set "APP_EXIT_CODE=%ERRORLEVEL%"
-if not "%APP_EXIT_CODE%"=="0" pause
-endlocal & exit /b %APP_EXIT_CODE%
+if not exist "node_modules\.bin\tsx.cmd" (
+  echo [ERROR] Project dependencies are missing. BAT only starts the project and will not install them.
+  set "EXIT_CODE=1"
+  goto :failed
+)
+
+echo [START] Launching Pi Business Skill Studio...
+echo [INFO] Project configuration will be read from .env when present.
+echo.
+call npm run web
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" (
+  endlocal
+  exit /b 0
+)
+
+:failed
+echo.
+echo [ERROR] Pi Business Skill Studio did not start. Exit code: %EXIT_CODE%
+echo [INFO] The error above is preserved so it can be read.
+if /I not "%BSS_NO_PAUSE%"=="true" pause
+endlocal & exit /b %EXIT_CODE%

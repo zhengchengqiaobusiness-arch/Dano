@@ -18,6 +18,7 @@ export const UI_RECORDER_SCRIPT = String.raw`
     }
     if (el instanceof HTMLSelectElement) return el.multiple ? [...el.selectedOptions].map(o => o.value) : el.value;
     if (el instanceof HTMLTextAreaElement) return el.value;
+    if (el.isContentEditable) return text(el.textContent);
     return undefined;
   };
   const labelOf = (el) => {
@@ -27,14 +28,19 @@ export const UI_RECORDER_SCRIPT = String.raw`
     const labelled = el.getAttribute("aria-labelledby");
     if (labelled) return text(labelled.split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" "));
     const parentLabel = el.closest("label");
-    return text(parentLabel?.textContent || "");
+    if (parentLabel) return text(parentLabel.textContent);
+    const formItem = el.closest('.el-form-item,.ant-form-item,.arco-form-item,[class*="form-item"],[class*="formItem"]');
+    const itemLabel = formItem?.querySelector('label,.el-form-item__label,.ant-form-item-label,[class*="label"]');
+    return text(itemLabel?.textContent || el.getAttribute("placeholder") || el.getAttribute("title") || "");
   };
   const selectorOf = (el) => {
     if (el.id) return "#" + CSS.escape(el.id);
-    const name = el.getAttribute("name");
-    if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
     const testid = el.getAttribute("data-testid");
     if (testid) return '[data-testid="' + CSS.escape(testid) + '"]';
+    const name = el.getAttribute("name");
+    if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
+    const aria = el.getAttribute("aria-label");
+    if (aria) return el.tagName.toLowerCase() + '[aria-label="' + CSS.escape(aria) + '"]';
     const parts = [];
     let node = el;
     for (let i = 0; node && node.nodeType === 1 && i < 4; i++, node = node.parentElement) {
@@ -67,16 +73,19 @@ export const UI_RECORDER_SCRIPT = String.raw`
     .map(el => text(el.textContent))
     .filter(Boolean);
 
-  const formSnapshot = (form) => {
-    if (!(form instanceof HTMLFormElement)) return undefined;
-    return [...form.elements].slice(0, 200).map(el => {
+  const formSnapshot = (container) => {
+    if (!(container instanceof HTMLElement)) return undefined;
+    const controls = container instanceof HTMLFormElement
+      ? [...container.elements]
+      : [...container.querySelectorAll('input,select,textarea,[contenteditable="true"],[role="combobox"],[role="checkbox"],[role="switch"],[data-field]')];
+    return controls.slice(0, 200).map(el => {
       if (!(el instanceof HTMLElement)) return null;
       return {
-        name: el.getAttribute("name") || undefined,
+        name: el.getAttribute("name") || el.getAttribute("data-field") || el.getAttribute("data-name") || el.getAttribute("id") || undefined,
         label: labelOf(el) || undefined,
         type: el.getAttribute("type") || el.tagName.toLowerCase(),
         value: valueOf(el),
-        required: el.hasAttribute("required"),
+        required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest('.is-required,[class*="required"]') !== null,
         options: optionsOf(el)
       };
     }).filter(Boolean);
@@ -85,9 +94,11 @@ export const UI_RECORDER_SCRIPT = String.raw`
   const send = (eventType, rawTarget) => {
     const el = rawTarget instanceof HTMLElement ? rawTarget : rawTarget?.parentElement;
     if (!(el instanceof HTMLElement)) return;
-    const control = el.matches('input,select,textarea,button,[role="button"],[role="combobox"]')
+    const control = el.matches('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"]')
       ? el
-      : el.closest('input,select,textarea,button,[role="button"],[role="combobox"],a') || el;
+      : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],a') || el;
+
+    const formContainer = control.closest('form,[role="form"],.el-form,.ant-form,.arco-form,[data-form]');
 
     const payload = {
       eventType,
@@ -97,26 +108,26 @@ export const UI_RECORDER_SCRIPT = String.raw`
       role: control.getAttribute("role") || undefined,
       text: text(control.textContent || control.getAttribute("value") || ""),
       label: labelOf(control) || undefined,
-      name: control.getAttribute("name") || undefined,
+      name: control.getAttribute("name") || control.getAttribute("data-field") || control.getAttribute("data-name") || control.getAttribute("id") || undefined,
       inputType: control.getAttribute("type") || undefined,
       value: valueOf(control),
       options: optionsOf(control),
       visibleOptions: visibleRoleOptions(),
-      form: formSnapshot(control.closest("form"))
+      form: formSnapshot(formContainer)
     };
     Promise.resolve(window.__bssRecordUi?.(payload)).catch(() => {});
   };
 
   const inputTimers = new WeakMap();
-  document.addEventListener("click", e => send("click", e.target), true);
+  document.addEventListener("click", e => send("click", e.composedPath?.()[0] || e.target), true);
   document.addEventListener("input", e => {
-    const target = e.target;
+    const target = e.composedPath?.()[0] || e.target;
     if (!(target instanceof HTMLElement)) return;
     const previous = inputTimers.get(target);
     if (previous) clearTimeout(previous);
     inputTimers.set(target, setTimeout(() => send("input", target), 250));
   }, true);
-  document.addEventListener("change", e => send("change", e.target), true);
-  document.addEventListener("submit", e => send("submit", e.target), true);
+  document.addEventListener("change", e => send("change", e.composedPath?.()[0] || e.target), true);
+  document.addEventListener("submit", e => send("submit", e.composedPath?.()[0] || e.target), true);
 })();
 `;
