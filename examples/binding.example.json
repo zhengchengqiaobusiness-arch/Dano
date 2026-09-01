@@ -1,0 +1,14 @@
+{
+  "note": "Illustrative only; not loaded by runtime.",
+  "bindingExample": {
+    "id": "customer-search-to-update-id",
+    "fromCapabilityId": "customer-search",
+    "fromPath": "$.items[0].id",
+    "toPath": "$.id",
+    "confidence": 1,
+    "evidenceIds": [
+      "net_example"
+    ],
+    "approved": true
+  }
+}

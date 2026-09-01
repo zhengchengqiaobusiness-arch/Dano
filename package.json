@@ -1,0 +1,38 @@
+{
+  "name": "pi-business-skill-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Record real business-system browser/API operations and distill them into evidence-backed Agent Skills for Pi.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "studio": "tsx src/cli.ts",
+    "agent": "tsx src/pi-agent.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "browser:install": "playwright install chromium",
+    "clean": "node scripts/clean.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "openai": "7.8.0",
+    "playwright": "1.62.1",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "tsx": "latest",
+    "typescript": "^5.8.3",
+    "@types/node": "latest"
+  },
+  "pi": {
+    "extensions": [
+      "./.pi/extensions/business-skill-studio.ts"
+    ],
+    "skills": [
+      "./.pi/skills"
+    ]
+  }
+}

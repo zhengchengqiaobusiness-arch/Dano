@@ -1,0 +1,5 @@
+{
+  "enableSkillCommands": true,
+  "sessionDir": ".pi/sessions",
+  "defaultTools": ["read", "bash", "edit", "write"]
+}
