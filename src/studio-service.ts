@@ -86,7 +86,8 @@ export class StudioService {
   }
 
   async analyze(sessionId?: string, useLlm = true) {
-    const events = sessionId ? await this.sessionEvents(sessionId) : await this.allEvents();
+    const latest = sessionId || (await this.listSessions())[0]?.id;
+    const events = latest ? await this.sessionEvents(latest) : [];
     const existing = await this.capabilities();
     const existingByTransport = new Map(existing.map(c => [
       `${c.transport.method}|${c.transport.pathTemplate}`,

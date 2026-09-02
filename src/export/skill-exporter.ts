@@ -22,9 +22,19 @@ function safeCell(value: unknown) {
   return String(value ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
-export function normalizeSkillName(value: string) {
+const PATH_SKIP = new Set(["admin-api", "api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query", "save"]);
+
+export function resourceSlugFromPath(pathTemplate: string) {
+  const parts = pathTemplate.split("/").filter(part => part && !PATH_SKIP.has(part));
+  return (parts.slice(-2).join("-") || parts[0] || "").replace(/-page$/, "");
+}
+
+export function normalizeSkillName(value: string, capabilities: CapabilityContract[] = []) {
   const ascii = value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-  return ascii || `business-skill-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
+  if (ascii) return ascii;
+  const primary = capabilities.filter(isPrimaryCapability);
+  const fromPath = resourceSlugFromPath((primary[0] || capabilities[0])?.transport.pathTemplate || "");
+  return fromPath || `business-skill-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
 }
 
 function inputType(field: InputFormField) {
@@ -316,7 +326,7 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
   ).map(field => `${capability.id}:${field.path}`));
   if (unresolved.length) throw new Error(`存在没有处理规则的系统必填字段：${unresolved.join("、")}`);
 
-  const skillName = normalizeSkillName(requestedName);
+  const skillName = normalizeSkillName(requestedName, capabilities);
   const directory = path.join(outputRoot, skillName);
   const referencesDir = path.join(directory, "references");
   const scriptsDir = path.join(directory, "scripts");
@@ -356,11 +366,18 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
     await chmod(target, 0o755);
   }
 
+  const primary = capabilities.filter(capability => isPrimaryCapability(capability));
+  const lookups = capabilities.filter(capability => !primary.includes(capability));
   return {
     dir: directory,
     count: capabilities.length,
+    primaryCount: primary.length,
+    lookupCount: lookups.length,
     skillName,
+    displayName,
     capabilityIds: capabilities.map(capability => capability.id),
+    primaryCapabilityIds: primary.map(capability => capability.id),
+    lookupCapabilityIds: lookups.map(capability => capability.id),
     routeIds: routes.map(route => route.id)
   };
 }

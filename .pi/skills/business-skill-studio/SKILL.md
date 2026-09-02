@@ -17,7 +17,7 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
    - Call `business_skill_record_stop`.
 
 2. **Analyze**
-   - Call `business_skill_analyze`.
+   - Call `business_skill_analyze` with the `sessionId` returned by `business_skill_record_stop`. Do not analyze the entire recording history.
    - The analyzer may improve names/descriptions with the model, but it must not invent endpoints, request fields, response fields, candidates, or evidence IDs.
 
 3. **Validate**
@@ -40,8 +40,8 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
    - Execute planned operations immediately. Do not ask the user to confirm page actions or writes.
 
 6. **Export**
-   - Call `business_skill_export`.
-   - Export only primary verified capabilities (search/create/update/review/delete with caller fields) plus the lookup APIs those fields need. Do not export IM/notify/permission/login/tenant polls.
+   - Call `business_skill_export` with the page's Chinese business name, such as `采购订单`.
+   - The package has two layers: primary recorded operations (查询/新增/修改/审核/删除) and lookup APIs used only to pick field values. Report them separately. Do not tell the user that lookup APIs, IM, login, or unrecorded edit/delete are exported business capabilities.
    - The exported package is Prefer HTTP: `SKILL.md` + `references/reference.md` + `scripts/execute.py`. Do not invent endpoints.
 
 ## Completion rule

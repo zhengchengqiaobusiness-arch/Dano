@@ -129,6 +129,28 @@ function pickUi(group: NetworkEvidence[], uiById: Map<string, UiEvidence>) {
   return items.find(item => /搜索|查询|新增|新建|确定|保存|提交/.test(`${item.text || ""} ${item.label || ""}`)) || items[0];
 }
 
+function relatedUiEvents(
+  event: NetworkEvidence,
+  uiById: Map<string, UiEvidence>,
+  sample: unknown,
+  operation: CapabilityContract["operation"]
+) {
+  const at = Date.parse(event.at);
+  const windowMs = ["create", "update", "review", "delete", "upload", "action"].includes(operation)
+    ? 15 * 60_000
+    : 15 * 60_000;
+  return [...uiById.values()]
+    .filter(item => {
+      if (item.sessionId !== event.sessionId) return false;
+      const delta = at - Date.parse(item.at);
+      if (delta < 0) return false;
+      if (event.correlatedUiEvidenceId === item.id) return true;
+      if (delta <= 15_000) return true;
+      return delta <= windowMs && (uiSupportsRequest(item, sample) || Boolean(item.form?.length) || Boolean(item.label));
+    })
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+}
+
 function capabilityTitle(operation: CapabilityContract["operation"], ui: UiEvidence | undefined, pathTemplate: string) {
   const skip = new Set(["admin-api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query"]);
   const resource = pathTemplate.split("/").filter(part => part && !skip.has(part)).slice(-2).join("/") || pathTemplate;
@@ -249,10 +271,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         status: event.response?.status
       }];
       const sample = requestInput(event);
-      const nearby = [...uiById.values()].filter(item => {
-        const delta = Date.parse(event.at) - Date.parse(item.at);
-        return item.sessionId === event.sessionId && delta >= 0 && delta <= 15_000 && uiSupportsRequest(item, sample);
-      });
+      const nearby = relatedUiEvents(event, uiById, sample, operation);
       if (event.correlatedUiEvidenceId) {
         const correlated = uiById.get(event.correlatedUiEvidenceId);
         if (correlated) nearby.unshift(correlated);
@@ -290,13 +309,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         const inferred = schemaFieldsToForm(inputSchema);
         const observed = new Map(forms);
         forms.clear();
-        const nearbyUi = group.flatMap(event => {
-          const correlated = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
-          return [correlated, ...[...uiById.values()].filter(item => {
-            const delta = Date.parse(event.at) - Date.parse(item.at);
-            return item.sessionId === event.sessionId && delta >= 0 && delta <= 15_000;
-          })].filter((item): item is UiEvidence => Boolean(item));
-        });
+        const nearbyUi = group.flatMap(event => relatedUiEvents(event, uiById, requestInput(event), operation));
         const observations = collectUiObservations(nearbyUi);
         const sample = group.map(requestInput).reduce((best, item) => {
           const score = Object.keys(item && typeof item === "object" ? item as object : {}).length;

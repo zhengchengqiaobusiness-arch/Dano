@@ -2,27 +2,32 @@ import type { InputFormField, UiEvidence } from "../domain.js";
 
 const GENERATED_NAME = /^(el-id-\d+-\d+|el-[a-z]+-\d+)$/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
-const COMPUTED_NAME = /^(amount|total|taxAmount|taxPrice|taxAmt|discountAmount|discountPrice|payable|paid|sum|totalPrice)$/i;
+const COMPUTED_NAME = /^(amount|total|taxAmount|taxPrice|taxAmt|discountAmount|discountPrice|payable|paid|sum|totalPrice|totalProductPrice)$/i;
 const AUTO_GENERATED = /^(no|orderNo|orderNumber|orderSn)$/i;
-const LOOKUP_FIELD = /product|supplier|account|creator|createUser|userId|owner/i;
+const AUTO_FROM_LOOKUP = /^(productUnitName|productBarCode|stockCount|productName)$/i;
+const LOOKUP_FIELD = /^(productId|product|supplierId|supplier|accountId|account|creator|creatorId|createUser|createUserId|userId|owner)$/i;
+const EDITABLE_LINE_ITEM = /^(count|qty|quantity|productPrice|unitPrice|taxPercent|taxRate|discountPercent|depositPrice|remark|orderTime)$/i;
 const LABEL_ALIASES: Array<[RegExp, RegExp]> = [
+  [/入库数量|入库状态/, /inStatus|inCount|stockIn/i],
+  [/退货数量|退货状态/, /returnStatus|returnCount|refund/i],
+  [/结束日期|结束时间/, /orderTime\[1\]|endTime|endDate|\[1\]$/i],
+  [/开始日期|开始时间/, /orderTime\[0\]|startTime|startDate|\[0\]$/i],
+  [/订单时间|下单时间/, /^(orderTime|orderDate)$/i],
+  [/产品名称|^产品$|商品/, /^(productId|product)$/i],
+  [/供应商/, /supplier/i],
+  [/结算账户|账户/, /account/i],
+  [/创建人/, /creator|createUser|creatorId|userId/i],
   [/备注|说明/, /remark|note|comment|memo|desc/i],
-  [/数量/, /^(count|qty|quantity|num|number)$/i],
+  [/^数量$/, /^(count|qty|quantity)$/i],
   [/单价|价格/, /price|unitPrice|productPrice/i],
   [/税率/, /taxPercent|taxRate|^tax$/i],
-  [/优惠/, /discountPercent|discountRate|discount/i],
+  [/优惠率/, /discountPercent|discountRate/i],
   [/订金|定金/, /deposit/i],
-  [/订单时间|下单时间|日期/, /time|date|orderTime/i],
-  [/供应商/, /supplier/i],
-  [/产品|商品/, /product/i],
-  [/账户|结算/, /account/i],
   [/订单单号|单号/, /^(no|orderNo|orderNumber|orderSn)$/i],
-  [/创建人/, /creator|createUser|creatorId|userId/i],
-  [/状态/, /status/i],
-  [/入库/, /inCount|inStatus|stockIn/i],
-  [/退货/, /returnCount|returnStatus|refund/i],
-  [/开始/, /start|begin/i],
-  [/结束/, /end|finish/i]
+  [/状态/, /^(status)$/i],
+  [/单位/, /unit/i],
+  [/条码/, /barCode|barcode|bar_code/i],
+  [/库存/, /stock/i]
 ];
 
 export function isGeneratedFieldName(name?: string) {
@@ -31,6 +36,14 @@ export function isGeneratedFieldName(name?: string) {
 
 export function isPaginationField(name?: string) {
   return Boolean(name && PAGE_NAME.test(name));
+}
+
+export function isLookupField(name?: string) {
+  return Boolean(name && LOOKUP_FIELD.test(name));
+}
+
+export function isEditableBusinessField(field: Pick<InputFormField, "name">) {
+  return isLookupField(field.name) || EDITABLE_LINE_ITEM.test(field.name);
 }
 
 export interface UiObservation {
@@ -89,18 +102,32 @@ function sameValue(left: unknown, right: unknown) {
   return String(left) === String(right);
 }
 
-function labelMatchesName(label: string | undefined, name: string) {
+function isDistinctiveValue(value: unknown) {
+  if (value === undefined || value === null || value === "") return false;
+  if (typeof value === "boolean") return true;
+  if (typeof value === "number" && (value === 0 || value === 1)) return false;
+  if (typeof value === "string" && /^(0|0\.0+|1|1\.0+)$/.test(value.trim())) return false;
+  return String(value).length > 1;
+}
+
+export function labelMatchesName(label: string | undefined, name: string) {
   if (!label) return false;
   return LABEL_ALIASES.some(([labelPattern, namePattern]) => labelPattern.test(label) && namePattern.test(name));
 }
 
 export function findObservation(field: InputFormField, requestValue: unknown, observations: UiObservation[]) {
-  return observations.find(item => {
-    if (item.name && item.name === field.name) return true;
-    if (item.label && (item.label === field.label || item.label === field.name)) return true;
-    if (sameValue(item.value, requestValue)) return true;
-    return labelMatchesName(item.label, field.name);
-  });
+  const byName = observations.find(item => item.name && item.name === field.name);
+  if (byName) return byName;
+  const byLabel = observations.find(item =>
+    Boolean(item.label) && (
+      item.label === field.label
+      || item.label === field.name
+      || labelMatchesName(item.label, field.name)
+    )
+  );
+  if (byLabel) return byLabel;
+  if (!isDistinctiveValue(requestValue)) return undefined;
+  return observations.find(item => sameValue(item.value, requestValue));
 }
 
 export function fieldHasUiEvidence(field: InputFormField, events: UiEvidence[]) {
@@ -125,8 +152,13 @@ function literalRule(value: unknown) {
   return undefined;
 }
 
-function formatHint(field: InputFormField) {
-  if (/time|date|start|end/i.test(`${field.name} ${field.label}`)) return "，保持页面原始日期格式";
+function formatHint(field: InputFormField, observation?: UiObservation, requestValue?: unknown) {
+  if (/time|date|start|end/i.test(`${field.name} ${field.label}`)) {
+    if (typeof requestValue === "number" && observation && typeof observation.value === "string") {
+      return "，页面按日期填写，请求使用对应时间戳，不要改成录制当天的固定数字";
+    }
+    return "，保持页面原始日期格式";
+  }
   if (field.valueType === "number" || field.valueType === "integer") return "，保持页面数字格式";
   return "，保持页面原始输入格式";
 }
@@ -151,6 +183,30 @@ function finalizeUnhandled(field: InputFormField, requestValue: unknown): InputF
   };
 }
 
+function asCaller(field: InputFormField, matched: UiObservation | undefined, requestValue: unknown): InputFormField {
+  const useStatic = Boolean(matched?.options?.length) && !LOOKUP_FIELD.test(field.name);
+  const options = useStatic
+    ? matched!.options!.map(item =>
+      String(item.label) === String(matched!.value) && requestValue !== undefined && requestValue !== matched!.value
+        ? { value: requestValue, label: String(item.label) }
+        : { value: item.value, label: String(item.label || item.value) }
+    )
+    : undefined;
+  return {
+    ...field,
+    label: field.label && field.label !== field.name ? field.label : (matched?.label || field.label),
+    source: "caller",
+    systemHandled: false,
+    widget: options?.length || LOOKUP_FIELD.test(field.name) ? "select" : field.widget,
+    candidates: options?.length ? { type: "static", values: options } : field.candidates,
+    sourceDetail: options?.length
+      ? "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
+      : LOOKUP_FIELD.test(field.name)
+        ? "调用方从已录制查询接口选择，不要写死录制样本"
+        : `调用方按页面原始格式提供（${field.valueType}）${formatHint(field, matched, requestValue)}，不要改成录制样本`
+  };
+}
+
 export function resolveFieldOwnership(
   field: InputFormField,
   requestValue: unknown,
@@ -166,7 +222,16 @@ export function resolveFieldOwnership(
       sourceDetail: "列表分页由执行器按默认值补齐，调用方可覆盖，不要当成业务主键"
     };
   }
-  if (COMPUTED_NAME.test(field.name) && !observations.some(item => item.name === field.name || sameValue(item.value, requestValue))) {
+  if (AUTO_FROM_LOOKUP.test(field.name)) {
+    return {
+      ...field,
+      source: "system",
+      systemHandled: true,
+      required: false,
+      sourceDetail: "选择产品或关联对象后由页面自动带出。调用方不要手填；漏掉会导致提交成功但单位、条码或库存为空"
+    };
+  }
+  if (COMPUTED_NAME.test(field.name)) {
     return {
       ...field,
       source: "computed",
@@ -177,26 +242,9 @@ export function resolveFieldOwnership(
     };
   }
   const matched = findObservation(field, requestValue, observations);
-  if (!matched) return finalizeUnhandled(field, requestValue);
-  const useStatic = Boolean(matched.options?.length) && !LOOKUP_FIELD.test(field.name);
-  const options = useStatic
-    ? matched.options!.map(item =>
-      String(item.label) === String(matched.value) && requestValue !== undefined && requestValue !== matched.value
-        ? { value: requestValue, label: String(item.label) }
-        : { value: item.value, label: String(item.label || item.value) }
-    )
-    : undefined;
-  return {
-    ...field,
-    label: field.label && field.label !== field.name ? field.label : (matched.label || field.label),
-    source: "caller",
-    systemHandled: false,
-    widget: options?.length ? "select" : field.widget,
-    candidates: options?.length ? { type: "static", values: options } : field.candidates,
-    sourceDetail: options?.length
-      ? "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
-      : `调用方按页面原始格式提供（${field.valueType}）${formatHint(field)}，不要改成录制样本`
-  };
+  if (matched) return asCaller(field, matched, requestValue);
+  if (isEditableBusinessField(field)) return asCaller(field, undefined, requestValue);
+  return finalizeUnhandled(field, requestValue);
 }
 
 export function requestValueAt(sample: unknown, path: string) {
@@ -209,8 +257,8 @@ export function uiSupportsRequest(event: UiEvidence, sample: unknown) {
   return collectUiObservations([event]).some(item =>
     values.some(field =>
       (item.name && item.name === field.name)
-      || sameValue(item.value, field.value)
       || labelMatchesName(item.label, field.name)
+      || (isDistinctiveValue(field.value) && sameValue(item.value, field.value))
     )
   );
 }

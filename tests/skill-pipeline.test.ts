@@ -96,7 +96,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-export-"));
   try {
     const result = await exportSkill(temporary, "销售订单审核", [query, review]);
-    assert.match(result.skillName, /^business-skill-[a-f0-9]{8}$/);
+    assert.equal(result.skillName, "review-order");
     for (const relative of [
       "SKILL.md", "references/CONTRACT.json", "references/reference.md", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
       "references/OPTIONS.md", "scripts/execute.py", "scripts/candidates.py", "scripts/format_list.py"

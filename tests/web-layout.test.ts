@@ -143,6 +143,8 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(browserSkill, /#el-id-\*/);
   assert.match(browserSkill, /YYYY-MM-DD/);
   assert.match(bridge, /never click the dim overlay|Never click text=2/);
+  assert.match(bridge, /sessionId from record_stop|主能力 and 字段候选接口/);
+  assert.match(extension, /本次录制主能力|已导出主能力/);
 });
 
 test("capability catalog UI and HTTP surface are gone", async () => {

@@ -69,7 +69,8 @@ export class PiRpcBridge {
         "If a dialog is open, only click controls inside that dialog. Do not press Escape to recover; that closes the dialog.",
         "click/fill already use force and a 4s timeout. If an action fails because the page is still loading, wait 400-800ms once and retry choose; do not retry the same blocked click and do not take extra snapshots.",
         "Only click, fill, select, choose, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",
-        "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations."
+        "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations.",
+        "When analyzing, pass the sessionId from record_stop. When exporting, report 主能力 and 字段候选接口 separately; do not claim 编辑/删除 unless those writes were recorded and verified."
       ].join(" ")
     );
 

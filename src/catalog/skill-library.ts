@@ -51,7 +51,7 @@ export class SkillLibrary {
 
   async export(name: string, capabilities: CapabilityContract[], confirmed: boolean) {
     if (!confirmed) throw new Error("导出或重新导出前必须取得明确确认");
-    const skillName = normalizeSkillName(name);
+    const skillName = normalizeSkillName(name, capabilities);
     const records = await this.allRecords();
     const previous = records.find(record => record.name === skillName && record.status !== "deleted");
     if (previous?.status === "frozen") throw new Error("该 Skill 已冻结；需要先解除冻结才能重新导出");
@@ -85,7 +85,14 @@ export class SkillLibrary {
     const next = records.filter(item => item.id !== record.id);
     next.push(record);
     await this.save(next);
-    return { ...record, count: exported.count };
+    return {
+      ...record,
+      count: exported.count,
+      primaryCount: exported.primaryCount,
+      lookupCount: exported.lookupCount,
+      primaryCapabilityIds: exported.primaryCapabilityIds,
+      lookupCapabilityIds: exported.lookupCapabilityIds
+    };
   }
 
   async setFrozen(name: string, frozen: boolean, confirmed: boolean) {

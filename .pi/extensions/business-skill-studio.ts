@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StudioService } from "../../src/studio-service.js";
+import { isNoiseCapability, isPrimaryCapability, summarizeCatalog } from "../../src/inference/export-scope.js";
 import { getByPath, setByPath } from "../../src/utils.js";
 
 const parameters = (properties: Record<string, unknown>, required: string[] = []) => ({
@@ -113,8 +114,13 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     }),
     async execute(_id, params: any) {
       const caps = await studio.analyze(params.sessionId, !params.noLlm);
+      const summary = summarizeCatalog(caps);
+      const primaryTitles = summary.primary.map(item => item.title).join("、") || "无";
       return {
-        content: [{ type: "text", text: `Generated ${caps.length} editable capability candidate(s).` }],
+        content: [{
+          type: "text",
+          text: `本次录制主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。`
+        }],
         details: caps
       };
     }
@@ -127,9 +133,14 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     parameters: parameters({}),
     async execute() {
       const caps = await studio.validate();
-      const verified = caps.filter(c => c.validation.status === "verified").length;
+      const verified = caps.filter(item => item.validation.status === "verified");
+      const primary = verified.filter(isPrimaryCapability);
+      const noise = caps.filter(isNoiseCapability).length;
       return {
-        content: [{ type: "text", text: `Validation complete: ${verified}/${caps.length} verified.` }],
+        content: [{
+          type: "text",
+          text: `验证完成：主能力 ${primary.filter(item => item.validation.status === "verified").length} 项已通过（${primary.map(item => item.title).join("、") || "无"}）。后台轮询 ${noise} 项不会导出。`
+        }],
         details: caps
       };
     }
@@ -234,7 +245,10 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     async execute(_id, params: any) {
       const result = await studio.exportManaged(params.name, true);
       return {
-        content: [{ type: "text", text: `已导出 ${result.capabilityIds.length} 项验证能力，版本 v${result.version}。` }],
+        content: [{
+          type: "text",
+          text: `已导出主能力 ${result.primaryCount} 项、字段候选接口 ${result.lookupCount} 个，版本 v${result.version}。目录 ${result.directory}。候选接口只给调用方选值，不是独立业务操作。`
+        }],
         details: result
       };
     }

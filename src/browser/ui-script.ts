@@ -41,7 +41,16 @@ export const UI_RECORDER_SCRIPT = String.raw`
     if (parentLabel) return text(parentLabel.textContent);
     const formItem = el.closest('.el-form-item,.ant-form-item,.arco-form-item,[class*="form-item"],[class*="formItem"]');
     const itemLabel = formItem?.querySelector('label,.el-form-item__label,.ant-form-item-label,[class*="label"]');
-    return text(itemLabel?.textContent || el.getAttribute("placeholder") || el.getAttribute("title") || "");
+    if (itemLabel?.textContent) return text(itemLabel.textContent);
+    const cell = el.closest("td,.el-table__cell");
+    const row = cell?.closest("tr,.el-table__row");
+    if (cell && row) {
+      const index = [...row.children].indexOf(cell);
+      const table = el.closest("table,.el-table");
+      const headers = table ? [...table.querySelectorAll("th,.el-table__header .el-table__cell")] : [];
+      if (index >= 0 && headers[index]?.textContent) return text(headers[index].textContent);
+    }
+    return text(el.getAttribute("placeholder") || el.getAttribute("title") || "");
   };
   const selectorOf = (el) => {
     const placeholder = el.getAttribute("placeholder");
@@ -113,7 +122,7 @@ export const UI_RECORDER_SCRIPT = String.raw`
       ? el
       : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],a') || el;
 
-    const formContainer = control.closest('form,[role="form"],.el-form,.ant-form,.arco-form,[data-form]');
+    const formContainer = control.closest('form,[role="form"],.el-form,.ant-form,.arco-form,[data-form],[role="dialog"],.el-dialog,.el-overlay-dialog');
 
     const payload = {
       eventType,

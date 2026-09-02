@@ -2,6 +2,7 @@ import type { CapabilityContract } from "../domain.js";
 import { isPaginationField } from "./field-resolver.js";
 
 const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout/i;
+const LOOKUP_QUERY = /simple-list|get-count|\/dict-data\//i;
 
 export function isNoiseCapability(capability: CapabilityContract) {
   if (capability.operation === "authenticate") return true;
@@ -15,7 +16,9 @@ export function hasBusinessCallerField(capability: CapabilityContract) {
 export function isPrimaryCapability(capability: CapabilityContract) {
   if (isNoiseCapability(capability)) return false;
   if (["create", "update", "review", "delete", "upload"].includes(capability.operation)) return true;
-  return capability.operation === "query" && hasBusinessCallerField(capability);
+  if (capability.operation !== "query") return false;
+  if (LOOKUP_QUERY.test(capability.transport.pathTemplate || capability.transport.urlTemplate)) return false;
+  return hasBusinessCallerField(capability);
 }
 
 export function isCandidateSourceCapability(capability: CapabilityContract, catalog: CapabilityContract[]) {
@@ -37,4 +40,13 @@ export function exportableCapabilities(capabilities: CapabilityContract[]) {
   const selected = verified.filter(capability => needed.has(capability.id) && !isNoiseCapability(capability));
   if (selected.length) return selected;
   return verified.filter(capability => !isNoiseCapability(capability));
+}
+
+export function summarizeCatalog(capabilities: CapabilityContract[]) {
+  const primary = capabilities.filter(capability => isPrimaryCapability(capability));
+  const lookups = capabilities.filter(capability =>
+    !primary.includes(capability) && isCandidateSourceCapability(capability, capabilities)
+  );
+  const noise = capabilities.filter(isNoiseCapability);
+  return { primary, lookups, noise };
 }

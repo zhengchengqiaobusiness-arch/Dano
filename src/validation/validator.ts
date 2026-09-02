@@ -1,6 +1,6 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
-import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { fieldHasUiEvidence, isEditableBusinessField, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -135,7 +135,11 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
 
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
-    .every(field => fieldHasUiEvidence(field, uiRefs));
+    .every(field =>
+      fieldHasUiEvidence(field, uiRefs)
+      || field.candidates?.type === "capability"
+      || (uiRefs.length > 0 && isEditableBusinessField(field))
+    );
   checks.push({
     name: "caller-fields-backed-by-ui",
     ok: callerFieldsBacked,
