@@ -1,5 +1,5 @@
 import path from "node:path";
-import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
+import { chromium, type BrowserContext, type Browser, type Frame, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
 import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
@@ -26,14 +26,34 @@ const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
 
 const SNAPSHOT_IN_PAGE = new Function(String.raw`
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
+  const generatedName = (value) => /^(el-id-\d+-\d+|el-[a-z]+-\d+)$/i.test(String(value || ""));
+  const labelOf = (el) => {
+    if (el.labels?.length) return clean([...el.labels].map(item => item.textContent).join(" "));
+    const aria = el.getAttribute("aria-label");
+    if (aria) return clean(aria);
+    const formItem = el.closest('.el-form-item,.ant-form-item,.arco-form-item,[class*="form-item"]');
+    const itemLabel = formItem?.querySelector('label,.el-form-item__label,.ant-form-item-label,[class*="label"]');
+    return clean(itemLabel?.textContent || el.getAttribute("placeholder") || "");
+  };
+  const nameOf = (el) => {
+    const named = el.getAttribute("name") || el.getAttribute("data-field") || el.getAttribute("data-name");
+    if (named) return named;
+    const formItem = el.closest('.el-form-item,.ant-form-item,.arco-form-item,[class*="form-item"]');
+    return formItem?.getAttribute("prop") || formItem?.getAttribute("data-prop") || (el.id && !generatedName(el.id) ? el.id : undefined);
+  };
   const selectorOf = (el) => {
-    if (el.id) return "#" + CSS.escape(el.id);
+    const placeholder = el.getAttribute("placeholder");
+    if (placeholder) return "placeholder=" + placeholder;
+    if (el.id && !generatedName(el.id)) return "#" + CSS.escape(el.id);
+    const label = labelOf(el);
+    if (label && label.length <= 40) return "label=" + label;
+    const role = el.getAttribute("role") || (el.matches("button,.el-button") ? "button" : "");
+    const roleName = clean(el.getAttribute("aria-label") || el.textContent || "");
+    if (role && roleName && roleName.length <= 40) return "role=" + role + '[name="' + roleName + '"]';
     const testid = el.getAttribute("data-testid");
     if (testid) return '[data-testid="' + CSS.escape(testid) + '"]';
-    const name = el.getAttribute("name");
+    const name = nameOf(el);
     if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
-    const aria = el.getAttribute("aria-label");
-    if (aria) return el.tagName.toLowerCase() + '[aria-label="' + CSS.escape(aria) + '"]';
     const parts = [];
     let node = el;
     for (let i = 0; node && i < 4; i++, node = node.parentElement) {
@@ -54,12 +74,14 @@ const SNAPSHOT_IN_PAGE = new Function(String.raw`
     selector: selectorOf(el),
     tag: el.tagName.toLowerCase(),
     role: el.getAttribute("role") || undefined,
-    label: el.getAttribute("aria-label") || undefined,
-    name: el.getAttribute("name") || undefined,
+    label: labelOf(el) || el.getAttribute("aria-label") || undefined,
+    name: nameOf(el),
     type: el.getAttribute("type") || undefined,
     placeholder: el.getAttribute("placeholder") || undefined,
     required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
     disabled: el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true",
+    value: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? String(el.value || "") : undefined,
+    filled: Boolean((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && el.value),
     text: clean(el.textContent || el.value || "").slice(0, 300)
   }));
   return {
@@ -77,6 +99,7 @@ interface ActiveRecording {
   eventsFile: string;
   requestIds: WeakMap<Request, string>;
   lastUiByPage: WeakMap<Page, UiEvidence>;
+  recentUi: UiEvidence[];
   externalBrowser: boolean;
 }
 
@@ -145,6 +168,7 @@ export class BrowserRecorder {
       eventsFile,
       requestIds: new WeakMap(),
       lastUiByPage: new WeakMap(),
+      recentUi: [],
       externalBrowser: false
     };
 
@@ -180,6 +204,7 @@ export class BrowserRecorder {
         form: redactValue(payload?.form) as UiEvidence["form"]
       };
       active.lastUiByPage.set(page, event);
+      active.recentUi = [...active.recentUi, event].slice(-40);
       await appendJsonl(active.eventsFile, event);
     });
 
@@ -355,13 +380,37 @@ export class BrowserRecorder {
     return locator.evaluate(INSPECT_TARGET_IN_PAGE);
   }
 
+  private locatorIn(frame: Frame, selector: string) {
+    const placeholder = selector.match(/^placeholder=(.+)$/s);
+    if (placeholder) return frame.getByPlaceholder(placeholder[1]!);
+    const label = selector.match(/^label=(.+)$/s);
+    if (label) return frame.getByLabel(label[1]!);
+    const text = selector.match(/^text=(.+)$/s);
+    if (text) return frame.getByText(text[1]!, { exact: true });
+    const role = selector.match(/^role=([a-z]+)(?:\[name=["'](.+)["']\])?$/i);
+    if (role) return frame.getByRole(role[1] as "button", role[2] ? { name: role[2] } : {});
+    return frame.locator(selector);
+  }
+
   private async locate(selector: string) {
     const page = this.currentPage();
     for (const frame of page.frames()) {
-      const locator = frame.locator(selector).first();
+      const locator = this.locatorIn(frame, selector).first();
       if (await locator.count()) return locator;
     }
     throw new Error(`Selector not found in the page or its frames: ${selector}`);
+  }
+
+  private recentUserActions() {
+    return (this.active?.recentUi || []).slice(-20).map(event => ({
+      at: event.at,
+      eventType: event.eventType,
+      name: event.name,
+      label: event.label,
+      text: event.text,
+      selector: event.selector,
+      value: event.value
+    }));
   }
 
   async manualControl(command:
@@ -444,7 +493,7 @@ export class BrowserRecorder {
             frames.push({ frameUrl: frame.url(), unavailable: true });
           }
         }
-        return { ...frames[0], frames: frames.slice(1) };
+        return { ...frames[0], frames: frames.slice(1), recentUserActions: this.recentUserActions() };
       }
     }
   }

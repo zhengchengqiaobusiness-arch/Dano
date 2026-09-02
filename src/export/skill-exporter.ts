@@ -5,6 +5,7 @@ import type { CapabilityContract, CapabilityRoute, InputFormField } from "../dom
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
 import { writeJson } from "../utils.js";
+import { exportableCapabilities } from "../inference/export-scope.js";
 
 const operationNames: Record<CapabilityContract["operation"], string> = {
   query: "查询", create: "新建", update: "修改", review: "审核", delete: "删除",
@@ -88,33 +89,43 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
   };
 }
 
-function buildSkillMd(skillName: string, capabilities: CapabilityContract[], routes: CapabilityRoute[]) {
+function buildSkillMd(skillName: string, displayName: string, capabilities: CapabilityContract[], routes: CapabilityRoute[]) {
   const actions = capabilities.map(capability => capability.title).slice(0, 8).join("、");
-  const description = `使用真实业务操作验证过的原子能力完成${actions || "业务查询和操作"}。当用户用自然语言提出相关查询、新建、修改、审核、删除、认证或文件处理需求时使用；负责选择能力、收集调用方字段、按已确认绑定组合、在歧义和写操作前停下来询问，并依据合同验证结果。`;
+  const description = `Prefer HTTP 执行已验证业务能力：${actions || "业务查询和操作"}。当用户要用自然语言完成这些已录制操作时使用；只走合同里的接口和调用方字段，不补写、不猜测。`;
   const routeLine = routes.length
     ? "目标包含多个步骤时，只选择 `references/routes/` 中与目标完全匹配的路线。"
     : "当前没有经过确认的组合路线，只能执行单个原子能力。";
+  const transport = capabilities.map(capability =>
+    `| ${safeCell(capability.title)} | \`python scripts/execute.py --capability ${capability.id} --input '{...}'${capability.sideEffect ? " --confirm-write" : ""}\` | 内置浏览器按 evidence 补录 |`
+  ).join("\n");
   return `---
 name: ${skillName}
 description: ${JSON.stringify(description)}
 ---
 
-# ${safeCell(skillName)}
+# ${safeCell(displayName || skillName)}
 
-只执行 <code>references/CONTRACT.json</code> 中 <code>validation.status = "verified"</code> 的能力。该文件是能力、字段、绑定、路线和完成条件的唯一事实来源，不补写、合并或猜测其中没有的内容。
+只执行 <code>references/CONTRACT.json</code> 中 <code>validation.status = "verified"</code> 的能力。接口、字段和完成条件以 <code>references/reference.md</code> 与合同为准，不补写、合并或猜测其中没有的内容。
+
+## Transport
+
+| 能力 | Prefer | Fallback |
+| --- | --- | --- |
+${transport}
+
+Prefer 失败时整段改走 Fallback，并在回复里写明走了哪条路径。
 
 ## 执行流程
 
-1. 先读 <code>references/CAPABILITIES.md</code>，把用户目标匹配到一个明确的原子能力或组合路线。
+1. 先读 <code>references/CAPABILITIES.md</code> 和 <code>references/reference.md</code>，把用户目标匹配到一个明确的原子能力或组合路线。
 2. ${routeLine}
 3. 只为选中的能力读取 <code>references/INPUT_FORMS.md</code> 对应小节。仅询问 <code>source = "caller"</code> 且尚未提供的字段；系统处理字段不得询问用户。运行环境提供 <code>ask_user_question</code> 时，把同一阶段缺失字段合并到一次 <code>title + questions[]</code> 提问中，每个 <code>id</code> 必须使用合同里的字段名；否则使用等价的交互输入。
 4. 字段有候选规则时，再读取 <code>references/OPTIONS.md</code> 对应小节。动态候选先执行查询能力并展示候选，不能替用户猜选项。
 5. 多步执行只能采用合同中 <code>approved: true</code> 的绑定，并严格按路线步骤顺序传值。字段名相似不构成绑定。
-6. 新建、修改、审核、删除、上传和其他写动作在输入校验完成后，必须单独展示操作对象、关键输入和影响，再原生调用 <code>ask_user_question</code> 的 <code>{"confirm": true, "formIds": [...]}</code>；确认调用不得混入普通问题。只有返回 <code>confirmed</code> 才继续，规划阶段的同意不算执行确认。
-7. 使用 Python 执行：
+6. Prefer 使用 Python 执行：
    <code>python scripts/execute.py --capability &lt;能力编号&gt; --input '&lt;JSON&gt;' [--confirm-write]</code>
-8. 列表结果使用 <code>python scripts/format_list.py</code> 整理后再展示；不要把大段原始 JSON 直接交给用户。
-9. HTTP 状态和全部完成断言同时满足才算成功。结果不明确时停止并说明，不猜测；写操作结果不明确时不得自动重试。
+7. 列表结果使用 <code>python scripts/format_list.py</code> 整理后再展示；不要把大段原始 JSON 直接交给用户。
+8. HTTP 状态和全部完成断言同时满足才算成功。结果不明确时停止并说明，不猜测；写操作结果不明确时不得自动重试。
 
 ## 必须停下来询问
 
@@ -122,15 +133,32 @@ description: ${JSON.stringify(description)}
 - 缺少调用方必填字段，或字段值无法按合同类型唯一转换。
 - 动态候选返回多个可行对象，需要用户选择。
 - 组合所需绑定不存在、未确认、上游值为空或不唯一。
-- 即将执行新建、修改、审核、删除。
 
 ## 完成检查
 
 - 选择的每项能力均已验证。
 - 只读取和询问当前路线需要的字段。
 - 自动传值的每条绑定均为 <code>approved: true</code>。
-- 每个写步骤都取得了该次执行的单独确认。
 - 每一步都满足自身合同完成条件，最后一步满足用户目标；否则明确报告未完成。
+`;
+}
+
+function buildReference(capabilities: CapabilityContract[]) {
+  const rows = capabilities.map(capability => {
+    const caller = capability.inputForm.filter(field => field.source === "caller").map(field => `<code>${safeCell(field.path)}</code>`).join("、") || "无调用方字段";
+    return `## ${safeCell(capability.title)}
+
+- 能力编号：<code>${capability.id}</code>
+- Prefer：<code>${capability.transport.method} ${capability.transport.urlTemplate}</code>
+- 调用方字段：${caller}
+- 完成：HTTP ${capability.completion.acceptedHttpStatuses.join(" / ")}
+`;
+  }).join("\n");
+  return `# API 与执行参考
+
+本页只列出已验证能力的真实接口。不要发明路径、字段或枚举。
+
+${rows}
 `;
 }
 
@@ -250,7 +278,7 @@ ${route.completion}，并满足 <code>references/CONTRACT.json</code> 中该能�
 }
 
 export async function exportSkill(outputRoot: string, requestedName: string, allCapabilities: CapabilityContract[]) {
-  const capabilities = normalizeCatalog(allCapabilities).filter(capability => capability.validation.status === "verified");
+  const capabilities = exportableCapabilities(normalizeCatalog(allCapabilities));
   if (!capabilities.length) throw new Error("没有可导出的已验证能力");
   const unresolved = capabilities.flatMap(capability => capability.inputForm.filter(field =>
     field.required && field.source !== "caller" && field.source !== "binding" && !field.defaultRule
@@ -266,7 +294,9 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
   await mkdir(scriptsDir, { recursive: true });
 
   const routes = buildApprovedRoutes(capabilities);
-  await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, capabilities, routes), "utf8");
+  const displayName = requestedName.trim() || skillName;
+  await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, displayName, capabilities, routes), "utf8");
+  await writeFile(path.join(referencesDir, "reference.md"), buildReference(capabilities), "utf8");
   await writeJson(path.join(referencesDir, "CONTRACT.json"), {
     schemaVersion: "2.0",
     skill: skillName,

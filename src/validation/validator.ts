@@ -120,7 +120,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
   });
 
   const systemFieldsResolvable = cap.inputForm.every(field => {
-    if (!field.required || field.source === "caller") return true;
+    if (!field.required || field.source === "caller" || field.source === "computed") return true;
     if (field.source === "binding") return cap.bindings.some(binding => binding.approved && binding.toPath === field.path);
     return Boolean(field.defaultRule && /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso)$/.test(field.defaultRule));
   });
@@ -135,7 +135,9 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
     .every(field => uiRefs.some(event =>
-      event.name === field.name || event.form?.some(item => item.name === field.name)
+      event.name === field.name
+      || event.label === field.label
+      || event.form?.some(item => item.name === field.name || item.label === field.label)
     ));
   checks.push({
     name: "caller-fields-backed-by-ui",

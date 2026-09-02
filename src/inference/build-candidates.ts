@@ -6,6 +6,7 @@ import type {
   UiEvidence
 } from "../domain.js";
 import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
+import { collectUiObservations, requestValueAt, resolveFieldOwnership, uiSupportsRequest } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -75,6 +76,9 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
     const isRequired = parentRequired && required.has(name);
     if (type === "object" && raw?.properties) {
       return schemaFieldsToForm(raw, path, isRequired);
+    }
+    if (type === "array" && raw?.items?.type === "object" && raw.items.properties) {
+      return schemaFieldsToForm(raw.items, `${path}[*]`, isRequired);
     }
     const widget: InputFormField["widget"] =
       type === "number" || type === "integer" ? "number" :
@@ -208,13 +212,24 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         at: event.at,
         status: event.response?.status
       }];
+      const sample = requestInput(event);
+      const nearby = [...uiById.values()].filter(item => {
+        const delta = Date.parse(event.at) - Date.parse(item.at);
+        return item.sessionId === event.sessionId && delta >= 0 && delta <= 15_000 && uiSupportsRequest(item, sample);
+      });
       if (event.correlatedUiEvidenceId) {
         const correlated = uiById.get(event.correlatedUiEvidenceId);
-        if (correlated) refs.push({
-          eventId: correlated.id,
-          sessionId: correlated.sessionId,
+        if (correlated) nearby.unshift(correlated);
+      }
+      const seen = new Set<string>();
+      for (const item of nearby) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        refs.push({
+          eventId: item.id,
+          sessionId: item.sessionId,
           kind: "ui",
-          at: correlated.at
+          at: item.at
         });
       }
       return refs;
@@ -239,17 +254,31 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         const inferred = schemaFieldsToForm(inputSchema);
         const observed = new Map(forms);
         forms.clear();
-        for (const field of inferred) forms.set(field.path, observed.get(field.path) ? {
-          ...field,
-          ...observed.get(field.path),
-          required: observed.get(field.path)!.required || field.required,
-          requiredBasis: observed.get(field.path)!.required ? observed.get(field.path)!.requiredBasis : field.requiredBasis,
-          candidates: observed.get(field.path)!.candidates || field.candidates
-        } : field);
+        const nearbyUi = group.flatMap(event => {
+          const correlated = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
+          return [correlated, ...[...uiById.values()].filter(item => {
+            const delta = Date.parse(event.at) - Date.parse(item.at);
+            return item.sessionId === event.sessionId && delta >= 0 && delta <= 15_000;
+          })].filter((item): item is UiEvidence => Boolean(item));
+        });
+        const observations = collectUiObservations(nearbyUi);
+        const sample = requestInput(first);
+        for (const field of inferred) {
+          const merged = observed.get(field.path) ? {
+            ...field,
+            ...observed.get(field.path),
+            required: observed.get(field.path)!.required || field.required,
+            requiredBasis: observed.get(field.path)!.required ? observed.get(field.path)!.requiredBasis : field.requiredBasis,
+            candidates: observed.get(field.path)!.candidates || field.candidates
+          } : field;
+          forms.set(field.path, resolveFieldOwnership(merged, requestValueAt(sample, merged.path), observations));
+        }
         for (const [fieldPath, field] of observed) {
           const isTransportInput = normalized.urlTemplate.includes(`{${field.name}}`);
           const isDirectInteraction = directUiNames.has(field.name);
-          if (!forms.has(fieldPath) && (isTransportInput || isDirectInteraction)) forms.set(fieldPath, field);
+          if (!forms.has(fieldPath) && (isTransportInput || isDirectInteraction)) {
+            forms.set(fieldPath, resolveFieldOwnership(field, requestValueAt(sample, field.path), observations));
+          }
         }
         return [...forms.values()];
       })(),

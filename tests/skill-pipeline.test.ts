@@ -101,7 +101,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
     const result = await exportSkill(temporary, "销售订单审核", [query, review]);
     assert.match(result.skillName, /^business-skill-[a-f0-9]{8}$/);
     for (const relative of [
-      "SKILL.md", "references/CONTRACT.json", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
+      "SKILL.md", "references/CONTRACT.json", "references/reference.md", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
       "references/OPTIONS.md", "scripts/execute.py", "scripts/candidates.py", "scripts/format_list.py"
     ]) await stat(path.join(result.dir, relative));
     await execFileAsync("python", ["-m", "py_compile",
@@ -111,6 +111,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
       await execFileAsync("python", [process.env.SKILL_QUICK_VALIDATE, result.dir]);
     }
     const skill = await readFile(path.join(result.dir, "SKILL.md"), "utf8");
+    assert.match(skill, /Prefer HTTP/);
     assert.match(skill, /ask_user_question/);
     assert.match(skill, /approved: true/);
     assert.match(skill, /Python/);

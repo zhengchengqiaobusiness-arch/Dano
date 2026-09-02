@@ -21,6 +21,16 @@ export const UI_RECORDER_SCRIPT = String.raw`
     if (el.isContentEditable) return text(el.textContent);
     return undefined;
   };
+  const generatedName = (value) => /^(el-id-\d+-\d+|el-[a-z]+-\d+)$/i.test(String(value || ""));
+  const nameOf = (el) => {
+    const named = el.getAttribute("name") || el.getAttribute("data-field") || el.getAttribute("data-name");
+    if (named) return named;
+    const formItem = el.closest('.el-form-item,.ant-form-item,.arco-form-item,[class*="form-item"]');
+    const prop = formItem?.getAttribute("prop") || formItem?.getAttribute("data-prop");
+    if (prop) return prop;
+    const id = el.getAttribute("id");
+    return id && !generatedName(id) ? id : undefined;
+  };
   const labelOf = (el) => {
     if (el.labels?.length) return text([...el.labels].map(l => l.textContent).join(" "));
     const aria = el.getAttribute("aria-label");
@@ -34,13 +44,18 @@ export const UI_RECORDER_SCRIPT = String.raw`
     return text(itemLabel?.textContent || el.getAttribute("placeholder") || el.getAttribute("title") || "");
   };
   const selectorOf = (el) => {
-    if (el.id) return "#" + CSS.escape(el.id);
+    const placeholder = el.getAttribute("placeholder");
+    if (placeholder) return "placeholder=" + placeholder;
+    if (el.id && !generatedName(el.id)) return "#" + CSS.escape(el.id);
+    const label = labelOf(el);
+    if (label && label.length <= 40) return "label=" + label;
+    const role = el.getAttribute("role") || (el.matches("button,.el-button") ? "button" : "");
+    const roleName = text(el.getAttribute("aria-label") || el.textContent || "");
+    if (role && roleName && roleName.length <= 40) return "role=" + role + '[name="' + roleName + '"]';
     const testid = el.getAttribute("data-testid");
     if (testid) return '[data-testid="' + CSS.escape(testid) + '"]';
-    const name = el.getAttribute("name");
+    const name = nameOf(el);
     if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
-    const aria = el.getAttribute("aria-label");
-    if (aria) return el.tagName.toLowerCase() + '[aria-label="' + CSS.escape(aria) + '"]';
     const parts = [];
     let node = el;
     for (let i = 0; node && node.nodeType === 1 && i < 4; i++, node = node.parentElement) {
@@ -81,7 +96,7 @@ export const UI_RECORDER_SCRIPT = String.raw`
     return controls.slice(0, 200).map(el => {
       if (!(el instanceof HTMLElement)) return null;
       return {
-        name: el.getAttribute("name") || el.getAttribute("data-field") || el.getAttribute("data-name") || el.getAttribute("id") || undefined,
+        name: nameOf(el),
         label: labelOf(el) || undefined,
         type: el.getAttribute("type") || el.tagName.toLowerCase(),
         value: valueOf(el),
@@ -108,7 +123,7 @@ export const UI_RECORDER_SCRIPT = String.raw`
       role: control.getAttribute("role") || undefined,
       text: text(control.textContent || control.getAttribute("value") || ""),
       label: labelOf(control) || undefined,
-      name: control.getAttribute("name") || control.getAttribute("data-field") || control.getAttribute("data-name") || control.getAttribute("id") || undefined,
+      name: nameOf(control),
       inputType: control.getAttribute("type") || undefined,
       value: valueOf(control),
       options: optionsOf(control),

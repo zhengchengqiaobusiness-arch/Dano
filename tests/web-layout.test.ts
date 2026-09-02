@@ -42,6 +42,8 @@ test("Pi send button becomes an immediate abort control and thinking is requeste
   assert.match(app, /if \(state\.agentStreaming\) void abortAgent\(\)/);
   assert.match(css, /\.composer-footer button\.abort\s*\{[^}]*background:\s*var\(--red\)/s);
   assert.match(bridge, /思考过程、阶段状态、工具使用说明和最终回答均使用简体中文/);
+  assert.match(bridge, /recentUserActions/);
+  assert.match(bridge, /Never use generated #el-id-\*/);
 });
 
 test("recording workbench can clear conversation history in one click", async () => {
@@ -123,6 +125,8 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(server, /event\.method === "confirm"[\s\S]*respondToUi\(\{ id: event\.id, confirmed: true \}\)/);
   assert.match(app, /if \(request\.method === "confirm"\) \{\s*state\.currentUiRequest = request;\s*void closeConfirmation\(true\);/s);
   assert.match(browserSkill, /Execute click, fill, select, press, submit, and navigation immediately/);
+  assert.match(browserSkill, /recentUserActions/);
+  assert.match(browserSkill, /#el-id-\*/);
 });
 
 test("capability catalog UI and HTTP surface are gone", async () => {

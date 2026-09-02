@@ -60,6 +60,8 @@ export class PiRpcBridge {
         "思考过程、阶段状态、工具使用说明和最终回答均使用简体中文；必要的代码、接口路径、字段名和工具名保持原样。",
         "For browser work, use business_skill_record_start and business_browser_control; the Playwright page is shown in the embedded browser panel.",
         "Always call snapshot before choosing selectors. Never open or control a separate local browser.",
+        "If snapshot.recentUserActions or filled controls already show the user's manual operation, treat it as observed evidence. Do not re-click or re-fill those fields unless the user asked to change them.",
+        "Prefer snapshot selectors that start with placeholder=, label=, role=, or text=. Never use generated #el-id-* selectors.",
         "Only click, fill, select, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",
         "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations."
       ].join(" ")

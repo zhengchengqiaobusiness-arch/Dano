@@ -11,10 +11,11 @@ Use `business_browser_control` only against the active recorder browser.
 ## Grounded loop
 
 1. Call `snapshot` before selecting a target.
-2. Choose a selector returned by the snapshot. Never invent a selector from memory.
-3. Use one action: `goto`, `click`, `fill`, `select`, `press`, `wait`, or `screenshot`.
-4. After navigation, dialog changes, or form submission, call `snapshot` again.
-5. Keep actions small so the recorder can correlate UI events to requests.
+2. Read `recentUserActions` and any control with `filled: true`. Those are already observed user operations; do not repeat them unless the user asked to change the value.
+3. Choose a snapshot selector. Prefer `placeholder=`, `label=`, `role=`, or `text=`. Never use generated `#el-id-*` selectors.
+4. Use one action: `goto`, `click`, `fill`, `select`, `press`, `wait`, or `screenshot`.
+5. After navigation, dialog changes, or form submission, call `snapshot` again.
+6. Keep actions small so the recorder can correlate UI events to requests.
 
 ## Write safety
 

@@ -53,6 +53,9 @@ test("snapshots and controls component forms and iframes in one embedded browser
     const snapshot: any = await recorder.control({ action: "snapshot" });
     assert.equal(snapshot.title, "泛化页面");
     assert.equal(snapshot.controls.some((control: any) => control.selector === "#customer" && control.text === "手动录制客户"), true);
+    assert.equal(Array.isArray(snapshot.recentUserActions), true);
+    assert.equal(snapshot.recentUserActions.some((item: any) => item.name === "customerName" || item.value === "手动录制客户"), true);
+    await recorder.control({ action: "click", selector: 'role=button[name="登录"]' });
     assert.equal(snapshot.frames.length, 1);
     assert.equal(snapshot.frames[0].controls.some((control: any) => control.text === "框架内操作"), true);
     await recorder.stop();

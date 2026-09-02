@@ -12,6 +12,7 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
 1. **Record**
    - Call `business_skill_record_start` with the real system URL.
    - Let the user operate the headed browser, or use `business_browser_control` after a `snapshot` to perform grounded page actions.
+   - If `snapshot.recentUserActions` already contains the user's manual clicks or fills, treat them as evidence and do not replay those actions with `#el-id-*` selectors.
    - Capture actual UI events, field choices, requests, responses, and statuses.
    - Call `business_skill_record_stop`.
 
@@ -40,8 +41,8 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
 
 6. **Export**
    - Call `business_skill_export`.
-   - Export only verified capabilities.
-   - The exported package contains `SKILL.md`, routing/composition references, form/candidate rules, executable scripts, and machine-readable contracts.
+   - Export only user-facing verified capabilities (search/create/update/review/delete with UI evidence), not background IM/notify/permission polls.
+   - The exported package is Prefer HTTP: `SKILL.md` + `references/reference.md` + `scripts/execute.py`. Do not invent endpoints.
 
 ## Completion rule
 
