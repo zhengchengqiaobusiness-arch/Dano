@@ -1,7 +1,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import type { CapabilityContract } from "../domain.js";
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import type { CapabilityContract, DataBinding, InputFormField } from "../domain.js";
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
 import { writeJson } from "../utils.js";
@@ -10,6 +10,7 @@ import {
   buildCapabilities,
   buildInputForms,
   buildOptions,
+  buildPlaybook,
   buildRoute,
   buildSkillMd,
   classifyExported,
@@ -51,11 +52,15 @@ function exportedTitle(capability: CapabilityContract, displayName: string, capa
   return capability.title;
 }
 
-function exportedDescription(capability: CapabilityContract, displayName: string) {
+function exportedDescription(capability: CapabilityContract, displayName: string, capabilities: CapabilityContract[]) {
   if (capability.editing?.description === "manual") return capability.description;
   if (isPrimaryCapability(capability) && displayName) {
     return `对「${displayName}」执行${operationNames[capability.operation]}。只使用合同里的接口和调用方字段。`;
   }
+  const usedBy = capabilities.flatMap(item => item.inputForm).find(field =>
+    field.candidates?.type === "capability" && field.candidates.capabilityId === capability.id
+  );
+  if (usedBy) return `只为选择「${usedBy.label}」提供候选，不是独立业务动作。`;
   return capability.description;
 }
 
@@ -63,8 +68,34 @@ function withExportTitles(capabilities: CapabilityContract[], displayName: strin
   return capabilities.map(capability => ({
     ...capability,
     title: exportedTitle(capability, displayName, capabilities),
-    description: exportedDescription(capability, displayName)
+    description: exportedDescription(capability, displayName, capabilities)
   }));
+}
+
+function exportedField(field: InputFormField) {
+  const exported: Record<string, unknown> = {
+    path: field.path,
+    name: field.name,
+    label: field.label,
+    valueType: field.valueType,
+    source: field.source,
+    required: field.required,
+    systemHandled: field.systemHandled,
+    widget: field.widget
+  };
+  if (field.defaultRule) exported.defaultRule = field.defaultRule;
+  if (field.candidates) exported.candidates = field.candidates;
+  return exported;
+}
+
+function exportedBinding(binding: DataBinding) {
+  return {
+    id: binding.id,
+    fromCapabilityId: binding.fromCapabilityId,
+    fromPath: binding.fromPath,
+    toPath: binding.toPath,
+    approved: binding.approved
+  };
 }
 
 function exportedCapability(capability: CapabilityContract, capabilities: CapabilityContract[]) {
@@ -75,20 +106,21 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
     title: capability.title,
     description: capability.description,
     operation: capability.operation,
-    confidence: capability.confidence,
     transport: capability.transport,
-    inputSchema: capability.inputSchema,
-    outputSchema: capability.outputSchema,
-    inputForm: capability.inputForm,
+    inputForm: capability.inputForm.map(exportedField),
     inputQuestions: capability.inputForm.filter(field => field.source === "caller").map(field => exportedQuestion(field, capabilities)),
-    evidence: capability.evidence.filter(item => item.kind === "network").slice(0, 2),
     sideEffect: capability.sideEffect,
     confirmation: capability.confirmation,
-    completion: capability.completion,
-    bindings: capability.bindings,
+    completion: {
+      acceptedHttpStatuses: capability.completion.acceptedHttpStatuses,
+      ...(capability.completion.requiredOutputPaths?.length
+        ? { requiredOutputPaths: capability.completion.requiredOutputPaths }
+        : {}),
+      ...(capability.completion.assertions?.length ? { assertions: capability.completion.assertions } : {})
+    },
+    bindings: capability.bindings.filter(binding => binding.approved).map(exportedBinding),
     validation: {
-      status: capability.validation.status,
-      verifiedAt: capability.validation.verifiedAt
+      status: capability.validation.status
     }
   };
 }
@@ -117,7 +149,6 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
   await writeJson(path.join(referencesDir, "CONTRACT.json"), {
     schemaVersion: "2.0",
     skill: skillName,
-    generatedAt: new Date().toISOString(),
     policy: {
       ambiguity: "ask-user",
       composition: "approved-bindings-only",
@@ -130,8 +161,13 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
   await writeFile(path.join(referencesDir, "CAPABILITIES.md"), buildCapabilities(capabilities, routes), "utf8");
   await writeFile(path.join(referencesDir, "INPUT_FORMS.md"), buildInputForms(capabilities), "utf8");
   await writeFile(path.join(referencesDir, "OPTIONS.md"), buildOptions(capabilities), "utf8");
+  await writeFile(path.join(referencesDir, "PLAYBOOK.md"), buildPlaybook(displayName, capabilities, routes), "utf8");
   for (const route of routes) {
     await writeFile(path.join(routesDir, `${route.id}.md`), buildRoute(route, capabilities), "utf8");
+  }
+  const wantedRoutes = new Set(routes.map(route => `${route.id}.md`));
+  for (const file of await readdir(routesDir)) {
+    if (!wantedRoutes.has(file)) await rm(path.join(routesDir, file), { force: true });
   }
   await rm(path.join(referencesDir, "EVIDENCE.md"), { force: true });
   await rm(path.join(referencesDir, "reference.md"), { force: true });

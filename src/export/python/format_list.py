@@ -23,7 +23,7 @@ def read_value(source: str) -> Any:
 def cell(value: Any) -> str:
     if isinstance(value, (dict, list)):
         value = json.dumps(value, ensure_ascii=False)
-    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+    return str(value if value is not None else "").replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
 
 
 def main() -> int:
@@ -56,7 +56,7 @@ def main() -> int:
         for item in items[: max(0, args.limit)]:
             print("| " + " | ".join(cell(get_by_path(item, path)) for path in columns.values()) + " |")
         if len(items) > args.limit:
-            print(f"\n仅展示前 {args.limit} 项，共 {len(items)} 项。")
+            print(f"仅展示前 {args.limit} 项，共 {len(items)} 项。")
         return 0
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"格式化失败：{exc}", file=sys.stderr)

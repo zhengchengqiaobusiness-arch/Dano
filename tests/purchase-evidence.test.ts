@@ -265,32 +265,47 @@ test("exported purchase skill keeps API candidates and omits background polls", 
     const forms = await readFile(path.join(result.dir, "references", "INPUT_FORMS.md"), "utf8");
     const options = await readFile(path.join(result.dir, "references", "OPTIONS.md"), "utf8");
     const capabilities = await readFile(path.join(result.dir, "references", "CAPABILITIES.md"), "utf8");
+    const playbook = await readFile(path.join(result.dir, "references", "PLAYBOOK.md"), "utf8");
     assert.equal(result.skillName, "purchase-order");
     assert.equal(result.primaryCount, 2);
     assert.match(skill, /新建采购订单/);
     assert.match(skill, /查询采购订单/);
     assert.match(skill, /字段候选/);
+    assert.match(skill, /前置/);
+    assert.match(skill, /SKILL_AUTH_HEADERS/);
     assert.match(skill, /何时使用/);
     assert.match(skill, /何时不要使用/);
+    assert.match(skill, /## 路由/);
     assert.match(skill, /能力怎么组合/);
     assert.match(skill, /何时走哪条原子操作/);
-    assert.match(skill, /YYYY-MM-DD/);
+    assert.match(skill, /失败处理/);
     assert.match(skill, /ask_user_question/);
+    assert.match(skill, /用户：「/);
     assert.doesNotMatch(skill, /auth\/login|conversation\/list|get-permission-info/);
     assert.doesNotMatch(skill, /产品单价[\s\S]{0,80}product\/simple-list/);
     assert.doesNotMatch(skill, /订单单号[\s\S]{0,80}未退货/);
     assert.doesNotMatch(skill, /订单时间[\s\S]{0,80}泉源鱼家/);
     assert.doesNotMatch(skill, /### 查询采购订单[\s\S]*参数名/);
-    assert.doesNotMatch(skill, /net_mtjq|rec_mtjq|生成器实现|TypeScript/);
+    assert.doesNotMatch(skill, /net_mtjq|rec_mtjq|生成器实现|TypeScript|执行器/);
     assert.doesNotMatch(capabilities, /## 查询产品名称/);
     assert.match(forms, /接口候选|页面固定枚举|后台自动|dataSource/);
     assert.match(forms, /入库数量/);
     assert.match(forms, /结束日期/);
+    assert.match(forms, /YYYY-MM-DD/);
     assert.match(forms, /数量/);
+    assert.doesNotMatch(forms, /执行器/);
     assert.match(options, /dataSource/);
     assert.match(options, /product\/simple-list/);
+    assert.match(options, /resultPath/);
     assert.match(options, /不是独立业务操作/);
+    assert.match(playbook, /规划例子/);
+    assert.match(playbook, /无数据/);
+    assert.match(playbook, /format_list/);
     const contract = JSON.parse(await readFile(path.join(result.dir, "references", "CONTRACT.json"), "utf8"));
+    assert.equal(contract.generatedAt, undefined);
+    assert.equal(contract.capabilities.every((item: { confidence?: unknown; evidence?: unknown }) =>
+      item.confidence === undefined && item.evidence === undefined
+    ), true);
     const query = contract.capabilities.find((item: { operation: string; transport: { pathTemplate: string } }) =>
       item.operation === "query" && item.transport.pathTemplate.includes("/purchase/order/page")
     );

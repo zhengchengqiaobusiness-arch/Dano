@@ -181,6 +181,7 @@ test("skill catalog distinguishes handbook export from business spec dump", asyn
   assert.match(html, /dist\/skills/);
   assert.match(html, /SKILL.md 路由手册/);
   assert.match(html, /主能力索引/);
+  assert.match(html, /规划例子与失败/);
   assert.match(html, /例如 采购订单/);
   assert.doesNotMatch(html, /PYTHON AGENT SKILLS|class="management-header"|<h1>Skill 目录<\/h1>/);
   assert.match(css, /\.management-view\s*\{[^}]*padding:\s*14px/s);
