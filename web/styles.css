@@ -114,11 +114,13 @@ button { color: inherit; }
 .composer { margin: 12px; border: 1px solid var(--line); border-radius: 12px; background: #091310; overflow: hidden; }
 .composer:focus-within { border-color: #3a7967; }
 .composer textarea { width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); padding: 12px 13px 5px; font-size: 12px; line-height: 1.5; }
-.composer-footer { display: flex; align-items: center; justify-content: space-between; padding: 7px 8px 8px 13px; }
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px 8px 13px; }
 .composer-footer span { color: #60756c; font-size: 9px; }
-.composer-footer button { width: 30px; height: 30px; border: 0; border-radius: 8px; background: var(--teal); color: #052119; font-weight: 900; cursor: pointer; }
+.composer-actions { display: flex; align-items: center; gap: 6px; }
+.composer-footer button { min-width: 52px; height: 30px; border: 0; border-radius: 8px; padding: 0 10px; background: var(--teal); color: #052119; font-size: 12px; font-weight: 700; cursor: pointer; }
 .composer-footer button.abort { background: var(--red); color: #fff3f1; }
-.composer-footer button:disabled { opacity: .45; cursor: wait; }
+.composer-footer button:disabled { opacity: .45; cursor: not-allowed; }
+.browser-ime { position: fixed; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }
 .statusbar { padding: 0 18px; border-top: 1px solid var(--line); background: #07100e; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 

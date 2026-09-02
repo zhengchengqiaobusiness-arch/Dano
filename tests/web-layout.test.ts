@@ -16,7 +16,8 @@ test("recording workspace stays on one page with an internal session scroller", 
   assert.doesNotMatch(html, /PLAYWRIGHT 内置会话|业务系统浏览器|traffic-lights/);
   assert.doesNotMatch(html, /class="panel-heading"|class="agent-heading"/);
   assert.match(html, />接入并开始录制</);
-  assert.doesNotMatch(html, /manual-controls|页面输入|id="manual-text"|data-manual-key/);
+  assert.doesNotMatch(html, /manual-controls|id="manual-text"|data-manual-key/);
+  assert.match(html, /id="browser-ime"/);
   assert.match(html, /class="browser-toolbar"[\s\S]*class="address-form"[\s\S]*class="mode-switch"[\s\S]*class="recording-session-controls"[\s\S]*id="reload-browser"/);
   assert.match(css, /body\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden|html, body\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.app-shell\s*\{[^}]*height:\s*100dvh[^}]*min-height:\s*0/s);
@@ -37,10 +38,17 @@ test("Pi send button becomes an immediate abort control and thinking is requeste
   ]);
 
   assert.match(html, /id="composer-hint"/);
+  assert.match(html, /id="send-prompt"[^>]*>发送</);
+  assert.match(html, /id="abort-prompt"[^>]*>终止</);
+  assert.match(html, /id="browser-ime"/);
   assert.match(app, /async function abortAgent\(\)[\s\S]*\/api\/agent\/abort/);
-  assert.match(app, /working \? "■" : "↑"/);
-  assert.match(app, /if \(state\.agentStreaming\) void abortAgent\(\)/);
+  assert.match(app, /elements\.abortPrompt\.addEventListener\("click"/);
+  assert.match(app, /void submitPrompt\(elements\.prompt\.value\)/);
+  assert.doesNotMatch(app, /working \? "■" : "↑"/);
+  assert.doesNotMatch(app, /if \(state\.agentStreaming\) void abortAgent\(\)/);
+  assert.doesNotMatch(app, /Pi 正在工作，请先终止当前任务/);
   assert.match(css, /\.composer-footer button\.abort\s*\{[^}]*background:\s*var\(--red\)/s);
+  assert.match(css, /\.composer-actions/);
   assert.match(bridge, /思考过程、阶段状态、工具使用说明和最终回答均使用简体中文/);
   assert.match(bridge, /recentUserActions/);
   assert.match(bridge, /Never use generated #el-id-\*/);
@@ -99,12 +107,18 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
 
   assert.match(manualCommand, /if \(!state\.browserActive\) return;/);
   assert.doesNotMatch(manualCommand, /browserMode !== "manual"/);
+  assert.match(app, /flushImeText|action: "text"/);
   assert.match(previewHandlers, /if \(!state\.browserActive\) return;/);
   assert.doesNotMatch(previewHandlers, /browserMode !== "manual"/);
   assert.doesNotMatch(userControlRoute, /请先切换到手动录制模式/);
   assert.match(piControlRoute, /当前是手动录制模式；Pi 只能读取页面/);
   assert.match(app, /classList\.toggle\("interactive", state\.browserActive\)/);
   assert.match(css, /\.browser-viewport\.interactive/);
+  assert.match(app, /if \(state\.pollInFlight\) return;/);
+  assert.match(app, /if \(!state\.browserActive \|\| state\.frameLoading \|\| document\.hidden\) return;/);
+  assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowser\(\); \}, 1400\)/);
+  assert.match(server, /Content-Type": "image\/jpeg"/);
+  assert.doesNotMatch(app, /setInterval\(pollBrowser, 900\)/);
 });
 
 test("workbench operations execute without a confirmation dialog", async () => {
@@ -124,9 +138,11 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.doesNotMatch(bridge, /must wait for the existing explicit confirmation dialog/);
   assert.match(server, /event\.method === "confirm"[\s\S]*respondToUi\(\{ id: event\.id, confirmed: true \}\)/);
   assert.match(app, /if \(request\.method === "confirm"\) \{\s*state\.currentUiRequest = request;\s*void closeConfirmation\(true\);/s);
-  assert.match(browserSkill, /Execute click, fill, select, press, submit, and navigation immediately/);
+  assert.match(browserSkill, /Execute click, fill, select, choose, press, submit, and navigation immediately/);
   assert.match(browserSkill, /recentUserActions/);
   assert.match(browserSkill, /#el-id-\*/);
+  assert.match(browserSkill, /YYYY-MM-DD/);
+  assert.match(bridge, /never click the dim overlay|Never click text=2/);
 });
 
 test("capability catalog UI and HTTP surface are gone", async () => {

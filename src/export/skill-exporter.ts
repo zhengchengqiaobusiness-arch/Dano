@@ -5,7 +5,8 @@ import type { CapabilityContract, CapabilityRoute, InputFormField } from "../dom
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
 import { writeJson } from "../utils.js";
-import { exportableCapabilities } from "../inference/export-scope.js";
+import { describeFieldHandling } from "../inference/candidate-sources.js";
+import { exportableCapabilities, isCandidateSourceCapability, isPrimaryCapability } from "../inference/export-scope.js";
 
 const operationNames: Record<CapabilityContract["operation"], string> = {
   query: "查询", create: "新建", update: "修改", review: "审核", delete: "删除",
@@ -89,14 +90,24 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
   };
 }
 
+function commandOf(capability: CapabilityContract) {
+  return `python scripts/execute.py --capability ${capability.id} --input '{...}'${capability.sideEffect ? " --confirm-write" : ""}`;
+}
+
 function buildSkillMd(skillName: string, displayName: string, capabilities: CapabilityContract[], routes: CapabilityRoute[]) {
-  const actions = capabilities.map(capability => capability.title).slice(0, 8).join("、");
+  const primary = capabilities.filter(capability => isPrimaryCapability(capability));
+  const lookups = capabilities.filter(capability => !primary.includes(capability) && isCandidateSourceCapability(capability, capabilities));
+  const listed = primary.length ? primary : capabilities;
+  const actions = listed.map(capability => capability.title).slice(0, 8).join("、");
   const description = `Prefer HTTP 执行已验证业务能力：${actions || "业务查询和操作"}。当用户要用自然语言完成这些已录制操作时使用；只走合同里的接口和调用方字段，不补写、不猜测。`;
   const routeLine = routes.length
     ? "目标包含多个步骤时，只选择 `references/routes/` 中与目标完全匹配的路线。"
     : "当前没有经过确认的组合路线，只能执行单个原子能力。";
-  const transport = capabilities.map(capability =>
-    `| ${safeCell(capability.title)} | \`python scripts/execute.py --capability ${capability.id} --input '{...}'${capability.sideEffect ? " --confirm-write" : ""}\` | 内置浏览器按 evidence 补录 |`
+  const transport = listed.map(capability =>
+    `| ${safeCell(capability.title)} | \`${commandOf(capability)}\` | 内置浏览器按 evidence 补录 |`
+  ).join("\n");
+  const lookupRows = lookups.map(capability =>
+    `| ${safeCell(capability.title)} | \`${capability.transport.method} ${capability.transport.pathTemplate}\` | \`${commandOf(capability)}\` |`
   ).join("\n");
   return `---
 name: ${skillName}
@@ -107,13 +118,28 @@ description: ${JSON.stringify(description)}
 
 只执行 <code>references/CONTRACT.json</code> 中 <code>validation.status = "verified"</code> 的能力。接口、字段和完成条件以 <code>references/reference.md</code> 与合同为准，不补写、合并或猜测其中没有的内容。
 
+## 字段处理原则
+
+- 字段来源是查询接口时，调用方必须先调该接口再选择，禁止把录制样本写成固定值。
+- 页面固定枚举由调用方直接选择。
+- 页面输入字段保持页面原始格式，不要改类型。
+- 后台自动生成或自动计算的字段由执行器按合同处理；漏传会导致看似提交成功但内容缺失。
+
 ## Transport
 
 | 能力 | Prefer | Fallback |
 | --- | --- | --- |
 ${transport}
 
-Prefer 失败时整段改走 Fallback，并在回复里写明走了哪条路径。
+${lookupRows ? `## 字段候选接口
+
+这些接口只给调用方选值，不是独立业务操作。
+
+| 用途 | 接口 | 调用 |
+| --- | --- | --- |
+${lookupRows}
+
+` : ""}Prefer 失败时整段改走 Fallback，并在回复里写明走了哪条路径。
 
 ## 执行流程
 
@@ -145,13 +171,18 @@ Prefer 失败时整段改走 Fallback，并在回复里写明走了哪条路径�
 
 function buildReference(capabilities: CapabilityContract[]) {
   const rows = capabilities.map(capability => {
-    const caller = capability.inputForm.filter(field => field.source === "caller").map(field => `<code>${safeCell(field.path)}</code>`).join("、") || "无调用方字段";
+    const fields = capability.inputForm.length
+      ? `| 字段 | 类型 | 来源 | 处理方式 |
+| --- | --- | --- | --- |
+${capability.inputForm.map(field => `| <code>${safeCell(field.path)}</code> ${safeCell(field.label)} | ${field.valueType} | ${sourceNames[field.source]} | ${safeCell(describeFieldHandling(field))} |`).join("\n")}`
+      : "无输入字段。";
     return `## ${safeCell(capability.title)}
 
 - 能力编号：<code>${capability.id}</code>
 - Prefer：<code>${capability.transport.method} ${capability.transport.urlTemplate}</code>
-- 调用方字段：${caller}
 - 完成：HTTP ${capability.completion.acceptedHttpStatuses.join(" / ")}
+
+${fields}
 `;
   }).join("\n");
   return `# API 与执行参考
@@ -195,9 +226,9 @@ function buildInputForms(capabilities: CapabilityContract[]) {
 
 ${capabilities.map(capability => `## ${capability.id}
 
-${capability.inputForm.length ? `| 合同路径 | 提问编号 | 业务名称 | 类型 | 来源 | 必填 | 处理方 | 必填依据 |
+${capability.inputForm.length ? `| 合同路径 | 提问编号 | 业务名称 | 类型 | 来源 | 必填 | 处理方 | 处理方式 |
 |---|---|---|---|---|---|---|---|
-${capability.inputForm.map(field => `| <code>${safeCell(field.path)}</code> | <code>${safeCell(field.name)}</code> | ${safeCell(field.label)} | ${field.valueType} | ${sourceNames[field.source]} | ${field.required ? "是" : "否"} | ${field.systemHandled ? "系统" : "调用方"} | ${field.requiredBasis} |`).join("\n")}` : "该能力没有观察到输入字段。"}
+${capability.inputForm.map(field => `| <code>${safeCell(field.path)}</code> | <code>${safeCell(field.name)}</code> | ${safeCell(field.label)} | ${field.valueType} | ${sourceNames[field.source]} | ${field.required ? "是" : "否"} | ${field.systemHandled ? "系统" : "调用方"} | ${safeCell(describeFieldHandling(field))} |`).join("\n")}` : "该能力没有观察到输入字段。"}
 `).join("\n")}
 `;
 }

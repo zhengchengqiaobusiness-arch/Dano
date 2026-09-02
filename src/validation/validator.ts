@@ -1,5 +1,6 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
+import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -134,11 +135,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
 
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
-    .every(field => uiRefs.some(event =>
-      event.name === field.name
-      || event.label === field.label
-      || event.form?.some(item => item.name === field.name || item.label === field.label)
-    ));
+    .every(field => fieldHasUiEvidence(field, uiRefs));
   checks.push({
     name: "caller-fields-backed-by-ui",
     ok: callerFieldsBacked,
@@ -158,10 +155,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     const rule = field.candidates;
     if (!rule) return true;
     if (rule.type === "static") {
-      return rule.values.length > 0 && uiRefs.some(event =>
-        (event.name === field.name && Boolean(event.options?.length || event.visibleOptions?.length)) ||
-        event.form?.some(item => item.name === field.name && Boolean(item.options?.length))
-      );
+      return rule.values.length > 0 && staticCandidatesHaveUiEvidence(field, uiRefs);
     }
     const source = catalog.find(item => item.id === rule.capabilityId);
     return Boolean(source && source.operation === "query" && source.validation.status === "verified" &&

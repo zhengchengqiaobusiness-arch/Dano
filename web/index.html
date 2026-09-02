@@ -47,6 +47,7 @@
           </div>
           <div class="browser-viewport" id="browser-viewport" tabindex="0" aria-label="内置浏览器操作画面">
             <img id="browser-frame" class="browser-frame" alt="内置 Playwright 浏览器实时画面" />
+            <textarea id="browser-ime" class="browser-ime" autocomplete="off" spellcheck="false" aria-label="向内置浏览器键入"></textarea>
             <div class="manual-mode-hint" id="manual-mode-hint" hidden>可直接点击画面操作，Pi 也可自动点击</div>
             <div class="empty-browser">
               <div class="orbit" aria-hidden="true"><span>π</span></div>
@@ -81,7 +82,13 @@
           <form class="composer">
             <label class="sr-only" for="prompt">给 Pi 的指令</label>
             <textarea id="prompt" rows="3" placeholder="例如：打开销售订单，录制一次查询和审核…"></textarea>
-            <div class="composer-footer"><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span><button id="send-prompt" type="submit" aria-label="发送" title="发送">↑</button></div>
+            <div class="composer-footer">
+              <span id="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+              <div class="composer-actions">
+                <button id="abort-prompt" type="button" class="abort" aria-label="终止" title="终止当前任务" disabled>终止</button>
+                <button id="send-prompt" type="submit" aria-label="发送" title="发送">发送</button>
+              </div>
+            </div>
           </form>
         </aside>
       </main>

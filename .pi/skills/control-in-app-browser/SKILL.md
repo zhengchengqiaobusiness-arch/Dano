@@ -10,16 +10,17 @@ Use `business_browser_control` only against the active recorder browser.
 
 ## Grounded loop
 
-1. Call `snapshot` before selecting a target.
+1. Call `snapshot` at the start, and again only after navigation, dialog open/close, or submit. Do not snapshot after every field.
 2. Read `recentUserActions` and any control with `filled: true`. Those are already observed user operations; do not repeat them unless the user asked to change the value.
 3. Choose a snapshot selector. Prefer `placeholder=`, `label=`, `role=`, or `text=`. Never use generated `#el-id-*` selectors.
-4. Use one action: `goto`, `click`, `fill`, `select`, `press`, `wait`, or `screenshot`.
-5. After navigation, dialog changes, or form submission, call `snapshot` again.
-6. Keep actions small so the recorder can correlate UI events to requests.
+4. Use one action: `goto`, `click`, `fill`, `select`, `choose`, `press`, `wait`, or `screenshot`.
+5. For dropdowns and comboboxes, call `choose` with the field selector and the visible option text in one step. Do not click the inner input and wait for a timeout.
+6. For dates, `fill` or `choose` the field with `YYYY-MM-DD`. Do not click a bare day number like `text=2` on the whole page, and never click the modal mask or blank overlay.
+7. Keep actions inside the open dialog or picker. If a dialog is open, do not click page-background buttons such as 新增 again.
 
 ## Write safety
 
-- Execute click, fill, select, press, submit, and navigation immediately. Do not ask the user to confirm page operations.
+- Execute click, fill, select, choose, press, submit, and navigation immediately. Do not ask the user to confirm page operations.
 - Filling/selecting a form is not proof that a business change succeeded. Success comes from captured network evidence and later capability validation.
 
 ## Recording objective

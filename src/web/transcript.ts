@@ -30,6 +30,21 @@ export class PiTranscript {
     return { type: "session_item", item };
   }
 
+  addManual(observation: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string }) {
+    const item: TranscriptItem = {
+      id: this.nextId("manual"),
+      kind: "tool",
+      toolCallId: this.nextId("manual-call"),
+      toolName: "manual_page_input",
+      args: observation,
+      result: { recorded: true },
+      at: new Date().toISOString(),
+      phase: "complete"
+    };
+    this.push(item);
+    return { type: "session_item", item };
+  }
+
   clear() {
     this.items.length = 0;
     this.sequence = 0;

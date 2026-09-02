@@ -6,8 +6,8 @@ import { loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
+import { finalizeCapabilities } from "./inference/finalize-capabilities.js";
 import { OpenAIReasoner } from "./llm/openai.js";
-import { validateCapability } from "./validation/validator.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
@@ -89,7 +89,7 @@ export class StudioService {
     const events = sessionId ? await this.sessionEvents(sessionId) : await this.allEvents();
     const existing = await this.capabilities();
     const existingByTransport = new Map(existing.map(c => [
-      `${c.transport.method}|${c.transport.urlTemplate}`,
+      `${c.transport.method}|${c.transport.pathTemplate}`,
       c
     ]));
 
@@ -100,7 +100,7 @@ export class StudioService {
 
     // Preserve explicit human edits and approvals, but require validation again after evidence analysis.
     candidates = candidates.map(candidate => {
-      const old = existingByTransport.get(`${candidate.transport.method}|${candidate.transport.urlTemplate}`);
+      const old = existingByTransport.get(`${candidate.transport.method}|${candidate.transport.pathTemplate}`);
       if (!old) return candidate;
       const operation = old.editing?.operation === "manual" ? old.operation : candidate.operation;
       const sideEffect = ["create", "update", "review", "delete", "upload", "action"].includes(operation);
@@ -143,7 +143,7 @@ export class StudioService {
   async validate() {
     const events = await this.allEvents();
     const caps = await this.capabilities();
-    const validated = caps.map(cap => validateCapability(cap, events, caps));
+    const validated = finalizeCapabilities(caps, events);
     await writeJson(this.catalogFile(), validated);
     return validated;
   }

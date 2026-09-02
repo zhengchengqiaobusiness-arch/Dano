@@ -1,5 +1,5 @@
 import path from "node:path";
-import { chromium, type BrowserContext, type Browser, type Frame, type Request, type Response, type Page } from "playwright";
+import { chromium, type BrowserContext, type Browser, type Frame, type Locator, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
 import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
@@ -105,6 +105,9 @@ interface ActiveRecording {
 
 export class BrowserRecorder {
   private active?: ActiveRecording;
+  private actionBusy = 0;
+  private previewInFlight?: Promise<Buffer>;
+  private lastPreview?: { at: number; buffer: Buffer };
 
   constructor(private readonly config: StudioConfig) {}
 
@@ -129,14 +132,51 @@ export class BrowserRecorder {
   }
 
   async preview(): Promise<Buffer> {
+    if (this.lastPreview && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 220)) {
+      return this.lastPreview.buffer;
+    }
+    if (this.previewInFlight) return this.previewInFlight;
+    this.previewInFlight = this.capturePreview().finally(() => {
+      this.previewInFlight = undefined;
+    });
+    return this.previewInFlight;
+  }
+
+  private async capturePreview() {
     const page = this.currentPage();
-    return page.screenshot({ type: "png", fullPage: false });
+    const buffer = await page.screenshot({
+      type: "jpeg",
+      quality: 42,
+      fullPage: false,
+      animations: "disabled",
+      caret: "hide"
+    });
+    this.lastPreview = { at: Date.now(), buffer };
+    return buffer;
+  }
+
+  private async withAction<T>(work: () => Promise<T>): Promise<T> {
+    this.actionBusy += 1;
+    try {
+      return await work();
+    } finally {
+      this.actionBusy -= 1;
+    }
+  }
+
+  private async waitForPageQuiet(page: Page, timeout = 1_800) {
+    await page.waitForTimeout(80);
+    const busy = page.locator(".el-loading-mask, .el-overlay.is-loading, .nprogress-busy, .ant-spin-spinning").first();
+    await busy.waitFor({ state: "hidden", timeout }).catch(() => {});
   }
 
   async reload() {
-    const page = this.currentPage();
-    await page.reload({ waitUntil: "domcontentloaded" });
-    return { url: page.url(), title: await page.title() };
+    return this.withAction(async () => {
+      const page = this.currentPage();
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await this.waitForPageQuiet(page);
+      return { url: page.url(), title: await page.title() };
+    });
   }
 
   async start(startUrl: string, name = "recording"): Promise<RecordingSession> {
@@ -174,38 +214,22 @@ export class BrowserRecorder {
 
     await writeJson(path.join(dir, "session.json"), session);
     await this.instrument(context);
+    const armPage = (target: Page) => {
+      target.setDefaultTimeout(5_000);
+      target.setDefaultNavigationTimeout(15_000);
+    };
+    for (const existing of context.pages()) armPage(existing);
+    context.on("page", armPage);
 
     const page = context.pages()[0] || await context.newPage();
     await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+    await this.waitForPageQuiet(page);
     return session;
   }
 
   private async instrument(context: BrowserContext) {
     await context.exposeBinding("__bssRecordUi", async ({ page }, payload: any) => {
-      const active = this.active;
-      if (!active || !page) return;
-      const event: UiEvidence = {
-        id: id("ui"),
-        kind: "ui",
-        sessionId: active.session.id,
-        at: new Date().toISOString(),
-        pageUrl: String(payload?.pageUrl || page.url()),
-        eventType: ["click", "input", "change", "submit"].includes(payload?.eventType) ? payload.eventType : "click",
-        selector: payload?.selector,
-        tag: payload?.tag,
-        role: payload?.role,
-        text: payload?.text,
-        label: payload?.label,
-        name: payload?.name,
-        inputType: payload?.inputType,
-        value: redactValue(payload?.value, payload?.name || payload?.label || ""),
-        options: redactValue(payload?.options) as UiEvidence["options"],
-        visibleOptions: redactValue(payload?.visibleOptions) as string[],
-        form: redactValue(payload?.form) as UiEvidence["form"]
-      };
-      active.lastUiByPage.set(page, event);
-      active.recentUi = [...active.recentUi, event].slice(-40);
-      await appendJsonl(active.eventsFile, event);
+      await this.writeUiEvent(page, payload);
     });
 
     await context.addInitScript({ content: UI_RECORDER_SCRIPT });
@@ -361,11 +385,59 @@ export class BrowserRecorder {
     await appendJsonl(active.eventsFile, event);
   }
 
+  private async writeUiEvent(page: Page | undefined, payload: any) {
+    const active = this.active;
+    if (!active || !page) return undefined;
+    const event: UiEvidence = {
+      id: id("ui"),
+      kind: "ui",
+      sessionId: active.session.id,
+      at: new Date().toISOString(),
+      pageUrl: String(payload?.pageUrl || page.url()),
+      eventType: ["click", "input", "change", "submit"].includes(payload?.eventType) ? payload.eventType : "click",
+      selector: payload?.selector,
+      tag: payload?.tag,
+      role: payload?.role,
+      text: payload?.text,
+      label: payload?.label,
+      name: payload?.name,
+      inputType: payload?.inputType,
+      value: redactValue(payload?.value, payload?.name || payload?.label || ""),
+      options: redactValue(payload?.options) as UiEvidence["options"],
+      visibleOptions: redactValue(payload?.visibleOptions) as string[],
+      form: redactValue(payload?.form) as UiEvidence["form"]
+    };
+    const last = active.recentUi.at(-1);
+    if (last && last.eventType === event.eventType && last.name === event.name && last.label === event.label && Object.is(last.value, event.value)
+      && Date.parse(event.at) - Date.parse(last.at) < 800) {
+      last.at = event.at;
+      active.lastUiByPage.set(page, last);
+      return last;
+    }
+    active.lastUiByPage.set(page, event);
+    active.recentUi = [...active.recentUi, event].slice(-40);
+    await appendJsonl(active.eventsFile, event);
+    return event;
+  }
+
+  private async captureActiveControl(eventType: UiEvidence["eventType"]) {
+    const page = this.currentPage();
+    await page.evaluate(`(() => {
+      const el = document.activeElement;
+      if (!(el instanceof HTMLElement) || el === document.body) return;
+      el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      if (typeof window.__bssFlushUi === "function") window.__bssFlushUi(${JSON.stringify(eventType)}, el);
+    })()`).catch(() => {});
+    await page.waitForTimeout(40);
+    return this.active?.recentUi.at(-1);
+  }
+
   private recentUi(page?: Page, active = this.active) {
     if (!active || !page) return undefined;
     const ui = active.lastUiByPage.get(page);
     if (!ui) return undefined;
-    return Date.now() - Date.parse(ui.at) <= 8_000 ? ui : undefined;
+    return Date.now() - Date.parse(ui.at) <= 30_000 ? ui : undefined;
   }
 
   private currentPage(): Page {
@@ -380,25 +452,120 @@ export class BrowserRecorder {
     return locator.evaluate(INSPECT_TARGET_IN_PAGE);
   }
 
-  private locatorIn(frame: Frame, selector: string) {
+  private locatorIn(root: Frame | Locator, selector: string) {
     const placeholder = selector.match(/^placeholder=(.+)$/s);
-    if (placeholder) return frame.getByPlaceholder(placeholder[1]!);
+    if (placeholder) return root.getByPlaceholder(placeholder[1]!);
     const label = selector.match(/^label=(.+)$/s);
-    if (label) return frame.getByLabel(label[1]!);
+    if (label) return root.getByLabel(label[1]!);
     const text = selector.match(/^text=(.+)$/s);
-    if (text) return frame.getByText(text[1]!, { exact: true });
+    if (text) return root.getByText(text[1]!, { exact: true });
     const role = selector.match(/^role=([a-z]+)(?:\[name=["'](.+)["']\])?$/i);
-    if (role) return frame.getByRole(role[1] as "button", role[2] ? { name: role[2] } : {});
-    return frame.locator(selector);
+    if (role) return root.getByRole(role[1] as "button", role[2] ? { name: role[2] } : {});
+    return root.locator(selector);
+  }
+
+  private isDayTextSelector(selector: string) {
+    const text = selector.match(/^text=(.+)$/s)?.[1]?.trim();
+    return Boolean(text && /^\d{1,2}$/.test(text));
+  }
+
+  private isDateCellSelector(selector: string) {
+    return /el-date-picker|el-date-table|el-picker-panel|available\.today|date-table-cell/.test(selector) || this.isDayTextSelector(selector);
   }
 
   private async locate(selector: string) {
     const page = this.currentPage();
-    for (const frame of page.frames()) {
-      const locator = this.locatorIn(frame, selector).first();
-      if (await locator.count()) return locator;
+    const deadline = Date.now() + 4_000;
+    const dayOnly = this.isDayTextSelector(selector);
+    while (Date.now() < deadline) {
+      for (const frame of page.frames()) {
+        const popper = frame.locator(".el-picker-panel:visible, .el-select-dropdown:visible, .el-popper:visible, [role='listbox']:visible").last();
+        const dialog = frame.locator(".el-dialog:visible, [role='dialog']:visible, .ant-modal:visible, .arco-modal:visible").last();
+        const scopes: Array<Frame | Locator> = [];
+        if (await popper.count()) scopes.push(popper);
+        if (await dialog.count()) scopes.push(dialog);
+        if (!dayOnly) scopes.push(frame);
+        for (const scope of scopes) {
+          const locator = this.locatorIn(scope, selector).first();
+          if (await locator.count()) return locator;
+        }
+      }
+      await page.waitForTimeout(80);
     }
     throw new Error(`Selector not found in the page or its frames: ${selector}`);
+  }
+
+  private async clickTarget(selector: string) {
+    const locator = await this.locate(selector);
+    const wrapper = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-select') or contains(@class,'el-date-editor') or contains(@class,'el-cascader')][1]");
+    if (await wrapper.count()) return wrapper.first();
+    return locator;
+  }
+
+  private async clickSafely(locator: Locator) {
+    const kind = await locator.first().evaluate(el => {
+      const safe = el.closest(".el-dialog,.el-picker-panel,.el-select-dropdown,.el-popper,.el-date-picker,.el-select,.el-date-editor,.ant-modal,.arco-modal,[role='dialog'],[role='listbox'],[role='option']");
+      const mask = el.closest(".el-overlay,.el-overlay-dialog,.v-modal,.ant-modal-mask,.arco-modal-mask");
+      if (mask && !safe) return "mask";
+      const box = el.getBoundingClientRect();
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      if (top && top !== el && !el.contains(top) && !top.contains(el)) {
+        const coveredByMask = top.closest(".el-overlay,.el-overlay-dialog") && !top.closest(".el-dialog,.el-picker-panel,.el-select-dropdown,.el-popper,[role='option']");
+        if (coveredByMask) return "occluded";
+      }
+      return "ok";
+    }).catch(() => "ok");
+    if (kind === "mask") throw new Error("Refusing to click the modal mask; that would close the dialog");
+    if (kind === "occluded") throw new Error("Target is behind an open dialog; click a control inside the dialog or picker");
+    await locator.first().click({ force: true, timeout: 4_000 });
+  }
+
+  private async pickCalendarDay(dayText: string) {
+    const page = this.currentPage();
+    const panel = page.locator(".el-picker-panel:visible, .el-date-picker:visible, .el-date-range-picker:visible").last();
+    if (!(await panel.count())) throw new Error("No visible date picker");
+    const day = String(Number(dayText));
+    const cell = panel.locator(".el-date-table-cell__text, .el-date-table-cell, td.available .cell, td.available").filter({ hasText: new RegExp(`^\\s*${day}\\s*$`) }).last();
+    await this.clickSafely(cell);
+  }
+
+  private async fillField(selector: string, value: string) {
+    const locator = await this.locate(selector);
+    const dateWrap = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-date-editor') or contains(@class,'el-date-picker')][1]");
+    const input = ((await dateWrap.count()) ? dateWrap : locator).locator("input").first();
+    const target = (await input.count()) ? input : locator;
+    await target.fill(value, { force: true, timeout: 4_000 });
+    if ((await dateWrap.count()) || /^\d{4}-\d{2}-\d{2}/.test(value)) {
+      await target.press("Enter").catch(() => {});
+    }
+  }
+
+  private async chooseOption(selector: string, value: string | string[]) {
+    const labels = (Array.isArray(value) ? value : [value]).map(item => String(item));
+    if (labels.length === 1 && /^\d{4}-\d{2}-\d{2}/.test(labels[0]!)) {
+      await this.fillField(selector, labels[0]!);
+      return { ok: true, url: this.currentPage().url() };
+    }
+    const target = await this.clickTarget(selector);
+    const page = this.currentPage();
+    await this.waitForPageQuiet(page, 1_200);
+    for (const label of labels) {
+      const option = page.getByRole("option", { name: label });
+      const openAndPick = async () => {
+        await this.clickSafely(target);
+        await option.first().waitFor({ state: "visible", timeout: 2_500 });
+        await this.clickSafely(option.first());
+      };
+      try {
+        await openAndPick();
+      } catch {
+        await this.clickSafely(target);
+        await option.first().waitFor({ state: "visible", timeout: 2_500 });
+        await this.clickSafely(option.first());
+      }
+    }
+    await this.waitForPageQuiet(page, 1_200);
+    return { ok: true, url: page.url() };
   }
 
   private recentUserActions() {
@@ -419,88 +586,120 @@ export class BrowserRecorder {
     | { action: "key"; key: string }
     | { action: "scroll"; deltaX?: number; deltaY?: number }
   ) {
-    const page = this.currentPage();
-    if (command.action === "click") {
-      const viewport = page.viewportSize();
-      if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
-      if (command.x < 0 || command.y < 0 || command.x > viewport.width || command.y > viewport.height) {
-        throw new Error("manual click coordinates are outside the embedded browser viewport");
+    return this.withAction(async () => {
+      const page = this.currentPage();
+      if (command.action === "click") {
+        const viewport = page.viewportSize();
+        if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
+        if (command.x < 0 || command.y < 0 || command.x > viewport.width || command.y > viewport.height) {
+          throw new Error("manual click coordinates are outside the embedded browser viewport");
+        }
+        await page.mouse.click(command.x, command.y, {
+          button: command.button || "left",
+          clickCount: Math.max(1, Math.min(Number(command.clickCount) || 1, 2))
+        });
+      } else if (command.action === "text") {
+        if (typeof command.value !== "string" || command.value.length > 10_000) throw new Error("manual text requires a string no longer than 10000 characters");
+        await page.keyboard.insertText(command.value);
+      } else if (command.action === "key") {
+        if (typeof command.key !== "string" || !command.key || command.key.length > 80) throw new Error("manual key requires a valid key name");
+        await page.keyboard.press(command.key);
+      } else {
+        const deltaX = Math.max(-5_000, Math.min(Number(command.deltaX) || 0, 5_000));
+        const deltaY = Math.max(-5_000, Math.min(Number(command.deltaY) || 0, 5_000));
+        await page.mouse.wheel(deltaX, deltaY);
       }
-      await page.mouse.click(command.x, command.y, {
-        button: command.button || "left",
-        clickCount: Math.max(1, Math.min(Number(command.clickCount) || 1, 2))
-      });
-    } else if (command.action === "text") {
-      if (typeof command.value !== "string" || command.value.length > 10_000) throw new Error("manual text requires a string no longer than 10000 characters");
-      await page.keyboard.insertText(command.value);
-    } else if (command.action === "key") {
-      if (typeof command.key !== "string" || !command.key || command.key.length > 80) throw new Error("manual key requires a valid key name");
-      await page.keyboard.press(command.key);
-    } else {
-      const deltaX = Math.max(-5_000, Math.min(Number(command.deltaX) || 0, 5_000));
-      const deltaY = Math.max(-5_000, Math.min(Number(command.deltaY) || 0, 5_000));
-      await page.mouse.wheel(deltaX, deltaY);
-    }
-    return { ok: true, url: page.url(), title: await page.title().catch(() => "") };
+      const observed = command.action === "scroll"
+        ? undefined
+        : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click");
+      return {
+        ok: true,
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        observed: observed ? { eventType: observed.eventType, label: observed.label, name: observed.name, value: observed.value, selector: observed.selector } : undefined
+      };
+    });
   }
 
   async control(command: {
-    action: "goto" | "snapshot" | "click" | "fill" | "select" | "press" | "wait" | "screenshot";
+    action: "goto" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot";
     selector?: string;
     value?: string | string[];
     url?: string;
     key?: string;
     ms?: number;
   }): Promise<unknown> {
-    const page = this.currentPage();
-    switch (command.action) {
-      case "goto":
-        if (!command.url) throw new Error("goto requires url");
-        await page.goto(command.url, { waitUntil: "domcontentloaded" });
-        return { url: page.url(), title: await page.title() };
-      case "click":
-        if (!command.selector) throw new Error("click requires selector");
-        await (await this.locate(command.selector)).click();
-        return { ok: true, url: page.url() };
-      case "fill":
-        if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
-        await (await this.locate(command.selector)).fill(command.value);
-        return { ok: true };
-      case "select":
-        if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
-        await (await this.locate(command.selector)).selectOption(command.value);
-        return { ok: true };
-      case "press":
-        if (!command.selector || !command.key) throw new Error("press requires selector and key");
-        await (await this.locate(command.selector)).press(command.key);
-        return { ok: true };
-      case "wait":
-        await page.waitForTimeout(Math.max(0, Math.min(command.ms || 500, 30_000)));
-        return { ok: true };
-      case "screenshot": {
-        const dir = path.join(this.config.dataDir, "screenshots");
-        await ensureDir(dir);
-        const file = path.join(dir, `${Date.now()}.png`);
-        await page.screenshot({ path: file, fullPage: true });
-        return { file, url: page.url() };
-      }
-      case "snapshot": {
-        const frames = [];
-        for (const frame of page.frames()) {
-          try {
-            frames.push({ frameUrl: frame.url(), ...(await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as any) });
-          } catch {
-            frames.push({ frameUrl: frame.url(), unavailable: true });
+    return this.withAction(async () => {
+      const page = this.currentPage();
+      switch (command.action) {
+        case "goto":
+          if (!command.url) throw new Error("goto requires url");
+          await page.goto(command.url, { waitUntil: "domcontentloaded" });
+          await this.waitForPageQuiet(page);
+          return { url: page.url(), title: await page.title() };
+        case "click":
+          if (!command.selector) throw new Error("click requires selector");
+          if (this.isDateCellSelector(command.selector)) {
+            const day = command.selector.match(/(\d{1,2})/)?.[1] || (command.selector.includes("today") ? String(new Date().getDate()) : "");
+            if (day) {
+              await this.pickCalendarDay(day);
+              await this.waitForPageQuiet(page);
+              return { ok: true, url: page.url() };
+            }
           }
+          await this.clickSafely(await this.clickTarget(command.selector));
+          await this.waitForPageQuiet(page);
+          return { ok: true, url: page.url() };
+        case "fill":
+          if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
+          await this.fillField(command.selector, command.value);
+          return { ok: true };
+        case "choose":
+          if (!command.selector || command.value === undefined) throw new Error("choose requires selector and value");
+          return this.chooseOption(command.selector, command.value);
+        case "select":
+          if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
+          try {
+            await (await this.locate(command.selector)).selectOption(command.value, { timeout: 1_500 });
+            return { ok: true };
+          } catch {
+            return this.chooseOption(command.selector, command.value);
+          }
+        case "press":
+          if (!command.selector || !command.key) throw new Error("press requires selector and key");
+          await (await this.locate(command.selector)).press(command.key, { timeout: 4_000 });
+          return { ok: true };
+        case "wait":
+          await page.waitForTimeout(Math.max(0, Math.min(command.ms || 500, 8_000)));
+          return { ok: true };
+        case "screenshot": {
+          const dir = path.join(this.config.dataDir, "screenshots");
+          await ensureDir(dir);
+          const file = path.join(dir, `${Date.now()}.jpg`);
+          await page.screenshot({ path: file, type: "jpeg", quality: 55, fullPage: false, animations: "disabled" });
+          return { file, url: page.url() };
         }
-        return { ...frames[0], frames: frames.slice(1), recentUserActions: this.recentUserActions() };
+        case "snapshot": {
+          const frames = [];
+          for (const frame of page.frames()) {
+            try {
+              frames.push({ frameUrl: frame.url(), ...(await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as any) });
+            } catch {
+              frames.push({ frameUrl: frame.url(), unavailable: true });
+            }
+          }
+          return { ...frames[0], frames: frames.slice(1), recentUserActions: this.recentUserActions() };
+        }
       }
-    }
+    });
   }
 
   disposeImmediate() {
     const active = this.active;
     this.active = undefined;
+    this.lastPreview = undefined;
+    this.previewInFlight = undefined;
+    this.actionBusy = 0;
     if (!active) return;
     void active.context.close().catch(() => {});
     void active.browser?.close().catch(() => {});
@@ -510,6 +709,9 @@ export class BrowserRecorder {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;
     this.active = undefined;
+    this.lastPreview = undefined;
+    this.previewInFlight = undefined;
+    this.actionBusy = 0;
 
     active.session.stoppedAt = new Date().toISOString();
     const dir = path.dirname(active.eventsFile);

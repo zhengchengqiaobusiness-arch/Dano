@@ -9,7 +9,8 @@ const elements = {
   stopRecording: $("#stop-recording"), finishRecording: $("#finish-recording"),
   reloadBrowser: $("#reload-browser"), agentStatus: $("#agent-status"), modelStatus: $("#model-status"),
   conversation: $("#conversation"), clearSession: $("#clear-session"), composer: $(".composer"), prompt: $("#prompt"),
-  composerHint: $("#composer-hint"), sendPrompt: $("#send-prompt"),
+  composerHint: $("#composer-hint"), sendPrompt: $("#send-prompt"), abortPrompt: $("#abort-prompt"),
+  browserIme: $("#browser-ime"),
   exportForm: $("#export-form"),
   skillName: $("#skill-name"), skillsList: $("#skills-list"),
   confirmationModal: $("#confirmation-modal"), confirmationTitle: $("#confirmation-title"),
@@ -24,7 +25,9 @@ const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
   sessionNodes: new Map(), toastTimer: null, skills: [],
-  manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null, clearingSession: false
+  manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null, clearingSession: false,
+  pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0,
+  imeComposing: false, imeBuffer: "", imeTimer: null
 };
 
 async function api(path, options = {}) {
@@ -60,7 +63,8 @@ function toolLabel(name) {
   return ({ business_skill_record_start: "启动内置浏览器录制", business_skill_record_stop: "保存录制",
     business_browser_control: "操作内置浏览器", business_skill_analyze: "识别业务能力",
     business_skill_validate: "验证能力", business_skill_plan: "规划路线", business_skill_execute: "执行业务能力",
-    business_skill_approve_binding: "确认数据绑定", business_skill_export: "导出 Python Skill" })[name] || name;
+    business_skill_approve_binding: "确认数据绑定", business_skill_export: "导出 Python Skill",
+    manual_page_input: "手动填写" })[name] || name;
 }
 
 function dataText(value) {
@@ -154,14 +158,16 @@ function patchSessionItem(event) {
 
 function renderAgentControls() {
   const working = state.agentStreaming;
-  elements.sendPrompt.classList.toggle("abort", working);
-  elements.sendPrompt.textContent = state.agentAborting ? "…" : working ? "■" : "↑";
-  elements.sendPrompt.setAttribute("aria-label", state.agentAborting ? "正在终止 Pi" : working ? "终止 Pi" : "发送");
-  elements.sendPrompt.title = state.agentAborting ? "正在终止 Pi" : working ? "终止 Pi" : "发送";
-  elements.sendPrompt.disabled = working ? state.agentAborting : !state.agentReady;
-  elements.prompt.disabled = working;
+  elements.sendPrompt.disabled = !state.agentReady;
+  elements.prompt.disabled = false;
+  if (elements.abortPrompt) {
+    elements.abortPrompt.disabled = !working || state.agentAborting;
+    elements.abortPrompt.textContent = state.agentAborting ? "终止中" : "终止";
+  }
   if (elements.composerHint) {
-    elements.composerHint.textContent = working ? "Pi 正在工作 · 点击方形按钮立即终止" : "Enter 发送 · Shift+Enter 换行";
+    elements.composerHint.textContent = working
+      ? "Enter 发送跟进 · 终止可单独点"
+      : "Enter 发送 · Shift+Enter 换行";
   }
 }
 
@@ -199,20 +205,51 @@ async function changeBrowserMode(mode) {
   showToast(mode === "manual" ? "已切换到手动录制：直接操作内置画面" : "已切换到 Pi 自动点击模式");
 }
 
-async function pollBrowser() {
+function clearBrowserFrame() {
+  if (state.frameBlobUrl) {
+    URL.revokeObjectURL(state.frameBlobUrl);
+    state.frameBlobUrl = null;
+  }
+  elements.browserFrame.removeAttribute("src");
+  state.lastFrameAt = 0;
+}
+
+async function refreshBrowserFrame(force = false) {
+  if (!state.browserActive || state.frameLoading || document.hidden) return;
+  if (!force && Date.now() - state.lastFrameAt < 360) return;
+  state.frameLoading = true;
+  try {
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store" });
+    if (response.status === 204 || !response.ok) return;
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const previous = state.frameBlobUrl;
+    state.frameBlobUrl = url;
+    elements.browserFrame.src = url;
+    if (previous) URL.revokeObjectURL(previous);
+    state.lastFrameAt = Date.now();
+  } finally {
+    state.frameLoading = false;
+  }
+}
+
+async function pollBrowser(forceFrame = false) {
+  if (state.pollInFlight) return;
+  state.pollInFlight = true;
   try {
     const browser = await api("/api/browser/state"); state.browserActive = Boolean(browser.active); state.browserMode = browser.mode || state.browserMode; renderBrowserMode();
     elements.browserFrame.classList.toggle("active", state.browserActive); elements.recordingState.classList.toggle("active", state.browserActive);
     elements.recordingState.innerHTML = `<i></i>${state.browserActive ? " 正在录制" : " 等待会话"}`; elements.reloadBrowser.disabled = !state.browserActive; renderRecordingActions();
     if (!state.browserActive) {
-      elements.browserFrame.removeAttribute("src"); elements.browserStatus.innerHTML = '<i class="status-dot muted"></i> 浏览器空闲'; return;
+      clearBrowserFrame(); elements.browserStatus.innerHTML = '<i class="status-dot muted"></i> 浏览器空闲'; return;
     }
     if (document.activeElement !== elements.browserUrl) elements.browserUrl.value = browser.url || "";
     elements.browserStatus.innerHTML = ""; const dot = document.createElement("i"); dot.className = "status-dot";
     elements.browserStatus.append(dot, document.createTextNode(` ${browser.title || "浏览器运行中"}`));
     if (browser.viewport) elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
-    elements.browserFrame.src = `/api/browser/frame?t=${Date.now()}`;
+    await refreshBrowserFrame(forceFrame);
   } catch { elements.browserStatus.textContent = "浏览器不可用"; }
+  finally { state.pollInFlight = false; }
 }
 
 async function openBrowser(rawUrl) {
@@ -245,7 +282,7 @@ async function manualCommand(command) {
   if (!state.browserActive) return;
   await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
   clearTimeout(state.manualRefreshTimer);
-  state.manualRefreshTimer = setTimeout(() => void pollBrowser(), 120);
+  state.manualRefreshTimer = setTimeout(() => void pollBrowser(true), 180);
 }
 
 function enqueueManualCommand(command) {
@@ -269,11 +306,10 @@ function browserCoordinates(event) {
 async function submitPrompt(message) {
   const text = message.trim();
   if (!text || !state.agentReady) return;
-  if (state.agentStreaming) return showToast("Pi 正在工作，请先终止当前任务");
   elements.prompt.value = "";
   updateAgentStatus(true, true);
   try { await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) }); }
-  catch (error) { updateAgentStatus(state.agentReady, false); showToast(error.message); }
+  catch (error) { updateAgentStatus(state.agentReady, state.agentStreaming); showToast(error.message); }
 }
 
 async function abortAgent() {
@@ -426,7 +462,7 @@ function connectEvents() {
     if (event.type === "session_patch") patchSessionItem(event);
     if (event.type === "session_replace") renderSessionItem(event.item);
     if (event.type === "ui_request") showUiRequest(event);
-    if (event.type === "browser_changed") void pollBrowser();
+    if (event.type === "browser_changed") void pollBrowser(true);
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
     if (event.type === "studio_shutdown") window.close();
@@ -447,9 +483,9 @@ elements.finishRecording.addEventListener("click", () => void completeRecording(
 elements.clearSession.addEventListener("click", () => void clearSessionHistory());
 elements.composer.addEventListener("submit", event => {
   event.preventDefault();
-  if (state.agentStreaming) void abortAgent();
-  else void submitPrompt(elements.prompt.value);
+  void submitPrompt(elements.prompt.value);
 });
+if (elements.abortPrompt) elements.abortPrompt.addEventListener("click", () => void abortAgent());
 elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.composer.requestSubmit(); } });
 document.querySelectorAll("[data-prompt]").forEach(button => button.addEventListener("click", () => void submitPrompt(button.dataset.prompt || "")));
 elements.confirmationCancel.addEventListener("click", () => void closeConfirmation(false)); elements.confirmationApprove.addEventListener("click", () => void closeConfirmation(true));
@@ -462,10 +498,26 @@ elements.invokeSubmit.addEventListener("click", async () => {
     elements.invokeModal.hidden = true; state.invokeSkill = null; setView("recording"); showToast("已交给 Pi，执行中的选择和确认会显示在这里");
   } catch (error) { showToast(error.message); }
 });
+function flushImeText() {
+  clearTimeout(state.imeTimer);
+  const value = state.imeBuffer;
+  state.imeBuffer = "";
+  if (elements.browserIme) elements.browserIme.value = "";
+  if (value) enqueueManualCommand({ action: "text", value });
+}
+
+function focusBrowserIme(event) {
+  if (!elements.browserIme) return;
+  elements.browserIme.style.left = `${event.clientX}px`;
+  elements.browserIme.style.top = `${event.clientY}px`;
+  elements.browserIme.focus();
+}
+
 elements.browserFrame.addEventListener("click", event => {
   if (!state.browserActive) return;
   const point = browserCoordinates(event); if (!point) return;
-  elements.browserViewport.focus();
+  flushImeText();
+  focusBrowserIme(event);
   enqueueManualCommand({ action: "click", ...point });
 });
 elements.browserViewport.addEventListener("wheel", event => {
@@ -474,9 +526,45 @@ elements.browserViewport.addEventListener("wheel", event => {
   const factor = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 40 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 600 : 1;
   enqueueManualCommand({ action: "scroll", deltaX: event.deltaX * factor, deltaY: event.deltaY * factor });
 }, { passive: false });
+if (elements.browserIme) {
+  elements.browserIme.addEventListener("compositionstart", () => { state.imeComposing = true; });
+  elements.browserIme.addEventListener("compositionend", event => {
+    state.imeComposing = false;
+    if (event.data) state.imeBuffer += event.data;
+    flushImeText();
+  });
+  elements.browserIme.addEventListener("input", event => {
+    if (state.imeComposing) return;
+    const next = event.target.value || "";
+    if (!next) return;
+    state.imeBuffer += next;
+    event.target.value = "";
+    clearTimeout(state.imeTimer);
+    state.imeTimer = setTimeout(flushImeText, 80);
+  });
+  elements.browserIme.addEventListener("keydown", event => {
+    if (!state.browserActive) return;
+    if (state.imeComposing) return;
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) return;
+    event.preventDefault();
+    flushImeText();
+    const keyName = event.key === " " ? "Space" : event.key;
+    const modifiers = [event.ctrlKey && "Control", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"].filter(Boolean);
+    enqueueManualCommand({ action: "key", key: [...modifiers, keyName].join("+") });
+  });
+}
 elements.browserViewport.addEventListener("keydown", event => {
-  if (!state.browserActive || ["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+  if (!state.browserActive || event.target === elements.browserIme) return;
+  if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+  if (state.imeComposing) return;
   event.preventDefault();
+  if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    state.imeBuffer += event.key;
+    clearTimeout(state.imeTimer);
+    state.imeTimer = setTimeout(flushImeText, 80);
+    return;
+  }
+  flushImeText();
   const keyName = event.key === " " ? "Space" : event.key;
   const modifiers = [event.ctrlKey && "Control", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"].filter(Boolean);
   enqueueManualCommand({ action: "key", key: [...modifiers, keyName].join("+") });
@@ -488,7 +576,7 @@ async function initialize() {
     for (const item of status.sessionItems || []) renderSessionItem(item);
     state.browserMode = status.browser?.mode || state.browserMode; renderBrowserMode(); await pollBrowser();
   } catch (error) { showToast(error.message); }
-  connectEvents(); setInterval(pollBrowser, 900);
+  connectEvents(); setInterval(() => { if (!document.hidden) void pollBrowser(); }, 1400);
 }
 
 void initialize();

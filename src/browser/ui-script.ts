@@ -134,15 +134,22 @@ export const UI_RECORDER_SCRIPT = String.raw`
   };
 
   const inputTimers = new WeakMap();
+  const flush = (eventType, target) => {
+    if (!(target instanceof HTMLElement)) return;
+    const previous = inputTimers.get(target);
+    if (previous) clearTimeout(previous);
+    send(eventType, target);
+  };
+  window.__bssFlushUi = (eventType, target) => flush(eventType || "input", target || document.activeElement);
   document.addEventListener("click", e => send("click", e.composedPath?.()[0] || e.target), true);
   document.addEventListener("input", e => {
     const target = e.composedPath?.()[0] || e.target;
     if (!(target instanceof HTMLElement)) return;
     const previous = inputTimers.get(target);
     if (previous) clearTimeout(previous);
-    inputTimers.set(target, setTimeout(() => send("input", target), 250));
+    inputTimers.set(target, setTimeout(() => send("input", target), 80));
   }, true);
-  document.addEventListener("change", e => send("change", e.composedPath?.()[0] || e.target), true);
+  document.addEventListener("change", e => flush("change", e.composedPath?.()[0] || e.target), true);
   document.addEventListener("submit", e => send("submit", e.composedPath?.()[0] || e.target), true);
 })();
 `;

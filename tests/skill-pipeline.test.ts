@@ -59,10 +59,7 @@ test("distinguishes caller fields from unresolved system fields", () => {
   assert.equal(customer.systemHandled, false);
   assert.equal(tenant.source, "system");
   assert.equal(tenant.systemHandled, true);
-  assert.equal(validateCapability(capability, events, [capability]).validation.status, "candidate");
-
-  tenant.source = "session";
-  tenant.defaultRule = "env:TENANT_ID";
+  assert.match(tenant.sourceDetail, /后台自动处理/);
   const validated = validateCapability(capability, events, [capability]);
   assert.equal(validated.validation.status, "verified");
 });

@@ -41,7 +41,7 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
 
 6. **Export**
    - Call `business_skill_export`.
-   - Export only user-facing verified capabilities (search/create/update/review/delete with UI evidence), not background IM/notify/permission polls.
+   - Export only primary verified capabilities (search/create/update/review/delete with caller fields) plus the lookup APIs those fields need. Do not export IM/notify/permission/login/tenant polls.
    - The exported package is Prefer HTTP: `SKILL.md` + `references/reference.md` + `scripts/execute.py`. Do not invent endpoints.
 
 ## Completion rule

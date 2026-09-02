@@ -228,7 +228,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     }
     const frame = await studio.recorder.preview();
     response.writeHead(200, {
-      "Content-Type": "image/png",
+      "Content-Type": "image/jpeg",
       "Content-Length": String(frame.byteLength),
       "Cache-Control": "no-store, max-age=0"
     });
@@ -296,7 +296,14 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   }
 
   if (request.method === "POST" && pathname === "/api/browser/manual") {
-    const result = await studio.recorder.manualControl(await readJsonBody(request));
+    const result = await studio.recorder.manualControl(await readJsonBody(request)) as { observed?: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string } };
+    if (result.observed && (result.observed.eventType === "input" || result.observed.eventType === "change" || result.observed.label || result.observed.value !== undefined)) {
+      const label = result.observed.label || result.observed.name || "页面字段";
+      runtimeLog("BROWSER", `Manual ${result.observed.eventType || "action"}: ${label}=${String(result.observed.value ?? "")}`);
+      if (result.observed.eventType === "input" || result.observed.eventType === "change") {
+        broadcast(transcript.addManual(result.observed));
+      }
+    }
     sendJson(response, 200, result);
     return;
   }
@@ -372,7 +379,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/control") {
-      if (browserInteractionMode !== "automatic" && new Set(["goto", "click", "fill", "select", "press"]).has(String(body.action))) {
+      if (browserInteractionMode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press"]).has(String(body.action))) {
         throw new Error("当前是手动录制模式；Pi 只能读取页面，不能自动点击或输入");
       }
       sendJson(response, 200, await studio.recorder.control(body));

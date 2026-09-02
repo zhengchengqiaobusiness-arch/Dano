@@ -10,7 +10,6 @@ import { collectUiObservations, requestValueAt, resolveFieldOwnership, uiSupport
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
-const QUERY_LIKE_UI = /query|search|find|list|page|detail|lookup|查询|搜索|列表|详情|检索/i;
 const OPERATION_NAMES: Record<CapabilityContract["operation"], string> = {
   query: "查询", create: "新建", update: "修改", review: "审核", delete: "删除",
   authenticate: "认证", upload: "上传", download: "下载", action: "业务动作", unknown: "未识别"
@@ -105,6 +104,43 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
 }
 
 
+function unionUrl(group: NetworkEvidence[]) {
+  const first = normalizeUrl(group[0]!.request.url);
+  const keys = new Set<string>();
+  for (const event of group) {
+    try {
+      for (const key of new URL(event.request.url).searchParams.keys()) keys.add(key);
+    } catch {
+      // ignore malformed recorded URLs
+    }
+  }
+  const suffix = [...keys].sort().map(key => `${encodeURIComponent(key)}={${key}}`).join("&");
+  return {
+    origin: first.origin,
+    pathTemplate: first.pathTemplate,
+    urlTemplate: `${first.origin}${first.pathTemplate}${suffix ? `?${suffix}` : ""}`
+  };
+}
+
+function pickUi(group: NetworkEvidence[], uiById: Map<string, UiEvidence>) {
+  const items = group
+    .map(event => event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined)
+    .filter((item): item is UiEvidence => Boolean(item));
+  return items.find(item => /搜索|查询|新增|新建|确定|保存|提交/.test(`${item.text || ""} ${item.label || ""}`)) || items[0];
+}
+
+function capabilityTitle(operation: CapabilityContract["operation"], ui: UiEvidence | undefined, pathTemplate: string) {
+  const skip = new Set(["admin-api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query"]);
+  const resource = pathTemplate.split("/").filter(part => part && !skip.has(part)).slice(-2).join("/") || pathTemplate;
+  if (operation === "create") return `新建 ${resource}`;
+  if (operation === "update") return `修改 ${resource}`;
+  if (operation === "delete") return `删除 ${resource}`;
+  if (operation === "review") return `审核 ${resource}`;
+  if (operation === "query") return `查询 ${resource}`;
+  if (operation === "authenticate") return ui?.text || ui?.label || `认证 ${resource}`;
+  return ui?.text || ui?.label || `${OPERATION_NAMES[operation]} ${resource}`;
+}
+
 function inferCompletion(group: NetworkEvidence[], operation: string) {
   const successful = group.filter(g => g.response && g.response.status >= 200 && g.response.status < 400);
   const acceptedHttpStatuses = [...new Set(successful.map(g => g.response!.status))];
@@ -136,7 +172,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     const normalized = normalizeUrl(event.request.url);
     const ui = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
     const operation = inferOperation(event, ui);
-    const key = `${operation}|${event.request.method.toUpperCase()}|${normalized.urlTemplate}`;
+    const key = `${operation}|${event.request.method.toUpperCase()}|${normalized.pathTemplate}`;
     const list = groups.get(key) || [];
     list.push(event);
     groups.set(key, list);
@@ -147,8 +183,8 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
 
   for (const group of groups.values()) {
     const first = group[0]!;
-    const normalized = normalizeUrl(first.request.url);
-    const ui = first.correlatedUiEvidenceId ? uiById.get(first.correlatedUiEvidenceId) : undefined;
+    const normalized = unionUrl(group);
+    const ui = pickUi(group, uiById);
     const operation = inferOperation(first, ui);
     const method = first.request.method.toUpperCase();
     const baseTitle = `${operation}-${method.toLowerCase()}-${normalized.pathTemplate.split("/").filter(Boolean).slice(-2).join("-") || "root"}`;
@@ -238,7 +274,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     result.push({
       id: capId,
       kind: "atomic",
-      title: ((operation !== "query" || QUERY_LIKE_UI.test(`${ui?.text || ""} ${ui?.label || ""}`)) && (ui?.text || ui?.label)) || `${operation} ${normalized.pathTemplate}`,
+      title: capabilityTitle(operation, ui, normalized.pathTemplate),
       description: `已从真实操作观察到“${OPERATION_NAMES[operation]}”能力。请结合业务含义核对并修改本描述。`,
       operation,
       confidence: operationConfidence(first, ui),
@@ -262,7 +298,11 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           })].filter((item): item is UiEvidence => Boolean(item));
         });
         const observations = collectUiObservations(nearbyUi);
-        const sample = requestInput(first);
+        const sample = group.map(requestInput).reduce((best, item) => {
+          const score = Object.keys(item && typeof item === "object" ? item as object : {}).length;
+          const bestScore = Object.keys(best && typeof best === "object" ? best as object : {}).length;
+          return score > bestScore ? item : best;
+        }, requestInput(first));
         for (const field of inferred) {
           const merged = observed.get(field.path) ? {
             ...field,
