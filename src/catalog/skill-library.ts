@@ -86,31 +86,27 @@ export class SkillLibrary {
 
   async export(name: string, capabilities: CapabilityContract[], confirmed: boolean) {
     if (!confirmed) throw new Error("导出或重新导出前必须取得明确确认");
-    const skillName = normalizeSkillName(name, capabilities);
+    const slug = normalizeSkillName(name, capabilities);
     const records = await this.allRecords();
-    const previous = records.find(record => record.name === skillName && record.status !== "deleted");
-    if (previous?.status === "frozen") throw new Error("该 Skill 已冻结；需要先解除冻结才能重新导出");
+    const family = records.filter(record =>
+      record.status !== "deleted" && normalizeSkillName(record.displayName) === slug
+    );
 
-    const temporaryRoot = path.join(this.stateDir, "staging", `${skillName}-${Date.now()}`);
+    const temporaryRoot = path.join(this.stateDir, "staging", `${slug}-${Date.now()}`);
     const exported = await exportSkill(temporaryRoot, name, capabilities);
     const destination = path.join(this.outputRoot, exported.skillName);
     assertInside(this.outputRoot, destination);
+    if (await exists(destination)) throw new Error(`导出目录已存在：${exported.skillName}`);
     await ensureDir(this.outputRoot);
-
-    if (await exists(destination)) {
-      const historyTarget = path.join(this.historyDir, `${skillName}-v${previous?.version || 1}-${Date.now()}`);
-      await ensureDir(path.dirname(historyTarget));
-      await rename(destination, historyTarget);
-    }
     await rename(exported.dir, destination);
 
     const now = new Date().toISOString();
     const record: SkillRecord = {
-      id: previous?.id || `skill-${skillName}`,
-      name: skillName,
-      displayName: name.trim() || skillName,
+      id: exported.skillName,
+      name: exported.skillName,
+      displayName: name.trim() || slug,
       directory: destination,
-      version: (previous?.version || 0) + 1,
+      version: Math.max(0, ...family.map(item => item.version)) + 1,
       status: "active",
       capabilityIds: exported.capabilityIds,
       primaryCapabilityIds: exported.primaryCapabilityIds,
@@ -119,9 +115,7 @@ export class SkillLibrary {
       exportedAt: now,
       updatedAt: now
     };
-    const next = records.filter(item => item.id !== record.id);
-    next.push(record);
-    await this.save(next);
+    await this.save([...records, record]);
     return {
       ...await this.enrich(record),
       count: exported.count,

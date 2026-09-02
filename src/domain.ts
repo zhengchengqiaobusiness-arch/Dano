@@ -19,6 +19,7 @@ export interface UiFieldSnapshot {
   value?: unknown;
   required?: boolean;
   options?: Array<{ value: string; label: string }>;
+  rangeIndex?: number;
 }
 
 export interface UiEvidence {
@@ -28,6 +29,7 @@ export interface UiEvidence {
   at: string;
   pageUrl: string;
   eventType: "click" | "input" | "change" | "submit" | "snapshot";
+  scope?: "page" | "dialog";
   selector?: string;
   tag?: string;
   role?: string;
@@ -103,8 +105,9 @@ export interface InputFormField {
   requiredBasis: FieldRequiredBasis;
   systemHandled: boolean;
   sourceDetail: string;
-  widget: "text" | "number" | "boolean" | "select" | "multiselect" | "json";
+  widget: "text" | "number" | "boolean" | "select" | "multiselect" | "json" | "textarea" | "date";
   defaultRule?: string;
+  dateClock?: string;
   candidates?: CandidateRule;
 }
 

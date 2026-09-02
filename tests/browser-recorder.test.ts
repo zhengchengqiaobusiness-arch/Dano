@@ -515,3 +515,161 @@ test("element plus readonly selects and date dialogs fill without leftover poppe
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("required number 0 is empty and date picker chrome is not a form field", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-zero-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>时长表单</title></head><body>
+      <form class="el-form">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">请假天数</label>
+          <input id="days" type="number" value="0" required>
+        </div>
+      </form>
+      <div class="el-picker-panel" style="display:block;width:240px;height:120px">
+        <div class="el-form-item">
+          <label class="el-form-item__label">选择日期</label>
+          <input value="2026-09-02">
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">选择时间</label>
+          <input value="00:00:00">
+        </div>
+      </div>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "zero-days");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.equal(snapshot.todoFields.some((field: any) => field.label === "请假天数"), true);
+    assert.equal(snapshot.formFields.some((field: any) => field.label === "选择日期"), false);
+    assert.equal(snapshot.formFields.some((field: any) => field.label === "选择时间"), false);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form keeps later dates after earlier ones and submit-form repairs zero duration", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-span-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/leave/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":{"id":1}}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>发起申请</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">开始时间</label>
+          <div class="el-date-editor el-date-editor--datetime"><input id="start" placeholder="开始时间"></div>
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">结束时间</label>
+          <div class="el-date-editor el-date-editor--datetime"><input id="end" placeholder="结束时间"></div>
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">请假天数</label>
+          <input id="days" type="number" value="0" required>
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">原因</label>
+          <textarea id="reason"></textarea>
+        </div>
+        <button type="submit">提交</button>
+      </form>
+      <div id="err" class="el-form-item__error" hidden></div>
+      <script>
+        const start = document.getElementById("start");
+        const end = document.getElementById("end");
+        const days = document.getElementById("days");
+        const err = document.getElementById("err");
+        const recalc = () => {
+          if (!start.value || !end.value) return;
+          const diff = (new Date(end.value) - new Date(start.value)) / 86400000;
+          days.value = String(Math.max(0, diff));
+        };
+        start.addEventListener("change", recalc);
+        end.addEventListener("change", recalc);
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          recalc();
+          if (Number(days.value) <= 0) {
+            err.hidden = false;
+            err.textContent = "天数必须大于 0";
+            return;
+          }
+          err.hidden = true;
+          fetch("/api/leave/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ startTime: start.value, endTime: end.value, days: Number(days.value), reason: document.getElementById("reason").value })
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "span-form");
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    const start = parseFieldInstant(result.formFields.find((field: any) => field.label === "开始时间")?.value);
+    const end = parseFieldInstant(result.formFields.find((field: any) => field.label === "结束时间")?.value);
+    assert.ok(start && end && end > start, JSON.stringify(result.formFields));
+    assert.ok(Number(result.formFields.find((field: any) => field.label === "请假天数")?.value) > 0, JSON.stringify(result.formFields));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as { days?: number; startTime?: string; endTime?: string };
+    assert.ok(Number(payload.days) > 0, JSON.stringify(payload));
+    assert.ok(new Date(String(payload.endTime)).getTime() > new Date(String(payload.startTime)).getTime(), JSON.stringify(payload));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+function parseFieldInstant(value?: string) {
+  const text = String(value || "");
+  const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);
+  if (!match) return undefined;
+  const time = match[2] ? (match[2].length === 5 ? `${match[2]}:00` : match[2]) : "00:00:00";
+  const date = new Date(`${match[1]}T${time}`);
+  return Number.isNaN(date.getTime()) ? undefined : date.getTime();
+}

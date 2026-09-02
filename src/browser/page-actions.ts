@@ -19,8 +19,10 @@ export interface FormField {
   skip: boolean;
   disabled: boolean;
   required?: boolean;
+  invalid?: boolean;
   value?: string;
   scope?: string;
+  rangeIndex?: number;
 }
 
 export interface PageSnapshot {
@@ -32,6 +34,7 @@ export interface PageSnapshot {
   formFields?: FormField[];
   todoFields?: FormField[];
   todoCount?: number;
+  errors?: string[];
   frames?: unknown[];
   recentUserActions?: unknown[];
 }
@@ -40,6 +43,13 @@ export interface PageActionHost {
   page(): Page;
   writePageInventory(page: Page, snapshot: PageSnapshot): Promise<void>;
   recentUserActions(): unknown[];
+  recordSelectObservation?(info: {
+    label?: string;
+    name?: string;
+    scope?: "page" | "dialog";
+    value?: string;
+    options: Array<{ value: unknown; label: string }>;
+  }): Promise<void>;
 }
 
 function escapeRegExp(value: string) {
@@ -49,6 +59,31 @@ function escapeRegExp(value: string) {
 function exactText(value: string) {
   return new RegExp(`^\\s*${escapeRegExp(value)}\\s*$`);
 }
+
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function localIsoDate(offsetDays = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function parseFieldDate(value?: string) {
+  const match = String(value || "").trim().match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);
+  if (!match) return undefined;
+  const time = match[2] ? (match[2].length === 5 ? `${match[2]}:00` : match[2]) : "00:00:00";
+  const date = new Date(`${match[1]}T${time}`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function isNumericZero(value?: string) {
+  return /^(0+|0*\.0+)$/.test(String(value || "").trim());
+}
+
+const SUBMIT_LABEL = /^(提交|确定|保存|搜索|查询|search|submit|save|ok|confirm|apply)/i;
+const CANCEL_LABEL = /取消|关闭|重置|reset|cancel|close|back/i;
 
 export class PageActions {
   constructor(private readonly host: PageActionHost) {}
@@ -81,14 +116,13 @@ export class PageActions {
       const labeled = root.locator(FORM_LABELS).filter({ hasText: exact });
       return root.getByLabel(name, { exact: true })
         .or(root.getByPlaceholder(name, { exact: true }))
-        .or(root.getByPlaceholder(new RegExp(`^(请选择|请输入|请填写)?${escapeRegExp(name)}$`)))
+        .or(root.getByPlaceholder(new RegExp(`^(请选择|请输入|请填写|please select|please enter|please choose|select)?\\s*${escapeRegExp(name)}$`, "i")))
         .or(root.getByRole("combobox", { name, exact: true }))
         .or(root.getByRole("textbox", { name, exact: true }))
         .or(root.locator(FORM_ITEMS).filter({
           has: labeled
         }).locator("input, textarea, select, [role='combobox'], .el-select__wrapper, .el-date-editor, .ant-select-selector, .ant-picker").first())
-        .or(labeled.locator("xpath=following::*[self::input or self::textarea or self::select or @role='combobox'][1]"))
-        .or(root.getByPlaceholder(new RegExp(`^(请选择|请输入|请填写)?${escapeRegExp(name.replace(/名称$/, ""))}$`)));
+        .or(labeled.locator("xpath=following::*[self::input or self::textarea or self::select or @role='combobox'][1]"));
     }
     const text = selector.match(/^text=(.+)$/s);
     if (text) return root.getByText(text[1]!, { exact: true });
@@ -278,17 +312,13 @@ export class PageActions {
     const page = this.page();
     try {
       if (await this.hasDatePanel()) {
-        const panel = page.locator(DATE_PANELS).last();
-        const today = panel.locator("td.today, td.available.today, .el-date-table td.is-today, .today, .ant-picker-cell-today .ant-picker-cell-inner").first();
-        const day = (await today.count())
-          ? today
-          : panel.locator(".el-date-table-cell__text, td.available .cell, .ant-picker-cell-inner").filter({ visible: true }).first();
-        if (await day.count()) {
-          await this.clickSafely(day, "option").catch(async () => {
-            await day.click({ force: true, timeout: 400 });
-          });
-        }
-        await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 500 }).catch(() => {});
+        await page.keyboard.press("Tab").catch(() => {});
+        await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
+      }
+      if (await this.hasDatePanel()) {
+        const label = page.locator(`${DIALOGS} ${FORM_LABELS}, ${FORM_LABELS}`).filter({ visible: true }).first();
+        if (await label.count()) await label.click({ timeout: 400 }).catch(() => {});
+        await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
       }
       if (await this.dropdownScope()) {
         const opener = page.locator(".el-select__wrapper.is-focused, .el-select.is-focused .el-select__wrapper, .ant-select-open .ant-select-selector").first();
@@ -333,28 +363,76 @@ export class PageActions {
     return scope;
   }
 
+  private async dateEditorMode(dateWrap: Locator) {
+    return dateWrap.evaluate(el => {
+      const blob = `${el.className} ${el.querySelector("input")?.placeholder || ""}`;
+      return /datetime|datetimerange|time|时/i.test(blob) ? "datetime" : "date";
+    }).catch(() => "date" as const);
+  }
+
+  private async alignDatePanel(isoDate: string) {
+    const [year, month] = isoDate.split("-").map(Number);
+    if (!year || !month) return;
+    const panel = this.page().locator(DATE_PANELS).last();
+    for (let step = 0; step < 36; step += 1) {
+      const header = await panel.locator(".el-date-picker__header, .el-picker-panel__icon-btn, .ant-picker-header, .arco-picker-header").first().evaluate(el => {
+        const host = el.closest(".el-picker-panel, .el-date-picker, .ant-picker-dropdown, .arco-picker-container") || el.parentElement;
+        return String(host?.textContent || el.textContent || "");
+      }).catch(async () => panel.innerText().catch(() => ""));
+      const currentYear = Number((header.match(/(\d{4})/) || [])[1]);
+      let currentMonth = Number((header.match(/(\d{1,2})\s*月/) || [])[1]);
+      if (!currentMonth) {
+        const names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        const index = names.findIndex(name => header.toLowerCase().includes(name));
+        if (index >= 0) currentMonth = index + 1;
+      }
+      if (currentYear === year && currentMonth === month) return;
+      const forward = !currentYear || currentYear < year || (currentYear === year && (currentMonth || 0) < month);
+      const next = panel.locator(".el-date-picker__next-btn, .arrow-right, .ant-picker-header-next-btn, .arco-picker-header-next").filter({ visible: true }).last();
+      const prev = panel.locator(".el-date-picker__prev-btn, .arrow-left, .ant-picker-header-prev-btn, .arco-picker-header-prev").filter({ visible: true }).last();
+      const target = forward ? next : prev;
+      if (!(await target.count())) return;
+      await this.clickSafely(target, "option").catch(async () => target.click({ force: true, timeout: 400 }));
+    }
+  }
+
+  private formatDateValue(value: string, mode: "date" | "datetime") {
+    const parsed = parseFieldDate(value);
+    const iso = parsed ? `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())}` : (value.match(/\d{4}-\d{2}-\d{2}/)?.[0] || localIsoDate());
+    if (mode === "date") return iso;
+    const time = value.match(/\d{2}:\d{2}(?::\d{2})?/)?.[0];
+    return `${iso} ${time ? (time.length === 5 ? `${time}:00` : time) : "00:00:00"}`;
+  }
+
   async fillField(selector: string, value: string) {
     const locator = await this.locate(selector);
     const dateWrap = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-date-editor') or contains(@class,'el-date-picker') or contains(@class,'ant-picker')][1]");
     if (await dateWrap.count()) {
+      const mode = await this.dateEditorMode(dateWrap);
+      const filled = this.formatDateValue(value, mode);
       await this.dismissTransientOverlays();
+      const input = dateWrap.locator("input").first();
+      const target = (await input.count()) ? input : locator;
+      await target.fill(filled, { timeout: 1_200 }).catch(async () => {
+        await target.fill(filled, { force: true, timeout: 800 });
+      });
+      await target.press("Tab").catch(() => {});
+      await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
+      const current = await target.inputValue().catch(() => "");
+      if (current.includes(filled.slice(0, 10))) return;
       await this.clickSafely(await this.clickTarget(selector), "field");
       if (await this.hasDatePanel()) {
-        const day = /^\d{4}-\d{2}-\d{2}/.test(value.trim()) ? String(Number(value.trim().slice(8, 10))) : String(new Date().getDate());
-        await this.pickCalendarDay(day);
+        await this.alignDatePanel(filled.slice(0, 10));
+        await this.pickCalendarDay(String(Number(filled.slice(8, 10))));
         await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
-        return;
       }
+      return;
     }
-    const input = ((await dateWrap.count()) ? dateWrap : locator).locator("input, textarea").first();
+    const input = locator.locator("input, textarea").first();
     const target = (await input.count()) ? input : locator;
-    const filled = (await dateWrap.count()) && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())
-      ? `${value.trim()} 00:00:00`
-      : value;
-    await target.fill(filled, { timeout: 1_200 }).catch(async () => {
-      await target.fill(filled, { force: true, timeout: 800 });
+    await target.fill(value, { timeout: 1_200 }).catch(async () => {
+      await target.fill(value, { force: true, timeout: 800 });
     });
-    if (await dateWrap.count()) await target.press("Tab").catch(() => {});
   }
 
   async chooseOption(selector: string, value: string | string[]) {
@@ -388,6 +466,16 @@ export class PageActions {
     return { ok: true, url: page.url() };
   }
 
+  async dropdownOptions(scope?: Locator) {
+    const root = scope || await this.dropdownScope();
+    if (!root) return [];
+    return root.locator(OPTION_ITEMS).evaluateAll(elements => elements.map(el => {
+      const label = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      const raw = el.getAttribute("value") || el.getAttribute("data-value") || el.getAttribute("data-id");
+      return { label, value: raw !== undefined && raw !== "" ? raw : label };
+    })).then(items => items.filter(item => item.label));
+  }
+
   async firstVisibleOption(scope?: Locator) {
     const root = scope || await this.dropdownScope();
     if (!root) throw new Error("No open select dropdown");
@@ -415,7 +503,44 @@ export class PageActions {
         throw new Error("Select opened but no option became visible");
       }
     }
+    const options = await this.dropdownOptions(scope);
     const value = await this.firstVisibleOption(scope);
+    const fieldMeta = await target.evaluate(el => {
+      const attrs = ["name", "data-field", "data-name", "data-prop", "prop", "data-key", "data-model"];
+      const generated = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
+      let name: string | undefined;
+      let node: Element | null = el;
+      for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+        if (i > 0 && node.matches("form, [role='form'], [role='dialog'], .el-dialog, .ant-modal, .arco-modal")) break;
+        for (const attr of attrs) {
+          const value = node.getAttribute(attr);
+          if (value && !generated.test(value)) {
+            name = value;
+            break;
+          }
+        }
+        if (name) break;
+        if (i === 0) {
+          const id = node.getAttribute("id");
+          if (id && !generated.test(id)) name = id;
+        }
+      }
+      const item = el.closest(".el-form-item, .ant-form-item, .arco-form-item, [class*='form-item']");
+      const label = item?.querySelector("label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label");
+      const dialog = el.closest(".el-dialog, .el-drawer, .ant-modal, .arco-modal");
+      return {
+        label: String(label?.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim(),
+        name: name || undefined,
+        scope: dialog ? "dialog" : "page"
+      };
+    }).catch(() => ({ label: "", name: undefined, scope: "page" as const }));
+    await this.host.recordSelectObservation?.({
+      label: fieldMeta.label,
+      name: fieldMeta.name,
+      scope: fieldMeta.scope,
+      value,
+      options
+    });
     await this.clickSafely(this.optionLocator(value, scope).filter({ visible: true }).first(), "option");
     await this.page().locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
     return value;
@@ -436,14 +561,17 @@ export class PageActions {
     return snapshot;
   }
 
-  private sampleValue(field: FormField) {
-    if (field.kind === "date") return new Date().toISOString().slice(0, 10);
+  private sampleValue(field: FormField, dateOffset = 0) {
+    if (field.kind === "date") {
+      const endLike = field.rangeIndex === 1 || dateOffset % 2 === 1;
+      return `${localIsoDate(dateOffset)} ${endLike ? "23:59:59" : "00:00:00"}`;
+    }
     if (field.kind === "number") return "1";
     const hint = String(field.label || "").replace(/[：:*：\s]/g, "").slice(0, 8);
     return hint ? `样例-${hint}` : "样例";
   }
 
-  private async fillOneField(field: FormField, startUrl: string) {
+  private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
@@ -456,9 +584,63 @@ export class PageActions {
       await this.clickSafely(await this.clickTarget(selector), "field");
       return { label: field.label, selector, kind: field.kind, value: "true" };
     }
-    const value = this.sampleValue(field);
+    const value = this.sampleValue(field, dateOffset);
     await this.fillField(selector, value);
     return { label: field.label, selector, kind: field.kind, value };
+  }
+
+  private requiredNumberInvalid(field: FormField) {
+    return field.kind === "number" && Boolean(field.required) && !field.disabled && !field.skip && isNumericZero(field.value);
+  }
+
+  private formReady(snapshot: PageSnapshot, startUrl: string) {
+    const leftover = (snapshot.todoFields || []).filter(field => !field.skip && !field.disabled);
+    const zeroRequired = (snapshot.formFields || []).some(field => this.requiredNumberInvalid(field));
+    return leftover.length === 0 && !zeroRequired && this.page().url() === startUrl;
+  }
+
+  private async repairFormValues(startUrl: string) {
+    const snapshot = await this.captureSnapshot();
+    const dates = (snapshot.formFields || []).filter(field => field.kind === "date" && !field.skip && !field.disabled);
+    let last: Date | undefined;
+    for (const [index, field] of dates.entries()) {
+      const parsed = parseFieldDate(field.value);
+      if (parsed && (!last || parsed.getTime() > last.getTime())) {
+        last = parsed;
+        continue;
+      }
+      const next = new Date(last ? last.getTime() + 86_400_000 : Date.now());
+      if (!last) next.setDate(next.getDate() + index);
+      const iso = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+      const value = `${iso} ${index % 2 === 1 ? "23:59:59" : "00:00:00"}`;
+      await this.fillField(field.selector || `label=${field.label}`, value);
+      last = parseFieldDate(value);
+    }
+    const afterDates = await this.captureSnapshot();
+    for (const field of afterDates.formFields || []) {
+      if (!this.requiredNumberInvalid(field) && !(field.invalid && field.kind === "number" && !field.disabled)) continue;
+      await this.fillField(field.selector || `label=${field.label}`, "1");
+    }
+    void startUrl;
+  }
+
+  private submitControl(snapshot: PageSnapshot) {
+    const controls = snapshot.controls || [];
+    const scored = controls.flatMap(control => {
+      const text = String(control.text || control.label || "").replace(/\s+/g, "");
+      if (!text || CANCEL_LABEL.test(text)) return [];
+      const button = control.tag === "button" || control.role === "button" || control.type === "submit";
+      if (!button) return [];
+      if (!(control.type === "submit" || SUBMIT_LABEL.test(text))) return [];
+      const draft = /草稿|draft/i.test(text);
+      const preferred = /^(提交|确定|搜索|查询|search|submit)$/i.test(text);
+      return [{
+        selector: String(control.selector || `text=${text}`),
+        text,
+        rank: preferred ? 0 : control.type === "submit" && !draft ? 1 : draft ? 3 : 2
+      }];
+    });
+    return scored.sort((left, right) => left.rank - right.rank)[0];
   }
 
   async exerciseForm() {
@@ -467,10 +649,12 @@ export class PageActions {
     const filled: Array<Record<string, unknown>> = [];
     const failed: Array<Record<string, unknown>> = [];
     const startUrl = this.page().url();
+    let dateOffset = 0;
     const run = async (fields: FormField[]) => {
       for (const field of fields) {
+        const offset = field.kind === "date" ? dateOffset++ : 0;
         try {
-          const result = await this.fillOneField(field, startUrl);
+          const result = await this.fillOneField(field, startUrl, offset);
           if (!result.skipped) filled.push(result);
         } catch (error: any) {
           failed.push({ label: field.label, selector: field.selector || `label=${field.label}`, kind: field.kind, error: String(error?.message || error) });
@@ -485,11 +669,56 @@ export class PageActions {
       await this.dismissTransientOverlays();
       after = await this.captureSnapshot();
     }
+    if (!this.formReady(after, startUrl)) {
+      await this.repairFormValues(startUrl);
+      after = await this.captureSnapshot();
+    }
     return {
-      ok: (after.todoFields || []).length === 0 && this.page().url() === startUrl,
+      ok: this.formReady(after, startUrl),
       scope: after.scope,
       filled,
       failed,
+      errors: after.errors || [],
+      todoFields: after.todoFields || [],
+      todoCount: after.todoCount ?? (after.todoFields || []).length,
+      formFields: after.formFields || []
+    };
+  }
+
+  async submitForm() {
+    await this.dismissTransientOverlays();
+    const before = await this.captureSnapshot();
+    const startUrl = this.page().url();
+    const button = this.submitControl(before);
+    if (!button) throw new Error("No submit/search button in the active form");
+    if (!this.formReady(before, startUrl)) {
+      await this.repairFormValues(startUrl);
+    }
+    await this.click(button.selector).catch(async () => {
+      await this.click(`text=${button.text}`);
+    });
+    await this.waitForPageQuiet();
+    await this.page().waitForTimeout(400);
+    let after = await this.captureSnapshot();
+    const stillOpen = after.scope === before.scope && this.page().url() === startUrl;
+    const blocked = stillOpen && ((after.errors || []).length > 0 || !this.formReady(after, startUrl) || (after.formFields || []).some(field => field.invalid));
+    if (blocked) {
+      await this.repairFormValues(startUrl);
+      await this.click(button.selector);
+      await this.waitForPageQuiet();
+      await this.page().waitForTimeout(400);
+      after = await this.captureSnapshot();
+    }
+    const leftoverErrors = after.errors || [];
+    const closed = this.page().url() !== startUrl || after.scope !== before.scope;
+    const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
+    return {
+      ok: closed || (leftoverErrors.length === 0 && !invalid),
+      submitted: button.text,
+      repaired: blocked,
+      errors: leftoverErrors,
+      url: this.page().url(),
+      scope: after.scope,
       todoFields: after.todoFields || [],
       todoCount: after.todoCount ?? (after.todoFields || []).length,
       formFields: after.formFields || []

@@ -6,7 +6,7 @@ import type {
   UiEvidence
 } from "../domain.js";
 import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
-import { collectUiObservations, requestValueAt, resolveFieldOwnership, uiSupportsRequest } from "./field-resolver.js";
+import { assignUniqueFromSamples, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -42,14 +42,21 @@ function valueType(raw: any): InputFormField["valueType"] {
   return ["string", "number", "integer", "boolean", "array", "object"].includes(type) ? type : "unknown";
 }
 
+function widgetFromUiType(type: string): InputFormField["widget"] {
+  const kind = type.toLowerCase();
+  if (kind === "number") return "number";
+  if (kind === "checkbox" || kind === "boolean") return "boolean";
+  if (kind === "select-multiple" || kind === "multiselect") return "multiselect";
+  if (kind === "select-one" || kind === "select" || kind === "combobox") return "select";
+  if (kind === "textarea") return "textarea";
+  if (kind === "date" || kind === "datetime" || kind === "daterange") return "date";
+  return "text";
+}
+
 function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number]): InputFormField | undefined {
   if (!field?.name) return undefined;
   const type = field.type || "text";
-  const widget: InputFormField["widget"] =
-    type === "number" ? "number" :
-    type === "checkbox" ? "boolean" :
-    type === "select-one" || type === "select" ? "select" :
-    type === "select-multiple" ? "multiselect" : "text";
+  const widget = widgetFromUiType(type);
   const options = field.options?.map(o => ({ value: o.value, label: o.label || o.value }));
   return {
     path: jsonPathForName(field.name),
@@ -74,10 +81,10 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
     const path = `${prefix}.${name}`;
     const isRequired = parentRequired && required.has(name);
     if (type === "object" && raw?.properties) {
-      return schemaFieldsToForm(raw, path, isRequired);
+      return schemaFieldsToForm(raw, path, false);
     }
     if (type === "array" && raw?.items?.type === "object" && raw.items.properties) {
-      return schemaFieldsToForm(raw.items, `${path}[*]`, isRequired);
+      return schemaFieldsToForm(raw.items, `${path}[*]`, false);
     }
     const widget: InputFormField["widget"] =
       type === "number" || type === "integer" ? "number" :
@@ -91,8 +98,8 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
       label: raw?.title || name,
       valueType: type,
       source: "system",
-      required: isRequired,
-      requiredBasis: isRequired ? "observed-always" : "not-observed",
+      required: false,
+      requiredBasis: "not-observed",
       systemHandled: true,
       sourceDetail: "请求中观察到该字段，但未观察到用户输入；默认由业务系统处理",
       widget,
@@ -129,28 +136,6 @@ function pickUi(group: NetworkEvidence[], uiById: Map<string, UiEvidence>) {
   return items.find(item => /搜索|查询|新增|新建|确定|保存|提交/.test(`${item.text || ""} ${item.label || ""}`)) || items[0];
 }
 
-function relatedUiEvents(
-  event: NetworkEvidence,
-  uiById: Map<string, UiEvidence>,
-  sample: unknown,
-  operation: CapabilityContract["operation"]
-) {
-  const at = Date.parse(event.at);
-  const windowMs = ["create", "update", "review", "delete", "upload", "action"].includes(operation)
-    ? 15 * 60_000
-    : 15 * 60_000;
-  return [...uiById.values()]
-    .filter(item => {
-      if (item.sessionId !== event.sessionId) return false;
-      const delta = at - Date.parse(item.at);
-      if (delta < 0) return false;
-      if (event.correlatedUiEvidenceId === item.id) return true;
-      if (delta <= 15_000) return true;
-      return delta <= windowMs && (uiSupportsRequest(item, sample) || Boolean(item.form?.length) || Boolean(item.label));
-    })
-    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
-}
-
 function capabilityTitle(operation: CapabilityContract["operation"], ui: UiEvidence | undefined, pathTemplate: string) {
   const skip = new Set(["admin-api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query"]);
   const resource = pathTemplate.split("/").filter(part => part && !skip.has(part)).slice(-2).join("/") || pathTemplate;
@@ -171,9 +156,14 @@ function inferCompletion(group: NetworkEvidence[], operation: string) {
   if (sample && typeof sample === "object" && !Array.isArray(sample)) {
     if (sample.success === true) assertions.push({ path: "$.success", kind: "equals", value: true });
     else if (sample.ok === true) assertions.push({ path: "$.ok", kind: "equals", value: true });
+    if (sample.code === 0) assertions.push({ path: "$.code", kind: "equals", value: 0 });
     if (operation === "create") {
       if (sample.id !== undefined && sample.id !== null) assertions.push({ path: "$.id", kind: "nonempty" });
-      else if (sample.data?.id !== undefined && sample.data?.id !== null) assertions.push({ path: "$.data.id", kind: "nonempty" });
+      else if (sample.data && typeof sample.data === "object" && !Array.isArray(sample.data) && sample.data.id !== undefined && sample.data.id !== null) {
+        assertions.push({ path: "$.data.id", kind: "nonempty" });
+      } else if (sample.data !== undefined && sample.data !== null && sample.data !== "" && (typeof sample.data === "number" || typeof sample.data === "string")) {
+        assertions.push({ path: "$.data", kind: "nonempty" });
+      }
     }
   }
   return {
@@ -231,8 +221,8 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           forms.set(mapped.path, previous ? {
             ...previous,
             ...mapped,
-            required: mapped.required || previous.required,
-            requiredBasis: mapped.required ? "ui-required" : previous.requiredBasis,
+            required: mapped.required === true || previous.required === true,
+            requiredBasis: mapped.required || previous.required ? "ui-required" : previous.requiredBasis,
             candidates: mapped.candidates || previous.candidates
           } : mapped);
         }
@@ -271,7 +261,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         status: event.response?.status
       }];
       const sample = requestInput(event);
-      const nearby = relatedUiEvents(event, uiById, sample, operation);
+      const nearby = relatedUiEvents(event, uiById, sample);
       if (event.correlatedUiEvidenceId) {
         const correlated = uiById.get(event.correlatedUiEvidenceId);
         if (correlated) nearby.unshift(correlated);
@@ -309,31 +299,59 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         const inferred = schemaFieldsToForm(inputSchema);
         const observed = new Map(forms);
         forms.clear();
-        const nearbyUi = group.flatMap(event => relatedUiEvents(event, uiById, requestInput(event), operation));
+        const requestSize = (event: NetworkEvidence) => flattenRequestValues(requestInput(event)).length;
+        const ownerSource = group.reduce((best, event) =>
+          requestSize(event) > requestSize(best) ? event : best
+        , first);
+        const sample = requestInput(ownerSource);
+        const owner = owningFormEvent(ownerSource, [...uiById.values()], sample);
+        const nearbyUi = group.flatMap(event => {
+          const other = owningFormEvent(event, [...uiById.values()], requestInput(event));
+          if (event !== ownerSource && !sameFormShape(owner, other)) return [];
+          return relatedUiEvents(event, uiById, requestInput(event));
+        });
         const observations = collectUiObservations(nearbyUi);
-        const sample = group.map(requestInput).reduce((best, item) => {
-          const score = Object.keys(item && typeof item === "object" ? item as object : {}).length;
-          const bestScore = Object.keys(best && typeof best === "object" ? best as object : {}).length;
-          return score > bestScore ? item : best;
-        }, requestInput(first));
+        const lists = recordedLists(network);
         for (const field of inferred) {
-          const merged = observed.get(field.path) ? {
+          const seen = observed.get(field.path);
+          const merged = seen ? {
             ...field,
-            ...observed.get(field.path),
-            required: observed.get(field.path)!.required || field.required,
-            requiredBasis: observed.get(field.path)!.required ? observed.get(field.path)!.requiredBasis : field.requiredBasis,
-            candidates: observed.get(field.path)!.candidates || field.candidates
+            ...seen,
+            required: seen.required === true,
+            requiredBasis: seen.required ? "ui-required" : "not-observed",
+            candidates: seen.candidates || field.candidates
           } : field;
-          forms.set(field.path, resolveFieldOwnership(merged, requestValueAt(sample, merged.path), observations));
+          forms.set(field.path, resolveFieldOwnership(merged, requestValueAt(sample, merged.path), observations, lists, sample));
         }
         for (const [fieldPath, field] of observed) {
           const isTransportInput = normalized.urlTemplate.includes(`{${field.name}}`);
           const isDirectInteraction = directUiNames.has(field.name);
           if (!forms.has(fieldPath) && (isTransportInput || isDirectInteraction)) {
-            forms.set(fieldPath, resolveFieldOwnership(field, requestValueAt(sample, field.path), observations));
+            forms.set(fieldPath, resolveFieldOwnership(field, requestValueAt(sample, field.path), observations, lists, sample));
           }
         }
-        return [...forms.values()];
+        const samples = group.map(requestInput);
+        return finalizeCallerFields(
+          promoteUnboundFillable(
+            bindByUniqueMatching(
+              assignUniqueFromSamples(
+                bindLeftoverFields([...forms.values()], observations, sample, lists, owner),
+                observations,
+                samples,
+                lists
+              ),
+              observations,
+              sample,
+              lists
+            ),
+            observations,
+            sample
+          ),
+          observations,
+          sample,
+          lists,
+          owner
+        );
       })(),
       evidence,
       sideEffect: ["create", "update", "review", "delete", "upload", "action"].includes(operation),

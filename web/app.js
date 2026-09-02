@@ -413,7 +413,7 @@ function renderSkills() {
     ];
     actionData.forEach(([label, action, danger]) => {
       const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.className = danger ? "text-danger" : "";
-      if (action === "reexport" && skill.status === "frozen") button.disabled = true;
+      if (action === "reexport") button.title = "再导出一份新的唯一目录，不覆盖现有成品";
       button.addEventListener("click", () => void skillAction(skill, action)); actions.append(button);
     });
     card.append(heading, facts, location, actions); elements.skillsList.append(card);
@@ -421,9 +421,9 @@ function renderSkills() {
 }
 
 async function exportSkill(name) {
-  if (!(await confirmAction("导出 Python Skill", `将把当前全部已验证能力导出为“${name}”。未验证能力不会进入包。是否继续？`, false))) return;
+  if (!(await confirmAction("导出 Python Skill", `将把当前全部已验证能力导出为“${name}”。会生成新的唯一目录，不会覆盖已有成品。未验证能力不会进入包。是否继续？`, false))) return;
   const result = await api("/api/skills/export", { method: "POST", body: JSON.stringify({ name, confirmed: true }) });
-  showToast(`已导出主能力 ${result.primaryCount ?? 0} 项、字段候选 ${result.lookupCount ?? 0} 个，共 ${result.fileCount ?? 0} 个文件：${result.directory}`); await loadSkills();
+  showToast(`已导出主能力 ${result.primaryCount ?? 0} 项、字段候选 ${result.lookupCount ?? 0} 个（${result.name}），共 ${result.fileCount ?? 0} 个文件：${result.directory}`); await loadSkills();
 }
 
 async function skillAction(skill, action) {
@@ -434,7 +434,7 @@ async function skillAction(skill, action) {
     if (action === "reexport") { await exportSkill(skill.displayName); return; }
     if (action === "freeze") {
       const frozen = skill.status !== "frozen";
-      if (!(await confirmAction(frozen ? "冻结 Skill" : "解除冻结", frozen ? "冻结后不能重新导出覆盖，但仍可调用当前版本。" : "解除后允许重新导出新版本。", false))) return;
+      if (!(await confirmAction(frozen ? "冻结 Skill" : "解除冻结", frozen ? "冻结后仍可从上方再导出一份新的唯一目录；本份成品保持不变。" : "解除后仍可调用这份成品。", false))) return;
       await api(`/api/skills/${encodeURIComponent(skill.name)}/freeze`, { method: "POST", body: JSON.stringify({ frozen, confirmed: true }) });
       showToast(frozen ? "Skill 已冻结" : "Skill 已解除冻结"); await loadSkills(); return;
     }

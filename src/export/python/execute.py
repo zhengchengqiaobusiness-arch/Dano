@@ -80,10 +80,11 @@ def date_to_millis(value: str) -> int:
     return int(moment.timestamp() * 1000)
 
 
-def normalize_date_string(value: str) -> str:
+def normalize_date_string(value: str, clock: str | None = None) -> str:
     raw = value.strip().replace("T", " ")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        return f"{raw} 00:00:00"
+        suffix = clock if clock and re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(clock)) else "00:00:00"
+        return f"{raw} {suffix}"
     return value
 
 
@@ -114,29 +115,6 @@ def apply_candidate(field: dict[str, Any], value: Any) -> Any:
     return value
 
 
-def fill_computed(prepared: dict[str, Any]) -> dict[str, Any]:
-    items = prepared.get("items")
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            count = item.get("count")
-            price = item.get("productPrice")
-            if isinstance(count, (int, float)) and isinstance(price, (int, float)):
-                item.setdefault("totalProductPrice", count * price)
-            base = item.get("totalProductPrice")
-            tax_percent = item.get("taxPercent") or 0
-            if isinstance(base, (int, float)):
-                item.setdefault("taxPrice", base * float(tax_percent) / 100)
-                item.setdefault("totalPrice", base + float(item.get("taxPrice") or 0))
-        totals = [item.get("totalPrice") for item in items if isinstance(item, dict) and isinstance(item.get("totalPrice"), (int, float))]
-        if totals:
-            prepared.setdefault("totalPrice", sum(totals))
-        if "discountPercent" in prepared and "totalPrice" in prepared:
-            prepared.setdefault("discountPrice", float(prepared["totalPrice"]) * float(prepared.get("discountPercent") or 0) / 100)
-    return prepared
-
-
 def delete_by_path(target: dict[str, Any], json_path: str) -> None:
     key = literal_key(json_path)
     if key is not None:
@@ -156,7 +134,11 @@ def delete_by_path(target: dict[str, Any], json_path: str) -> None:
 
 def resolve_rule(rule: str) -> Any:
     if rule.startswith("literal:"):
-        return json.loads(rule.removeprefix("literal:"))
+        raw = rule.removeprefix("literal:")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
     if rule.startswith("env:"):
         name = rule.removeprefix("env:").strip()
         if not name or name not in os.environ:
@@ -177,7 +159,7 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
         if value_type in {"integer", "number"}:
             return date_to_millis(value)
         if value_type == "string":
-            return normalize_date_string(value)
+            return normalize_date_string(value, (field or {}).get("dateClock"))
     if value_type == "string":
         return value if isinstance(value, str) else str(value)
     if value_type == "integer" and isinstance(value, str) and re.fullmatch(r"[-+]?\d+", value.strip()):
@@ -232,7 +214,7 @@ def prepare_input(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[
             raise ValueError(f"系统必填字段没有可执行的处理结果：{field['label']} ({field['path']})")
         if value is not None:
             set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
-    return fill_computed(prepared)
+    return prepared
 
 
 def auth_headers() -> dict[str, str]:

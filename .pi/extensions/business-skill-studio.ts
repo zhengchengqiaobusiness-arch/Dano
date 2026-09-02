@@ -86,9 +86,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form. Use choose for dropdowns. When the user requires every field filled, call exercise-form or finish snapshot.todoFields before submit.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns. When the user requires every field filled, call exercise-form then submit-form. Required number 0 is empty. If submit-form returns errors, repair and submit again; do not stop a planned write.",
     parameters: parameters({
-      action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form"] },
+      action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },
       value: {},
       url: { type: "string" },
@@ -247,7 +247,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `已导出主能力 ${result.primaryCount} 项、字段候选接口 ${result.lookupCount} 个，版本 v${result.version}。目录 ${result.directory}。候选接口只给调用方选值，不是独立业务操作。`
+          text: `已导出主能力 ${result.primaryCount} 项、字段候选接口 ${result.lookupCount} 个，标识 ${result.name}，版本 v${result.version}。目录 ${result.directory}。本次写入独立目录，不覆盖已有成品。候选接口只给调用方选值，不是独立业务操作。`
         }],
         details: result
       };

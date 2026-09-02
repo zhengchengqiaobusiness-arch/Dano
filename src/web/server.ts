@@ -379,7 +379,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/control") {
-      if (browserInteractionMode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form"]).has(String(body.action))) {
+      if (browserInteractionMode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
         throw new Error("当前是手动录制模式；Pi 只能读取页面，不能自动点击或输入");
       }
       sendJson(response, 200, await studio.recorder.control(body));

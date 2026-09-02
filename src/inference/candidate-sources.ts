@@ -1,12 +1,5 @@
-import type { CapabilityContract, CandidateRule, InputFormField } from "../domain.js";
-
-const LOOKUPS: Array<{ field: RegExp; label: RegExp; path: RegExp }> = [
-  { field: /^(productId|product)$/i, label: /^(产品名称|产品|商品)$/, path: /\/product\//i },
-  { field: /^(supplierId|supplier)$/i, label: /^(供应商)$/, path: /\/supplier\//i },
-  { field: /^(accountId|account)$/i, label: /^(结算账户|账户)$/, path: /\/account\//i },
-  { field: /^(creator|creatorId|createUser|createUserId|userId)$/i, label: /^(创建人)$/, path: /\/user\/simple-list|\/user\/list/i }
-];
-const NOT_LOOKUP = /price|count|percent|qty|amount|total|tax|stock|unit|barCode|name$/i;
+import type { CapabilityContract, CandidateRule, EvidenceEvent, InputFormField, UiEvidence } from "../domain.js";
+import { recordedLists } from "./field-resolver.js";
 
 function schemaNode(schema: any, jsonPath: string): any {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -37,27 +30,102 @@ function listPaths(schema: CapabilityContract["outputSchema"]): { valuePath: str
   return undefined;
 }
 
-function lookupFor(field: InputFormField, catalog: CapabilityContract[]) {
-  const byName = LOOKUPS.find(item => item.field.test(field.name));
-  const byLabel = !byName && !NOT_LOOKUP.test(field.name)
-    ? LOOKUPS.find(item => item.label.test(field.label || ""))
-    : undefined;
-  const rule = byName || byLabel;
-  if (!rule) return undefined;
-  return catalog.find(capability =>
-    capability.operation === "query"
-    && capability.validation.status === "verified"
-    && rule.path.test(capability.transport.pathTemplate)
+function fieldStem(name: string) {
+  return name.replace(/Ids$/i, "").replace(/Id$/i, "").toLowerCase();
+}
+
+function pathHasStem(path: string, stem: string) {
+  if (stem.length < 3) return false;
+  const normalized = path.toLowerCase();
+  return normalized.includes(`/${stem}/`)
+    || normalized.includes(`/${stem}s/`)
+    || normalized.endsWith(`/${stem}`)
+    || normalized.includes(`/${stem}-`);
+}
+
+function triggerLabels(capability: CapabilityContract, events: EvidenceEvent[]) {
+  const byId = new Map(events.map(event => [event.id, event]));
+  const labels = new Set<string>();
+  for (const ref of capability.evidence) {
+    if (ref.kind !== "network") continue;
+    const network = byId.get(ref.eventId);
+    if (network?.kind !== "network" || !network.correlatedUiEvidenceId) continue;
+    const ui = byId.get(network.correlatedUiEvidenceId) as UiEvidence | undefined;
+    if (ui?.label) labels.add(ui.label);
+  }
+  return labels;
+}
+
+function pickUnique<T>(items: T[]) {
+  return items.length === 1 ? items[0] : undefined;
+}
+
+function displayNamesOf(capability: CapabilityContract, events: EvidenceEvent[]) {
+  const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
+  return new Set(
+    recordedLists(events.filter(event => ids.has(event.id)))
+      .flatMap(list => list.rows.map(row => row.name ?? row.label ?? row.title ?? row.nickname))
+      .map(value => value === undefined || value === null || value === "" ? "" : String(value))
+      .filter(Boolean)
   );
 }
 
-export function attachCandidateSources(catalog: CapabilityContract[]): CapabilityContract[] {
+function selectedDisplays(field: InputFormField, events: EvidenceEvent[]) {
+  const values = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== "ui") continue;
+    if (event.label === field.label && event.value !== undefined && event.value !== "") {
+      values.add(String(event.value));
+    }
+    for (const item of event.form || []) {
+      if (item.label === field.label && item.value !== undefined && item.value !== "") {
+        values.add(String(item.value));
+      }
+    }
+  }
+  return [...values];
+}
+
+function lookupFor(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
+  const lists = catalog.filter(item =>
+    item.operation === "query"
+    && item.validation.status === "verified"
+    && Boolean(listPaths(item.outputSchema))
+  );
+  const byTrigger = events.length
+    ? lists.filter(item => triggerLabels(item, events).has(field.label))
+    : [];
+  const byPath = lists.filter(item => pathHasStem(item.transport.pathTemplate, fieldStem(field.name)));
+  const optionLabels = field.candidates?.type === "static"
+    ? field.candidates.values.map(item => String(item.label || "")).filter(Boolean)
+    : [];
+  const byOptions = optionLabels.length >= 2 && events.length
+    ? lists.filter(item => {
+      const names = displayNamesOf(item, events);
+      const hit = optionLabels.filter(label => names.has(label)).length;
+      return hit >= Math.max(2, optionLabels.length - 1) && names.size <= optionLabels.length * 2 + 4;
+    })
+    : [];
+  const displays = events.length ? selectedDisplays(field, events) : [];
+  const bySelected = displays.length
+    ? lists.filter(item => {
+      const names = displayNamesOf(item, events);
+      return displays.every(label => names.has(label)) && names.size <= Math.max(40, displays.length * 8);
+    })
+    : [];
+  const closedEnum = field.candidates?.type === "static"
+    && field.candidates.values.length >= 2
+    && field.candidates.values.length <= 20;
+  if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath);
+  return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected);
+}
+
+export function attachCandidateSources(catalog: CapabilityContract[], events: EvidenceEvent[] = []): CapabilityContract[] {
   return catalog.map(capability => ({
     ...capability,
     inputForm: capability.inputForm.map(field => {
       if (field.source !== "caller") return field;
-      if (field.candidates?.type === "static") return field;
-      const source = lookupFor(field, catalog);
+      const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
       const paths = source ? listPaths(source.outputSchema) : undefined;
       if (!source || !paths) return field;
       const candidates: CandidateRule = {

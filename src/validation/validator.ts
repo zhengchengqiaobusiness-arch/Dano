@@ -1,6 +1,6 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
-import { fieldHasUiEvidence, isEditableBusinessField, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -133,12 +133,14 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       : "存在没有可执行规则的系统必填字段"
   });
 
+  const hasOwningForm = uiRefs.some(event => Boolean(event.form?.length));
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
     .every(field =>
       fieldHasUiEvidence(field, uiRefs)
       || field.candidates?.type === "capability"
-      || (uiRefs.length > 0 && isEditableBusinessField(field))
+      || field.candidates?.type === "static"
+      || hasOwningForm
     );
   checks.push({
     name: "caller-fields-backed-by-ui",

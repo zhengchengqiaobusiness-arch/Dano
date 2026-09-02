@@ -1,13 +1,13 @@
 export const PAGE_HELPERS = String.raw`
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
-  const generatedName = (value) => /^(el-id-\d+-\d+|el-[a-z]+-\d+)$/i.test(String(value || ""));
+  const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false;
     const style = getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   };
-  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field';
+  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
   const DIALOG_SEL = '.el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
   const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown';
@@ -16,15 +16,22 @@ export const PAGE_HELPERS = String.raw`
   const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
 
   const formItemOf = (el) => el.closest(FORM_ITEM_SEL);
+  const FIELD_NAME_ATTRS = ["name", "data-field", "data-name", "data-prop", "prop", "data-key", "data-model"];
 
   const nameOf = (el) => {
-    const named = el.getAttribute("name") || el.getAttribute("data-field") || el.getAttribute("data-name") || el.getAttribute("data-prop");
-    if (named) return named;
-    const item = formItemOf(el);
-    const prop = item?.getAttribute("prop") || item?.getAttribute("data-prop") || item?.getAttribute("name");
-    if (prop) return prop;
-    const id = el.getAttribute("id");
-    return id && !generatedName(id) ? id : undefined;
+    let node = el;
+    for (let i = 0; i < 8 && node && node.nodeType === 1; i++, node = node.parentElement) {
+      if (i > 0 && node.matches && node.matches("form, [role='form'], [role='dialog'], " + DIALOG_SEL)) break;
+      for (const attr of FIELD_NAME_ATTRS) {
+        const value = node.getAttribute(attr);
+        if (value && !generatedName(value)) return value;
+      }
+      if (i === 0) {
+        const id = node.getAttribute("id");
+        if (id && !generatedName(id)) return id;
+      }
+    }
+    return undefined;
   };
 
   const tableHeaderOf = (el) => {
@@ -94,6 +101,11 @@ export const PAGE_HELPERS = String.raw`
 
   const displayValue = (el) => {
     const widget = el.closest(".el-select, .el-cascader, .el-date-editor, .ant-select, .ant-picker, .arco-select, .arco-picker, .n-select");
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      if (el.type === "checkbox" || el.type === "radio") return el.checked ? "true" : "";
+      const own = clean(el.value);
+      if (own && !EMPTY_VALUE.test(own)) return own;
+    }
     if (widget) {
       const nodes = [...widget.querySelectorAll(".el-select__selected-item, .el-select__placeholder, .ant-select-selection-item, .arco-select-view-value, .n-base-select-option--selected, .el-range-input, input, textarea")];
       const texts = nodes
@@ -144,12 +156,22 @@ export const PAGE_HELPERS = String.raw`
     const blob = [type, host?.className || "", el.getAttribute("placeholder") || "", label, el.closest(".el-date-editor, .el-select")?.className || ""].join(" ");
     if (type === "checkbox" || el.getAttribute("role") === "checkbox" || el.getAttribute("role") === "switch") return "checkbox";
     if (type === "radio" || el.getAttribute("role") === "radio") return "radio";
-    if (/date|time|picker/i.test(blob) || el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker") || host?.querySelector?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
+    if (/date|time|picker|时间|日期/i.test(blob) || el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker") || host?.querySelector?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
     if (el instanceof HTMLSelectElement || el.getAttribute("role") === "combobox" || el.closest(".el-select, .ant-select, .arco-select") || host?.querySelector?.(".el-select, .ant-select, .arco-select, [role=combobox], select")) return "select";
     if (isDisabledWidget(el)) return "readonly";
     if (type === "number" || el.getAttribute("inputmode") === "decimal" || el.getAttribute("inputmode") === "numeric") return "number";
     if (el.tagName === "TEXTAREA") return "textarea";
     return "text";
+  };
+
+  const optionRecord = (el) => {
+    const label = clean(el.textContent);
+    if (!label) return null;
+    const attr = el.getAttribute("data-value") || el.getAttribute("value") || el.getAttribute("data-id");
+    const raw = el instanceof HTMLOptionElement && el.value !== ""
+      ? el.value
+      : (attr !== null && attr !== "" ? attr : undefined);
+    return { value: raw !== undefined && raw !== null && raw !== "" ? raw : label, label };
   };
 
   const optionsOf = (el) => {
@@ -166,7 +188,7 @@ export const PAGE_HELPERS = String.raw`
     return undefined;
   };
 
-  const collectVisibleOptions = (root) => {
+  const collectOptionRecords = (root) => {
     const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']")].filter(isVisible);
     const searchRoot = dropdowns.at(-1) || root || document;
     return [...searchRoot.querySelectorAll(OPTION_SEL)]
@@ -176,8 +198,19 @@ export const PAGE_HELPERS = String.raw`
         && !el.getAttribute("disabled")
         && !el.classList.contains("ant-select-item-option-disabled"))
       .slice(0, 200)
-      .map((el) => clean(el.textContent))
+      .map(optionRecord)
       .filter(Boolean);
+  };
+
+  const collectVisibleOptions = (root) => collectOptionRecords(root).map((item) => item.label);
+
+  const rangeInputsOf = (item) => {
+    if (!(item instanceof Element)) return [];
+    const rangeHost = item.querySelector(".el-date-editor--daterange, .el-date-editor--datetimerange, .el-range-editor, .ant-picker-range, .arco-picker-range")
+      || (item.classList.contains("el-date-editor") && item.querySelectorAll(".el-range-input, input").length >= 2 ? item : null);
+    const inputs = [...(rangeHost || item).querySelectorAll("input")].filter(isVisible);
+    if (inputs.length >= 2 && widgetKind(item, inputs[0], labelOf(inputs[0])) === "date") return inputs.slice(0, 2);
+    return [];
   };
 
   const activeScope = () => {
@@ -189,23 +222,29 @@ export const PAGE_HELPERS = String.raw`
 
   const fieldFromControl = (el, item) => {
     if (!(el instanceof HTMLElement) || !isVisible(el)) return null;
+    if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|button|reset|image/.test(type)) return null;
     const label = labelOf(el) || clean(item?.querySelector?.(FORM_LABEL_SEL)?.textContent || "");
     if (!label) return null;
     const kind = widgetKind(item, el, label);
     const value = displayValue(el);
-    const filled = !isEmptyValue(value);
+    const required = Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required"));
+    const numericZero = kind === "number" && /^(0+|0*\.0+)$/.test(clean(value));
+    const filled = !isEmptyValue(value) && !(required && numericZero);
+    const invalid = Boolean(item?.classList?.contains("is-error") || item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message"));
     return {
       label,
-      name: nameOf(el) || item?.getAttribute?.("prop") || item?.getAttribute?.("data-prop") || undefined,
+      name: nameOf(el),
       selector: selectorOf(el),
       kind,
       filled,
       skip: kind === "upload",
       disabled: kind === "readonly" || isDisabledWidget(el),
-      required: Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required")),
+      required,
+      invalid,
       value,
+      options: optionsOf(el),
       scope: scopeName(el)
     };
   };
@@ -221,6 +260,22 @@ export const PAGE_HELPERS = String.raw`
       fields.push(field);
     };
     for (const item of root.querySelectorAll(FORM_ITEM_SEL)) {
+      if (item.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) continue;
+      const range = rangeInputsOf(item);
+      if (range.length >= 2) {
+        const prop = nameOf(range[0]);
+        range.forEach((input, index) => {
+          const field = fieldFromControl(input, item);
+          if (!field) return;
+          add({
+            ...field,
+            name: prop ? prop + "[" + index + "]" : field.name,
+            label: labelOf(input) || field.label,
+            rangeIndex: index
+          });
+        });
+        continue;
+      }
       const el = item.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
       add(fieldFromControl(el, item));
     }
@@ -261,9 +316,15 @@ export const PAGE_HELPERS = String.raw`
       type: field.kind,
       value: field.value,
       required: field.required,
-      options: undefined
+      invalid: field.invalid,
+      options: field.options,
+      rangeIndex: field.rangeIndex
     }));
   };
+
+  const collectErrors = () => [...new Set([...document.querySelectorAll(
+    ".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message, .n-form-item-feedback, .el-message--error, .el-notification--error, .ant-message-error, .ant-notification-notice-error"
+  )].filter(isVisible).map((el) => clean(el.textContent)).filter(Boolean))].slice(0, 20);
 
   const buildSnapshot = () => {
     const scope = activeScope();
@@ -277,7 +338,8 @@ export const PAGE_HELPERS = String.raw`
       controls: collectControls(document),
       formFields,
       todoFields,
-      todoCount: todoFields.length
+      todoCount: todoFields.length,
+      errors: collectErrors()
     };
   };
 `;
@@ -311,8 +373,9 @@ export const UI_RECORDER_SCRIPT = `(() => {
         if (/password|passwd|pwd|secret|token|credential|current-password|new-password/i.test(key)) return "[REDACTED]";
         return displayValue(control);
       })(),
-      options: optionsOf(control),
+      options: optionsOf(control) || collectOptionRecords(),
       visibleOptions: collectVisibleOptions(document),
+      scope: scopeName(formContainer || control),
       form: formSnapshot(formContainer)
     };
     Promise.resolve(window.__bssRecordUi?.(payload)).catch(() => {});

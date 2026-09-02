@@ -40,11 +40,13 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (AUTHENTICATE.test(endpoint)) return "authenticate";
   if (UPLOAD.test(endpoint)) return "upload";
   if (DOWNLOAD.test(endpoint)) return "download";
+  if (method === "GET" || method === "HEAD") return "query";
   if (REVIEW.test(signal)) return "review";
   if (DELETE.test(signal)) return "delete";
-  if (method === "GET" || method === "HEAD") return "query";
   if (QUERY.test(signal) && method === "POST") return "query";
   if (method === "PATCH" || method === "PUT") return "update";
+  if (CREATE.test(endpoint)) return "create";
+  if (UPDATE.test(endpoint)) return "update";
   if (UPDATE.test(signal)) return "update";
   if (CREATE.test(signal)) return "create";
   if (method === "POST") return "action";

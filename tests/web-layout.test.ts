@@ -179,6 +179,7 @@ test("skill catalog distinguishes handbook export from business spec dump", asyn
   ]);
   assert.match(html, /执行手册，不是业务说明书/);
   assert.match(html, /dist\/skills/);
+  assert.match(html, /独立目录，不会覆盖上一份/);
   assert.match(html, /SKILL.md 路由手册/);
   assert.match(html, /主能力索引/);
   assert.match(html, /规划例子与失败/);

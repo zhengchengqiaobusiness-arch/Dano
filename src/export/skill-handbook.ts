@@ -32,8 +32,8 @@ export function isDateField(field: InputFormField) {
 }
 
 export function inputType(field: InputFormField) {
-  if (isDateField(field)) return "date";
-  if (field.widget === "json") return "textarea";
+  if (field.widget === "date" || isDateField(field)) return "date";
+  if (field.widget === "textarea" || field.widget === "json") return "textarea";
   if (field.widget === "boolean") return "radio";
   if (field.widget === "select" || field.widget === "multiselect") return "select";
   if (field.widget === "number") return "number";
@@ -161,7 +161,10 @@ export function dataSourceOf(field: InputFormField, capabilities: CapabilityCont
 export function exportedQuestion(field: InputFormField, capabilities: CapabilityContract[]) {
   const question: Record<string, unknown> = {
     id: field.name,
-    question: field.label,
+    question: (() => {
+      const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
+      return hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
+    })(),
     inputType: inputType(field),
     multiple: field.widget === "multiselect",
     required: field.required,
@@ -174,11 +177,19 @@ export function exportedQuestion(field: InputFormField, capabilities: Capability
   return question;
 }
 
+function mentionableLabel(field: InputFormField) {
+  const label = field.label?.trim();
+  if (!label || label === field.name) return undefined;
+  if (!/[\u4e00-\u9fff]/.test(label)) return undefined;
+  if (/[\[\]{}.]/.test(label)) return undefined;
+  return label;
+}
+
 export function skillDescriptionLines(displayName: string, capabilities: CapabilityContract[]) {
   const { primary, lookups } = classifyExported(capabilities);
   const actions = primary.map(capability => capability.title);
   const labels = [...new Set(primary.flatMap(capability =>
-    capability.inputForm.filter(field => field.source === "caller").map(field => field.label)
+    capability.inputForm.filter(field => field.source === "caller").map(mentionableLabel).filter((item): item is string => Boolean(item))
   ))].slice(0, 6);
   const verbs = [...new Set(primary.map(capability => operationNames[capability.operation]))];
   const lookupLabels = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean);
@@ -527,11 +538,15 @@ ${fields.map(field => {
     } else if (dataSource) {
       candidate = `dataSource: ${JSON.stringify(dataSource)}`;
     } else if (isDateField(field)) {
-      candidate = "dateFormat: YYYY-MM-DD";
+      candidate = field.dateClock
+        ? `dateFormat: YYYY-MM-DD，请求补 ${field.dateClock}`
+        : "dateFormat: YYYY-MM-DD";
     } else if (field.widget === "select" || field.widget === "multiselect") {
       candidate = "无固定候选";
     }
-    return `| \`${safeCell(field.name)}\` | ${safeCell(field.label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
+    const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
+    const label = hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
+    return `| \`${safeCell(field.name)}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
   }).join("\n")}`;
 }
 
@@ -540,7 +555,7 @@ function systemFieldTable(capability: CapabilityContract) {
   if (!fields.length) return "";
   return `
 
-系统处理字段不要问用户，执行时按合同带上：
+系统处理字段不要问用户。有安全默认值的按合同补齐；没有默认值的不要按录制样本补齐，执行时省略。
 
 | 合同路径 | 业务名称 | 来源 | 处理方式 |
 |---|---|---|---|

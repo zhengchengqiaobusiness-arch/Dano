@@ -4,7 +4,7 @@ import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises
 import type { CapabilityContract, DataBinding, InputFormField } from "../domain.js";
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
-import { writeJson } from "../utils.js";
+import { id, writeJson } from "../utils.js";
 import { exportableCapabilities, isPrimaryCapability } from "../inference/export-scope.js";
 import {
   buildCapabilities,
@@ -30,11 +30,15 @@ export function resourceSlugFromPath(pathTemplate: string) {
 }
 
 export function normalizeSkillName(value: string, capabilities: CapabilityContract[] = []) {
-  const ascii = value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  const ascii = value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
   if (ascii) return ascii;
   const primary = capabilities.filter(isPrimaryCapability);
   const fromPath = resourceSlugFromPath((primary[0] || capabilities[0])?.transport.pathTemplate || "");
   return fromPath || `business-skill-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
+}
+
+export function uniqueSkillExportName(slug: string) {
+  return `${slug}-${id("sk")}`;
 }
 
 function exportedTitle(capability: CapabilityContract, displayName: string, capabilities: CapabilityContract[]) {
@@ -84,6 +88,7 @@ function exportedField(field: InputFormField) {
     widget: field.widget
   };
   if (field.defaultRule) exported.defaultRule = field.defaultRule;
+  if (field.dateClock) exported.dateClock = field.dateClock;
   if (field.candidates) exported.candidates = field.candidates;
   return exported;
 }
@@ -135,7 +140,8 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
 
   const displayName = requestedName.trim() || normalizeSkillName(requestedName, selected);
   const capabilities = withExportTitles(selected, displayName);
-  const skillName = normalizeSkillName(requestedName, capabilities);
+  const slug = normalizeSkillName(requestedName, capabilities);
+  const skillName = uniqueSkillExportName(slug);
   const directory = path.join(outputRoot, skillName);
   const referencesDir = path.join(directory, "references");
   const scriptsDir = path.join(directory, "scripts");
@@ -185,6 +191,7 @@ export async function exportSkill(outputRoot: string, requestedName: string, all
     primaryCount: primary.length,
     lookupCount: lookups.length,
     skillName,
+    slug,
     displayName,
     capabilityIds: capabilities.map(capability => capability.id),
     primaryCapabilityIds: primary.map(capability => capability.id),

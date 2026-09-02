@@ -59,7 +59,7 @@ test("distinguishes caller fields from unresolved system fields", () => {
   assert.equal(customer.systemHandled, false);
   assert.equal(tenant.source, "system");
   assert.equal(tenant.systemHandled, true);
-  assert.match(tenant.sourceDetail, /后台自动处理/);
+  assert.match(tenant.sourceDetail, /未能唯一对应到页面控件/);
   const validated = validateCapability(capability, events, [capability]);
   assert.equal(validated.validation.status, "verified");
 });
@@ -96,7 +96,11 @@ test("exports a progressively disclosed Python Skill package", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-export-"));
   try {
     const result = await exportSkill(temporary, "销售订单审核", [query, review]);
-    assert.equal(result.skillName, "review-order");
+    const again = await exportSkill(temporary, "销售订单审核", [query, review]);
+    assert.match(result.skillName, /^review-order-sk_/);
+    assert.match(again.skillName, /^review-order-sk_/);
+    assert.notEqual(result.skillName, again.skillName);
+    assert.notEqual(result.dir, again.dir);
     for (const relative of [
       "SKILL.md", "references/CONTRACT.json", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
       "references/OPTIONS.md", "references/PLAYBOOK.md", "references/routes/route-review-order.md",
@@ -175,17 +179,23 @@ test("manages export versions, freezing and recoverable deletion", async () => {
     await assert.rejects(() => library.export("orders", capabilities, false), /明确确认/);
     const first = await library.export("orders", capabilities, true);
     assert.equal(first.version, 1);
+    assert.match(first.name, /^orders-sk_/);
     await library.setFrozen(first.name, true, true);
-    await assert.rejects(() => library.export("orders", capabilities, true), /冻结/);
-    await library.setFrozen(first.name, false, true);
     const second = await library.export("orders", capabilities, true);
     assert.equal(second.version, 2);
+    assert.notEqual(second.name, first.name);
+    assert.notEqual(second.directory, first.directory);
+    await stat(first.directory);
+    await stat(second.directory);
     await assert.rejects(() => library.delete(second.name, false), /明确确认/);
     const deleted = await library.delete(second.name, true);
     assert.equal(deleted.status, "deleted");
     assert.ok(deleted.recoverableFrom);
     await stat(deleted.recoverableFrom!);
-    assert.equal((await library.list()).length, 0);
+    const remaining = await library.list();
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0]!.name, first.name);
+    assert.equal(remaining[0]!.status, "frozen");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

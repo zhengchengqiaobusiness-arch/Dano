@@ -12,6 +12,7 @@ import { buildCapabilityCandidates } from "../src/inference/build-candidates.js"
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { exportableCapabilities } from "../src/inference/export-scope.js";
 import { relatedEvidence } from "../src/inference/related-evidence.js";
+import { normalizeCatalog } from "../src/catalog/normalize.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
 
 function purchaseEvents(): EvidenceEvent[] {
@@ -125,19 +126,24 @@ function purchaseEvents(): EvidenceEvent[] {
     pageUrl: "http://admin.dianshixinxi.com:90/erp/purchase/order", eventType: "input",
     label: "备注", value: "测试采购订单",
     form: [
-      { name: "el-id-2-1", label: "订单时间", type: "text", value: "2026-09-01" },
-      { name: "el-id-2-2", label: "供应商", type: "text", value: "泉源鱼家" },
-      { name: "el-id-2-3", label: "备注", type: "textarea", value: "测试采购订单" },
-      { name: "el-id-2-4", label: "产品名称", type: "text", value: "苹果电脑" },
-      { name: "el-id-2-5", label: "数量", type: "number", value: 5 },
-      { name: "el-id-2-6", label: "产品单价", type: "number", value: 100 },
-      { name: "el-id-2-7", label: "税率", type: "number", value: 13 },
-      { name: "el-id-2-8", label: "优惠率", type: "number", value: 5 },
-      { name: "el-id-2-9", label: "支付订金", type: "number", value: 100 },
-      { name: "el-id-2-10", label: "结算账户", type: "text", value: "公司基本户" },
-      { name: "el-id-2-11", label: "单位", type: "text", value: "台" },
-      { name: "el-id-2-12", label: "条码", type: "text", value: "0101010101" },
-      { name: "el-id-2-13", label: "库存", type: "number", value: 925.5 }
+      { name: "orderTime", label: "订单时间", type: "date", required: true, value: "2026-09-01" },
+      { name: "supplierId", label: "供应商", type: "select", required: true, value: "泉源鱼家" },
+      { name: "remark", label: "备注", type: "textarea", required: false, value: "测试采购订单" },
+      { name: "productId", label: "产品名称", type: "select", required: true, value: "苹果电脑" },
+      { name: "count", label: "数量", type: "number", required: true, value: 5 },
+      { name: "productPrice", label: "产品单价", type: "number", required: true, value: 100 },
+      { name: "taxPercent", label: "税率", type: "number", required: false, value: 13 },
+      { name: "discountPercent", label: "优惠率", type: "number", required: false, value: 5 },
+      { name: "depositPrice", label: "支付订金", type: "number", required: false, value: 100 },
+      { name: "accountId", label: "结算账户", type: "select", required: false, value: "公司基本户" },
+      { name: "productUnitName", label: "单位", type: "readonly", value: "台" },
+      { name: "productBarCode", label: "条码", type: "readonly", value: "0101010101" },
+      { name: "stockCount", label: "库存", type: "readonly", value: 925.5 },
+      { name: "totalProductPrice", label: "金额", type: "readonly", value: 500 },
+      { name: "taxPrice", label: "税额", type: "readonly", value: 65 },
+      { name: "discountPrice", label: "付款优惠", type: "readonly", value: 28.25 },
+      { name: "totalPrice", label: "优惠后金额", type: "readonly", value: 536.75 },
+      { name: "amount", label: "金额", type: "readonly", value: 500 }
     ]
   }, {
     id: "ui-create-submit", kind: "ui", sessionId: "rec-1", at: "2026-09-02T03:19:12.000Z",
@@ -203,6 +209,11 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.notEqual(search.inputForm.find(field => field.name === "no")?.widget, "select");
   assert.equal(search.inputForm.find(field => field.name === "status")?.widget, "select");
   assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.label, "结束日期");
+  assert.equal(search.inputForm.find(field => field.name === "productId")?.label, "产品");
+  assert.equal(create.inputForm.find(field => field.name === "productId")?.label, "产品名称");
+  assert.equal(create.inputForm.find(field => field.name === "depositPrice")?.label, "支付订金");
+  assert.equal(create.inputForm.find(field => field.name === "remark")?.required, false);
+  assert.equal(create.inputForm.find(field => field.name === "discountPercent")?.required, false);
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.candidates?.type, "static");
   assert.equal(create.inputForm.find(field => field.name === "remark")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "supplierId")?.source, "caller");
@@ -213,17 +224,23 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(create.inputForm.find(field => field.name === "productPrice")?.label, "产品单价");
   assert.notEqual(create.inputForm.find(field => field.name === "count")?.label, "入库数量");
   assert.notEqual(create.inputForm.find(field => field.name === "productPrice")?.candidates?.type, "capability");
-  assert.equal(create.inputForm.find(field => field.name === "amount")?.source, "computed");
-  assert.equal(create.inputForm.find(field => field.name === "totalPrice")?.source, "computed");
+  assert.equal(create.inputForm.find(field => field.name === "amount")?.source, "system");
+  assert.equal(create.inputForm.find(field => field.name === "totalPrice")?.source, "system");
   assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "system");
   assert.equal(create.inputForm.find(field => field.name === "productBarCode")?.source, "system");
   assert.equal(create.inputForm.find(field => field.name === "stockCount")?.source, "system");
   assert.equal(create.inputForm.find(field => field.name === "productId")?.defaultRule, undefined);
+  for (const field of [...search.inputForm, ...create.inputForm]) {
+    if (/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) continue;
+    assert.equal(field.defaultRule, undefined, `${field.name} must not freeze a recorded sample`);
+  }
   const verified = finalizeCapabilities(capabilities, events);
   const verifiedSearch = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
   const verifiedCreate = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
   assert.equal(verifiedSearch.validation.status, "verified");
   assert.equal(verifiedCreate.validation.status, "verified");
+  assert.equal(verifiedCreate.completion.assertions?.some(item => item.path === "$.success" && item.value === true), true);
+  assert.equal(verifiedCreate.completion.assertions?.some(item => item.path === "$.data" && item.kind === "nonempty"), true);
   assert.equal(verifiedSearch.inputForm.find(field => field.name === "productId")?.candidates?.type, "capability");
   assert.equal(verifiedCreate.inputForm.find(field => field.name === "supplierId")?.candidates?.type, "capability");
   assert.equal(verifiedCreate.inputForm.find(field => field.name === "productId")?.candidates?.type, "capability");
@@ -241,6 +258,129 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(exported.filter(item => ["query", "create"].includes(item.operation) && item.transport.pathTemplate.includes("/purchase/order")).length, 2);
   assert.equal(exported.some(item => item.id === im.id || item.transport.pathTemplate.includes("/im/conversation")), false);
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/auth/login")), false);
+});
+
+test("nameless forms bind only uniquely evidenced fields", () => {
+  const pageForm = purchaseEvents().find(event => event.id === "ui-page-snapshot");
+  const namelessForm = ((pageForm && "form" in pageForm ? pageForm.form : []) || []).map(({ name: _name, ...field }) => field);
+  const events: EvidenceEvent[] = [
+    ...purchaseEvents().map(event => {
+      if (event.id === "ui-search-click") return { ...event, form: namelessForm };
+      if (event.kind !== "ui" || !("form" in event) || !event.form) return event;
+      return { ...event, form: event.form.map(({ name: _name, ...field }) => field) };
+    }),
+    {
+      id: "net-audit-enum", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:01.680Z",
+      request: {
+        method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/system/enum/list?type=audit",
+        resourceType: "xhr", headers: {}, query: { type: "audit" }
+      },
+      response: {
+        status: 200, headers: {},
+        body: { success: true, data: [{ label: "未审核", value: 10 }, { label: "已审核", value: 20 }] }
+      }
+    },
+    {
+      id: "net-in-enum", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:01.690Z",
+      request: {
+        method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/system/enum/list?type=in",
+        resourceType: "xhr", headers: {}, query: { type: "in" }
+      },
+      response: {
+        status: 200, headers: {},
+        body: { success: true, data: [{ label: "未入库", value: 0 }, { label: "部分入库", value: 1 }] }
+      }
+    },
+    {
+      id: "net-return-enum", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:01.695Z",
+      request: {
+        method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/system/enum/list?type=return",
+        resourceType: "xhr", headers: {}, query: { type: "return" }
+      },
+      response: {
+        status: 200, headers: {},
+        body: { success: true, data: [{ label: "未退货", value: 0 }, { label: "部分退货", value: 1 }] }
+      }
+    }
+  ];
+  const capabilities = buildCapabilityCandidates(events);
+  const search = capabilities.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
+  const create = capabilities.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
+  assert.equal(search.inputForm.find(field => field.name === "no")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "productId")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "productId")?.label, "产品");
+  assert.equal(search.inputForm.find(field => field.name === "status")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "status")?.label, "状态");
+  assert.equal(search.inputForm.find(field => field.name === "status")?.candidates?.values?.find(item => item.label === "未审核")?.value, 10);
+  assert.equal(search.inputForm.find(field => field.name === "inStatus")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "inStatus")?.defaultRule, undefined);
+  assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.defaultRule, undefined);
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.source, "caller");
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "productId")?.label, "产品名称");
+  assert.equal(create.inputForm.find(field => field.name === "supplierId")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "accountId")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "remark")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "taxPercent")?.label, "税率");
+  assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "system");
+});
+
+test("same-day date range binds start and end labels without guessing names", () => {
+  const events = purchaseEvents().map(event => {
+    if (event.kind !== "ui" || !("form" in event) || !event.form) return event;
+    if (event.id === "ui-search-start") return { ...event, value: "2026-09-02" };
+    if (event.id === "ui-search-end") return { ...event, value: "2026-09-02" };
+    return {
+      ...event,
+      form: event.form.map(field => {
+        if (field.label === "开始日期") return { ...field, type: "date", value: "2026-09-02", rangeIndex: 0 };
+        if (field.label === "结束日期") return { ...field, type: "date", value: "2026-09-02", rangeIndex: 1 };
+        return field;
+      })
+    };
+  }).map(event => {
+    if (event.id !== "net-search") return event;
+    return {
+      ...event,
+      request: {
+        ...event.request,
+        query: {
+          ...event.request.query,
+          "orderTime[0]": "2026-09-02 00:00:00",
+          "orderTime[1]": "2026-09-02 23:59:59"
+        }
+      }
+    };
+  });
+  const search = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.label, "开始日期");
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.label, "结束日期");
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.widget, "date");
+  assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.dateClock, "23:59:59");
+  const normalized = normalizeCatalog([search])[0]!;
+  assert.equal(normalized.inputForm.find(field => field.name === "orderTime[1]")?.dateClock, "23:59:59");
+});
+
+test("later search after create dialog keeps each form's own labels", () => {
+  const events = purchaseEvents();
+  events.push({
+    id: "net-search-after-create", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:19:20.000Z",
+    correlatedUiEvidenceId: "ui-search-click",
+    request: {
+      method: "GET",
+      url: "http://admin.dianshixinxi.com:90/admin-api/erp/purchase/order/page?productId=3&pageNo=1&pageSize=10",
+      resourceType: "xhr", headers: {},
+      query: { productId: 3, pageNo: 1, pageSize: 10 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: { list: [], total: 0 } } }
+  });
+  const capabilities = buildCapabilityCandidates(events);
+  const search = capabilities.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
+  const create = capabilities.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
+  assert.equal(search.inputForm.find(field => field.name === "productId")?.label, "产品");
+  assert.equal(create.inputForm.find(field => field.name === "productId")?.label, "产品名称");
+  assert.equal(create.inputForm.find(field => field.name === "accountId")?.required, false);
 });
 
 test("create form filled minutes before submit still verifies", () => {
@@ -266,7 +406,7 @@ test("exported purchase skill keeps API candidates and omits background polls", 
     const options = await readFile(path.join(result.dir, "references", "OPTIONS.md"), "utf8");
     const capabilities = await readFile(path.join(result.dir, "references", "CAPABILITIES.md"), "utf8");
     const playbook = await readFile(path.join(result.dir, "references", "PLAYBOOK.md"), "utf8");
-    assert.equal(result.skillName, "purchase-order");
+    assert.match(result.skillName, /^purchase-order-sk_/);
     assert.equal(result.primaryCount, 2);
     assert.match(skill, /新建采购订单/);
     assert.match(skill, /查询采购订单/);
@@ -285,6 +425,7 @@ test("exported purchase skill keeps API candidates and omits background polls", 
     assert.doesNotMatch(skill, /产品单价[\s\S]{0,80}product\/simple-list/);
     assert.doesNotMatch(skill, /订单单号[\s\S]{0,80}未退货/);
     assert.doesNotMatch(skill, /订单时间[\s\S]{0,80}泉源鱼家/);
+    assert.doesNotMatch(skill, /orderTime\[0\]/);
     assert.doesNotMatch(skill, /### 查询采购订单[\s\S]*参数名/);
     assert.doesNotMatch(skill, /net_mtjq|rec_mtjq|生成器实现|TypeScript|执行器/);
     assert.doesNotMatch(capabilities, /## 查询产品名称/);
@@ -323,6 +464,16 @@ test("exported purchase skill keeps API candidates and omits background polls", 
     const queryBody = JSON.parse(queryPrepared.stdout);
     assert.match(queryBody.url, /orderTime%5B0%5D=2026-09-01\+00%3A00%3A00/);
     assert.equal(queryBody.prepared.status, 10);
+    const queryOpen = await execFileAsync("python", [
+      path.join(result.dir, "scripts", "execute.py"),
+      "--capability", query.id,
+      "--input", JSON.stringify({ "orderTime[0]": "2026-09-01", "orderTime[1]": "2026-09-02" }),
+      "--prepare-only"
+    ]);
+    const queryOpenBody = JSON.parse(queryOpen.stdout);
+    assert.doesNotMatch(queryOpenBody.url, /[?&]status=/);
+    assert.doesNotMatch(queryOpenBody.url, /inStatus=/);
+    assert.equal(queryOpenBody.prepared.status, undefined);
     const createPrepared = await execFileAsync("python", [
       path.join(result.dir, "scripts", "execute.py"),
       "--capability", create.id,

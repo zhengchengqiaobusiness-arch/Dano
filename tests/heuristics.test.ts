@@ -33,4 +33,7 @@ test("classifies common methods", () => {
   assert.equal(inferOperation(event("POST", "https://x.test/files/upload")), "upload");
   assert.equal(inferOperation(event("GET", "https://x.test/report/download")), "download");
   assert.equal(inferOperation(event("POST", "https://x.test/orders/recalculate")), "action");
+  assert.equal(inferOperation(event("GET", "https://x.test/bpm/process-instance/get-approval-detail")), "query");
+  assert.equal(inferOperation(event("POST", "https://x.test/bpm/task/approve")), "review");
+  assert.equal(inferOperation(event("POST", "https://x.test/oa/duty-leave/create"), { text: "保存草稿" } as any), "create");
 });

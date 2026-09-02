@@ -41,7 +41,17 @@ export class BrowserRecorder {
   private readonly actions = new PageActions({
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
-    recentUserActions: () => this.recentUserActions()
+    recentUserActions: () => this.recentUserActions(),
+    recordSelectObservation: info => this.writeUiEvent(this.currentPage(), {
+      eventType: "change",
+      label: info.label,
+      name: info.name,
+      scope: info.scope,
+      value: info.value,
+      inputType: "select",
+      options: info.options,
+      visibleOptions: info.options.map(item => item.label)
+    })
   });
 
   constructor(private readonly config: StudioConfig) {}
@@ -336,6 +346,7 @@ export class BrowserRecorder {
       label: payload?.label,
       name: payload?.name,
       inputType: payload?.inputType,
+      scope: payload?.scope === "dialog" || payload?.scope === "page" ? payload.scope : undefined,
       value: redactValue(payload?.value, payload?.name || payload?.label || ""),
       options: redactValue(payload?.options) as UiEvidence["options"],
       visibleOptions: redactValue(payload?.visibleOptions) as string[],
@@ -360,7 +371,9 @@ export class BrowserRecorder {
       label: typeof field.label === "string" ? field.label : undefined,
       type: String(field.kind || field.type || "text"),
       value: field.value,
-      required: Boolean(field.required)
+      required: Boolean(field.required),
+      options: Array.isArray((field as { options?: unknown }).options) ? (field as { options: UiEvidence["options"] }).options : undefined,
+      rangeIndex: typeof (field as { rangeIndex?: unknown }).rangeIndex === "number" ? (field as { rangeIndex: number }).rangeIndex : undefined
     })).filter(field => field.label || field.name);
     const form = fromFields.length ? fromFields : (snapshot.controls || []).flatMap(control => {
       const role = String(control.role || "");
@@ -382,6 +395,8 @@ export class BrowserRecorder {
     await this.writeUiEvent(page, {
       eventType: "snapshot",
       pageUrl: snapshot.url || page.url(),
+      text: snapshot.scope,
+      scope: snapshot.scope === "dialog" || snapshot.scope === "page" ? snapshot.scope : undefined,
       form
     });
   }
@@ -472,7 +487,7 @@ export class BrowserRecorder {
   }
 
   async control(command: {
-    action: "goto" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot" | "exercise-form";
+    action: "goto" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot" | "exercise-form" | "submit-form";
     selector?: string;
     value?: string | string[];
     url?: string;
@@ -523,6 +538,8 @@ export class BrowserRecorder {
           return this.actions.captureSnapshot();
         case "exercise-form":
           return this.actions.exerciseForm();
+        case "submit-form":
+          return this.actions.submitForm();
       }
     });
   }

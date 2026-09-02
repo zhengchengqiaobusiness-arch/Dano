@@ -2,7 +2,6 @@ import type { CapabilityContract } from "../domain.js";
 import { isPaginationField } from "./field-resolver.js";
 
 const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout/i;
-const LOOKUP_QUERY = /simple-list|get-count|\/dict-data\//i;
 
 export function isNoiseCapability(capability: CapabilityContract) {
   if (capability.operation === "authenticate") return true;
@@ -13,12 +12,16 @@ export function hasBusinessCallerField(capability: CapabilityContract) {
   return capability.inputForm.some(field => field.source === "caller" && !isPaginationField(field.name));
 }
 
+const LIST_QUERY = /\/page$|\/list$|\/search$|\/query$|simple-list/i;
+
 export function isPrimaryCapability(capability: CapabilityContract) {
   if (isNoiseCapability(capability)) return false;
   if (["create", "update", "review", "delete", "upload"].includes(capability.operation)) return true;
   if (capability.operation !== "query") return false;
-  if (LOOKUP_QUERY.test(capability.transport.pathTemplate || capability.transport.urlTemplate)) return false;
-  return hasBusinessCallerField(capability);
+  const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
+  if (/\/page$/i.test(path)) return true;
+  if (!hasBusinessCallerField(capability)) return false;
+  return LIST_QUERY.test(path);
 }
 
 export function isCandidateSourceCapability(capability: CapabilityContract, catalog: CapabilityContract[]) {

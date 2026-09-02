@@ -15,7 +15,10 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - Call `business_skill_record_start` with the real system URL.
    - Let the user operate the headed browser, or use `business_browser_control` after a `snapshot`.
    - Snapshot returns `formFields` / `todoFields` for the active scope (`page` or `dialog`). That checklist is the source of truth for visible fields. Analyze/export must use those labels and widgets; do not re-guess names from API keys.
-   - If the user says to run 查询/新增/修改 and fill every field except upload: snapshot the list/search form, call `exercise-form` (or fill every `todoFields` item), submit the query; open the write dialog, snapshot again, call `exercise-form` again, then submit. Do not skip optional or blank fields. Do not treat「请选择」as already filled. Upload/attachment widgets are the only skip. Do not click the page title to close pickers and do not press Escape.
+   - If the user says to run 查询/新增/修改 and fill every field except upload: snapshot the list/search form, call `exercise-form` (or fill every `todoFields` item), then `submit-form` (or click 搜索/查询); open the write form, snapshot again, call `exercise-form` again, then `submit-form`. Do not skip optional or blank fields. Do not treat「请选择」or a required number `0` as already filled. Upload/attachment widgets are the only skip. Date picker chrome is not a form field.
+   - `exercise-form` must leave required numbers greater than 0 and later date/time fields later than earlier ones. If a write page computes duration from dates, fix the dates; do not stop because a required number shows `0`.
+   - After a write submit: snapshot. If a toast/form error remains or the write dialog/page is still open, repair the invalid fields (or call `exercise-form` / `submit-form` again) until a successful write network response is recorded. Do not stop, analyze, or export while a planned 新增/修改/审核/删除 has no successful write response.
+   - Do not click the page title to close pickers and do not press Escape.
    - If `snapshot.recentUserActions` already contains the user's manual clicks or fills, keep those values; still fill remaining empty fields when complete coverage was requested.
    - Capture actual UI events, field choices, requests, responses, and statuses.
    - Call `business_skill_record_stop`.
@@ -52,4 +55,4 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 
 ## Completion rule
 
-A workflow is complete only when every planned step satisfies its contract completion criteria. Do not infer success from prose alone.
+A workflow is complete only when every planned step satisfies its contract completion criteria. Do not infer success from prose alone. If the user asked for 新增/修改 and the catalog has no verified create/update, go back to the page, fix the form, and record a successful submit before export. Do not hand that gap back as a finished Skill.
