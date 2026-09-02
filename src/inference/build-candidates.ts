@@ -34,7 +34,7 @@ function isStudioInternal(event: NetworkEvidence) {
 
 function jsonPathForName(name: string) {
   if (name.startsWith("$.")) return name;
-  return `$.${name.replace(/\[([^\]]+)\]/g, ".$1").replace(/^\./, "")}`;
+  return `$.${name}`;
 }
 
 function valueType(raw: any): InputFormField["valueType"] {

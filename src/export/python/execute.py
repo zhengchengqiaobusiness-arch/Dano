@@ -29,6 +29,13 @@ def parse_json_argument(raw: str) -> Any:
     return json.loads(raw)
 
 
+def literal_key(json_path: str) -> str | None:
+    if json_path == "$":
+        return None
+    literal = json_path.removeprefix("$.")
+    return literal if literal and "." not in literal else None
+
+
 def path_parts(json_path: str) -> list[str | int]:
     if json_path == "$":
         return []
@@ -36,6 +43,9 @@ def path_parts(json_path: str) -> list[str | int]:
 
 
 def get_by_path(value: Any, json_path: str) -> Any:
+    key = literal_key(json_path)
+    if key is not None:
+        return value.get(key) if isinstance(value, dict) else None
     current = value
     for part in path_parts(json_path):
         if isinstance(part, int) and isinstance(current, list) and part < len(current):
@@ -48,6 +58,10 @@ def get_by_path(value: Any, json_path: str) -> Any:
 
 
 def set_by_path(target: dict[str, Any], json_path: str, value: Any) -> None:
+    key = literal_key(json_path)
+    if key is not None:
+        target[key] = value
+        return
     parts = path_parts(json_path)
     if any(isinstance(part, int) for part in parts):
         raise ValueError(f"暂不支持向数组路径写入字段：{json_path}")
@@ -58,7 +72,76 @@ def set_by_path(target: dict[str, Any], json_path: str, value: Any) -> None:
         current[str(parts[-1])] = value
 
 
+def date_to_millis(value: str) -> int:
+    raw = value.strip().replace("T", " ")
+    if len(raw) == 10:
+        raw += " 00:00:00"
+    moment = dt.datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    return int(moment.timestamp() * 1000)
+
+
+def normalize_date_string(value: str) -> str:
+    raw = value.strip().replace("T", " ")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return f"{raw} 00:00:00"
+    return value
+
+
+def nest_line_items(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
+    prepared = copy.deepcopy(supplied)
+    item_fields = [field for field in capability.get("inputForm", []) if "[*]" in field.get("path", "")]
+    if not item_fields:
+        return prepared
+    if isinstance(prepared.get("items"), list):
+        return prepared
+    item: dict[str, Any] = {}
+    for field in item_fields:
+        name = field["name"]
+        if name in prepared:
+            item[name] = prepared.pop(name)
+    if item:
+        prepared["items"] = [item]
+    return prepared
+
+
+def apply_candidate(field: dict[str, Any], value: Any) -> Any:
+    rule = field.get("candidates") or {}
+    if rule.get("type") != "static" or value is None:
+        return value
+    for option in rule.get("values", []):
+        if option.get("value") == value or str(option.get("label")) == str(value):
+            return option.get("value")
+    return value
+
+
+def fill_computed(prepared: dict[str, Any]) -> dict[str, Any]:
+    items = prepared.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            count = item.get("count")
+            price = item.get("productPrice")
+            if isinstance(count, (int, float)) and isinstance(price, (int, float)):
+                item.setdefault("totalProductPrice", count * price)
+            base = item.get("totalProductPrice")
+            tax_percent = item.get("taxPercent") or 0
+            if isinstance(base, (int, float)):
+                item.setdefault("taxPrice", base * float(tax_percent) / 100)
+                item.setdefault("totalPrice", base + float(item.get("taxPrice") or 0))
+        totals = [item.get("totalPrice") for item in items if isinstance(item, dict) and isinstance(item.get("totalPrice"), (int, float))]
+        if totals:
+            prepared.setdefault("totalPrice", sum(totals))
+        if "discountPercent" in prepared and "totalPrice" in prepared:
+            prepared.setdefault("discountPrice", float(prepared["totalPrice"]) * float(prepared.get("discountPercent") or 0) / 100)
+    return prepared
+
+
 def delete_by_path(target: dict[str, Any], json_path: str) -> None:
+    key = literal_key(json_path)
+    if key is not None:
+        target.pop(key, None)
+        return
     parts = path_parts(json_path)
     if not parts or any(isinstance(part, int) for part in parts):
         return
@@ -86,9 +169,15 @@ def resolve_rule(rule: str) -> Any:
     raise ValueError(f"无法执行的字段处理规则：{rule}")
 
 
-def coerce(value: Any, value_type: str, field_path: str) -> Any:
+def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] | None = None) -> Any:
     if value is None:
         return value
+    value = apply_candidate(field or {}, value)
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?", value.strip()):
+        if value_type in {"integer", "number"}:
+            return date_to_millis(value)
+        if value_type == "string":
+            return normalize_date_string(value)
     if value_type == "string":
         return value if isinstance(value, str) else str(value)
     if value_type == "integer" and isinstance(value, str) and re.fullmatch(r"[-+]?\d+", value.strip()):
@@ -111,8 +200,28 @@ def coerce(value: Any, value_type: str, field_path: str) -> Any:
 
 
 def prepare_input(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
-    prepared = copy.deepcopy(supplied)
+    prepared = nest_line_items(capability, supplied)
     for field in capability.get("inputForm", []):
+        if "[*]" in field["path"]:
+            prefix, suffix = field["path"].split("[*].", 1)
+            items = get_by_path(prepared, prefix)
+            if not isinstance(items, list):
+                if field.get("required") and field.get("source") == "caller":
+                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
+                continue
+            name = suffix.split(".")[-1]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get(name)
+                if value is None and field.get("defaultRule"):
+                    value = resolve_rule(field["defaultRule"])
+                    item[name] = value
+                if value is None and field.get("required") and field.get("source") == "caller":
+                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
+                if value is not None:
+                    item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
+            continue
         value = get_by_path(prepared, field["path"])
         if value is None and field.get("defaultRule"):
             value = resolve_rule(field["defaultRule"])
@@ -122,8 +231,8 @@ def prepare_input(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[
                 raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
             raise ValueError(f"系统必填字段没有可执行的处理结果：{field['label']} ({field['path']})")
         if value is not None:
-            set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"]))
-    return prepared
+            set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
+    return fill_computed(prepared)
 
 
 def auth_headers() -> dict[str, str]:
@@ -255,6 +364,7 @@ def main() -> int:
     parser.add_argument("--capability", required=True, help="能力编号")
     parser.add_argument("--input", default="{}", help="JSON 字符串，或 @JSON文件")
     parser.add_argument("--confirm-write", action="store_true", help="仅在用户已明确确认本次写操作后使用")
+    parser.add_argument("--prepare-only", action="store_true", help="只组装请求，不访问业务系统")
     args = parser.parse_args()
     try:
         contract = load_contract()
@@ -264,6 +374,16 @@ def main() -> int:
         supplied = parse_json_argument(args.input)
         if not isinstance(supplied, dict):
             raise ValueError("--input 必须是 JSON 对象")
+        if args.prepare_only:
+            prepared = prepare_input(capability, supplied)
+            url, options = build_request(capability, prepared)
+            print(json.dumps({
+                "ok": True,
+                "prepared": prepared,
+                "url": url,
+                "method": options["method"],
+            }, ensure_ascii=False, indent=2))
+            return 0
         result = execute_capability(capability, supplied, args.confirm_write)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 2

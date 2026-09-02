@@ -86,9 +86,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot. Use choose for dropdowns. Snapshot only after page or dialog changes, not after every field.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form. Use choose for dropdowns. When the user requires every field filled, call exercise-form or finish snapshot.todoFields before submit.",
     parameters: parameters({
-      action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot"] },
+      action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form"] },
       selector: { type: "string" },
       value: {},
       url: { type: "string" },

@@ -7,6 +7,7 @@ import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
 import { finalizeCapabilities } from "./inference/finalize-capabilities.js";
+import { relatedEvidence } from "./inference/related-evidence.js";
 import { OpenAIReasoner } from "./llm/openai.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
@@ -87,7 +88,8 @@ export class StudioService {
 
   async analyze(sessionId?: string, useLlm = true) {
     const latest = sessionId || (await this.listSessions())[0]?.id;
-    const events = latest ? await this.sessionEvents(latest) : [];
+    const latestEvents = latest ? await this.sessionEvents(latest) : [];
+    const events = relatedEvidence(latestEvents, await this.allEvents());
     const existing = await this.capabilities();
     const existingByTransport = new Map(existing.map(c => [
       `${c.transport.method}|${c.transport.pathTemplate}`,

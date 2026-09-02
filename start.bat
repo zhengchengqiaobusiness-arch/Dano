@@ -33,20 +33,23 @@ if not exist "node_modules\tsx\package.json" (
 
 echo [CHECK] Stopping leftover Studio processes on port %BSS_PORT%...
 node.exe scripts\stop-studio.mjs
+echo [CHECK] Clearing temporary files...
+node.exe scripts\clean-temp.mjs
 if /I "%BSS_SKIP_WEB%"=="true" (
   echo [INFO] Leftover Studio processes were stopped.
+  echo [INFO] Temporary files were cleared.
   endlocal
   exit /b 0
 )
 
 echo [START] Launching Pi Business Skill Studio...
-echo [INFO] Close this CMD window to stop the page and every Studio process.
+echo [INFO] Closing this window stops Studio and the embedded recorder only. Your Chrome/Edge pages stay open.
 echo [INFO] Project configuration will be read from .env when present.
 echo.
 node.exe --env-file-if-exists=.env --import tsx src/web/server.ts
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
-echo [STOP] CMD session ended. Killing leftover Studio processes...
+echo [STOP] Studio session ended. Stopping Studio and the embedded recorder only...
 node.exe scripts\stop-studio.mjs
 if "%EXIT_CODE%"=="0" (
   endlocal

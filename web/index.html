@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="从真实业务操作生产、验证、组合和管理 Agent Skill" />
-    <title>Pi Business Skill Studio</title>
+    <title>Pi Skill Studio</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -13,14 +13,13 @@
       <header class="topbar">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">π</span>
-          <div><strong>Business Skill Studio</strong><span>真实操作 → 可执行 Skill</span></div>
+          <div><strong>Skill Studio</strong><span>真实操作 → 可执行 Skill</span></div>
         </div>
         <nav class="primary-nav" aria-label="工作区">
           <button class="nav-button active" type="button" data-view="recording">录制工作台</button>
           <button class="nav-button" type="button" data-view="skills">Skill 目录</button>
         </nav>
         <div class="topbar-status">
-          <span class="status-pill" id="agent-status"><i class="status-dot"></i> Pi 启动中</span>
           <span class="model-pill" id="model-status">读取模型配置…</span>
         </div>
       </header>
@@ -39,9 +38,7 @@
               <button class="active" type="button" data-browser-mode="automatic">Pi 自动点击</button>
             </div>
             <div class="recording-session-controls">
-              <span class="recording-state" id="recording-state"><i></i> 等待会话</span>
-              <button class="recording-action" id="stop-recording" type="button" disabled>停止录制</button>
-              <button class="recording-action finish" id="finish-recording" type="button" disabled>结束录制</button>
+              <button class="recording-action finish" id="stop-recording" type="button" disabled>结束录制</button>
             </div>
             <button class="icon-button" id="reload-browser" type="button" aria-label="刷新页面">↻</button>
           </div>
@@ -53,7 +50,7 @@
               <div class="orbit" aria-hidden="true"><span>π</span></div>
               <p class="empty-kicker">真实页面与网络证据</p>
               <h2>从一次真实业务操作开始</h2>
-              <p>输入业务系统地址。你可以自己操作，也可以让 Pi 自动控制同一个内置浏览器；页面行为和网络请求会一起留证。</p>
+              <p>输入业务系统地址。你可以自己操作，或自动控制同一个内置浏览器；页面行为和网络请求会一起留证。</p>
               <div class="empty-features"><span>自动控制</span><span>手动录制</span><span>网络取证</span><span>不操作本地浏览器</span></div>
             </div>
           </div>
@@ -93,10 +90,7 @@
         </aside>
       </main>
 
-      <main class="view management-view" data-view-panel="skills" hidden>
-        <header class="management-header">
-          <div><span class="eyebrow">PYTHON AGENT SKILLS</span><h1>Skill 目录</h1><p>导出、重新导出、冻结、删除和自然语言调用经过验证的能力。</p></div>
-        </header>
+      <main class="view management-view" data-view-panel="skills" hidden aria-label="Skill 目录">
         <section class="export-panel">
           <div><h2>导出自包含 Python Skill</h2><p>导出的是执行手册，不是业务说明书。只包含已验证主能力；字段候选只给选值。成品写入 <code>dist/skills</code>，并在下方显示完整路径和文件数量。</p></div>
           <form id="export-form"><label class="sr-only" for="skill-name">Skill 名称</label><input id="skill-name" placeholder="例如 采购订单" required /><button class="primary-button" type="submit">导出 Skill</button></form>
@@ -108,11 +102,6 @@
         </section>
       </main>
 
-      <footer class="statusbar">
-        <span><i class="status-dot"></i> Studio 在线</span>
-        <span>页面、网络和合同证据保存在项目本地</span>
-        <span>写操作始终需要确认</span>
-      </footer>
     </div>
 
     <div class="modal-backdrop" id="confirmation-modal" hidden>

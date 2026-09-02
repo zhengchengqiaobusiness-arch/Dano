@@ -5,18 +5,21 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const port = String(process.env.BSS_PORT || 4310);
 const protectedPids = new Set([process.pid, process.ppid].filter(Boolean));
+const userBrowsers = /^(chrome|msedge|msedgewebview2|firefox|iexplore|brave|opera)\.exe$/i;
+const ourProfileMarker = path.join(root, ".business-skill-studio", "browser-profile").toLowerCase();
 
-function killPid(pid) {
+function killPid(pid, tree = false) {
   const id = Number(pid);
   if (!Number.isInteger(id) || id <= 0 || protectedPids.has(id)) return;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/F", "/T", "/PID", String(id)], { stdio: "ignore", windowsHide: true });
+    const args = tree ? ["/F", "/T", "/PID", String(id)] : ["/F", "/PID", String(id)];
+    spawnSync("taskkill", args, { stdio: "ignore", windowsHide: true });
     return;
   }
   try { process.kill(id, "SIGKILL"); } catch { /* already gone */ }
 }
 
-function pidsOnPort(targetPort) {
+function pidsListeningOnPort(targetPort) {
   if (process.platform !== "win32") return [];
   let output = "";
   try {
@@ -33,14 +36,41 @@ function pidsOnPort(targetPort) {
   return [...pids];
 }
 
-for (const pid of pidsOnPort(port)) killPid(pid);
-
-if (process.platform === "win32") {
-  const rootPattern = root.replace(/'/g, "''");
-  spawnSync("powershell.exe", [
+function studioProcesses() {
+  if (process.platform !== "win32") return [];
+  const escapedRoot = root.replace(/'/g, "''");
+  const result = spawnSync("powershell.exe", [
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    `$root='${rootPattern}'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*' + $root + '*') -and $_.CommandLine -match 'src[\\\\/]web[\\\\/]server\\.ts|rpc-entry|browser-profile|bss-ui-' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`
-  ], { stdio: "ignore", windowsHide: true });
+    `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*' + '${escapedRoot}' + '*') } | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress`
+  ], { encoding: "utf8", windowsHide: true, maxBuffer: 20_000_000 });
+  if (!result.stdout?.trim()) return [];
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+function isStudioServer(commandLine = "") {
+  return /src[\\/]+web[\\/]+server\.ts|rpc-entry/i.test(commandLine);
+}
+
+function isOurRecorderBrowser(name = "", commandLine = "") {
+  const cmd = commandLine.toLowerCase().replaceAll("/", "\\");
+  const marker = ourProfileMarker.replaceAll("/", "\\");
+  return userBrowsers.test(name) && cmd.includes(marker);
+}
+
+for (const pid of pidsListeningOnPort(port)) killPid(pid, true);
+
+for (const proc of studioProcesses()) {
+  const pid = Number(proc.ProcessId);
+  const name = String(proc.Name || "");
+  const commandLine = String(proc.CommandLine || "");
+  if (userBrowsers.test(name) && !isOurRecorderBrowser(name, commandLine)) continue;
+  if (isStudioServer(commandLine)) killPid(pid, true);
+  else if (isOurRecorderBrowser(name, commandLine)) killPid(pid, false);
 }

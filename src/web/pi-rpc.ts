@@ -49,25 +49,32 @@ export class PiRpcBridge {
     );
     const provider = process.env.PI_PROVIDER || "xiaomi-token-plan-cn";
     const model = process.env.PI_MODEL;
+    const windows = process.platform === "win32";
     const args = [rpcEntry, "--approve", "--no-session", "--provider", provider];
     if (model) args.push("--model", model);
+    if (windows) args.push("--exclude-tools", "bash");
     args.push(
       "--thinking",
       process.env.PI_THINKING || "medium",
       "--append-system-prompt",
       [
-        "You are running inside the Pi Business Skill Studio web interface.",
+        `You are running inside the Pi Business Skill Studio web interface on ${windows ? "Windows" : process.platform}.`,
         "思考过程、阶段状态、工具使用说明和最终回答均使用简体中文；必要的代码、接口路径、字段名和工具名保持原样。",
+        windows
+          ? "Host OS is Windows. The bash tool is disabled. If a shell is unavoidable, use the powershell tool. Never call bash, WSL, or Unix-only commands such as dir via bash. If a tool fails, do not retry it with a different shell."
+          : "Use the host shell as provided. If a tool fails, do not retry the same command through another shell.",
+        "Page work only uses business_skill_record_start and business_browser_control. Do not use bash, powershell, read, grep, ls, or filesystem tools to inspect or operate the business page.",
         "For browser work, use business_skill_record_start and business_browser_control; the Playwright page is shown in the embedded browser panel.",
         "Ground selectors with snapshot only at the start and after navigation, dialog open/close, or submit. Do not snapshot after every field.",
         "Never open or control a separate local browser.",
-        "If snapshot.recentUserActions or filled controls already show the user's manual operation, treat it as observed evidence and continue from those values. Do not re-click or re-fill those fields unless the user asked to change them. Manual fills are recorded immediately into the evidence log.",
+        "snapshot.formFields/todoFields are the visible field checklist for the active page or dialog. 「请选择」is empty. When the user requires every field filled except upload, call exercise-form and do not submit while todoCount>0. Do not skip optional or blank fields.",
+        "If snapshot.recentUserActions or filled controls already show the user's manual operation, keep those values. Still fill remaining empty fields when complete coverage was requested. Manual fills are recorded immediately into the evidence log.",
         "The user can send follow-up messages while you are working. Read the new instruction and continue; do not ignore already recorded manual input.",
-        "Prefer snapshot selectors that start with placeholder=, label=, role=, or text=. Never use generated #el-id-* selectors.",
-        "For Element Plus dropdowns and comboboxes, use action=choose with selector plus the visible option text in one call. Do not click the inner input and wait for a 30s timeout.",
+        "Prefer snapshot selectors that start with placeholder=, label=, role=, or text=. Never use generated #el-id-* selectors or long CSS paths such as div.el-select__wrapper > div.el-select__selection. Table columns use label=产品名称.",
+        "For dropdowns and comboboxes, use action=choose with selector plus the visible option text in one call. Do not click the inner input and wait for a 30s timeout.",
         "For dates, fill or choose the field with YYYY-MM-DD. Never click text=2 or a calendar CSS cell on the whole page, and never click the dim overlay or blank area outside a dialog.",
-        "If a dialog is open, only click controls inside that dialog. Do not press Escape to recover; that closes the dialog.",
-        "click/fill already use force and a 4s timeout. If an action fails because the page is still loading, wait 400-800ms once and retry choose; do not retry the same blocked click and do not take extra snapshots.",
+        "If a dialog is open, only click controls inside that dialog. Do not press Escape to recover; that closes the dialog. Do not click the page title or a heading such as 采购订单 to close a date picker or dropdown.",
+        "If an action fails because the page is still loading, wait 400-800ms once and retry choose; do not retry the same blocked click and do not take extra snapshots.",
         "Only click, fill, select, choose, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",
         "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations.",
         "When analyzing, pass the sessionId from record_stop. When exporting, report 主能力 and 字段候选接口 separately; do not claim 编辑/删除 unless those writes were recorded and verified."

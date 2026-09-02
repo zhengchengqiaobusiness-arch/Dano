@@ -19,6 +19,11 @@ test("recording workspace stays on one page with an internal session scroller", 
   assert.doesNotMatch(html, /manual-controls|id="manual-text"|data-manual-key/);
   assert.match(html, /id="browser-ime"/);
   assert.match(html, /class="browser-toolbar"[\s\S]*class="address-form"[\s\S]*class="mode-switch"[\s\S]*class="recording-session-controls"[\s\S]*id="reload-browser"/);
+  assert.match(html, /id="stop-recording"[^>]*>结束录制</);
+  assert.doesNotMatch(html, /等待会话|停止录制|id="finish-recording"|id="recording-state"|id="agent-status"|class="statusbar"|Business Skill Studio/);
+  assert.match(html, /<strong>Skill Studio<\/strong>/);
+  assert.doesNotMatch(css, /\.statusbar|\.recording-state/);
+  assert.doesNotMatch(app, /finishRecording|recordingState|agentStatus\.innerHTML/);
   assert.match(css, /body\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden|html, body\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.app-shell\s*\{[^}]*height:\s*100dvh[^}]*min-height:\s*0/s);
   assert.match(css, /\.recording-view\s*\{[^}]*overflow:\s*hidden/s);
@@ -167,15 +172,20 @@ test("Windows Pi host uses powershell instead of bash", async () => {
 });
 
 test("skill catalog distinguishes handbook export from business spec dump", async () => {
-  const [html, app] = await Promise.all([
+  const [html, app, css] = await Promise.all([
     readFile(path.join(root, "web", "index.html"), "utf8"),
-    readFile(path.join(root, "web", "app.js"), "utf8")
+    readFile(path.join(root, "web", "app.js"), "utf8"),
+    readFile(path.join(root, "web", "styles.css"), "utf8")
   ]);
   assert.match(html, /执行手册，不是业务说明书/);
   assert.match(html, /dist\/skills/);
   assert.match(html, /SKILL.md 路由手册/);
   assert.match(html, /主能力索引/);
   assert.match(html, /例如 采购订单/);
+  assert.doesNotMatch(html, /PYTHON AGENT SKILLS|class="management-header"|<h1>Skill 目录<\/h1>/);
+  assert.match(css, /\.management-view\s*\{[^}]*padding:\s*14px/s);
+  assert.match(css, /\.recording-view\s*\{[^}]*padding:\s*14px/s);
+  assert.doesNotMatch(css, /\.management-header/);
   assert.match(app, /\["主能力"/);
   assert.match(app, /\["字段候选"/);
   assert.match(app, /已导出主能力/);

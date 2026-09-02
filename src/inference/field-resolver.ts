@@ -6,10 +6,41 @@ const COMPUTED_NAME = /^(amount|total|taxAmount|taxPrice|taxAmt|discountAmount|d
 const AUTO_GENERATED = /^(no|orderNo|orderNumber|orderSn)$/i;
 const AUTO_FROM_LOOKUP = /^(productUnitName|productBarCode|stockCount|productName)$/i;
 const LOOKUP_FIELD = /^(productId|product|supplierId|supplier|accountId|account|creator|creatorId|createUser|createUserId|userId|owner)$/i;
-const EDITABLE_LINE_ITEM = /^(count|qty|quantity|productPrice|unitPrice|taxPercent|taxRate|discountPercent|depositPrice|remark|orderTime)$/i;
+const NEVER_STATIC = /time|date|price|count|percent|qty|remark|^no$|amount|total/i;
+const EDITABLE_LINE_ITEM = /^(count|qty|quantity|productPrice|unitPrice|taxPercent|taxRate|discountPercent|depositPrice|remark|orderTime)/i;
+const NAME_LABELS: Array<[RegExp, string]> = [
+  [/inStatus/i, "入库数量"],
+  [/inCount/i, "入库数量"],
+  [/returnStatus/i, "退货数量"],
+  [/returnCount/i, "退货数量"],
+  [/orderTime\[1\]/, "结束日期"],
+  [/orderTime\[0\]/, "开始日期"],
+  [/^orderTime$/i, "订单时间"],
+  [/^(count|qty|quantity)$/i, "数量"],
+  [/totalProductPrice/i, "金额"],
+  [/^(productPrice|unitPrice)$/i, "产品单价"],
+  [/taxPercent|taxRate/i, "税率"],
+  [/discountPercent/i, "优惠率"],
+  [/depositPrice/i, "支付订金"],
+  [/discountPrice/i, "付款优惠"],
+  [/taxPrice/i, "税额"],
+  [/^totalPrice$/i, "优惠后金额"],
+  [/productUnitName/i, "单位"],
+  [/productBarCode/i, "条码"],
+  [/stockCount/i, "库存"],
+  [/^status$/i, "状态"],
+  [/^(no|orderNo)$/i, "订单单号"],
+  [/supplier/i, "供应商"],
+  [/^productId$|^product$/i, "产品"],
+  [/account/i, "结算账户"],
+  [/creator/i, "创建人"],
+  [/remark/i, "备注"]
+];
 const LABEL_ALIASES: Array<[RegExp, RegExp]> = [
-  [/入库数量|入库状态/, /inStatus|inCount|stockIn/i],
-  [/退货数量|退货状态/, /returnStatus|returnCount|refund/i],
+  [/入库状态/, /inStatus|stockIn/i],
+  [/入库数量/, /inCount|inStatus/i],
+  [/退货状态/, /returnStatus|refund/i],
+  [/退货数量/, /returnCount|returnStatus/i],
   [/结束日期|结束时间/, /orderTime\[1\]|endTime|endDate|\[1\]$/i],
   [/开始日期|开始时间/, /orderTime\[0\]|startTime|startDate|\[0\]$/i],
   [/订单时间|下单时间/, /^(orderTime|orderDate)$/i],
@@ -24,7 +55,7 @@ const LABEL_ALIASES: Array<[RegExp, RegExp]> = [
   [/优惠率/, /discountPercent|discountRate/i],
   [/订金|定金/, /deposit/i],
   [/订单单号|单号/, /^(no|orderNo|orderNumber|orderSn)$/i],
-  [/状态/, /^(status)$/i],
+  [/^状态$/, /^status$/i],
   [/单位/, /unit/i],
   [/条码/, /barCode|barcode|bar_code/i],
   [/库存/, /stock/i]
@@ -50,11 +81,12 @@ export interface UiObservation {
   name?: string;
   label?: string;
   value?: unknown;
+  type?: string;
   options?: Array<{ value: unknown; label: string }>;
 }
 
 function optionsOf(event: UiEvidence, field?: NonNullable<UiEvidence["form"]>[number]) {
-  const raw = field?.options?.length
+  const raw = field
     ? field.options
     : event.options?.length
       ? event.options
@@ -62,18 +94,45 @@ function optionsOf(event: UiEvidence, field?: NonNullable<UiEvidence["form"]>[nu
   return raw?.filter(item => String(item.label || item.value || "").trim()).slice(0, 200);
 }
 
+function eventLabel(event: UiEvidence) {
+  if (event.label) return event.label;
+  const match = String(event.text || "").match(/^请选择(.+)$/);
+  return match?.[1];
+}
+
+function sharesToken(label: string, option: string) {
+  for (let index = 0; index < label.length - 1; index += 1) {
+    const token = label.slice(index, index + 2);
+    if (/^[\u4e00-\u9fff]{2}$/.test(token) && option.includes(token)) return true;
+  }
+  return false;
+}
+
+export function displayLabelFor(name: string, fallback?: string) {
+  return NAME_LABELS.find(([pattern]) => pattern.test(name))?.[1] || fallback || name;
+}
+
 export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
   const items: UiObservation[] = [];
   for (const event of events) {
     const eventOptions = optionsOf(event);
+    const label = eventLabel(event);
+    const controlType = eventOptions?.length || event.role === "combobox" ? "select" : (event.inputType || event.role);
     if (event.name && !isGeneratedFieldName(event.name)) {
-      items.push({ name: event.name, label: event.label, value: event.value, options: eventOptions });
-    } else if (event.label) {
-      items.push({ name: undefined, label: event.label, value: event.value, options: eventOptions });
+      items.push({ name: event.name, label, value: event.value, type: controlType, options: eventOptions });
+    } else if (label) {
+      items.push({ name: undefined, label, value: event.value, type: controlType, options: eventOptions });
+    } else if (eventOptions?.length) {
+      const matches = (event.form || []).filter(field =>
+        field.label && eventOptions.some(item => sharesToken(field.label!, String(item.label || item.value)))
+      );
+      if (matches.length === 1) {
+        items.push({ name: matches[0]!.name, label: matches[0]!.label, value: matches[0]!.value, type: matches[0]!.type, options: eventOptions });
+      }
     }
     for (const field of event.form || []) {
       const name = field.name && !isGeneratedFieldName(field.name) ? field.name : undefined;
-      items.push({ name, label: field.label, value: field.value, options: optionsOf(event, field) });
+      items.push({ name, label: field.label, value: field.value, type: field.type, options: optionsOf(event, field) });
     }
   }
   return items;
@@ -115,17 +174,39 @@ export function labelMatchesName(label: string | undefined, name: string) {
   return LABEL_ALIASES.some(([labelPattern, namePattern]) => labelPattern.test(label) && namePattern.test(name));
 }
 
+function preferredStatusLabel(name: string) {
+  if (/inStatus/i.test(name)) return /入库数量|入库状态/;
+  if (/returnStatus/i.test(name)) return /退货数量|退货状态/;
+  if (/^status$/i.test(name)) return /^状态$/;
+  return undefined;
+}
+
+function rankObservations(field: InputFormField, items: UiObservation[]) {
+  const wanted = preferredStatusLabel(field.name);
+  if (wanted) {
+    return items.find(item => item.options?.length && wanted.test(item.label || ""))
+      || items.find(item => wanted.test(item.label || ""))
+      || items.find(item => item.options?.length)
+      || items[0];
+  }
+  return items.find(item => item.options?.length) || items[0];
+}
+
 export function findObservation(field: InputFormField, requestValue: unknown, observations: UiObservation[]) {
-  const byName = observations.find(item => item.name && item.name === field.name);
-  if (byName) return byName;
-  const byLabel = observations.find(item =>
+  const byName = observations.filter(item => item.name && item.name === field.name);
+  const byLabel = observations.filter(item =>
     Boolean(item.label) && (
       item.label === field.label
       || item.label === field.name
       || labelMatchesName(item.label, field.name)
     )
   );
-  if (byLabel) return byLabel;
+  const matched = [...byName, ...byLabel];
+  if (matched.length) {
+    const ranked = rankObservations(field, matched);
+    const typed = matched.find(item => item.type && (item.label === ranked?.label || item.name === ranked?.name || item.name === field.name));
+    return ranked && typed && !ranked.type ? { ...ranked, type: typed.type } : ranked;
+  }
   if (!isDistinctiveValue(requestValue)) return undefined;
   return observations.find(item => sameValue(item.value, requestValue));
 }
@@ -154,8 +235,11 @@ function literalRule(value: unknown) {
 
 function formatHint(field: InputFormField, observation?: UiObservation, requestValue?: unknown) {
   if (/time|date|start|end/i.test(`${field.name} ${field.label}`)) {
-    if (typeof requestValue === "number" && observation && typeof observation.value === "string") {
-      return "，页面按日期填写，请求使用对应时间戳，不要改成录制当天的固定数字";
+    if (typeof requestValue === "number") {
+      return "，页面按 YYYY-MM-DD 填写，执行器转成当天 00:00 的毫秒时间戳";
+    }
+    if (typeof requestValue === "string" && /00:00:00/.test(String(requestValue))) {
+      return "，页面按 YYYY-MM-DD 填写，请求使用 YYYY-MM-DD 00:00:00";
     }
     return "，保持页面原始日期格式";
   }
@@ -183,21 +267,46 @@ function finalizeUnhandled(field: InputFormField, requestValue: unknown): InputF
   };
 }
 
-function asCaller(field: InputFormField, matched: UiObservation | undefined, requestValue: unknown): InputFormField {
-  const useStatic = Boolean(matched?.options?.length) && !LOOKUP_FIELD.test(field.name);
+function preferredLabel(field: InputFormField, matched?: UiObservation) {
+  const named = displayLabelFor(field.name);
+  const ui = matched?.label && matched.label !== field.name ? matched.label : undefined;
+  const wanted = preferredStatusLabel(field.name);
+  if (wanted) {
+    if (ui && wanted.test(ui)) return ui;
+    return named || ui || field.label;
+  }
+  return ui || (field.label && field.label !== field.name ? field.label : undefined) || named || field.name;
+}
+
+function asCaller(field: InputFormField, matched: UiObservation | undefined, requestValue: unknown, observations: UiObservation[] = []): InputFormField {
+  const selected = matched?.value
+    || observations.find(item => item.label === matched?.label && item.value !== undefined && item.value !== "")?.value;
+  const controlType = `${matched?.type || ""}`;
+  const looksSelect = /select|combobox/i.test(controlType);
+  const looksText = /text|textarea|search|date|number|tel|email/i.test(controlType) && !looksSelect;
+  const useStatic = Boolean(matched?.options?.length)
+    && !LOOKUP_FIELD.test(field.name)
+    && !NEVER_STATIC.test(field.name)
+    && !looksText;
   const options = useStatic
     ? matched!.options!.map(item =>
-      String(item.label) === String(matched!.value) && requestValue !== undefined && requestValue !== matched!.value
+      selected !== undefined && String(item.label) === String(selected) && requestValue !== undefined && requestValue !== selected
         ? { value: requestValue, label: String(item.label) }
         : { value: item.value, label: String(item.label || item.value) }
     )
     : undefined;
   return {
     ...field,
-    label: field.label && field.label !== field.name ? field.label : (matched?.label || field.label),
+    label: preferredLabel(field, matched),
     source: "caller",
     systemHandled: false,
-    widget: options?.length || LOOKUP_FIELD.test(field.name) ? "select" : field.widget,
+    widget: LOOKUP_FIELD.test(field.name)
+      ? "select"
+      : NEVER_STATIC.test(field.name)
+        ? (field.widget === "select" ? "text" : field.widget)
+        : options?.length || looksSelect
+          ? "select"
+          : looksText && field.widget === "select" ? "text" : field.widget,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
     sourceDetail: options?.length
       ? "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
@@ -225,6 +334,7 @@ export function resolveFieldOwnership(
   if (AUTO_FROM_LOOKUP.test(field.name)) {
     return {
       ...field,
+      label: displayLabelFor(field.name, field.label),
       source: "system",
       systemHandled: true,
       required: false,
@@ -234,6 +344,7 @@ export function resolveFieldOwnership(
   if (COMPUTED_NAME.test(field.name)) {
     return {
       ...field,
+      label: displayLabelFor(field.name, field.label),
       source: "computed",
       systemHandled: true,
       required: false,
@@ -242,8 +353,8 @@ export function resolveFieldOwnership(
     };
   }
   const matched = findObservation(field, requestValue, observations);
-  if (matched) return asCaller(field, matched, requestValue);
-  if (isEditableBusinessField(field)) return asCaller(field, undefined, requestValue);
+  if (matched) return asCaller(field, matched, requestValue, observations);
+  if (isEditableBusinessField(field)) return asCaller(field, undefined, requestValue, observations);
   return finalizeUnhandled(field, requestValue);
 }
 

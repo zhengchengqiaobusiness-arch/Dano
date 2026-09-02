@@ -5,9 +5,9 @@ const elements = {
   addressForm: $(".address-form"), browserUrl: $("#browser-url"), browserFrame: $("#browser-frame"),
   browserViewport: $("#browser-viewport"),
   manualModeHint: $("#manual-mode-hint"),
-  browserStatus: $("#browser-status"), browserSize: $("#browser-size"), recordingState: $("#recording-state"),
-  stopRecording: $("#stop-recording"), finishRecording: $("#finish-recording"),
-  reloadBrowser: $("#reload-browser"), agentStatus: $("#agent-status"), modelStatus: $("#model-status"),
+  browserStatus: $("#browser-status"), browserSize: $("#browser-size"),
+  stopRecording: $("#stop-recording"),
+  reloadBrowser: $("#reload-browser"), modelStatus: $("#model-status"),
   conversation: $("#conversation"), clearSession: $("#clear-session"), composer: $(".composer"), prompt: $("#prompt"),
   composerHint: $("#composer-hint"), sendPrompt: $("#send-prompt"), abortPrompt: $("#abort-prompt"),
   browserIme: $("#browser-ime"),
@@ -174,9 +174,6 @@ function renderAgentControls() {
 function updateAgentStatus(ready, streaming) {
   state.agentReady = Boolean(ready); state.agentStreaming = Boolean(streaming);
   if (!state.agentStreaming) state.agentAborting = false;
-  elements.agentStatus.innerHTML = "";
-  const dot = document.createElement("i"); dot.className = `status-dot${ready ? "" : " muted"}`;
-  elements.agentStatus.append(dot, document.createTextNode(streaming ? " Pi 工作中" : ready ? " Pi 已就绪" : " Pi 不可用"));
   renderAgentControls();
 }
 
@@ -194,9 +191,7 @@ function renderBrowserMode() {
 function renderRecordingActions() {
   const busy = Boolean(state.recordingAction);
   elements.stopRecording.disabled = !state.browserActive || busy;
-  elements.finishRecording.disabled = !state.browserActive || busy;
-  elements.stopRecording.textContent = state.recordingAction === "stop" ? "正在停止…" : "停止录制";
-  elements.finishRecording.textContent = state.recordingAction === "stop" ? "正在结束…" : "结束录制";
+  elements.stopRecording.textContent = state.recordingAction === "stop" ? "正在结束…" : "结束录制";
 }
 
 async function changeBrowserMode(mode) {
@@ -238,8 +233,8 @@ async function pollBrowser(forceFrame = false) {
   state.pollInFlight = true;
   try {
     const browser = await api("/api/browser/state"); state.browserActive = Boolean(browser.active); state.browserMode = browser.mode || state.browserMode; renderBrowserMode();
-    elements.browserFrame.classList.toggle("active", state.browserActive); elements.recordingState.classList.toggle("active", state.browserActive);
-    elements.recordingState.innerHTML = `<i></i>${state.browserActive ? " 正在录制" : " 等待会话"}`; elements.reloadBrowser.disabled = !state.browserActive; renderRecordingActions();
+    elements.browserFrame.classList.toggle("active", state.browserActive);
+    elements.reloadBrowser.disabled = !state.browserActive; renderRecordingActions();
     if (!state.browserActive) {
       clearBrowserFrame(); elements.browserStatus.innerHTML = '<i class="status-dot muted"></i> 浏览器空闲'; return;
     }
@@ -255,7 +250,6 @@ async function pollBrowser(forceFrame = false) {
 async function openBrowser(rawUrl) {
   const value = rawUrl.trim(); if (!value) return;
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
-  elements.recordingState.textContent = "正在启动…";
   await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
   await pollBrowser();
   showToast("录制已开始");
@@ -479,7 +473,6 @@ document.querySelectorAll("[data-browser-mode]").forEach(button => button.addEve
 elements.addressForm.addEventListener("submit", event => { event.preventDefault(); void openBrowser(elements.browserUrl.value).catch(error => showToast(error.message)); });
 elements.reloadBrowser.addEventListener("click", () => state.browserActive && void api("/api/browser/reload", { method: "POST", body: "{}" }).then(pollBrowser).catch(error => showToast(error.message)));
 elements.stopRecording.addEventListener("click", () => void completeRecording());
-elements.finishRecording.addEventListener("click", () => void completeRecording());
 elements.clearSession.addEventListener("click", () => void clearSessionHistory());
 elements.composer.addEventListener("submit", event => {
   event.preventDefault();

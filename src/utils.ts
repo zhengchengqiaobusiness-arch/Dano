@@ -54,8 +54,9 @@ export function slugify(text: string) {
 
 export function getByPath(value: any, jsonPath: string): unknown {
   if (jsonPath === "$") return value;
-  const parts = jsonPath
-    .replace(/^\$\./, "")
+  const literal = jsonPath.replace(/^\$\./, "");
+  if (!literal.includes(".")) return value?.[literal];
+  const parts = literal
     .split(".")
     .filter(Boolean)
     .flatMap(part => {
@@ -71,7 +72,12 @@ export function getByPath(value: any, jsonPath: string): unknown {
 }
 
 export function setByPath(target: Record<string, unknown>, jsonPath: string, value: unknown) {
-  const parts = jsonPath.replace(/^\$\./, "").split(".").filter(Boolean);
+  const literal = jsonPath.replace(/^\$\./, "");
+  if (!literal.includes(".")) {
+    target[literal] = value;
+    return;
+  }
+  const parts = literal.split(".").filter(Boolean);
   let cursor: any = target;
   for (let i = 0; i < parts.length; i++) {
     const key = parts[i]!;

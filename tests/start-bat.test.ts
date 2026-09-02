@@ -33,6 +33,7 @@ test("start.bat stops leftover Studio processes on the port instead of reusing t
       timeout: 15_000
     });
     assert.match(result.stdout, /Leftover Studio processes were stopped/i);
+    assert.match(result.stdout, /Temporary files were cleared/i);
     assert.equal(await Promise.race([
       closed,
       new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2000))

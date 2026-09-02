@@ -1,11 +1,12 @@
 import type { CapabilityContract, CandidateRule, InputFormField } from "../domain.js";
 
 const LOOKUPS: Array<{ field: RegExp; label: RegExp; path: RegExp }> = [
-  { field: /^(productId|product)$/i, label: /产品|商品/, path: /\/product\//i },
-  { field: /^(supplierId|supplier)$/i, label: /供应商/, path: /\/supplier\//i },
-  { field: /^(accountId|account)$/i, label: /账户|结算/, path: /\/account\//i },
-  { field: /^(creator|creatorId|createUser|createUserId|userId)$/i, label: /创建人/, path: /\/user\/simple-list|\/user\/list/i }
+  { field: /^(productId|product)$/i, label: /^(产品名称|产品|商品)$/, path: /\/product\//i },
+  { field: /^(supplierId|supplier)$/i, label: /^(供应商)$/, path: /\/supplier\//i },
+  { field: /^(accountId|account)$/i, label: /^(结算账户|账户)$/, path: /\/account\//i },
+  { field: /^(creator|creatorId|createUser|createUserId|userId)$/i, label: /^(创建人)$/, path: /\/user\/simple-list|\/user\/list/i }
 ];
+const NOT_LOOKUP = /price|count|percent|qty|amount|total|tax|stock|unit|barCode|name$/i;
 
 function schemaNode(schema: any, jsonPath: string): any {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -37,7 +38,11 @@ function listPaths(schema: CapabilityContract["outputSchema"]): { valuePath: str
 }
 
 function lookupFor(field: InputFormField, catalog: CapabilityContract[]) {
-  const rule = LOOKUPS.find(item => item.field.test(field.name) || item.label.test(field.label || ""));
+  const byName = LOOKUPS.find(item => item.field.test(field.name));
+  const byLabel = !byName && !NOT_LOOKUP.test(field.name)
+    ? LOOKUPS.find(item => item.label.test(field.label || ""))
+    : undefined;
+  const rule = byName || byLabel;
   if (!rule) return undefined;
   return catalog.find(capability =>
     capability.operation === "query"
@@ -51,6 +56,7 @@ export function attachCandidateSources(catalog: CapabilityContract[]): Capabilit
     ...capability,
     inputForm: capability.inputForm.map(field => {
       if (field.source !== "caller") return field;
+      if (field.candidates?.type === "static") return field;
       const source = lookupFor(field, catalog);
       const paths = source ? listPaths(source.outputSchema) : undefined;
       if (!source || !paths) return field;
