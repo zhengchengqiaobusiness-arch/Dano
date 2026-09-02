@@ -8,7 +8,7 @@ const elements = {
   browserStatus: $("#browser-status"), browserSize: $("#browser-size"), recordingState: $("#recording-state"),
   stopRecording: $("#stop-recording"), finishRecording: $("#finish-recording"),
   reloadBrowser: $("#reload-browser"), agentStatus: $("#agent-status"), modelStatus: $("#model-status"),
-  conversation: $("#conversation"), composer: $(".composer"), prompt: $("#prompt"),
+  conversation: $("#conversation"), clearSession: $("#clear-session"), composer: $(".composer"), prompt: $("#prompt"),
   composerHint: $("#composer-hint"), sendPrompt: $("#send-prompt"),
   exportForm: $("#export-form"),
   skillName: $("#skill-name"), skillsList: $("#skills-list"),
@@ -24,7 +24,7 @@ const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
   sessionNodes: new Map(), toastTimer: null, skills: [],
-  manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null
+  manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null, clearingSession: false
 };
 
 async function api(path, options = {}) {
@@ -72,6 +72,7 @@ function dataText(value) {
 function resetWorkbench() {
   for (const node of state.sessionNodes.values()) node.remove();
   state.sessionNodes.clear();
+  elements.conversation.querySelectorAll("[data-session-id]").forEach(node => node.remove());
   if (state.localConfirmation) {
     const resolve = state.localConfirmation;
     state.localConfirmation = null;
@@ -80,6 +81,23 @@ function resetWorkbench() {
   state.currentUiRequest = null;
   elements.confirmationModal.hidden = true;
   elements.conversation.scrollTop = 0;
+}
+
+async function clearSessionHistory() {
+  if (state.clearingSession) return;
+  state.clearingSession = true;
+  if (elements.clearSession) elements.clearSession.disabled = true;
+  try {
+    if (state.agentStreaming) await abortAgent();
+    await api("/api/session/clear", { method: "POST", body: "{}" });
+    resetWorkbench();
+    showToast("已清空会话历史；下一条消息会作为新对话开始");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    state.clearingSession = false;
+    if (elements.clearSession) elements.clearSession.disabled = false;
+  }
 }
 
 function renderSessionItem(item) {
@@ -158,9 +176,13 @@ function updateAgentStatus(ready, streaming) {
 
 function renderBrowserMode() {
   document.querySelectorAll("[data-browser-mode]").forEach(button => button.classList.toggle("active", button.dataset.browserMode === state.browserMode));
-  const manual = state.browserMode === "manual";
-  elements.manualModeHint.hidden = !(manual && state.browserActive);
-  elements.browserViewport.classList.toggle("manual", manual && state.browserActive);
+  elements.browserViewport.classList.toggle("interactive", state.browserActive);
+  elements.manualModeHint.hidden = !state.browserActive;
+  if (elements.manualModeHint) {
+    elements.manualModeHint.textContent = state.browserMode === "manual"
+      ? "手动录制 · 直接点击画面，滚轮可滚动"
+      : "可直接点击画面操作，Pi 也可自动点击";
+  }
 }
 
 function renderRecordingActions() {
@@ -197,10 +219,9 @@ async function openBrowser(rawUrl) {
   const value = rawUrl.trim(); if (!value) return;
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
   elements.recordingState.textContent = "正在启动…";
-  resetWorkbench();
   await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
   await pollBrowser();
-  showToast("新录制已开始；上次录制和工作台已清空");
+  showToast("录制已开始");
 }
 
 async function completeRecording() {
@@ -221,7 +242,7 @@ async function completeRecording() {
 }
 
 async function manualCommand(command) {
-  if (!state.browserActive || state.browserMode !== "manual") return;
+  if (!state.browserActive) return;
   await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
   clearTimeout(state.manualRefreshTimer);
   state.manualRefreshTimer = setTimeout(() => void pollBrowser(), 120);
@@ -284,6 +305,11 @@ function confirmAction(title, message, danger = true) {
 
 function showUiRequest(request) {
   if (request.method === "notify") { showToast(request.message || "Pi 通知"); return; }
+  if (request.method === "confirm") {
+    state.currentUiRequest = request;
+    void closeConfirmation(true);
+    return;
+  }
   resetConfirmation(); state.currentUiRequest = request;
   elements.confirmationTitle.textContent = request.title || "Pi 需要你的选择";
   elements.confirmationMessage.textContent = request.message || "请提供继续执行所需的信息。";
@@ -403,9 +429,13 @@ function connectEvents() {
     if (event.type === "browser_changed") void pollBrowser();
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
+    if (event.type === "studio_shutdown") window.close();
     if (event.type === "agent_error") showToast(event.message || "Pi 连接异常");
   };
-  stream.onerror = () => updateAgentStatus(false, false);
+  stream.onerror = () => {
+    updateAgentStatus(false, false);
+    void fetch("/api/status", { cache: "no-store" }).catch(() => window.close());
+  };
 }
 
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
@@ -414,6 +444,7 @@ elements.addressForm.addEventListener("submit", event => { event.preventDefault(
 elements.reloadBrowser.addEventListener("click", () => state.browserActive && void api("/api/browser/reload", { method: "POST", body: "{}" }).then(pollBrowser).catch(error => showToast(error.message)));
 elements.stopRecording.addEventListener("click", () => void completeRecording());
 elements.finishRecording.addEventListener("click", () => void completeRecording());
+elements.clearSession.addEventListener("click", () => void clearSessionHistory());
 elements.composer.addEventListener("submit", event => {
   event.preventDefault();
   if (state.agentStreaming) void abortAgent();
@@ -432,19 +463,19 @@ elements.invokeSubmit.addEventListener("click", async () => {
   } catch (error) { showToast(error.message); }
 });
 elements.browserFrame.addEventListener("click", event => {
-  if (!state.browserActive || state.browserMode !== "manual") return;
+  if (!state.browserActive) return;
   const point = browserCoordinates(event); if (!point) return;
   elements.browserViewport.focus();
   enqueueManualCommand({ action: "click", ...point });
 });
 elements.browserViewport.addEventListener("wheel", event => {
-  if (!state.browserActive || state.browserMode !== "manual") return;
+  if (!state.browserActive) return;
   event.preventDefault();
   const factor = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 40 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 600 : 1;
   enqueueManualCommand({ action: "scroll", deltaX: event.deltaX * factor, deltaY: event.deltaY * factor });
 }, { passive: false });
 elements.browserViewport.addEventListener("keydown", event => {
-  if (!state.browserActive || state.browserMode !== "manual" || ["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+  if (!state.browserActive || ["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
   event.preventDefault();
   const keyName = event.key === " " ? "Space" : event.key;
   const modifiers = [event.ctrlKey && "Control", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"].filter(Boolean);

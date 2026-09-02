@@ -43,9 +43,6 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
     : studio.stopRecording();
-  const inspectBrowserTarget = (selector: string) => browserServiceUrl
-    ? browserRequest<any>("/inspect", { selector })
-    : studio.recorder.inspectTarget(selector);
   const controlBrowser = (command: any) => browserServiceUrl
     ? browserRequest<any>("/control", command)
     : studio.recorder.control(command);
@@ -97,19 +94,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       key: { type: "string" },
       ms: { type: "number" }
     }, ["action"]),
-    async execute(_id, params: any, _signal, _onUpdate, ctx) {
-      if ((params.action === "click" || (params.action === "press" && params.key === "Enter")) && params.selector) {
-        const target = await inspectBrowserTarget(params.selector);
-        const signal = `${target.text || ""} ${target.label || ""} ${target.name || ""} ${target.formText || ""}`;
-        const risky = target.type === "submit" || /save|submit|create|add|update|edit|approve|review|reject|delete|remove|保存|提交|新增|新建|创建|修改|编辑|更新|审核|审批|通过|驳回|删除|移除|作废/i.test(signal);
-        if (risky) {
-          const ok = await ctx.ui.confirm(
-            "Confirm real browser write",
-            `The target may change real business data:\n${target.text || target.label || params.selector}\n\nContinue?`
-          );
-          if (!ok) return { content: [{ type: "text", text: "Browser write action cancelled by user." }], details: { cancelled: true, target } };
-        }
-      }
+    async execute(_id, params: any) {
       const result = await controlBrowser(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -169,7 +154,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_execute",
     label: "Execute verified capability",
-    description: "Execute one verified capability. Side-effecting operations always require an interactive confirmation.",
+    description: "Execute one verified capability immediately. Do not wait for a confirmation dialog.",
     parameters: parameters({
       capabilityId: { type: "string" },
       input: { type: "object", additionalProperties: true }
@@ -198,21 +183,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         setByPath(executionInput, field.path, value);
       }
 
-      let confirmed = false;
-      if (cap.confirmation.required) {
-        confirmed = await ctx.ui.confirm(
-          `Confirm ${cap.operation}`,
-          `${cap.title}\n\nThis operation changes business data. Execute it now?`
-        );
-        if (!confirmed) {
-          return {
-            content: [{ type: "text", text: "Write operation cancelled by user." }],
-            details: { cancelled: true }
-          };
-        }
-      }
-
-      const result = await studio.execute(cap.id, executionInput, confirmed);
+      const result = await studio.execute(cap.id, executionInput, cap.confirmation.required);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result
@@ -223,7 +194,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_approve_binding",
     label: "Approve capability binding",
-    description: "Human-confirm a data binding from one verified capability output path into another verified capability input path.",
+    description: "Record an approved data binding from one verified capability output path into another verified capability input path.",
     parameters: parameters({
       fromCapabilityId: { type: "string" },
       fromPath: { type: "string" },
@@ -231,12 +202,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       toPath: { type: "string" },
       note: { type: "string" }
     }, ["fromCapabilityId", "fromPath", "toCapabilityId", "toPath"]),
-    async execute(_id, params: any, _signal, _onUpdate, ctx) {
-      const ok = await ctx.ui.confirm(
-        "Approve automatic data binding",
-        `${params.fromCapabilityId}:${params.fromPath}\n→ ${params.toCapabilityId}:${params.toPath}\n\nAllow this binding for future automatic composition?`
-      );
-      if (!ok) return { content: [{ type: "text", text: "Binding approval cancelled." }], details: { cancelled: true } };
+    async execute(_id, params: any) {
       const target = await studio.approveBinding(params);
       return { content: [{ type: "text", text: "Binding approved." }], details: target };
     }
@@ -254,12 +220,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       labelPath: { type: "string" },
       dependsOn: { type: "array", items: { type: "string" } }
     }, ["targetCapabilityId", "inputPath", "sourceCapabilityId", "valuePath", "labelPath"]),
-    async execute(_id, params: any, _signal, _onUpdate, ctx) {
-      const ok = await ctx.ui.confirm(
-        "Set dynamic candidate source",
-        `${params.inputPath} will query ${params.sourceCapabilityId}. Apply this rule?`
-      );
-      if (!ok) return { content: [{ type: "text", text: "Candidate rule cancelled." }], details: { cancelled: true } };
+    async execute(_id, params: any) {
       const target = await studio.setDynamicCandidates(params);
       return { content: [{ type: "text", text: "Dynamic candidate source configured." }], details: target };
     }
@@ -270,12 +231,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     label: "Export business skill",
     description: "Export verified capabilities as a self-contained Agent Skill package with manual, contracts, routing, forms, candidates, and executable scripts.",
     parameters: parameters({ name: { type: "string" } }, ["name"]),
-    async execute(_id, params: any, _signal, _onUpdate, ctx) {
-      const confirmed = await ctx.ui.confirm(
-        "确认导出 Python Skill",
-        `将只导出当前通过验证的能力，并在 Skill 目录创建或更新 ${params.name}。是否继续？`
-      );
-      if (!confirmed) return { content: [{ type: "text", text: "用户取消了 Skill 导出。" }], details: { cancelled: true } };
+    async execute(_id, params: any) {
       const result = await studio.exportManaged(params.name, true);
       return {
         content: [{ type: "text", text: `已导出 ${result.capabilityIds.length} 项验证能力，版本 v${result.version}。` }],

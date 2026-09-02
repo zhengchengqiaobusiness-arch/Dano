@@ -135,6 +135,15 @@ pi.subscribe(event => {
     runtimeLog("PI", "Natural-language task completed.");
   }
   if (event.type === "extension_ui_request") {
+    if (event.method === "confirm") {
+      runtimeLog("PI", `Auto-approved confirmation: ${event.title || event.message || "operation"}.`);
+      try {
+        pi.respondToUi({ id: event.id, confirmed: true });
+      } catch (error) {
+        runtimeLog("WARN", `Failed to auto-approve confirmation: ${errorMessage(error)}`);
+      }
+      return;
+    }
     runtimeLog("WAIT", `Pi requested ${event.method || "user input"}.`);
     const safeRequest = {
       type: "ui_request",
@@ -160,18 +169,21 @@ pi.subscribe(event => {
 });
 
 async function resetWorkbench() {
+  if (pi.status().streaming) {
+    await pi.abort().catch(() => {});
+    broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
+  }
+  if (pi.status().ready) {
+    await pi.newSession().catch(error => {
+      runtimeLog("WARN", `Failed to start a new Pi session: ${errorMessage(error)}`);
+    });
+  }
   transcript.clear();
   broadcast({ type: "session_reset" });
 }
 
-async function browserStart(url: string, name?: string, options: { resetWorkbench?: boolean; abortAgent?: boolean } = {}) {
-  if (options.abortAgent && pi.status().streaming) {
-    await pi.abort().catch(() => {});
-    broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
-  }
-  const session = await studio.startRecording(url, name || "web-session");
-  if (options.resetWorkbench !== false) resetWorkbench();
-  return session;
+async function browserStart(url: string, name?: string) {
+  return studio.startRecording(url, name || "web-session");
 }
 
 async function browserState() {
@@ -268,8 +280,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   if (request.method === "POST" && pathname === "/api/browser/open") {
     const body = await readJsonBody(request);
     if (body.mode !== undefined) setBrowserMode(parseBrowserMode(body.mode));
-    const session = await browserStart(parseBrowserUrl(body.url), body.name, { abortAgent: true });
-    runtimeLog("BROWSER", `${browserInteractionMode === "manual" ? "Manual" : "Pi automatic"} recording session started; previous recording and workbench were cleared.`);
+    const session = await browserStart(parseBrowserUrl(body.url), body.name);
+    runtimeLog("BROWSER", `${browserInteractionMode === "manual" ? "Manual" : "Pi automatic"} recording session started.`);
     sendJson(response, 200, { session, state: await browserState() });
     broadcast({ type: "browser_changed" });
     return;
@@ -284,7 +296,6 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   }
 
   if (request.method === "POST" && pathname === "/api/browser/manual") {
-    if (browserInteractionMode !== "manual") throw new Error("请先切换到手动录制模式");
     const result = await studio.recorder.manualControl(await readJsonBody(request));
     sendJson(response, 200, result);
     return;
@@ -303,6 +314,13 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     runtimeLog("BROWSER", "Recording session stopped and evidence was saved.");
     sendJson(response, 200, session);
     broadcast({ type: "browser_changed" });
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/session/clear") {
+    await resetWorkbench();
+    runtimeLog("PI", "Workbench conversation history was cleared.");
+    sendJson(response, 200, { cleared: true, sessionItems: transcript.items });
     return;
   }
 
@@ -403,15 +421,23 @@ const heartbeat = setInterval(() => {
   for (const client of eventClients) client.write(": heartbeat\n\n");
 }, 15_000);
 
-async function shutdown() {
+let shuttingDown = false;
+
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   clearInterval(heartbeat);
+  try { broadcast({ type: "studio_shutdown" }); } catch { /* clients may already be gone */ }
   pi.stop();
-  if (studio.recorder.isActive()) await studio.stopRecording().catch(() => {});
-  server.close();
+  studio.recorder.disposeImmediate();
+  try { server.close(); } catch { /* already closed */ }
+  process.exit(0);
 }
 
-process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
-process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
+process.on("SIGBREAK", shutdown);
 
 async function packageVersion(relativePath: string) {
   try {
@@ -436,9 +462,9 @@ async function logStartupEnvironment() {
 
 server.on("error", (error: NodeJS.ErrnoException) => {
   clearInterval(heartbeat);
-  if (error.code === "EADDRINUSE") runtimeLog("ERROR", `Port ${port} is already in use. Open ${origin} if Studio is already running.`);
+  if (error.code === "EADDRINUSE") runtimeLog("ERROR", `Port ${port} is still in use after leftover cleanup. Close the occupying process and start again.`);
   else runtimeLog("ERROR", `Studio server failed: ${errorMessage(error)}`);
-  process.exitCode = 1;
+  process.exit(1);
 });
 
 await logStartupEnvironment();
@@ -446,12 +472,10 @@ await logStartupEnvironment();
 server.listen(port, host, async () => {
   runtimeLog("READY", `Pi Business Skill Studio is ready at ${origin}`);
   if (["1", "true", "yes"].includes(String(process.env.BSS_OPEN_UI || "").toLowerCase()) && process.platform === "win32") {
-    const opener = spawn("cmd.exe", ["/d", "/c", "start", "", origin], {
-      detached: true,
+    spawn("cmd.exe", ["/d", "/c", "start", "", origin], {
       stdio: "ignore",
       windowsHide: true
     });
-    opener.unref();
   }
   try {
     await pi.start();

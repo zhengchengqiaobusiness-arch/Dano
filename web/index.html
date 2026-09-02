@@ -47,7 +47,7 @@
           </div>
           <div class="browser-viewport" id="browser-viewport" tabindex="0" aria-label="内置浏览器操作画面">
             <img id="browser-frame" class="browser-frame" alt="内置 Playwright 浏览器实时画面" />
-            <div class="manual-mode-hint" id="manual-mode-hint" hidden>手动录制 · 直接点击画面，滚轮可滚动</div>
+            <div class="manual-mode-hint" id="manual-mode-hint" hidden>可直接点击画面操作，Pi 也可自动点击</div>
             <div class="empty-browser">
               <div class="orbit" aria-hidden="true"><span>π</span></div>
               <p class="empty-kicker">真实页面与网络证据</p>
@@ -63,8 +63,11 @@
         </section>
 
         <aside class="agent-panel" aria-label="当前会话">
+          <div class="session-toolbar">
+            <span>当前会话</span>
+            <button class="session-clear" id="clear-session" type="button">清空历史</button>
+          </div>
           <div class="conversation" id="conversation" aria-live="polite">
-            <div class="day-label">当前会话</div>
             <article class="message assistant-message">
               <div class="message-meta"><span>PI</span><time>刚刚</time></div>
               <p>准备好了。接入业务系统后，告诉我需要观察或录制的操作。我会先读取页面，再控制内置浏览器执行。</p>

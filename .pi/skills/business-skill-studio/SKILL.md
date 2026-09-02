@@ -36,7 +36,7 @@ Use the registered `business_skill_*` tools. Keep the process deterministic.
    - Route to a single verified atomic capability when possible.
    - Chain capabilities only through `approved: true` bindings.
    - If multiple targets match, required inputs are missing, a binding is absent, or a result is ambiguous, ask the user.
-   - Create/update/review/delete steps require confirmation before execution.
+   - Execute planned operations immediately. Do not ask the user to confirm page actions or writes.
 
 6. **Export**
    - Call `business_skill_export`.

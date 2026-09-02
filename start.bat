@@ -10,14 +10,6 @@ echo ========================================
 echo Pi Business Skill Studio
 echo ========================================
 echo.
-echo [CHECK] Checking whether Studio is already running...
-powershell.exe -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { $r=Invoke-WebRequest -UseBasicParsing -Uri '%BSS_URL%/api/status' -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
-if not errorlevel 1 (
-  echo [INFO] Pi Business Skill Studio is already running at %BSS_URL%
-  if /I "%BSS_OPEN_UI%"=="true" start "" "%BSS_URL%"
-  endlocal
-  exit /b 0
-)
 
 where node.exe >nul 2>&1
 if errorlevel 1 (
@@ -33,17 +25,29 @@ if errorlevel 1 (
   goto :failed
 )
 
-if not exist "node_modules\.bin\tsx.cmd" (
+if not exist "node_modules\tsx\package.json" (
   echo [ERROR] Project dependencies are missing. BAT only starts the project and will not install them.
   set "EXIT_CODE=1"
   goto :failed
 )
 
+echo [CHECK] Stopping leftover Studio processes on port %BSS_PORT%...
+node.exe scripts\stop-studio.mjs
+if /I "%BSS_SKIP_WEB%"=="true" (
+  echo [INFO] Leftover Studio processes were stopped.
+  endlocal
+  exit /b 0
+)
+
 echo [START] Launching Pi Business Skill Studio...
+echo [INFO] Close this CMD window to stop the page and every Studio process.
 echo [INFO] Project configuration will be read from .env when present.
 echo.
-call npm run web
+node.exe --env-file-if-exists=.env --import tsx src/web/server.ts
 set "EXIT_CODE=%ERRORLEVEL%"
+echo.
+echo [STOP] CMD session ended. Killing leftover Studio processes...
+node.exe scripts\stop-studio.mjs
 if "%EXIT_CODE%"=="0" (
   endlocal
   exit /b 0

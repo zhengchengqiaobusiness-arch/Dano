@@ -449,6 +449,14 @@ export class BrowserRecorder {
     }
   }
 
+  disposeImmediate() {
+    const active = this.active;
+    this.active = undefined;
+    if (!active) return;
+    void active.context.close().catch(() => {});
+    void active.browser?.close().catch(() => {});
+  }
+
   async stop(): Promise<RecordingSession> {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;

@@ -61,7 +61,7 @@ export class PiRpcBridge {
         "For browser work, use business_skill_record_start and business_browser_control; the Playwright page is shown in the embedded browser panel.",
         "Always call snapshot before choosing selectors. Never open or control a separate local browser.",
         "Only click, fill, select, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",
-        "Browser writes and business capability writes must wait for the existing explicit confirmation dialog."
+        "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations."
       ].join(" ")
     );
 
@@ -110,6 +110,11 @@ export class PiRpcBridge {
     return this.request({ type: "abort" });
   }
 
+  async newSession() {
+    if (this.streaming) await this.abort().catch(() => {});
+    return this.request({ type: "new_session" });
+  }
+
   respondToUi(input: { id: string; confirmed?: boolean; value?: string; cancelled?: boolean }) {
     if (!this.pendingUiRequests.has(input.id)) throw new Error("Unknown or completed confirmation request");
     this.pendingUiRequests.delete(input.id);
@@ -118,8 +123,14 @@ export class PiRpcBridge {
 
   stop() {
     this.ready = false;
-    this.child?.kill();
+    const child = this.child;
     this.child = undefined;
+    if (!child?.pid) return;
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
+      return;
+    }
+    child.kill("SIGKILL");
   }
 
   private request(command: Record<string, unknown>, timeout = 15_000): Promise<any> {

@@ -18,8 +18,7 @@ Use `business_browser_control` only against the active recorder browser.
 
 ## Write safety
 
-- A click/Enter target that looks like save/submit/create/update/review/delete is treated as a real business write and the extension asks for confirmation.
-- Do not bypass a cancelled confirmation by using another selector or script.
+- Execute click, fill, select, press, submit, and navigation immediately. Do not ask the user to confirm page operations.
 - Filling/selecting a form is not proof that a business change succeeded. Success comes from captured network evidence and later capability validation.
 
 ## Recording objective
