@@ -8,6 +8,7 @@ import { chromium } from "playwright";
 import { loadConfig } from "../config.js";
 import { StudioService } from "../studio-service.js";
 import { PiRpcBridge } from "./pi-rpc.js";
+import { PiTranscript } from "./transcript.js";
 
 const host = "127.0.0.1";
 const port = Number(process.env.BSS_PORT || 4310);
@@ -17,19 +18,13 @@ const browserServiceToken = randomBytes(32).toString("hex");
 const studio = new StudioService({ ...loadConfig(), headless: true });
 const pi = new PiRpcBridge(process.cwd(), origin, browserServiceToken);
 
-type ChatMessage = { id: string; role: "user" | "assistant"; text: string; at: string };
 type BrowserInteractionMode = "manual" | "automatic";
 type RuntimeLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR";
-type RuntimeLogEntry = { id: number; at: string; level: RuntimeLogLevel; line: string };
-const chatMessages: ChatMessage[] = [];
-const runtimeLogs: RuntimeLogEntry[] = [];
 const eventClients = new Set<ServerResponse>();
 const secretValues = Object.entries(process.env)
   .filter(([key, value]) => /KEY|TOKEN|SECRET|PASSWORD/i.test(key) && typeof value === "string" && value.length >= 6)
   .map(([, value]) => value as string)
   .sort((left, right) => right.length - left.length);
-let assistantBuffer = "";
-let runtimeLogId = 0;
 let browserInteractionMode: BrowserInteractionMode = "automatic";
 
 const contentTypes: Record<string, string> = {
@@ -65,15 +60,22 @@ function safeLogMessage(value: unknown) {
 function runtimeLog(level: RuntimeLogLevel, message: unknown) {
   const safeMessage = safeLogMessage(message);
   const line = level === "PLAIN" ? safeMessage : `[${level}] ${safeMessage}`;
-  const entry: RuntimeLogEntry = { id: ++runtimeLogId, at: new Date().toISOString(), level, line };
-  runtimeLogs.push(entry);
-  if (runtimeLogs.length > 500) runtimeLogs.shift();
   if (level === "ERROR") console.error(line);
   else if (level === "WARN") console.warn(line);
   else console.log(line);
-  broadcast({ type: "runtime_log", entry });
-  return entry;
 }
+
+function sanitizeTranscript(value: unknown, key = "", depth = 0): unknown {
+  if (/KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION|COOKIE/i.test(key)) return "[REDACTED]";
+  if (depth > 8) return "[内容层级过深]";
+  if (typeof value === "string") return safeLogMessage(value).slice(0, 30_000);
+  if (Array.isArray(value)) return value.slice(0, 200).map(item => sanitizeTranscript(item, key, depth + 1));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .slice(0, 300).map(([childKey, child]) => [childKey, sanitizeTranscript(child, childKey, depth + 1)]));
+  return value;
+}
+
+const transcript = new PiTranscript(sanitizeTranscript);
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -118,57 +120,19 @@ function authorized(request: IncomingMessage) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-function messageText(message: any): string {
-  if (typeof message?.content === "string") return message.content;
-  if (!Array.isArray(message?.content)) return "";
-  return message.content
-    .filter((block: any) => block?.type === "text" && typeof block.text === "string")
-    .map((block: any) => block.text)
-    .join("\n");
-}
-
 pi.subscribe(event => {
+  for (const payload of transcript.handle(event)) broadcast(payload);
   if (event.type === "agent_ready") {
     broadcast({ type: "agent_status", ready: true, streaming: false });
     runtimeLog("READY", `Pi connected. Provider: ${process.env.PI_PROVIDER || "xiaomi-token-plan-cn"}; model: ${process.env.PI_MODEL || "provider default"}.`);
   }
   if (event.type === "agent_start") {
-    assistantBuffer = "";
     runtimeLog("PI", "Natural-language task started.");
     broadcast({ type: "agent_status", ready: true, streaming: true });
-    broadcast({ type: "assistant_start" });
-  }
-  if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-    const delta = String(event.assistantMessageEvent.delta || "");
-    assistantBuffer += delta;
-    broadcast({ type: "assistant_delta", delta });
-  }
-  if (event.type === "message_end" && event.message?.role === "assistant") {
-    const text = messageText(event.message) || assistantBuffer;
-    if (text) {
-      const message: ChatMessage = { id: `assistant-${Date.now()}`, role: "assistant", text, at: new Date().toISOString() };
-      chatMessages.push(message);
-      broadcast({ type: "assistant_done", message });
-    }
-    assistantBuffer = "";
   }
   if (event.type === "agent_settled") {
     broadcast({ type: "agent_status", ready: true, streaming: false });
     runtimeLog("PI", "Natural-language task completed.");
-  }
-  if (event.type === "tool_execution_start") {
-    runtimeLog("TOOL", `${event.toolName || "unknown tool"} started.`);
-    broadcast({ type: "tool_status", phase: "start", toolName: event.toolName, toolCallId: event.toolCallId });
-  }
-  if (event.type === "tool_execution_end") {
-    runtimeLog(event.isError ? "ERROR" : "TOOL", `${event.toolName || "unknown tool"} ${event.isError ? "failed" : "completed"}.`);
-    broadcast({
-      type: "tool_status",
-      phase: "end",
-      toolName: event.toolName,
-      toolCallId: event.toolCallId,
-      isError: Boolean(event.isError)
-    });
   }
   if (event.type === "extension_ui_request") {
     runtimeLog("WAIT", `Pi requested ${event.method || "user input"}.`);
@@ -195,12 +159,19 @@ pi.subscribe(event => {
   }
 });
 
-async function browserStart(url: string, name?: string) {
-  if (studio.recorder.isActive()) {
-    await studio.recorder.control({ action: "goto", url });
-    return studio.recorder.activeSession();
+async function resetWorkbench() {
+  transcript.clear();
+  broadcast({ type: "session_reset" });
+}
+
+async function browserStart(url: string, name?: string, options: { resetWorkbench?: boolean; abortAgent?: boolean } = {}) {
+  if (options.abortAgent && pi.status().streaming) {
+    await pi.abort().catch(() => {});
+    broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
   }
-  return studio.startRecording(url, name || "web-session");
+  const session = await studio.startRecording(url, name || "web-session");
+  if (options.resetWorkbench !== false) resetWorkbench();
+  return session;
 }
 
 async function browserState() {
@@ -228,14 +199,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       model: process.env.PI_MODEL || null,
       provider: process.env.PI_PROVIDER || "xiaomi-token-plan-cn",
       thinking: process.env.PI_THINKING || "medium",
-      messages: chatMessages,
-      logs: runtimeLogs
+      sessionItems: transcript.items
     });
-    return;
-  }
-
-  if (request.method === "GET" && pathname === "/api/logs") {
-    sendJson(response, 200, { logs: runtimeLogs });
     return;
   }
 
@@ -256,64 +221,6 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       "Cache-Control": "no-store, max-age=0"
     });
     response.end(frame);
-    return;
-  }
-
-  if (request.method === "GET" && pathname === "/api/catalog") {
-    const capabilities = await studio.capabilities();
-    const routes = await studio.routes();
-    sendJson(response, 200, {
-      capabilities,
-      routes,
-      summary: {
-        total: capabilities.length,
-        verified: capabilities.filter(item => item.validation.status === "verified").length,
-        candidates: capabilities.filter(item => item.validation.status === "candidate").length,
-        fields: capabilities.reduce((count, item) => count + item.inputForm.length, 0),
-        approvedBindings: capabilities.reduce((count, item) => count + item.bindings.filter(binding => binding.approved).length, 0)
-      }
-    });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/api/catalog/analyze") {
-    const body = await readJsonBody(request);
-    const capabilities = await studio.analyze(typeof body.sessionId === "string" ? body.sessionId : undefined, body.useLlm !== false);
-    sendJson(response, 200, { capabilities });
-    broadcast({ type: "catalog_changed" });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/api/catalog/validate") {
-    const capabilities = await studio.validate();
-    sendJson(response, 200, { capabilities });
-    broadcast({ type: "catalog_changed" });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/api/bindings/approve") {
-    const body = await readJsonBody(request);
-    if (body.confirmed !== true) throw new Error("确认数据绑定前必须取得明确确认");
-    const capability = await studio.approveBinding(body);
-    sendJson(response, 200, capability);
-    broadcast({ type: "catalog_changed" });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/api/candidates/configure") {
-    const body = await readJsonBody(request);
-    if (body.confirmed !== true) throw new Error("配置动态候选前必须取得明确确认");
-    const capability = await studio.setDynamicCandidates(body);
-    sendJson(response, 200, capability);
-    broadcast({ type: "catalog_changed" });
-    return;
-  }
-
-  const capabilityMatch = pathname.match(/^\/api\/capabilities\/([^/]+)$/);
-  if (request.method === "PATCH" && capabilityMatch) {
-    const capability = await studio.updateCapability(decodeURIComponent(capabilityMatch[1]!), await readJsonBody(request));
-    sendJson(response, 200, capability);
-    broadcast({ type: "catalog_changed" });
     return;
   }
 
@@ -350,9 +257,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     }
     if (request.method === "POST" && action === "invoke") {
       const invocation = await studio.invokeSkill(name, typeof body.goal === "string" ? body.goal : "");
-      const message: ChatMessage = { id: `user-${Date.now()}`, role: "user", text: invocation.prompt, at: new Date().toISOString() };
-      chatMessages.push(message);
-      broadcast({ type: "user_message", message });
+      const userEvent = transcript.addUser(invocation.prompt);
+      broadcast(userEvent);
       await pi.prompt(invocation.prompt);
       sendJson(response, 202, { accepted: true, skill: invocation.record.name });
       return;
@@ -362,8 +268,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   if (request.method === "POST" && pathname === "/api/browser/open") {
     const body = await readJsonBody(request);
     if (body.mode !== undefined) setBrowserMode(parseBrowserMode(body.mode));
-    const session = await browserStart(parseBrowserUrl(body.url), body.name);
-    runtimeLog("BROWSER", `${browserInteractionMode === "manual" ? "Manual" : "Pi automatic"} recording session started.`);
+    const session = await browserStart(parseBrowserUrl(body.url), body.name, { abortAgent: true });
+    runtimeLog("BROWSER", `${browserInteractionMode === "manual" ? "Manual" : "Pi automatic"} recording session started; previous recording and workbench were cleared.`);
     sendJson(response, 200, { session, state: await browserState() });
     broadcast({ type: "browser_changed" });
     return;
@@ -404,11 +310,10 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     const messageText = typeof body.message === "string" ? body.message.trim() : "";
     if (!messageText) throw new Error("A message is required");
-    const message: ChatMessage = { id: `user-${Date.now()}`, role: "user", text: messageText, at: new Date().toISOString() };
-    chatMessages.push(message);
-    broadcast({ type: "user_message", message });
+    const userEvent = transcript.addUser(messageText);
+    broadcast(userEvent);
     await pi.prompt(messageText);
-    sendJson(response, 202, { accepted: true, message });
+    sendJson(response, 202, { accepted: true, item: userEvent.item });
     return;
   }
 

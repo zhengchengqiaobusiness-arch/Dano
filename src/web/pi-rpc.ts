@@ -57,6 +57,7 @@ export class PiRpcBridge {
       "--append-system-prompt",
       [
         "You are running inside the Pi Business Skill Studio web interface.",
+        "思考过程、阶段状态、工具使用说明和最终回答均使用简体中文；必要的代码、接口路径、字段名和工具名保持原样。",
         "For browser work, use business_skill_record_start and business_browser_control; the Playwright page is shown in the embedded browser panel.",
         "Always call snapshot before choosing selectors. Never open or control a separate local browser.",
         "Only click, fill, select, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",

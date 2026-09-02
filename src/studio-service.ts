@@ -47,6 +47,7 @@ export class StudioService {
   }
 
   async startRecording(url: string, name?: string) {
+    if (this.recorder.isActive()) await this.stopRecording();
     return this.recorder.start(url, name);
   }
 
