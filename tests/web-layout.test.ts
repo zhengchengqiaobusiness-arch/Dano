@@ -142,9 +142,45 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(browserSkill, /recentUserActions/);
   assert.match(browserSkill, /#el-id-\*/);
   assert.match(browserSkill, /YYYY-MM-DD/);
+  assert.match(browserSkill, /todoFields|exercise-form/);
+  assert.match(bridge, /todoFields|exercise-form|todoCount/);
   assert.match(bridge, /never click the dim overlay|Never click text=2/);
+  assert.match(bridge, /Windows|Never use bash|WSL/);
+  assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);
   assert.match(bridge, /sessionId from record_stop|主能力 and 字段候选接口/);
   assert.match(extension, /本次录制主能力|已导出主能力/);
+});
+
+test("Windows Pi host uses powershell instead of bash", async () => {
+  const [settings, bridge, studioSkill, browserSkill] = await Promise.all([
+    readFile(path.join(root, ".pi", "settings.json"), "utf8"),
+    readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8"),
+    readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8"),
+    readFile(path.join(root, ".pi", "skills", "control-in-app-browser", "SKILL.md"), "utf8")
+  ]);
+  assert.match(settings, /"powershell"/);
+  assert.doesNotMatch(settings, /"bash"/);
+  assert.match(bridge, /exclude-tools["', ]+bash/);
+  assert.match(bridge, /The bash tool is disabled/);
+  assert.match(studioSkill, /bash tool is disabled|use powershell/);
+  assert.match(browserSkill, /bash tool is disabled|use powershell/);
+});
+
+test("skill catalog distinguishes handbook export from business spec dump", async () => {
+  const [html, app] = await Promise.all([
+    readFile(path.join(root, "web", "index.html"), "utf8"),
+    readFile(path.join(root, "web", "app.js"), "utf8")
+  ]);
+  assert.match(html, /执行手册，不是业务说明书/);
+  assert.match(html, /dist\/skills/);
+  assert.match(html, /SKILL.md 路由手册/);
+  assert.match(html, /主能力索引/);
+  assert.match(html, /例如 采购订单/);
+  assert.match(app, /\["主能力"/);
+  assert.match(app, /\["字段候选"/);
+  assert.match(app, /已导出主能力/);
+  assert.doesNotMatch(html, /\.business-skill-studio\/export/);
+  assert.doesNotMatch(app, /\["业务能力"/);
 });
 
 test("capability catalog UI and HTTP surface are gone", async () => {

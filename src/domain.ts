@@ -27,7 +27,7 @@ export interface UiEvidence {
   sessionId: string;
   at: string;
   pageUrl: string;
-  eventType: "click" | "input" | "change" | "submit";
+  eventType: "click" | "input" | "change" | "submit" | "snapshot";
   selector?: string;
   tag?: string;
   role?: string;
@@ -209,12 +209,21 @@ export interface SkillRecord {
   version: number;
   status: SkillLifecycleStatus;
   capabilityIds: string[];
+  primaryCapabilityIds?: string[];
+  lookupCapabilityIds?: string[];
   routeIds: string[];
   exportedAt: string;
   updatedAt: string;
   frozenAt?: string;
   deletedAt?: string;
   recoverableFrom?: string;
+}
+
+export interface SkillListItem extends SkillRecord {
+  artifactStatus: "ready" | "missing";
+  fileCount: number;
+  primaryCount: number;
+  lookupCount: number;
 }
 
 export interface PlanStep {

@@ -98,9 +98,12 @@ test("exports a progressively disclosed Python Skill package", async () => {
     const result = await exportSkill(temporary, "销售订单审核", [query, review]);
     assert.equal(result.skillName, "review-order");
     for (const relative of [
-      "SKILL.md", "references/CONTRACT.json", "references/reference.md", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
-      "references/OPTIONS.md", "scripts/execute.py", "scripts/candidates.py", "scripts/format_list.py"
+      "SKILL.md", "references/CONTRACT.json", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
+      "references/OPTIONS.md", "references/routes/route-review-order.md",
+      "scripts/execute.py", "scripts/candidates.py", "scripts/format_list.py"
     ]) await stat(path.join(result.dir, relative));
+    await assert.rejects(stat(path.join(result.dir, "references", "EVIDENCE.md")));
+    await assert.rejects(stat(path.join(result.dir, "references", "reference.md")));
     await execFileAsync("python", ["-m", "py_compile",
       path.join(result.dir, "scripts", "execute.py"), path.join(result.dir, "scripts", "candidates.py"), path.join(result.dir, "scripts", "format_list.py")
     ]);
@@ -108,15 +111,34 @@ test("exports a progressively disclosed Python Skill package", async () => {
       await execFileAsync("python", [process.env.SKILL_QUICK_VALIDATE, result.dir]);
     }
     const skill = await readFile(path.join(result.dir, "SKILL.md"), "utf8");
+    const capabilities = await readFile(path.join(result.dir, "references", "CAPABILITIES.md"), "utf8");
+    const forms = await readFile(path.join(result.dir, "references", "INPUT_FORMS.md"), "utf8");
+    const route = await readFile(path.join(result.dir, "references", "routes", "route-review-order.md"), "utf8");
     assert.match(skill, /Prefer HTTP/);
     assert.match(skill, /ask_user_question/);
     assert.match(skill, /approved: true/);
-    assert.match(skill, /Python/);
-    assert.doesNotMatch(skill, /生成器实现|TypeScript|execute\.mjs/);
+    assert.match(skill, /何时使用/);
+    assert.match(skill, /何时不要使用/);
+    assert.match(skill, /能力怎么组合/);
+    assert.match(skill, /何时走哪条原子操作/);
+    assert.match(skill, /何时可以按已确认绑定串联/);
+    assert.match(skill, /何时必须停下来问人/);
+    assert.match(skill, /按需读取/);
+    assert.match(skill, /INPUT_FORMS\.md/);
+    assert.doesNotMatch(skill, /生成器实现|TypeScript|execute\.mjs|src\/export|录制样本当成默认查询条件/);
+    assert.doesNotMatch(skill, /### 查询销售订单[\s\S]*参数名/);
+    assert.match(capabilities, /查询销售订单/);
+    assert.match(capabilities, /审核销售订单/);
+    assert.match(forms, /ask_user_question/);
+    assert.match(forms, /comment/);
+    assert.match(route, /自然语言组合/);
+    assert.match(route, /可执行约定/);
+    assert.match(route, /find-orders/);
     const contract = JSON.parse(await readFile(path.join(result.dir, "references", "CONTRACT.json"), "utf8"));
     assert.equal(contract.schemaVersion, "2.0");
     assert.equal(contract.routes.length, 1);
     assert.equal(contract.capabilities.every((item: any) => item.validation.status === "verified"), true);
+    assert.equal(contract.capabilities.find((item: any) => item.id === "review-order")?.role, "primary");
     const reviewContract = contract.capabilities.find((item: any) => item.id === "review-order");
     assert.equal(reviewContract.inputQuestions[0].id, "comment");
     assert.match(reviewContract.inputQuestions[0].defaultStrategy, /不复制录制样本/);

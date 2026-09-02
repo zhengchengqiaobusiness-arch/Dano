@@ -71,7 +71,6 @@ Pi 的页面读取、点击、填写、选择和截图全部作用于前端显�
 │   ├── CAPABILITIES.md
 │   ├── INPUT_FORMS.md
 │   ├── OPTIONS.md
-│   ├── EVIDENCE.md
 │   └── routes/
 └── scripts/
     ├── execute.py
@@ -79,9 +78,11 @@ Pi 的页面读取、点击、填写、选择和截图全部作用于前端显�
     └── format_list.py
 ```
 
-`references/CONTRACT.json` 是能力、字段、绑定、路线和完成条件的唯一机器事实来源。`SKILL.md` 只保留选择、询问、确认、执行和验收规则；能力索引、当前表单、候选项与组合路线按需加载，避免一次性塞入全部上下文。
+`SKILL.md` 是路由手册：何时用、何时不用、能力怎么组合，以及规划结束后的可执行约定——何时走哪条原子操作、何时可以按 `approved: true` 绑定串联、何时必须停下来问人。它不是业务说明书，也不写生成过程或代码结构。
 
-导出的 Skill 不包含生成器实现过程、项目代码结构、录制时凭据、Cookie 或 secret-bearing headers。运行时认证通过 `SKILL_AUTH_HEADERS` 环境变量提供。
+`references/CONTRACT.json` 是能力、字段、绑定、路线和完成条件的唯一机器事实来源。能力索引、当前表单、候选项与组合路线按需加载。产品、供应商、账户、人员等目录接口只作为字段候选，不作为独立业务能力。
+
+导出的 Skill 不包含生成器实现过程、项目代码结构、录制证据清单、凭据、Cookie 或 secret-bearing headers。运行时认证通过 `SKILL_AUTH_HEADERS` 环境变量提供。
 
 ## 修改 Skill 还是修改平台
 

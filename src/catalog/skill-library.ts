@@ -1,6 +1,6 @@
 import path from "node:path";
-import { rename, stat } from "node:fs/promises";
-import type { CapabilityContract, SkillRecord } from "../domain.js";
+import { readdir, rename, stat } from "node:fs/promises";
+import type { CapabilityContract, SkillListItem, SkillRecord } from "../domain.js";
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
 import { ensureDir, readJson, writeJson } from "../utils.js";
 
@@ -11,6 +11,15 @@ async function exists(target: string) {
   } catch (error: any) {
     if (error?.code === "ENOENT") return false;
     throw error;
+  }
+}
+
+async function countFiles(directory: string) {
+  try {
+    const entries = await readdir(directory, { withFileTypes: true, recursive: true });
+    return entries.filter(entry => entry.isFile()).length;
+  } catch {
+    return 0;
   }
 }
 
@@ -38,11 +47,37 @@ export class SkillLibrary {
     return readJson<SkillRecord[]>(this.registryFile, []);
   }
 
-  async list(includeDeleted = false) {
+  async list(includeDeleted = false): Promise<SkillListItem[]> {
     const records = await this.allRecords();
-    return records
+    const visible = records
       .filter(record => includeDeleted || record.status !== "deleted")
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return Promise.all(visible.map(record => this.enrich(record)));
+  }
+
+  private async enrich(record: SkillRecord): Promise<SkillListItem> {
+    const skillFile = path.join(record.directory, "SKILL.md");
+    const present = await exists(skillFile);
+    let primaryIds = record.primaryCapabilityIds;
+    let lookupIds = record.lookupCapabilityIds;
+    if ((!primaryIds || !lookupIds) && present) {
+      const contract = await readJson<{ capabilities?: Array<{ id: string; role?: string }> }>(
+        path.join(record.directory, "references", "CONTRACT.json"),
+        { capabilities: [] }
+      );
+      const capabilities = contract.capabilities || [];
+      primaryIds ||= capabilities.filter(item => item.role !== "lookup").map(item => item.id);
+      lookupIds ||= capabilities.filter(item => item.role === "lookup").map(item => item.id);
+    }
+    return {
+      ...record,
+      primaryCapabilityIds: primaryIds,
+      lookupCapabilityIds: lookupIds,
+      artifactStatus: present ? "ready" : "missing",
+      fileCount: present ? await countFiles(record.directory) : 0,
+      primaryCount: primaryIds?.length ?? record.capabilityIds.length,
+      lookupCount: lookupIds?.length ?? 0
+    };
   }
 
   private async save(records: SkillRecord[]) {
@@ -78,6 +113,8 @@ export class SkillLibrary {
       version: (previous?.version || 0) + 1,
       status: "active",
       capabilityIds: exported.capabilityIds,
+      primaryCapabilityIds: exported.primaryCapabilityIds,
+      lookupCapabilityIds: exported.lookupCapabilityIds,
       routeIds: exported.routeIds,
       exportedAt: now,
       updatedAt: now
@@ -86,10 +123,8 @@ export class SkillLibrary {
     next.push(record);
     await this.save(next);
     return {
-      ...record,
+      ...await this.enrich(record),
       count: exported.count,
-      primaryCount: exported.primaryCount,
-      lookupCount: exported.lookupCount,
       primaryCapabilityIds: exported.primaryCapabilityIds,
       lookupCapabilityIds: exported.lookupCapabilityIds
     };
@@ -104,7 +139,7 @@ export class SkillLibrary {
     record.frozenAt = frozen ? new Date().toISOString() : undefined;
     record.updatedAt = new Date().toISOString();
     await this.save(records);
-    return record;
+    return this.enrich(record);
   }
 
   async delete(name: string, confirmed: boolean) {
@@ -124,7 +159,7 @@ export class SkillLibrary {
     record.updatedAt = record.deletedAt;
     record.recoverableFrom = recoverableFrom;
     await this.save(records);
-    return record;
+    return { ...await this.enrich(record), recoverableFrom };
   }
 
   async invocation(name: string, goal: string) {
@@ -133,7 +168,7 @@ export class SkillLibrary {
     if (!goal.trim()) throw new Error("请描述要完成的业务目标");
     return {
       record,
-      prompt: `请严格按照 ${path.join(record.directory, "SKILL.md")} 中的 Skill 执行以下业务目标。只使用合同中已验证的能力和 approved: true 的绑定；遇到歧义先询问，写操作执行前单独确认。\n\n业务目标：${goal.trim()}`
+      prompt: `请严格按照 ${path.join(record.directory, "SKILL.md")} 路由手册执行以下业务目标。先规划再按手册约定执行；只使用已验证主能力和 approved: true 的绑定。字段候选不是独立业务。遇到歧义先询问，写操作执行前单独确认。按需读取 references，不要一开始读完全部文件。\n\n业务目标：${goal.trim()}`
     };
   }
 }

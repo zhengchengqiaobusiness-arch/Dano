@@ -401,7 +401,7 @@ function renderSkills() {
     const name = document.createElement("h2"); name.textContent = skill.displayName; const slug = document.createElement("code"); slug.textContent = skill.name; title.append(name, slug);
     const status = document.createElement("span"); status.className = `skill-status ${skill.status}`; status.textContent = skill.status === "frozen" ? "已冻结" : "可用"; heading.append(title, status);
     const facts = document.createElement("div"); facts.className = "skill-facts";
-    [["版本", `v${skill.version}`], ["业务能力", skill.capabilityIds.length], ["成品文件", skill.fileCount ?? 0], ["最近导出", timeLabel(skill.exportedAt)]].forEach(([label, value]) => {
+    [["版本", `v${skill.version}`], ["主能力", skill.primaryCount ?? skill.primaryCapabilityIds?.length ?? skill.capabilityIds.length], ["字段候选", skill.lookupCount ?? skill.lookupCapabilityIds?.length ?? 0], ["成品文件", skill.fileCount ?? 0]].forEach(([label, value]) => {
       const fact = document.createElement("span"); fact.innerHTML = `<small>${label}</small><strong>${value}</strong>`; facts.append(fact);
     });
     const location = document.createElement("div"); location.className = `skill-location ${skill.artifactStatus === "missing" ? "missing" : ""}`;
@@ -429,7 +429,7 @@ function renderSkills() {
 async function exportSkill(name) {
   if (!(await confirmAction("导出 Python Skill", `将把当前全部已验证能力导出为“${name}”。未验证能力不会进入包。是否继续？`, false))) return;
   const result = await api("/api/skills/export", { method: "POST", body: JSON.stringify({ name, confirmed: true }) });
-  showToast(`已导出 ${result.capabilityIds.length} 项能力，共 ${result.fileCount} 个文件：${result.directory}`); await loadSkills();
+  showToast(`已导出主能力 ${result.primaryCount ?? 0} 项、字段候选 ${result.lookupCount ?? 0} 个，共 ${result.fileCount ?? 0} 个文件：${result.directory}`); await loadSkills();
 }
 
 async function skillAction(skill, action) {
