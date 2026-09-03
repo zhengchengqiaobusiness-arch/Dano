@@ -36,7 +36,11 @@ function near(left: number, right: number) {
 }
 
 function rowIdentity(row: Record<string, unknown>) {
-  return row.id ?? row.value ?? row.code;
+  for (const key of ["id", "value", "code", "key"]) {
+    const value = row[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
 }
 
 function headerRecord(sample: unknown) {
@@ -217,10 +221,10 @@ function isEnvelopePath(path: string, fieldName: string) {
 
 function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, row: Record<string, unknown> | undefined) {
   if (!row) {
-    return joins.find(item => fieldScope(field.path) === item.scope) || joins[0];
+    return joins.find(item => item.name !== field.name && fieldScope(field.path) === item.scope) || joins.find(item => item.name !== field.name);
   }
   const identity = rowIdentity(row);
-  const matched = joins.filter(item => sameValue(item.value, identity));
+  const matched = joins.filter(item => item.name !== field.name && sameValue(item.value, identity));
   if (!matched.length) return undefined;
   return matched.find(item => fieldScope(item.path) === fieldScope(field.path)) || matched[0];
 }
@@ -228,7 +232,6 @@ function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, 
 function lookupEvents(events: EvidenceEvent[]) {
   return events.filter((event): event is NetworkEvidence =>
     event.kind === "network"
-    && event.request.method.toUpperCase() === "GET"
     && Boolean(event.response && event.response.status >= 200 && event.response.status < 400)
   );
 }
@@ -254,7 +257,10 @@ function fromApiMatch(
         Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
       );
       const via = leaf.row ? pickVia(field, joins, leaf.row) : queryJoin;
-      if (leaf.row && !via) continue;
+      if (leaf.row && !via) {
+        const siblings = responseHits(event.response?.body).filter(item => item.path === leaf.path);
+        if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
+      }
       hits.push({
         capabilityId: capability.id,
         fromPath: leaf.path,
@@ -274,6 +280,7 @@ function emptyDefault(field: InputFormField, value: unknown) {
   if (/balance|stock|库存|余额/i.test(`${field.name} ${field.label}`)) return undefined;
   if (field.sourceDetail?.includes("只读")) return undefined;
   if (Array.isArray(value) && value.length === 0) return "literal:[]";
+  if (value === "") return "literal:\"\"";
   if (value === 0) return "literal:0";
   if (value === false) return "literal:false";
   return undefined;

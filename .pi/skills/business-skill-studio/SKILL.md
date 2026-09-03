@@ -21,7 +21,8 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - `exercise-form` must leave required numbers greater than 0 and later date/time fields later than earlier ones, including both ends of a range picker (`rangeIndex`). If a write page computes duration from dates, fix the dates; do not stop because a required number shows `0`.
    - After a write submit: snapshot once. If there is still no successful write response after the allowed `exercise-form` / `submit-form` budget, follow recorded manual steps or ask the user to finish the page in 手动录制. Do not loop. Do not analyze or export a planned 新增/修改/审核/删除 with no successful write response. `submit-form` only clicks a button in the active scope; when both search and write buttons exist, it prefers 提交/确定.
    - Do not click the page title to close pickers and do not press Escape.
-   - If `snapshot.recentUserActions` already contains the user's manual clicks or fills, keep those values; still fill remaining empty fields when complete coverage was requested.
+   - If `snapshot.recentUserActions` already contains the user's manual clicks or fills, keep those values; still fill remaining empty fields when complete coverage was requested. Manual clicks in Pi automatic mode, or typing in the headed page, must record the same field labels, final values, options and write request as `exercise-form`. A bare click without a form inventory is not enough to export a Skill.
+   - When the user says 手动录制完毕, stop this session and analyze it. Do not start a new recording just because Chinese labels do not match request keys; bind by unique values, recorded lists, and page-context IDs from this session.
    - Capture actual UI events, field choices, requests, responses, and statuses.
    - Call `business_skill_record_stop`.
 

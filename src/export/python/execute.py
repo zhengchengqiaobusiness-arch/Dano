@@ -221,7 +221,11 @@ def extract_joined(body: Any, json_path: str, via_value: Any = None) -> Any:
             )
         ]
         matched = [item for item in matched if item is not None]
-        return matched[0] if len(matched) == 1 else None
+        if len(matched) == 1:
+            return matched[0]
+        if via_value is None and matched and len({str(item) for item in matched}) == 1:
+            return matched[0]
+        return None
     return get_by_path(body, json_path)
 
 
