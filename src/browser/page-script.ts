@@ -148,6 +148,13 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const selectorOf = (el) => {
+    const actionRole = el.getAttribute("role") || "";
+    if (el.matches("button, [type='submit'], [type='button']") || actionRole === "button" || actionRole === "tab") {
+      const name = clean(el.getAttribute("aria-label") || el.textContent || "");
+      if (name && name.length <= 40 && !generatedName(name) && !PLUS_ONLY.test(name)) {
+        return "role=" + (actionRole || "button") + "[name=\"" + name + "\"]";
+      }
+    }
     const placeholder = identityPlaceholder(el) || "";
     if (placeholder) return "placeholder=" + placeholder;
     if (el.id && !generatedName(el.id)) return "#" + CSS.escape(el.id);
@@ -449,16 +456,24 @@ export const PAGE_HELPERS = String.raw`
       }
       return pickFrom(uniqueControls(siblingControls));
     };
-    for (const lab of queryDeep(root, "label")) {
-      if (labelTextOf(lab) !== want && labelTextOf(lab) !== base) continue;
-      const picked = afterLabel(lab);
-      if (picked) return picked;
+    const exactLabs = [];
+    const seenLab = new Set();
+    for (const lab of queryDeep(root, "label, " + FORM_LABEL_SEL)) {
+      if (labelTextOf(lab) !== want || seenLab.has(lab) || !isVisible(lab)) continue;
+      seenLab.add(lab);
+      exactLabs.push(lab);
     }
-    const candidates = queryDeep(root, FORM_LABEL_SEL + ", span, p, div, dt, legend, h2, h3, h4, [class*='label'], [class*='title'], [class*='name'], [class*='head']")
-      .filter((el) => isVisible(el) && !el.matches("h1, nav, header") && (labelTextOf(el) === want || labelTextOf(el) === base) && labelTextOf(el).length <= 40);
-    for (const lab of candidates) {
-      const picked = afterLabel(lab);
-      if (picked) return picked;
+    if (numbered || exactLabs.length <= 1) {
+      for (const lab of exactLabs) {
+        const picked = afterLabel(lab);
+        if (picked) return picked;
+      }
+      const candidates = queryDeep(root, FORM_LABEL_SEL + ", span, p, div, dt, legend, h2, h3, h4, [class*='label'], [class*='title'], [class*='name'], [class*='head']")
+        .filter((el) => isVisible(el) && !el.matches("h1, nav, header") && (labelTextOf(el) === want || labelTextOf(el) === base) && labelTextOf(el).length <= 40);
+      for (const lab of candidates) {
+        const picked = afterLabel(lab);
+        if (picked) return picked;
+      }
     }
     for (const el of queryDeep(root, FIELD_CONTROL_SEL)) {
       if (!isFieldControl(el) || isChooserFilter(el)) continue;

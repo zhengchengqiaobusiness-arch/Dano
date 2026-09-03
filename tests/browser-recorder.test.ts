@@ -1300,6 +1300,120 @@ test("exercise-form covers kit-agnostic choosers, nearby labels, shadow fields a
   }
 });
 
+test("form contract: unique locate, chooser is not a typed sample, submit needs a write request", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-contract-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":{"id":3}}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>合同页</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">名称</label>
+          <input id="name-a" placeholder="请输入名称甲">
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">名称</label>
+          <input id="name-b" placeholder="请输入名称乙">
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">状态</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择</span>
+              <input id="status" role="combobox" readonly placeholder="请选择">
+            </div>
+          </div>
+        </div>
+        <button type="submit" id="save">提交</button>
+      </form>
+      <ul id="status-options" class="el-select-dropdown" hidden>
+        <li role="option">启用</li>
+        <li role="option">停用</li>
+      </ul>
+      <script>
+        const bound = { nameA: "", nameB: "", status: "" };
+        document.getElementById("status").addEventListener("click", event => event.stopPropagation());
+        document.querySelector(".el-select").addEventListener("click", () => {
+          document.getElementById("status-options").hidden = false;
+        });
+        document.getElementById("status-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.status = option.textContent;
+          document.querySelector(".el-select__placeholder").textContent = option.textContent;
+          document.getElementById("status").value = option.textContent;
+          document.getElementById("status-options").hidden = true;
+        });
+        document.getElementById("name-a").addEventListener("input", event => { bound.nameA = event.target.value; });
+        document.getElementById("name-b").addEventListener("input", event => { bound.nameB = event.target.value; });
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.nameA = bound.nameA || document.getElementById("name-a").value;
+          bound.nameB = bound.nameB || document.getElementById("name-b").value;
+          if (!bound.nameA || !bound.nameB || !bound.status) return;
+          fetch("/api/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(bound)
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "contract");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    assert.equal(labels.filter((label: string) => /^名称/.test(label)).length >= 2, true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /状态/.test(label)), true, JSON.stringify(before.todoFields));
+    await assert.rejects(() => recorder.control({ action: "click", selector: "label=名称" }));
+    const blocked: any = await recorder.control({ action: "submit-form" });
+    assert.equal(blocked.ok, false, JSON.stringify(blocked));
+    assert.equal(created.length, 0);
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    const status = String((result.formFields || []).find((field: any) => /状态/.test(String(field.label || "")))?.value || "");
+    assert.match(status, /用/);
+    assert.equal(/^样例-/.test(status), false, status);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(submitted.sawRequest, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as { nameA?: string; nameB?: string; status?: string };
+    assert.match(String(payload.nameA || ""), /样例/);
+    assert.match(String(payload.nameB || ""), /样例/);
+    assert.notEqual(payload.nameA, payload.nameB);
+    assert.match(String(payload.status || ""), /用/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

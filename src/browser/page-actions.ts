@@ -169,6 +169,22 @@ export class PageActions {
     return typeof (root as Frame).url === "function" ? (root as Frame).locator("body") : root as Locator;
   }
 
+  private async uniqueField(root: Frame | Locator, name: string) {
+    const scope = this.scopeRoot(root);
+    for (const candidate of [
+      scope.getByRole("combobox", { name, exact: true }),
+      scope.getByRole("textbox", { name, exact: true }),
+      scope.getByRole("radio", { name, exact: true }),
+      scope.getByRole("checkbox", { name, exact: true }),
+      scope.getByRole("button", { name, exact: true }),
+      scope.getByPlaceholder(name, { exact: true })
+    ]) {
+      const unique = candidate.filter({ visible: true });
+      if (await unique.count() === 1) return unique.first();
+    }
+    return undefined;
+  }
+
   private async labeledControl(root: Frame | Locator, name: string) {
     const mark = `bss-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const scope = this.scopeRoot(root);
@@ -182,7 +198,7 @@ export class PageActions {
     if (await found.isVisible().catch(() => false)) return found;
     const host = found.locator("xpath=ancestor-or-self::*[contains(@class,'select') or contains(@class,'picker') or contains(@class,'cascader') or @role='combobox'][1]");
     if (await host.count() && await host.first().isVisible().catch(() => false)) return host.first();
-    return undefined;
+    return found;
   }
 
   isDayTextSelector(selector: string) {
@@ -226,37 +242,25 @@ export class PageActions {
         for (const scope of scopes) {
           if (fieldOnly && /^label=/i.test(selector)) {
             const name = selector.replace(/^label=/i, "");
-            const table = await this.tableControl(scope, name);
-            if (table) return table;
             const labeled = await this.labeledControl(scope, name);
             if (labeled) return labeled;
-            for (const candidate of [
-              this.scopeRoot(scope).getByLabel(name, { exact: true }),
-              this.scopeRoot(scope).getByRole("combobox", { name, exact: true }),
-              this.scopeRoot(scope).getByRole("textbox", { name, exact: true }),
-              this.scopeRoot(scope).getByRole("button", { name, exact: true }),
-              this.scopeRoot(scope).getByPlaceholder(name, { exact: true })
-            ]) {
-              const unique = candidate.filter({ visible: true });
-              if (await unique.count() === 1) return unique.first();
-            }
+            const table = await this.tableControl(scope, name);
+            if (table) return table;
+            const unique = await this.uniqueField(scope, name);
+            if (unique) return unique;
             continue;
           }
           const found = this.locatorIn(scope, selector).filter({ visible: true });
-          if (await found.count() === 1) {
+          const count = await found.count();
+          if (count === 1) {
             const item = found.first();
             if (textOnly && await this.isNavigationTarget(item)) continue;
             return item;
           }
-          if (await found.count() > 1 && !fieldOnly) {
+          if (count > 1 && fieldOnly) continue;
+          if (count > 1 && textOnly && ((dialog && scope === dialog) || (await dropdown.count() && scope === dropdown))) {
             const item = found.first();
-            if (textOnly && await this.isNavigationTarget(item)) continue;
-            return item;
-          }
-          if (fieldOnly) {
-            const name = selector.replace(/^(label|placeholder)=/i, "");
-            const table = await this.tableControl(scope, name);
-            if (table) return table;
+            if (!(await this.isNavigationTarget(item))) return item;
           }
         }
       }
@@ -272,8 +276,11 @@ export class PageActions {
       await this.pickCalendarDay(day || String(new Date().getDate()));
       return { ok: true, url: this.page().url() };
     }
-    const intent = this.isFieldSelector(selector) ? "field" : "button";
-    await this.clickSafely(await this.clickTarget(selector), intent);
+    if (this.isFieldSelector(selector)) {
+      await this.hostClick(await this.clickTarget(selector));
+      return { ok: true, url: this.page().url() };
+    }
+    await this.clickSafely(await this.locate(selector), "button");
     return { ok: true, url: this.page().url() };
   }
 
@@ -310,38 +317,37 @@ export class PageActions {
     const locator = await this.locate(selector);
     const mark = `bss-click-${Date.now().toString(36)}`;
     const marked = await locator.evaluate((el, token) => {
-      const start = el.matches("input, textarea") ? (el.parentElement || el) : el;
-      let best = start;
-      let node: Element | null = start;
-      for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
-        const box = node.getBoundingClientRect();
-        if (box.height > 72 || box.width > 720) break;
-        if (node !== start && node.matches("[class*='form-item'], [class*='form-field'], [role='group'], td, th, [class*='table-cell'], [class*='table__cell']")) break;
+      const isChooserHost = (node: Element) => {
         const cls = String(node.className || "");
-        const chooser = (node.getAttribute("role") === "combobox" && !node.matches("input, textarea"))
-          || Boolean(node.getAttribute("aria-haspopup"))
-          || node.hasAttribute("aria-expanded")
-          || (/(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls))
-          || (/(?:^|\s|_|-)(select|picker|cascader|date-editor)(?:\s|$|_)/i.test(cls) && !/dropdown|panel|item|option/i.test(cls));
-        best = node;
-        if (chooser) break;
+        if (node.getAttribute("role") === "combobox" && !node.matches("input, textarea")) return true;
+        return /(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls);
+      };
+      let best = el;
+      let node: Element | null = el.parentElement;
+      for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
+        if (node.matches("[class*='form-item'], [class*='form-field'], [role='group'], td, th, [class*='table-cell'], [class*='table__cell']")) break;
+        if (isChooserHost(node)) {
+          best = node;
+          break;
+        }
       }
       best.setAttribute("data-bss-click", token);
       return true;
     }, mark).catch(() => false);
     if (marked) {
-      const surfaces = [
-        this.page().locator(`[data-bss-click="${mark}"]`),
-        locator.locator(`xpath=ancestor-or-self::*[@data-bss-click="${mark}"][1]`)
-      ];
-      for (const surface of surfaces) {
-        const visible = surface.filter({ visible: true });
-        if (await visible.count()) return visible.first();
-      }
+      const host = this.page().locator(`[data-bss-click="${mark}"]`).filter({ visible: true });
+      if (await host.count()) return host.first();
     }
-    const parent = locator.locator("xpath=ancestor::*[not(self::input or self::textarea)][1]");
-    if (await parent.count()) return parent.first();
     return locator;
+  }
+
+  private async hostClick(locator: Locator) {
+    await locator.evaluate(el => {
+      if (!(el instanceof Element)) return;
+      const host = el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker")
+        || (el instanceof HTMLElement ? el : el.parentElement);
+      if (host instanceof HTMLElement) host.click();
+    });
   }
 
   async clickSafely(locator: Locator, intent: "field" | "option" | "button" = "button") {
@@ -458,6 +464,7 @@ export class PageActions {
   private async overlayState() {
     return this.page().evaluate(`(() => {
       const vis = (sel) => [...document.querySelectorAll(sel)].filter((el) => {
+        if (el.hidden || el.closest("[hidden]")) return false;
         const box = el.getBoundingClientRect();
         const style = getComputedStyle(el);
         return box.width > 2 && box.height > 2 && style.display !== "none" && style.visibility !== "hidden";
@@ -468,7 +475,9 @@ export class PageActions {
       };
       const dialogs = vis("[role='dialog'], [role='alertdialog'], .el-dialog, .el-drawer, .ant-modal, .arco-modal")
         .filter((el) => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(String(el.className || "")));
-      const drops = vis(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']");
+      const kitDrops = vis(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']");
+      const looseDrops = vis("ul").filter((el) => el.querySelector("[role='option'], .el-select-dropdown__item, .ant-select-item-option"));
+      const drops = [...new Set([...kitDrops, ...looseDrops])];
       const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
       return {
         dialogs: dialogs.length,
@@ -483,70 +492,39 @@ export class PageActions {
   }
 
   private async chooserOpened(before: { dialogs: number; drops: string; dates: string }) {
-    await this.waitForPageQuiet(300);
-    return this.overlayOpened(before, await this.overlayState());
+    const deadline = Date.now() + 1_200;
+    while (Date.now() < deadline) {
+      if (this.overlayOpened(before, await this.overlayState())) return true;
+      if (await this.dropdownScope()) return true;
+      await this.page().waitForTimeout(50);
+    }
+    return this.overlayOpened(before, await this.overlayState()) || Boolean(await this.dropdownScope());
   }
 
   private async activateChooser(selector: string) {
     await this.dismissTransientOverlays();
     const before = await this.overlayState();
-    const host = await this.clickTarget(selector);
-    const raw = await this.locate(selector);
-    const inner = raw.locator("input, textarea, [role='combobox'], [aria-haspopup]").first();
-    const surfaces = [host];
-    if (await inner.count()) surfaces.push(inner);
-    surfaces.push(raw);
-    for (const surface of surfaces) {
-      await this.clickSafely(surface, "field").catch(() => {});
-      if (await this.chooserOpened(before)) return { before, opened: true };
-      await surface.evaluate(el => { if (el instanceof HTMLElement) el.click(); }).catch(() => {});
-      if (await this.chooserOpened(before)) return { before, opened: true };
-      await surface.locator("input, [role='combobox']").first().press("ArrowDown").catch(async () => {
-        await surface.press("ArrowDown").catch(() => {});
-      });
-      if (await this.chooserOpened(before)) return { before, opened: true };
-    }
-    const group = raw.locator("xpath=ancestor::*[self::div or self::li or self::section or self::td][1]");
-    const affordances = group.locator("button, [role='button'], [aria-haspopup]").filter({ visible: true });
-    const extra = Math.min(await affordances.count(), 3);
-    for (let index = 0; index < extra; index += 1) {
-      await this.clickSafely(affordances.nth(index), "field").catch(() => {});
-      if (await this.chooserOpened(before)) return { before, opened: true };
-    }
+    await this.hostClick(await this.clickTarget(selector));
     return { before, opened: await this.chooserOpened(before) };
   }
 
+  private async nativeSelect(target: Locator) {
+    const own = target.evaluate(el => el instanceof HTMLSelectElement).catch(() => false);
+    if (await own) return target;
+    const inner = target.locator("select").first();
+    return (await inner.count()) ? inner : undefined;
+  }
+
   async openSelect(target: Locator) {
+    if (await this.nativeSelect(target)) return target;
     await this.dismissTransientOverlays();
     const before = await this.overlayState();
-    const inner = target.locator("input, textarea, [role='combobox']").first();
-    const surfaces = [target];
-    if (await inner.count()) surfaces.push(inner);
-    for (const surface of surfaces) {
-      await this.clickSafely(surface, "field").catch(() => {});
-      if (await this.chooserOpened(before)) {
-        const scope = await this.dropdownScope();
-        if (scope) return scope;
-      }
-      await surface.evaluate(el => { if (el instanceof HTMLElement) el.click(); }).catch(() => {});
-      if (await this.chooserOpened(before)) {
-        const scope = await this.dropdownScope();
-        if (scope) return scope;
-      }
-      await surface.press("ArrowDown").catch(async () => {
-        await surface.locator("input").first().press("ArrowDown").catch(() => {});
-      });
-      if (await this.chooserOpened(before)) {
-        const scope = await this.dropdownScope();
-        if (scope) return scope;
-      }
+    await this.hostClick(target);
+    if (await this.chooserOpened(before)) {
+      const scope = await this.dropdownScope();
+      if (scope) return scope;
     }
-    const scope = await this.waitForDropdown(400);
-    if (!scope) throw new Error("Select dropdown did not open");
-    if (before.drops && !this.overlayOpened(before, await this.overlayState())) {
-      throw new Error("Select dropdown did not open");
-    }
-    return scope;
+    throw new Error("Select dropdown did not open");
   }
 
   private async dateEditorMode(dateWrap: Locator) {
@@ -699,22 +677,17 @@ export class PageActions {
     const target = await this.clickTarget(selector);
     const page = this.page();
     const startUrl = page.url();
+    const native = await this.nativeSelect(target);
+    if (native) {
+      for (const label of labels) await native.selectOption({ label });
+      return { ok: true, url: page.url() };
+    }
     for (const label of labels) {
       const scope = await this.openSelect(target);
       const option = this.optionLocator(label, scope).filter({ visible: true }).first();
-      try {
-        await option.waitFor({ state: "visible", timeout: 1_200 });
-        if (await this.isNavigationTarget(option)) throw new Error("option is navigation");
-        await this.clickSafely(option, "option");
-      } catch {
-        const input = target.locator("input").first();
-        if (await input.count()) await input.fill(label, { timeout: 800 }).catch(() => {});
-        const retryScope = await this.dropdownScope() || await this.openSelect(target);
-        const retry = this.optionLocator(label, retryScope).filter({ visible: true }).first();
-        await retry.waitFor({ state: "visible", timeout: 1_200 });
-        if (await this.isNavigationTarget(retry)) throw new Error("Refusing to click navigation; that would leave the form and discard filled fields");
-        await this.clickSafely(retry, "option");
-      }
+      await option.waitFor({ state: "visible", timeout: 1_200 });
+      if (await this.isNavigationTarget(option)) throw new Error("Refusing to click navigation; that would leave the form and discard filled fields");
+      await this.clickSafely(option, "option");
     }
     if (page.url() !== startUrl) throw new Error("Dropdown click navigated away and would discard filled fields");
     await page.locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
@@ -741,23 +714,19 @@ export class PageActions {
     return ((await item.innerText()) || "").replace(/\s+/g, " ").trim();
   }
 
-  async chooseFirstOption(selector: string) {
+  async chooseFirstOption(selector: string, opened?: Locator) {
     const target = await this.clickTarget(selector);
-    let scope = await this.openSelect(target);
-    const item = scope.locator(OPTION_ITEMS).filter({ visible: true }).first();
-    try {
-      await item.waitFor({ state: "visible", timeout: 2_000 });
-    } catch {
-      const input = target.locator("input").first();
-      if (await input.count()) {
-        await input.fill("a", { timeout: 400 }).catch(() => {});
-        await input.fill("", { timeout: 400 }).catch(() => {});
-        scope = await this.dropdownScope() || scope;
-        await scope.locator(OPTION_ITEMS).filter({ visible: true }).first().waitFor({ state: "visible", timeout: 2_000 });
-      } else {
-        throw new Error("Select opened but no option became visible");
-      }
+    const native = await this.nativeSelect(target);
+    if (native) {
+      const labels = await native.locator("option").evaluateAll(elements => elements.map(el => String(el.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean));
+      const value = labels.find(item => item && !/请选择|please select|select/i.test(item)) || labels[0];
+      if (!value) throw new Error("Select opened but no option became visible");
+      await native.selectOption({ label: value });
+      return value;
     }
+    const scope = opened || await this.openSelect(target);
+    const item = scope.locator(OPTION_ITEMS).filter({ visible: true }).first();
+    await item.waitFor({ state: "visible", timeout: 2_000 });
     const options = await this.dropdownOptions(scope);
     const value = await this.firstVisibleOption(scope);
     const fieldMeta = await target.evaluate(el => {
@@ -847,7 +816,8 @@ export class PageActions {
       return `${localIsoDate(dateOffset)} ${endLike ? "23:59:59" : "00:00:00"}`;
     }
     if (field.kind === "number") return "1";
-    const hint = String(field.label || "").replace(/[：:*：\s]/g, "").slice(0, 8);
+    const placeholder = String(field.selector || "").match(/^placeholder=(.+)$/s)?.[1] || "";
+    const hint = String(placeholder || field.label || field.name || "").replace(/[：:*：\s]/g, "").slice(0, 12);
     return hint ? `样例-${hint}` : "样例";
   }
 
@@ -865,7 +835,10 @@ export class PageActions {
     const { before } = await this.activateChooser(selector);
     const after = await this.overlayState();
     if (after.dialogs <= before.dialogs) {
-      if (after.drops !== before.drops || await this.dropdownScope()) return this.chooseFirstOption(selector);
+      if (after.drops !== before.drops || await this.dropdownScope()) {
+        const opened = await this.dropdownScope();
+        if (opened) return this.chooseFirstOption(selector, opened);
+      }
       throw new Error("Picker did not open a dialog or list");
     }
     const dialog = await this.waitForFormDialog();
@@ -910,31 +883,26 @@ export class PageActions {
       await this.clickSafely(await this.clickTarget(selector), "field");
       return "true";
     };
-    if (field.kind === "select") return [choose, pick];
-    if (field.kind === "picker") return [pick, choose];
+    if (field.kind === "select") return [choose];
+    if (field.kind === "picker") return [pick];
     if (field.kind === "checkbox" || field.kind === "radio") return [toggle];
-    return [type, choose, pick];
+    return [type];
   }
 
   private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
+    const [attempt] = this.strategiesFor(field, dateOffset);
+    if (!attempt) throw new Error(`Could not fill ${field.label}`);
+    await this.dismissTransientOverlays();
+    const value = String((await attempt()) || "");
+    const after = this.matchField(await this.captureSnapshot(), field);
     const chooser = field.kind === "select" || field.kind === "picker";
-    let lastError: unknown;
-    for (const attempt of this.strategiesFor(field, dateOffset)) {
-      try {
-        await this.dismissTransientOverlays();
-        const value = String((await attempt()) || "");
-        const after = this.matchField(await this.captureSnapshot(), field);
-        if (!after?.filled) continue;
-        if (chooser && this.isSampleValue(String(after.value || value), field)) continue;
-        return { label: field.label, selector, kind: field.kind, value: after.value || value };
-      } catch (error) {
-        lastError = error;
-      }
+    if (!after?.filled || (chooser && this.isSampleValue(String(after.value || value), field))) {
+      throw new Error(`Could not fill ${field.label}`);
     }
-    throw lastError || new Error(`Could not fill ${field.label}`);
+    return { label: field.label, selector, kind: field.kind, value: after.value || value };
   }
 
   private requiredNumberInvalid(field: FormField) {
@@ -986,7 +954,7 @@ export class PageActions {
       const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(text) && !draft;
       const search = /^(搜索|查询|search)$/i.test(text);
       return [{
-        selector: String(control.selector || `text=${text}`),
+        selector: /^(label|placeholder)=/i.test(String(control.selector || "")) ? `text=${text}` : String(control.selector || `text=${text}`),
         text,
         rank: write ? 0 : search ? 1 : control.type === "submit" && !draft ? 2 : draft ? 4 : 3
       }];
@@ -1027,7 +995,7 @@ export class PageActions {
       }
     };
     let after = await this.captureSnapshot();
-    for (let pass = 0; pass < 5 && this.page().url() === startUrl; pass += 1) {
+    for (let pass = 0; pass < 2 && this.page().url() === startUrl; pass += 1) {
       const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
       if (!leftover.length) {
         if (await this.revealHiddenSections()) {
@@ -1068,41 +1036,32 @@ export class PageActions {
     const startUrl = this.page().url();
     const button = this.submitControl(before);
     if (!button) throw new Error("No submit/search button in the active form");
+    let repaired = false;
     if (!this.formReady(before, startUrl)) {
-      const leftover = (before.todoFields || []).filter(field => !field.skip && !field.disabled);
-      for (const field of leftover) {
-        await this.fillOneField(field, startUrl).catch(() => {});
-      }
       await this.repairFormValues(startUrl);
       before = await this.captureSnapshot();
+      repaired = true;
+    }
+    if (!this.formReady(before, startUrl) && /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text)) {
+      return {
+        ok: false,
+        submitted: button.text,
+        repaired: false,
+        sawRequest: false,
+        errors: before.errors || [],
+        url: this.page().url(),
+        scope: before.scope,
+        todoFields: before.todoFields || [],
+        todoCount: before.todoCount ?? (before.todoFields || []).length,
+        formFields: before.formFields || []
+      };
     }
     const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text);
     const pending = this.awaitFormRequest(3_000, write);
-    await this.click(button.selector).catch(async () => {
-      await this.click(`text=${button.text}`);
-    });
-    let sawRequest = await pending;
-    if (!sawRequest) {
-      const retry = this.awaitFormRequest(2_500, write);
-      await this.page().locator("button[type='submit'], input[type='submit']").filter({ visible: true }).last().click({ timeout: 800 }).catch(() => {});
-      sawRequest = await retry;
-    }
+    await this.click(button.selector);
+    const sawRequest = await pending;
     await this.waitForPageQuiet();
-    let after = await this.captureSnapshot();
-    const stillOpen = after.scope === before.scope && this.page().url() === startUrl;
-    const blocked = stillOpen && ((after.errors || []).length > 0 || !this.formReady(after, startUrl) || (after.formFields || []).some(field => field.invalid) || !sawRequest);
-    if (blocked) {
-      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
-      for (const field of leftover) {
-        await this.fillOneField(field, startUrl).catch(() => {});
-      }
-      await this.repairFormValues(startUrl);
-      const again = this.awaitFormRequest(3_000, write);
-      await this.click(button.selector);
-      sawRequest = (await again) || sawRequest;
-      await this.waitForPageQuiet();
-      after = await this.captureSnapshot();
-    }
+    const after = await this.captureSnapshot();
     const leftoverErrors = after.errors || [];
     const closed = this.page().url() !== startUrl || after.scope !== before.scope;
     const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
@@ -1110,7 +1069,7 @@ export class PageActions {
     return {
       ok: closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0),
       submitted: button.text,
-      repaired: blocked,
+      repaired,
       sawRequest,
       errors: leftoverErrors,
       url: this.page().url(),
