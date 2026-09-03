@@ -26,6 +26,8 @@ test("start.bat never kills the user browser and clears temp files on launch", a
   assert.match(bat, /clean-temp\.mjs/);
   assert.match(bat, /Your Chrome\/Edge pages stay open/);
   assert.doesNotMatch(bat, /stop the page and every Studio process/);
+  const app = await readFile(path.join(root, "web", "app.js"), "utf8");
+  assert.doesNotMatch(app, /window\.close\(/);
   assert.doesNotMatch(stop, /taskkill[\s\S]*\/IM[\s\S]*chrome/i);
   assert.doesNotMatch(stop, /taskkill[\s\S]*\/IM[\s\S]*msedge/i);
   assert.match(stop, /LISTENING/);

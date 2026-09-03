@@ -672,12 +672,12 @@ function connectEvents() {
     if (event.type === "browser_changed") void pollBrowser(true);
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
-    if (event.type === "studio_shutdown") window.close();
+    if (event.type === "studio_shutdown") showToast("Studio 服务已停止，页面保留");
     if (event.type === "agent_error") showToast(event.message || "Pi 连接异常");
   };
   stream.onerror = () => {
     updateAgentStatus(false, false);
-    void fetch("/api/status", { cache: "no-store", headers: pageHeaders() }).catch(() => window.close());
+    void fetch("/api/status", { cache: "no-store", headers: pageHeaders() }).catch(() => showToast("Studio 服务已断开，页面保留"));
   };
 }
 

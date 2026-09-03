@@ -83,6 +83,7 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.match(app, /resetBrowserWorkbench/);
   assert.match(app, /已结束录制并清空全部内容；下一条消息是新对话/);
   assert.match(app, /studio_shutdown/);
+  assert.doesNotMatch(app, /window\.close\(/);
   assert.match(server, /pathname === "\/api\/session\/clear"/);
   assert.match(resetWorkbench, /this\.recorder\.disposeImmediate\(\)/);
   assert.match(resetWorkbench, /beginFreshConversation/);
