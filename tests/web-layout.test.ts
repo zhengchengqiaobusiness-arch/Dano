@@ -121,9 +121,11 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(css, /\.browser-viewport\.interactive/);
   assert.match(app, /if \(state\.pollInFlight\) return;/);
   assert.match(app, /if \(!state\.browserActive \|\| state\.frameLoading \|\| document\.hidden\) return;/);
-  assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowser\(\); \}, 1400\)/);
+  assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden && state\.browserActive\) void refreshBrowserFrame\(\); \}, 240\)/);
+  assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowserState\(\); \}, 2000\)/);
   assert.match(server, /Content-Type": "image\/jpeg"/);
   assert.doesNotMatch(app, /setInterval\(pollBrowser, 900\)/);
+  assert.doesNotMatch(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowser\(\); \}, 1400\)/);
 });
 
 test("workbench operations execute without a confirmation dialog", async () => {

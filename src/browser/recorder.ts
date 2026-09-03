@@ -1,6 +1,6 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
+import { chromium, type BrowserContext, type Browser, type CDPSession, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
 import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
@@ -58,6 +58,8 @@ export class BrowserRecorder {
   private focused?: Page;
   private pageError?: string;
   private lastGoodUrl?: string;
+  private lastTitle = { at: 0, value: "" };
+  private screencast?: { page: Page; session: CDPSession };
   private readonly actions = new PageActions({
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
@@ -93,11 +95,16 @@ export class BrowserRecorder {
       url: item.url(),
       current: item === page
     }));
+    let title = this.lastTitle.value;
+    if (Date.now() - this.lastTitle.at > 900) {
+      title = await this.withTimeout(page.title(), 400, this.lastTitle.value);
+      this.lastTitle = { at: Date.now(), value: title };
+    }
     return {
       active: true as const,
       session: this.active.session,
       url: page.url(),
-      title: await this.withTimeout(page.title(), 1_200, ""),
+      title,
       viewport: page.viewportSize(),
       pageError: this.pageError,
       pages
@@ -105,7 +112,7 @@ export class BrowserRecorder {
   }
 
   async preview(): Promise<Buffer> {
-    if (this.lastPreview && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 220)) {
+    if (this.lastPreview && (this.screencast || Date.now() - this.lastPreview.at < 400)) {
       return this.lastPreview.buffer;
     }
     if (this.previewInFlight) return this.previewInFlight;
@@ -117,21 +124,59 @@ export class BrowserRecorder {
 
   private async capturePreview() {
     const page = this.currentPage();
-    if (this.isErrorUrl(page.url()) || await this.pageLooksFailed(page)) {
+    if (this.isErrorUrl(page.url())) {
       this.pageError = this.pageError || `页面打开失败：${page.url()}`;
       return this.lastPreview?.buffer || EMPTY_JPEG;
     }
+    void this.attachScreencast(page);
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
-      quality: 42,
+      quality: 48,
       fullPage: false,
       animations: "disabled",
       caret: "hide"
-    }), 2_500, undefined);
+    }), 1_600, undefined);
     if (!buffer?.length) return this.lastPreview?.buffer || EMPTY_JPEG;
     this.lastPreview = { at: Date.now(), buffer };
     this.lastGoodUrl = page.url();
     return buffer;
+  }
+
+  private setFocused(page?: Page) {
+    this.focused = page;
+    if (page && !page.isClosed()) void this.attachScreencast(page);
+    else void this.detachScreencast();
+  }
+
+  private async attachScreencast(page: Page) {
+    if (this.screencast?.page === page) return;
+    await this.detachScreencast();
+    if (page.isClosed()) return;
+    try {
+      const session = await page.context().newCDPSession(page);
+      await session.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: 52,
+        maxWidth: 1440,
+        maxHeight: 960,
+        everyNthFrame: 2
+      });
+      session.on("Page.screencastFrame", (event: { data: string; sessionId: number }) => {
+        this.lastPreview = { at: Date.now(), buffer: Buffer.from(event.data, "base64") };
+        void session.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => {});
+      });
+      this.screencast = { page, session };
+    } catch {
+      this.screencast = undefined;
+    }
+  }
+
+  private async detachScreencast() {
+    const current = this.screencast;
+    this.screencast = undefined;
+    if (!current) return;
+    await current.session.send("Page.stopScreencast").catch(() => {});
+    await current.session.detach().catch(() => {});
   }
 
   private async withAction<T>(work: () => Promise<T>): Promise<T> {
@@ -177,7 +222,8 @@ export class BrowserRecorder {
     const launchOptions = {
       headless: this.config.headless,
       viewport: { width: 1440, height: 960 },
-      args: ["--disable-features=TranslateUI"]
+      deviceScaleFactor: 1,
+      args: ["--disable-features=TranslateUI", "--disable-background-timer-throttling"]
     };
     const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
       if (!/Executable doesn't exist/i.test(String(error))) throw error;
@@ -212,7 +258,7 @@ export class BrowserRecorder {
     context.on("page", armPage);
 
     const page = context.pages()[0] || await context.newPage();
-    this.focused = page;
+    this.setFocused(page);
     try {
       await page.goto(startUrl, { waitUntil: "domcontentloaded" });
       await this.waitForPageQuiet(page);
@@ -225,6 +271,7 @@ export class BrowserRecorder {
     } catch {
       this.pageError = `无法打开页面：${startUrl}`;
     }
+    await this.attachScreencast(page);
     return session;
   }
 
@@ -232,11 +279,11 @@ export class BrowserRecorder {
     target.setDefaultTimeout(5_000);
     target.setDefaultNavigationTimeout(15_000);
     target.on("crash", () => {
-      if (this.focused === target) this.focused = undefined;
+      if (this.focused === target) this.setFocused(undefined);
       this.pageError = "页面已崩溃，已停在上一页";
     });
     target.on("close", () => {
-      if (this.focused === target) this.focused = undefined;
+      if (this.focused === target) this.setFocused(undefined);
     });
   }
 
@@ -411,10 +458,30 @@ export class BrowserRecorder {
     await appendJsonl(active.eventsFile, event);
   }
 
+  private stabilizeUiEvent(event: UiEvidence): UiEvidence {
+    const value = event.value === undefined || event.value === null ? "" : String(event.value);
+    const cssy = (text?: string) => Boolean(text && ((/^[a-z]+\./i.test(text) && text.includes(">")) || /(?:arco-|el-|ant-)[\w-]*\./.test(text)));
+    const polluted = Boolean(event.label && value && event.label === value) || event.label === "字段" || cssy(event.label);
+    if (!polluted && !cssy(event.selector)) return event;
+    const hit = (event.form || []).find(field =>
+      field.label
+      && field.label !== value
+      && field.label !== "字段"
+      && !cssy(field.label)
+      && (field.value === event.value || field.name === event.name)
+    ) || (event.form || []).find(field => field.label && field.label !== value && field.label !== "字段" && !cssy(field.label) && field.value !== undefined && field.value !== "");
+    if (!hit?.label) return event;
+    return {
+      ...event,
+      label: hit.label,
+      selector: event.selector && !cssy(event.selector) ? event.selector : `label=${hit.label}`
+    };
+  }
+
   private async writeUiEvent(page: Page | undefined, payload: any) {
     const active = this.active;
     if (!active || !page) return undefined;
-    const event: UiEvidence = {
+    const event = this.stabilizeUiEvent({
       id: id("ui"),
       kind: "ui",
       sessionId: active.session.id,
@@ -433,7 +500,7 @@ export class BrowserRecorder {
       options: redactValue(payload?.options) as UiEvidence["options"],
       visibleOptions: redactValue(payload?.visibleOptions) as string[],
       form: redactValue(payload?.form) as UiEvidence["form"]
-    };
+    });
     const last = active.recentUi.at(-1);
     if (last && last.eventType === event.eventType && last.name === event.name && last.label === event.label && Object.is(last.value, event.value)
       && Date.parse(event.at) - Date.parse(last.at) < 800) {
@@ -553,17 +620,17 @@ export class BrowserRecorder {
 
   private async adoptIfReady(page: Page) {
     if (page.isClosed()) return false;
-    await this.withTimeout(page.waitForLoadState("domcontentloaded"), 6_000, undefined);
+    await this.withTimeout(page.waitForLoadState("domcontentloaded"), 2_000, undefined);
     if (this.isTransientUrl(page.url())) {
-      await this.withTimeout(page.waitForURL(url => !this.isTransientUrl(url), { timeout: 6_000 }), 6_000, undefined);
-      await this.withTimeout(page.waitForLoadState("domcontentloaded"), 6_000, undefined);
+      await this.withTimeout(page.waitForURL(url => !this.isTransientUrl(url), { timeout: 2_000 }), 2_000, undefined);
+      await this.withTimeout(page.waitForLoadState("domcontentloaded"), 2_000, undefined);
     }
     if (page.isClosed() || this.isTransientUrl(page.url()) || await this.pageLooksFailed(page)) {
       this.pageError = `新页面打开失败${page.isClosed() || this.isTransientUrl(page.url()) ? "" : `：${page.url()}`}`;
       if (this.livePages().length > 1) await page.close().catch(() => {});
       return false;
     }
-    this.focused = page;
+    this.setFocused(page);
     this.lastGoodUrl = page.url();
     this.pageError = undefined;
     await page.bringToFront().catch(() => {});
@@ -592,44 +659,53 @@ export class BrowserRecorder {
       if (origin.isClosed()) return;
       if (await this.pageLooksFailed(origin)) {
         this.pageError = `页面打开失败：${origin.url()}`;
-        this.focused = origin;
+        this.setFocused(origin);
         return;
       }
-      this.focused = origin;
+      this.setFocused(origin);
       this.lastGoodUrl = origin.url();
       this.pageError = undefined;
-      await this.waitForPageQuiet(origin, 600);
+      await this.waitForPageQuiet(origin, 400);
     };
     const takeNewPage = async (page: Page) => {
       if (page.isClosed()) {
         this.pageError = this.pageError || "新页面打开失败";
-        if (!origin.isClosed()) this.focused = origin;
+        if (!origin.isClosed()) this.setFocused(origin);
         return false;
       }
       if (await this.adoptIfReady(page)) return true;
-      if (!origin.isClosed()) this.focused = origin;
+      if (!origin.isClosed()) this.setFocused(origin);
       return false;
     };
 
+    if (!origin.isClosed() && origin.url() !== beforeUrl) {
+      await settleOrigin();
+      return;
+    }
+    let extra = newcomers();
+    if (extra.length) {
+      await takeNewPage(extra[extra.length - 1]!);
+      return;
+    }
     let waited = 0;
-    while (waited <= 800) {
+    const budget = appeared.length ? 400 : 120;
+    while (waited <= budget) {
       if (!origin.isClosed() && origin.url() !== beforeUrl) {
         await settleOrigin();
         return;
       }
-      const extra = newcomers();
+      extra = newcomers();
       if (extra.length) {
         await takeNewPage(extra[extra.length - 1]!);
         return;
       }
-      if (waited >= 250) break;
-      await new Promise(resolve => setTimeout(resolve, 50));
-      waited += 50;
+      await new Promise(resolve => setTimeout(resolve, 20));
+      waited += 20;
     }
     if (appeared.some(page => page !== origin && (page.isClosed() || this.isErrorUrl(page.url())))) {
       this.pageError = this.pageError || "新页面打开失败";
     }
-    if (!origin.isClosed()) this.focused = origin;
+    if (!origin.isClosed()) this.setFocused(origin);
   }
 
   private currentPage(): Page {
@@ -639,12 +715,12 @@ export class BrowserRecorder {
     }
     const usable = this.livePages().filter(page => !this.isErrorUrl(page.url()) && !this.isTransientUrl(page.url()));
     if (usable.length) {
-      this.focused = usable[usable.length - 1];
+      this.setFocused(usable[usable.length - 1]);
       return this.focused!;
     }
     const alive = this.livePages().filter(page => !this.isErrorUrl(page.url()));
     if (alive.length) {
-      this.focused = alive[alive.length - 1];
+      this.setFocused(alive[alive.length - 1]);
       return this.focused!;
     }
     if (!this.livePages().length) throw new Error("No active browser page");
@@ -674,11 +750,13 @@ export class BrowserRecorder {
 
   private async writeManualStepsFile(active: ActiveRecording) {
     const steps = buildManualSteps(active.manualEvents);
+    const lastForm = [...active.recentUi].reverse().find(event => event.form?.length)?.form;
     const file = path.join(path.dirname(active.eventsFile), "manual-steps.md");
     active.session.manualStepsFile = file;
     await writeFile(file, renderManualStepsMarkdown(steps, {
       sessionId: active.session.id,
-      startUrl: active.session.startUrl
+      startUrl: active.session.startUrl,
+      form: lastForm
     }), "utf8");
   }
 
@@ -716,6 +794,7 @@ export class BrowserRecorder {
       const observed = command.action === "scroll"
         ? undefined
         : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click", page);
+      if (command.action !== "scroll") await this.actions.recordFormInventory().catch(() => {});
       try {
         if (command.action === "click" || command.action === "key") {
           await this.followAfterGesture(page, known, watch?.appeared || []);
@@ -793,7 +872,7 @@ export class BrowserRecorder {
             if (await this.pageLooksFailed(page)) {
               this.pageError = `无法打开页面：${command.url}`;
             } else {
-              this.focused = page;
+              this.setFocused(page);
               this.lastGoodUrl = page.url();
               this.pageError = undefined;
             }
@@ -817,19 +896,27 @@ export class BrowserRecorder {
           if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
           return this.guardedPageAction("fill", command.selector, async () => {
             await this.actions.fillField(command.selector!, command.value as string);
+            await this.actions.recordFormInventory().catch(() => {});
             return { ok: true };
           });
         case "choose":
           if (!command.selector || command.value === undefined) throw new Error("choose requires selector and value");
-          return this.guardedPageAction("choose", command.selector, () => this.actions.chooseOption(command.selector!, command.value!));
+          return this.guardedPageAction("choose", command.selector, async () => {
+            const result = await this.actions.chooseOption(command.selector!, command.value!);
+            await this.actions.recordFormInventory().catch(() => {});
+            return result;
+          });
         case "select":
           if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
           return this.guardedPageAction("select", command.selector, async () => {
             try {
               await (await this.actions.locate(command.selector!)).selectOption(command.value!, { timeout: 1_500 });
+              await this.actions.recordFormInventory().catch(() => {});
               return { ok: true };
             } catch {
-              return this.actions.chooseOption(command.selector!, command.value!);
+              const result = await this.actions.chooseOption(command.selector!, command.value!);
+              await this.actions.recordFormInventory().catch(() => {});
+              return result;
             }
           });
         case "press":
@@ -875,9 +962,10 @@ export class BrowserRecorder {
   disposeImmediate() {
     const active = this.active;
     this.active = undefined;
-    this.focused = undefined;
+    this.setFocused(undefined);
     this.pageError = undefined;
     this.lastGoodUrl = undefined;
+    this.lastTitle = { at: 0, value: "" };
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;
@@ -890,9 +978,11 @@ export class BrowserRecorder {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;
     this.active = undefined;
+    await this.detachScreencast();
     this.focused = undefined;
     this.pageError = undefined;
     this.lastGoodUrl = undefined;
+    this.lastTitle = { at: 0, value: "" };
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;

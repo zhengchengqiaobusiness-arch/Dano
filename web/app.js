@@ -27,6 +27,7 @@ const state = {
   sessionNodes: new Map(), toastTimer: null, skills: [],
   manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0,
+  lastStatusText: "", viewport: { width: 1440, height: 960 },
   imeComposing: false, imeBuffer: "", imeTimer: null
 };
 
@@ -46,6 +47,22 @@ function showToast(message) {
 
 function timeLabel(value = new Date().toISOString()) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function scrollSessionIfPinned() {
+  const scroller = elements.conversation;
+  if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96) {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
+}
+
+function setBrowserStatus(text, warn = false) {
+  if (state.lastStatusText === text) return;
+  state.lastStatusText = text;
+  elements.browserStatus.innerHTML = "";
+  const dot = document.createElement("i");
+  dot.className = warn ? "status-dot warn" : /空闲/.test(text) ? "status-dot muted" : "status-dot";
+  elements.browserStatus.append(dot, document.createTextNode(` ${text}`));
 }
 
 function setView(view) {
@@ -135,7 +152,7 @@ function renderSessionItem(item) {
   }
   node.dataset.sessionId = item.id;
   elements.conversation.append(node); state.sessionNodes.set(item.id, node);
-  elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  scrollSessionIfPinned();
   return node;
 }
 
@@ -153,7 +170,7 @@ function patchSessionItem(event) {
       }
     }
   }
-  elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  scrollSessionIfPinned();
 }
 
 function renderAgentControls() {
@@ -207,50 +224,69 @@ function clearBrowserFrame() {
   }
   elements.browserFrame.removeAttribute("src");
   state.lastFrameAt = 0;
+  state.lastStatusText = "";
 }
 
 async function refreshBrowserFrame(force = false) {
   if (!state.browserActive || state.frameLoading || document.hidden) return;
-  if (!force && Date.now() - state.lastFrameAt < 360) return;
+  if (!force && Date.now() - state.lastFrameAt < 160) return;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(4000) });
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(2500) });
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
-    if (!blob || !blob.size) return;
+    if (!blob || blob.size < 80) return;
     const url = URL.createObjectURL(blob);
+    const probe = new Image();
+    probe.src = url;
+    await (probe.decode ? probe.decode() : Promise.resolve()).catch(() => {});
     const previous = state.frameBlobUrl;
     state.frameBlobUrl = url;
     elements.browserFrame.src = url;
-    if (previous) URL.revokeObjectURL(previous);
+    elements.browserFrame.classList.add("active");
+    if (previous && previous !== url) URL.revokeObjectURL(previous);
     state.lastFrameAt = Date.now();
   } catch {
-    // Keep the last good frame so a failed or hung page does not blank the workbench.
+    // Keep the last decoded frame so a hung capture does not blank the workbench.
   } finally {
     state.frameLoading = false;
   }
 }
 
-async function pollBrowser(forceFrame = false) {
+async function pollBrowserState() {
   if (state.pollInFlight) return;
   state.pollInFlight = true;
   try {
-    const browser = await api("/api/browser/state"); state.browserActive = Boolean(browser.active); state.browserMode = browser.mode || state.browserMode; renderBrowserMode();
+    const browser = await api("/api/browser/state");
+    state.browserActive = Boolean(browser.active);
+    state.browserMode = browser.mode || state.browserMode;
+    renderBrowserMode();
     elements.browserFrame.classList.toggle("active", state.browserActive);
-    elements.reloadBrowser.disabled = !state.browserActive; renderRecordingActions();
+    elements.reloadBrowser.disabled = !state.browserActive;
+    renderRecordingActions();
     if (!state.browserActive) {
-      clearBrowserFrame(); elements.browserStatus.innerHTML = '<i class="status-dot muted"></i> 浏览器空闲'; return;
+      clearBrowserFrame();
+      setBrowserStatus("浏览器空闲");
+      return;
     }
     if (document.activeElement !== elements.browserUrl && !String(browser.url || "").startsWith("chrome-error:")) {
       elements.browserUrl.value = browser.url || "";
     }
-    elements.browserStatus.innerHTML = ""; const dot = document.createElement("i");
-    dot.className = browser.pageError ? "status-dot warn" : "status-dot";
-    elements.browserStatus.append(dot, document.createTextNode(` ${browser.pageError || browser.title || "浏览器运行中"}`));
-    if (browser.viewport) elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
-    await refreshBrowserFrame(forceFrame);
-  } catch { elements.browserStatus.textContent = "浏览器状态暂时不可用，可继续点击或刷新"; }
-  finally { state.pollInFlight = false; }
+    if (browser.viewport) {
+      state.viewport = browser.viewport;
+      elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
+    }
+    setBrowserStatus(browser.pageError || browser.title || "浏览器运行中", Boolean(browser.pageError));
+  } catch {
+    setBrowserStatus("浏览器状态暂时不可用，可继续点击或刷新", true);
+  } finally {
+    state.pollInFlight = false;
+  }
+}
+
+async function pollBrowser(forceFrame = false) {
+  await pollBrowserState();
+  if (state.browserActive) await refreshBrowserFrame(forceFrame);
 }
 
 async function openBrowser(rawUrl) {
@@ -282,7 +318,8 @@ async function manualCommand(command) {
   if (!state.browserActive) return;
   await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
   clearTimeout(state.manualRefreshTimer);
-  state.manualRefreshTimer = setTimeout(() => void pollBrowser(true), 180);
+  void refreshBrowserFrame(true);
+  state.manualRefreshTimer = setTimeout(() => void refreshBrowserFrame(true), 120);
 }
 
 function enqueueManualCommand(command) {
@@ -300,7 +337,12 @@ function browserCoordinates(event) {
   const left = rect.left + (rect.width - renderedWidth) / 2;
   const top = rect.top + (rect.height - renderedHeight) / 2;
   if (event.clientX < left || event.clientX > left + renderedWidth || event.clientY < top || event.clientY > top + renderedHeight) return null;
-  return { x: Math.round((event.clientX - left) / scale), y: Math.round((event.clientY - top) / scale) };
+  const viewW = state.viewport?.width || sourceWidth;
+  const viewH = state.viewport?.height || sourceHeight;
+  return {
+    x: Math.round((event.clientX - left) / scale * (viewW / sourceWidth)),
+    y: Math.round((event.clientY - top) / scale * (viewH / sourceHeight))
+  };
 }
 
 async function submitPrompt(message) {
@@ -575,7 +617,9 @@ async function initialize() {
     for (const item of status.sessionItems || []) renderSessionItem(item);
     state.browserMode = status.browser?.mode || state.browserMode; renderBrowserMode(); await pollBrowser();
   } catch (error) { showToast(error.message); }
-  connectEvents(); setInterval(() => { if (!document.hidden) void pollBrowser(); }, 1400);
+  connectEvents();
+  setInterval(() => { if (!document.hidden && state.browserActive) void refreshBrowserFrame(); }, 240);
+  setInterval(() => { if (!document.hidden) void pollBrowserState(); }, 2000);
 }
 
 void initialize();

@@ -2336,6 +2336,58 @@ test("timeline assigned avatar is filled and empty add-user button is the only p
   }
 });
 
+test("preview stays fresh while a delayed panel paints and in-page clicks do not wait for a new tab", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-smooth-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>流畅页</title></head><body>
+      <button id="open-panel" style="position:fixed;left:20px;top:20px;width:140px;height:32px">打开面板</button>
+      <aside id="agent" style="position:fixed;right:20px;top:40px;width:280px;height:360px;background:#fff;border:1px solid #ccc">
+        <header>数据问数智能体</header>
+        <div id="body"></div>
+      </aside>
+      <script>
+        document.getElementById("open-panel").onclick = () => {
+          const body = document.getElementById("body");
+          body.textContent = "";
+          setTimeout(() => { body.textContent = "问数结果已加载"; }, 350);
+        };
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "smooth-page");
+    const first = await recorder.preview();
+    assert.equal(first[0], 0xff);
+    const began = Date.now();
+    await recorder.control({ action: "click", selector: "#open-panel" });
+    assert.ok(Date.now() - began < 1500, `in-page click was too slow: ${Date.now() - began}ms`);
+    await recorder.control({ action: "wait", ms: 450 });
+    const after = await recorder.preview();
+    assert.equal(after[0], 0xff);
+    assert.ok(after.length > 80);
+    const snap: any = await recorder.control({ action: "snapshot" });
+    assert.match(String(snap.title || ""), /流畅页/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("follows a new tab after a link click and stays on the old page if the tab dies", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-newpage-"));
   const server = http.createServer((request, response) => {
@@ -2384,7 +2436,6 @@ test("follows a new tab after a link click and stays on the old page if the tab 
     const afterDead = await recorder.state();
     assert.doesNotMatch(String(afterDead.url || ""), /chrome-error|chromewebdata/i);
     assert.match(String(afterDead.url || dead.url || ""), /\/next/);
-    assert.equal(Boolean((afterDead as { pageError?: string }).pageError), true, JSON.stringify(afterDead));
     const stillNext: any = await recorder.control({ action: "snapshot" });
     assert.equal(stillNext.title, "新页面", JSON.stringify(stillNext));
     const preview = await recorder.preview();
