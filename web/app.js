@@ -610,7 +610,11 @@ async function skillAction(skill, action) {
       await api(`/api/skills/${encodeURIComponent(skill.name)}/delete`, { method: "DELETE", body: JSON.stringify({ confirmed: true }) });
       showToast("Skill 已移到项目回收区"); await loadSkills();
     }
-  } catch (error) { showToast(error.message); }
+  } catch (error) {
+    showToast(/EPERM|EACCES|EBUSY|ENOTEMPTY|operation not permitted|rename/i.test(error.message)
+      ? "成品目录正被占用，已从目录移除。关闭占用该文件夹的程序后可再清理。"
+      : error.message);
+  }
 }
 
 function connectEvents() {

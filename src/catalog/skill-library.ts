@@ -3,6 +3,7 @@ import { readdir, rename, stat } from "node:fs/promises";
 import type { CapabilityContract, SkillListItem, SkillRecord } from "../domain.js";
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
 import { ensureDir, readJson, writeJson } from "../utils.js";
+import { moveDirectory } from "./skill-files.js";
 
 async function exists(target: string) {
   try {
@@ -145,8 +146,11 @@ export class SkillLibrary {
     let recoverableFrom: string | undefined;
     if (await exists(record.directory)) {
       recoverableFrom = path.join(this.trashDir, `${record.name}-v${record.version}-${Date.now()}`);
-      await ensureDir(path.dirname(recoverableFrom));
-      await rename(record.directory, recoverableFrom);
+      try {
+        await moveDirectory(record.directory, recoverableFrom);
+      } catch {
+        recoverableFrom = await exists(recoverableFrom) ? recoverableFrom : record.directory;
+      }
     }
     record.status = "deleted";
     record.deletedAt = new Date().toISOString();
