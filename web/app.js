@@ -402,14 +402,29 @@ function enqueueManualCommand(command) {
   state.manualQueue = state.manualQueue.then(() => manualCommand(command)).catch(error => showToast(error.message));
 }
 
+function displayedFrameRect() {
+  const img = elements.browserFrame;
+  const box = img.getBoundingClientRect();
+  const sourceWidth = img.naturalWidth;
+  const sourceHeight = img.naturalHeight;
+  if (!sourceWidth || !sourceHeight || !box.width || !box.height) return null;
+  const scale = Math.min(box.width / sourceWidth, box.height / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  return {
+    left: box.left + (box.width - width) / 2,
+    top: box.top + (box.height - height) / 2,
+    width,
+    height
+  };
+}
+
 function browserCoordinates(event) {
-  const rect = elements.browserFrame.getBoundingClientRect();
-  const sourceWidth = elements.browserFrame.naturalWidth;
-  const sourceHeight = elements.browserFrame.naturalHeight;
-  if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) return null;
-  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return null;
-  const viewW = state.viewport?.width || sourceWidth;
-  const viewH = state.viewport?.height || sourceHeight;
+  const rect = displayedFrameRect();
+  if (!rect) return null;
+  if (event.clientX < rect.left || event.clientX > rect.left + rect.width || event.clientY < rect.top || event.clientY > rect.top + rect.height) return null;
+  const viewW = state.viewport?.width || elements.browserFrame.naturalWidth;
+  const viewH = state.viewport?.height || elements.browserFrame.naturalHeight;
   return {
     x: Math.round((event.clientX - rect.left) / rect.width * viewW),
     y: Math.round((event.clientY - rect.top) / rect.height * viewH)

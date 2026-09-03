@@ -135,7 +135,9 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(app, /classList\.toggle\("interactive", state\.browserActive\)/);
   assert.match(css, /\.browser-viewport\.interactive/);
   assert.doesNotMatch(css, /\.browser-viewport\.interactive\s*\{[^}]*outline/);
-  assert.match(css, /\.browser-frame\s*\{[^}]*object-fit:\s*fill/);
+  assert.match(css, /\.browser-frame\s*\{[^}]*object-fit:\s*contain/);
+  assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*object-fit:\s*fill/);
+  assert.match(app, /function displayedFrameRect\(/);
   assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
   assert.doesNotMatch(css, /\.browser-footer/);
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*contain:\s*strict/);

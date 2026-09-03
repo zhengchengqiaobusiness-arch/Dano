@@ -65,7 +65,7 @@ button { color: inherit; }
 .icon-button:hover, .suggestions button:hover { color: var(--text); border-color: #496258; }
 
 .browser-viewport { min-height: 0; position: relative; overflow: hidden; background-color: #07100e; }
-.browser-frame { display: none; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; object-position: top left; background: #fff; user-select: none; -webkit-user-drag: none; }
+.browser-frame { display: none; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center; background: #07100e; user-select: none; -webkit-user-drag: none; }
 .browser-frame.active { display: block; }
 .browser-viewport.interactive .browser-frame { cursor: crosshair; }
 .manual-mode-hint { position: absolute; z-index: 2; top: 10px; left: 50%; transform: translateX(-50%); pointer-events: none; border: 1px solid rgba(69, 210, 173, .42); border-radius: 999px; padding: 6px 10px; background: rgba(7, 16, 14, .86); color: #bcebdc; box-shadow: 0 7px 22px rgba(0, 0, 0, .28); font-size: 9px; }
