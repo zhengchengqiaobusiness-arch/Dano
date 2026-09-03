@@ -1414,6 +1414,109 @@ test("form contract: unique locate, chooser is not a typed sample, submit needs 
   }
 });
 
+test("snapshot sees empty avatar wells in a process rail and exercise-form can open them", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-well-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>流程槽</title></head><body>
+      <form id="create">
+        <label>说明<input id="memo"></label>
+        <button type="submit">提交</button>
+      </form>
+      <aside class="approval-rail">
+        <div class="process-node">
+          <div class="node-name">一级审批</div>
+          <span class="selected-tag">已指定甲</span>
+        </div>
+        <div class="process-node">
+          <div class="node-name">二级审批</div>
+          <div class="el-avatar el-avatar--circle" style="width:36px;height:36px;cursor:pointer">
+            <i class="el-icon"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></i>
+          </div>
+        </div>
+      </aside>
+      <div id="picker" role="dialog" hidden style="position:fixed;inset:20px;background:#fff;z-index:30;padding:16px">
+        <table><tbody><tr data-user="乙"><td>乙</td></tr></tbody></table>
+        <button type="button" id="pick-ok">确定</button>
+      </div>
+      <script>
+        const bound = { memo: "", assignee: "" };
+        document.getElementById("memo").addEventListener("input", event => { bound.memo = event.target.value; });
+        document.querySelector(".el-avatar").addEventListener("click", () => {
+          document.getElementById("picker").hidden = false;
+        });
+        document.querySelector("#picker table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.assignee = row.getAttribute("data-user");
+        });
+        document.getElementById("pick-ok").onclick = () => {
+          if (!bound.assignee) return;
+          const node = document.querySelectorAll(".process-node")[1];
+          const tag = document.createElement("span");
+          tag.className = "selected-tag";
+          tag.textContent = bound.assignee;
+          node.querySelector(".el-avatar")?.remove();
+          node.appendChild(tag);
+          document.getElementById("picker").hidden = true;
+        };
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.memo = bound.memo || document.getElementById("memo").value;
+          if (!bound.assignee) return;
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "avatar-well");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const todos = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    const fields = (before.formFields || []).map((field: any) => `${field.label}:${field.filled}:${field.value || ""}`);
+    assert.equal(todos.some((label: string) => /二级审批/.test(label)), true, JSON.stringify({ todos, fields }));
+    assert.equal(todos.some((label: string) => /一级审批/.test(label)), false, JSON.stringify({ todos, fields }));
+    const empty = (before.formFields || []).find((field: any) => /二级审批/.test(String(field.label || "")));
+    assert.equal(empty?.filled, false, JSON.stringify(empty));
+    assert.equal(String(empty?.value || "").includes("二级审批"), false, JSON.stringify(empty));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    const filled = (result.formFields || []).find((field: any) => /二级审批/.test(String(field.label || "")));
+    assert.match(String(filled?.value || ""), /乙/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    assert.equal((created[0] as { assignee?: string }).assignee, "乙");
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

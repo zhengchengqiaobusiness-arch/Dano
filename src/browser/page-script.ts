@@ -328,12 +328,18 @@ export const PAGE_HELPERS = String.raw`
     return rect.height > 0 && rect.height <= 240 && rect.width > 0 && rect.width <= 960;
   };
 
+  const compactStep = (node) => {
+    if (!(node instanceof Element) || isWide(node)) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.height > 8 && rect.height <= 280 && rect.width > 8;
+  };
+
   const slotHost = (el) => {
     let node = el.parentElement;
     let compact = el.parentElement;
     for (let i = 0; i < 6 && node && !isWide(node); i += 1, node = node.parentElement) {
-      if (compactBox(node)) compact = node;
-      if (node.matches(SLOT_HOST_SEL) && compactBox(node)) return node;
+      if (compactBox(node) || compactStep(node)) compact = node;
+      if (node.matches(SLOT_HOST_SEL) && compactStep(node)) return node;
     }
     return compact || el.parentElement;
   };
@@ -346,6 +352,44 @@ export const PAGE_HELPERS = String.raw`
     return Boolean(looksAdd) && compact.length <= 2;
   };
 
+  const headingOf = (host) => {
+    if (!(host instanceof Element)) return null;
+    return host.querySelector("h1, h2, h3, h4, [class*='title'], [class*='name'], [class*='head'], [class*='label']");
+  };
+
+  const headingTextOf = (host) => clean(headingOf(host)?.textContent || "").replace(/[:：*]\s*$/g, "");
+
+  const personChip = (host) => {
+    if (!(host instanceof Element)) return "";
+    const title = headingTextOf(host);
+    const heading = headingOf(host);
+    return [...host.querySelectorAll("[class*='tag'], [class*='user'], [class*='nickname'], [class*='selected'], span, strong")]
+      .filter((node) => node !== heading && !(heading && heading.contains(node)) && !node.matches("button, [role='button'], [class*='avatar'], [class*='plus'], [class*='icon']"))
+      .map((node) => clean(node.textContent))
+      .find((text) => text && text !== title && !PLUS_ONLY.test(text) && !isEmptyValue(text) && text.length <= 40) || "";
+  };
+
+  const isEmptyWell = (el) => {
+    if (!(el instanceof HTMLElement) || !isVisible(el) || isWide(el)) return false;
+    if (el.matches("input, textarea, select, a, [role='tab']")) return false;
+    const box = el.getBoundingClientRect();
+    if (box.width < 8 || box.height < 8 || box.width > 96 || box.height > 96) return false;
+    const text = clean(el.textContent || el.getAttribute("aria-label") || "");
+    if (ACTION_ONLY.test(text.replace(/\s+/g, ""))) return false;
+    if (text && !PLUS_ONLY.test(text.replace(/\s+/g, "")) && !isEmptyValue(text) && text.length > 2) return false;
+    return true;
+  };
+
+  const emptyWellOf = (host) => {
+    if (!(host instanceof Element) || personChip(host)) return null;
+    const title = headingTextOf(host);
+    if (!title || title.length > 40) return null;
+    const heading = headingOf(host);
+    const candidates = [...host.querySelectorAll("button, [role='button'], [aria-haspopup], [class*='avatar'], [class*='plus'], [class*='add-user'], [class*='add-btn'], [class*='icon']")]
+      .filter((el) => isVisible(el) && el !== heading && !(heading && heading.contains(el)));
+    return candidates.find((el) => isPlusControl(el) || isEmptyWell(el)) || null;
+  };
+
   const isPickerSlot = (el) => {
     if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
     if (el.matches("input, textarea, select, [role=combobox]")) return false;
@@ -353,10 +397,11 @@ export const PAGE_HELPERS = String.raw`
     if (isUploadWidget(el, labelOf(el))) return false;
     const text = clean(el.textContent || el.getAttribute("aria-label") || "");
     if (ACTION_ONLY.test(text.replace(/\s+/g, ""))) return false;
-    if (/dialog/i.test(el.getAttribute("aria-haspopup") || "") && (isPlusControl(el) || EMPTY_VALUE.test(text) || PLUS_ONLY.test(text.replace(/\s+/g, "")))) return true;
+    if (/dialog/i.test(el.getAttribute("aria-haspopup") || "") && (isPlusControl(el) || isEmptyValue(text) || PLUS_ONLY.test(text.replace(/\s+/g, "")))) return true;
     if (isPlusControl(el) && !el.closest("thead, .el-table__header, [class*='toolbar']")) return true;
     const host = slotHost(el);
-    if (host && compactBox(host) && (isPlusControl(el) || PLUS_ONLY.test(text.replace(/\s+/g, "")) || EMPTY_VALUE.test(text))) {
+    const empty = !text || isEmptyValue(text) || PLUS_ONLY.test(text.replace(/\s+/g, ""));
+    if (host && compactStep(host) && !personChip(host) && (isPlusControl(el) || isEmptyWell(el) || empty)) {
       if (!el.closest("thead, .el-table__header, [class*='toolbar'], nav, header")) return true;
     }
     return false;
@@ -481,10 +526,17 @@ export const PAGE_HELPERS = String.raw`
       const placeholder = clean(el.getAttribute("placeholder") || "");
       if (placeholder === want || identityPlaceholder(el) === want || promptName.test(placeholder)) return el;
     }
-    for (const el of queryDeep(root, "button, [role='button'], [aria-haspopup], [class*='plus'], [class*='add-user']")) {
+    for (const el of queryDeep(root, "button, [role='button'], [aria-haspopup], [class*='plus'], [class*='add-user'], [class*='avatar']")) {
       if (!isPickerSlot(el)) continue;
       const label = slotLabel(el);
       if (label === want || label === base) return el;
+    }
+    for (const host of queryDeep(root, SLOT_HOST_SEL)) {
+      if (!isVisible(host) || !compactStep(host)) continue;
+      const title = headingTextOf(host);
+      if (title !== want && title !== base) continue;
+      const well = emptyWellOf(host);
+      if (well) return well;
     }
     return null;
   };
@@ -500,13 +552,11 @@ export const PAGE_HELPERS = String.raw`
 
   const selectedName = (el) => {
     const host = slotHost(el);
-    const texts = [...(host ? host.querySelectorAll("[class*='tag'], [class*='user'], [class*='name'], [class*='nickname'], span, strong") : [])]
-      .filter((node) => node !== el && !el.contains(node) && !node.contains(el) && !node.matches("button, [role=button]"))
-      .map((node) => clean(node.textContent))
-      .filter((text) => text && !PLUS_ONLY.test(text) && !EMPTY_VALUE.test(text) && text.length <= 40);
-    if (texts.length) return texts[0];
+    const title = headingTextOf(host);
+    const chip = personChip(host);
+    if (chip && chip !== title) return chip;
     const own = clean(el.textContent || "");
-    if (own && !PLUS_ONLY.test(own) && !EMPTY_VALUE.test(own) && own.length > 1) return own;
+    if (own && own !== title && !PLUS_ONLY.test(own) && !isEmptyValue(own) && own.length > 1) return own;
     return "";
   };
 
@@ -550,7 +600,7 @@ export const PAGE_HELPERS = String.raw`
     if (range.length >= 2) return range;
     const fields = uniqueControls([...item.querySelectorAll("input, textarea, select, [role=combobox], [contenteditable=true]")]
       .filter((el) => !el.closest(PICKER_SEL) && isFieldControl(el)));
-    const slots = [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='plus']")].filter(isPickerSlot);
+    const slots = [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='plus'], [class*='avatar']")].filter(isPickerSlot);
     return [...fields, ...slots];
   };
 
@@ -645,9 +695,14 @@ export const PAGE_HELPERS = String.raw`
       seenEls.add(el);
       add(fieldFromControl(el, host));
     }
-    for (const el of queryDeep(root, "button, [role=button], [aria-haspopup], [class*='plus'], [class*='add-user'], [class*='add-btn'], [class*='user-select']")) {
+    for (const el of queryDeep(root, "button, [role=button], [aria-haspopup], [class*='plus'], [class*='add-user'], [class*='add-btn'], [class*='user-select'], [class*='avatar']")) {
       if (formItemOf(el) || !isPickerSlot(el)) continue;
       add(fieldFromPicker(el));
+    }
+    for (const host of queryDeep(root, SLOT_HOST_SEL)) {
+      if (!isVisible(host) || !compactStep(host) || formItemOf(host) || host.closest(PICKER_SEL + ", " + CHROME_SEL)) continue;
+      const well = emptyWellOf(host);
+      if (well) add(fieldFromPicker(well));
     }
     for (const el of queryDeep(root, "[class*='user-tag'], [class*='el-tag'], [class*='selected-tag']")) {
       if (!isVisible(el) || !el.closest("[class*='process'], [class*='workflow'], [class*='node'], [class*='card']")) continue;
