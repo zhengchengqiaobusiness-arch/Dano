@@ -24,7 +24,7 @@ const elements = {
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
-  sessionNodes: new Map(), toastTimer: null, skills: [],
+  sessionNodes: new Map(), toastTimer: null, skills: [], sessionFollow: false,
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
@@ -49,11 +49,18 @@ function timeLabel(value = new Date().toISOString()) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
-function scrollSessionIfPinned() {
+function conversationAtBottom() {
   const scroller = elements.conversation;
-  if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96) {
-    scroller.scrollTop = scroller.scrollHeight;
-  }
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2;
+}
+
+function syncSessionFollowFromUser() {
+  state.sessionFollow = conversationAtBottom();
+}
+
+function followSessionIfWanted() {
+  if (!state.sessionFollow) return;
+  elements.conversation.scrollTop = elements.conversation.scrollHeight;
 }
 
 function setBrowserStatus(text, warn = false) {
@@ -102,6 +109,7 @@ function resetWorkbench() {
   }
   state.currentUiRequest = null;
   elements.confirmationModal.hidden = true;
+  state.sessionFollow = false;
   elements.conversation.scrollTop = 0;
 }
 
@@ -152,8 +160,11 @@ function renderSessionItem(item) {
     details.append(summary, argsTitle, args, resultTitle, result); node = details;
   }
   node.dataset.sessionId = item.id;
+  const scroller = elements.conversation;
+  const keptTop = scroller.scrollTop;
   elements.conversation.append(node); state.sessionNodes.set(item.id, node);
-  scrollSessionIfPinned();
+  if (state.sessionFollow) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop = keptTop;
   return node;
 }
 
@@ -171,7 +182,7 @@ function patchSessionItem(event) {
       }
     }
   }
-  scrollSessionIfPinned();
+  followSessionIfWanted();
 }
 
 function renderAgentControls() {
@@ -348,6 +359,8 @@ async function submitPrompt(message) {
   const text = message.trim();
   if (!text || !state.agentReady) return;
   elements.prompt.value = "";
+  state.sessionFollow = true;
+  followSessionIfWanted();
   updateAgentStatus(true, true);
   try { await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) }); }
   catch (error) { updateAgentStatus(state.agentReady, state.agentStreaming); showToast(error.message); }
@@ -521,6 +534,8 @@ elements.addressForm.addEventListener("submit", event => { event.preventDefault(
 elements.reloadBrowser.addEventListener("click", () => state.browserActive && void api("/api/browser/reload", { method: "POST", body: "{}" }).then(pollBrowser).catch(error => showToast(error.message)));
 elements.stopRecording.addEventListener("click", () => void completeRecording());
 elements.clearSession.addEventListener("click", () => void clearSessionHistory());
+elements.conversation.addEventListener("scroll", syncSessionFollowFromUser, { passive: true });
+elements.conversation.addEventListener("wheel", syncSessionFollowFromUser, { passive: true });
 elements.composer.addEventListener("submit", event => {
   event.preventDefault();
   void submitPrompt(elements.prompt.value);

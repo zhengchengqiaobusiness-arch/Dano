@@ -85,7 +85,7 @@ button { color: inherit; }
 .session-toolbar span { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
 .session-clear { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: transparent; color: #a9bdb5; font-size: 10px; cursor: pointer; white-space: nowrap; }
 .session-clear:hover:not(:disabled) { border-color: #567168; color: #e1eee9; }
-.conversation { min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 18px; contain: content; background: #0d1815; }
+.conversation { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 18px; background: #0d1815; }
 .message { border-radius: 3px 14px 14px 14px; padding: 14px; background: var(--panel-strong); border: 1px solid var(--line); }
 .message-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; color: var(--teal); font-size: 9px; font-weight: 800; letter-spacing: .12em; }
 .message-meta time { color: #60756c; font-weight: 500; letter-spacing: 0; }

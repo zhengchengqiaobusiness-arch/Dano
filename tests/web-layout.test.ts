@@ -29,6 +29,10 @@ test("recording workspace stays on one page with an internal session scroller", 
   assert.match(css, /\.app-shell\s*\{[^}]*height:\s*100dvh[^}]*min-height:\s*0/s);
   assert.match(css, /\.recording-view\s*\{[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.conversation\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.conversation\s*\{[^}]*overscroll-behavior:\s*contain/s);
+  assert.doesNotMatch(app, /scrollHeight - scroller\.scrollTop - scroller\.clientHeight < 96/);
+  assert.match(app, /sessionFollow/);
+  assert.match(app, /conversation\.addEventListener\("scroll", syncSessionFollowFromUser/);
   assert.match(css, /\.browser-toolbar\s*\{[^}]*flex-wrap:\s*nowrap/s);
   assert.match(app, /details\.className\s*=\s*"thinking-block";\s*details\.open\s*=\s*true/);
   assert.doesNotMatch(app, /details\.open\s*=\s*!item\.complete/);
