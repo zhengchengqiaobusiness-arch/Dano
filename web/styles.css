@@ -39,7 +39,7 @@ button { color: inherit; }
 .status-dot.warn { background: #d97706; box-shadow: 0 0 10px #d97706; }
 
 .view[hidden] { display: none !important; }
-.recording-view { min-height: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(320px, .72fr); gap: 0; padding: 0; background: var(--canvas); }
+.recording-view { min-height: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, .48fr); gap: 0; padding: 0; background: var(--canvas); }
 .browser-panel, .agent-panel { min-height: 0; border: 0; border-radius: 0; overflow: hidden; background: var(--panel); box-shadow: none; }
 .browser-panel { display: grid; grid-template-rows: 40px minmax(0, 1fr); border-right: 1px solid var(--line); }
 .agent-panel { border-left: 1px solid var(--line); }
