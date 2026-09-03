@@ -955,8 +955,10 @@ export class BrowserRecorder {
           }
           if (this.active) this.active.guard.exerciseFormCount += 1;
           const result = await this.actions.exerciseForm() as { ok?: boolean };
-          if (!result.ok && this.active) this.active.guard.followManualSteps = true;
-          return result;
+          const used = this.active?.guard.exerciseFormCount || 0;
+          const stop = !result.ok && used >= 2;
+          if (stop && this.active) this.active.guard.followManualSteps = true;
+          return { ...result, followManualSteps: stop };
         }
         case "submit-form": {
           if ((this.active?.guard.submitFormCount || 0) >= 2) {
@@ -964,8 +966,10 @@ export class BrowserRecorder {
           }
           if (this.active) this.active.guard.submitFormCount += 1;
           const result = await this.actions.submitForm() as { ok?: boolean };
-          if (!result.ok && this.active) this.active.guard.followManualSteps = true;
-          return result;
+          const used = this.active?.guard.submitFormCount || 0;
+          const stop = !result.ok && used >= 2;
+          if (stop && this.active) this.active.guard.followManualSteps = true;
+          return { ...result, followManualSteps: stop };
         }
       }
     });

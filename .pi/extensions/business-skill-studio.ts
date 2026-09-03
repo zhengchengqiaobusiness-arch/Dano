@@ -89,7 +89,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns. exercise-form at most twice, submit-form at most twice. The same click/choose/fill may fail only once; then stop and follow recordedManualSteps or manual-steps.md. If the page cannot be clicked, ask the user to switch to manual recording. Never loop snapshot-click-snapshot or retry a failed selector. Required number 0 is empty.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns. exercise-form at most twice, submit-form at most twice. The first exercise-form/submit-form failure is not a stop: call it again. followManualSteps is true only after the second failure or stopped=true; then follow recordedManualSteps or ask 手动录制. The same click/choose/fill may fail only once. Never loop snapshot-click-snapshot or retry a failed selector. Do not record_stop+analyze a planned 新增 with no successful write response. Required number 0 is empty.",
     parameters: parameters({
       action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },
@@ -122,7 +122,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `本次识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本页查询/新建/修改/审核/删除；用户分页、产品下拉、库存带出不是主能力。分析后必须验证，验证未通过不能导出。`
+          text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。分析后必须验证，验证未通过不能导出。`
         }],
         details: caps
       };

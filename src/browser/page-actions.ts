@@ -22,6 +22,7 @@ export interface FormField {
   disabled: boolean;
   required?: boolean;
   invalid?: boolean;
+  error?: string;
   value?: string;
   scope?: string;
   rangeIndex?: number;
@@ -980,15 +981,23 @@ export class PageActions {
     return snapshot;
   }
 
+  private fieldHint(field: FormField, extra = "") {
+    return `${field.label || ""} ${field.name || ""} ${field.selector || ""} ${field.error || ""} ${extra}`;
+  }
+
   private sampleValue(field: FormField, dateOffset = 0) {
     if (field.kind === "date") {
       const endLike = field.rangeIndex === 1 || dateOffset % 2 === 1;
       return `${localIsoDate(dateOffset)} ${endLike ? "23:59:59" : "00:00:00"}`;
     }
     if (field.kind === "number") return "1";
+    const hint = this.fieldHint(field);
+    if (/座机|区号/.test(hint)) return "0516-85881234";
+    if (/联系方式|手机号|手机|电话|mobile|phone|lxfs|lxdh/i.test(hint)) return "13212341234";
+    if (/邮箱|email/i.test(hint)) return "user@example.com";
     const placeholder = String(field.selector || "").match(/^placeholder=(.+)$/s)?.[1] || "";
-    const hint = String(placeholder || field.label || field.name || "").replace(/[：:*：\s]/g, "").slice(0, 12);
-    return hint ? `样例-${hint}` : "样例";
+    const text = String(placeholder || field.label || field.name || "").replace(/[：:*：\s]/g, "").slice(0, 12);
+    return text ? `样例-${text}` : "样例";
   }
 
   private async waitForFormDialog(timeout = 2_000) {
@@ -1178,11 +1187,49 @@ export class PageActions {
     }
     await this.page().waitForTimeout(180);
     const afterDates = await this.captureFields();
+    const pageErrors = (afterDates.errors || []).join(" ");
     for (const field of afterDates.formFields || []) {
-      if (!this.requiredNumberInvalid(field) && !(field.invalid && field.kind === "number" && !field.disabled)) continue;
-      await this.fillField(field.selector || `label=${field.label}`, "1");
+      if (field.disabled || field.skip) continue;
+      if (this.requiredNumberInvalid(field) || (field.invalid && field.kind === "number")) {
+        await this.fillField(field.selector || `label=${field.label}`, "1");
+        continue;
+      }
+      if (!field.invalid && !field.error) continue;
+      if (field.kind !== "text" && field.kind !== "textarea") continue;
+      const hint = this.fieldHint(field, pageErrors);
+      const next = /座机|区号/.test(hint)
+        ? "0516-85881234"
+        : /手机|11位|联系方式|电话/.test(hint)
+          ? "13212341234"
+          : undefined;
+      if (next && next !== field.value) {
+        await this.fillField(field.selector || `label=${field.label}`, next);
+      }
     }
     void startUrl;
+  }
+
+  private async expandRepeatableRows() {
+    const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细)$/;
+    const before = (await this.captureFields()).formFields || [];
+    const snapshot = await this.captureSnapshot();
+    const control = (snapshot.controls || []).find(item =>
+      addRow.test(String(item.text || item.label || "").replace(/\s+/g, ""))
+      && (!snapshot.scope || !item.scope || item.scope === snapshot.scope)
+    );
+    const name = String(control?.text || control?.label || "").replace(/\s+/g, "");
+    if (!control && snapshot.scope !== "dialog") return false;
+    try {
+      if (control?.selector) await this.click(String(control.selector));
+      else await this.page().getByRole("button", { name: addRow }).first().click({ timeout: 1_500 });
+    } catch {
+      if (!name) return false;
+      await this.page().locator(`${DIALOGS} button, ${DIALOGS} [role='button']`).filter({ hasText: name }).first()
+        .click({ timeout: 1_200 }).catch(() => {});
+    }
+    await this.waitForPageQuiet(600);
+    const after = (await this.captureFields()).formFields || [];
+    return after.some(field => !before.some(item => item.selector === field.selector && item.label === field.label));
   }
 
   private submitControl(snapshot: PageSnapshot) {
@@ -1240,10 +1287,20 @@ export class PageActions {
       }
     };
     let after = await this.captureSnapshot();
+    let expanded = false;
     for (let pass = 0; pass < 2 && this.page().url() === startUrl; pass += 1) {
+      if (!expanded && await this.expandRepeatableRows()) {
+        expanded = true;
+        after = await this.captureFields();
+      }
       const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
       if (!leftover.length) {
         if (await this.revealHiddenSections()) {
+          after = await this.captureFields();
+          continue;
+        }
+        if (!expanded && await this.expandRepeatableRows()) {
+          expanded = true;
           after = await this.captureFields();
           continue;
         }
@@ -1281,7 +1338,7 @@ export class PageActions {
       todoCount: after.todoCount ?? (after.todoFields || []).length,
       formFields: after.formFields || [],
       recordedManualSteps: after.recordedManualSteps || [],
-      followManualSteps: !ok
+      followManualSteps: Boolean(this.host.followManualSteps?.())
     };
   }
 

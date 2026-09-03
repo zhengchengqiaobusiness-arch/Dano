@@ -11,6 +11,7 @@ const SYS_ID = "02021060111315890400000101001809";
 const SYS_NAME = "中共徐州市委机构编制委员会办公室_共享交换数据服务应用";
 
 const PAGE_FIELDS: UiFieldSnapshot[] = [
+  { label: "部门名称", type: "select", value: "徐州市教育局", required: true },
   { label: "一级内设机构", type: "select", value: "123", required: true },
   { label: "二级内设机构", type: "text", value: "123123123", required: true },
   { label: "职能描述", type: "textarea", value: "办公室", required: true },
@@ -49,6 +50,7 @@ function namedForm(fields: UiFieldSnapshot[]): UiFieldSnapshot[] {
     职能描述: "qzms",
     联系人: "lxr",
     联系方式: "lxfs",
+    部门名称: "ssbmmc",
     职能清单: "ywsxmc",
     所属系统: "yyxtid",
     编目状态: "catalogStatus"
@@ -206,6 +208,7 @@ test("manual form snapshots without request names still bind Chinese labels and 
   assert.equal(fields.ercsmc?.label, "二级内设机构");
   assert.equal(fields.ywsxmc?.source, "caller");
   assert.equal(fields.ywsxmc?.label, "职能清单");
+  assert.equal(fields.ssbmmc?.label, "部门名称");
   assert.ok(fields.yyxtid?.source === "caller" || fields.yyxtid?.defaultRule?.startsWith("from:"), fields.yyxtid?.sourceDetail);
   assert.equal(fields.yyxtid?.label, "所属系统");
   const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);

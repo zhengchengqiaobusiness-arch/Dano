@@ -2578,6 +2578,217 @@ test("failed click is not retried and exercise-form stops after two calls", asyn
   }
 });
 
+test("first exercise-form failure does not stop; second failure follows manual steps", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-retry-form-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>重试</title></head><body>
+      <form class="el-form">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">密级</label>
+          <div class="el-select">
+            <input role="combobox" readonly placeholder="请选择">
+          </div>
+        </div>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "retry-form");
+    const first: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(first.ok, false, JSON.stringify(first));
+    assert.equal(first.followManualSteps, false, JSON.stringify(first));
+    const second: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(second.ok, false, JSON.stringify(second));
+    assert.equal(second.followManualSteps, true, JSON.stringify(second));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form keeps official department labels, repairs phone format, and fills add-row fields", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-qzqd-form-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/createQzqdSl" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"success":true,"data":true}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>三定职能清单</title></head><body>
+      <div role="dialog" class="arco-modal" style="position:fixed;inset:10px;background:#fff;z-index:20;padding:16px">
+        <form class="arco-form" id="create">
+          <div class="arco-form-item">
+            <label class="arco-form-item-label">部门名称</label>
+            <div class="arco-select" id="dept">
+              <div class="arco-select-view"><span class="arco-select-view-value">徐州市政府办公室</span></div>
+            </div>
+            <div class="arco-select" id="dept2">
+              <input id="dept2-input" role="combobox" readonly placeholder="请选择">
+            </div>
+          </div>
+          <div class="arco-form-item">
+            <span>徐州市政府办公室</span>
+            <input id="ghost">
+          </div>
+          <div class="arco-form-item is-required">
+            <label class="arco-form-item-label">一级内设机构</label>
+            <input id="csmc" class="arco-input">
+          </div>
+          <div class="arco-form-item">
+            <label class="arco-form-item-label">二级内设机构</label>
+            <input id="ercsmc" class="arco-input">
+          </div>
+          <div class="arco-form-item">
+            <label class="arco-form-item-label">职能描述</label>
+            <textarea id="qzms" class="arco-textarea"></textarea>
+          </div>
+          <div class="arco-form-item">
+            <label class="arco-form-item-label">联系人</label>
+            <input id="lxr" class="arco-input">
+          </div>
+          <div class="arco-form-item is-required" id="phone-item">
+            <label class="arco-form-item-label">联系方式</label>
+            <input id="lxfs" class="arco-input">
+            <div class="arco-form-item-message" id="phone-error" hidden>需要座机格式区号-座机号码</div>
+          </div>
+          <div id="line" hidden>
+            <div class="arco-form-item is-required">
+              <label class="arco-form-item-label">职能清单</label>
+              <input id="ywsxmc" class="arco-input">
+            </div>
+            <div class="arco-form-item is-required">
+              <label class="arco-form-item-label">所属系统</label>
+              <div class="arco-select" id="sys">
+                <input id="yyxt" role="combobox" readonly placeholder="请选择">
+              </div>
+            </div>
+          </div>
+          <button type="button" id="add-row">新增一行</button>
+          <button type="submit" id="save">提交</button>
+        </form>
+      </div>
+      <ul id="sys-options" class="arco-select-dropdown" hidden>
+        <li role="option">共享交换数据服务应用</li>
+      </ul>
+      <ul id="dept2-options" class="arco-select-dropdown" hidden>
+        <li role="option">秘书一处</li>
+      </ul>
+      <script>
+        const bound = { csmc: "", ercsmc: "", qzms: "", lxr: "", lxfs: "", ywsxmc: "", yyxt: "", dept2: "" };
+        const bind = (id, key) => {
+          const node = document.getElementById(id);
+          node.addEventListener("input", () => { bound[key] = node.value; validatePhone(); });
+          node.addEventListener("change", () => { bound[key] = node.value; validatePhone(); });
+        };
+        const validatePhone = () => {
+          const phone = document.getElementById("lxfs");
+          const error = document.getElementById("phone-error");
+          const item = document.getElementById("phone-item");
+          const ok = /^\\d{3,4}-\\d{7,8}$/.test(phone.value);
+          error.hidden = ok || !phone.value;
+          item.classList.toggle("is-error", Boolean(phone.value) && !ok);
+          bound.lxfs = phone.value;
+        };
+        bind("csmc", "csmc");
+        bind("ercsmc", "ercsmc");
+        bind("qzms", "qzms");
+        bind("lxr", "lxr");
+        bind("lxfs", "lxfs");
+        bind("ywsxmc", "ywsxmc");
+        document.getElementById("dept2").addEventListener("click", () => {
+          document.getElementById("dept2-options").hidden = false;
+        });
+        document.getElementById("dept2-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.dept2 = option.textContent;
+          document.getElementById("dept2-input").value = option.textContent;
+          document.getElementById("dept2-options").hidden = true;
+        });
+        document.getElementById("add-row").addEventListener("click", () => {
+          document.getElementById("line").hidden = false;
+        });
+        document.getElementById("sys").addEventListener("click", () => {
+          document.getElementById("sys-options").hidden = false;
+        });
+        document.getElementById("sys-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.yyxt = option.textContent;
+          document.getElementById("yyxt").value = option.textContent;
+          document.getElementById("sys-options").hidden = true;
+        });
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/createQzqdSl", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "qzqd-form");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.formFields || []).map((field: any) => field.label);
+    assert.equal(labels.includes("部门名称") || labels.includes("部门名称-1"), true, JSON.stringify(before.formFields));
+    assert.equal(labels.includes("部门名称-2"), true, JSON.stringify(before.formFields));
+    assert.equal((before.formFields || []).some((field: any) => /徐州市政府办公室/.test(field.label || "")), false, JSON.stringify(before.formFields));
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, errors: filled.errors, fields: filled.formFields }));
+    for (const label of ["部门名称-2", "一级内设机构", "二级内设机构", "职能描述", "联系人", "职能清单", "所属系统"]) {
+      assert.equal((filled.formFields || []).some((field: any) => field.label === label && field.filled), true, `${label} ${JSON.stringify(filled.formFields)}`);
+    }
+    assert.equal((filled.formFields || []).some((field: any) => field.label === "联系方式" && /^\d{3,4}-\d{7,8}$/.test(String(field.value || ""))), true, JSON.stringify(filled.formFields));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length > 0, true, JSON.stringify(created));
+    assert.match(String((created[0] as any)?.lxfs || ""), /^\d{3,4}-\d{7,8}$/);
+    assert.ok(String((created[0] as any)?.ywsxmc || "").length > 0);
+    assert.ok(String((created[0] as any)?.ercsmc || "").length > 0);
+    assert.ok(String((created[0] as any)?.qzms || "").length > 0);
+    assert.ok(String((created[0] as any)?.lxr || "").length > 0);
+    assert.ok(String((created[0] as any)?.dept2 || "").length > 0);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("Arco form keeps official labels after typing and records a full form on manual intervention", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-arco-"));
   const server = http.createServer((_request, response) => {

@@ -175,7 +175,11 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(browserSkill, /#el-id-\*/);
   assert.match(browserSkill, /YYYY-MM-DD/);
   assert.match(browserSkill, /todoFields|exercise-form/);
+  assert.match(browserSkill, /first `exercise-form`\/`submit-form` `ok: false` is not a stop/);
+  assert.match(browserSkill, /Follow `recordedManualSteps`[\s\S]*only after `followManualSteps`/);
+  assert.match(browserControl, /first exercise-form\/submit-form failure is not a stop/);
   assert.match(bridge, /todoFields|exercise-form|todoCount/);
+  assert.match(bridge, /first exercise-form failure is not a stop/);
   assert.match(bridge, /never click the dim overlay|Never click text=2/);
   assert.match(bridge, /Windows|Never use bash|WSL/);
   assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);

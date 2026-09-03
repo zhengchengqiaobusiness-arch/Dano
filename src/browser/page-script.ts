@@ -49,7 +49,7 @@ export const PAGE_HELPERS = String.raw`
   const DATE_PLACEHOLDER = /yyyy-mm-dd|年\/月\/日/i;
   const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
   const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
-  const ACTION_ONLY = /^(新增|添加一行|添加明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
+  const ACTION_ONLY = /^(新增|新增一行|添加一行|加一行|添加明细|新增明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
   const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar']";
   const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='approval-node'], [class*='flow-node'], [class*='activity'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']";
   const WIDE_SEL = DIALOG_SEL + ", form, [role='form'], body, main, header, nav, aside, footer, .el-overlay, .ant-modal-wrap, [class*='overlay']";
@@ -137,8 +137,16 @@ export const PAGE_HELPERS = String.raw`
     const placeholder = el.getAttribute("placeholder") || "";
     if (placeholder && !EMPTY_VALUE.test(placeholder) && !PROMPT_ONLY.test(placeholder)) return clean(placeholder);
     const nearby = nearbyLabel(el);
-    if (nearby && nearby !== displayValue(el)) return nearby;
+    if (nearby && nearby !== displayValue(el) && !isForeignDisplayValue(nearby, el)) return nearby;
     return "";
+  };
+
+  const isForeignDisplayValue = (text, el) => {
+    if (!text || text.length < 2) return false;
+    return queryDeep(document.body, FIELD_CONTROL_SEL).some((other) => {
+      if (other === el || other.contains(el) || el.contains(other)) return false;
+      return displayValue(other) === text;
+    });
   };
 
   const nearbyLabel = (el) => {
@@ -725,7 +733,9 @@ export const PAGE_HELPERS = String.raw`
     const required = Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required"));
     const numericZero = kind === "number" && /^(0+|0*\.0+)$/.test(clean(value));
     const filled = !isEmptyValue(value) && !(required && numericZero);
-    const invalid = Boolean(item?.classList?.contains("is-error") || item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message"));
+    const errorNode = item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message");
+    const error = errorNode && isVisible(errorNode) ? clean(errorNode.textContent || "") : "";
+    const invalid = Boolean(error);
     return {
       label,
       name: nameOf(el),
@@ -736,6 +746,7 @@ export const PAGE_HELPERS = String.raw`
       disabled: kind === "readonly" || isDisabledWidget(el),
       required,
       invalid,
+      error: error || undefined,
       value,
       options: optionsOf(el),
       scope: scopeName(el)
@@ -859,7 +870,14 @@ export const PAGE_HELPERS = String.raw`
       if (!value || PLUS_ONLY.test(value) || EMPTY_VALUE.test(value)) continue;
       add({ ...fieldFromPicker(el), filled: true, required: false, value, kind: "picker" });
     }
-    return fields;
+    return fields.filter((field, index, all) => {
+      const base = String(field.label || "").replace(/-\d+$/, "");
+      return !all.some((other, otherIndex) =>
+        otherIndex !== index
+        && other.value
+        && (other.value === field.label || other.value === base)
+      );
+    });
   };
 
   const collectControls = (root) => queryDeep(root,
@@ -936,7 +954,8 @@ export const SNAPSHOT_FIELDS_IN_PAGE = new Function(`${PAGE_HELPERS}
   return {
     scope: scopeName(scope),
     formFields,
-    todoFields: formFields.filter((field) => !field.skip && !field.disabled && !field.filled)
+    todoFields: formFields.filter((field) => !field.skip && !field.disabled && !field.filled),
+    errors: collectErrors()
   };
 `) as () => unknown;
 
