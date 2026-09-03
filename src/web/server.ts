@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -7,25 +7,23 @@ import path from "node:path";
 import { chromium } from "playwright";
 import { loadConfig } from "../config.js";
 import { StudioService } from "../studio-service.js";
-import { PiRpcBridge } from "./pi-rpc.js";
-import { PiTranscript } from "./transcript.js";
+import { isPageSessionId, sendEvent, WorkbenchPage } from "./workbench-page.js";
 
 const host = "127.0.0.1";
 const port = Number(process.env.BSS_PORT || 4310);
 const origin = `http://${host}:${port}`;
 const publicDir = path.resolve(process.cwd(), "web");
-const browserServiceToken = randomBytes(32).toString("hex");
-const studio = new StudioService({ ...loadConfig(), headless: true });
-const pi = new PiRpcBridge(process.cwd(), origin, browserServiceToken);
+const sharedConfig = { ...loadConfig(), headless: true };
+const studio = new StudioService(sharedConfig);
 
 type BrowserInteractionMode = "manual" | "automatic";
 type RuntimeLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR";
-const eventClients = new Set<ServerResponse>();
+const pages = new Map<string, WorkbenchPage>();
+const pagesByToken = new Map<string, WorkbenchPage>();
 const secretValues = Object.entries(process.env)
   .filter(([key, value]) => /KEY|TOKEN|SECRET|PASSWORD/i.test(key) && typeof value === "string" && value.length >= 6)
   .map(([, value]) => value as string)
   .sort((left, right) => right.length - left.length);
-let browserInteractionMode: BrowserInteractionMode = "automatic";
 
 const contentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -43,12 +41,8 @@ function sendJson(response: ServerResponse, status: number, payload: unknown) {
   response.end(JSON.stringify(payload));
 }
 
-function sendEvent(response: ServerResponse, payload: unknown) {
-  response.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
-
-function broadcast(payload: unknown) {
-  for (const client of eventClients) sendEvent(client, payload);
+function broadcastAll(payload: unknown) {
+  for (const page of pages.values()) page.broadcast(payload);
 }
 
 function safeLogMessage(value: unknown) {
@@ -73,14 +67,6 @@ function sanitizeTranscript(value: unknown, key = "", depth = 0): unknown {
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .slice(0, 300).map(([childKey, child]) => [childKey, sanitizeTranscript(child, childKey, depth + 1)]));
   return value;
-}
-
-const transcript = new PiTranscript(sanitizeTranscript);
-let conversationEpoch = 0;
-let transcriptOpen = true;
-
-function broadcastSession(payload: Record<string, unknown>) {
-  broadcast({ ...payload, epoch: conversationEpoch });
 }
 
 function errorMessage(error: unknown) {
@@ -112,137 +98,88 @@ function parseBrowserMode(value: unknown): BrowserInteractionMode {
   throw new Error("录制模式必须是 manual 或 automatic");
 }
 
-function setBrowserMode(mode: BrowserInteractionMode) {
-  if (browserInteractionMode === mode) return;
-  browserInteractionMode = mode;
-  runtimeLog("BROWSER", mode === "manual" ? "Switched to manual recording mode." : "Switched to Pi automatic click mode.");
-  broadcast({ type: "browser_mode", mode });
-}
-
-function authorized(request: IncomingMessage) {
-  const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, "") || "";
-  const expected = Buffer.from(browserServiceToken);
-  const actual = Buffer.from(supplied);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
-
-pi.subscribe(event => {
-  if (transcriptOpen) {
-    for (const payload of transcript.handle(event)) broadcastSession(payload);
+function getOrCreatePage(id: string) {
+  const existing = pages.get(id);
+  if (existing) {
+    existing.touch();
+    void existing.ensureStarted().catch(error => {
+      runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
+    });
+    return existing;
   }
-  if (event.type === "agent_ready") {
-    broadcast({ type: "agent_status", ready: true, streaming: false });
-    runtimeLog("READY", `Pi connected. Provider: ${process.env.PI_PROVIDER || "xiaomi-token-plan-cn"}; model: ${process.env.PI_MODEL || "provider default"}.`);
-  }
-  if (event.type === "agent_start") {
-    if (!transcriptOpen) return;
-    runtimeLog("PI", "Natural-language task started.");
-    broadcast({ type: "agent_status", ready: true, streaming: true });
-  }
-  if (event.type === "agent_settled") {
-    broadcast({ type: "agent_status", ready: true, streaming: false });
-    runtimeLog("PI", "Natural-language task completed.");
-  }
-  if (event.type === "extension_ui_request") {
-    if (!transcriptOpen) {
-      try { pi.respondToUi({ id: event.id, cancelled: true }); } catch { /* already cancelled */ }
-      return;
-    }
-    if (event.method === "confirm") {
-      runtimeLog("PI", `Auto-approved confirmation: ${event.title || event.message || "operation"}.`);
-      try {
-        pi.respondToUi({ id: event.id, confirmed: true });
-      } catch (error) {
-        runtimeLog("WARN", `Failed to auto-approve confirmation: ${errorMessage(error)}`);
-      }
-      return;
-    }
-    runtimeLog("WAIT", `Pi requested ${event.method || "user input"}.`);
-    const safeRequest = {
-      type: "ui_request",
-      id: event.id,
-      method: event.method,
-      title: event.title,
-      message: event.message,
-      options: event.options,
-      placeholder: event.placeholder,
-      prefill: event.prefill,
-      notifyType: event.notifyType
-    };
-    broadcast(safeRequest);
-  }
-  if (event.type === "agent_diagnostic") {
-    runtimeLog("WARN", event.message || "Pi reported a diagnostic message.");
-    broadcast({ type: "agent_error", message: event.message || "Pi reported a diagnostic message" });
-  }
-  if (event.type === "agent_process_exit") {
-    runtimeLog("ERROR", event.message || `Pi process stopped with code ${event.code ?? "unknown"}.`);
-    broadcast({ type: "agent_error", message: event.message || "Pi stopped unexpectedly" });
-  }
-});
-
-async function resetWorkbench() {
-  conversationEpoch += 1;
-  transcriptOpen = false;
-  if (studio.recorder.isActive()) {
-    studio.recorder.disposeImmediate();
-    runtimeLog("BROWSER", "Active recording was discarded so the next conversation starts clean.");
-  }
-  await pi.beginFreshConversation().catch(error => {
-    runtimeLog("WARN", `Failed to start a new Pi session: ${errorMessage(error)}`);
+  const page = new WorkbenchPage(id, sharedConfig, origin, sanitizeTranscript, runtimeLog);
+  pages.set(id, page);
+  pagesByToken.set(page.browserToken, page);
+  runtimeLog("PI", `Opened isolated workbench page ${id}.`);
+  void page.ensureStarted().catch(error => {
+    runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
   });
-  transcript.clear();
-  broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
-  broadcast({ type: "browser_changed" });
-  broadcast({ type: "session_reset", epoch: conversationEpoch });
+  return page;
 }
 
-async function browserStart(url: string, name?: string) {
-  return studio.startRecording(url, name || "web-session");
+function pageSessionIdFrom(request: IncomingMessage) {
+  const url = new URL(request.url || "/", origin);
+  return String(request.headers["x-bss-page-session"] || url.searchParams.get("pageSession") || "").trim();
 }
 
-async function browserState() {
-  return { ...(await studio.recorder.state()), mode: browserInteractionMode };
+function requirePage(request: IncomingMessage) {
+  const id = pageSessionIdFrom(request);
+  if (!isPageSessionId(id)) throw new Error("A page session is required");
+  return getOrCreatePage(id);
+}
+
+function pageFromBrowserToken(request: IncomingMessage) {
+  const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, "") || "";
+  const actual = Buffer.from(supplied);
+  for (const [token, page] of pagesByToken) {
+    const expected = Buffer.from(token);
+    if (actual.length === expected.length && timingSafeEqual(actual, expected)) return page;
+  }
 }
 
 async function handleApi(request: IncomingMessage, response: ServerResponse, pathname: string) {
   if (request.method === "GET" && pathname === "/api/events") {
+    const page = requirePage(request);
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive"
     });
     response.write("retry: 1500\n\n");
-    eventClients.add(response);
-    sendEvent(response, { type: "connected" });
-    request.on("close", () => eventClients.delete(response));
+    page.clients.add(response);
+    sendEvent(response, { type: "connected", pageSession: page.id });
+    request.on("close", () => page.clients.delete(response));
     return;
   }
 
   if (request.method === "GET" && pathname === "/api/status") {
+    const page = requirePage(request);
     sendJson(response, 200, {
-      agent: pi.status(),
-      browser: await browserState(),
+      pageSession: page.id,
+      agent: page.pi.status(),
+      browser: await page.browserState(),
       model: process.env.PI_MODEL || null,
       provider: process.env.PI_PROVIDER || "xiaomi-token-plan-cn",
       thinking: process.env.PI_THINKING || "medium",
-      sessionItems: transcript.items
+      sessionItems: page.transcript.items
     });
     return;
   }
 
   if (request.method === "GET" && pathname === "/api/browser/state") {
-    sendJson(response, 200, await browserState());
+    const page = requirePage(request);
+    sendJson(response, 200, await page.browserState());
     return;
   }
 
   if (request.method === "GET" && pathname === "/api/browser/frame") {
-    if (!studio.recorder.isActive()) {
+    const page = requirePage(request);
+    if (!page.recorder.isActive()) {
       response.writeHead(204, { "Cache-Control": "no-store" }).end();
       return;
     }
     try {
-      const frame = await studio.recorder.preview();
+      const frame = await page.recorder.preview();
       response.writeHead(200, {
         "Content-Type": "image/jpeg",
         "Content-Length": String(frame.byteLength),
@@ -265,7 +202,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     if (typeof body.name !== "string" || !body.name.trim()) throw new Error("请输入 Skill 名称");
     const record = await studio.exportManaged(body.name, body.confirmed === true);
     sendJson(response, 200, record);
-    broadcast({ type: "skills_changed" });
+    broadcastAll({ type: "skills_changed" });
     return;
   }
 
@@ -277,51 +214,55 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     if (request.method === "POST" && action === "freeze") {
       const record = await studio.setSkillFrozen(name, body.frozen === true, body.confirmed === true);
       sendJson(response, 200, record);
-      broadcast({ type: "skills_changed" });
+      broadcastAll({ type: "skills_changed" });
       return;
     }
     if (request.method === "DELETE" && action === "delete") {
       const record = await studio.deleteSkill(name, body.confirmed === true);
       sendJson(response, 200, record);
-      broadcast({ type: "skills_changed" });
+      broadcastAll({ type: "skills_changed" });
       return;
     }
     if (request.method === "POST" && action === "invoke") {
+      const page = requirePage(request);
       const invocation = await studio.invokeSkill(name, typeof body.goal === "string" ? body.goal : "");
-      transcriptOpen = true;
-      const userEvent = transcript.addUser(invocation.prompt);
-      broadcastSession(userEvent);
-      await pi.prompt(invocation.prompt);
+      page.transcriptOpen = true;
+      const userEvent = page.transcript.addUser(invocation.prompt);
+      page.broadcastSession(userEvent);
+      await page.pi.prompt(invocation.prompt);
       sendJson(response, 202, { accepted: true, skill: invocation.record.name });
       return;
     }
   }
 
   if (request.method === "POST" && pathname === "/api/browser/open") {
+    const page = requirePage(request);
     const body = await readJsonBody(request);
-    if (body.mode !== undefined) setBrowserMode(parseBrowserMode(body.mode));
-    const session = await browserStart(parseBrowserUrl(body.url), body.name);
-    runtimeLog("BROWSER", `${browserInteractionMode === "manual" ? "Manual" : "Pi automatic"} recording session started.`);
-    sendJson(response, 200, { session, state: await browserState() });
-    broadcast({ type: "browser_changed" });
+    if (body.mode !== undefined) page.setMode(parseBrowserMode(body.mode));
+    const session = await page.startRecording(parseBrowserUrl(body.url), body.name);
+    runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
+    sendJson(response, 200, { session, state: await page.browserState() });
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/browser/mode") {
+    const page = requirePage(request);
     const body = await readJsonBody(request);
-    setBrowserMode(parseBrowserMode(body.mode));
-    sendJson(response, 200, await browserState());
-    broadcast({ type: "browser_changed" });
+    page.setMode(parseBrowserMode(body.mode));
+    sendJson(response, 200, await page.browserState());
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/browser/manual") {
-    const result = await studio.recorder.manualControl(await readJsonBody(request)) as { observed?: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string } };
+    const page = requirePage(request);
+    const result = await page.recorder.manualControl(await readJsonBody(request)) as { observed?: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string } };
     if (result.observed && (result.observed.eventType === "input" || result.observed.eventType === "change" || result.observed.label || result.observed.value !== undefined)) {
       const label = result.observed.label || result.observed.name || "页面字段";
       runtimeLog("BROWSER", `Manual ${result.observed.eventType || "action"}: ${label}=${String(result.observed.value ?? "")}`);
-      if (transcriptOpen && (result.observed.eventType === "input" || result.observed.eventType === "change")) {
-        broadcastSession(transcript.addManual(result.observed));
+      if (page.transcriptOpen && (result.observed.eventType === "input" || result.observed.eventType === "change")) {
+        page.broadcastSession(page.transcript.addManual(result.observed));
       }
     }
     sendJson(response, 200, result);
@@ -329,82 +270,89 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   }
 
   if (request.method === "POST" && pathname === "/api/browser/reload") {
-    const result = await studio.recorder.reload();
+    const page = requirePage(request);
+    const result = await page.recorder.reload();
     runtimeLog("BROWSER", "Embedded browser page reloaded.");
     sendJson(response, 200, result);
-    broadcast({ type: "browser_changed" });
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/browser/stop") {
-    const session = await studio.stopRecording();
+    const page = requirePage(request);
+    const session = await page.stopRecording();
     runtimeLog("BROWSER", "Recording session stopped and evidence was saved.");
     sendJson(response, 200, session);
-    broadcast({ type: "browser_changed" });
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/session/clear") {
-    await resetWorkbench();
-    runtimeLog("PI", "All recordings ended and the workbench started a new conversation.");
-    sendJson(response, 200, { cleared: true, epoch: conversationEpoch, sessionItems: transcript.items });
+    const page = requirePage(request);
+    await page.reset();
+    runtimeLog("PI", `Page ${page.id} ended its recording and started a new conversation.`);
+    sendJson(response, 200, { cleared: true, epoch: page.epoch, pageSession: page.id, sessionItems: page.transcript.items });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/chat") {
+    const page = requirePage(request);
     const body = await readJsonBody(request);
     const messageText = typeof body.message === "string" ? body.message.trim() : "";
     if (!messageText) throw new Error("A message is required");
-    transcriptOpen = true;
-    const userEvent = transcript.addUser(messageText);
-    broadcastSession(userEvent);
-    await pi.prompt(messageText);
+    page.transcriptOpen = true;
+    const userEvent = page.transcript.addUser(messageText);
+    page.broadcastSession(userEvent);
+    await page.pi.prompt(messageText);
     sendJson(response, 202, { accepted: true, item: userEvent.item });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/agent/abort") {
-    await pi.abort();
+    const page = requirePage(request);
+    await page.pi.abort();
     sendJson(response, 200, { aborted: true });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/agent/ui-response") {
+    const page = requirePage(request);
     const body = await readJsonBody(request);
-    pi.respondToUi(body);
+    page.pi.respondToUi(body);
     sendJson(response, 200, { accepted: true });
     return;
   }
 
   if (pathname.startsWith("/internal/browser/")) {
-    if (!authorized(request)) {
+    const page = pageFromBrowserToken(request);
+    if (!page) {
       sendJson(response, 401, { error: "Unauthorized" });
       return;
     }
     const body = await readJsonBody(request);
     if (request.method === "POST" && pathname === "/internal/browser/start") {
-      if (browserInteractionMode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
-      sendJson(response, 200, await browserStart(parseBrowserUrl(body.url), body.name));
-      broadcast({ type: "browser_changed" });
+      if (page.mode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
+      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name));
+      page.broadcast({ type: "browser_changed" });
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/stop") {
-      if (browserInteractionMode !== "automatic") throw new Error("当前是手动录制模式，Pi 不能停止手动会话");
-      sendJson(response, 200, await studio.stopRecording());
-      broadcast({ type: "browser_changed" });
+      if (page.mode !== "automatic") throw new Error("当前是手动录制模式，Pi 不能停止手动会话");
+      sendJson(response, 200, await page.stopRecording());
+      page.broadcast({ type: "browser_changed" });
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/inspect") {
       if (typeof body.selector !== "string" || !body.selector) throw new Error("A selector is required");
-      sendJson(response, 200, await studio.recorder.inspectTarget(body.selector));
+      sendJson(response, 200, await page.recorder.inspectTarget(body.selector));
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/control") {
-      if (browserInteractionMode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
+      if (page.mode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
         throw new Error("当前是手动录制模式；Pi 只能读取页面，不能自动点击或输入");
       }
-      sendJson(response, 200, await studio.recorder.control(body));
-      broadcast({ type: "browser_changed" });
+      sendJson(response, 200, await page.recorder.control(body));
+      page.broadcast({ type: "browser_changed" });
       return;
     }
   }
@@ -446,7 +394,9 @@ const server = http.createServer(async (request, response) => {
 });
 
 const heartbeat = setInterval(() => {
-  for (const client of eventClients) client.write(": heartbeat\n\n");
+  for (const page of pages.values()) {
+    for (const client of page.clients) client.write(": heartbeat\n\n");
+  }
 }, 15_000);
 
 let shuttingDown = false;
@@ -455,8 +405,10 @@ function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(heartbeat);
-  try { broadcast({ type: "studio_shutdown" }); } catch { /* clients may already be gone */ }
-  pi.stop();
+  try { broadcastAll({ type: "studio_shutdown" }); } catch { /* clients may already be gone */ }
+  for (const page of pages.values()) page.dispose();
+  pages.clear();
+  pagesByToken.clear();
   studio.recorder.disposeImmediate();
   try { server.close(); } catch { /* already closed */ }
   process.exit(0);
@@ -505,9 +457,5 @@ server.listen(port, host, async () => {
       windowsHide: true
     });
   }
-  try {
-    await pi.start();
-  } catch (error) {
-    runtimeLog("ERROR", `Pi failed to start: ${errorMessage(error)}`);
-  }
+  runtimeLog("INFO", "Each workbench tab keeps its own conversation; refresh reuses that tab, a new page starts clean.");
 });

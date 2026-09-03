@@ -65,14 +65,15 @@ test("Pi send button becomes an immediate abort control and thinking is requeste
 });
 
 test("recording workbench can clear conversation history in one click", async () => {
-  const [html, css, app, server, bridge] = await Promise.all([
+  const [html, css, app, server, bridge, page] = await Promise.all([
     readFile(path.join(root, "web", "index.html"), "utf8"),
     readFile(path.join(root, "web", "styles.css"), "utf8"),
     readFile(path.join(root, "web", "app.js"), "utf8"),
     readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
-    readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8")
+    readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8")
   ]);
-  const resetWorkbench = server.match(/async function resetWorkbench\(\)[\s\S]*?broadcast\(\{ type: "session_reset"/)?.[0] || "";
+  const resetWorkbench = page.match(/async reset\(\)[\s\S]*?session_reset/)?.[0] || "";
 
   assert.match(html, /id="clear-session"[^>]*>清空历史</);
   assert.match(css, /\.session-toolbar\s*\{/);
@@ -82,25 +83,26 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.match(app, /已结束录制并清空全部内容；下一条消息是新对话/);
   assert.match(app, /studio_shutdown/);
   assert.match(server, /pathname === "\/api\/session\/clear"/);
-  assert.match(resetWorkbench, /studio\.recorder\.disposeImmediate\(\)/);
+  assert.match(resetWorkbench, /this\.recorder\.disposeImmediate\(\)/);
   assert.match(resetWorkbench, /beginFreshConversation/);
-  assert.match(resetWorkbench, /transcript\.clear\(\)/);
+  assert.match(resetWorkbench, /this\.transcript\.clear\(\)/);
   assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
   assert.match(bridge, /this\.suppressEvents = true/);
   assert.match(bridge, /async newSession\(\)[\s\S]*type: "new_session"/);
 });
 
 test("starting a recording keeps the workbench conversation", async () => {
-  const [app, server] = await Promise.all([
+  const [app, server, page] = await Promise.all([
     readFile(path.join(root, "web", "app.js"), "utf8"),
-    readFile(path.join(root, "src", "web", "server.ts"), "utf8")
+    readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8")
   ]);
-  const browserStart = server.match(/async function browserStart[\s\S]*?\n\}/)?.[0] || "";
+  const browserStart = page.match(/async startRecording[\s\S]*?\n  \}/)?.[0] || "";
   const openBrowser = app.match(/async function openBrowser[\s\S]*?\n\}/)?.[0] || "";
   const clearRoute = server.match(/pathname === "\/api\/session\/clear"[\s\S]*?return;/)?.[0] || "";
 
-  assert.match(clearRoute, /await resetWorkbench\(\)/);
-  assert.doesNotMatch(browserStart, /resetWorkbench|transcript\.clear|pi\.abort|abortAgent/);
+  assert.match(clearRoute, /await page\.reset\(\)/);
+  assert.doesNotMatch(browserStart, /reset\(|transcript\.clear|pi\.abort|abortAgent|beginFreshConversation/);
   assert.doesNotMatch(openBrowser, /resetWorkbench/);
   assert.doesNotMatch(openBrowser, /工作台已清空/);
   assert.match(app, /if \(event\.type === "session_reset"\) \{\s*if \(event\.epoch != null\) state\.sessionEpoch = event\.epoch;\s*resetWorkbench\(\);/s);
@@ -151,10 +153,10 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
 });
 
 test("workbench operations execute without a confirmation dialog", async () => {
-  const [extension, bridge, server, app, browserSkill] = await Promise.all([
+  const [extension, bridge, page, app, browserSkill] = await Promise.all([
     readFile(path.join(root, ".pi", "extensions", "business-skill-studio.ts"), "utf8"),
     readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8"),
-    readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8"),
     readFile(path.join(root, "web", "app.js"), "utf8"),
     readFile(path.join(root, ".pi", "skills", "control-in-app-browser", "SKILL.md"), "utf8")
   ]);
@@ -165,7 +167,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.doesNotMatch(extension, /Write operation cancelled by user|用户取消了 Skill 导出|Binding approval cancelled/);
   assert.match(bridge, /Execute browser actions and business operations immediately/);
   assert.doesNotMatch(bridge, /must wait for the existing explicit confirmation dialog/);
-  assert.match(server, /event\.method === "confirm"[\s\S]*respondToUi\(\{ id: event\.id, confirmed: true \}\)/);
+  assert.match(page, /event\.method === "confirm"[\s\S]*respondToUi\(\{ id: event\.id, confirmed: true \}\)/);
   assert.match(app, /if \(request\.method === "confirm"\) \{\s*state\.currentUiRequest = request;\s*void closeConfirmation\(true\);/s);
   assert.match(browserSkill, /Execute click, fill, select, choose, press, submit, and navigation immediately/);
   assert.match(browserSkill, /recentUserActions/);
@@ -195,6 +197,27 @@ test("Windows Pi host uses powershell instead of bash", async () => {
   assert.match(bridge, /The bash tool is disabled/);
   assert.match(studioSkill, /bash tool is disabled|use powershell/);
   assert.match(browserSkill, /bash tool is disabled|use powershell/);
+});
+
+test("refresh keeps a tab session while a new page starts isolated", async () => {
+  const [app, server, page] = await Promise.all([
+    readFile(path.join(root, "web", "app.js"), "utf8"),
+    readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8")
+  ]);
+
+  assert.match(app, /sessionStorage\.getItem\(PAGE_SESSION_KEY\)/);
+  assert.match(app, /sessionStorage\.setItem\(PAGE_SESSION_KEY/);
+  assert.match(app, /X-Bss-Page-Session/);
+  assert.match(app, /\/api\/events\?pageSession=/);
+  assert.doesNotMatch(app, /localStorage\.(get|set)Item\(PAGE_SESSION_KEY/);
+  assert.match(server, /function getOrCreatePage/);
+  assert.match(server, /function requirePage/);
+  assert.match(server, /x-bss-page-session/);
+  assert.match(server, /pagesByToken/);
+  assert.match(page, /class WorkbenchPage/);
+  assert.match(page, /profileDir: path\.join\(config\.profileDir, id\)/);
+  assert.match(page, /new PiRpcBridge/);
 });
 
 test("skill catalog distinguishes handbook export from business spec dump", async () => {

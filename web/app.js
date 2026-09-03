@@ -21,6 +21,31 @@ const elements = {
   invokeCancel: $("#invoke-cancel"), invokeSubmit: $("#invoke-submit"), toast: $("#toast")
 };
 
+const PAGE_SESSION_KEY = "bss-page-session";
+let memoryPageSession = "";
+
+function createPageSessionId() {
+  const raw = (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`).replace(/-/g, "");
+  return `page_${raw}`;
+}
+
+function pageSessionId() {
+  try {
+    const existing = sessionStorage.getItem(PAGE_SESSION_KEY) || "";
+    if (/^page_[A-Za-z0-9_-]{8,80}$/.test(existing)) return existing;
+    const id = createPageSessionId();
+    sessionStorage.setItem(PAGE_SESSION_KEY, id);
+    return id;
+  } catch {
+    if (!memoryPageSession) memoryPageSession = createPageSessionId();
+    return memoryPageSession;
+  }
+}
+
+function pageHeaders(extra = {}) {
+  return { "Content-Type": "application/json", "X-Bss-Page-Session": pageSessionId(), ...extra };
+}
+
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
@@ -32,7 +57,7 @@ const state = {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
+  const response = await fetch(path, { ...options, headers: pageHeaders(options.headers || {}) });
   const payload = response.status === 204 ? null : await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload?.error || `请求失败（${response.status}）`);
   return payload;
@@ -273,7 +298,7 @@ async function refreshBrowserFrame(force = false) {
   const epoch = state.frameEpoch;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(1200) });
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", headers: pageHeaders(), signal: AbortSignal.timeout(1200) });
     if (epoch !== state.frameEpoch) return;
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
@@ -544,7 +569,7 @@ async function skillAction(skill, action) {
 }
 
 function connectEvents() {
-  const stream = new EventSource("/api/events");
+  const stream = new EventSource(`/api/events?pageSession=${encodeURIComponent(pageSessionId())}`);
   stream.onmessage = message => {
     const event = JSON.parse(message.data);
     if (event.type === "agent_status") updateAgentStatus(event.ready, event.streaming);
@@ -568,7 +593,7 @@ function connectEvents() {
   };
   stream.onerror = () => {
     updateAgentStatus(false, false);
-    void fetch("/api/status", { cache: "no-store" }).catch(() => window.close());
+    void fetch("/api/status", { cache: "no-store", headers: pageHeaders() }).catch(() => window.close());
   };
 }
 
