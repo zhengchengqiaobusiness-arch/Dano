@@ -14,6 +14,9 @@ export const PAGE_HELPERS = String.raw`
   const OPTION_SEL = '[role="option"], [role="menuitem"], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
+  const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
+  const PICKER_HINT = /user-select|dept-select|org-select|person-select|assignee|candidate-user|select-user|add-user|选择用户|选择人员|选择审批|添加审批|选择部门/;
+  const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='process'] [class*='node'], [class*='workflow'] [class*='node']";
 
   const formItemOf = (el) => el.closest(FORM_ITEM_SEL);
   const FIELD_NAME_ATTRS = ["name", "data-field", "data-name", "data-key", "data-model"];
@@ -223,12 +226,89 @@ export const PAGE_HELPERS = String.raw`
 
   const scopeName = (root) => root && root !== document.body && root.closest(DIALOG_SEL) ? "dialog" : "page";
 
+  const slotHost = (el) => el.closest(SLOT_HOST_SEL) || el.closest("[class*='node'], [class*='step'], [class*='activity']") || el.parentElement;
+
+  const isPlusControl = (el) => {
+    const text = clean(el.getAttribute("aria-label") || el.textContent || "");
+    const compact = text.replace(/\s+/g, "");
+    if (PLUS_ONLY.test(compact) || /^选择.{0,6}$/.test(compact)) return true;
+    return Boolean(el.querySelector(".el-icon, .anticon, [class*='plus'], [class*='add']"))
+      && compact.length <= 8
+      && !/提交|确定|搜索|查询|重置|取消/.test(compact);
+  };
+
+  const isPickerSlot = (el) => {
+    if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+    if (el.matches("input, textarea, select, [role=combobox]")) return false;
+    if (el.closest(PICKER_SEL + ", nav, .el-menu, .ant-menu, .el-pagination, .ant-pagination")) return false;
+    if (isUploadWidget(el, labelOf(el))) return false;
+    const blob = [el.className || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || ""].join(" ");
+    if (PICKER_HINT.test(blob)) return true;
+    return isPlusControl(el) && Boolean(el.closest("[class*='process'], [class*='workflow'], [class*='node'], [class*='approve'], [class*='user-select'], [class*='assignee']"));
+  };
+
+  const selectedName = (el) => {
+    const host = slotHost(el);
+    const texts = [...(host ? host.querySelectorAll("[class*='tag'], [class*='user'], [class*='name'], [class*='nickname'], span, strong") : [])]
+      .filter((node) => node !== el && !el.contains(node) && !node.contains(el) && !node.matches("button, [role=button]"))
+      .map((node) => clean(node.textContent))
+      .filter((text) => text && !PLUS_ONLY.test(text) && !EMPTY_VALUE.test(text) && text.length <= 40);
+    if (texts.length) return texts[0];
+    const own = clean(el.textContent || "");
+    if (own && !PLUS_ONLY.test(own) && !EMPTY_VALUE.test(own) && own.length > 1) return own;
+    return "";
+  };
+
+  const slotLabel = (el) => {
+    const host = slotHost(el);
+    const heading = host?.querySelector("h1, h2, h3, h4, [class*='title'], [class*='name']");
+    const headingText = clean(heading?.textContent || "");
+    if (headingText && headingText.length <= 40 && headingText !== clean(el.textContent || "")) return headingText;
+    const aria = clean(el.getAttribute("aria-label") || "");
+    if (aria && !PLUS_ONLY.test(aria)) return aria;
+    return labelOf(el) || "选择人员";
+  };
+
+  const fieldFromPicker = (el) => {
+    const label = slotLabel(el);
+    const value = selectedName(el);
+    return {
+      label,
+      name: nameOf(el),
+      selector: "label=" + label,
+      kind: "picker",
+      filled: Boolean(value),
+      skip: false,
+      disabled: isDisabledWidget(el),
+      required: !value,
+      invalid: false,
+      value,
+      scope: scopeName(el)
+    };
+  };
+
+  const distinctLabel = (el, shared, index, total) => {
+    const ph = clean(el.getAttribute("placeholder") || "");
+    if (ph && !EMPTY_VALUE.test(ph)) return ph;
+    if (total > 1 && shared) return clean(shared) + "-" + (index + 1);
+    return shared || "";
+  };
+
+  const itemControls = (item) => {
+    const range = rangeInputsOf(item);
+    if (range.length >= 2) return range;
+    const fields = [...item.querySelectorAll("input, textarea, select, [role=combobox], [contenteditable=true]")]
+      .filter((el) => isVisible(el) && !el.closest(PICKER_SEL));
+    const slots = [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select']")].filter(isPickerSlot);
+    return [...fields, ...slots];
+  };
+
   const fieldFromControl = (el, item) => {
     if (!(el instanceof HTMLElement) || !isVisible(el)) return null;
     if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|button|reset|image/.test(type)) return null;
-    const label = labelOf(el) || clean(item?.querySelector?.(FORM_LABEL_SEL)?.textContent || "");
+    const label = distinctLabel(el, labelOf(el) || clean(item?.querySelector?.(FORM_LABEL_SEL)?.textContent || ""), 0, 1);
     if (!label) return null;
     const kind = widgetKind(item, el, label);
     const value = displayValue(el);
@@ -265,22 +345,23 @@ export const PAGE_HELPERS = String.raw`
     for (const item of root.querySelectorAll(FORM_ITEM_SEL)) {
       if (item.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) continue;
       const range = rangeInputsOf(item);
-      if (range.length >= 2) {
-        const prop = nameOf(range[0]);
-        range.forEach((input, index) => {
-          const field = fieldFromControl(input, item);
-          if (!field) return;
-          add({
-            ...field,
-            name: prop ? prop + "[" + index + "]" : field.name,
-            label: labelOf(input) || field.label,
-            rangeIndex: index
-          });
+      const controls = itemControls(item);
+      const prop = range.length >= 2 ? nameOf(range[0]) : undefined;
+      controls.forEach((el, index) => {
+        if (isPickerSlot(el)) {
+          add(fieldFromPicker(el));
+          return;
+        }
+        const field = fieldFromControl(el, item);
+        if (!field) return;
+        add({
+          ...field,
+          name: prop ? prop + "[" + index + "]" : field.name,
+          label: distinctLabel(el, field.label, index, controls.length),
+          selector: (el.getAttribute("placeholder") && !EMPTY_VALUE.test(el.getAttribute("placeholder"))) ? "placeholder=" + clean(el.getAttribute("placeholder")) : field.selector,
+          rangeIndex: range.length >= 2 ? index : field.rangeIndex
         });
-        continue;
-      }
-      const el = item.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
-      add(fieldFromControl(el, item));
+      });
     }
     for (const cell of root.querySelectorAll("tbody td, .el-table__body td, .el-table__body .el-table__cell, .ant-table-tbody .ant-table-cell")) {
       const el = cell.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
@@ -308,6 +389,16 @@ export const PAGE_HELPERS = String.raw`
       }
       seenEls.add(el);
       add(fieldFromControl(el, host));
+    }
+    for (const el of root.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='select-user']")) {
+      if (formItemOf(el) || !isPickerSlot(el)) continue;
+      add(fieldFromPicker(el));
+    }
+    for (const el of root.querySelectorAll("[class*='user-tag'], [class*='el-tag']")) {
+      if (!isVisible(el) || !el.closest("[class*='process'], [class*='workflow'], [class*='node']")) continue;
+      const value = clean(el.textContent);
+      if (!value || PLUS_ONLY.test(value) || EMPTY_VALUE.test(value)) continue;
+      add({ ...fieldFromPicker(el), filled: true, required: false, value, kind: "picker" });
     }
     return fields;
   };

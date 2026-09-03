@@ -139,8 +139,11 @@ export class PageActions {
         .or(root.getByRole("textbox", { name, exact: true }))
         .or(root.locator(FORM_ITEMS).filter({
           has: labeled
-        }).locator("input, textarea, select, [role='combobox'], .el-select__wrapper, .el-date-editor, .ant-select-selector, .ant-picker").first())
-        .or(labeled.locator("xpath=following::*[self::input or self::textarea or self::select or @role='combobox'][1]"));
+        }).locator("input, textarea, select, [role='combobox'], .el-select__wrapper, .el-date-editor, .ant-select-selector, .ant-picker, button, [role='button']").first())
+        .or(labeled.locator("xpath=following::*[self::input or self::textarea or self::select or @role='combobox'][1]"))
+        .or(root.locator("[class*='node'], [class*='step'], [class*='activity'], [class*='user-select']").filter({
+          has: root.locator("h1, h2, h3, h4, [class*='title'], [class*='name']").filter({ hasText: exact })
+        }).locator("button, [role='button'], [class*='add-user']").first());
     }
     const text = selector.match(/^text=(.+)$/s);
     if (text) return root.getByText(text[1]!, { exact: true });
@@ -240,7 +243,8 @@ export class PageActions {
     return locator.first().evaluate(el => {
       const inPicker = el.closest(".el-select-dropdown,.ant-select-dropdown,.el-picker-panel,.el-cascader__dropdown,[role='listbox'],[role='dialog'],.el-dialog,.ant-modal");
       if (inPicker) return false;
-      return Boolean(el.closest("nav, aside, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination"));
+      if (el.closest("[class*='process'], [class*='workflow'], [class*='user-select'], [class*='add-user']")) return false;
+      return Boolean(el.closest("nav, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination"));
     }).catch(() => false);
   }
 
@@ -265,7 +269,7 @@ export class PageActions {
       const mask = el.closest(".el-overlay,.el-overlay-dialog,.v-modal,.ant-modal-mask,.arco-modal-mask");
       if (mask === el) return "mask";
       if (mask && !inOverlayChrome) return "mask";
-      const nav = el.closest("nav, aside, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination");
+      const nav = el.closest("nav, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination");
       const inPicker = el.closest(".el-select-dropdown,.ant-select-dropdown,.el-picker-panel,[role='listbox'],.el-dialog,[role='dialog']");
       if (nav && !inPicker) return "nav";
       if (el.closest("a[href]") && !inPicker && clickIntent !== "button") return "nav";
@@ -288,7 +292,7 @@ export class PageActions {
         const box = el.getBoundingClientRect();
         if (box.width * box.height > 80_000) return false;
         if (el.matches(".el-overlay,.el-overlay-dialog,.v-modal,.ant-modal-mask,.arco-modal-mask,a[href]")) return false;
-        if (el.closest("nav, aside, .el-menu, .ant-menu") && !el.closest(".el-select-dropdown,[role='listbox'],.el-dialog,[role='dialog']")) return false;
+        if (el.closest("nav, .el-menu, .ant-menu") && !el.closest(".el-select-dropdown,[role='listbox'],.el-dialog,[role='dialog'],[class*='process'],[class*='workflow']")) return false;
         return clickIntent === "field" || clickIntent === "option"
           || el.matches("button, [role='button'], input, textarea, select, [type='submit'], [type='button']");
       }, intent).catch(() => intent !== "button");
@@ -447,7 +451,10 @@ export class PageActions {
         : node instanceof HTMLSelectElement
           ? window.HTMLSelectElement.prototype
           : window.HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, "value")?.set?.call(node, next);
+      const own = Object.getOwnPropertyDescriptor(node, "value");
+      const protoSet = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      (own?.set || protoSet)?.call(node, next);
+      if (own?.set && protoSet && own.set !== protoSet) protoSet.call(node, next);
       node.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertReplacementText", data: next }));
       node.dispatchEvent(new Event("change", { bubbles: true }));
     }, value).catch(() => {});
@@ -650,11 +657,45 @@ export class PageActions {
     return hint ? `样例-${hint}` : "样例";
   }
 
+  private async waitForFormDialog(timeout = 2_000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const dialog = await this.lastFormDialog(this.page());
+      if (dialog) return dialog;
+      await this.page().waitForTimeout(40);
+    }
+    return undefined;
+  }
+
+  private async pickFirstChoice(selector: string) {
+    await this.dismissTransientOverlays();
+    await this.click(selector);
+    await this.waitForPageQuiet(800);
+    const dialog = await this.waitForFormDialog();
+    if (!dialog) {
+      if (await this.dropdownScope()) return this.chooseFirstOption(selector);
+      throw new Error("Picker did not open a dialog or list");
+    }
+    const row = dialog.locator("tbody tr, .el-table__body .el-table__row, [role='row'], .el-checkbox, [class*='user-item'], [class*='candidate']").filter({ visible: true }).first();
+    if (!(await row.count())) throw new Error("Picker dialog has no selectable row");
+    await this.clickSafely(row, "option");
+    const ok = dialog.locator("button, [role='button']").filter({ hasText: /^(确定|确认|选择|ok|confirm)$/i }).first();
+    if (await ok.count()) await this.clickSafely(ok, "button");
+    await this.waitForPageQuiet(800);
+    const after = await this.captureSnapshot();
+    const field = (after.formFields || []).find(item => item.selector === selector || item.label === selector.replace(/^label=/i, ""));
+    return field?.value || "selected";
+  }
+
   private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
     await this.dismissTransientOverlays();
+    if (field.kind === "picker") {
+      const value = await this.pickFirstChoice(selector);
+      return { label: field.label, selector, kind: field.kind, value };
+    }
     if (field.kind === "select") {
       const value = await this.chooseFirstOption(selector);
       return { label: field.label, selector, kind: field.kind, value };
@@ -743,7 +784,9 @@ export class PageActions {
         }
       }
     };
-    await run(before.todoFields || []);
+    const todos = before.todoFields || [];
+    await run(todos.filter(field => field.kind !== "picker"));
+    await run(todos.filter(field => field.kind === "picker"));
     await this.dismissTransientOverlays();
     await this.page().waitForTimeout(180);
     let after = await this.captureSnapshot();

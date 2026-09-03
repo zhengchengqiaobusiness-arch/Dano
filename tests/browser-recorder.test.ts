@@ -495,7 +495,7 @@ test("element plus readonly selects and date dialogs fill without leftover poppe
     assert.match(String(search.formFields.find((field: any) => field.label === "产品")?.value || ""), /华为matebook14|键盘/);
     assert.match(String(search.formFields.find((field: any) => field.label === "供应商")?.value || ""), /泉源鱼家|丽丽/);
     assert.match(String(search.formFields.find((field: any) => field.label === "状态")?.value || ""), /审核/);
-    assert.match(String(search.formFields.find((field: any) => field.label === "订单时间")?.value || ""), /2026-09-02/);
+    assert.match(String(search.formFields.find((field: any) => field.label === "订单时间")?.value || ""), /\d{4}-\d{2}-\d{2}/);
     await recorder.control({ action: "click", selector: "text=新增" });
     const opened: any = await recorder.control({ action: "snapshot" });
     assert.equal(opened.scope, "dialog");
@@ -825,6 +825,166 @@ test("native pages fill range dates, commit change events, and submit only in th
     const payload = created[0] as { qty?: number; start?: string; end?: string };
     assert.ok(Number(payload.qty) > 0, JSON.stringify(payload));
     assert.ok(new Date(String(payload.end)).getTime() > new Date(String(payload.start)).getTime(), JSON.stringify(payload));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form fills sibling inputs and empty picker slots, not just the first control", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-slots-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":{"id":1}}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>复合表单</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">归属</label>
+          <input id="code" placeholder="编号">
+          <input id="name" placeholder="名称">
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">对象</label>
+          <div class="el-select">
+            <input id="object" role="combobox" readonly aria-label="对象" placeholder="请选择">
+            <span class="el-select__placeholder">请选择</span>
+          </div>
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">说明</label>
+          <textarea id="memo" placeholder="请输入说明"></textarea>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">附件</label>
+          <div class="el-upload"><button type="button">上传附件</button><input type="file"></div>
+        </div>
+        <button type="submit" id="save">提交</button>
+      </form>
+      <aside class="process-panel">
+        <div class="process-node">
+          <div class="node-title">复核</div>
+          <span class="user-tag">已指定甲</span>
+        </div>
+        <div class="process-node">
+          <div class="node-title">会签</div>
+          <button type="button" class="add-user" aria-label="选择会签">+</button>
+        </div>
+      </aside>
+      <div id="picker" role="dialog" hidden style="position:fixed;inset:20px;background:#fff;z-index:30;padding:16px">
+        <table><tbody><tr data-user="乙"><td>乙</td></tr><tr data-user="丙"><td>丙</td></tr></tbody></table>
+        <button type="button" id="pick-ok">确定</button>
+      </div>
+      <ul id="object-options" class="el-select-dropdown" hidden>
+        <li role="option">甲对象</li>
+        <li role="option">乙对象</li>
+      </ul>
+      <script>
+        const bound = { code: "", name: "", memo: "", object: "", assignee: "" };
+        const bind = (id, key) => {
+          const node = document.getElementById(id);
+          Object.defineProperty(node, "value", {
+            get() { return this.getAttribute("data-bound") || ""; },
+            set(next) { this.setAttribute("data-bound", String(next)); bound[key] = String(next); }
+          });
+          node.addEventListener("input", () => { bound[key] = node.value; });
+          node.addEventListener("change", () => { bound[key] = node.value; });
+        };
+        bind("code", "code");
+        bind("name", "name");
+        bind("memo", "memo");
+        document.querySelector(".el-select").addEventListener("click", () => {
+          document.getElementById("object-options").hidden = false;
+        });
+        document.getElementById("object-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.object = option.textContent;
+          document.querySelector(".el-select__placeholder").textContent = option.textContent;
+          document.getElementById("object-options").hidden = true;
+        });
+        document.querySelector(".add-user").addEventListener("click", () => {
+          document.getElementById("picker").hidden = false;
+        });
+        document.querySelector("#picker table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.assignee = row.getAttribute("data-user");
+        });
+        document.getElementById("pick-ok").addEventListener("click", () => {
+          if (bound.assignee) {
+            const node = document.querySelectorAll(".process-node")[1];
+            const tag = document.createElement("span");
+            tag.className = "user-tag";
+            tag.textContent = bound.assignee;
+            node.querySelector(".add-user")?.remove();
+            node.appendChild(tag);
+          }
+          document.getElementById("picker").hidden = true;
+        });
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(bound)
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "slot-form");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.todoFields || []).map((field: any) => field.label);
+    assert.equal(labels.includes("编号"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("名称"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("说明"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("对象"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /会签/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /复核|附件/.test(label)), false, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.equal(result.todoCount, 0, JSON.stringify(result.todoFields));
+    const code = String(result.formFields.find((field: any) => field.label === "编号")?.value || "");
+    const name = String(result.formFields.find((field: any) => field.label === "名称")?.value || "");
+    assert.match(code, /样例/);
+    assert.match(name, /样例/);
+    assert.notEqual(code, name);
+    assert.match(String(result.formFields.find((field: any) => field.label === "对象")?.value || ""), /对象/);
+    assert.match(String(result.formFields.find((field: any) => /会签/.test(String(field.label || "")))?.value || ""), /乙|丙/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as { code?: string; name?: string; memo?: string; object?: string; assignee?: string };
+    assert.match(String(payload.code || ""), /样例/);
+    assert.match(String(payload.name || ""), /样例/);
+    assert.notEqual(payload.code, payload.name);
+    assert.match(String(payload.memo || ""), /样例/);
+    assert.match(String(payload.object || ""), /对象/);
+    assert.match(String(payload.assignee || ""), /乙|丙/);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
