@@ -1,12 +1,13 @@
 import type { Frame, Locator, Page } from "playwright";
-import { SNAPSHOT_IN_PAGE } from "./page-script.js";
+import { MARK_LABELED_CONTROL, SNAPSHOT_IN_PAGE } from "./page-script.js";
 
 export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
 export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
 export const DROPDOWNS = ".el-select-dropdown:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, [role='listbox']:visible";
 export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
-export const OPTION_ITEMS = "[role='option'], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option";
+export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option";
+export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], [role='row'], tbody tr, .el-table__body .el-table__row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
 export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor')][1]";
 export const BUSY_SPINNERS = ".el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
 
@@ -23,6 +24,7 @@ export interface FormField {
   value?: string;
   scope?: string;
   rangeIndex?: number;
+  groupIndex?: number;
 }
 
 export interface PageSnapshot {
@@ -98,11 +100,19 @@ export class PageActions {
     await busy.first().waitFor({ state: "hidden", timeout }).catch(() => {});
   }
 
-  private async awaitFormRequest(timeout = 2_500) {
-    await this.page().waitForResponse(response => {
-      const type = response.request().resourceType();
-      return type === "xhr" || type === "fetch";
-    }, { timeout }).catch(() => {});
+  private async awaitFormRequest(timeout = 2_500, write = false) {
+    try {
+      await this.page().waitForResponse(response => {
+        const request = response.request();
+        const type = request.resourceType();
+        if (type !== "xhr" && type !== "fetch") return false;
+        if (write) return /^(POST|PUT|PATCH|DELETE)$/i.test(request.method());
+        return true;
+      }, { timeout });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async hasDatePanel() {
@@ -113,15 +123,28 @@ export class PageActions {
     return Boolean(await this.lastFormDialog(this.page()));
   }
 
+  private async isFormDialog(item: Locator) {
+    return item.evaluate(el => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(el.className || "")).catch(() => true);
+  }
+
   private async lastFormDialog(root: Frame | Locator | Page) {
     const all = root.locator(DIALOGS);
     const count = await all.count();
     for (let index = count - 1; index >= 0; index -= 1) {
       const item = all.nth(index);
-      const formDialog = await item.evaluate(el => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(el.className || "")).catch(() => true);
-      if (formDialog) return item;
+      if (await this.isFormDialog(item)) return item;
     }
     return undefined;
+  }
+
+  private async formDialogCount() {
+    const all = this.page().locator(DIALOGS);
+    const count = await all.count();
+    let total = 0;
+    for (let index = 0; index < count; index += 1) {
+      if (await this.isFormDialog(all.nth(index))) total += 1;
+    }
+    return total;
   }
 
   locatorIn(root: Frame | Locator, selector: string) {
@@ -130,26 +153,36 @@ export class PageActions {
     const label = selector.match(/^label=(.+)$/s);
     if (label) {
       const name = label[1]!;
-      const exact = exactText(name);
-      const labeled = root.locator(FORM_LABELS).filter({ hasText: exact });
       return root.getByLabel(name, { exact: true })
-        .or(root.getByPlaceholder(name, { exact: true }))
-        .or(root.getByPlaceholder(new RegExp(`^(请选择|请输入|请填写|please select|please enter|please choose|select)?\\s*${escapeRegExp(name)}$`, "i")))
         .or(root.getByRole("combobox", { name, exact: true }))
         .or(root.getByRole("textbox", { name, exact: true }))
-        .or(root.locator(FORM_ITEMS).filter({
-          has: labeled
-        }).locator("input, textarea, select, [role='combobox'], .el-select__wrapper, .el-date-editor, .ant-select-selector, .ant-picker, button, [role='button']").first())
-        .or(labeled.locator("xpath=following::*[self::input or self::textarea or self::select or @role='combobox'][1]"))
-        .or(root.locator("[class*='node'], [class*='step'], [class*='activity'], [class*='user-select']").filter({
-          has: root.locator("h1, h2, h3, h4, [class*='title'], [class*='name']").filter({ hasText: exact })
-        }).locator("button, [role='button'], [class*='add-user']").first());
+        .or(root.getByPlaceholder(name, { exact: true }));
     }
     const text = selector.match(/^text=(.+)$/s);
     if (text) return root.getByText(text[1]!, { exact: true });
     const role = selector.match(/^role=([a-z]+)(?:\[name=["'](.+)["']\])?$/i);
     if (role) return root.getByRole(role[1] as "button", role[2] ? { name: role[2] } : {});
     return root.locator(selector);
+  }
+
+  private scopeRoot(root: Frame | Locator) {
+    return typeof (root as Frame).url === "function" ? (root as Frame).locator("body") : root as Locator;
+  }
+
+  private async labeledControl(root: Frame | Locator, name: string) {
+    const mark = `bss-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const scope = this.scopeRoot(root);
+    await scope.evaluate(() => {
+      for (const el of document.querySelectorAll("[data-bss-locate]")) el.removeAttribute("data-bss-locate");
+    }).catch(() => {});
+    const ok = await scope.evaluate(MARK_LABELED_CONTROL, { name, mark }).catch(() => false);
+    if (!ok) return undefined;
+    const found = scope.locator(`[data-bss-locate="${mark}"]`).first();
+    if (!(await found.count())) return undefined;
+    if (await found.isVisible().catch(() => false)) return found;
+    const host = found.locator("xpath=ancestor-or-self::*[contains(@class,'select') or contains(@class,'picker') or contains(@class,'cascader') or @role='combobox'][1]");
+    if (await host.count() && await host.first().isVisible().catch(() => false)) return host.first();
+    return undefined;
   }
 
   isDayTextSelector(selector: string) {
@@ -191,10 +224,34 @@ export class PageActions {
         if (dialog) scopes.push(dialog);
         if (!fieldOnly || !dialog) scopes.push(frame);
         for (const scope of scopes) {
-          const found = this.locatorIn(scope, selector).filter({ visible: true }).first();
-          if (await found.count()) {
-            if (textOnly && await this.isNavigationTarget(found)) continue;
-            return found;
+          if (fieldOnly && /^label=/i.test(selector)) {
+            const name = selector.replace(/^label=/i, "");
+            const table = await this.tableControl(scope, name);
+            if (table) return table;
+            const labeled = await this.labeledControl(scope, name);
+            if (labeled) return labeled;
+            for (const candidate of [
+              this.scopeRoot(scope).getByLabel(name, { exact: true }),
+              this.scopeRoot(scope).getByRole("combobox", { name, exact: true }),
+              this.scopeRoot(scope).getByRole("textbox", { name, exact: true }),
+              this.scopeRoot(scope).getByRole("button", { name, exact: true }),
+              this.scopeRoot(scope).getByPlaceholder(name, { exact: true })
+            ]) {
+              const unique = candidate.filter({ visible: true });
+              if (await unique.count() === 1) return unique.first();
+            }
+            continue;
+          }
+          const found = this.locatorIn(scope, selector).filter({ visible: true });
+          if (await found.count() === 1) {
+            const item = found.first();
+            if (textOnly && await this.isNavigationTarget(item)) continue;
+            return item;
+          }
+          if (await found.count() > 1 && !fieldOnly) {
+            const item = found.first();
+            if (textOnly && await this.isNavigationTarget(item)) continue;
+            return item;
           }
           if (fieldOnly) {
             const name = selector.replace(/^(label|placeholder)=/i, "");
@@ -229,7 +286,8 @@ export class PageActions {
       const headerCount = await headers.count();
       for (let index = 0; index < headerCount; index += 1) {
         const text = ((await headers.nth(index).innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
-        if (text !== name) continue;
+        const norm = (value: string) => value.replace(/[*：:\s]/g, "");
+        if (text !== name && norm(text) !== norm(name)) continue;
         const cell = table.locator(".el-table__body tr, .el-table__body .el-table__row, tbody tr").first()
           .locator("td, .el-table__cell, .ant-table-cell").nth(index);
         const input = cell.locator("input, textarea, select, [role='combobox'], .el-select__wrapper").filter({ visible: true }).first();
@@ -250,13 +308,39 @@ export class PageActions {
 
   async clickTarget(selector: string) {
     const locator = await this.locate(selector);
-    const selectSurface = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'ant-select-selector') or contains(@class,'arco-select-view')][1]");
-    if (await selectSurface.count()) return selectSurface.first();
-    if (!this.isFieldSelector(selector)) return locator;
-    const surface = locator.locator(WIDGET_SURFACES);
-    if (await surface.count()) return surface.first();
-    const inner = locator.locator("input, textarea, [role='combobox']").first();
-    if (await inner.count()) return inner;
+    const mark = `bss-click-${Date.now().toString(36)}`;
+    const marked = await locator.evaluate((el, token) => {
+      const start = el.matches("input, textarea") ? (el.parentElement || el) : el;
+      let best = start;
+      let node: Element | null = start;
+      for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
+        const box = node.getBoundingClientRect();
+        if (box.height > 72 || box.width > 720) break;
+        if (node !== start && node.matches("[class*='form-item'], [class*='form-field'], [role='group'], td, th, [class*='table-cell'], [class*='table__cell']")) break;
+        const cls = String(node.className || "");
+        const chooser = (node.getAttribute("role") === "combobox" && !node.matches("input, textarea"))
+          || Boolean(node.getAttribute("aria-haspopup"))
+          || node.hasAttribute("aria-expanded")
+          || (/(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls))
+          || (/(?:^|\s|_|-)(select|picker|cascader|date-editor)(?:\s|$|_)/i.test(cls) && !/dropdown|panel|item|option/i.test(cls));
+        best = node;
+        if (chooser) break;
+      }
+      best.setAttribute("data-bss-click", token);
+      return true;
+    }, mark).catch(() => false);
+    if (marked) {
+      const surfaces = [
+        this.page().locator(`[data-bss-click="${mark}"]`),
+        locator.locator(`xpath=ancestor-or-self::*[@data-bss-click="${mark}"][1]`)
+      ];
+      for (const surface of surfaces) {
+        const visible = surface.filter({ visible: true });
+        if (await visible.count()) return visible.first();
+      }
+    }
+    const parent = locator.locator("xpath=ancestor::*[not(self::input or self::textarea)][1]");
+    if (await parent.count()) return parent.first();
     return locator;
   }
 
@@ -371,22 +455,97 @@ export class PageActions {
     return undefined;
   }
 
+  private async overlayState() {
+    return this.page().evaluate(`(() => {
+      const vis = (sel) => [...document.querySelectorAll(sel)].filter((el) => {
+        const box = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return box.width > 2 && box.height > 2 && style.display !== "none" && style.visibility !== "hidden";
+      });
+      const keyOf = (el) => {
+        const box = el.getBoundingClientRect();
+        return [el.className, Math.round(box.top), Math.round(box.left), String(el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 48)].join("|");
+      };
+      const dialogs = vis("[role='dialog'], [role='alertdialog'], .el-dialog, .el-drawer, .ant-modal, .arco-modal")
+        .filter((el) => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(String(el.className || "")));
+      const drops = vis(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']");
+      const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
+      return {
+        dialogs: dialogs.length,
+        drops: drops.map(keyOf).sort().join("||"),
+        dates: dates.map(keyOf).sort().join("||")
+      };
+    })()`);
+  }
+
+  private overlayOpened(before: { dialogs: number; drops: string; dates: string }, after: { dialogs: number; drops: string; dates: string }) {
+    return after.dialogs > before.dialogs || after.drops !== before.drops || after.dates !== before.dates;
+  }
+
+  private async chooserOpened(before: { dialogs: number; drops: string; dates: string }) {
+    await this.waitForPageQuiet(300);
+    return this.overlayOpened(before, await this.overlayState());
+  }
+
+  private async activateChooser(selector: string) {
+    await this.dismissTransientOverlays();
+    const before = await this.overlayState();
+    const host = await this.clickTarget(selector);
+    const raw = await this.locate(selector);
+    const inner = raw.locator("input, textarea, [role='combobox'], [aria-haspopup]").first();
+    const surfaces = [host];
+    if (await inner.count()) surfaces.push(inner);
+    surfaces.push(raw);
+    for (const surface of surfaces) {
+      await this.clickSafely(surface, "field").catch(() => {});
+      if (await this.chooserOpened(before)) return { before, opened: true };
+      await surface.evaluate(el => { if (el instanceof HTMLElement) el.click(); }).catch(() => {});
+      if (await this.chooserOpened(before)) return { before, opened: true };
+      await surface.locator("input, [role='combobox']").first().press("ArrowDown").catch(async () => {
+        await surface.press("ArrowDown").catch(() => {});
+      });
+      if (await this.chooserOpened(before)) return { before, opened: true };
+    }
+    const group = raw.locator("xpath=ancestor::*[self::div or self::li or self::section or self::td][1]");
+    const affordances = group.locator("button, [role='button'], [aria-haspopup]").filter({ visible: true });
+    const extra = Math.min(await affordances.count(), 3);
+    for (let index = 0; index < extra; index += 1) {
+      await this.clickSafely(affordances.nth(index), "field").catch(() => {});
+      if (await this.chooserOpened(before)) return { before, opened: true };
+    }
+    return { before, opened: await this.chooserOpened(before) };
+  }
+
   async openSelect(target: Locator) {
     await this.dismissTransientOverlays();
-    await this.clickSafely(target, "field");
-    let scope = await this.waitForDropdown(1_600);
-    if (!scope) {
-      const input = target.locator("input").first();
-      if (await input.count()) {
-        await input.press("ArrowDown").catch(() => {});
-        scope = await this.waitForDropdown(800);
+    const before = await this.overlayState();
+    const inner = target.locator("input, textarea, [role='combobox']").first();
+    const surfaces = [target];
+    if (await inner.count()) surfaces.push(inner);
+    for (const surface of surfaces) {
+      await this.clickSafely(surface, "field").catch(() => {});
+      if (await this.chooserOpened(before)) {
+        const scope = await this.dropdownScope();
+        if (scope) return scope;
+      }
+      await surface.evaluate(el => { if (el instanceof HTMLElement) el.click(); }).catch(() => {});
+      if (await this.chooserOpened(before)) {
+        const scope = await this.dropdownScope();
+        if (scope) return scope;
+      }
+      await surface.press("ArrowDown").catch(async () => {
+        await surface.locator("input").first().press("ArrowDown").catch(() => {});
+      });
+      if (await this.chooserOpened(before)) {
+        const scope = await this.dropdownScope();
+        if (scope) return scope;
       }
     }
-    if (!scope) {
-      await this.clickSafely(target, "field");
-      scope = await this.waitForDropdown(800);
-    }
+    const scope = await this.waitForDropdown(400);
     if (!scope) throw new Error("Select dropdown did not open");
+    if (before.drops && !this.overlayOpened(before, await this.overlayState())) {
+      throw new Error("Select dropdown did not open");
+    }
     return scope;
   }
 
@@ -513,6 +672,16 @@ export class PageActions {
       await this.commitValue(dateField.target, filled);
       return;
     }
+    const chooser = await locator.evaluate(el => {
+      if (el instanceof HTMLTextAreaElement) return false;
+      if (el instanceof HTMLInputElement && !el.readOnly && el.getAttribute("role") !== "combobox" && !el.getAttribute("aria-haspopup")) return false;
+      const role = el.getAttribute("role") || "";
+      const popup = el.getAttribute("aria-haspopup") || "";
+      if (role === "combobox" || /listbox|menu|dialog/i.test(popup)) return true;
+      if (el.hasAttribute("readonly") && /请选择|please select/i.test(el.getAttribute("placeholder") || "")) return true;
+      return Boolean(el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker"));
+    }).catch(() => false);
+    if (chooser) throw new Error("Control is a chooser; do not type a sample");
     const input = locator.locator("input, textarea").first();
     const target = (await input.count()) ? input : locator;
     await target.fill(value, { timeout: 1_200 }).catch(async () => {
@@ -628,6 +797,15 @@ export class PageActions {
       options
     });
     await this.clickSafely(this.optionLocator(value, scope).filter({ visible: true }).first(), "option");
+    await this.page().locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 250 }).catch(() => {});
+    for (let level = 0; level < 3 && await this.dropdownScope(); level += 1) {
+      const nextScope = await this.dropdownScope();
+      if (!nextScope) break;
+      const next = nextScope.locator(OPTION_ITEMS).filter({ visible: true }).first();
+      if (!(await next.count())) break;
+      await this.clickSafely(next, "option");
+      await this.page().waitForTimeout(80);
+    }
     await this.page().locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
     return value;
   }
@@ -636,13 +814,29 @@ export class PageActions {
     const page = this.page();
     const frames = [];
     for (const frame of page.frames()) {
+      if (frame !== page.mainFrame()) await frame.waitForLoadState("domcontentloaded").catch(() => {});
       try {
-        frames.push({ frameUrl: frame.url(), ...(await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as object) });
+        const box = await frame.locator("body").boundingBox().catch(() => null);
+        const snap = await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as PageSnapshot & { frameUrl?: string; unavailable?: boolean };
+        const visible = Boolean(box && box.width >= 20 && box.height >= 20);
+        frames.push({ frameUrl: frame.url(), visible, ...snap });
       } catch {
-        frames.push({ frameUrl: frame.url(), unavailable: true });
+        frames.push({ frameUrl: frame.url(), unavailable: true, visible: false, formFields: [] });
       }
     }
-    const snapshot = { ...frames[0], frames: frames.slice(1), recentUserActions: this.host.recentUserActions() };
+    const main = frames[0] || {};
+    const child = frames.slice(1).filter(frame => !frame.unavailable && (frame.visible || (frame.formFields || []).length > 0));
+    const childFields = child.flatMap(frame => frame.formFields || []);
+    const formFields = [...(main.formFields || []), ...childFields];
+    const todoFields = formFields.filter(field => !field.skip && !field.disabled && !field.filled);
+    const snapshot = {
+      ...main,
+      frames: frames.slice(1),
+      formFields,
+      todoFields,
+      todoCount: todoFields.length,
+      recentUserActions: this.host.recentUserActions()
+    };
     await this.host.writePageInventory(page, snapshot);
     return snapshot;
   }
@@ -668,45 +862,79 @@ export class PageActions {
   }
 
   private async pickFirstChoice(selector: string) {
-    await this.dismissTransientOverlays();
-    await this.click(selector);
-    await this.waitForPageQuiet(800);
-    const dialog = await this.waitForFormDialog();
-    if (!dialog) {
-      if (await this.dropdownScope()) return this.chooseFirstOption(selector);
+    const { before } = await this.activateChooser(selector);
+    const after = await this.overlayState();
+    if (after.dialogs <= before.dialogs) {
+      if (after.drops !== before.drops || await this.dropdownScope()) return this.chooseFirstOption(selector);
       throw new Error("Picker did not open a dialog or list");
     }
-    const row = dialog.locator("tbody tr, .el-table__body .el-table__row, [role='row'], .el-checkbox, [class*='user-item'], [class*='candidate']").filter({ visible: true }).first();
+    const dialog = await this.waitForFormDialog();
+    if (!dialog) throw new Error("Picker did not open a dialog or list");
+    const row = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).first();
     if (!(await row.count())) throw new Error("Picker dialog has no selectable row");
     await this.clickSafely(row, "option");
+    const nested = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).nth(1);
+    if (await this.hasDialog() && await nested.count()) await this.clickSafely(nested, "option").catch(() => {});
     const ok = dialog.locator("button, [role='button']").filter({ hasText: /^(确定|确认|选择|ok|confirm)$/i }).first();
     if (await ok.count()) await this.clickSafely(ok, "button");
     await this.waitForPageQuiet(800);
-    const after = await this.captureSnapshot();
-    const field = (after.formFields || []).find(item => item.selector === selector || item.label === selector.replace(/^label=/i, ""));
+    const snapshot = await this.captureSnapshot();
+    const field = (snapshot.formFields || []).find(item => item.selector === selector || item.label === selector.replace(/^label=/i, ""));
     return field?.value || "selected";
+  }
+
+  private matchField(snapshot: PageSnapshot, field: FormField) {
+    const items = snapshot.formFields || [];
+    const sameIndex = (item: FormField) => (item.groupIndex ?? item.rangeIndex ?? 0) === (field.groupIndex ?? field.rangeIndex ?? 0);
+    return items.find(item => item.selector === field.selector && item.label === field.label)
+      || items.find(item => item.label === field.label && item.name && item.name === field.name && sameIndex(item))
+      || items.find(item => item.selector === field.selector && items.filter(other => other.selector === field.selector).length === 1)
+      || items.find(item => item.label === field.label && sameIndex(item));
+  }
+
+  private isSampleValue(value: string, field: FormField) {
+    const sample = this.sampleValue(field);
+    return value === sample || value === "样例" || /^样例-/.test(value);
+  }
+
+  private strategiesFor(field: FormField, dateOffset: number) {
+    const selector = field.selector || `label=${field.label}`;
+    const type = async () => {
+      const value = this.sampleValue(field, dateOffset);
+      await this.fillField(selector, value, { rangeIndex: field.rangeIndex });
+      return value;
+    };
+    const choose = async () => this.chooseFirstOption(selector);
+    const pick = async () => this.pickFirstChoice(selector);
+    const toggle = async () => {
+      await this.clickSafely(await this.clickTarget(selector), "field");
+      return "true";
+    };
+    if (field.kind === "select") return [choose, pick];
+    if (field.kind === "picker") return [pick, choose];
+    if (field.kind === "checkbox" || field.kind === "radio") return [toggle];
+    return [type, choose, pick];
   }
 
   private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
-    await this.dismissTransientOverlays();
-    if (field.kind === "picker") {
-      const value = await this.pickFirstChoice(selector);
-      return { label: field.label, selector, kind: field.kind, value };
+    const chooser = field.kind === "select" || field.kind === "picker";
+    let lastError: unknown;
+    for (const attempt of this.strategiesFor(field, dateOffset)) {
+      try {
+        await this.dismissTransientOverlays();
+        const value = String((await attempt()) || "");
+        const after = this.matchField(await this.captureSnapshot(), field);
+        if (!after?.filled) continue;
+        if (chooser && this.isSampleValue(String(after.value || value), field)) continue;
+        return { label: field.label, selector, kind: field.kind, value: after.value || value };
+      } catch (error) {
+        lastError = error;
+      }
     }
-    if (field.kind === "select") {
-      const value = await this.chooseFirstOption(selector);
-      return { label: field.label, selector, kind: field.kind, value };
-    }
-    if (field.kind === "checkbox" || field.kind === "radio") {
-      await this.clickSafely(await this.clickTarget(selector), "field");
-      return { label: field.label, selector, kind: field.kind, value: "true" };
-    }
-    const value = this.sampleValue(field, dateOffset);
-    await this.fillField(selector, value, { rangeIndex: field.rangeIndex });
-    return { label: field.label, selector, kind: field.kind, value };
+    throw lastError || new Error(`Could not fill ${field.label}`);
   }
 
   private requiredNumberInvalid(field: FormField) {
@@ -766,9 +994,23 @@ export class PageActions {
     return scored.sort((left, right) => left.rank - right.rank)[0];
   }
 
+  private async revealHiddenSections() {
+    const tabs = this.page().locator("[role='tab'], .el-tabs__item, .ant-tabs-tab, .el-collapse-item__header").filter({ visible: true });
+    const count = await tabs.count();
+    for (let index = 0; index < count; index += 1) {
+      const tab = tabs.nth(index);
+      const selected = await tab.getAttribute("aria-selected");
+      const cls = await tab.getAttribute("class") || "";
+      if (selected === "true" || /is-active|ant-tabs-tab-active/.test(cls)) continue;
+      await this.clickSafely(tab, "button").catch(() => {});
+      await this.waitForPageQuiet(800);
+      return true;
+    }
+    return false;
+  }
+
   async exerciseForm() {
     await this.dismissTransientOverlays();
-    const before = await this.captureSnapshot();
     const filled: Array<Record<string, unknown>> = [];
     const failed: Array<Record<string, unknown>> = [];
     const startUrl = this.page().url();
@@ -784,21 +1026,30 @@ export class PageActions {
         }
       }
     };
-    const todos = before.todoFields || [];
-    await run(todos.filter(field => field.kind !== "picker"));
-    await run(todos.filter(field => field.kind === "picker"));
-    await this.dismissTransientOverlays();
-    await this.page().waitForTimeout(180);
     let after = await this.captureSnapshot();
-    if ((after.todoFields || []).length) {
-      await run(after.todoFields || []);
+    for (let pass = 0; pass < 5 && this.page().url() === startUrl; pass += 1) {
+      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
+      if (!leftover.length) {
+        if (await this.revealHiddenSections()) {
+          after = await this.captureSnapshot();
+          continue;
+        }
+        break;
+      }
+      await run(leftover.filter(field => field.kind !== "picker"));
+      await run(leftover.filter(field => field.kind === "picker"));
       await this.dismissTransientOverlays();
       after = await this.captureSnapshot();
     }
     if (!this.formReady(after, startUrl)) {
-      await this.repairFormValues(startUrl);
-      after = await this.captureSnapshot();
+      if (await this.revealHiddenSections()) {
+        after = await this.captureSnapshot();
+        await run((after.todoFields || []).filter(field => !field.skip && !field.disabled));
+        after = await this.captureSnapshot();
+      }
     }
+    await this.repairFormValues(startUrl);
+    after = await this.captureSnapshot();
     return {
       ok: this.formReady(after, startUrl),
       scope: after.scope,
@@ -813,35 +1064,54 @@ export class PageActions {
 
   async submitForm() {
     await this.dismissTransientOverlays();
-    const before = await this.captureSnapshot();
+    let before = await this.captureSnapshot();
     const startUrl = this.page().url();
     const button = this.submitControl(before);
     if (!button) throw new Error("No submit/search button in the active form");
     if (!this.formReady(before, startUrl)) {
+      const leftover = (before.todoFields || []).filter(field => !field.skip && !field.disabled);
+      for (const field of leftover) {
+        await this.fillOneField(field, startUrl).catch(() => {});
+      }
       await this.repairFormValues(startUrl);
+      before = await this.captureSnapshot();
     }
+    const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text);
+    const pending = this.awaitFormRequest(3_000, write);
     await this.click(button.selector).catch(async () => {
       await this.click(`text=${button.text}`);
     });
-    await this.awaitFormRequest();
+    let sawRequest = await pending;
+    if (!sawRequest) {
+      const retry = this.awaitFormRequest(2_500, write);
+      await this.page().locator("button[type='submit'], input[type='submit']").filter({ visible: true }).last().click({ timeout: 800 }).catch(() => {});
+      sawRequest = await retry;
+    }
     await this.waitForPageQuiet();
     let after = await this.captureSnapshot();
     const stillOpen = after.scope === before.scope && this.page().url() === startUrl;
-    const blocked = stillOpen && ((after.errors || []).length > 0 || !this.formReady(after, startUrl) || (after.formFields || []).some(field => field.invalid));
+    const blocked = stillOpen && ((after.errors || []).length > 0 || !this.formReady(after, startUrl) || (after.formFields || []).some(field => field.invalid) || !sawRequest);
     if (blocked) {
+      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
+      for (const field of leftover) {
+        await this.fillOneField(field, startUrl).catch(() => {});
+      }
       await this.repairFormValues(startUrl);
+      const again = this.awaitFormRequest(3_000, write);
       await this.click(button.selector);
-      await this.awaitFormRequest();
+      sawRequest = (await again) || sawRequest;
       await this.waitForPageQuiet();
       after = await this.captureSnapshot();
     }
     const leftoverErrors = after.errors || [];
     const closed = this.page().url() !== startUrl || after.scope !== before.scope;
     const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
+    const leftoverTodos = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
     return {
-      ok: closed || (leftoverErrors.length === 0 && !invalid),
+      ok: closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0),
       submitted: button.text,
       repaired: blocked,
+      sawRequest,
       errors: leftoverErrors,
       url: this.page().url(),
       scope: after.scope,

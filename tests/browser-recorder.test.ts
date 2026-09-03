@@ -992,6 +992,314 @@ test("exercise-form fills sibling inputs and empty picker slots, not just the fi
   }
 });
 
+test("exercise-form fills a shared-label select plus prompt input and only accepts a real write request", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-shared-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":{"id":2}}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>共享组表单</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">所属</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择</span>
+              <input id="owner-select" role="combobox" readonly placeholder="请选择">
+            </div>
+          </div>
+          <input id="project-name" placeholder="请输入项目名称">
+        </div>
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">说明</label>
+          <textarea id="memo" placeholder="请输入说明"></textarea>
+        </div>
+        <button type="submit" id="save">提交</button>
+      </form>
+      <aside class="process-panel">
+        <div class="process-node">
+          <div class="node-title">复核</div>
+          <span class="user-tag">已指定甲</span>
+        </div>
+        <div class="process-node">
+          <div class="node-title">会签</div>
+          <button type="button" class="add-user" aria-label="选择会签">+</button>
+        </div>
+      </aside>
+      <ul id="owner-options" class="el-select-dropdown" hidden>
+        <li role="option">甲项目</li>
+        <li role="option">乙项目</li>
+      </ul>
+      <div id="picker" role="dialog" hidden style="position:fixed;inset:20px;background:#fff;z-index:30;padding:16px">
+        <table><tbody><tr data-user="乙"><td>乙</td></tr></tbody></table>
+        <button type="button" id="pick-ok">确定</button>
+      </div>
+      <script>
+        const bound = { owner: "", projectName: "", memo: "", assignee: "" };
+        document.querySelector(".el-select").addEventListener("click", () => {
+          document.getElementById("owner-options").hidden = false;
+        });
+        document.getElementById("owner-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.owner = option.textContent;
+          document.querySelector(".el-select__placeholder").textContent = option.textContent;
+          document.getElementById("owner-select").value = option.textContent;
+          document.getElementById("owner-options").hidden = true;
+        });
+        document.getElementById("project-name").addEventListener("input", event => { bound.projectName = event.target.value; });
+        document.getElementById("memo").addEventListener("input", event => { bound.memo = event.target.value; });
+        document.querySelector(".add-user").addEventListener("click", () => {
+          document.getElementById("picker").hidden = false;
+        });
+        document.querySelector("#picker table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.assignee = row.getAttribute("data-user");
+        });
+        document.getElementById("pick-ok").addEventListener("click", () => {
+          if (bound.assignee) {
+            const node = document.querySelectorAll(".process-node")[1];
+            const tag = document.createElement("span");
+            tag.className = "user-tag";
+            tag.textContent = bound.assignee;
+            node.querySelector(".add-user")?.remove();
+            node.appendChild(tag);
+          }
+          document.getElementById("picker").hidden = true;
+        });
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.projectName = bound.projectName || document.getElementById("project-name").value;
+          bound.memo = bound.memo || document.getElementById("memo").value;
+          if (!bound.owner || !bound.projectName || !bound.assignee) {
+            const err = document.createElement("div");
+            err.className = "el-form-item__error";
+            err.textContent = "请补全必填项";
+            document.getElementById("create").appendChild(err);
+            return;
+          }
+          fetch("/api/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(bound)
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "shared-group");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    assert.equal(labels.includes("请输入项目名称"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /所属/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /会签/.test(label)), true, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.equal(result.todoCount, 0, JSON.stringify(result.todoFields));
+    const owner = String((result.formFields || []).find((field: any) => /所属/.test(String(field.label || "")))?.value || "");
+    const project = String((result.formFields || []).find((field: any) => field.label === "请输入项目名称")?.value || "");
+    assert.match(owner, /项目/);
+    assert.equal(/^样例-/.test(owner), false, owner);
+    assert.match(project, /样例/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as { owner?: string; projectName?: string; memo?: string; assignee?: string };
+    assert.match(String(payload.owner || ""), /项目/);
+    assert.match(String(payload.projectName || ""), /样例/);
+    assert.match(String(payload.memo || ""), /样例/);
+    assert.match(String(payload.assignee || ""), /乙/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form covers kit-agnostic choosers, nearby labels, shadow fields and hidden tabs", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-anykit-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    if (request.url === "/inner") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<!doctype html><html><body><span>来源</span><input id='source'></body></html>");
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>任意套件</title></head><body>
+      <form id="create">
+        <div><span>客户</span><input id="customer"></div>
+        <div><span>归属</span><input id="owner" readonly placeholder="请选择" aria-haspopup="dialog"></div>
+        <div id="shadow-host"></div>
+        <div>
+          <span>优先级</span>
+          <label><input type="radio" name="prio" value="高">高</label>
+          <label><input type="radio" name="prio" value="低">低</label>
+        </div>
+        <div>
+          <span>地区</span>
+          <input id="region" role="combobox" readonly aria-label="地区">
+        </div>
+        <div role="tablist">
+          <button type="button" role="tab" id="tab-base" aria-selected="true">基本</button>
+          <button type="button" role="tab" id="tab-more" aria-selected="false">更多</button>
+        </div>
+        <div id="panel-more" hidden><span>备注</span><textarea id="note"></textarea></div>
+        <div class="card">
+          <div class="heading">经办</div>
+          <button type="button" aria-haspopup="dialog">+</button>
+        </div>
+        <label>附件<input type="file"></label>
+        <iframe src="/inner" style="width:240px;height:80px;border:0"></iframe>
+        <button type="submit">提交</button>
+      </form>
+      <ul id="region-drop" role="listbox" hidden>
+        <li role="option" id="east">东部</li>
+      </ul>
+      <ul id="region-drop-2" role="listbox" hidden>
+        <li role="option">市区</li>
+      </ul>
+      <div id="owner-dlg" role="dialog" hidden style="position:fixed;inset:10px;background:#fff;z-index:20">
+        <table><tbody><tr data-v="组A"><td>组A</td></tr></tbody></table>
+        <button type="button" id="owner-ok">确定</button>
+      </div>
+      <div id="agent-dlg" role="dialog" hidden style="position:fixed;inset:10px;background:#fff;z-index:21">
+        <ul><li role="option">经办甲</li></ul>
+        <button type="button" id="agent-ok">确定</button>
+      </div>
+      <script>
+        const bound = { customer: "", owner: "", secret: "", prio: "", region: "", note: "", agent: "" };
+        const host = document.getElementById("shadow-host");
+        const shadow = host.attachShadow({ mode: "open" });
+        shadow.innerHTML = '<span>密级</span><input id="secret">';
+        shadow.getElementById("secret").addEventListener("input", event => { bound.secret = event.target.value; });
+        document.getElementById("customer").addEventListener("change", event => { bound.customer = event.target.value; });
+        document.getElementById("owner").addEventListener("click", () => { document.getElementById("owner-dlg").hidden = false; });
+        document.querySelector("#owner-dlg table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.owner = row.getAttribute("data-v");
+        });
+        document.getElementById("owner-ok").onclick = () => {
+          document.getElementById("owner").value = bound.owner;
+          document.getElementById("owner-dlg").hidden = true;
+        };
+        document.querySelectorAll("input[name=prio]").forEach(node => node.addEventListener("change", () => { bound.prio = node.value; }));
+        document.getElementById("region").addEventListener("click", () => { document.getElementById("region-drop").hidden = false; });
+        document.getElementById("east").onclick = () => {
+          document.getElementById("region-drop").hidden = true;
+          document.getElementById("region-drop-2").hidden = false;
+        };
+        document.getElementById("region-drop-2").onclick = event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.region = "东部/" + option.textContent;
+          document.getElementById("region").value = bound.region;
+          document.getElementById("region-drop-2").hidden = true;
+        };
+        document.getElementById("tab-more").onclick = () => {
+          document.getElementById("tab-more").setAttribute("aria-selected", "true");
+          document.getElementById("tab-base").setAttribute("aria-selected", "false");
+          document.getElementById("panel-more").hidden = false;
+        };
+        document.getElementById("note").addEventListener("change", event => { bound.note = event.target.value; });
+        document.querySelector(".card button").onclick = () => { document.getElementById("agent-dlg").hidden = false; };
+        document.querySelector("#agent-dlg [role=option]").onclick = () => { bound.agent = "经办甲"; };
+        document.getElementById("agent-ok").onclick = () => {
+          const tag = document.createElement("span");
+          tag.className = "selected-tag";
+          tag.textContent = bound.agent;
+          document.querySelector(".card button")?.replaceWith(tag);
+          document.getElementById("agent-dlg").hidden = true;
+        };
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.customer = bound.customer || document.getElementById("customer").value;
+          bound.note = bound.note || document.getElementById("note").value;
+          const frame = document.querySelector("iframe");
+          const source = frame && frame.contentDocument && frame.contentDocument.getElementById("source");
+          bound.source = source ? source.value : "";
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "any-kit");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    assert.equal(labels.includes("客户"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("归属"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("密级"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.includes("来源"), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /经办/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /附件/.test(label)), false, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as Record<string, string>;
+    assert.match(String(payload.customer || ""), /样例/);
+    assert.match(String(payload.secret || ""), /样例/);
+    assert.match(String(payload.source || ""), /样例/);
+    assert.equal(payload.owner, "组A");
+    assert.ok(payload.prio === "高" || payload.prio === "低", JSON.stringify(payload));
+    assert.match(String(payload.region || ""), /市区/);
+    assert.match(String(payload.note || ""), /样例/);
+    assert.equal(payload.agent, "经办甲");
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);
