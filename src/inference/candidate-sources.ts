@@ -1,5 +1,5 @@
 import type { CapabilityContract, CandidateRule, EvidenceEvent, InputFormField, UiEvidence } from "../domain.js";
-import { recordedLists } from "./field-resolver.js";
+import { looksPickerField, recordedLists } from "./field-resolver.js";
 
 function schemaNode(schema: any, jsonPath: string): any {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -115,9 +115,17 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     : [];
   const closedEnum = field.candidates?.type === "static"
     && field.candidates.values.length >= 2
-    && field.candidates.values.length <= 20;
+    && field.candidates.values.length <= 20
+    && !looksPickerField(field);
   if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath);
   return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected);
+}
+
+export function queryCandidateForField(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
+  if (field.source !== "caller") return undefined;
+  if (field.candidates?.type === "capability") return undefined;
+  if (!looksPickerField(field) && field.candidates?.type !== "static") return undefined;
+  return lookupFor(field, catalog, events);
 }
 
 export function attachCandidateSources(catalog: CapabilityContract[], events: EvidenceEvent[] = []): CapabilityContract[] {
@@ -126,7 +134,7 @@ export function attachCandidateSources(catalog: CapabilityContract[], events: Ev
     inputForm: capability.inputForm.map(field => {
       if (field.source !== "caller") return field;
       if (field.widget === "number" || field.widget === "date" || field.widget === "textarea") return field;
-      if (/天数|数量|金额|单价|税率|库存/.test(field.label || "")) return field;
+      if (/天数|数量|金额|单价|税率|库存/.test(field.label || "") && !looksPickerField(field)) return field;
       const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
       const paths = source ? listPaths(source.outputSchema) : undefined;
       if (!source || !paths) return field;
@@ -138,7 +146,7 @@ export function attachCandidateSources(catalog: CapabilityContract[], events: Ev
       };
       return {
         ...field,
-        widget: "select",
+        widget: field.valueType === "array" ? "multiselect" : "select",
         candidates,
         sourceDetail: `调用方从已录制查询接口选择，不要写死录制样本。接口 ${source.transport.method} ${source.transport.pathTemplate}，值 ${paths.valuePath}，显示 ${paths.labelPath}`
       };
@@ -152,6 +160,9 @@ export function describeFieldHandling(field: InputFormField) {
   }
   if (field.candidates?.type === "static") {
     return `页面固定枚举，调用方直接选择：${field.candidates.values.map(item => `${item.label}=${String(item.value)}`).join("；")}`;
+  }
+  if (field.source === "caller" && field.defaultRule?.startsWith("computed:")) {
+    return `调用方按页面类型提供（${field.valueType}）。未提供时按 ${field.defaultRule.slice("computed:".length)} 计算，可以改`;
   }
   if (field.source === "caller") return `调用方按页面原始格式输入（${field.valueType}），不要改成其它类型`;
   if (field.sourceDetail && (field.defaultRule?.startsWith("from:") || field.defaultRule?.startsWith("computed:") || field.defaultRule?.startsWith("copy:") || field.source === "binding")) {

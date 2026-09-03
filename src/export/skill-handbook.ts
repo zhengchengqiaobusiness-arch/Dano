@@ -62,6 +62,9 @@ function recommendedDefault(field: InputFormField, capability: CapabilityContrac
     return `${field.defaultRule.slice("literal:".length)}（安全默认值）`;
   }
   if (capability.operation === "query") return "无；用户点名才收集";
+  if (field.source === "caller" && field.defaultRule?.startsWith("computed:")) {
+    return `页面按 ${field.defaultRule.slice("computed:".length)} 自动计算，调用方可改`;
+  }
   if (field.defaultRule?.startsWith("computed:")) return `按 ${field.defaultRule.slice("computed:".length)} 计算`;
   if (field.defaultRule?.startsWith("copy:")) return `拷贝 ${field.defaultRule.slice("copy:".length)}`;
   if (field.defaultRule?.startsWith("from:")) return "从已录制查询带出";

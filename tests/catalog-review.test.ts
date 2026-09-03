@@ -60,6 +60,69 @@ test("unexplained write field blocks export and asks for re-analyze", () => {
   assert.match(review.summary, /单位/);
 });
 
+test("frozen user picker blocks export when a recorded user query exists", () => {
+  const catalog = [
+    cap({
+      id: "create-leave",
+      operation: "create",
+      title: "发起请假",
+      transport: { method: "POST", urlTemplate: "https://x/oa/duty-leave/submit-process", origin: "https://x", pathTemplate: "/oa/duty-leave/submit-process" },
+      inputForm: [{
+        path: "$.startUserSelectAssignees.Activity_0ag2wyz", name: "Activity_0ag2wyz", label: "人力审批",
+        valueType: "array", source: "caller", required: true, requiredBasis: "ui-required", systemHandled: false,
+        sourceDetail: "页面固定枚举", widget: "select",
+        candidates: { type: "static", values: [{ value: 1, label: "管理员" }, { value: 174, label: "LS部门" }] }
+      }]
+    }),
+    cap({
+      id: "query-user",
+      operation: "query",
+      title: "查询用户",
+      validation: { version: 2, status: "verified", checks: [] },
+      transport: { method: "GET", urlTemplate: "https://x/system/user/page", origin: "https://x", pathTemplate: "/system/user/page" },
+      outputSchema: { type: "object", properties: { data: { type: "object", properties: { list: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, nickname: { type: "string" } } } } } } } },
+      evidence: [{ eventId: "net-users", sessionId: "s", kind: "network", at: "2026-09-01T00:00:00.000Z", status: 200 }]
+    })
+  ];
+  const events = [{
+    id: "net-users", kind: "network" as const, sessionId: "s", at: "2026-09-01T00:00:00.000Z",
+    request: { method: "GET", url: "https://x/system/user/page", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { data: { list: [{ id: 1, nickname: "管理员" }, { id: 174, nickname: "LS部门" }] } } }
+  }];
+  const review = reviewCatalog(catalog, events);
+  assert.equal(review.status, "blocked");
+  assert.match(review.summary, /选人|弹窗/);
+});
+
+test("unsound computed formula blocks export", () => {
+  const catalog = [
+    cap({
+      id: "create-leave",
+      operation: "create",
+      title: "发起请假",
+      transport: { method: "POST", urlTemplate: "https://x/oa/duty-leave/submit-process", origin: "https://x", pathTemplate: "/oa/duty-leave/submit-process" },
+      inputForm: [{
+        path: "$.leaveBalance", name: "leaveBalance", label: "假期余额", valueType: "number",
+        source: "computed", required: false, requiredBasis: "not-observed", systemHandled: true,
+        defaultRule: "computed:day - type",
+        sourceDetail: "由请求内字段自动计算：day - type，调用方不要手填", widget: "number"
+      }, {
+        path: "$.day", name: "day", label: "请假天数", valueType: "number",
+        source: "caller", required: true, requiredBasis: "ui-required", systemHandled: false,
+        sourceDetail: "调用方填写", widget: "number"
+      }, {
+        path: "$.type", name: "type", label: "请假类型", valueType: "integer",
+        source: "caller", required: true, requiredBasis: "ui-required", systemHandled: false,
+        sourceDetail: "页面固定枚举", widget: "select",
+        candidates: { type: "static", values: [{ value: 1, label: "事假" }] }
+      }]
+    })
+  ];
+  const review = reviewCatalog(catalog);
+  assert.equal(review.status, "blocked");
+  assert.match(review.summary, /编号、枚举或时间戳/);
+});
+
 test("missing successful write evidence asks to re-record", () => {
   const catalog = [
     cap({

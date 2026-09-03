@@ -7,7 +7,7 @@ import type {
 } from "../domain.js";
 import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
-import { assignUniqueFromSamples, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
+import { assignUniqueFromSamples, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -48,7 +48,7 @@ function widgetFromUiType(type: string): InputFormField["widget"] {
   if (kind === "number") return "number";
   if (kind === "checkbox" || kind === "boolean") return "boolean";
   if (kind === "select-multiple" || kind === "multiselect") return "multiselect";
-  if (kind === "select-one" || kind === "select" || kind === "combobox") return "select";
+  if (kind === "select-one" || kind === "select" || kind === "combobox" || kind === "picker") return "select";
   if (kind === "textarea") return "textarea";
   if (kind === "date" || kind === "datetime" || kind === "daterange") return "date";
   return "text";
@@ -82,7 +82,19 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
     const path = `${prefix}.${name}`;
     const isRequired = parentRequired && required.has(name);
     if (type === "object" && raw?.properties) {
-      return schemaFieldsToForm(raw, path, false);
+      const children = schemaFieldsToForm(raw, path, false);
+      return [{
+        path,
+        name,
+        label: raw?.title || name,
+        valueType: "object",
+        source: "system",
+        required: false,
+        requiredBasis: "not-observed",
+        systemHandled: true,
+        sourceDetail: `由子字段 ${children.map(item => item.name).join("、")} 按路径拼接，调用方不要手填`,
+        widget: "json"
+      }, ...children];
     }
     if (type === "array" && raw?.items?.type === "object" && raw.items.properties) {
       return schemaFieldsToForm(raw.items, `${path}[*]`, false);
@@ -318,8 +330,13 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           const merged = seen ? {
             ...field,
             ...seen,
+            valueType: preferRequestValueType(field.valueType, seen.valueType),
             required: seen.required === true,
             requiredBasis: seen.required ? "ui-required" : "not-observed",
+            widget: preferRequestValueType(field.valueType, seen.valueType) === "array"
+              && (seen.widget === "select" || seen.widget === "text")
+              ? "multiselect"
+              : seen.widget || field.widget,
             candidates: seen.candidates || field.candidates
           } : field;
           forms.set(field.path, resolveFieldOwnership(merged, requestValueAt(sample, merged.path), observations, lists, sample));

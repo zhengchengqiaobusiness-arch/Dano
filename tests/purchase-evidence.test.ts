@@ -247,8 +247,8 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(create.inputForm.find(field => field.name === "productId")?.defaultRule, undefined);
   for (const field of [...search.inputForm, ...create.inputForm]) {
     if (/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) continue;
-    if (field.source === "caller") {
-      assert.equal(field.defaultRule, undefined, `${field.name} must not freeze a recorded sample`);
+    if (field.source === "caller" && field.defaultRule) {
+      assert.match(field.defaultRule, /^computed:/, `${field.name} caller default must be an override formula, not a frozen sample`);
     }
     if (field.defaultRule?.startsWith("literal:") && !/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) {
       assert.match(field.sourceDetail || "", /系统默认|系统常量/, `${field.name} literal must be a default, not a recorded sample`);

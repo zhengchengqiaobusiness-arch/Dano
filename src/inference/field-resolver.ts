@@ -122,10 +122,21 @@ function isPromptLabel(label?: string) {
   return /^(请输入|请选择|请填写|please (select|enter|choose))/i.test(String(label || "").trim());
 }
 
-function preferPromptObservation(items: UiObservation[]) {
+function labelsEquivalent(left?: string, right?: string) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const strippedLeft = emptyPromptLabel(left) || left;
+  const strippedRight = emptyPromptLabel(right) || right;
+  return strippedLeft === strippedRight;
+}
+
+function preferLabeledObservation(items: UiObservation[]) {
+  const business = items.filter(item => item.label && !isPromptLabel(item.label));
+  const businessLabels = new Set(business.map(item => item.label));
+  if (businessLabels.size === 1) return business[0];
   const prompts = items.filter(item => isPromptLabel(item.label));
-  const labels = new Set(prompts.map(item => item.label).filter(Boolean));
-  return labels.size === 1 ? prompts[0] : undefined;
+  const promptLabels = new Set(prompts.map(item => item.label));
+  return promptLabels.size === 1 ? prompts[0] : undefined;
 }
 
 const SYNONYM_GROUPS = [
@@ -163,6 +174,29 @@ function looksChoiceObservation(item: UiObservation) {
 function looksChoiceField(field: InputFormField) {
   return field.widget === "select" || field.widget === "multiselect"
     || /type|status|result|kind|category|dict|assignee|user|Activity_/i.test(field.name);
+}
+
+export function looksPickerField(
+  field: Pick<InputFormField, "name" | "label" | "widget">,
+  observation?: Pick<UiObservation, "type">
+) {
+  if (/picker/i.test(`${observation?.type || ""} ${field.widget || ""}`)) return true;
+  return /人员|审批|创建人|选人|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(`${field.name || ""} ${field.label || ""}`);
+}
+
+export function preferRequestValueType(
+  schemaType: InputFormField["valueType"] | undefined,
+  uiType: InputFormField["valueType"] | undefined
+): InputFormField["valueType"] {
+  if (schemaType && schemaType !== "unknown" && schemaType !== "string") return schemaType;
+  return uiType || schemaType || "unknown";
+}
+
+export function coerceCandidateValue(value: unknown, valueType: InputFormField["valueType"]) {
+  if ((valueType === "integer" || valueType === "number") && typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value.trim())) {
+    return valueType === "integer" ? Number.parseInt(value, 10) : Number(value);
+  }
+  return value;
 }
 
 function looksQuantityObservation(item: UiObservation) {
@@ -401,14 +435,20 @@ export function findObservation(
   const seedLabel = byName.find(item => item.label)?.label || field.label;
   const related = observations.filter(item =>
     uiNameMatches(item.name, field.name)
-    || Boolean(item.label) && (item.label === seedLabel || item.label === field.label || item.label === field.name)
+    || Boolean(item.label) && (
+      item.label === seedLabel
+      || item.label === field.label
+      || item.label === field.name
+      || labelsEquivalent(item.label, seedLabel)
+      || labelsEquivalent(item.label, field.label)
+    )
   );
   const direct = mergeObservations(related);
   if (direct) return expandObservation(direct, observations);
 
   if (isDistinctiveValue(requestValue)) {
     const exact = observations.filter(item => sameValue(item.value, requestValue));
-    const preferred = preferPromptObservation(exact);
+    const preferred = preferLabeledObservation(exact);
     if (preferred) return expandObservation(preferred, observations);
     if (exact.length === 1) return expandObservation(exact[0], observations);
     const labels = new Set(exact.map(item => item.label).filter(Boolean));
@@ -449,7 +489,7 @@ export function staticCandidatesHaveUiEvidence(field: InputFormField, events: Ui
   const labels = new Set(field.candidates.values.map(item => String(item.label)));
   return collectUiObservations(events).some(item => {
     const same = uiNameMatches(item.name, field.name)
-      || Boolean(item.label) && (item.label === field.label || item.label === field.name);
+      || Boolean(item.label) && (item.label === field.label || item.label === field.name || labelsEquivalent(item.label, field.label));
     if (!same) return false;
     if (item.options?.some(option => labels.has(String(option.label)))) return true;
     return item.value !== undefined && item.value !== "" && labels.has(String(item.value));
@@ -559,7 +599,12 @@ function displayLabel(label?: string, rangeIndex?: number) {
 
 function observedLabel(field: InputFormField, matched?: UiObservation) {
   const fromMatch = displayLabel(matched?.label, matched?.rangeIndex);
+  if (fromMatch && isPromptLabel(fromMatch)) {
+    if (field.label && !isPromptLabel(field.label) && field.label !== field.name) return field.label;
+    return emptyPromptLabel(fromMatch) || fromMatch;
+  }
   if (fromMatch && fromMatch !== field.name) return fromMatch;
+  if (field.label && isPromptLabel(field.label)) return emptyPromptLabel(field.label) || field.label;
   if (field.label && field.label !== field.name) return field.label;
   return field.name;
 }
@@ -587,19 +632,30 @@ function asCaller(
   const selected = matched?.value
     || observations.find(item => item.label === matched?.label && item.value !== undefined && item.value !== "")?.value;
   const looksText = /text|textarea|search|date|number|tel|email/i.test(`${matched?.type || ""}`)
-    && !/select|combobox/i.test(`${matched?.type || ""}`);
+    && !/select|combobox|picker/i.test(`${matched?.type || ""}`);
   const quantityObs = looksQuantityObservation(matched || {});
-  const useStatic = Boolean(matched?.options?.length) && !looksText && !looksDateControl(matched || field) && !quantityObs;
-  const options = looksDateControl(matched || field) || quantityObs
+  const picker = looksPickerField(field, matched);
+  const useStatic = Boolean(matched?.options?.length)
+    && !looksText
+    && !looksDateControl(matched || field)
+    && !quantityObs
+    && !picker;
+  const options = looksDateControl(matched || field) || quantityObs || picker
     ? undefined
     : useStatic
       ? matched!.options!.map(item =>
         selected !== undefined && String(item.label) === String(selected) && requestValue !== undefined && requestValue !== selected
-          ? { value: requestValue, label: String(item.label) }
-          : { value: item.value, label: String(item.label || item.value) }
+          ? { value: coerceCandidateValue(requestValue, field.valueType), label: String(item.label) }
+          : { value: coerceCandidateValue(item.value, field.valueType), label: String(item.label || item.value) }
       )
       : staticFromList(matched ? listForObservation(matched, lists, requestValue) : undefined);
   const clock = recordedClock(requestValue);
+  const choiceWidget = field.valueType === "array" ? "multiselect" : "select";
+  const widget = looksDateControl(matched || field)
+    ? "date"
+    : options?.length || picker || /select|combobox|picker/i.test(`${matched?.type || ""}`)
+      ? choiceWidget
+      : widgetFromObservation(field, matched);
   return {
     ...field,
     label: observedLabel(field, matched),
@@ -607,12 +663,14 @@ function asCaller(
     required: matched?.required === true,
     requiredBasis: matched?.required === true ? "ui-required" : "not-observed",
     systemHandled: false,
-    widget: looksDateControl(matched || field) ? "date" : options?.length ? "select" : widgetFromObservation(field, matched),
+    widget,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
     dateClock: looksDateControl(matched || field) && clock ? clock : field.dateClock,
     sourceDetail: options?.length
       ? "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
-      : `调用方按页面原始格式提供（${field.valueType}）${formatHint(field, requestValue)}，不要改成录制样本`
+      : picker
+        ? "调用方从已录制查询接口选择，不要把弹窗当前页冻成页面枚举"
+        : `调用方按页面原始格式提供（${field.valueType}）${formatHint(field, requestValue)}，不要改成录制样本`
   };
 }
 
@@ -944,7 +1002,7 @@ function leftoverForField(
   lists: RecordedList[]
 ) {
   if ((field.widget === "select" || field.widget === "text") && field.valueType !== "number" && field.valueType !== "integer") {
-    const selects = leftover.filter(item => /select|combobox/.test(item.type || ""));
+    const selects = leftover.filter(item => /select|combobox|picker/.test(item.type || ""));
     if (selects.length) return selects;
   }
   const value = requestValueAt(sample, field.path);

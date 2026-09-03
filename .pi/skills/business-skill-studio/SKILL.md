@@ -31,8 +31,8 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 
 3. **Review**
    - Call `business_skill_validate`. This is the gate. Inference is not assumed correct.
-   - **Pass** only when the tool returns `审核通过`: every 主能力 is `verified`, every write non-caller field has a unique origin rule, and every lookup used by `from:` / candidates is usable. Then export is allowed.
-   - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed.
+   - **Pass** only when the tool returns `审核通过`: every 主能力 is `verified`; every write non-caller field has a unique origin rule; computed formulas do not use IDs, enums, or timestamps as operands; picker/user-select fields expose a recorded query instead of a frozen page enum; every key in the successful write request has a field or an assemble rule; and every lookup used by `from:` / candidates is usable. Then export is allowed.
+   - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed. A write Skill that freezes a user picker as a static enum, uses `computed:day - type`, or drops `startUserSelectAssignees` is not passed.
    - Read `下一步` and go back to that stage:
      - `回到页面补录`：missing request, failed submit, missing UI fill, or no page operation. Resume recording, fix the page, `record_stop`, then analyze and validate again.
      - `补证据后重新分析再验证`：a field/query/formula was not uniquely explained. Record the missing lookup or calculation if needed, then `analyze` the same session and validate again. Do not freeze the sample.

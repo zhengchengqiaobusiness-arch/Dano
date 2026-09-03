@@ -1,5 +1,5 @@
 import type { CapabilityContract, EvidenceEvent, InputFormField } from "../domain.js";
-import { recordedLists } from "./field-resolver.js";
+import { looksPickerField, recordedLists } from "./field-resolver.js";
 
 function rowDisplay(row: Record<string, unknown>) {
   const value = row.name ?? row.label ?? row.title ?? row.nickname;
@@ -35,7 +35,7 @@ function bestListForLabels(labels: string[], lists: ReturnType<typeof recordedLi
 }
 
 function applyRecordedList(field: InputFormField, lists: ReturnType<typeof recordedLists>) {
-  if (field.candidates?.type !== "static") return field;
+  if (field.candidates?.type !== "static" || looksPickerField(field)) return field;
   const labels = field.candidates.values.map(item => String(item.label));
   if (labels.length < 2) return field;
   const best = bestListForLabels(labels, lists);

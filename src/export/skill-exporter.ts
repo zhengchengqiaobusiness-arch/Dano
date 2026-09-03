@@ -1,7 +1,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import type { CapabilityContract, DataBinding, InputFormField } from "../domain.js";
+import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField } from "../domain.js";
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
 import { id, writeJson } from "../utils.js";
@@ -139,10 +139,11 @@ export async function exportSkill(
   outputRoot: string,
   requestedName: string,
   allCapabilities: CapabilityContract[],
-  match: string[] = []
+  match: string[] = [],
+  events: EvidenceEvent[] = []
 ) {
   const catalog = normalizeCatalog(allCapabilities);
-  assertExportable(catalog);
+  assertExportable(catalog, events);
   const selected = exportableCapabilities(catalog, match);
   if (!selected.length) throw new Error("没有可导出的已验证主能力。下拉和用户分页不是主能力。");
 

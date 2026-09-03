@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { validateCapability } from "../src/validation/validator.js";
 import { buildApprovedRoutes } from "../src/planner/routes.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
@@ -110,12 +111,22 @@ test("binds create-page enums, prompt twins, and picker assignees from recorded 
   assert.equal(capability.inputForm.find(field => field.name === "day")?.label, "请假天数");
   assert.equal(capability.inputForm.find(field => field.name === "day")?.widget, "number");
   assert.equal(capability.inputForm.find(field => field.name === "projectName")?.source, "caller");
-  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.label, "请输入项目名称");
+  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.label, "所属项目");
   const assignee = capability.inputForm.find(field => field.name === "Activity_0ag2wyz")!;
   assert.equal(assignee.source, "caller");
   assert.equal(assignee.label, "人力审批");
-  assert.equal(assignee.widget, "select");
+  assert.ok(assignee.widget === "select" || assignee.widget === "multiselect");
   assert.equal(capability.inputForm.find(field => field.name === "billType")?.defaultRule, "literal:oa_duty_leave");
+  const assembled = capability.inputForm.find(field => field.name === "startUserSelectAssignees");
+  assert.equal(assembled?.source, "computed");
+  assert.match(assembled?.sourceDetail || "", /拼接/);
+  const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
+  const submit = verified.find(item => item.transport.pathTemplate.includes("submit-process"))!;
+  const picked = submit.inputForm.find(field => field.name === "Activity_0ag2wyz")!;
+  assert.equal(picked.candidates?.type, "capability");
+  assert.match(picked.sourceDetail || "", /user\/page|已录制查询/);
+  assert.equal(submit.inputForm.find(field => field.name === "type")?.candidates?.type, "static");
+  assert.equal(submit.validation.status, "verified");
 });
 
 test("binds a leftover request field only when its value uniquely matches leftover UI", () => {

@@ -2,7 +2,7 @@ import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } f
 import { getByPath } from "../utils.js";
 import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { isExecutableRule } from "../inference/field-derivation.js";
-import { unresolvedWriteFields } from "../review/catalog-review.js";
+import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -143,6 +143,30 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       detail: unresolved.length === 0
         ? "写操作非调用方字段均有唯一来源规则"
         : `无法唯一推断来源：${unresolved.map(field => field.name).join("、")}。不要冻录制样本`
+    });
+    const unsound = unsoundFormulaFields(cap);
+    checks.push({
+      name: "computed-formula-operands-sound",
+      ok: unsound.length === 0,
+      detail: unsound.length === 0
+        ? "计算公式未使用编号、枚举或时间戳当运算数"
+        : `公式不成立：${unsound.map(field => field.name).join("、")}`
+    });
+    const frozenPickers = pickerFieldsMissingQuery(cap, catalog, events);
+    checks.push({
+      name: "picker-uses-recorded-query",
+      ok: frozenPickers.length === 0,
+      detail: frozenPickers.length === 0
+        ? "选人/弹窗字段已指向已录制查询"
+        : `选人被冻成枚举：${frozenPickers.map(field => field.name).join("、")}`
+    });
+    const missingKeys = uncoveredWriteLeaves(cap, events);
+    checks.push({
+      name: "write-request-keys-covered",
+      ok: missingKeys.length === 0,
+      detail: missingKeys.length === 0
+        ? "录制成功请求键均有字段或拼接规则"
+        : `请求键无着落：${missingKeys.map(item => item.path).join("、")}`
     });
   }
 

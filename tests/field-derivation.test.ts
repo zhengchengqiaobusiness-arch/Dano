@@ -61,6 +61,52 @@ test("write fields get a unique origin rule instead of a frozen sample", () => {
   assert.doesNotMatch(amount.sourceDetail || "", /literal:20|写入 20/);
 });
 
+test("ids and timestamps are not used as formula operands", () => {
+  const create = buildCapabilityCandidates([{
+    id: "ui-form", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:00.000Z",
+    pageUrl: "https://example.test/leave", eventType: "input",
+    form: [
+      { name: "type", label: "请假类型", type: "select", required: true, value: "事假" },
+      { name: "day", label: "请假天数", type: "number", required: true, value: 1 },
+      { name: "startTime", label: "开始时间", type: "date", required: true, value: "2026-09-01" },
+      { name: "endTime", label: "结束时间", type: "date", required: true, value: "2026-09-02" },
+      { name: "leaveBalance", label: "假期余额", type: "readonly", value: 8 }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:01.000Z",
+    pageUrl: "https://example.test/leave", eventType: "click", text: "提交"
+  }, {
+    id: "net-balance", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.400Z",
+    request: { method: "GET", url: "https://example.test/admin-api/oa/duty-leave/get-balance?type=2", resourceType: "xhr", headers: {}, query: { type: 2 } },
+    response: { status: 200, headers: {}, body: { success: true, data: { leaveBalance: 8 } } }
+  }, {
+    id: "net-users", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.500Z",
+    request: { method: "GET", url: "https://example.test/admin-api/system/user/page", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { data: { list: [{ id: 174, username: "LSBM", nickname: "LS部门" }] } } }
+  }, {
+    id: "net-create", kind: "network", sessionId: "s", at: "2026-09-02T00:00:02.000Z",
+    correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/duty-leave/submit-process", resourceType: "xhr", headers: {}, query: {},
+      body: {
+        type: 2, day: 1, leaveBalance: 8,
+        startTime: 1788192000000, endTime: 1788278400000,
+        startUserSelectAssignees: { Activity_0ag2wyz: [174] }
+      }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 1 } }
+  }]).find(item => item.transport.pathTemplate.includes("submit-process"))!;
+  const day = create.inputForm.find(field => field.name === "day")!;
+  const balance = create.inputForm.find(field => field.name === "leaveBalance")!;
+  const assignees = create.inputForm.find(field => field.name === "startUserSelectAssignees")!;
+  assert.equal(day.source, "caller");
+  assert.equal(day.defaultRule, "computed:(endTime - startTime) / 86400000");
+  assert.doesNotMatch(balance.defaultRule || "", /^computed:.*\btype\b/);
+  assert.match(balance.defaultRule || "", /^from:.+leaveBalance/);
+  assert.equal(assignees.source, "computed");
+  assert.match(assignees.sourceDetail || "", /拼接/);
+});
+
 test("the same value in two queries is not a unique from rule", () => {
   const create = buildCapabilityCandidates(events([{
     id: "net-product-2", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.600Z",

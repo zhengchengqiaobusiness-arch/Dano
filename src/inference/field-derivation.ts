@@ -7,10 +7,15 @@ import { isNoiseCapability } from "./export-scope.js";
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
 const PERCENT_NAME = /percent|rate|比率|税率|优惠率|折扣/i;
+const QUANTITY_NAME = /count|qty|quantity|price|amount|total|percent|rate|tax|discount|deposit|day|days|hour|stock|sum|数量|金额|单价|税率|优惠|订金|天数|库存|合计|余额/i;
+const IDENTIFIER_NAME = /(?:Id|Ids|Key|Type|Status|Code)$|(?:^|[^A-Za-z])(id|type|status|code|key|userId|accountId|supplierId|creator|deptId)(?:$|[^A-Za-z])/i;
+const DURATION_NAME = /(?:^|[^a-z])(day|days|hour|hours|duration)(?:$|[^a-z])|天数|小时|时长/i;
 const ENVELOPE_LEAF = /\.(success|ok|msg|message|error|errmsg)$/i;
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_VALUE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const EXECUTABLE_RULE = /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/;
+const EPOCH_MS_MIN = 1e11;
+const EPOCH_MS_MAX = 2e13;
 
 export function isExecutableRule(rule?: string) {
   return Boolean(rule && EXECUTABLE_RULE.test(rule));
@@ -72,19 +77,45 @@ function commute(operator: "*" | "+", left: string, right: string) {
   return [left, right].sort((a, b) => a.localeCompare(b)).join(` ${operator} `);
 }
 
+export function isIdentifierOperandName(name: string) {
+  return IDENTIFIER_NAME.test(name) && !QUANTITY_NAME.test(name);
+}
+
+export function isEpochMs(value: number) {
+  return Number.isFinite(value) && value > EPOCH_MS_MIN && value < EPOCH_MS_MAX;
+}
+
+function isChoiceOperand(field?: InputFormField) {
+  return Boolean(field && (field.candidates || field.widget === "select" || field.widget === "multiselect"));
+}
+
+function usableArithmeticOperand(entry: { name: string; value: number }, fields: InputFormField[] = []) {
+  if (!Number.isFinite(entry.value) || isEpochMs(entry.value)) return false;
+  if (isIdentifierOperandName(entry.name)) return false;
+  return !isChoiceOperand(fields.find(field => field.name === entry.name));
+}
+
+function relatedFormula(targetName: string, ...names: string[]) {
+  return names.some(name => formulaScore(targetName, name) >= 3 || QUANTITY_NAME.test(name) && QUANTITY_NAME.test(targetName));
+}
+
 function uniqueFormula(targetName: string, hits: string[]) {
   const unique = [...new Set(hits)];
   if (!unique.length) return undefined;
   if (unique.length === 1) return unique[0];
-  return unique.slice().sort((left, right) => {
+  const ranked = unique.slice().sort((left, right) => {
     const score = formulaScore(targetName, right) - formulaScore(targetName, left);
     if (score) return score;
     if (left.length !== right.length) return left.length - right.length;
     return left.localeCompare(right);
-  })[0];
+  });
+  const topScore = formulaScore(targetName, ranked[0]!);
+  const top = ranked.filter(item => formulaScore(targetName, item) === topScore);
+  if (topScore === 0) return undefined;
+  return top.sort((left, right) => left.length - right.length || left.localeCompare(right))[0];
 }
 
-function binaryFormulas(target: number, others: Array<{ name: string; value: number }>) {
+function binaryFormulas(targetName: string, target: number, others: Array<{ name: string; value: number }>) {
   const hits: string[] = [];
   for (const left of others) {
     for (const right of others) {
@@ -94,7 +125,11 @@ function binaryFormulas(target: number, others: Array<{ name: string; value: num
       if (!percentLeft && !percentRight && near(target, left.value * right.value)) hits.push(commute("*", left.name, right.name));
       if (near(target, left.value + right.value)) hits.push(commute("+", left.name, right.name));
       if (near(target, left.value - right.value)) hits.push(`${left.name} - ${right.name}`);
-      if (!percentRight && right.value !== 0 && near(target, left.value / right.value)) hits.push(`${left.name} / ${right.name}`);
+      if (!percentRight && right.value !== 0 && near(target, left.value / right.value) && Math.abs(target) > 0.005) {
+        if (relatedFormula(targetName, left.name, right.name) || /rate|ratio|percent|平均/.test(targetName)) {
+          hits.push(`${left.name} / ${right.name}`);
+        }
+      }
       if (percentRight && near(target, left.value * right.value / 100)) hits.push(`${left.name} * ${right.name} / 100`);
       if (percentRight && near(target, left.value * (1 - right.value / 100))) hits.push(`${left.name} * (1 - ${right.name} / 100)`);
       if (percentRight && near(target, left.value * (1 + right.value / 100))) hits.push(`${left.name} * (1 + ${right.name} / 100)`);
@@ -103,8 +138,31 @@ function binaryFormulas(target: number, others: Array<{ name: string; value: num
   return hits;
 }
 
+function durationFormulas(targetName: string, target: number, others: Array<{ name: string; value: number }>) {
+  if (!DURATION_NAME.test(targetName)) return [];
+  const times = others.filter(item => isEpochMs(item.value) || /time|date|At$/i.test(item.name));
+  const hits: string[] = [];
+  for (const start of times) {
+    for (const end of times) {
+      if (start.name === end.name || end.value <= start.value) continue;
+      const days = (end.value - start.value) / 86400000;
+      if (near(target, days) || near(target, Math.ceil(days - 1e-9)) || near(target, Math.max(0, Math.round(days)))) {
+        hits.push(`(${end.name} - ${start.name}) / 86400000`);
+      }
+      if (/hour|小时/.test(targetName) && near(target, (end.value - start.value) / 3600000)) {
+        hits.push(`(${end.name} - ${start.name}) / 3600000`);
+      }
+    }
+  }
+  return hits;
+}
+
 function inferredFormula(targetName: string, target: number, others: Array<{ name: string; value: number }>) {
-  return uniqueFormula(targetName, binaryFormulas(target, others.filter(item => item.name !== targetName)));
+  const usable = others.filter(item => item.name !== targetName);
+  return uniqueFormula(targetName, [
+    ...binaryFormulas(targetName, target, usable.filter(item => !isEpochMs(item.value) && !isIdentifierOperandName(item.name))),
+    ...durationFormulas(targetName, target, usable)
+  ]);
 }
 
 function fieldScope(path: string) {
@@ -212,7 +270,9 @@ function fromApiMatch(
   return unique[0];
 }
 
-function emptyDefault(value: unknown) {
+function emptyDefault(field: InputFormField, value: unknown) {
+  if (/balance|stock|库存|余额/i.test(`${field.name} ${field.label}`)) return undefined;
+  if (field.sourceDetail?.includes("只读")) return undefined;
   if (Array.isArray(value) && value.length === 0) return "literal:[]";
   if (value === 0) return "literal:0";
   if (value === false) return "literal:false";
@@ -245,20 +305,20 @@ function headerAggregates(items: Record<string, unknown>[], known: Set<string>) 
   });
 }
 
-function computedForField(field: InputFormField, sample: unknown, known: Set<string>) {
+function computedForField(field: InputFormField, sample: unknown, known: Set<string>, fields: InputFormField[]) {
   const value = requestValueAt(sample, field.path);
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   const header = headerRecord(sample);
   const items = itemRecords(sample);
   if (fieldScope(field.path) === "item") {
     const formulas = [...new Set(items.map(item => {
-      const others = numericEntries(item).filter(entry => known.has(entry.name));
+      const others = numericEntries(item).filter(entry => known.has(entry.name) && usableArithmeticOperand(entry, fields));
       return inferredFormula(field.name, Number(item[field.name]), others);
     }).filter(Boolean))];
     return formulas.length === 1 ? formulas[0] : undefined;
   }
   const others = [
-    ...numericEntries(header).filter(entry => known.has(entry.name)),
+    ...numericEntries(header).filter(entry => known.has(entry.name) && (usableArithmeticOperand(entry, fields) || isEpochMs(entry.value))),
     ...headerAggregates(items, known)
   ];
   return inferredFormula(field.name, value, others);
@@ -268,9 +328,16 @@ function viaLabel(fields: InputFormField[], via?: string) {
   return fields.find(field => field.name === via)?.label || via || "关联字段";
 }
 
-function shouldKeep(field: InputFormField, capability: CapabilityContract) {
+export function isAssembledObjectField(field: InputFormField, fields: InputFormField[]) {
+  return field.valueType === "object" && fields.some(other =>
+    other.path !== field.path && (other.path.startsWith(`${field.path}.`) || other.path.startsWith(`${field.path}[`))
+  );
+}
+
+function shouldKeep(field: InputFormField, capability: CapabilityContract, fields: InputFormField[] = capability.inputForm) {
   if (field.source === "caller") return true;
   if (PAGE_NAME.test(field.name)) return true;
+  if (isAssembledObjectField(field, fields)) return true;
   if (capability.editing?.fields === "manual" && capability.editing.fieldPaths?.includes(field.path)) return true;
   if (field.source === "binding" && capability.bindings.some(binding => binding.approved && binding.approvalSource === "human" && binding.toPath === field.path)) {
     return true;
@@ -323,6 +390,28 @@ function asCallerInput(field: InputFormField): InputFormField {
   };
 }
 
+function asAssembled(field: InputFormField, children: InputFormField[]): InputFormField {
+  const names = children.map(item => item.label || item.name).join("、");
+  return {
+    ...field,
+    source: "computed",
+    systemHandled: true,
+    required: false,
+    defaultRule: undefined,
+    sourceDetail: `由子字段「${names}」按路径拼接成对象，调用方不要手填。最终请求键与录制成功请求一致，不增不删`
+  };
+}
+
+function asCallerOverride(field: InputFormField, expr: string): InputFormField {
+  return {
+    ...field,
+    source: "caller",
+    systemHandled: false,
+    defaultRule: `computed:${expr}`,
+    sourceDetail: `页面按 ${expr} 自动计算，调用方可改。未提供时按公式计算，不要冻成录制样本`
+  };
+}
+
 function asCopy(field: InputFormField, source: InputFormField): InputFormField {
   return {
     ...field,
@@ -356,8 +445,17 @@ function uniqueCopySource(field: InputFormField, fields: InputFormField[], sampl
   return hits.length === 1 ? hits[0] : undefined;
 }
 
-function operandNames(expr: string) {
+export function operandNames(expr: string) {
   return [...new Set((expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []).filter(name => name !== "sum" && name !== "items"))];
+}
+
+export function unsoundComputedOperands(expr: string, fields: InputFormField[]) {
+  return operandNames(expr).filter(name => {
+    const field = fields.find(item => item.name === name);
+    if (isIdentifierOperandName(name) && field?.widget !== "date") return true;
+    if (isChoiceOperand(field) && field?.widget !== "date") return true;
+    return false;
+  });
 }
 
 function knownNames(fields: InputFormField[]) {
@@ -368,7 +466,7 @@ function knownNames(fields: InputFormField[]) {
   );
 }
 
-function evidenceSample(capability: CapabilityContract, events: EvidenceEvent[]) {
+export function evidenceSample(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
   let best: unknown;
   let size = -1;
@@ -396,14 +494,25 @@ function applyComputed(fields: InputFormField[], sample: unknown, capability: Ca
     changed = false;
     const known = knownNames(next);
     next = next.map(field => {
-      if (shouldKeep(field, capability) || field.defaultRule) return field;
-      const expr = computedForField(field, sample, known);
+      if (shouldKeep(field, capability, next) || field.defaultRule) return field;
+      const expr = computedForField(field, sample, known, next);
       if (!expr) return field;
       changed = true;
       return asComputed(field, expr);
     });
   }
   return next;
+}
+
+function attachCallerOverrides(fields: InputFormField[], sample: unknown) {
+  const known = knownNames(fields);
+  return fields.map(field => {
+    if (field.source !== "caller" || field.defaultRule) return field;
+    if (field.candidates || field.widget === "select" || field.widget === "multiselect") return field;
+    const expr = computedForField(field, sample, known, fields);
+    if (!expr || !DURATION_NAME.test(`${field.name} ${field.label}`)) return field;
+    return asCallerOverride(field, expr);
+  });
 }
 
 function unexplained(field: InputFormField): InputFormField {
@@ -425,7 +534,10 @@ export function attachDerivationRules(
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
   const bindings: DataBinding[] = [];
   let next = fields.map(field => {
-    if (shouldKeep(field, capability) || field.defaultRule) return field;
+    if (isAssembledObjectField(field, fields)) {
+      return asAssembled(field, fields.filter(item => item.path.startsWith(`${field.path}.`) || item.path.startsWith(`${field.path}[`)));
+    }
+    if (shouldKeep(field, capability, fields) || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
     const from = fromApiMatch(field, value, sample, events, catalog);
     if (from) {
@@ -458,23 +570,24 @@ export function attachDerivationRules(
     return asCallerInput(field);
   });
   next = applyComputed(next, sample, capability);
+  next = attachCallerOverrides(next, sample);
 
   next = next.map(field => {
-    if (shouldKeep(field, capability) || field.defaultRule) return field;
+    if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const copied = uniqueCopySource(field, next, sample);
     return copied ? asCopy(field, copied) : field;
   });
   next = applyComputed(next, sample, capability);
 
   next = next.map(field => {
-    if (shouldKeep(field, capability) || field.defaultRule) return field;
+    if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
     const generated = generatedRule(field, value);
     if (generated) return asGenerated(field, generated.rule, generated.detail);
     if (looksInvariantConstant(field, value) && value !== undefined && value !== null && value !== "") {
       return asDefault(field, `literal:${value}`, `请求中观察到的系统常量 ${value}，按该值补齐，调用方不要手填`);
     }
-    const rule = emptyDefault(value);
+    const rule = emptyDefault(field, value);
     if (rule) return asDefault(field, rule, `系统默认空值 ${rule.slice("literal:".length)}，调用方未提供时使用，不是某次录制的业务样本`);
     return unexplained(field);
   });

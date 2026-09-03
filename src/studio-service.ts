@@ -152,8 +152,9 @@ export class StudioService {
   }
 
   async review() {
+    const events = await this.allEvents();
     const capabilities = await this.validate();
-    return { capabilities, review: reviewCatalog(capabilities) };
+    return { capabilities, review: reviewCatalog(capabilities, events) };
   }
 
   async sealWrites() {
@@ -347,7 +348,7 @@ export class StudioService {
   }
 
   async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = []) {
-    return exportSkill(outputRoot, name, await this.sealWrites(), match);
+    return exportSkill(outputRoot, name, await this.sealWrites(), match, await this.allEvents());
   }
 
   async listSkills() {
