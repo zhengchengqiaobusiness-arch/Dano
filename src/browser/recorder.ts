@@ -9,6 +9,8 @@ import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 
+const FORM_ACTION_BUDGET = 3;
+
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
   const text = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
   const form = el.closest("form");
@@ -950,24 +952,24 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
-          if ((this.active?.guard.exerciseFormCount || 0) >= 2) {
-            return this.stopBecauseStuck("exercise-form 已用满 2 次，禁止再循环填表。按 recordedManualSteps 或 manual-steps.md 操作，点不动就请用户切到手动录制。");
+          if ((this.active?.guard.exerciseFormCount || 0) >= FORM_ACTION_BUDGET) {
+            return this.stopBecauseStuck(`exercise-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环填表。按 recordedManualSteps 或 manual-steps.md 操作，点不动就请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
           }
           if (this.active) this.active.guard.exerciseFormCount += 1;
           const result = await this.actions.exerciseForm() as { ok?: boolean };
           const used = this.active?.guard.exerciseFormCount || 0;
-          const stop = !result.ok && used >= 2;
+          const stop = !result.ok && used >= FORM_ACTION_BUDGET;
           if (stop && this.active) this.active.guard.followManualSteps = true;
           return { ...result, followManualSteps: stop };
         }
         case "submit-form": {
-          if ((this.active?.guard.submitFormCount || 0) >= 2) {
-            return this.stopBecauseStuck("submit-form 已用满 2 次，禁止再循环提交。按 recordedManualSteps 操作，或请用户切到手动录制。");
+          if ((this.active?.guard.submitFormCount || 0) >= FORM_ACTION_BUDGET) {
+            return this.stopBecauseStuck(`submit-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环提交。按 recordedManualSteps 操作，或请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
           }
           if (this.active) this.active.guard.submitFormCount += 1;
           const result = await this.actions.submitForm() as { ok?: boolean };
           const used = this.active?.guard.submitFormCount || 0;
-          const stop = !result.ok && used >= 2;
+          const stop = !result.ok && used >= FORM_ACTION_BUDGET;
           if (stop && this.active) this.active.guard.followManualSteps = true;
           return { ...result, followManualSteps: stop };
         }

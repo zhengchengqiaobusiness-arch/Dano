@@ -2536,7 +2536,7 @@ test("follows a new tab after a link click and stays on the old page if the tab 
   }
 });
 
-test("failed click is not retried and exercise-form stops after two calls", async () => {
+test("failed click is not retried and exercise-form stops after three calls", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-noloop-"));
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -2566,9 +2566,10 @@ test("failed click is not retried and exercise-form stops after two calls", asyn
     assert.match(String(retry.reason || ""), /禁止重试/);
     await recorder.control({ action: "exercise-form" });
     await recorder.control({ action: "exercise-form" });
-    const third: any = await recorder.control({ action: "exercise-form" });
-    assert.equal(third.stopped, true, JSON.stringify(third));
-    assert.match(String(third.reason || ""), /exercise-form/);
+    await recorder.control({ action: "exercise-form" });
+    const fourth: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(fourth.stopped, true, JSON.stringify(fourth));
+    assert.match(String(fourth.reason || ""), /exercise-form/);
     const snap: any = await recorder.control({ action: "snapshot" });
     assert.equal(snap.followManualSteps, true);
   } finally {
@@ -2578,7 +2579,7 @@ test("failed click is not retried and exercise-form stops after two calls", asyn
   }
 });
 
-test("first exercise-form failure does not stop; second failure follows manual steps", async () => {
+test("first two exercise-form failures do not stop; third failure follows manual steps", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-retry-form-"));
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -2613,7 +2614,10 @@ test("first exercise-form failure does not stop; second failure follows manual s
     assert.equal(first.followManualSteps, false, JSON.stringify(first));
     const second: any = await recorder.control({ action: "exercise-form" });
     assert.equal(second.ok, false, JSON.stringify(second));
-    assert.equal(second.followManualSteps, true, JSON.stringify(second));
+    assert.equal(second.followManualSteps, false, JSON.stringify(second));
+    const third: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(third.ok, false, JSON.stringify(third));
+    assert.equal(third.followManualSteps, true, JSON.stringify(third));
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -2857,6 +2861,123 @@ test("Arco form keeps official labels after typing and records a full form on ma
     assert.match(guide, /联系人/);
     assert.match(guide, /张三/);
     assert.match(guide, /提交时页面字段|职能描述/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form keeps a filled tree-select and picks a tree node for the empty twin", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-tree-select-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"success":true}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>部门树</title></head><body>
+      <div role="dialog" class="arco-modal" style="position:fixed;inset:10px;background:#fff;z-index:20;padding:16px">
+        <form class="arco-form" id="create">
+          <div class="arco-form-item is-required">
+            <label class="arco-form-item-label">部门名称</label>
+            <div class="arco-select" id="parent">
+              <span class="arco-select-view-single arco-select-view" id="parent-view" style="display:inline-block;border:1px solid #999;width:220px;height:32px">
+                <input class="arco-select-view-input" role="combobox" readonly placeholder="请选择" style="width:1px;height:1px;opacity:0.2">
+                <span class="arco-select-view-value">徐州市政府办公室</span>
+              </span>
+            </div>
+            <div class="arco-select" id="child">
+              <span class="arco-select-view-single arco-select-view" id="child-view" style="display:inline-block;border:1px solid #999;width:220px;height:32px">
+                <input class="arco-select-view-input" role="combobox" readonly placeholder="请选择" style="width:1px;height:1px;opacity:0.2">
+              </span>
+            </div>
+          </div>
+          <div class="arco-form-item">
+            <label class="arco-form-item-label">职能描述</label>
+            <textarea id="qzms" class="arco-textarea"></textarea>
+          </div>
+          <button type="submit">提交</button>
+        </form>
+      </div>
+      <div id="tree-pop" class="arco-trigger-popup arco-tree-select-popup" hidden style="position:fixed;left:40px;top:120px;background:#fff;border:1px solid #ccc;z-index:40;padding:8px">
+        <div class="arco-tree">
+          <div class="arco-tree-node"><span class="arco-tree-node-title">秘书一处</span></div>
+          <div class="arco-tree-node"><span class="arco-tree-node-title">秘书二处</span></div>
+        </div>
+      </div>
+      <script>
+        const bound = { parent: "徐州市政府办公室", child: "", qzms: "" };
+        const openTree = (which) => {
+          const pop = document.getElementById("tree-pop");
+          pop.hidden = false;
+          pop.dataset.for = which;
+        };
+        document.getElementById("parent-view").addEventListener("mousedown", () => openTree("parent"));
+        document.getElementById("child-view").addEventListener("mousedown", () => openTree("child"));
+        document.getElementById("tree-pop").addEventListener("mousedown", event => {
+          const title = event.target.closest(".arco-tree-node-title");
+          if (!title) return;
+          const which = document.getElementById("tree-pop").dataset.for;
+          bound[which] = title.textContent;
+          if (which === "parent") document.querySelector("#parent-view .arco-select-view-value").textContent = title.textContent;
+          else {
+            let value = document.querySelector("#child-view .arco-select-view-value");
+            if (!value) {
+              value = document.createElement("span");
+              value.className = "arco-select-view-value";
+              document.getElementById("child-view").appendChild(value);
+            }
+            value.textContent = title.textContent;
+          }
+          document.getElementById("tree-pop").hidden = true;
+        });
+        document.getElementById("qzms").addEventListener("input", () => { bound.qzms = document.getElementById("qzms").value; });
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "tree-select");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const dept = (before.formFields || []).filter((field: any) => /^部门名称/.test(String(field.label || "")));
+    assert.equal(dept.length, 2, JSON.stringify(before.formFields));
+    assert.equal(dept.some((field: any) => field.filled && /徐州市政府办公室/.test(String(field.value || ""))), true, JSON.stringify(dept));
+    assert.equal(dept.some((field: any) => !field.filled), true, JSON.stringify(dept));
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const after = filled.formFields || [];
+    assert.equal(after.some((field: any) => /^部门名称/.test(field.label || "") && /徐州市政府办公室/.test(String(field.value || ""))), true, JSON.stringify(after));
+    assert.equal(after.some((field: any) => /^部门名称/.test(field.label || "") && /秘书/.test(String(field.value || ""))), true, JSON.stringify(after));
+    assert.equal(after.some((field: any) => field.label === "职能描述" && field.filled), true, JSON.stringify(after));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(String((created[0] as any)?.parent || ""), "徐州市政府办公室");
+    assert.match(String((created[0] as any)?.child || ""), /秘书/);
+    assert.ok(String((created[0] as any)?.qzms || "").length > 0);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

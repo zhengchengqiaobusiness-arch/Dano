@@ -41,9 +41,9 @@ export const PAGE_HELPERS = String.raw`
   const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
-  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, [class*="picker-panel"], [class*="picker-dropdown"]';
+  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"]';
   const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/;
-  const OPTION_SEL = '[role="option"], [role="menuitem"], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option';
+  const OPTION_SEL = '[role="option"], [role="menuitem"], [role="treeitem"], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const PROMPT_ONLY = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose)[.…]?$/i;
   const DATE_PLACEHOLDER = /yyyy-mm-dd|年\/月\/日/i;
@@ -249,8 +249,8 @@ export const PAGE_HELPERS = String.raw`
 
   const isChooserFilter = (el) => {
     if (!(el instanceof HTMLInputElement)) return false;
-    if (el.getAttribute("role") === "combobox") return false;
     if (/select__input|selection-search|search-input|filter|select-view-input/i.test(String(el.className || ""))) return true;
+    if (el.getAttribute("role") === "combobox") return false;
     return Boolean(el.getAttribute("aria-autocomplete") && chooserHostOf(el));
   };
 
@@ -337,7 +337,7 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const collectOptionRecords = (root) => {
-    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']")].filter(isVisible);
+    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox']")].filter(isVisible);
     const searchRoot = dropdowns.at(-1) || root || document;
     return [...searchRoot.querySelectorAll(OPTION_SEL)]
       .filter((el) => isVisible(el)
@@ -720,7 +720,10 @@ export const PAGE_HELPERS = String.raw`
 
   const fieldFromControl = (el, item) => {
     if (!(el instanceof HTMLElement)) return null;
-    if (isChooserFilter(el)) return null;
+    if (isChooserFilter(el)) {
+      const host = chooserHostOf(el);
+      return host && host !== el ? fieldFromControl(host, item) : null;
+    }
     if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
     if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination, thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();

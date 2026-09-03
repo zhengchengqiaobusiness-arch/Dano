@@ -89,7 +89,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns. exercise-form at most twice, submit-form at most twice. The first exercise-form/submit-form failure is not a stop: call it again. followManualSteps is true only after the second failure or stopped=true; then follow recordedManualSteps or ask 手动录制. The same click/choose/fill may fail only once. Never loop snapshot-click-snapshot or retry a failed selector. Do not record_stop+analyze a planned 新增 with no successful write response. Required number 0 is empty.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns and tree/cascader nodes. exercise-form at most 3 times, submit-form at most 3 times. The first exercise-form/submit-form failure is not a stop: call it again. followManualSteps is true only after the third failure or stopped=true; then follow recordedManualSteps or ask 手动录制. The same click/choose/fill may fail only once. Never loop snapshot-click-snapshot or retry a failed selector. Do not record_stop+analyze a planned 新增 with no successful write response. Required number 0 is empty.",
     parameters: parameters({
       action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },
